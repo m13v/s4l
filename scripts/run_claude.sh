@@ -316,7 +316,34 @@ END=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 # error already; we just protect the next 10 min of cadence-ticks.
 # ---------------------------------------------------------------------------
 if [ "$SA_QUOTA_PREFLIGHT_OK" = "1" ]; then
-    SA_QUOTA_REASON="$(preflight_classify_claude_error "$SIDE_LOG" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    # Skip the regex-based quota classifier when Claude emitted a successful
+    # SDK result event. Background: 2026-05-07 the Anthropic x SpaceX news
+    # cycle produced tweets containing the literal phrase "5 hour rate limit".
+    # Phase 1 of run-twitter-cycle.sh dumps every scraped tweet's full text
+    # into stdout as structured_output, the classifier matched the phrase
+    # inside tweet bodies, stamped /tmp/sa-claude-blocked.json, and the
+    # subsequent Phase 2b-prep skipped with `claude_blocked` even though
+    # Claude itself ran cleanly. The shared stamp file then blocked ~12 runs
+    # across twitter-cycle, engage-twitter, and run-moltbook before clearing.
+    #
+    # The result event is a single-line JSON object emitted last, and only
+    # on a clean orchestrator turn:
+    #   {"type":"result","subtype":"success","is_error":false,...}
+    # When that line is present AND claude exited 0, the run was clean by
+    # construction — there is no quota error to classify. Anchoring on
+    # `"subtype":"success"` (not just `is_error:false`) is intentional:
+    # tweet bodies may contain `is_error` strings, but `"subtype":"success"`
+    # is unique to the final result event.
+    SA_RESULT_OK=0
+    if [ "$RC" = "0" ] && grep -qE '"type":"result"[^}]*"subtype":"success"' "$SIDE_LOG" 2>/dev/null; then
+        SA_RESULT_OK=1
+    fi
+
+    SA_QUOTA_REASON=""
+    if [ "$SA_RESULT_OK" = "0" ]; then
+        SA_QUOTA_REASON="$(preflight_classify_claude_error "$SIDE_LOG" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    fi
+
     if [ -n "$SA_QUOTA_REASON" ]; then
         # Stamp + force exit 79. Block window 600s (10 min). If the underlying
         # cap is real, the next 10 min of fires skip cleanly. After 600s a
