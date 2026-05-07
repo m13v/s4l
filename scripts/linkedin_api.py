@@ -270,12 +270,30 @@ def resolve_post_urn(identifier):
     return f"urn:li:activity:{identifier}"
 
 
-def extract_activity_id_from_response(resp, fallback_id):
-    """Extract the real activity ID from a comment response's $URN field."""
+def extract_post_urn_parts(resp, fallback_id):
+    """Extract (namespace, id) from a comment response's $URN field.
+
+    Comment URN shape: urn:li:comment:(urn:li:<ns>:<id>,<comment_id>)
+    where <ns> is 'activity', 'ugcPost', or 'share'. The activity, share,
+    and ugcPost numeric IDs for the same post are DIFFERENT (LinkedIn
+    namespaces, not prefixes), so we must echo back the namespace
+    LinkedIn used. If we hard-code 'activity' but the response carried
+    'share', the constructed permalink stores a share-namespace ID
+    masquerading as an activity URN, which then 404s on every namespace-
+    sensitive read (Unipile, /v2/socialActions, etc.) and gets misflagged
+    as deleted. Falls back to ('activity', fallback_id) only when the
+    response has no parseable URN at all.
+    """
     urn = resp.get("$URN", "")
-    import re
-    m = re.search(r"activity:(\d+)", urn)
-    return m.group(1) if m else fallback_id
+    m = re.search(r"urn:li:(activity|ugcPost|share):(\d+)", urn)
+    if m:
+        return m.group(1), m.group(2)
+    return "activity", fallback_id
+
+
+def extract_activity_id_from_response(resp, fallback_id):
+    """Deprecated. Use extract_post_urn_parts; kept for any external caller."""
+    return extract_post_urn_parts(resp, fallback_id)[1]
 
 
 def comment_on_post(token, person_urn, activity_id, text, project=None, reply_id=None, post_id=None):
@@ -326,12 +344,13 @@ def comment_on_post(token, person_urn, activity_id, text, project=None, reply_id
     if r.status_code == 201:
         resp = r.json()
         comment_id = resp.get("id", "")
-        real_activity_id = extract_activity_id_from_response(resp, activity_id)
-        comment_urn = resp.get("$URN", f"urn:li:comment:(urn:li:activity:{real_activity_id},{comment_id})")
-        our_url = f"https://www.linkedin.com/feed/update/urn:li:activity:{real_activity_id}/"
+        ns, real_id = extract_post_urn_parts(resp, activity_id)
+        comment_urn = resp.get("$URN", f"urn:li:comment:(urn:li:{ns}:{real_id},{comment_id})")
+        our_url = f"https://www.linkedin.com/feed/update/urn:li:{ns}:{real_id}/"
         _backfill_after_success(minted_session, reply_id=reply_id, post_id=post_id)
         print(json.dumps({"ok": True, "comment_urn": comment_urn, "our_url": our_url,
-                          "activity_id": real_activity_id,
+                          "post_namespace": ns, "post_id": real_id,
+                          "activity_id": real_id,
                           "minted_session": minted_session}))
         return comment_urn
     else:
@@ -388,10 +407,10 @@ def reply_to_comment(token, person_urn, activity_id, parent_comment_urn, text,
         # which is our internal replies.id (int). The post_id/reply_id
         # backfill block below uses the function-scope param (the int).
         api_reply_id = resp.get("id", "")
-        real_activity_id = extract_activity_id_from_response(resp, activity_id)
-        reply_urn = resp.get("$URN", f"urn:li:comment:(urn:li:activity:{real_activity_id},{api_reply_id})")
+        ns, real_id = extract_post_urn_parts(resp, activity_id)
+        reply_urn = resp.get("$URN", f"urn:li:comment:(urn:li:{ns}:{real_id},{api_reply_id})")
         permalink = (
-            f"https://www.linkedin.com/feed/update/urn:li:activity:{real_activity_id}"
+            f"https://www.linkedin.com/feed/update/urn:li:{ns}:{real_id}"
             f"?commentUrn={urllib.parse.quote(reply_urn, safe='')}"
         )
         _backfill_after_success(minted_session, reply_id=reply_id, post_id=post_id)
