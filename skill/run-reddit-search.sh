@@ -274,9 +274,15 @@ for i in $(seq 1 "$ITERATIONS"); do
 done
 
 ELAPSED=$(( $(date +%s) - RUN_START ))
-log "=== Run summary: posted=$TOTAL_POSTED failed=$TOTAL_FAILED skipped=$TOTAL_SKIPPED salvaged=$TOTAL_SALVAGED candidates=$TOTAL_CANDIDATES projects=[$EXCLUDE] elapsed=${ELAPSED}s ==="
+# Sum claude_sessions.total_cost_usd for every post_reddit session started
+# during this cycle. Mirrors run-twitter-cycle.sh / run-linkedin.sh; the
+# script value here is the same tag passed to log_claude_session.py inside
+# scripts/post_reddit.py (~line 1141). Falls back to 0.0000 if the DB is
+# unreachable so the dashboard never shows blank.
+_COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "post_reddit" 2>/dev/null || echo "0.0000")
+log "=== Run summary: posted=$TOTAL_POSTED failed=$TOTAL_FAILED skipped=$TOTAL_SKIPPED salvaged=$TOTAL_SALVAGED candidates=$TOTAL_CANDIDATES projects=[$EXCLUDE] cost=\$$_COST elapsed=${ELAPSED}s ==="
 
-LOG_ARGS=(--script "post_reddit" --posted "$TOTAL_POSTED" --skipped "$TOTAL_SKIPPED" --failed "$TOTAL_FAILED" --cost 0 --elapsed "$ELAPSED")
+LOG_ARGS=(--script "post_reddit" --posted "$TOTAL_POSTED" --skipped "$TOTAL_SKIPPED" --failed "$TOTAL_FAILED" --cost "$_COST" --elapsed "$ELAPSED")
 # Queue counters surface in the dashboard Result column:
 #   --salvaged   how many iterations replayed a row from a prior cycle
 #                (parsed by RUN_LINE_RE and rendered as a "salvaged: N" pill,
