@@ -172,7 +172,10 @@ def log_rejected(args):
             "existing_post_id": resp.get("existing_post_id"),
         }))
         return
-    post_id = (resp or {}).get("post", {}).get("id")
+    # See note in main() about the resp.data.post.id shape.
+    data = (resp or {}).get("data") or {}
+    post_obj = data.get("post") or (resp or {}).get("post") or {}
+    post_id = post_obj.get("id")
     print(json.dumps({"rejected": True, "post_id": post_id, "urns": urn_ids}))
 
 
@@ -310,7 +313,14 @@ def main():
             "content_preview": resp.get("content_preview"),
         }))
         return
-    post_id = (resp or {}).get("post", {}).get("id")
+    # API response shape is {"ok":true,"data":{"post":{"id":N,...}}}.
+    # Earlier code looked at resp["post"]["id"] which silently returns None
+    # against the current API, causing twitter_post_plan.py to drop into the
+    # log_post_no_id branch even when the row was successfully inserted.
+    # Accept both shapes for backwards compat.
+    data = (resp or {}).get("data") or {}
+    post_obj = data.get("post") or (resp or {}).get("post") or {}
+    post_id = post_obj.get("id")
     print(json.dumps({"logged": True, "post_id": post_id, "urns": urn_ids}))
 
 
