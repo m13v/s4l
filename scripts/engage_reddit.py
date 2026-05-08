@@ -83,6 +83,54 @@ def bump_campaigns(table, row_id, campaign_ids):
             print(f"[engage_reddit] WARNING: campaign_bump failed (id={row_id} c={cid}): {e}")
 
 
+def patch_replied_with_retry(cmd_args, reply_id):
+    """Run reply_db.py replied PATCH with rate-limit-aware retry.
+
+    The comment is ALREADY posted on the platform when we call this. If the
+    s4l PATCH fails (e.g. 429 during a rate-limit storm), the row stays in
+    'processing' and reset_stuck_processing flips it back to 'pending' after
+    2h, which would re-fetch and re-post a duplicate. Confirmed in production
+    2026-05-07 where 423 duplicates landed on a single Moltbook parent.
+
+    To prevent that, we retry the PATCH for up to ~10min with growing backoff
+    (15s, 30s, 60s, 120s, 300s). If still failing after that, log a CRITICAL
+    line so the operator can flip the row to 'replied' manually before the 2h
+    reset fires. Returns True on success, False on terminal failure.
+    """
+    backoff_s = [15, 30, 60, 120, 300]
+    last_stderr = ""
+    for attempt in range(len(backoff_s) + 1):
+        try:
+            proc = subprocess.run(cmd_args, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired as e:
+            last_stderr = f"timeout: {e}"
+            proc = None
+        else:
+            if proc.returncode == 0:
+                return True
+            last_stderr = (proc.stderr or b"").decode(errors="replace")
+
+        if attempt < len(backoff_s):
+            wait = backoff_s[attempt]
+            print(
+                f"[engage_reddit] #{reply_id} REPLIED PATCH attempt {attempt+1} "
+                f"failed ({last_stderr[:200]}); retrying in {wait}s",
+                flush=True,
+            )
+            time.sleep(wait)
+
+    print(
+        f"[engage_reddit] CRITICAL: #{reply_id} REPLIED PATCH failed all retries "
+        f"({last_stderr[:300]}). Comment IS posted on platform but row stays in "
+        f"'processing'. After ~2h reset_stuck_processing will flip it to "
+        f"'pending' and the next run may post a DUPLICATE. Manual fix: SELECT "
+        f"-> verify our_reply_url, then UPDATE replies SET status='replied' "
+        f"WHERE id={reply_id}.",
+        flush=True,
+    )
+    return False
+
+
 def reset_stuck_processing(conn, platform):
     result = conn.execute(
         "UPDATE replies SET status='pending' WHERE status='processing' "
@@ -865,7 +913,7 @@ def main():
                             cmd_args = ["python3", REPLY_DB, "replied", str(reply["id"]), existing]
                             if existing_url:
                                 cmd_args.append(existing_url)
-                            subprocess.run(cmd_args)
+                            patch_replied_with_retry(cmd_args, reply["id"])
                             succeeded += 1
                             print(f"[engage_reddit] #{reply['id']} DEDUP (already replied) ({reply_elapsed:.0f}s)")
                             print(f"[engage_reddit] #{reply['id']} tokens: in={usage['input_tokens']} out={usage['output_tokens']} "
