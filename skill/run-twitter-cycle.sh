@@ -385,6 +385,12 @@ SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"t
 
 log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
 acquire_lock "twitter-browser" 3600
+# Drop stale Chrome singleton symlinks before launch. Background ungraceful-
+# exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
+# pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
+# went wrong when opening your profile" 7x and the pipeline hangs. Helper
+# refuses to clean if the lock PID is alive.
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 1: drafting queries and scraping tweets..."
@@ -736,6 +742,8 @@ PLAN_FILE="/tmp/twitter_cycle_plan_${BATCH_ID}.json"
 # --- Phase 2b-prep: pick + draft + plan -------------------------------------
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
 acquire_lock "twitter-browser" 3600
+# Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replies..."
@@ -885,6 +893,8 @@ fi
 # --- Phase 2b-post: re-acquire browser lock and post ------------------------
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
 acquire_lock "twitter-browser" 3600
+# Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
