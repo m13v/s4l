@@ -376,11 +376,11 @@ recently (cite the source URL in your concept field).
 PROPOSAL SHAPES (pick whichever best fits what your research surfaced):
 
 A. SINGLE-BLOCKBUSTER (preferred when a single notable release dominates).
-   One post about ONE specific recent thing — a new model, a new product,
+   One post about ONE specific recent thing: a new model, a new product,
    a vendor launch, a feature drop. The keyword can be the product/model
    name itself ("claude opus 4.7 deep dive") or a how-to/explainer about
    it ("how to use <new thing> for <use case>"). Date does NOT need to
-   appear in the slug or keyword — freshness comes from the post being
+   appear in the slug or keyword; freshness comes from the post being
    about a real {CURRENT_DATE_HUMAN} event.
 
 B. ROUNDUP/DIGEST (preferred when multiple notable releases happened).
@@ -419,7 +419,7 @@ PY
     # the model to run >=3 WebSearch queries to ground proposals in real
     # current-month news (since the model's training cutoff predates today).
     # Without --allowed-tools and --dangerously-skip-permissions, headless
-    # Claude silently denies tool calls and the model falls back to priors —
+    # Claude silently denies tool calls and the model falls back to priors,
     # which is how we ended up with zero "may-2026" pages despite April having
     # 28 of them.
     #
