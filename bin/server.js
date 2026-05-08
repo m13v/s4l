@@ -945,11 +945,16 @@ async function enrichCheckRepliesRuns(runs) {
       if (p.discoveredMs < startMs || p.discoveredMs > endMs) continue;
       found++;
     }
+    const prior = run.result || {};
     run.result = {
       type: 'check-replies',
       found,
       pending_now: pendingByPlatform[dbPlatform] || 0,
-      cost_usd: run.result && run.result.cost_usd ? run.result.cost_usd : 0,
+      cost_usd: prior.cost_usd || 0,
+      // Carry forward the scan-stage counters (seen / new / excluded /
+      // unmatched / backfill) that the shell wrapper extracted from the
+      // pipeline log. Empty {} when the run didn't emit a scan= segment.
+      scan: (prior.scan && typeof prior.scan === 'object') ? prior.scan : {},
     };
   }
 }
@@ -6625,7 +6630,33 @@ function renderResult(run) {
   if (r.type === 'check-replies') {
     const found = r.found || 0;
     const pending = r.pending_now || 0;
+    // Scan-stage pills: surface inbox/feed scan granularity (seen / new /
+    // excluded) on check-replies rows so empty scan cycles read as "scanned
+    // 100 / 0 new" instead of "found 0 / queue 0". scan is {} on runs that
+    // didn't emit a scan= segment.
+    const scan = (r.scan && typeof r.scan === 'object') ? r.scan : {};
+    const scannedN = scan.scanned || 0;
+    const newN = scan.new || 0;
+    const excludedN = scan.excluded || 0;
+    const unmatchedN = scan.unmatched || 0;
+    const backfillN = scan.backfill || 0;
+    const hasScan = scannedN || newN || excludedN || unmatchedN || backfillN;
+    const scanTooltip = hasScan
+      ? ('inbox scan: seen=' + scannedN +
+         ' / new=' + newN +
+         ' / excluded=' + excludedN +
+         ' / unmatched=' + unmatchedN +
+         ' / backfill_skipped=' + backfillN)
+      : '';
+    const scanPills = hasScan
+      ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+         pill('scanned', scannedN, scannedN > 0 ? 'var(--text)' : 'var(--muted)') +
+         pill('new', newN, newN > 0 ? '#22c55e' : 'var(--muted)') +
+         (excludedN ? pill('excluded', excludedN, 'var(--muted)') : '') +
+         '</span>')
+      : '';
     return (
+      scanPills +
       pill('found', found, found > 0 ? '#22c55e' : 'var(--muted)') +
       pill('queue', pending, pending > 0 ? 'var(--text)' : 'var(--muted)')
     );
