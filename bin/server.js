@@ -10304,7 +10304,16 @@ function renderTopPosts(payload) {
         // explicitly.
         filterPredicate: (fv, row, _raw) => {
           if (!fv) return true;
-          if (fv === 'has_link' || fv === '>=1') return Number(row.link_count) >= 1;
+          // Most comments are posted with the URL typed inline (no wrap
+          // pipeline -> no post_links row -> link_count=0 even though the
+          // user clearly "sent a link"). Fall back to a regex scan over
+          // our_content for that case, mirroring dmHasOutboundUrl on the
+          // DM rail. Doubled backslashes because we live inside a server
+          // template literal.
+          const URL_RE = /https?:\\/\\/\\S+|(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[\\w\\-./?#=&%+~:@!$,;*]+/i;
+          const hasInlineUrl = !!(row.our_content && URL_RE.test(String(row.our_content)));
+          const hasLink = Number(row.link_count) >= 1 || hasInlineUrl;
+          if (fv === 'has_link' || fv === '>=1') return hasLink;
           if (fv === 'has_clicks') {
             // Prefer real (human) clicks when the per-click log has anything,
             // fall back to legacy link_clicks so historical rows still match.
@@ -10313,7 +10322,7 @@ function renderTopPosts(payload) {
             if (real > 0 || bots > 0) return real >= 1;
             return Number(row.link_clicks) >= 1;
           }
-          if (fv === 'no_link') return !(Number(row.link_count) >= 1);
+          if (fv === 'no_link') return !hasLink;
           return true;
         } },
       { key: 'posted_ts',      label: 'Posted',   type: 'numeric', align: 'right', widthPct: 6,
