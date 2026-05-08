@@ -183,6 +183,8 @@ def main():
     skip_existing = 0
     skip_anchor = 0
 
+    skip_not_replying_to_us = 0
+
     for r in results:
         thread_url = r.get("thread_url") or ""
         anchor_id = r.get("anchor_tweet_id") or anchor_id_from_url(thread_url)
@@ -202,6 +204,19 @@ def main():
             if handle.lower() == OUR_HANDLE.lower():
                 skip_own += 1
                 continue
+            # Filter: only keep tweets that are actually replying to us.
+            # X tweet permalink pages inject "more from this author" / "you might
+            # like" articles into the timeline. Without this check, those leak
+            # in as fake follow-ups (observed 2026-05: ~80% of captures were
+            # the seed author's later unrelated promotional tweets, not replies
+            # to our reply). The extractor in twitter_browser.py captures
+            # `replying_to` from the "Replying to @handle" block above each
+            # tweet; if it's empty or doesn't point at our handle, it's not a
+            # response to us.
+            replying_to = (fu.get("replying_to") or "").lstrip("@").lower()
+            if replying_to != OUR_HANDLE.lower():
+                skip_not_replying_to_us += 1
+                continue
             if tid in known_ids:
                 skip_existing += 1
                 continue
@@ -218,7 +233,8 @@ def main():
 
     conn.close()
     print(f"\nSummary: {new_count} new follow-ups ingested, "
-          f"{skip_existing} already tracked, {skip_own} own account, {skip_anchor} anchor skips")
+          f"{skip_existing} already tracked, {skip_own} own account, "
+          f"{skip_anchor} anchor skips, {skip_not_replying_to_us} not replying to us")
     return new_count
 
 
