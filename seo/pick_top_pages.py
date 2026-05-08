@@ -352,7 +352,12 @@ def _enabled_products(cfg):
     out = []
     for p in cfg.get("projects", []):
         lp = p.get("landing_pages") or {}
-        if lp.get("top_pages_enabled"):
+        # Also require weight > 0 so paused projects (Clone, tenxats,
+        # macOS Session Replay as of 2026-05-08) don't get top-pages SEO
+        # work. Posting + Moltbook + SERP/GSC already filter weight > 0;
+        # this brings top-pages into line. Same gate added to
+        # pick_top_posts.py and run_improve_pipeline.sh.
+        if lp.get("top_pages_enabled") and (p.get("weight") or 0) > 0:
             out.append(p.get("name"))
     return out
 
@@ -412,9 +417,14 @@ def build_global_brief(days=1, top_n=10, cooldown_days=7):
     skipped when picking the winner; if every ranked row is in cooldown,
     the oldest-cooldown row wins anyway (pipeline never goes dark)."""
     cfg = _load_config()
-    enabled = [p for p in cfg.get("projects", []) if (p.get("landing_pages") or {}).get("top_pages_enabled")]
+    # Same gate as _enabled_products: top_pages_enabled AND weight > 0.
+    enabled = [
+        p for p in cfg.get("projects", [])
+        if (p.get("landing_pages") or {}).get("top_pages_enabled")
+        and (p.get("weight") or 0) > 0
+    ]
     if not enabled:
-        raise SystemExit("ERROR: no projects have landing_pages.top_pages_enabled=true")
+        raise SystemExit("ERROR: no projects have landing_pages.top_pages_enabled=true AND weight > 0")
 
     api_key = _posthog_api_key()
     if not api_key:
