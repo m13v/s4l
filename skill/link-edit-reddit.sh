@@ -36,9 +36,24 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 RUN_START=$(date +%s)
 log "=== Reddit Link Edit Run: $(date) ==="
 
+# A/B gate: per-post deterministic coin flip for the page-gen lane. Mirrors
+# scripts/twitter_gen_links.py's TWITTER_PAGE_GEN_RATE behavior. 0.30 means
+# ~30% of eligible posts hit the full seo/generate_page.py pipeline; the
+# other ~70% fall through to the project's homepage with
+# link_source='plain_url_ab_skip'. Per-post hash via Postgres hashtext() so
+# the same post stays in the same lane across cron retries — without that
+# we'd risk shipping two different lanes for the same post on consecutive
+# runs and burn budget. Tunable via env var so cadence sweeps don't need
+# code changes. 0.0 disables page-gen; 1.0 restores 100% page-gen.
+LINK_EDIT_REDDIT_PAGE_GEN_RATE="${LINK_EDIT_REDDIT_PAGE_GEN_RATE:-0.30}"
+PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_REDDIT_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
+log "A/B gate: LINK_EDIT_REDDIT_PAGE_GEN_RATE=$LINK_EDIT_REDDIT_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
+
 EDITABLE=$(psql "$DATABASE_URL" -t -A -c "
     SELECT json_agg(q) FROM (
-        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name
+        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name,
+               CASE WHEN ((hashtext(id::text) % 100) + 100) % 100 < ${PAGE_GEN_RATE_PCT}
+                    THEN 'page_gen' ELSE 'ab_skip' END AS page_gen_lane
         FROM posts
         WHERE status='active'
           AND platform='reddit'
@@ -84,15 +99,19 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
    b. If project_name is set but CLEARLY does not fit the thread (e.g. Cyrano tagged to a law firm billing thread), treat it as a bad upstream tag and scan config.json for a project that DOES fit. If you find one, use that project instead and also run: psql "\$DATABASE_URL" -c "UPDATE posts SET project_name='BETTER_PROJECT' WHERE id=POST_ID" so the correction is persisted.
    c. If project_name is NOT set, match by topics. Be generous: if the thread touches agents, automation, desktop, memory, or anything related to the project descriptions, it's a match.
    d. ONLY if no project in config.json fits at all, mark it skipped (see step 9) and move on. Frame it as recommending a cool tool you've come across, NOT as something you built.
-3. If the matched project has a landing_pages config (with repo, base_url), generate a fresh SEO page for this thread by delegating to the unified generator:
+3. PAGE-GEN LANE GATE — read the post's \`page_gen_lane\` field (set deterministically by the pipeline; do NOT override).
+   - If \`page_gen_lane == "ab_skip"\`: SKIP the full SEO page generation entirely. Set LINK_URL = the matched project's homepage from config.json (the \`website\` field) and LINK_SOURCE="plain_url_ab_skip". Continue to step 4. The /r/<code> short-link wrap in step 5 still mints attribution on the project's own domain, so we get click data for this lane to compare against seo_page lane CTR.
+   - If \`page_gen_lane == "page_gen"\` AND the matched project has a landing_pages config: continue to step 3a below.
+   - If \`page_gen_lane == "page_gen"\` BUT the matched project has NO landing_pages config: skip page-gen, set LINK_URL = project homepage, LINK_SOURCE="plain_url_no_lp", continue to step 4.
+
+3a. If the matched project has a landing_pages config (with repo, base_url), generate a fresh SEO page for this thread by delegating to the unified generator:
    a. Decide a SHORT keyword phrase (3-6 words) that captures what page would help this thread's audience. Think SEO intent, not headline copy. Examples: "local ai agent", "macos accessibility automation", "self hosted llm inference".
    b. Derive a URL slug from the keyword: lowercase, kebab-case, alphanumeric and hyphens only, max 50 chars. Examples: "local-ai-agent", "macos-accessibility-automation".
-   c. Run the unified SEO page generator (it loads the @m13v/seo-components palette, picks content type, builds the page, commits, pushes, verifies the live URL, and writes the seo_keywords row that surfaces in the dashboard activity feed). Use the Bash tool:
+   c. Run the unified SEO page generator (it loads the @m13v/seo-components palette, picks content type, builds the page, commits, pushes, verifies the live URL, and writes the seo_keywords row that surfaces in the dashboard activity feed). The generator's prompt has its own model-driven Step 0 reuse-or-redirect decision: if an existing page on the site already serves this keyword's intent, the generator will consolidate (308 redirect this slug to the existing page) instead of building a duplicate. Trust that decision; do not pre-filter for reuse here. Use the Bash tool:
         python3 ~/social-autoposter/seo/generate_page.py --product PROJECT_NAME --keyword "KEYWORD_PHRASE" --slug "url-slug" --trigger reddit
       This call can take 10-40 minutes per page (Cloud Run staging-then-tag deploys on mk0r are the slow end). The final stdout is a JSON object; parse it. On success it contains "success": true and "page_url": "https://...". On failure it contains "success": false and "error": "...".
    d. If success, set LINK_URL = the \`page_url\` from the JSON output and LINK_SOURCE="seo_page".
    e. If failure (success: false in the JSON), fall back GRACEFULLY (mirrors the Twitter pipeline behavior in scripts/twitter_gen_links.py): set LINK_URL = the project's homepage from config.json (the \`website\` field for the matched project) and set LINK_SOURCE="plain_url_fallback:<reason>" where <reason> is a SHORT snake_case tag derived from the JSON error string (preferred values: timeout, no_page_url, deploy_failed, build_failed, push_failed; otherwise pick a sensible 1-3 word snake_case summary). Do NOT skip the post; continue to step 4. The short-link wrap in step 5 will still mint a /r/<code> on the project's own domain, so click attribution works on the homepage URL too.
-   If the matched project has NO landing_pages config at all (genuinely unconfigured, not a generation failure), skip the page-gen step entirely: set LINK_URL = the project's website URL from config.json and LINK_SOURCE="plain_url_no_lp".
 4. Write the link sentence as a CONTEXTUAL BRIDGE, not a citation or footnote. This is a structured 4-step sub-task; do NOT shortcut it.
    a. Re-read our_content (the comment we already left on this Reddit thread). Identify the SINGLE strongest claim, mechanism, or specific number we said in that comment (examples: "auto-rephrasing on revisit", "the 81 number on the rubric", "scoring distractor quality", "200ms p95 latency", "structured output across nested tool calls"). Pick ONE concrete thing, not a category.
    b. Read the landing page at LINK_URL (use WebFetch on LINK_URL). Identify the SPECIFIC mechanism on the page that delivers the thing from step 4a (one feature, one capability, named in the page's own language).
