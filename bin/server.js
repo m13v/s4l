@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execSync, spawn, spawnSync } = require('child_process');
 const pg = require('pg');
 const { Pool } = pg;
@@ -2361,42 +2362,88 @@ async function handleApi(req, res) {
     }
     const pool = getPool();
     if (!pool) return json(res, { error: 'no_db' }, 500);
+    // Bot detection: the resolver helper in @m13v/seo-components matches the
+    // User-Agent against /bot|crawler|spider|Twitterbot|LinkedInBot|.../i and
+    // sets ?bot=1 when it fires. Twitter card prefetchers, LinkedIn unfurl,
+    // Slack/Discord/Telegram/WhatsApp link previews etc. were inflating the
+    // legacy `clicks` counter ~20x. We DO NOT bump that counter for bots
+    // (so historical queries against post_links.clicks / dm_links.clicks
+    // become humans-only going forward), but we DO log every hit in
+    // *_link_clicks with is_bot stamped, so the dashboard can split humans
+    // vs bots and so we keep auditable per-click history. UA + referrer are
+    // forwarded as query params (the request hits us server-to-server, so
+    // HTTP-level UA is the consumer-site Next.js fetch, not the browser).
+    // Raw IP is hashed sha256()[:16] hex (privacy, no plaintext stored).
+    const isBot = url.searchParams.get('bot') === '1';
+    const fwdUa = (url.searchParams.get('ua') || '').slice(0, 500) || null;
+    const fwdRef = (url.searchParams.get('ref') || '').slice(0, 500) || null;
+    const remoteIp =
+      (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+      (req.socket && req.socket.remoteAddress) || '';
+    let ipHash = null;
+    if (remoteIp) {
+      try {
+        ipHash = crypto.createHash('sha256').update(remoteIp).digest('hex').slice(0, 16);
+      } catch {}
+    }
     try {
       // Resolver tries dm_links first (DM rail), falls through to post_links
       // (public-post rail) on miss. Codes are minted from the same alphabet
       // and namespace; cross-rail collisions are statistically negligible at
-      // 8 chars × 32 alphabet, but the PK collision retry in mint() guards
+      // 8 chars times 32 alphabet, but the PK collision retry in mint() guards
       // against it inside each table independently.
-      const dmRes = await pool.query(
-        `UPDATE dm_links l SET
-            clicks = l.clicks + 1,
-            first_click_at = COALESCE(l.first_click_at, NOW()),
-            last_click_at = NOW()
-          FROM dms d
-          WHERE l.code = $1 AND d.id = l.dm_id
-          RETURNING l.dm_id, l.target_url, l.kind,
-                    d.platform, d.target_project, d.project_name`,
-        [code]
-      );
+      //
+      // Bot vs human branch: humans get the UPDATE that bumps clicks and
+      // stamps first/last click timestamps. Bots get a plain SELECT with the
+      // same column shape so the rest of the response stays identical.
+      const dmSql = isBot
+        ? `SELECT l.dm_id, l.target_url, l.kind,
+                  d.platform, d.target_project, d.project_name
+            FROM dm_links l JOIN dms d ON d.id = l.dm_id
+            WHERE l.code = $1`
+        : `UPDATE dm_links l SET
+              clicks = l.clicks + 1,
+              first_click_at = COALESCE(l.first_click_at, NOW()),
+              last_click_at = NOW()
+            FROM dms d
+            WHERE l.code = $1 AND d.id = l.dm_id
+            RETURNING l.dm_id, l.target_url, l.kind,
+                      d.platform, d.target_project, d.project_name`;
+      const dmRes = await pool.query(dmSql, [code]);
 
       if (dmRes.rows.length) {
         const row = dmRes.rows[0];
         if (!row.target_url) {
           return json(res, { error: 'no_target_url', dm_id: row.dm_id }, 404);
         }
+        // Per-click log row, captures every hit (human or bot) so we can
+        // split counts after the fact. Failure is non-fatal, redirect must
+        // succeed regardless.
+        try {
+          await pool.query(
+            `INSERT INTO dm_link_clicks (code, ip_hash, user_agent, is_bot, referrer)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [code, ipHash, fwdUa, isBot, fwdRef]
+          );
+        } catch (e) {
+          console.error('[short-links] dm_link_clicks insert failed (non-fatal):', e.message);
+        }
         // Click is treated as a first-class trigger to the engage-dm-replies
         // pipeline. Insert a synthetic 'inbound' row in dm_messages so the
         // existing PENDING_CONVOS query (last_in > last_out) surfaces this
-        // thread on the next polling tick. Failures MUST NOT break the
-        // redirect — log + continue.
-        try {
-          await pool.query(
-            `INSERT INTO dm_messages (dm_id, direction, author, content, message_at, logged_at)
-             VALUES ($1, 'inbound', '__click_signal__', '[CLICK_SIGNAL] short link clicked', NOW(), NOW())`,
-            [row.dm_id]
-          );
-        } catch (e) {
-          console.error('[short-links] click_signal insert failed (non-fatal):', e.message);
+        // thread on the next polling tick. Bots do not represent real intent,
+        // skip the click_signal for them. Failures MUST NOT break the
+        // redirect, log + continue.
+        if (!isBot) {
+          try {
+            await pool.query(
+              `INSERT INTO dm_messages (dm_id, direction, author, content, message_at, logged_at)
+               VALUES ($1, 'inbound', '__click_signal__', '[CLICK_SIGNAL] short link clicked', NOW(), NOW())`,
+              [row.dm_id]
+            );
+          } catch (e) {
+            console.error('[short-links] click_signal insert failed (non-fatal):', e.message);
+          }
         }
         let platform = (row.platform || 'reddit').toLowerCase();
         if (platform === 'x') platform = 'twitter';
@@ -2410,25 +2457,37 @@ async function handleApi(req, res) {
       }
 
       // Fallback: post_links rail (public posts/comments). No click_signal
-      // insert here — there is no engage pipeline waiting on these, the
+      // insert here, there is no engage pipeline waiting on these, the
       // attribution lives entirely in the post_links.clicks counter +
-      // first_click_at / last_click_at timestamps.
-      const postRes = await pool.query(
-        `UPDATE post_links SET
-            clicks = clicks + 1,
-            first_click_at = COALESCE(first_click_at, NOW()),
-            last_click_at = NOW()
-          WHERE code = $1
-          RETURNING post_id, reply_id, platform, project_name,
-                    target_url, kind`,
-        [code]
-      );
+      // first_click_at / last_click_at timestamps (humans only) plus
+      // post_link_clicks (humans + bots, split by is_bot).
+      const postSql = isBot
+        ? `SELECT post_id, reply_id, platform, project_name, target_url, kind
+            FROM post_links WHERE code = $1`
+        : `UPDATE post_links SET
+              clicks = clicks + 1,
+              first_click_at = COALESCE(first_click_at, NOW()),
+              last_click_at = NOW()
+            WHERE code = $1
+            RETURNING post_id, reply_id, platform, project_name,
+                      target_url, kind`;
+      const postRes = await pool.query(postSql, [code]);
       if (!postRes.rows.length) {
         return json(res, { error: 'not_found', code }, 404);
       }
       const prow = postRes.rows[0];
       if (!prow.target_url) {
         return json(res, { error: 'no_target_url', post_id: prow.post_id, reply_id: prow.reply_id }, 404);
+      }
+      // Per-click log for post rail (humans + bots).
+      try {
+        await pool.query(
+          `INSERT INTO post_link_clicks (code, ip_hash, user_agent, is_bot, referrer)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [code, ipHash, fwdUa, isBot, fwdRef]
+        );
+      } catch (e) {
+        console.error('[short-links] post_link_clicks insert failed (non-fatal):', e.message);
       }
       let pPlatform = (prow.platform || 'reddit').toLowerCase();
       if (pPlatform === 'x') pPlatform = 'twitter';
@@ -4271,10 +4330,33 @@ async function handleApi(req, res) {
         "our_account, project_name, engagement_style, is_recommendation, " +
         "c.name AS campaign_name, " +
         "COALESCE(pl.total_clicks, 0)::int AS link_clicks, " +
+        "COALESCE(pl.real_clicks, 0)::int AS link_real_clicks, " +
+        "COALESCE(pl.bot_clicks, 0)::int AS link_bot_clicks, " +
         "COALESCE(pl.link_count, 0)::int AS link_count, " +
         "pl.first_code AS link_code " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
-      "LEFT JOIN (SELECT post_id, SUM(clicks)::int AS total_clicks, COUNT(*)::int AS link_count, MIN(code) AS first_code FROM post_links GROUP BY post_id) pl ON pl.post_id = posts.id " +
+      // pl rollup: legacy `total_clicks` reads the post_links.clicks integer
+      // (humans-only after 2026-05-07; pre-existing rows include bots).
+      // real_clicks / bot_clicks come from post_link_clicks, the per-hit log,
+      // and split by UA bot regex. Posts minted before 2026-05-07 will have
+      // real_clicks=bot_clicks=0 and the legacy column carries the conflated
+      // historical count, the dashboard renders that as "(legacy)".
+      "LEFT JOIN (" +
+        "SELECT pl0.post_id, " +
+        "  SUM(pl0.clicks)::int AS total_clicks, " +
+        "  COUNT(*)::int AS link_count, " +
+        "  MIN(pl0.code) AS first_code, " +
+        "  COALESCE(SUM(plc.real_clicks), 0)::int AS real_clicks, " +
+        "  COALESCE(SUM(plc.bot_clicks), 0)::int AS bot_clicks " +
+        "FROM post_links pl0 " +
+        "LEFT JOIN (" +
+          "SELECT code, " +
+          "  COUNT(*) FILTER (WHERE is_bot = false)::int AS real_clicks, " +
+          "  COUNT(*) FILTER (WHERE is_bot = true)::int AS bot_clicks " +
+          "FROM post_link_clicks GROUP BY code" +
+        ") plc ON plc.code = pl0.code " +
+        "GROUP BY pl0.post_id" +
+      ") pl ON pl.post_id = posts.id " +
       "WHERE " + whereParts.join(' AND ') + " " +
       "ORDER BY upvotes DESC NULLS LAST, comments_count DESC NULLS LAST, views DESC NULLS LAST " +
       "LIMIT " + limit +
@@ -4315,6 +4397,11 @@ async function handleApi(req, res) {
       "SELECT pl.code, pl.platform, pl.project_name, pl.target_url, " +
         "pl.clicks, pl.first_click_at, pl.last_click_at, pl.minted_at, " +
         "pl.post_id, pl.reply_id, pl.kind, " +
+        // Humans vs bots split from post_link_clicks. Pre-2026-05-07 rows
+        // have no per-click log entries, so real_clicks/bot_clicks=0 for
+        // them; the UI falls back to pl.clicks rendered as "(legacy)".
+        "COALESCE(plc.real_clicks, 0)::int AS real_clicks, " +
+        "COALESCE(plc.bot_clicks, 0)::int AS bot_clicks, " +
         "CASE WHEN pl.reply_id IS NOT NULL THEN 'comment' ELSE 'thread' END AS link_kind, " +
         "LEFT(COALESCE(p.our_content, ''), 200) AS our_content, " +
         "p.our_url, p.thread_url, p.thread_title, p.posted_at, " +
@@ -4322,6 +4409,12 @@ async function handleApi(req, res) {
         "COALESCE(p.comments_count, 0)::int AS comments_count " +
       "FROM post_links pl " +
       "LEFT JOIN posts p ON p.id = pl.post_id " +
+      "LEFT JOIN (" +
+        "SELECT code, " +
+        "  COUNT(*) FILTER (WHERE is_bot = false)::int AS real_clicks, " +
+        "  COUNT(*) FILTER (WHERE is_bot = true)::int AS bot_clicks " +
+        "FROM post_link_clicks GROUP BY code" +
+      ") plc ON plc.code = pl.code " +
       whereSql + " " +
       "ORDER BY pl.clicks DESC NULLS LAST, pl.first_click_at DESC NULLS LAST " +
       "LIMIT " + limit +
@@ -10095,6 +10188,12 @@ function renderTopPosts(payload) {
     project_name:  p.project_name || '',
     is_recommendation: !!p.is_recommendation,
     link_clicks:   Number(p.link_clicks) || 0,
+    // real_clicks / bot_clicks come from the new post_link_clicks per-hit
+    // log (rolled up server-side). For posts minted before 2026-05-07
+    // they will both be 0 even when link_clicks > 0; the UI falls back to
+    // showing the legacy conflated count with a "(legacy)" marker.
+    link_real_clicks: Number(p.link_real_clicks) || 0,
+    link_bot_clicks:  Number(p.link_bot_clicks)  || 0,
     link_count:    Number(p.link_count)  || 0,
     link_code:     p.link_code || '',
   }));
@@ -10154,12 +10253,38 @@ function renderTopPosts(payload) {
       { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
         formatter: (_v, r) => {
           const hasLink = r.link_count > 0;
-          const clicks  = r.link_clicks;
+          const real    = Number(r.link_real_clicks) || 0;
+          const bots    = Number(r.link_bot_clicks)  || 0;
+          const legacy  = Number(r.link_clicks)      || 0;
+          const havePerClick = real > 0 || bots > 0;
           const linkLine  = '<span class="top-stats-bit"><span class="top-stats-k">link</span>'
             + (hasLink ? '\u2714' : '\u2014') + '</span>';
-          const clickLine = hasLink
-            ? '<span class="top-stats-bit"><span class="top-stats-k">clicks</span>' + (clicks || 0) + '</span>'
-            : '';
+          // Two display modes:
+          //   1. Per-click log present: "humans / bots" with bots dimmed.
+          //      Real human clicks drive sort + filter going forward.
+          //   2. Legacy only (post pre-dates 2026-05-07 bot-filter rollout):
+          //      show the conflated counter with "(legacy)" tag in tooltip
+          //      so the operator knows it includes Twitter card prefetches.
+          let clickLine = '';
+          if (hasLink) {
+            if (havePerClick) {
+              const tip = 'Humans / bots split from post_link_clicks (UA bot regex). Real clicks are the human number. Bots are Twitter card / LinkedIn unfurl / Slack preview prefetches.';
+              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + real
+                + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
+                + '</span>';
+            } else if (legacy > 0) {
+              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks.';
+              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + legacy
+                + ' <span style="color:var(--text-muted);">(legacy)</span>'
+                + '</span>';
+            } else {
+              clickLine = '<span class="top-stats-bit"><span class="top-stats-k">clicks</span>0</span>';
+            }
+          }
           const ctaLine = hasLink
             ? '<span class="top-stats-bit" title="CTA conversion data flows once UTM-tagged visits land in PostHog"><span class="top-stats-k">CTA</span>\u2014</span>'
             : '';
@@ -10180,7 +10305,14 @@ function renderTopPosts(payload) {
         filterPredicate: (fv, row, _raw) => {
           if (!fv) return true;
           if (fv === 'has_link' || fv === '>=1') return Number(row.link_count) >= 1;
-          if (fv === 'has_clicks') return Number(row.link_clicks) >= 1;
+          if (fv === 'has_clicks') {
+            // Prefer real (human) clicks when the per-click log has anything,
+            // fall back to legacy link_clicks so historical rows still match.
+            const real = Number(row.link_real_clicks) || 0;
+            const bots = Number(row.link_bot_clicks)  || 0;
+            if (real > 0 || bots > 0) return real >= 1;
+            return Number(row.link_clicks) >= 1;
+          }
           if (fv === 'no_link') return !(Number(row.link_count) >= 1);
           return true;
         } },
