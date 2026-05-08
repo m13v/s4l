@@ -453,21 +453,28 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
         for cid, suffix, sample_rate in _load_active_twitter_campaigns():
             if random.random() < sample_rate:
                 # Wrap any URLs in the suffix through dm_short_links so clicks
-                # attribute. Falls back to raw suffix if wrap fails (defensive;
-                # most active suffixes are plain text like " written with ai").
+                # attribute. The suffix carries no project_name, so we detect
+                # the project from the URL hostname against config.json before
+                # minting. Falls back to raw suffix if no project matches (e.g.
+                # plain-text suffix like " written with ai", or third-party URL).
                 wrapped_suffix = suffix
                 if 'http' in suffix:
                     try:
                         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                        from dm_short_links import wrap_text_for_post
-                        # project_name unknown at suffix layer; pass empty so the
-                        # wrapper auto-detects via URL hostname against config.json.
-                        wrap_res = wrap_text_for_post(text=suffix, platform='twitter',
-                                                      project_name='')
-                        if wrap_res.get('ok') and wrap_res.get('codes'):
-                            wrapped_suffix = wrap_res['text']
-                            print(f"[reply_to_tweet] suffix wrap codes={wrap_res['codes']}",
-                                  file=sys.stderr)
+                        from dm_short_links import wrap_text_for_post, _classify_url, _load_projects, _URL_RE
+                        projects = _load_projects()
+                        # Detect project_name from the first URL in the suffix.
+                        m = _URL_RE.search(suffix)
+                        detected_project = None
+                        if m:
+                            _, detected_project = _classify_url(m.group(0), projects)
+                        if detected_project:
+                            wrap_res = wrap_text_for_post(text=suffix, platform='twitter',
+                                                          project_name=detected_project)
+                            if wrap_res.get('ok') and wrap_res.get('codes'):
+                                wrapped_suffix = wrap_res['text']
+                                print(f"[reply_to_tweet] suffix wrap project={detected_project} "
+                                      f"codes={wrap_res['codes']}", file=sys.stderr)
                     except Exception as _e:
                         print(f"[reply_to_tweet] suffix wrap failed ({_e}); raw",
                               file=sys.stderr)
@@ -1098,7 +1105,23 @@ def send_dm(thread_url, message, dm_id=None):
     applied_campaigns = []
     for cid, suffix, sample_rate in _load_active_twitter_campaigns():
         if random.random() < sample_rate:
-            message = message + suffix
+            # Wrap any URLs in the suffix through dm_short_links (DM rail) so
+            # clicks attribute to this DM. Falls back to raw suffix if dm_id
+            # missing or wrap fails (e.g. plain-text suffix " written with ai").
+            wrapped_suffix = suffix
+            if 'http' in suffix and dm_id is not None:
+                try:
+                    from dm_short_links import wrap_text as _wrap_text_dm
+                    wrap_res2 = _wrap_text_dm(dm_id=dm_id, text=suffix)
+                    if wrap_res2.get('ok') and wrap_res2.get('minted_codes'):
+                        wrapped_suffix = wrap_res2['text']
+                        minted_link_codes.extend(wrap_res2.get('minted_codes', []))
+                        print(f"[send_dm] suffix wrap codes={wrap_res2['minted_codes']}",
+                              file=sys.stderr)
+                except Exception as _e:
+                    print(f"[send_dm] suffix wrap failed ({_e}); raw",
+                          file=sys.stderr)
+            message = message + wrapped_suffix
             applied_campaigns.append(cid)
     print(f"[send_dm] applied_campaigns={applied_campaigns} minted_links={minted_link_codes} message_len={len(message)} dm_id={dm_id}",
           file=sys.stderr)
