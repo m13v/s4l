@@ -84,9 +84,21 @@ Process ALL of them. For each post:
    d. If success, set LINK_URL = the \`page_url\` from the JSON output and LINK_SOURCE="seo_page".
    e. If failure (success: false in the JSON), fall back GRACEFULLY (mirrors the Twitter pipeline behavior in scripts/twitter_gen_links.py): set LINK_URL = the project's homepage from config.json (the \`website\` field for the matched project) and set LINK_SOURCE="plain_url_fallback:<reason>" where <reason> is a SHORT snake_case tag derived from the JSON error string (preferred values: timeout, no_page_url, deploy_failed, build_failed, push_failed; otherwise pick a sensible 1-3 word snake_case summary). Do NOT skip the post; continue to step 4. The short-link wrap in step 5 will still mint a /r/<code> on the project's own domain, so click attribution works on the homepage URL too.
    If the matched project has NO landing_pages config at all (genuinely unconfigured, not a generation failure), skip the page-gen step entirely: set LINK_URL = the project's website URL from config.json and LINK_SOURCE="plain_url_no_lp".
-4. Write 1 casual sentence ending with LINK_URL (from step 3.d, 3.e, or the no-LP fallback). ALWAYS frame as our own creation, never as a third-party tool we just discovered. We built / made / shipped this; we are not "finding" or "stumbling on" it.
-   - For Reddit (first person, claim ownership): "fwiw I built a tool for exactly this, LINK_URL", "we made this for it, LINK_URL", "I shipped a small thing that does this, LINK_URL".
-   - NEVER write: "I found this", "there's a tool", "came across this", "saw this manual", "found this guide". That phrasing pretends we are a neutral commenter pointing at someone else's project. We are the authors. Say so.
+4. Write the link sentence as a CONTEXTUAL BRIDGE, not a citation or footnote. This is a structured 4-step sub-task; do NOT shortcut it.
+   a. Re-read our_content (the comment we already left on this Reddit thread). Identify the SINGLE strongest claim, mechanism, or specific number we said in that comment (examples: "auto-rephrasing on revisit", "the 81 number on the rubric", "scoring distractor quality", "200ms p95 latency", "structured output across nested tool calls"). Pick ONE concrete thing, not a category.
+   b. Read the landing page at LINK_URL (use WebFetch on LINK_URL). Identify the SPECIFIC mechanism on the page that delivers the thing from step 4a (one feature, one capability, named in the page's own language).
+   c. Write 1-2 sentences (max ~35 words) that explicitly bridge: comment-claim → product mechanism → URL. The sentence MUST name at least ONE concrete capability inline (verb + noun, e.g. "scores against a rubric and rephrases the same fact on revisit"); NOT a category ("a tool for studying", "something for this"). The URL is the last token; nothing after it.
+   d. ALWAYS frame as our own creation. We built / made / shipped this; we are not "finding" or "stumbling on" it.
+      - First-person ownership phrasing only: "fwiw the [specific-thing-from-4a] is from [PROJECT_NAME], a thing I built that [specific-mechanism-from-4b], LINK_URL".
+      - Concrete examples of the bridge form (do NOT copy these verbatim; rewrite to match each post's actual claim):
+        * "fwiw the 81 number is from a rubric we trained on med-school decks, scores factual correctness, distractor quality, and rephrases on revisit so you can't pattern-match the stem, https://studyly.io/t/anki-card-generator-for-medical-school"
+        * "we shipped this for the rephrase-on-revisit problem specifically, it scores against a 4-axis rubric and re-asks the same fact in different stems, https://studyly.io/t/active-recall-question-generator"
+   e. BANNED phrasing (rejects the bridge structure, costs CTR):
+      - "I found this", "there's a tool", "came across this", "saw this manual", "found this guide" (pretends we're a neutral commenter pointing at someone else's project).
+      - Bare citation with no mechanism: "fwiw the X number is from a thing I built, URL" (this is what's currently shipping; underperforms).
+      - Generic verbs with no object: "a tool for exactly this", "made this for it", "does this" (no concrete mechanism named).
+      - "Click here", "check it out", "give it a try" (Reddit downvotes pitchy CTAs).
+   f. SELF-REVIEW before posting: read your sentence aloud. Does it (1) reference the comment's specific claim, (2) name a concrete product mechanism, and (3) end on the URL? If any of the three is missing, rewrite. If after one rewrite it still doesn't pass all three checks, write a fresh sentence from scratch.
 5. URL-WRAP THE LINK TEXT for click attribution. This MUST run for every LINK_SOURCE (seo_page, plain_url_fallback:*, plain_url_no_lp). The wrap helper accepts homepage URLs and mints a /r/<code> on the project's own domain. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
        --text "YOUR_LINK_SENTENCE_WITH_URL" \\
@@ -103,8 +115,12 @@ Process ALL of them. For each post:
    - NEVER promise to share links, files, or resources you don't have right now. Only share links from config.json projects (plus any new landing page you just deployed).
    - NEVER offer to DM or send anything outside the comment.
    - NEVER make time-bound promises.
-10. If a post is SKIPPED (no project match, comment not found, removed by moderation, bad URL), ALWAYS mark it so it won't be retried:
-    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+10. SKIP HANDLING — two classes:
+    A. PERMANENT skips (no project match, comment not found, removed by moderation, bad URL, post deleted, project has no landing_pages and no website at all): mark so it won't be retried.
+       psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+    B. TRANSIENT skips (single_run_capacity_exceeded, batch budget exhausted, you ran out of time, reddit-agent locked by peer, anything that would resolve on retry): DO NOT stamp link_edited_at. Leave both link_edited_at and link_edit_content NULL so the next 6h cron picks it up again.
+       Only annotate the reason in a comment / log line; never write to the DB for transient skips.
+    If unsure which class a skip falls into, treat it as TRANSIENT (default to retry, not to swallow). Stamping link_edited_at is permanent — once set, the post is excluded from future eligibility queries forever.
 PROMPT_EOF
 
 # Acquire the browser lock now, immediately before the Claude/MCP step.
