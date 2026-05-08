@@ -412,8 +412,10 @@ Respond with a SINGLE JSON object on one line, nothing else:
 sys.stdout.write(prompt)
 PY
 
-    # Use Opus for the per-project keyword/slug proposal (needs reasoning to
-    # translate the concept across different audiences/positioning).
+    # Use the CLI default model for the per-project keyword/slug proposal
+    # (matches the rest of the SEO stack: generate_page.py, run_serp_pipeline.sh,
+    # run_top_posts_pipeline.sh). Opt-in to a specific model via CLAUDE_MODEL
+    # env if you ever need to pin one.
     #
     # WebSearch + WebFetch are REQUIRED for this call. The prompt instructs
     # the model to run >=3 WebSearch queries to ground proposals in real
@@ -425,11 +427,15 @@ PY
     #
     # No --max-turns: the model needs an unbounded number of tool turns to
     # do real research (search, optionally fetch a result page, then propose).
-    if ! claude_with_retry --model opus --print --output-format json \
+    MODEL_ARGS=()
+    if [ -n "${CLAUDE_MODEL:-}" ]; then
+        MODEL_ARGS=(--model "$CLAUDE_MODEL")
+    fi
+    if ! claude_with_retry "${MODEL_ARGS[@]}" --print --output-format json \
             --allowed-tools "WebSearch,WebFetch" \
             --dangerously-skip-permissions \
             < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
-        echo "  claude opus proposal failed (after retries)"
+        echo "  claude proposal failed (after retries)"
         exit 10
     fi
 
