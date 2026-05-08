@@ -64,11 +64,17 @@ GEN_TIMEOUT_SEC = 3000  # generate_page.py's own 2400s budget + slack
 # env var so cadence can be swept without a code change. 0.0 disables
 # page-gen entirely; 1.0 restores the pre-A/B behaviour.
 def _page_gen_rate() -> float:
-    raw = os.environ.get("TWITTER_PAGE_GEN_RATE", "0.25")
+    # Bumped from 0.25 -> 0.30 on 2026-05-08 after CTA pipeline review:
+    # /t/ pages convert better than /r/ short-link-only fallbacks (Reddit data
+    # showed 17-71% click->signup vs 0% on plain_url_ab_skip). Bumping the
+    # default rate gives Twitter a higher share of full landing pages while
+    # still leaving 70% on the cheap path for budget reasons. See chat note
+    # 2026-05-07 "link suffix pipeline rewrite".
+    raw = os.environ.get("TWITTER_PAGE_GEN_RATE", "0.30")
     try:
         v = float(raw)
     except ValueError:
-        return 0.25
+        return 0.30
     if v < 0.0:
         return 0.0
     if v > 1.0:
