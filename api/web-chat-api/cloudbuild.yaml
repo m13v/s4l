@@ -1,0 +1,50 @@
+# Cloud Build config to deploy web-chat-api to Cloud Run.
+#
+# Deploy manually:
+#   cd ~/social-autoposter/api/web-chat-api
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --project=mk0r-prod \
+#     --substitutions=_REGION=us-central1
+#
+# Env vars (DATABASE_URL, RESEND_API_KEY, SOCIAL_AUTOPOSTER_CONFIG_JSON) MUST
+# be set on the service AFTER deploy via:
+#   gcloud run services update web-chat-api --project=mk0r-prod --region=us-central1 \
+#     --update-env-vars DATABASE_URL=...,RESEND_API_KEY=...,...
+# Use `echo -n` (not `echo`) when piping values; trailing \n corrupts secrets.
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/web-chat-api/web-chat-api:$BUILD_ID
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-central1-docker.pkg.dev/$PROJECT_ID/web-chat-api/web-chat-api:$BUILD_ID
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - web-chat-api
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/web-chat-api/web-chat-api:$BUILD_ID
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=512Mi
+      - --cpu=1
+      - --min-instances=0
+      - --max-instances=5
+      - --concurrency=40
+      - --timeout=30s
+
+substitutions:
+  _REGION: us-central1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
