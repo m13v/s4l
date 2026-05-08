@@ -55,6 +55,60 @@ echo "=== LinkedIn Post Run: $(date) (batch=$BATCH_ID) ===" | tee "$LOG_FILE"
 # release immediately after.
 source "$REPO_DIR/skill/lock.sh"
 
+# Idempotent run_monitor.log emitter wired into a chained EXIT/INT/TERM/HUP
+# trap. Without this, SIGTERM landing between Phase B post (where Claude has
+# already submitted the comment via the LinkedIn API and the row is in the
+# `posts` table) and the inline summary write at the bottom of the script
+# silently drops the run from run_monitor.log. Mirrors the same fix shipped
+# to run-reddit-search.sh and run-twitter-cycle.sh.
+#
+# Reads counters from globals the cycle accumulates (RUN_START_EPOCH,
+# PB_RC, LOG_FILE) and re-derives POSTED/SKIPPED/FAILED the same way the
+# inline block does. All shell-outs are wrapped in `timeout 10` so a Neon
+# hang during shutdown can't wedge the trap.
+#
+# Early-exit failure paths (Phase A no-candidates, etc.) write their own
+# tailored log_run.py line and then set _SA_RUN_SUMMARY_EMITTED=1 to
+# short-circuit this function — the trap fires, no-ops, and the dedicated
+# error reason stays.
+_SA_RUN_SUMMARY_EMITTED=0
+_sa_emit_run_summary_oneshot() {
+    [ "${_SA_RUN_SUMMARY_EMITTED:-0}" = "1" ] && return 0
+    _SA_RUN_SUMMARY_EMITTED=1
+
+    local elapsed window_sec posted skipped failed cost
+    elapsed=$(( $(date +%s) - ${RUN_START_EPOCH:-$(date +%s)} ))
+    window_sec=$(( elapsed + 60 ))
+    posted=0
+    if [ -n "${DATABASE_URL:-}" ]; then
+        posted=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
+            "SELECT COUNT(*) FROM posts WHERE platform='linkedin' AND posted_at >= NOW() - interval '$window_sec seconds'" \
+            2>/dev/null | tr -d '[:space:]' || true)
+        [ -z "$posted" ] && posted=0
+    fi
+    skipped=0
+    if [ "$posted" = "0" ] && [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ] \
+        && grep -qE "PHASE_B_SKIP_POST_UNAVAILABLE|## Already engaged|## Comment soft-blocked" "$LOG_FILE" 2>/dev/null; then
+        skipped=1
+    fi
+    failed=0
+    if [ "${PB_RC:-1}" -ne 0 ] && [ "$posted" = "0" ] && [ "$skipped" = "0" ]; then
+        failed=1
+    fi
+    cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                --since "${RUN_START_EPOCH:-0}" \
+                --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" \
+                2>/dev/null || echo "0.0000")
+    python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin \
+        --posted "$posted" --skipped "$skipped" --failed "$failed" \
+        --cost "$cost" --elapsed "$elapsed" 2>/dev/null || true
+}
+
+# Trap chain: lock.sh has already installed _sa_release_locks on
+# EXIT INT TERM HUP. Replace with a chained handler so summary fires first,
+# then locks release. _sa_release_locks remains in scope after sourcing.
+trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
+
 # ===== Phase A: discovery + scoring =====
 PROJECT_DIST=$(python3 "$REPO_DIR/scripts/pick_project.py" --platform linkedin --distribution 2>/dev/null || echo "(distribution unavailable)")
 
@@ -440,6 +494,7 @@ if [ "$PA_RC" -ne 0 ] || [ ! -s "$PHASE_A_OUT" ]; then
   ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
   _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
   python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 1 --failed 0 --cost "$_COST" --elapsed "$ELAPSED" || true
+  _SA_RUN_SUMMARY_EMITTED=1  # short-circuit EXIT-trap emitter; this branch already wrote a tailored line
   echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
   find "$LOG_DIR" -name "run-linkedin-*.log" -mtime +7 -delete 2>/dev/null || true
   exit 0
@@ -453,6 +508,7 @@ if ! python3 -c "import json,sys; json.load(open('$PHASE_A_OUT'))" 2>/dev/null; 
   ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
   _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
   python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 0 --failed 1 --cost "$_COST" --elapsed "$ELAPSED" || true
+  _SA_RUN_SUMMARY_EMITTED=1
   echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
   exit 0
 fi
@@ -566,6 +622,7 @@ if [ -z "$PA_ACTIVITY_ID" ] || [ -z "$PA_URL" ]; then
   ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
   _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
   python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 1 --failed 0 --cost "$_COST" --elapsed "$ELAPSED" || true
+  _SA_RUN_SUMMARY_EMITTED=1
   echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
   exit 0
 fi
@@ -578,6 +635,7 @@ case "$PA_ACTIVITY_ID" in
     ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
     python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 0 --failed 1 --cost "$_COST" --elapsed "$ELAPSED" || true
+    _SA_RUN_SUMMARY_EMITTED=1
     echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
     exit 0
     ;;
@@ -779,21 +837,12 @@ rm -f "$PHASE_B_PROMPT"
 rm -f "$PHASE_A_OUT"
 
 # ===== Persist run-level summary =====
-ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
-WINDOW_SEC=$(( ELAPSED + 60 ))
-POSTED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='linkedin' AND posted_at >= NOW() - interval '$WINDOW_SEC seconds'" 2>/dev/null | tr -d '[:space:]' || true)
-[ -z "$POSTED" ] && POSTED=0
-# Detect Phase B clean-skip markers in the log so the wrapper counter
-# attributes "post unavailable" / "already engaged" / "soft-blocked" exits
-# to skipped=1 rather than the default posted=0 skipped=0 failed=0.
-SKIPPED=0
-if [ "$POSTED" = "0" ] && grep -qE "PHASE_B_SKIP_POST_UNAVAILABLE|## Already engaged|## Comment soft-blocked" "$LOG_FILE" 2>/dev/null; then
-  SKIPPED=1
-fi
-FAILED=0
-if [ "$PB_RC" -ne 0 ] && [ "$POSTED" = "0" ] && [ "$SKIPPED" = "0" ]; then FAILED=1; fi
-_COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
-python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted "$POSTED" --skipped "$SKIPPED" --failed "$FAILED" --cost "$_COST" --elapsed "$ELAPSED" || true
+# Same logic that used to live inline now lives in
+# _sa_emit_run_summary_oneshot (defined near the top after sourcing lock.sh).
+# Calling it directly here on the happy path; the EXIT trap will short-
+# circuit afterwards via _SA_RUN_SUMMARY_EMITTED. Under SIGTERM mid-script,
+# the trap fires this same function so the dashboard still gets a row.
+_sa_emit_run_summary_oneshot
 
 echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
 find "$LOG_DIR" -name "run-linkedin-*.log" -mtime +7 -delete 2>/dev/null || true
