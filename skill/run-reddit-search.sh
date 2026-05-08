@@ -29,7 +29,7 @@ log "=== Reddit Search Post Run: $(date) ==="
 source "$REPO_DIR/skill/lock.sh"
 
 ITERATIONS=5
-LIMIT=1
+LIMIT=10
 EXCLUDE=""
 TOTAL_POSTED=0
 TOTAL_FAILED=0
