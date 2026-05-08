@@ -45,6 +45,12 @@ def main():
     parser.add_argument('--since', type=int, required=True, help='Unix timestamp of run start')
     parser.add_argument('--failed', type=int, default=0, help='Shell exit code of the wrapping script')
     parser.add_argument('--elapsed', type=float, default=0.0)
+    # When the wrapper already counts skips in-shell (e.g. seo_top_posts iterates
+    # 15 projects and most early-exit before staking a seo_keywords row), it can
+    # pass --skipped-override so run_monitor.log shows the real number instead
+    # of zero from an empty DB query.
+    parser.add_argument('--skipped-override', type=int, default=None)
+    parser.add_argument('--posted-override', type=int, default=None)
     args = parser.parse_args()
 
     run_start_ts = datetime.fromtimestamp(args.since, tz=timezone.utc).isoformat()
@@ -175,13 +181,18 @@ def main():
     # is usually 0 but we still want the row flagged.
     total_failed = db_failed + (1 if args.failed else 0)
 
+    # Honor wrapper-supplied overrides when the DB query can't see the work
+    # (e.g. seo_top_posts skips early before staking a row).
+    final_skipped = args.skipped_override if args.skipped_override is not None else skipped
+    final_pages = args.posted_override if args.posted_override is not None else pages
+
     log_run = os.path.join(ROOT_DIR, 'scripts', 'log_run.py')
     subprocess.run(
         [
             sys.executable, log_run,
             '--script', args.script,
-            '--posted', str(pages),
-            '--skipped', str(skipped),
+            '--posted', str(final_pages),
+            '--skipped', str(final_skipped),
             '--failed', str(total_failed),
             '--cost', f'{cost:.4f}',
             '--elapsed', str(int(args.elapsed)),
