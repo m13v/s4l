@@ -35,11 +35,23 @@ from project_stats_json import _hogql, _SAFE_DOMAIN_RE, HogqlError, _GET_STARTED
 
 _EVENT_CLAUSES = {
     "pageviews":            "event = '$pageview'",
-    "email_signups":        "event = 'newsletter_subscribed'",
+    # Email signups: client `newsletter_subscribed` is ad-blocker-lossy
+    # (~57% capture). Server-side `newsletter_subscribed_server` (added in
+    # @m13v/seo-components v0.38) fires from the API route after the Resend
+    # send succeeds, so it's ground truth. Both are counted with DISTINCT
+    # email so old client-only sites still show up while we transition;
+    # once both fire for the same submission they collapse into one row.
+    "email_signups":        "event IN ('newsletter_subscribed', 'newsletter_subscribed_server')",
     "schedule_clicks":      "event = 'schedule_click'",
     "get_started_clicks":   f"event IN {_GET_STARTED_EVENTS}",
     "cross_product_clicks": "event = 'cross_product_click'",
     "cta_clicks":           "event = 'cta_click'",
+}
+
+# Metrics that need DISTINCT counting (e.g. dedupe client + server captures
+# of the same event by email). Other metrics use plain count().
+_DISTINCT_KEY = {
+    "email_signups": "properties.email",
 }
 
 
@@ -52,8 +64,14 @@ def _per_day_for_bucket(api_key, project_id, domains, days):
     since_iso = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     out = {}
     for metric, clause in _EVENT_CLAUSES.items():
+        distinct_key = _DISTINCT_KEY.get(metric)
+        count_expr = (
+            f"count(DISTINCT {distinct_key}) AS c"
+            if distinct_key
+            else "count() AS c"
+        )
         q = (
-            "SELECT toDate(timestamp) AS day, count() AS c FROM events "
+            f"SELECT toDate(timestamp) AS day, {count_expr} FROM events "
             f"WHERE {clause} "
             f"AND properties.$host IN ({in_list}) "
             f"AND timestamp >= toDateTime('{since_iso}') "
