@@ -64,6 +64,11 @@ LOG_FILE = REPO / "skill" / "logs" / "watchdog-reddit-lock.log"
 
 BASH_LOCK_DIR = Path("/tmp/social-autoposter-reddit-browser.lock")
 BASH_LOCK_PID_FILE = BASH_LOCK_DIR / "pid"
+# Lease expiry (Unix timestamp) written by reddit_browser_lock.py acquire/heartbeat.
+# A fresh lease (now < expires_at) is the canonical "browser is being driven by
+# this pipeline" signal — it covers gaps between Python CDP subprocess calls
+# (DB writes, ripening sleeps) that PY_LOCK_FILE mtime alone cannot bridge.
+BASH_LOCK_EXPIRES_FILE = BASH_LOCK_DIR / "expires_at"
 PY_LOCK_FILE = Path.home() / ".claude" / "reddit-agent-lock.json"
 
 # Holder must hold the bash lock at least this long before we consider
@@ -147,14 +152,34 @@ def main() -> int:
     if py_lock_idle < PY_LOCK_IDLE_THRESHOLD_SEC:
         return 0  # CDP actively in use; respect the lock.
 
+    # Check the bash-lock LEASE (expires_at). reddit_browser.py bumps this on
+    # every CDP subprocess invocation via _heartbeat_bash_lease(); the MCP
+    # PreToolUse/PostToolUse hooks bump it on every reddit-agent tool call.
+    # So a fresh lease means EITHER a Python CDP pipeline OR an MCP-driven
+    # pipeline is alive and using the browser. Respect it.
+    lease_remaining = float("-inf")
+    if BASH_LOCK_EXPIRES_FILE.is_file():
+        try:
+            lease_expires_at = float(BASH_LOCK_EXPIRES_FILE.read_text().strip() or "0")
+            lease_remaining = lease_expires_at - time.time()
+        except (ValueError, OSError):
+            pass
+
+    if lease_remaining > 0:
+        return 0  # Lease fresh; pipeline is actively heart-beating.
+
     holder_cmd = ps_command(holder_pid) if holder_pid else ""
     holder_alive = pid_alive(holder_pid) if holder_pid else False
     py_idle_str = (
         f"{int(py_lock_idle)}s" if py_lock_idle != float("inf") else "missing"
     )
+    lease_str = (
+        f"{int(lease_remaining)}s" if lease_remaining != float("-inf") else "missing"
+    )
     log(
         f"reclaim bash_lock=reddit-browser bash_age={int(bash_lock_age)}s "
-        f"py_idle={py_idle_str} holder_pid={holder_pid} alive={holder_alive} "
+        f"py_idle={py_idle_str} lease_remaining={lease_str} "
+        f"holder_pid={holder_pid} alive={holder_alive} "
         f"cmd={holder_cmd[:120]!r}"
     )
 
