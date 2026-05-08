@@ -90,6 +90,18 @@ def main():
                              "opening the log file. Reason keys are free-form "
                              "snake_case; the dashboard sorts by count desc "
                              "and shows the top one with the rest in tooltip.")
+    # Inbox/feed scan counters (engage-reddit, engage-twitter, etc.). Lets a
+    # pipeline that scans an inbox before engaging surface scan-stage
+    # granularity (seen / new / excluded / unmatched) in the dashboard Result
+    # column, so an empty cycle reads as "scanned 100 / 0 new" instead of just
+    # "0 0 0 0". Comma-separated `key=N` pairs; whitespace and the pipe char are
+    # stripped. Empty = omit the segment entirely (preserves backward compat).
+    parser.add_argument("--scan", dest="scan", default="",
+                        help="Optional comma-separated `key=N` pairs from an "
+                             "inbox/feed scan stage (e.g. "
+                             "'seen=100,new=0,excluded=1,unmatched=0'). "
+                             "Surfaces as scan-stage pills in the dashboard "
+                             "Result column for engage runs.")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -146,10 +158,17 @@ def main():
     fr_raw = (args.failure_reasons or "").strip()
     fr_clean = fr_raw.replace("|", "").replace(" ", "")
     failure_segment = f" failure_reasons={fr_clean}" if fr_clean else ""
+    # `scan=` segment carries inbox/feed scan-stage counters. Same sanitization
+    # rules as failure_reasons (strip whitespace + pipe). Appended after
+    # discover= so the existing positional regex in bin/server.js can extend
+    # without breaking back-compat on old lines.
+    scan_raw = (args.scan or "").strip()
+    scan_clean = scan_raw.replace("|", "").replace(" ", "")
+    scan_segment = f" scan={scan_clean}" if scan_clean else ""
     line = (
         f"{timestamp} | {args.script} | "
         f"posted={args.posted} skipped={args.skipped} failed={args.failed}"
-        f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment} "
+        f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment}{scan_segment} "
         f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}"
     )
 
