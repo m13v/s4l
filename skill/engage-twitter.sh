@@ -290,7 +290,39 @@ log "Twitter summary: pending=$TOTAL_PENDING replied=$TOTAL_REPLIED skipped=$TOT
 # Log run to persistent monitor
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "engage-twitter-phaseB" 2>/dev/null || echo "0.0000")
-python3 "$REPO_DIR/scripts/log_run.py" --script "engage_twitter" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED"
+# Pull Phase A scan-stage counters out of the log so the dashboard Result
+# column shows "scanned N / new N / excluded N" on engage runs. Phase A prints:
+#   Processing N mentions...
+#   Summary: N new, N already tracked, N excluded, N own account, N too short, N no_tweet_id
+# We normalize to scanned/new/excluded/unmatched. Empty (Phase A failed before
+# printing) -> no --scan arg, dashboard falls back to old rendering.
+TW_SCAN_PROC_LINE=$(grep -m1 -E "^Processing [0-9]+ mentions\.\.\.$" "$LOG_FILE" 2>/dev/null || true)
+TW_SCAN_SUMMARY_LINE=$(grep -m1 -E "^Summary: [0-9]+ new" "$LOG_FILE" 2>/dev/null || true)
+TW_SCAN_ARG=""
+if [ -n "$TW_SCAN_PROC_LINE" ] || [ -n "$TW_SCAN_SUMMARY_LINE" ]; then
+  tw_scanned=$(echo "$TW_SCAN_PROC_LINE" | grep -oE "[0-9]+" | head -1)
+  tw_new=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ new" | grep -oE "[0-9]+" | head -1)
+  tw_already=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ already tracked" | grep -oE "[0-9]+" | head -1)
+  tw_excluded=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ excluded" | grep -oE "[0-9]+" | head -1)
+  tw_own=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ own account" | grep -oE "[0-9]+" | head -1)
+  tw_short=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ too short" | grep -oE "[0-9]+" | head -1)
+  tw_noid=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ no_tweet_id" | grep -oE "[0-9]+" | head -1)
+  # excluded pill = excluded + own_account; unmatched pill = too_short + no_tweet_id
+  tw_excl_total=$(( ${tw_excluded:-0} + ${tw_own:-0} ))
+  tw_unm_total=$(( ${tw_short:-0} + ${tw_noid:-0} ))
+  parts=""
+  [ -n "$tw_scanned" ] && parts="${parts}scanned=${tw_scanned},"
+  [ -n "$tw_new" ]     && parts="${parts}new=${tw_new},"
+  [ -n "$tw_already" ] && parts="${parts}already=${tw_already},"
+  [ "$tw_excl_total" -gt 0 ] && parts="${parts}excluded=${tw_excl_total},"
+  [ "$tw_unm_total"  -gt 0 ] && parts="${parts}unmatched=${tw_unm_total},"
+  TW_SCAN_ARG="${parts%,}"
+fi
+if [ -n "$TW_SCAN_ARG" ]; then
+  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_twitter" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED" --scan "$TW_SCAN_ARG"
+else
+  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_twitter" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED"
+fi
 
 # Delete old logs
 find "$LOG_DIR" -name "engage-twitter-*.log" -mtime +7 -delete 2>/dev/null || true
