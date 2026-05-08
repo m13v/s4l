@@ -185,8 +185,15 @@ def precompute_style(hours=24):
         "    ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes_discounted, "
         "  COALESCE(SUM(comments_count), 0)::int AS comments, "
         "  COALESCE(SUM(views) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::int AS views, "
+        # post_clicks: SUM of post_links.clicks attributable to short links
+        # minted for these posts (post_id-keyed). Mirrors the live query in
+        # bin/server.js /api/style/stats.
+        "  COALESCE(SUM(pl.total_clicks), 0)::int AS post_clicks, "
         "  COALESCE(SUM(CASE WHEN is_recommendation THEN 1 ELSE 0 END), 0)::int AS recommendations "
-        f"  FROM posts WHERE posted_at >= NOW() - {win} "
+        f"  FROM posts LEFT JOIN ("
+        "    SELECT post_id, SUM(clicks)::int AS total_clicks "
+        "    FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+        f"  ) pl ON pl.post_id = posts.id WHERE posted_at >= NOW() - {win} "
         "  AND our_content <> '(mention - no original post)' "
         "  GROUP BY engagement_style"
         "), r AS ("
@@ -206,6 +213,7 @@ def precompute_style(hours=24):
         "  COALESCE(p.upvotes_discounted, 0) AS upvotes_discounted, "
         "  COALESCE(p.comments, 0) AS comments, "
         "  COALESCE(p.views, 0) AS views, "
+        "  COALESCE(p.post_clicks, 0) AS post_clicks, "
         "  COALESCE(p.recommendations, 0) AS recommendations, "
         "  COALESCE(r.replies, 0) AS replies, "
         "  COALESCE(r.reply_upvotes, 0) AS reply_upvotes, "
