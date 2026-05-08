@@ -445,6 +445,11 @@ PY
         # Opt-in opus via CLAUDE_MODEL=opus env if you want to force it.
         # The agent can read the repo, WebFetch sources, write files, run
         # npm/typecheck.
+        #
+        # NB: macOS bash 3.2 trips `set -u` on `"${EMPTY_ARRAY[@]}"` even when
+        # declared with `=()`. Use `${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}` so an
+        # empty array yields nothing instead of "unbound variable". This bug
+        # killed every top_pages target on 2026-05-08 in the sibling script.
         MODEL_ARGS=()
         if [ -n "${CLAUDE_MODEL:-}" ]; then
             MODEL_ARGS=(--model "$CLAUDE_MODEL")
@@ -458,7 +463,7 @@ PY
         cd "$REPO_PATH" || { echo "  cd failed: $REPO_PATH"; exit 14; }
 
         # Stream-json so we can grep for quota markers afterward.
-        if ! claude_with_retry "${MODEL_ARGS[@]}" \
+        if ! claude_with_retry ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
                 --output-format stream-json \
                 --verbose \
                 --permission-mode acceptEdits \
