@@ -447,8 +447,8 @@ PY
         STREAM_FILE="$PER_LOG_DIR/${TS}_stream.jsonl"
         OUTPUT_FILE="$PER_LOG_DIR/${TS}.output.txt"
 
-        echo "  invoking Claude (--model $MODEL, agent mode, in $brief_repo)..."
         REPO_PATH=$(python3 -c "import json; b=json.load(open('$BRIEF_FILE')); print(b['repo_path'])")
+        echo "  invoking Claude (--model $MODEL, agent mode, in $REPO_PATH)..."
 
         cd "$REPO_PATH" || { echo "  cd failed: $REPO_PATH"; exit 14; }
 
