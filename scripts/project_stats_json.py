@@ -272,9 +272,18 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
 
     in_list = ", ".join(f"'{d}'" for d in safe_domains)
 
-    def _count_by_host(event_clause):
+    def _count_by_host(event_clause, distinct_key=None):
+        # Pass `distinct_key` (e.g. "properties.email") to dedupe across
+        # double-fired events for the same conversion. Used for email
+        # signups where both `newsletter_subscribed` (client) and
+        # `newsletter_subscribed_server` (server) fire for one submission.
+        count_expr = (
+            f"count(DISTINCT {distinct_key}) AS c"
+            if distinct_key
+            else "count() AS c"
+        )
         q = (
-            "SELECT properties.$host AS host, count() AS c FROM events "
+            f"SELECT properties.$host AS host, {count_expr} FROM events "
             f"WHERE {event_clause} "
             f"AND properties.$host IN ({in_list}) "
             f"AND timestamp >= toDateTime('{after_str}') "
@@ -301,15 +310,23 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
                 out[host][path] = cnt
         return out
 
+    # Email signups: client `newsletter_subscribed` is ad-blocker-lossy
+    # (~57% capture). Server-side `newsletter_subscribed_server` (added in
+    # @m13v/seo-components v0.38) is ground truth. Count both with DISTINCT
+    # email so a client + server pair for the same submission collapses to one.
+    _SIGNUP_CLAUSE = (
+        "event IN ('newsletter_subscribed', 'newsletter_subscribed_server')"
+    )
+
     pv_total = _count_by_host("event = '$pageview'")
     cta_total = _count_by_host("event = 'cta_click'")
-    signup_total = _count_by_host("event = 'newsletter_subscribed'")
+    signup_total = _count_by_host(_SIGNUP_CLAUSE, distinct_key="properties.email")
     sched_total = _count_by_host("event = 'schedule_click'")
     get_started_total = _count_by_host(f"event IN {_GET_STARTED_EVENTS}")
     cross_product_total = _count_by_host("event = 'cross_product_click'")
 
     top_pv = _top_pages_by_host("event = '$pageview'", row_cap=5000)
-    top_signup = _top_pages_by_host("event = 'newsletter_subscribed'", row_cap=500)
+    top_signup = _top_pages_by_host(_SIGNUP_CLAUSE, row_cap=500)
     top_sched = _top_pages_by_host("event = 'schedule_click'", row_cap=500)
     top_get_started = _top_pages_by_host(f"event IN {_GET_STARTED_EVENTS}", row_cap=500)
 
