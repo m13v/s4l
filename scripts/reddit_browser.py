@@ -173,6 +173,39 @@ def find_reddit_cdp_port():
 
 _LOCK_SESSION_ID = f"python:{os.getpid()}"
 
+# Path to the bash-lock lease helper. Bumping this lease from inside reddit_browser.py
+# is what shields Python-CDP pipelines (run-reddit-search, audit-reddit-resurrect,
+# stats.sh reddit phase, engage-reddit) from the watchdog's 60-90s reclaim. Those
+# pipelines never go through MCP, so the MCP PreToolUse heartbeat hook never fires
+# for them. Each subprocess invocation of reddit_browser.py is a CDP step, so
+# bumping `expires_at` on every subprocess start gives the watchdog a clear "this
+# pipeline is alive and using the browser" signal.
+_BASH_LEASE_HEARTBEAT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "reddit_browser_lock.py"
+)
+_BASH_LEASE_TTL_SEC = 90
+
+
+def _heartbeat_bash_lease():
+    """Best-effort: bump the bash-lock lease's expires_at by `_BASH_LEASE_TTL_SEC`.
+
+    Silent on every outcome (OK / NOT_HELD / HELD_BY_OTHER / errors). This is a
+    pure peace-keeping signal to the watchdog, not load-bearing for correctness.
+    Times out fast (3s) so a hung lease helper can't stall a CDP step.
+
+    NOT_HELD is fine: the bash lock may genuinely not be acquired (e.g. ad-hoc
+    use of reddit_browser.py outside a pipeline). HELD_BY_OTHER is also fine:
+    a peer holds the bash lock; we shouldn't touch their lease.
+    """
+    try:
+        subprocess.run(
+            ["python3", _BASH_LEASE_HEARTBEAT_PATH, "heartbeat",
+             "--ttl", str(_BASH_LEASE_TTL_SEC)],
+            capture_output=True, timeout=3, check=False,
+        )
+    except Exception:
+        pass  # Best-effort. Never fail a CDP op because of lease bookkeeping.
+
 
 def _release_browser_lock():
     """Release the lock if we hold it."""
@@ -219,15 +252,27 @@ def _acquire_browser_lock():
         break
     with open(LOCK_FILE, "w") as f:
         json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
+    # Also bump the bash-lock lease so the watchdog respects this CDP burst.
+    # See _heartbeat_bash_lease() for why: Python-CDP pipelines never trigger
+    # the MCP PreToolUse heartbeat hook, so without this call the watchdog
+    # would steal the bash lock at age >= 60s during legitimate CDP work.
+    _heartbeat_bash_lease()
 
 
 def _refresh_browser_lock():
-    """Refresh the lock timestamp to prevent expiry during long operations."""
+    """Refresh the lock timestamp to prevent expiry during long operations.
+
+    Also bumps the bash-lock lease so the watchdog won't reclaim during
+    multi-step CDP ops. Call this from inside long CDP flows (scroll loops,
+    multi-second waits) to keep both the python lock file mtime AND the bash
+    lease fresh.
+    """
     try:
         with open(LOCK_FILE, "w") as f:
             json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
     except OSError:
         pass
+    _heartbeat_bash_lease()
 
 
 def get_browser_and_page(playwright):
