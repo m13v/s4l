@@ -145,49 +145,12 @@ PROMPT_EOF
             # Detect persistent-error states that won't recover with quick retry:
             # rate limits, credit/billing, auth/quota, account-level issues.
             # All trip the same 1h pause; the next cycle re-tries automatically.
-            # The triage email tells the founder which kind it was so they
-            # know whether human intervention (top-up, key rotate) is needed.
+            # Pending threads stay in Neon (unread_by_founder>0) so nothing is
+            # ever lost; the launchd poller picks them up the moment the 1h
+            # marker expires. No human notification — the log line is enough.
             PAUSE_PATTERNS='hit your limit|rate limit|rate.limited|too many requests|usage limit|weekly limit|5.hour limit|credit balance|out of credit|insufficient (credit|funds|balance)|payment required|billing|quota exceeded|api[- ]?key|unauthori[sz]ed|forbidden|account.{0,30}(suspend|disabled)|HTTP 401|HTTP 403|HTTP 429|invalid.*x.api.key'
             if grep -qiE "$PAUSE_PATTERNS" "$SESSION_LOG" 2>/dev/null; then
-                # Triage which family of error this is.
-                REASON='rate limit / persistent error'
-                if grep -qiE 'credit balance|out of credit|insufficient (credit|funds|balance)|payment required|billing' "$SESSION_LOG" 2>/dev/null; then
-                    REASON='Claude credits depleted / billing'
-                elif grep -qiE 'api[- ]?key|unauthori[sz]ed|HTTP 401|HTTP 403|forbidden|account.{0,30}(suspend|disabled)|invalid.*x.api.key' "$SESSION_LOG" 2>/dev/null; then
-                    REASON='Claude auth / API key failure'
-                elif grep -qiE 'quota exceeded' "$SESSION_LOG" 2>/dev/null; then
-                    REASON='Claude quota exceeded'
-                elif grep -qiE 'weekly limit|5.hour limit|usage limit|hit your limit|HTTP 429|rate limit|too many requests' "$SESSION_LOG" 2>/dev/null; then
-                    REASON='Claude rate limited'
-                fi
-
-                echo "[$(date)] PERSISTENT ERROR ($REASON), pausing all spawns for 1h" >> "$LOG_DIR/web-chat.log"
-
-                # Idempotent alert: only email i@m13v.com if no marker was set already
-                # (so we don't email every 15s while paused).
-                if [ ! -f "/tmp/web-chat-ratelimit" ]; then
-                    NODE_BIN_PATH="$HOME/.nvm/versions/node/v20.19.4/bin/node"
-                    SEND_EMAIL_JS="$HOME/analytics/scripts/send-email.js"
-                    if [ -x "$NODE_BIN_PATH" ] && [ -f "$SEND_EMAIL_JS" ]; then
-                        ALERT_BODY="The web-chat agent paused all replies for 1 hour at $(date '+%H:%M %Z').
-
-Reason: $REASON
-Last failing thread: $THREAD_ID (project $PROJECT, visitor $EMAIL)
-
-Tail of session log:
-$(tail -40 "$SESSION_LOG" 2>/dev/null | sed 's/[\"\`\\$]/?/g')
-
-Auto-resumes in 1h. If credits or auth need a manual fix (top-up Anthropic console, rotate API key), do that and the next cycle will pick up pending threads. Pending unread threads stay in Neon (web_chat_threads.unread_by_founder>0) until handled."
-                        NODE_PATH="$HOME/analytics/node_modules" "$NODE_BIN_PATH" "$SEND_EMAIL_JS" \
-                            --to "i@m13v.com" \
-                            --from "Web Chat Agent <matt@mail.omi.me>" \
-                            --subject "[WEB-CHAT alert] $REASON, paused 1h" \
-                            --body "$ALERT_BODY" \
-                            --no-db >> "$LOG_DIR/web-chat.log" 2>&1 || \
-                            echo "[$(date)] alert email send failed (non-fatal)" >> "$LOG_DIR/web-chat.log"
-                    fi
-                fi
-
+                echo "[$(date)] PERSISTENT ERROR on $THREAD_ID (rate limit / credits / auth), pausing all spawns for 1h" >> "$LOG_DIR/web-chat.log"
                 echo "rate_limited $(date +%s)" > "/tmp/web-chat-ratelimit"
                 rm -f "$PROMPT_FILE" "$PID_FILE" "$FAIL_COUNT_FILE"
                 exit 0
