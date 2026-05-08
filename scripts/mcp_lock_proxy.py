@@ -246,6 +246,11 @@ def _proxy_proc_to_stdout(proc: subprocess.Popen) -> None:
 
 
 def main() -> int:
+    # Hoist `global` declarations to the very top of main() so argparse
+    # defaults below can reference module-level values without Python's
+    # "used prior to global declaration" SyntaxError.
+    global LOCK_NAME, LOCK_TTL, LOCK_SCRIPT
+
     p = argparse.ArgumentParser(
         description="Heartbeat wrapper for a browser-MCP stdio server.",
         allow_abbrev=False,
@@ -263,7 +268,6 @@ def main() -> int:
     args = p.parse_args()
 
     # Apply CLI overrides (env was already read at import; CLI wins).
-    global LOCK_NAME, LOCK_TTL, LOCK_SCRIPT
     LOCK_NAME = args.lock_name
     LOCK_TTL = args.ttl
     LOCK_SCRIPT = Path(args.lock_script)
