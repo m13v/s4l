@@ -307,209 +307,35 @@ while read -r TARGET_PRODUCT; do
     {
     echo "=== Top-Pages target: $TARGET_PRODUCT (ts=$TS) ==="
 
-    # Build per-target prompt: global winner + target project config.
-    PROPOSAL_PROMPT="$PER_LOG_DIR/${TS}.proposal.prompt"
+    # Per-target proposal: structured-output via Anthropic SDK (propose_keyword.py).
+    #
+    # Replaced the prior `claude -p --output-format json` flow on 2026-05-08.
+    # The CLI flow was free-text completion with a "please return JSON" hint;
+    # nothing enforced schema, so the model occasionally truncated the closing
+    # brace (Terminator hit this on 2026-05-07) and the shell-side parser had
+    # a 60-line regex fallback to salvage broken output.
+    #
+    # propose_keyword.py uses the SDK's tool-use mode with a strict JSON schema
+    # for {keyword, slug, concept}, plus the server-side web_search tool for
+    # grounding. The API itself rejects malformed tool input, so the model
+    # cannot emit truncated/invalid JSON. No fallback parser needed.
     PROPOSAL_FILE="$PER_LOG_DIR/${TS}.proposal.json"
-
-    python3 - "$BRIEF_FILE" "$TARGET_PRODUCT" > "$PROPOSAL_PROMPT" <<'PY'
-import json, sys
-from datetime import datetime
-brief = json.load(open(sys.argv[1]))
-target_product = sys.argv[2]
-target = next((t for t in brief.get("targets", []) if t["product"] == target_product), None)
-if not target:
-    print(f"ERROR: target {target_product} not in brief", file=sys.stderr)
-    sys.exit(1)
-proj = target["project_config"]
-winner = brief["winner"]
-
-# Date awareness for time-sensitive keywords. Without this, the model echoes
-# whatever month/year is in the global winner's slug (e.g. "april-2026") even
-# after the calendar rolled to the next month, producing dead-on-arrival pages.
-_now = datetime.now()
-CURRENT_MONTH = _now.strftime("%B")        # e.g. "May"
-CURRENT_MONTH_LOWER = _now.strftime("%B").lower()  # e.g. "may"
-CURRENT_YEAR = _now.strftime("%Y")          # e.g. "2026"
-CURRENT_DATE_HUMAN = _now.strftime("%B %Y") # e.g. "May 2026"
-
-prompt = f"""You are a senior SEO strategist. A global ranking across multiple
-sibling products identified ONE top-performing page in the last 24h, scored by
-a weighted composite of pageviews, email_signups, schedule_clicks,
-get_started_clicks, and bookings.
-
-TODAY IS {CURRENT_DATE_HUMAN}.
-
-GLOBAL WINNER (source of topical momentum):
-  product: {winner['product']}
-  page:    {winner['page_url']}
-  score:   {winner['score']}
-  metrics: {json.dumps(winner['metrics'])}
-
-Your job: propose ONE NEW adjacent landing page for the TARGET PROJECT below
-that rides the same topical wave, adapted for that project's audience and
-positioning. Do NOT copy the winning slug verbatim — propose a slug and
-keyword that fits the target's voice and ICP.
-
-TARGET PROJECT:
-  name:        {target['product']}
-  domain:      {target['domain']}
-  website:     {target['website']}
-  positioning: {json.dumps(proj.get('qualification', {}), ensure_ascii=False)}
-  description: {proj.get('description', '')}
-
-TOP 10 RANKING (for context across all projects):
-"""
-for r in brief.get("ranking", [])[:10]:
-    prompt += f"  {r['score']:>6} {r['product']:20} {r['page_url']}\n"
-
-prompt += f"""
-RESEARCH FIRST (HARD REQUIREMENT — do not skip):
-Your training cutoff predates {CURRENT_DATE_HUMAN}. You do NOT know what
-shipped recently. You MUST call WebSearch before proposing anything.
-A proposal without web-grounded evidence is invalid output.
-
-Run AT LEAST 3 WebSearch queries (more is fine). Suggested queries:
-
-  1. Topical area from the global winner, filtered to recent news:
-     - "<topic from winner> {CURRENT_MONTH} {CURRENT_YEAR}"
-     - "<topic> news {CURRENT_YEAR}" / "<topic> latest release"
-     - "<vendor or category> announcement {CURRENT_MONTH} {CURRENT_YEAR}"
-  2. TARGET project's audience-specific news:
-     - "<target ICP / use case> new tool {CURRENT_YEAR}"
-     - "<target category> launch {CURRENT_MONTH} {CURRENT_YEAR}"
-  3. If a specific model / product / release surfaces (e.g. a new LLM, a
-     new framework, a new API, a vendor announcement), search that thing
-     by name to confirm it actually shipped in the last ~30 days and pull
-     1-2 concrete details (version number, release date, capability claim).
-     Use WebFetch on the most relevant result if a search snippet alone is
-     not enough.
-
-Use what you find. The proposed page must ride the global winner's
-topical momentum AND be grounded in something that demonstrably happened
-recently (cite the source URL in your concept field).
-
-PROPOSAL SHAPES (pick whichever best fits what your research surfaced):
-
-A. SINGLE-BLOCKBUSTER (preferred when a single notable release dominates).
-   One post about ONE specific recent thing: a new model, a new product,
-   a vendor launch, a feature drop. The keyword can be the product/model
-   name itself ("claude opus 4.7 deep dive") or a how-to/explainer about
-   it ("how to use <new thing> for <use case>"). Date does NOT need to
-   appear in the slug or keyword; freshness comes from the post being
-   about a real {CURRENT_DATE_HUMAN} event.
-
-B. ROUNDUP/DIGEST (preferred when multiple notable releases happened).
-   Covers several recent releases in the topical area. SHOULD include
-   "{CURRENT_MONTH_LOWER} {CURRENT_YEAR}" or "{CURRENT_YEAR}" in the
-   keyword/slug ("ai model releases {CURRENT_MONTH_LOWER} {CURRENT_YEAR}").
-
-C. COMPARISON / HOW-TO with a fresh hook (acceptable when one specific
-   recent change makes an old comparison newly relevant). Example:
-   "X vs Y after the new Z release". Dated phrasing optional.
-
-D. EVERGREEN comparison/how-to. Use ONLY if WebSearch returned no
-   relevant recent news. Default to A or B whenever your research
-   surfaced something concrete.
-
-Rules:
-- keyword must be a 3-8 word search phrase a human would actually type
-  for the TARGET project's audience.
-- slug must be kebab-case, ASCII, <= 64 chars, unique on the target site.
-- concept must be 1-2 sentences explaining the angle, citing the specific
-  news/release you found via WebSearch (vendor name, version, or event)
-  so the downstream generator can verify and write a grounded page.
-- Never echo a stale month/year (any month != "{CURRENT_MONTH_LOWER}"
-  or year != "{CURRENT_YEAR}") into a dated slug/keyword.
-
-Respond with a SINGLE JSON object on one line, nothing else:
-  {{"keyword": "...", "slug": "...", "concept": "..."}}
-"""
-sys.stdout.write(prompt)
-PY
-
-    # Use the CLI default model for the per-project keyword/slug proposal
-    # (matches the rest of the SEO stack: generate_page.py, run_serp_pipeline.sh,
-    # run_top_posts_pipeline.sh). Opt-in to a specific model via CLAUDE_MODEL
-    # env if you ever need to pin one.
-    #
-    # WebSearch + WebFetch are REQUIRED for this call. The prompt instructs
-    # the model to run >=3 WebSearch queries to ground proposals in real
-    # current-month news (since the model's training cutoff predates today).
-    # Without --allowed-tools and --dangerously-skip-permissions, headless
-    # Claude silently denies tool calls and the model falls back to priors,
-    # which is how we ended up with zero "may-2026" pages despite April having
-    # 28 of them.
-    #
-    # No --max-turns: the model needs an unbounded number of tool turns to
-    # do real research (search, optionally fetch a result page, then propose).
-    MODEL_ARGS=()
-    if [ -n "${CLAUDE_MODEL:-}" ]; then
-        MODEL_ARGS=(--model "$CLAUDE_MODEL")
-    fi
-    if ! claude_with_retry "${MODEL_ARGS[@]}" --print --output-format json \
-            --allowed-tools "WebSearch,WebFetch" \
-            --dangerously-skip-permissions \
-            < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
-        echo "  claude proposal failed (after retries)"
+    if ! python3 "$SCRIPT_DIR/propose_keyword.py" "$BRIEF_FILE" "$TARGET_PRODUCT" \
+            > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
+        echo "  propose_keyword.py failed; see $PER_LOG"
         exit 10
     fi
 
-    PARSED=$(python3 - "$PROPOSAL_FILE" <<'PY'
+    PARSED=$(python3 -c '
 import json, sys
-raw = open(sys.argv[1]).read().strip()
-# Claude CLI may emit multiple JSON objects when a 429 rate-limit fires and
-# the CLI auto-retries: line 1 is is_error:true, line 2 is the real result.
-# Strategy: iterate every line, skip is_error:true lines, take the LAST
-# is_error:false object. Falls back to the whole-blob approach if no lines
-# parse cleanly (e.g. output is a single multi-line JSON blob).
-outer = None
-for line in raw.splitlines():
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(line)
-        if isinstance(obj, dict) and not obj.get("is_error"):
-            outer = obj
-    except Exception:
-        pass
-if outer is None:
-    # Fallback: treat whole blob as one JSON object (original approach).
-    s = raw.find("{")
-    if s < 0:
-        print("ERR no_json_in_output", file=sys.stderr); sys.exit(1)
-    try:
-        outer, _ = json.JSONDecoder().raw_decode(raw[s:])
-    except Exception as e:
-        print(f"ERR parse_outer: {e}", file=sys.stderr); sys.exit(1)
-    if outer.get("is_error"):
-        print(f"ERR claude: {outer.get('result','unknown')}", file=sys.stderr); sys.exit(1)
-result_str = outer.get("result") if isinstance(outer.get("result"), str) else None
-blob = result_str if result_str else json.dumps(outer)
-# Try strict first-object parse on the inner blob too.
-inner = None
-try:
-    s = blob.find("{")
-    if s >= 0:
-        inner, _ = json.JSONDecoder().raw_decode(blob[s:])
-except Exception:
-    inner = None
-if inner is None:
-    start = blob.find("{"); end = blob.rfind("}") + 1
-    if start < 0 or end <= start:
-        print("ERR no_json_object", file=sys.stderr); sys.exit(1)
-    try:
-        inner = json.loads(blob[start:end])
-    except Exception as e:
-        print(f"ERR parse_inner: {e}", file=sys.stderr); sys.exit(1)
-kw = (inner.get("keyword") or "").strip()
-slug = (inner.get("slug") or "").strip()
-concept = (inner.get("concept") or "").strip()
+d = json.load(open(sys.argv[1]))
+kw = (d.get("keyword") or "").strip()
+slug = (d.get("slug") or "").strip()
+concept = (d.get("concept") or "").strip()
 if not kw or not slug:
     print("ERR missing_fields", file=sys.stderr); sys.exit(1)
 print(f"{kw}\t{slug}\t{concept}")
-PY
-)
+' "$PROPOSAL_FILE")
     if [ -z "$PARSED" ]; then
         echo "  proposal parse failed; see $PROPOSAL_FILE"
         exit 11
