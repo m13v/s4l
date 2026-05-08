@@ -112,6 +112,14 @@ _sa_cleanup_batch_row() {
     fi
 }
 _sa_combined_exit() {
+    # Emit run_monitor.log summary FIRST, before any cleanup. Without this,
+    # SIGTERM landing between Phase 2b-post (where twitter_post_plan.py has
+    # already committed to the `posts` table) and the historical inline
+    # summary write at the bottom of the script silently drops the run from
+    # run_monitor.log. Mirrors the same fix shipped to run-reddit-search.sh.
+    # Idempotent: a flag-guarded one-shot, so the happy-path explicit call at
+    # the bottom and the trap firing on EXIT do not double-write.
+    _sa_emit_run_summary_oneshot
     _sa_cleanup_batch_row
     # Release the parallel-cycle slot acquired by preflight.sh. Without this,
     # this trap (which OVERWRITES the preflight trap installed at source-time)
@@ -122,6 +130,96 @@ _sa_combined_exit() {
     fi
     _sa_release_locks
 }
+
+# Idempotent run_monitor.log emitter wired into _sa_combined_exit (which is
+# trap'd to EXIT INT TERM HUP). On the happy path the bottom of the script
+# calls this directly; on SIGTERM the trap calls it. Either order is a no-op
+# after first emission via _SA_RUN_SUMMARY_EMITTED.
+#
+# Reads counters from globals the cycle has been accumulating (BATCH_ID,
+# RUN_START, EXEC_FAILED, EXEC_REASONS, EXEC_SKIPPED, CANDIDATE_COUNT,
+# SALVAGED, QUERIES_TOTAL, DUDS_TOTAL, TWEETS_PULLED, BATCH_COUNT,
+# HIGH_DELTA_COUNT). Re-derives POSTED_CT/SKIPPED_CT from the
+# twitter_candidates table directly so a SIGTERM mid-Phase-2b still gets
+# accurate counts (the row was committed inside twitter_post_plan.py before
+# the kill). All psql / get_run_cost.py calls are wrapped in `timeout 10`
+# so a Neon hang during shutdown can't wedge the trap.
+#
+# Early-exit failure paths (Phase 1 abort, empty batch, etc.) write their
+# own dedicated log_run.py line with custom failure_reasons and then set
+# _SA_RUN_SUMMARY_EMITTED=1 to short-circuit this function — they keep
+# their tailored error reason, this fallback skips.
+_SA_RUN_SUMMARY_EMITTED=0
+_sa_emit_run_summary_oneshot() {
+    [ "${_SA_RUN_SUMMARY_EMITTED:-0}" = "1" ] && return 0
+    _SA_RUN_SUMMARY_EMITTED=1
+
+    local posted_ct=0 skipped_ct=0 cost="0.0000" failed_ct failure_reasons
+    if [ -n "${BATCH_ID:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+        posted_ct=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
+            "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='posted'" \
+            2>/dev/null || echo 0)
+        skipped_ct=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
+            "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status IN ('skipped','expired')" \
+            2>/dev/null || echo 0)
+    fi
+    cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                --since "${RUN_START:-0}" \
+                --scripts "run-twitter-cycle-scan" "run-twitter-cycle-prep" "run-twitter-cycle-post" \
+                2>/dev/null || echo "0.0000")
+
+    failed_ct="${EXEC_FAILED:-0}"
+    failure_reasons="${EXEC_REASONS:-}"
+    # Reproduce the failure-reason synthesis block so SIGTERM cycles still
+    # get a useful reason instead of a silent "—". Same conditions as the
+    # historical inline block: cycle ended with zero progress despite having
+    # candidates pending.
+    if [ "${posted_ct:-0}" = "0" ] \
+        && [ "${failed_ct:-0}" = "0" ] \
+        && [ "${EXEC_SKIPPED:-0}" = "0" ] \
+        && [ -z "$failure_reasons" ] \
+        && [ "${CANDIDATE_COUNT:-0}" -gt 0 ]; then
+        local phase2b_log
+        phase2b_log=$(awk '/Phase 1: drafting queries|Phase 2b-prep: Claude reading|Phase 2b-post:/,EOF' "$LOG_FILE" 2>/dev/null || echo "")
+        local _add() {
+            failure_reasons="${failure_reasons:+$failure_reasons,}${1}:${2}"
+            failed_ct=$(( failed_ct + $2 ))
+        }
+        if echo "$phase2b_log" | grep -qiE '"api_error_status":429|hit your limit|monthly usage limit'; then
+            _add monthly_limit 1
+        fi
+        if echo "$phase2b_log" | grep -qiE 'auth redirect|re-authenticat|browser profile.*auth|profile.*needs.*re-auth'; then
+            _add auth_redirect 1
+        fi
+        if echo "$phase2b_log" | grep -qiE '"error":"rate_limited"|RATE_LIMITED_TWITTER'; then
+            _add rate_limited 1
+        fi
+        if echo "$phase2b_log" | grep -qiE 'page.load.timeout|navigation timeout|timed out|Timeout exceeded'; then
+            _add timeout 1
+        fi
+        if echo "$phase2b_log" | grep -qiE 'reply_box_not_found|tweet_not_found'; then
+            _add posting_blocked 1
+        fi
+        if [ -z "$failure_reasons" ]; then
+            _add phase2b_silent 1
+        fi
+    fi
+
+    local args
+    args=(--script "post_twitter" \
+          --posted "${posted_ct:-0}" \
+          --skipped "${skipped_ct:-0}" \
+          --failed "$failed_ct" \
+          --salvaged "${SALVAGED:-0}" \
+          --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
+          --tweets-pulled "${TWEETS_PULLED:-0}" \
+          --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
+          --cost "$cost" \
+          --elapsed $(( $(date +%s) - ${RUN_START:-$(date +%s)} )))
+    [ -n "$failure_reasons" ] && args+=(--failure-reasons "$failure_reasons")
+    python3 "$REPO_DIR/scripts/log_run.py" "${args[@]}" 2>/dev/null || true
+}
+
 trap _sa_combined_exit EXIT INT TERM HUP
 
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase phase0 2>&1 | tee -a "$LOG_FILE" || true
@@ -475,6 +573,9 @@ if [ "$EXTRACT_EXIT" -ne 0 ] || [ ! -f "$RAW_FILE" ]; then
         --tweets-pulled "${TWEETS_PULLED:-0}" \
         --failure-reasons "${PHASE1_REASON}:1" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
+    # Tell the EXIT trap's _sa_emit_run_summary_oneshot to skip; this branch
+    # already wrote its tailored failure-reasons line above.
+    _SA_RUN_SUMMARY_EMITTED=1
     exit 0
 fi
 
@@ -502,6 +603,7 @@ if [ "$BATCH_COUNT" = "0" ]; then
         --tweets-pulled "${TWEETS_PULLED:-0}" \
         --failure-reasons "empty_batch:1" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
+    _SA_RUN_SUMMARY_EMITTED=1
     exit 0
 fi
 
@@ -561,6 +663,7 @@ if [ -z "$CANDIDATES" ]; then
         --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
         --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
+    _SA_RUN_SUMMARY_EMITTED=1
     exit 0
 fi
 
