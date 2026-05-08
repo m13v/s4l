@@ -3351,10 +3351,20 @@ async function handleApi(req, res) {
           "ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes_discounted, " +
         "COALESCE(SUM(comments_count), 0)::int AS comments, " +
         "COALESCE(SUM(views) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::int AS views, " +
+        // post_clicks: SUM of post_links.clicks attributable to short links
+        // minted for these posts (post_id-keyed). Reply-keyed clicks are
+        // excluded so we don't double-count engagement on replies that hang
+        // off someone else's thread.
+        "COALESCE(SUM(pl.total_clicks), 0)::int AS post_clicks, " +
         // Intent dimension (is_recommendation) is independent of tone (engagement_style).
         // This sum tells us "of N posts in this tone, how many carried a project mention".
         "COALESCE(SUM(CASE WHEN is_recommendation THEN 1 ELSE 0 END), 0)::int AS recommendations " +
-      "FROM posts WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+      "FROM posts " +
+      "LEFT JOIN (" +
+        "SELECT post_id, SUM(clicks)::int AS total_clicks " +
+        "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id" +
+      ") pl ON pl.post_id = posts.id " +
+      "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
       "AND our_content <> '(mention - no original post)' " +
       platformFilter + projectFilter +
       "GROUP BY engagement_style ORDER BY posts DESC) r";
@@ -9148,7 +9158,8 @@ function renderStyleStats(payload, meta) {
     return v.toFixed(2);
   };
   // Views uses views_posts (excludes Moltbook and GitHub rows) as the denominator because
-  // neither platform exposes views. Upvotes/comments use the full posts count.
+  // neither platform exposes views. Upvotes/comments/post_clicks use the full posts count
+  // (every platform mints short links via wrap_text_for_post when a URL is present).
   const denomFor = (field, r) => {
     if (field === 'views') return Number(r && r.views_posts) || 0;
     return Number(r && r.posts) || 0;
@@ -9181,6 +9192,7 @@ function renderStyleStats(payload, meta) {
       upvotes:     Number(r.upvotes)     || 0,
       comments,
       views:       Number(r.views)       || 0,
+      post_clicks: Number(r.post_clicks) || 0,
       recommendations: Number(r.recommendations) || 0,
       score,
     };
@@ -9211,6 +9223,13 @@ function renderStyleStats(payload, meta) {
       { key: 'upvotes',  label: 'Upvotes',  type: 'numeric', align: 'right', accessor: perPostAccessor('upvotes'),  formatter: makeFmtPerPost('upvotes'),  footer: (_rows, synth) => makeFmtPerPost('upvotes')(null, synth), helpText: STYLE_STATS_HELP.upvotes },
       { key: 'comments', label: 'Comments', type: 'numeric', align: 'right', accessor: perPostAccessor('comments'), formatter: makeFmtPerPost('comments'), footer: (_rows, synth) => makeFmtPerPost('comments')(null, synth), helpText: STYLE_STATS_HELP.comments },
       { key: 'views',    label: 'Views',    type: 'numeric', align: 'right', accessor: perPostAccessor('views'),    formatter: makeFmtPerPost('views'),    footer: (_rows, synth) => makeFmtPerPost('views')(null, synth), helpText: STYLE_STATS_HELP.views },
+      // Post Clicks: SUM of post_links.clicks attributable to short links
+      // minted for posts in this style (post_id-keyed; reply-keyed clicks
+      // excluded so we don't double-count engagement on replies hanging off
+      // someone else's thread). Per-post denominator is total posts since
+      // every platform mints short links via wrap_text_for_post when a URL
+      // is present.
+      { key: 'post_clicks', label: 'Post Clicks', type: 'numeric', align: 'right', accessor: perPostAccessor('post_clicks'), formatter: makeFmtPerPost('post_clicks'), footer: (_rows, synth) => makeFmtPerPost('post_clicks')(null, synth), helpText: 'Clicks on /r/<code> short links minted for posts in this style. Per-post = total clicks / posts.' },
       // Intent column: count of posts in this tone that were ALSO flagged as a
       // project recommendation. Independent dimension from style.
       { key: 'recommendations', label: 'Recs', type: 'numeric', align: 'right', formatter: fmt, helpText: STYLE_STATS_HELP.recommendations },
