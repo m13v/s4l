@@ -453,11 +453,17 @@ PY
     #
     # No --max-turns: the model needs an unbounded number of tool turns to
     # do real research (search, optionally fetch a result page, then propose).
+    # NB: macOS bash 3.2 trips `set -u` on `"${EMPTY_ARRAY[@]}"` even when the
+    # array is declared with `MODEL_ARGS=()`. Use the conditional expansion
+    # `${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}` (matches scripts/run_claude.sh:270)
+    # so the empty-array case yields nothing instead of "unbound variable".
+    # Without this, the entire pipeline died with rc=1 on every target after
+    # commit c2b5e61 introduced the array-form on 2026-05-08.
     MODEL_ARGS=()
     if [ -n "${CLAUDE_MODEL:-}" ]; then
         MODEL_ARGS=(--model "$CLAUDE_MODEL")
     fi
-    if ! claude_with_retry "${MODEL_ARGS[@]}" --print --output-format json \
+    if ! claude_with_retry ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} --print --output-format json \
             --allowed-tools "WebSearch,WebFetch" \
             --dangerously-skip-permissions \
             < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
