@@ -1,74 +1,86 @@
 # web-chat deployment runbook
 
-End-to-end deploy steps for the web founder-chat pipeline. Mirror of the Fazm
-inbox setup; everything is centralized in social-autoposter.
+End-to-end deploy steps for the cross-site founder-chat pipeline.
 
-Each step is **idempotent** and **gated** so you can pause between them. The
-goal: get `<FounderChatPanel project="Mediar" />` live on mediar.ai with
-end-to-end Claude-driven replies + Gmail override rail.
+**Architecture in one diagram:**
+
+```
+[ visitor on mediar.ai / fazm.ai / assrt.ai / etc. ]
+  ↓ <FounderChatPanel> (from @m13v/seo-components)
+  ↓ POST https://social-autoposter-website.vercel.app/api/web-chat/send
+  ↓
+[ Next.js route on social-autoposter-website (Vercel) ]
+  ↓ INSERT
+[ Neon Postgres web_chat_threads / web_chat_messages ]   ← SAME Neon as the rest of social-autoposter
+  ↑ poll every 15s
+[ launchd com.m13v.web-chat → check-web-chats.sh → claude -p ... → send_web_chat_reply.py ]
+                                                      │
+                                                      ↓ Resend → visitor email
+                                                      ↓ send-email.js → "[WEB-CHAT #N]" → matt@mediar.ai (or i@m13v.com)
+                                                      ↑ matt replies in Gmail
+[ launchd com.m13v.web-chat-ingest (5min) → ingest_web_chat_replies.py ] ← matches "[WEB-CHAT #N]"
+                                                      ↓ INSERTs as sender='founder'
+                                                      ↓ Resend → visitor
+```
+
+**No Cloud Run. No new infra projects.** Just two new Vercel routes on the
+sibling repo + the same Neon DB you already use.
 
 ---
 
-## Inventory of what was built
+## What was built
 
 ```
-~/social-autoposter/
-  scripts/
-    web_chat_schema.sql           ← Neon migration
-    check_unread_web_chats.py     ← step 1 (find unread threads)
-    claim_web_chat.py             ← step 1.5 (cooldown lock)
-    unclaim_web_chat.py           ← step 1.6 (retry on Claude failure)
-    send_web_chat_reply.py        ← step 3 (insert agent msg + email visitor)
-    poll_web_chat.py              ← step 4 (block on visitor follow-up)
-    dump_web_chat_history.py      ← prompt context dump
-    ingest_web_chat_replies.py    ← override rail (Gmail [WEB-CHAT #N] poll)
-    web_chat_config_snippet.json  ← per-project config addition
-  skill/
-    check-web-chats.sh            ← orchestrator (mirror of check-founder-chat.sh)
-    ingest-web-chat-replies.sh    ← ingest wrapper for launchd
-    WEB-CHAT-SKILL.md             ← workflow prompt for Claude
-    WEB-CHAT-VOICE.md             ← per-project tone rules
-  launchd/
-    com.m13v.web-chat.plist           ← 15s tick (process unread threads)
-    com.m13v.web-chat-ingest.plist    ← 5min tick (ingest Gmail overrides)
-  api/web-chat-api/
-    main.py                       ← FastAPI Cloud Run service
-    Dockerfile
-    requirements.txt
-    cloudbuild.yaml
-    README.md
+~/social-autoposter-website/                       (Vercel)
+  src/app/api/web-chat/send/route.ts               POST visitor message
+  src/app/api/web-chat/thread/[threadId]/route.ts  GET thread for widget poll
+  src/lib/web-chat/projects.ts                     project allowlist (auto-generated)
+  src/lib/web-chat/cors.ts                         per-project CORS allowlist
+  src/lib/web-chat/notify.ts                       Resend founder-notify
+  src/lib/web-chat/rate-limit.ts                   5 msgs/min per IP
+
+~/social-autoposter/                               (local)
+  scripts/web_chat_schema.sql                      Neon migration
+  scripts/check_unread_web_chats.py                step 1 (find unread)
+  scripts/claim_web_chat.py                        cooldown lock
+  scripts/unclaim_web_chat.py                      retry on Claude failure
+  scripts/send_web_chat_reply.py                   insert agent msg + Resend visitor
+  scripts/poll_web_chat.py                         block on visitor follow-up
+  scripts/dump_web_chat_history.py                 prompt context
+  scripts/ingest_web_chat_replies.py               Gmail [WEB-CHAT #N] override rail
+  scripts/sync_web_chat_config.py                  config.json -> website projects.ts
+  skill/check-web-chats.sh                         orchestrator (15s)
+  skill/ingest-web-chat-replies.sh                 ingest wrapper (5min)
+  skill/WEB-CHAT-SKILL.md                          Claude workflow
+  skill/WEB-CHAT-VOICE.md                          tone rules
+  launchd/com.m13v.web-chat.plist
+  launchd/com.m13v.web-chat-ingest.plist
 
 ~/seo-components/
-  src/components/FounderChatPanel.tsx   ← the widget
-  src/index.ts                          ← export added
+  src/components/FounderChatPanel.tsx              the widget
+  src/index.ts                                     export added
 ```
 
 ---
 
-## Step 1: Run the Neon migration
+## Step 1: run the Neon migration
+
+The website routes and the local scripts both read/write the same two tables.
 
 ```bash
-cd ~/social-autoposter
-DATABASE_URL=$(grep '^DATABASE_URL=' .env | sed 's/^DATABASE_URL=//' | tr -d '"')
-psql "$DATABASE_URL" -f scripts/web_chat_schema.sql
-```
-
-Verify:
-```bash
+DATABASE_URL=$(grep '^DATABASE_URL=' ~/social-autoposter/.env | sed 's/^DATABASE_URL=//' | tr -d '"')
+psql "$DATABASE_URL" -f ~/social-autoposter/scripts/web_chat_schema.sql
 psql "$DATABASE_URL" -c "\d web_chat_threads"
-psql "$DATABASE_URL" -c "\d web_chat_messages"
 ```
 
-Expected: two tables with the columns from `web_chat_schema.sql`. Pure
-additive change, no impact on existing tables.
+Pure additive change. Won't touch anything else.
 
 ---
 
-## Step 2: Add per-project config
+## Step 2: enable per-project config
 
-Open `~/social-autoposter/scripts/web_chat_config_snippet.json` for the
-recommended per-project values. To enable on the dogfood three (Mediar, fazm,
-Assrt) only:
+Add `web_chat` blocks to `~/social-autoposter/config.json`. To enable on the
+dogfood three (Mediar, fazm, Assrt):
 
 ```bash
 cd ~/social-autoposter
@@ -84,147 +96,135 @@ for project in Mediar fazm Assrt; do
     }' config.json > /tmp/c.json && mv /tmp/c.json config.json
 done
 
-# Override notify_email per project where it differs (e.g. Mediar):
+# Per-site notify_email overrides where needed:
 jq '(.projects[] | select(.name=="Mediar") | .web_chat.notify_email) = "matt@mediar.ai"' \
   config.json > /tmp/c.json && mv /tmp/c.json config.json
 ```
 
-Verify:
+---
+
+## Step 3: sync config to the website allowlist
+
 ```bash
-jq '.projects[] | select(.web_chat.enabled==true) | {name, web_chat}' config.json
+python3 ~/social-autoposter/scripts/sync_web_chat_config.py
+# Output:
+#   wrote ~/social-autoposter-website/src/lib/web-chat/projects.ts (3 enabled / 3 total)
+#     [on] Assrt           -> i@m13v.com
+#     [on] Mediar          -> matt@mediar.ai
+#     [on] fazm            -> i@m13v.com
+```
+
+Commit + push:
+
+```bash
+cd ~/social-autoposter-website
+git add src/lib/web-chat/ src/app/api/web-chat/
+git commit -m "wire web-chat API + initial dogfood projects"
+git push
+# Vercel auto-deploys.
+```
+
+Verify the deploy:
+```bash
+curl -s https://social-autoposter-website.vercel.app/api/web-chat/thread/wc_does_not_exist
+# → {"error":"not_found"}    (404 is correct; means the route exists)
 ```
 
 ---
 
-## Step 3: Deploy the Cloud Run API
+## Step 4: env vars on Vercel
+
+The routes need `DATABASE_URL` (already set) and `RESEND_API_KEY` (already
+set, used by `/api/waitlist`). Verify they don't have a trailing `\n`:
 
 ```bash
-cd ~/social-autoposter/api/web-chat-api
-
-# First-time only: create the Artifact Registry repo.
-gcloud artifacts repositories create web-chat-api \
-  --project=mk0r-prod --location=us-central1 --repository-format=docker
-
-# Build + deploy.
-gcloud builds submit --config cloudbuild.yaml \
-  --project=mk0r-prod --substitutions=_REGION=us-central1
+cd ~/social-autoposter-website
+vercel env pull /tmp/env-check --environment production
+grep -E '^(DATABASE_URL|RESEND_API_KEY)=' /tmp/env-check
+rm /tmp/env-check
 ```
 
-Set env vars (use `echo -n` to avoid `\n` corruption that took out Stripe
-webhooks back in April):
+Optional: `WEB_CHAT_NOTIFY_FROM` (default `Web Chat Agent <matt@mail.omi.me>`).
+Set if you want to customise the founder-notify From: address:
 
 ```bash
-DBURL=$(grep '^DATABASE_URL=' ~/social-autoposter/.env | sed 's/^DATABASE_URL=//' | tr -d '"' | tr -d '\n')
-RKEY=$(grep '^RESEND_API_KEY=' ~/analytics/.env.production.local | sed 's/^RESEND_API_KEY=//' | tr -d '"' | tr -d '\n')
-CONFIG=$(cat ~/social-autoposter/config.json | tr -d '\n')
-
-gcloud run services update web-chat-api \
-  --project=mk0r-prod --region=us-central1 \
-  --update-env-vars "DATABASE_URL=$DBURL,RESEND_API_KEY=$RKEY,DEFAULT_NOTIFY_EMAIL=i@m13v.com"
-
-# config.json is too large for an env var on Cloud Run (~80kB). Mount via Secret Manager:
-gcloud secrets create social-autoposter-config --project=mk0r-prod --replication-policy=automatic
-echo -n "$CONFIG" | gcloud secrets versions add social-autoposter-config --data-file=- --project=mk0r-prod
-gcloud run services update web-chat-api \
-  --project=mk0r-prod --region=us-central1 \
-  --update-secrets="SOCIAL_AUTOPOSTER_CONFIG_JSON=social-autoposter-config:latest"
-```
-
-Verify env did not get a `\n`:
-```bash
-gcloud run services describe web-chat-api --project=mk0r-prod --region=us-central1 \
-  --format="value(spec.template.spec.containers[0].env)" 2>&1 | tr ';' '\n' | grep -E "DATABASE_URL|RESEND"
-```
-
-Sanity test:
-```bash
-URL=$(gcloud run services describe web-chat-api --project=mk0r-prod --region=us-central1 --format='value(status.url)')
-curl -s "$URL/healthz"  # → {"ok": true, "projects_loaded": <N>}
-```
-
-(Optional) custom domain:
-```bash
-gcloud run domain-mappings create --service=web-chat-api \
-  --domain=chat.m13v.com --region=us-central1 --project=mk0r-prod
-# Then add the CNAME/A records it tells you to.
+echo -n "Web Chat Agent <matt@mail.omi.me>" | vercel env add WEB_CHAT_NOTIFY_FROM production
 ```
 
 ---
 
-## Step 4: Publish the seo-components widget
+## Step 5: publish the widget
 
 ```bash
 cd ~/seo-components
-npm version patch         # bump to e.g. 0.37.0
-npm publish               # → @m13v/seo-components new version on npm
-npm run bump:consumers    # propagates to fazm-website, mediar-website, etc.
+npm version patch
+npm publish
+npm run bump:consumers   # propagates to mediar-website, fazm-website, etc.
 ```
 
 Drop the widget into the dogfood site (mediar-website example):
 
 ```tsx
-// app/layout.tsx (or any high-level layout)
+// ~/mediar-website/src/app/layout.tsx (or any high-level layout)
 import { FounderChatPanel } from "@m13v/seo-components";
 
-export default function RootLayout({ children }) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html>
+    <html lang="en">
       <body>
         {children}
-        <FounderChatPanel project="Mediar" apiOrigin="https://chat.m13v.com" />
+        <FounderChatPanel project="Mediar" />
       </body>
     </html>
   );
 }
 ```
 
-(If `chat.m13v.com` isn't mapped yet, pass the raw Cloud Run URL:
-`apiOrigin="https://web-chat-api-XXXXX-uc.a.run.app"`.)
+(`apiOrigin` defaults to `https://social-autoposter-website.vercel.app`.
+Override if you ever map a custom domain like `chat.m13v.com`.)
 
-Deploy mediar-website (Vercel auto-deploys on push).
+Push mediar-website; Vercel auto-deploys.
 
 ---
 
-## Step 5: Smoke-test the visitor side without launchd
-
-Before flipping the launchd jobs on, manually trigger one round-trip:
+## Step 6: smoke-test the visitor edge BEFORE flipping launchd on
 
 ```bash
-# 1. From mediar.ai (or curl), send a test message:
-curl -X POST https://chat.m13v.com/api/web-chat/send \
+# 1. Send a fake message from your terminal (skip the widget for this test).
+curl -X POST https://social-autoposter-website.vercel.app/api/web-chat/send \
   -H "content-type: application/json" \
+  -H "origin: https://mediar.ai" \
   -d '{"project":"Mediar","visitorId":"web_smoketest1","text":"hey, smoke test","email":"i@m13v.com","pageUrl":"https://mediar.ai"}'
 # → {"threadId":"wc_...","messageId":N}
 
-# 2. Verify it landed:
-psql "$DATABASE_URL" -c "SELECT id, thread_id, project_name, visitor_email, last_message_text FROM web_chat_threads ORDER BY id DESC LIMIT 3;"
+# 2. Verify the row landed in Neon:
+psql "$DATABASE_URL" -c "
+  SELECT id, thread_id, project_name, visitor_email, last_message_text
+    FROM web_chat_threads ORDER BY id DESC LIMIT 3;"
 
-# 3. Run the orchestrator manually (no launchd yet):
+# 3. Verify the founder-notify email arrived in i@m13v.com.
+
+# 4. Run the orchestrator manually one time (no launchd yet):
 bash ~/social-autoposter/skill/check-web-chats.sh
 
-# 4. Watch the session log:
+# 5. Watch the Claude session log:
 ls -t ~/social-autoposter/skill/logs/web-chat-session-*.log | head -1 | xargs tail -f
 ```
 
-You should see Claude pick up the message, send a reply, fire the
-`[WEB-CHAT #N]` notification email to your inbox, and the visitor
-(i@m13v.com here) gets the agent's reply via Resend.
+You should see Claude pick up the message, send a reply (visible in
+`web_chat_messages` and forwarded to i@m13v.com via Resend), then send a
+`[WEB-CHAT #N]` summary email.
 
 ---
 
-## Step 6: Flip the launchd jobs on
+## Step 7: turn on the launchd jobs
 
 ```bash
-# Symlink + load the 15s job (mirror of fazm-founder-chat).
-ln -sf ~/social-autoposter/launchd/com.m13v.web-chat.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.m13v.web-chat.plist
-
-# 5min ingest job for [WEB-CHAT #N] override replies.
+ln -sf ~/social-autoposter/launchd/com.m13v.web-chat.plist        ~/Library/LaunchAgents/
 ln -sf ~/social-autoposter/launchd/com.m13v.web-chat-ingest.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.m13v.web-chat.plist
 launchctl load ~/Library/LaunchAgents/com.m13v.web-chat-ingest.plist
-
-# Verify:
-launchctl list | grep -E "web-chat"
+launchctl list | grep web-chat
 ```
 
 Watch:
@@ -235,58 +235,55 @@ tail -f ~/social-autoposter/skill/logs/web-chat.log \
 
 ---
 
-## Step 7: End-to-end dogfood
+## Step 8: end-to-end dogfood from the actual widget
 
-1. Open mediar.ai in a private window (no widget interaction history).
-2. Click the bubble. Drop your real email, send a test question.
-3. Within ~15s, the launchd tick spawns Claude, you should:
-   - get a `[WEB-CHAT #N] Mediar: <your-email>` summary in your inbox
-   - see a reply appear in the widget on the next 30s poll
-   - get the same reply forwarded to your email via Resend
+1. Open mediar.ai in a private window.
+2. Click the chat bubble. Drop your real email, send a question.
+3. Within ~15s the launchd tick spawns Claude. You should:
+   - get `[WEB-CHAT #N] Mediar: <your-email>` in your inbox
+   - see the agent reply appear in the widget on the next 30s poll
+   - get the same reply via Resend in your email
 4. Reply to the `[WEB-CHAT #N]` email in Gmail with your override text.
-5. Within ~5min the ingest job picks it up, your reply lands as a
-   `sender='founder'` row, gets emailed to the visitor and surfaces in the
-   widget on next poll.
+5. Within ~5min the ingest job picks it up; your reply lands as
+   `sender='founder'` in `web_chat_messages` and gets emailed to the visitor.
 
 ---
 
-## Rollback / pause
+## Adding a new site
 
-Pause without deleting state:
 ```bash
+# 1. Add the web_chat block to config.json
+jq '(.projects[] | select(.name=="Cyrano")) += {"web_chat":{"enabled":true,"notify_email":"i@m13v.com","founder_name":"matt","reply_eta":"usually replies within a couple hours"}}' \
+  ~/social-autoposter/config.json > /tmp/c.json && mv /tmp/c.json ~/social-autoposter/config.json
+
+# 2. Sync to the website
+python3 ~/social-autoposter/scripts/sync_web_chat_config.py
+
+# 3. Commit + push (Vercel auto-deploys)
+cd ~/social-autoposter-website && git add -A && git commit -m "enable web-chat for Cyrano" && git push
+
+# 4. Drop <FounderChatPanel project="Cyrano" /> into the consumer site, push.
+```
+
+---
+
+## Pause / rollback
+
+```bash
+# Pause the local agent (visitor messages still land in Neon, just not auto-replied).
 launchctl unload ~/Library/LaunchAgents/com.m13v.web-chat.plist
 launchctl unload ~/Library/LaunchAgents/com.m13v.web-chat-ingest.plist
-```
 
-Disable on a single site (no redeploy needed):
-```bash
+# Disable on a single site (no redeploy needed for the LOCAL pipeline,
+# but the website route also rejects the project, so re-sync + push).
 jq '(.projects[] | select(.name=="Mediar") | .web_chat.enabled) = false' \
   ~/social-autoposter/config.json > /tmp/c.json && mv /tmp/c.json ~/social-autoposter/config.json
-# Cloud Run picks this up next time the secret is refreshed; or push a new
-# version of the secret immediately.
+python3 ~/social-autoposter/scripts/sync_web_chat_config.py
+cd ~/social-autoposter-website && git add -A && git commit -m "pause web-chat on Mediar" && git push
 ```
 
-Tear down the API:
-```bash
-gcloud run services delete web-chat-api --project=mk0r-prod --region=us-central1
+DB tables are isolated; drop only if you want to nuke history:
+```sql
+DROP TABLE web_chat_messages;
+DROP TABLE web_chat_threads;
 ```
-
-The DB tables are separate (`web_chat_threads`, `web_chat_messages`); drop
-them only if you really want to nuke history.
-
----
-
-## Adding a new site to the rail
-
-1. Add a `web_chat` block to that project entry in `config.json`.
-2. Re-push the secret:
-   ```bash
-   echo -n "$(cat ~/social-autoposter/config.json)" | \
-     gcloud secrets versions add social-autoposter-config --data-file=- --project=mk0r-prod
-   gcloud run services update web-chat-api --project=mk0r-prod --region=us-central1 \
-     --update-secrets="SOCIAL_AUTOPOSTER_CONFIG_JSON=social-autoposter-config:latest"
-   ```
-3. Drop `<FounderChatPanel project="<NewProjectName>" />` somewhere on the
-   site, deploy.
-4. That's it. The launchd jobs already process every project; routing is
-   driven by the `project_name` column.
