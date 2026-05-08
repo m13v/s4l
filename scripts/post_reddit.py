@@ -1678,24 +1678,27 @@ def main():
         return
 
     if args.phase == "salvage":
-        # Pull ONE salvage-eligible row (already re-assigned to args.batch_id
-        # by phase0) and write a discover-shape JSON to --out. The shell can
-        # then feed that file to ripen → draft → post like a normal candidate.
+        # Pull up to --limit salvage-eligible rows (already re-assigned to
+        # args.batch_id by phase0) from a SINGLE project and write a
+        # discover-shape JSON to --out. The shell can then feed that file
+        # to ripen → draft → post like a normal candidate batch.
         if not args.out:
             print("[post_reddit] ERROR: --phase salvage requires --out PATH", file=sys.stderr)
             sys.exit(2)
         if not args.batch_id:
             print("[post_reddit] ERROR: --phase salvage requires --batch-id", file=sys.stderr)
             sys.exit(2)
-        plan = _db_pick_salvage_candidate(args.batch_id)
+        salvage_limit = max(1, int(args.limit or 1))
+        plan = _db_pick_salvage_candidates(args.batch_id, limit=salvage_limit)
         if not plan:
             print("[post_reddit] salvage: no eligible pending rows for this cycle")
             sys.exit(6)
         with open(args.out, "w") as f:
             json.dump(plan, f)
-        url = plan["decisions"][0]["thread_url"]
-        print(f"[post_reddit] SALVAGED candidate (attempt={plan['salvaged_attempt']}/"
-              f"{MAX_ATTEMPTS}) project={plan['project_name']} url={url}")
+        urls = [d["thread_url"] for d in plan["decisions"]]
+        print(f"[post_reddit] SALVAGED {plan['salvaged_count']} candidate(s) "
+              f"(max attempt={plan['salvaged_attempt']}/{MAX_ATTEMPTS}) "
+              f"project={plan['project_name']} urls={urls}")
         return
 
     if args.phase == "discover":
