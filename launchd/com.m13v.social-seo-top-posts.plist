@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.m13v.social-seo-top-posts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/matthewdi/social-autoposter/seo/run_top_posts_pipeline.sh</string>
+    </array>
+    <!-- Daily at 18:30 local (after seo-improve and seo-top-pages at 18:13).
+         Iterates every project with landing_pages.top_pages_enabled = true
+         and pick_top_posts.py finds a post >= 10000 views in the last 7
+         days that has no /t/ page yet. Generates the dedicated /t/ page
+         AND mounts <NewsStrip> on the homepage so existing organic
+         clickthroughs from the viral post route to the new page. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/matthewdi/social-autoposter/skill/logs/launchd-seo-top-posts-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/matthewdi/social-autoposter/skill/logs/launchd-seo-top-posts-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin</string>
+        <key>HOME</key>
+        <string>/Users/matthewdi</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
