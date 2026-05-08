@@ -81,22 +81,22 @@ Process ALL of them. For each post:
    c. Run the unified SEO page generator (it loads the @m13v/seo-components palette, picks content type, builds the page, commits, pushes, verifies the live URL, and writes the seo_keywords row that surfaces in the dashboard activity feed). Use the Bash tool:
         python3 ~/social-autoposter/seo/generate_page.py --product PROJECT_NAME --keyword "KEYWORD_PHRASE" --slug "url-slug" --trigger reddit
       This call can take 10-40 minutes per page (Cloud Run staging-then-tag deploys on mk0r are the slow end). The final stdout is a JSON object; parse it. On success it contains "success": true and "page_url": "https://...". On failure it contains "success": false and "error": "...".
-   d. If success, use \`page_url\` from the JSON output for the Reddit link edit.
-   e. If failure, DO NOT fall back to a bare project website or github URL. DO NOT edit the Reddit comment. DO NOT update link_edited_at on the post. Log the error in your output and move to the next post. The post will stay eligible and be retried on the next scheduled run (every 6h). A custom landing page per thread is a hard requirement; a bare homepage link is never acceptable.
-   If the matched project has NO landing_pages config at all (not a generation failure, genuinely unconfigured), then and only then use the project's website URL.
-4. Write 1 casual sentence + project link. ALWAYS frame as our own creation, never as a third-party tool we just discovered. We built / made / shipped this; we are not "finding" or "stumbling on" it.
-   - For Reddit (first person, claim ownership): "fwiw I built a tool for exactly this, URL", "we made this for it, URL", "I shipped a small thing that does this, URL".
+   d. If success, set LINK_URL = the \`page_url\` from the JSON output and LINK_SOURCE="seo_page".
+   e. If failure (success: false in the JSON), fall back GRACEFULLY (mirrors the Twitter pipeline behavior in scripts/twitter_gen_links.py): set LINK_URL = the project's homepage from config.json (the \`website\` field for the matched project) and set LINK_SOURCE="plain_url_fallback:<reason>" where <reason> is a SHORT snake_case tag derived from the JSON error string (preferred values: timeout, no_page_url, deploy_failed, build_failed, push_failed; otherwise pick a sensible 1-3 word snake_case summary). Do NOT skip the post; continue to step 4. The short-link wrap in step 5 will still mint a /r/<code> on the project's own domain, so click attribution works on the homepage URL too.
+   If the matched project has NO landing_pages config at all (genuinely unconfigured, not a generation failure), skip the page-gen step entirely: set LINK_URL = the project's website URL from config.json and LINK_SOURCE="plain_url_no_lp".
+4. Write 1 casual sentence ending with LINK_URL (from step 3.d, 3.e, or the no-LP fallback). ALWAYS frame as our own creation, never as a third-party tool we just discovered. We built / made / shipped this; we are not "finding" or "stumbling on" it.
+   - For Reddit (first person, claim ownership): "fwiw I built a tool for exactly this, LINK_URL", "we made this for it, LINK_URL", "I shipped a small thing that does this, LINK_URL".
    - NEVER write: "I found this", "there's a tool", "came across this", "saw this manual", "found this guide". That phrasing pretends we are a neutral commenter pointing at someone else's project. We are the authors. Say so.
-5. URL-WRAP THE LINK TEXT for click attribution. Run:
+5. URL-WRAP THE LINK TEXT for click attribution. This MUST run for every LINK_SOURCE (seo_page, plain_url_fallback:*, plain_url_no_lp). The wrap helper accepts homepage URLs and mints a /r/<code> on the project's own domain. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
        --text "YOUR_LINK_SENTENCE_WITH_URL" \\
        --platform reddit \\
        --project PROJECT_NAME
-   Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
+   PROJECT_NAME must be the EXACT \`name\` field from config.json (case-sensitive; e.g. "fazm" lowercase, "Cyrano", "WhatsApp MCP"). Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
 6. Append the wrapped LINK_TEXT to our_content with a blank line separator.
 7. Navigate to old.reddit.com comment permalink via the reddit-agent browser. Click "edit", append the wrapped link text to the existing content, save, verify.
-8. After each successful edit, update the DB and backfill short-link attribution:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
+8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py) and backfill short-link attribution:
+   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
