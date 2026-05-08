@@ -323,20 +323,53 @@ def _db_phase0_salvage(batch_id, freshness_hours=FRESHNESS_HOURS,
     return 0, 0
 
 
-def _db_pick_salvage_candidate(batch_id):
-    """Pull ONE salvage-eligible row and reshape it like a discover output JSON.
+def _db_pick_salvage_candidates(batch_id, limit=1):
+    """Pull up to `limit` salvage-eligible rows from a SINGLE project.
 
     Phase 0 already re-assigned salvageable rows to `batch_id`. This helper
-    pulls the highest-priority such row (newest delta_score first, falling
-    back to most recently discovered) so the caller can write it to a tmpfile
-    and feed it through ripen → draft → post like a freshly-discovered candidate.
+    picks the project with the most pending rows in this batch, then returns
+    up to `limit` rows from THAT project (highest delta_score first, falling
+    back to most recently discovered).
 
-    Returns a {project_name, decisions:[{...}], cost:0, salvaged:True} dict, or
-    None if no eligible row remains.
+    Single-project batching is intentional: draft phase builds the Claude
+    prompt around plan["project_name"], and post phase logs each comment's
+    posts.project from the same field. Mixing projects in one salvage batch
+    would either misattribute posts or require a per-decision project_name
+    refactor across draft/post. The single-project rule keeps the existing
+    contract intact while letting one ripen+draft+post cycle handle N rows
+    instead of 1.
+
+    Returns a {project_name, decisions:[{...}, ...], cost:0, salvaged:True}
+    dict, or None if no eligible row remains.
     """
+    limit = max(1, int(limit or 1))
     try:
         dbmod.load_env()
         conn = dbmod.get_conn()
+        # Step 1: pick the project with the most pending rows in this batch.
+        # Tie-break by max delta_score so the project with the strongest
+        # remaining momentum signal wins.
+        cur = conn.execute(
+            "SELECT matched_project, COUNT(*) AS c "
+            "FROM reddit_candidates "
+            "WHERE batch_id = %s "
+            "  AND status = 'pending' "
+            "  AND attempt_count < %s "
+            "GROUP BY matched_project "
+            "ORDER BY c DESC, MAX(COALESCE(delta_score, 0)) DESC "
+            "LIMIT 1",
+            [batch_id, MAX_ATTEMPTS],
+        )
+        proj_row = cur.fetchone()
+        if not proj_row:
+            conn.close()
+            return None
+        project_name = proj_row[0] or "general"
+
+        # Step 2: pull up to `limit` rows from that project, highest-momentum
+        # first. The CASE on draft_text enforces draft_ttl_min freshness at
+        # the SQL level so stale drafts don't ride into post (mirrors the
+        # original single-row implementation).
         cur = conn.execute(
             "SELECT thread_url, thread_author, thread_title, subreddit, "
             "       matched_project, search_topic, "
@@ -347,40 +380,51 @@ def _db_pick_salvage_candidate(batch_id):
             "WHERE batch_id = %s "
             "  AND status = 'pending' "
             "  AND attempt_count < %s "
+            "  AND matched_project = %s "
             "ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
-            "LIMIT 1",
-            [DRAFT_TTL_MIN, batch_id, MAX_ATTEMPTS],
+            "LIMIT %s",
+            [DRAFT_TTL_MIN, batch_id, MAX_ATTEMPTS, project_name, limit],
         )
-        row = cur.fetchone()
+        rows = cur.fetchall()
         conn.close()
-        if not row:
+        if not rows:
             return None
-        decision = {
-            "action": "candidate",
-            "thread_url": row[0],
-            "thread_author": row[1] or "",
-            "thread_title": row[2] or "",
-            "search_topic": row[5] or "",
-            "engagement_style": row[7] or "",
-        }
-        # Carry the persisted draft forward ONLY when drafted_at is within
-        # DRAFT_TTL_MIN so the salvage shortcut in _draft_iteration doesn't
-        # repost a stale comment (e.g. a 6-hour-old draft whose context is
-        # no longer relevant). The CASE expression above does the freshness
-        # check at the SQL level so we never carry old text in memory.
-        if row[6]:
-            decision["draft_text"] = row[6]
+        decisions = []
+        max_attempt = 0
+        for row in rows:
+            decision = {
+                "action": "candidate",
+                "thread_url": row[0],
+                "thread_author": row[1] or "",
+                "thread_title": row[2] or "",
+                "search_topic": row[5] or "",
+                "engagement_style": row[7] or "",
+            }
+            if row[6]:
+                decision["draft_text"] = row[6]
+            decisions.append(decision)
+            attempt = int(row[8] or 0)
+            if attempt > max_attempt:
+                max_attempt = attempt
         return {
-            "project_name": row[4] or "general",
-            "decisions": [decision],
+            "project_name": project_name,
+            "decisions": decisions,
             "cost": 0.0,
             "salvaged": True,
-            "salvaged_attempt": int(row[8] or 0) + 1,
+            "salvaged_attempt": max_attempt + 1,
+            "salvaged_count": len(decisions),
         }
     except Exception as e:
-        print(f"[post_reddit] WARNING: pick_salvage_candidate failed: {e}",
+        print(f"[post_reddit] WARNING: pick_salvage_candidates failed: {e}",
               file=sys.stderr)
         return None
+
+
+# Back-compat shim: older callers (and tests) may still call the singular
+# name. Routes through the multi-row helper with limit=1 so we don't keep
+# two SQL paths in sync.
+def _db_pick_salvage_candidate(batch_id):
+    return _db_pick_salvage_candidates(batch_id, limit=1)
 
 
 def _apply_rate_limit_policy(remaining, reset_seconds, source, budget_seconds):
