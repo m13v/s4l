@@ -7,10 +7,13 @@
 
 set -euo pipefail
 
-# Pipeline lock at top (only-one-of-us guard). The reddit-browser lock is
-# acquired later, just before the Claude/MCP step that actually drives the
-# browser, so peers can use the profile during our Phase 0 (DB scan, prompt
-# build) and DB queries.
+# Pipeline lock at top (only-one-of-us guard). We DO NOT acquire
+# reddit-browser at the bash level anymore — claude itself acquires it
+# per-DM via scripts/reddit_browser_lock.py, only around the actual MCP
+# browser operations (profile fetch + compose DM, ~30-90s per DM). This
+# unblocks peer reddit pipelines (engage-reddit, dm-replies-reddit,
+# link-edit-reddit, post-reddit) during the DB scan, prompt build, and
+# psql update phases of each DM row.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "dm-outreach-reddit" 2700
 
@@ -112,6 +115,11 @@ CRITICAL RULES:
 3. Keep it short: 1-2 sentences max, like a text message
 4. No links in the first DM; earn the conversation first
 5. No em dashes. Write casually, like texting a coworker.
+
+EXECUTION MODEL — STRICT SEQUENTIAL, NO BATCHING (read this twice):
+- Process DMs ONE AT A TIME. Run the FULL chain (profile fetch → ICP pre-check → compose → send → log) end-to-end for DM N before reading DM N+1.
+- The reddit-browser lock is NOT held by the parent shell. You acquire/release it explicitly per DM (steps 1.5 and 7.5 below), so peer reddit pipelines can use the browser during your DB queries, ICP scoring, and psql updates.
+- The lock has a 90s lease that auto-renews on every reddit-agent MCP call (PreToolUse / PostToolUse hooks), so you do NOT need to manually heartbeat. Just acquire before the first browser call for the DM, release after the last one.
 
 ## COMMITMENT GUARDRAILS (violating any of these is a critical failure)
 - **NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.** Keep everything in the DM thread.
