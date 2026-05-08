@@ -863,12 +863,34 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments)
         )
     candidates_block = "\n".join(candidate_lines)
 
-    return f"""Write a comment for each of the {len(candidates)} pre-selected Reddit thread(s) below. These threads were chosen because they showed active engagement in the last few minutes — they're worth posting on now.
+    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to PICK only the ones that genuinely fit the project below, and draft a comment for those.
 
 Content angle: {content_angle}
 {recent_ctx}{top_ctx}
-## Threads to draft for:
+## Candidate threads (post-ripen):
 {candidates_block}
+
+## SELECTION GATE — read this before drafting anything
+
+The ripen step proves a thread is alive (people are voting/commenting). It does NOT prove the thread fits the project. Reddit search returns false positives based on raw token overlap (e.g. a search for "no-code app maker" surfaces r/gamemaker shader threads because of the word "maker"; a search for "E2E testing developer productivity QA" can surface a JonBenet murder thread because of how Reddit indexes acronyms). Ripen cannot detect that.
+
+You MUST. Before drafting for any thread, ask yourself the **bridge test**:
+"If a stranger reads my comment and later clicks through to {project.get('name', 'this project')}, does the project actually solve a problem the thread's audience cares about?"
+
+If the answer is no, OMIT the thread entirely. Do NOT emit a JSON line for it. Optimize for FIT, not VOLUME. Returning 0 of {len(candidates)} is a valid outcome on a bad batch. Returning all {len(candidates)} is also fine on a good batch. Never force entries to hit a quota; we'd rather post nothing this cycle than burn karma on a mismatch.
+
+GOOD MATCHES (draft a comment):
+- Project: AI test automation (Assrt). Thread: "Playwright selectors keep breaking on every refactor" → direct fit, audience is QA engineers.
+- Project: AI app builder (mk0r). Thread: "I want to prototype a tip calculator UI without learning React" → direct fit, audience wants no-code app generation.
+- Project: Home security camera assistant (Cyrano). Thread: "Wired NVR vs wireless Eufy for a long-term setup" → direct fit, audience cares about camera systems.
+
+BAD MATCHES (OMIT, do not draft):
+- Project: AI test automation. Thread: r/JonBenet "The Absurdity of the BDI Theory" → search query token-overlap false positive ("BDI" parsed as a testing acronym). Audience cares about a 1996 murder case, not QA tooling. No bridge.
+- Project: AI app builder. Thread: r/BostonSocialClub "Events worth leaving the house for this weekend" → matched on "tried" / "maker" tokens. Audience is locals looking for weekend plans. No bridge.
+- Project: AI app builder. Thread: r/gamemaker "Using surfaces to create paper-like behavior" → matched on "maker" but GameMaker is a code-based game-dev IDE, not a no-code prompt tool. Audience writes GML shaders. No bridge.
+- Any thread on a clearly off-topic subreddit relative to the project's domain (true-crime, local events, niche fandoms, political debate) where you'd be embarrassed to leave a comment that later points to {project.get('name', 'this project')}.
+
+If you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread, OMIT it.
 
 ## Tools (via Bash)
 - Fetch thread: python3 {REDDIT_TOOLS} fetch "THREAD_URL"
@@ -876,9 +898,9 @@ Content angle: {content_angle}
 
 ## CRITICAL Bash rules
 - NEVER use run_in_background=true. All commands foreground.
-- Fetch each thread once to read OP and top comments for context.
+- Fetch each thread once to read OP and top comments for context. Use the fetched content to apply the SELECTION GATE.
 
-## CRITICAL CONTENT RULES
+## CRITICAL CONTENT RULES (apply only to threads that pass the gate)
 - Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
 - GROUNDING RULE — pick ONE lane per comment:
   LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this", "scenario:") then you may invent specifics freely.
@@ -892,10 +914,12 @@ Content angle: {content_angle}
 {get_content_rules("reddit")}
 
 ## OUTPUT FORMAT
-After fetching and reading each thread, output one JSON object per line:
+For each thread that PASSES the SELECTION GATE, output one JSON object per line:
 {{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "style_name", "search_topic": "the seed concept", "new_style": null}}
 
-Output DONE after all JSONs. Do NOT narrate. Fetch, draft, output JSON, DONE.
+For threads that FAIL the gate, simply omit them. Do NOT emit a JSON line; do NOT draft a comment. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
+
+Output DONE after all JSONs. Do NOT narrate. Fetch, gate, draft (or omit), output JSON, DONE.
 """
 
 
