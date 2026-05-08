@@ -41,6 +41,7 @@ REPO_DIR = os.path.expanduser("~/social-autoposter")
 TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
 LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
+LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
@@ -213,7 +214,41 @@ def post_one(c: dict) -> tuple[str, str]:
         update_candidate(cid, "skipped")
         return ("skipped", "duplicate_thread_pre_post")
 
-    full_text = f"{reply_text} {link_url}".strip() if link_url else reply_text
+    # CTA bridge generation: instead of bolting `link_url` onto `reply_text`
+    # with a space (the old `f"{reply_text} {link_url}"`), call link_tail.py
+    # which spawns one Claude call (default smart model, NOT Haiku) to write
+    # a 1-sentence bridge that names a concrete benefit and ends in the URL.
+    # On any failure (timeout, model error, output fails sanity gate) the
+    # script returns the mechanical concat as a fallback, so this code path
+    # is always tolerant of model failure.
+    full_text = reply_text
+    link_tail_outcome = "skipped_no_link"
+    if link_url:
+        rc, out, err = run_subprocess(
+            ["python3", LINK_TAIL,
+             "--reply-text", reply_text,
+             "--link-url", link_url,
+             "--thread-text", thread_text or "",
+             "--project", project,
+             "--platform", "twitter",
+             "--timeout", "120"],
+            timeout_sec=180,
+        )
+        tail_obj = parse_last_json_object(out) or {}
+        if tail_obj.get("text"):
+            full_text = tail_obj["text"]
+            if tail_obj.get("model_call_ok") and not tail_obj.get("fallback_used"):
+                link_tail_outcome = "bridge_generated"
+            else:
+                link_tail_outcome = f"fallback:{tail_obj.get('error', 'unknown')[:60]}"
+        else:
+            # link_tail.py is supposed to ALWAYS return JSON; if we got
+            # nothing, hard-fall-back to the mechanical concat to preserve
+            # prior behavior (post still ships, link still on the wire).
+            full_text = f"{reply_text} {link_url}".strip()
+            link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
+        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+              f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
 
     # URL-wrap the text BEFORE handing it to twitter_browser. The browser
     # script appends the campaign suffix internally; suffixes are plain
