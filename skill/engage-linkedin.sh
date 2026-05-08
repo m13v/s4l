@@ -171,6 +171,16 @@ Print:
 - N own account
 - N no comment URN
 
+### Step 8b: Structured scan-summary marker line (REQUIRED)
+After the human-readable summary above, print EXACTLY ONE line with this
+format (no other text on the line, all values are integers):
+
+LINKEDIN_SCAN_SUMMARY: scanned=<TOTAL_NOTIFICATIONS_INSPECTED> new=<NEW_INSERTED> already=<ALREADY_TRACKED> excluded=<EXCLUDED+OWN_ACCOUNT> unmatched=<NO_COMMENT_URN>
+
+The wrapper shell script greps this line to surface scan-stage pills
+(scanned / new / excluded) on the dashboard Result column. If a counter
+doesn't apply this run, emit it as 0 anyway. The line MUST start with
+"LINKEDIN_SCAN_SUMMARY:" at column 0 with that exact spelling and casing.
 PROMPT_EOF
 
 # Acquire linkedin-browser ONLY around the Phase A Claude run. lock.sh is
@@ -418,7 +428,32 @@ log "LinkedIn summary: pending=$TOTAL_PENDING replied=$TOTAL_REPLIED skipped=$TO
 # Log run to persistent monitor
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "engage-linkedin-phaseA" "engage-linkedin-phaseB" 2>/dev/null || echo "0.0000")
-python3 "$REPO_DIR/scripts/log_run.py" --script "engage_linkedin" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED"
+# Pull Phase A scan-stage counters from the structured marker line Claude emits
+# at the end of Phase A: "LINKEDIN_SCAN_SUMMARY: scanned=N new=N already=N
+# excluded=N unmatched=N". If the marker is missing (Claude failed before
+# printing or the prompt drifted), fall back to no scan= segment and the
+# dashboard renders the old way.
+LI_SCAN_LINE=$(grep -m1 "^LINKEDIN_SCAN_SUMMARY:" "$LOG_FILE" 2>/dev/null || true)
+LI_SCAN_ARG=""
+if [ -n "$LI_SCAN_LINE" ]; then
+  li_scanned=$(echo "$LI_SCAN_LINE" | grep -oE "scanned=[0-9]+" | head -1 | cut -d= -f2)
+  li_new=$(echo "$LI_SCAN_LINE" | grep -oE "new=[0-9]+" | head -1 | cut -d= -f2)
+  li_already=$(echo "$LI_SCAN_LINE" | grep -oE "already=[0-9]+" | head -1 | cut -d= -f2)
+  li_excl=$(echo "$LI_SCAN_LINE" | grep -oE "excluded=[0-9]+" | head -1 | cut -d= -f2)
+  li_unm=$(echo "$LI_SCAN_LINE" | grep -oE "unmatched=[0-9]+" | head -1 | cut -d= -f2)
+  parts=""
+  [ -n "$li_scanned" ] && parts="${parts}scanned=${li_scanned},"
+  [ -n "$li_new" ]     && parts="${parts}new=${li_new},"
+  [ -n "$li_already" ] && [ "$li_already" -gt 0 ] && parts="${parts}already=${li_already},"
+  [ -n "$li_excl" ]    && [ "$li_excl"    -gt 0 ] && parts="${parts}excluded=${li_excl},"
+  [ -n "$li_unm" ]     && [ "$li_unm"     -gt 0 ] && parts="${parts}unmatched=${li_unm},"
+  LI_SCAN_ARG="${parts%,}"
+fi
+if [ -n "$LI_SCAN_ARG" ]; then
+  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_linkedin" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED" --scan "$LI_SCAN_ARG"
+else
+  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_linkedin" --posted "$TOTAL_REPLIED" --skipped "$TOTAL_SKIPPED" --failed 0 --cost "$_COST" --elapsed "$RUN_ELAPSED"
+fi
 
 # Delete old logs
 find "$LOG_DIR" -name "engage-linkedin-*.log" -mtime +7 -delete 2>/dev/null || true
