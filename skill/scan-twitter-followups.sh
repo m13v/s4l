@@ -11,6 +11,8 @@ set -euo pipefail
 # Browser-profile lock shared with all twitter pipelines.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "twitter-browser" 0
+# Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
+bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" || true
 ensure_browser_healthy "twitter"
 acquire_lock "scan-twitter-followups" 0
 
