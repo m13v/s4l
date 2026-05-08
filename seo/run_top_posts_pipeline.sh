@@ -145,8 +145,14 @@ while read -r TARGET_PRODUCT; do
         echo "=== Top-Posts target: $TARGET_PRODUCT (ts=$TS) ==="
 
         BRIEF_FILE="$PER_LOG_DIR/${TS}.brief.json"
-        if ! $PICK --product "$TARGET_PRODUCT" --days 7 --min-views 10000 --out "$BRIEF_FILE" 2>>"$PER_LOG"; then
-            RC=$?
+        # NOTE: do NOT use `if ! cmd; then RC=$?` here — bash's `!` resets $?
+        # to 0 in the then-branch, hiding the picker's real exit code (2 for
+        # "skip"). That bug caused every dry-night fire to report 15 fake
+        # failures (and a launchd exit 1) on 2026-05-08 11:41 PT. Capture
+        # $? on the line immediately after the call instead.
+        $PICK --product "$TARGET_PRODUCT" --days 7 --min-views 10000 --out "$BRIEF_FILE" 2>>"$PER_LOG"
+        RC=$?
+        if [ "$RC" -ne 0 ]; then
             if [ "$RC" -eq 2 ]; then
                 echo "  no eligible viral post in last 7d for $TARGET_PRODUCT, skip"
                 exit 13   # treated as "skip ok" by case below
