@@ -35,16 +35,34 @@ tree from os.getppid() looking for the long-lived link-edit-reddit.sh
 we fall back to os.getppid() (typically the bash subprocess from claude's
 Bash tool, which lives at least until the tool call returns).
 
+Lease/TTL semantics (added 2026-05-08)
+--------------------------------------
+On acquire we also write `expires_at` (a Unix timestamp) inside the lock dir.
+The lock is considered STALE (and stealable by a peer) once `now() > expires_at`.
+
+The MCP browser wrapper (`scripts/mcp_lock_proxy.py`) bumps `expires_at` on every
+`tools/call` request that crosses it, and again on every response, plus a periodic
+30s pulse while a request is in flight. So as long as actual reddit-agent browser
+work is happening, the lease keeps renewing. The moment the holder stops calling
+the browser (page-gen, sleeps, DB writes, agent crashes), no more bumps fire and
+the lease auto-expires within `LEASE_TTL_SECONDS` seconds (default 90). Peers
+in the queue then see the lock as stale and steal it.
+
+This eliminates orphaned-lock outages without needing the agent to remember to
+call `release` in every code path. `release` still works (and is preferred when
+the agent knows it's done early), but is no longer load-bearing for correctness.
+
 CLI
 ---
-    python3 reddit_browser_lock.py acquire [--name reddit-browser] [--timeout 600]
-    python3 reddit_browser_lock.py release [--name reddit-browser]
-    python3 reddit_browser_lock.py status  [--name reddit-browser]
+    python3 reddit_browser_lock.py acquire   [--name reddit-browser] [--timeout 600] [--ttl 90]
+    python3 reddit_browser_lock.py release   [--name reddit-browser]
+    python3 reddit_browser_lock.py status    [--name reddit-browser]
+    python3 reddit_browser_lock.py heartbeat [--name reddit-browser] [--ttl 90]
 
 Acquire prints a single line:
-    OK owner_pid=<N> waited=<sec>     (success)
-    BUSY holder_pid=<N> age=<sec>     (timed out)
-    ERROR <reason>                    (unexpected)
+    OK owner_pid=<N> waited=<sec> ttl=<sec>     (success)
+    BUSY holder_pid=<N> age=<sec>               (timed out)
+    ERROR <reason>                              (unexpected)
 
 Release prints:
     OK
@@ -52,8 +70,15 @@ Release prints:
     HELD_BY_OTHER holder_pid=<N>      (don't release — different owner)
     ERROR <reason>
 
+Heartbeat prints:
+    OK expires_at=<unix_ts>           (lease extended)
+    NOT_HELD                          (no lock dir; nothing to extend)
+    HELD_BY_OTHER holder_pid=<N>      (we're not the owner; refused to bump)
+    ERROR <reason>
+
 Status prints JSON:
-    {"name":"...", "held":bool, "holder_pid":N|null, "age_sec":N|null, "queue":[..]}
+    {"name":"...", "held":bool, "holder_pid":N|null, "age_sec":N|null,
+     "expires_at":F|null, "ttl_remaining_sec":F|null, "expired":bool, "queue":[..]}
 
 Exit codes
 ----------
@@ -78,12 +103,59 @@ LOCK_ROOT = "/tmp"
 DEFAULT_NAME = "reddit-browser"
 DEFAULT_ACQUIRE_TIMEOUT = 600  # 10 min — generous for a per-post browser slot
 POLL_INTERVAL = 2.0
-STALE_LOCK_AGE = 10800  # 3h, matches lock.sh safety net
+STALE_LOCK_AGE = 10800  # 3h, matches lock.sh safety net (final backstop)
+
+# Lease/TTL: how long the lock stays valid without a heartbeat. The MCP
+# wrapper auto-heartbeats during browser activity, so a holder that stops
+# making MCP browser calls will see its lease expire after this many seconds
+# of idleness, allowing peers to steal the lock.
+#
+# Sized from real reddit-agent MCP call distribution (n=2390, 14 days):
+#   p99 = 30s, max-legit = 5.6 min (one outlier on browser_close).
+#   90s = 15x p99, leaves comfortable headroom inside the wrapper's 30s
+#   periodic pulse for in-flight calls. For the rare 5+ min outlier the
+#   pulse keeps renewing, so the lease never accidentally expires under
+#   real activity.
+DEFAULT_LEASE_TTL_SECONDS = 90
 
 
 def lock_paths(name: str) -> tuple[Path, Path, Path]:
     base = Path(LOCK_ROOT) / f"social-autoposter-{name}.lock"
     return base, base / "pid", Path(f"{base}.queue")
+
+
+def expires_file_path(lock_dir: Path) -> Path:
+    return lock_dir / "expires_at"
+
+
+def read_expires_at(lock_dir: Path) -> float | None:
+    f = expires_file_path(lock_dir)
+    if not f.is_file():
+        return None
+    try:
+        return float(f.read_text().strip())
+    except Exception:
+        return None
+
+
+def write_expires_at(lock_dir: Path, ts: float) -> bool:
+    """Write `expires_at` atomically. Returns True on success.
+
+    Uses write-then-rename to keep readers from seeing a half-written value.
+    Safe no-op if `lock_dir` was removed mid-write (e.g. lock got released
+    or stolen between the existence check and the write).
+    """
+    try:
+        if not lock_dir.is_dir():
+            return False
+        tmp = lock_dir / f"expires_at.tmp.{os.getpid()}"
+        tmp.write_text(f"{ts:.3f}\n")
+        tmp.replace(expires_file_path(lock_dir))
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 def pid_alive(pid: int) -> bool:
