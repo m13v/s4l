@@ -438,16 +438,17 @@ tags or wrap them in any container.
 sys.stdout.write(prompt)
 PY
 
-    # Use OPUS for the per-project keyword/slug proposal. The proposer needs
-    # reasoning to translate the global winner's concept across different
-    # products' audiences and positioning. Sonnet (CLI default) is too shallow
-    # for this; the auto-commit agent stripped the opus pin in c2b5e61 on
-    # 2026-05-08 with no good reason and quality dropped immediately. Restored.
-    # CLAUDE_MODEL env still wins so a one-off override is possible.
+    # Model: inherit the global default from ~/.claude/settings.json
+    # (currently "claude-opus-4-7"). Setting the model in one place lets the
+    # whole social-autoposter stack run on the same opus build without each
+    # pipeline pinning its own version string that drifts. CLAUDE_MODEL env
+    # still wins for one-off overrides.
     #
-    # Parameter-expansion default avoids the macOS bash 3.2 set -u empty-array
-    # bug that killed every target after the agent's array-form change. We
-    # always pass --model now, no array gymnastics needed.
+    # The conditional `${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"}` expands to
+    # nothing when CLAUDE_MODEL is unset/empty (so the CLI uses settings.json),
+    # and to `--model <value>` when it's set. This sidesteps the macOS bash 3.2
+    # set -u empty-array bug that killed every target after the auto-commit
+    # agent's c2b5e61 change on 2026-05-08.
     #
     # WebSearch + WebFetch are REQUIRED for this call. The prompt instructs
     # the model to run >=3 WebSearch queries to ground proposals in real
@@ -459,11 +460,11 @@ PY
     #
     # No --max-turns: the model needs an unbounded number of tool turns to
     # do real research (search, optionally fetch a result page, then propose).
-    if ! claude_with_retry --model "${CLAUDE_MODEL:-opus}" --print --output-format json \
+    if ! claude_with_retry ${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"} --print --output-format json \
             --allowed-tools "WebSearch,WebFetch" \
             --dangerously-skip-permissions \
             < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
-        echo "  claude opus proposal failed (after retries)"
+        echo "  claude proposal failed (after retries)"
         exit 10
     fi
 
