@@ -89,3 +89,38 @@ scripts/instagram_creators.md
 
 # Archived root cleanup (2026-05-06): quarantined media/snapshots/scratch
 /_archive_*/
+
+# Rotated log archive (8.6k+ files, was triggering too_many_files dashboard warnings)
+skill/logs-archive/
+
+# Generated LinkedIn comments snapshot (root-level scratch)
+/linkedin-comments-snapshot.json
+
+# Media files — never commit/push from any depth in this repo.
+# Video
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.wmv
+*.flv
+*.mpg
+*.mpeg
+# Audio
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.aiff
+# Raw/large image formats (PNG/JPG screenshots stay tracked where already added)
+*.heic
+*.heif
+*.psd
+*.tiff
+*.tif
+*.raw
