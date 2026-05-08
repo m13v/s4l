@@ -425,6 +425,36 @@ def cmd_search(args):
         file=sys.stderr, flush=True,
     )
 
+    # Opaque-results discover mode (post 2026-05-07 refactor): when
+    # SAPS_REDDIT_DUMP_DIR is set, write the full threads JSON to a unique
+    # file in that directory and print ONLY a one-line summary to stdout.
+    # This prevents Claude (running this tool from the discover prompt) from
+    # ever seeing thread content, which it would otherwise filter despite
+    # explicit "emit every thread" instructions. The orchestrator
+    # (_discover_iteration in post_reddit.py) globs the dump dir after Claude
+    # exits and reads every dumped file directly into the candidate plan.
+    dump_dir = os.environ.get("SAPS_REDDIT_DUMP_DIR")
+    if dump_dir and os.path.isdir(dump_dir):
+        import tempfile as _tempfile
+        fd, dump_path = _tempfile.mkstemp(
+            dir=dump_dir, prefix="result-", suffix=".json"
+        )
+        try:
+            with os.fdopen(fd, "w") as df:
+                json.dump({"query": query, "threads": threads, "stats": stats}, df)
+        except Exception as e:
+            # If dump fails, fall back to stdout so the cycle isn't silently broken.
+            print(f"[reddit_search] WARN: dump failed, falling back to stdout: {e}",
+                  file=sys.stderr, flush=True)
+            print(json.dumps(threads, indent=2))
+            return
+        # Tell Claude only the count, not the content. No file path so Claude
+        # can't `cat` it. The stderr [reddit_search] line above already gives
+        # the full breakdown (raw/returned/blocked/etc.) for query-quality
+        # decisions.
+        print(f"OK: {stats['returned']} threads passed to ripen pipeline (results not shown)")
+        return
+
     print(json.dumps(threads, indent=2))
 
 
