@@ -2,7 +2,7 @@
 """Per-project top-post picker for the seo_top_posts pipeline.
 
 Logic (per project):
-    1. Read posts table for last 7d:
+    1. Read posts table for last 14d:
          project_name = <product>
          status NULL or NOT IN ('deleted', 'removed')
          views >= MIN_VIEWS (default 10000)
@@ -56,7 +56,7 @@ if ENV_PATH.exists():
 import psycopg2  # noqa: E402
 
 DEFAULT_MIN_VIEWS = 10_000
-DEFAULT_WINDOW_DAYS = 7
+DEFAULT_WINDOW_DAYS = 14
 
 # Composite score weights. Views dominate, but high-engagement posts on
 # platforms with small view counts (Reddit, LinkedIn organic) still get a
