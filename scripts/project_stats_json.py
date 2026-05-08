@@ -320,7 +320,10 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
 
     pv_total = _count_by_host("event = '$pageview'")
     cta_total = _count_by_host("event = 'cta_click'")
-    signup_total = _count_by_host(_SIGNUP_CLAUSE, distinct_key="properties.email")
+    signup_total = _count_by_host(
+        _SIGNUP_CLAUSE,
+        distinct_key="coalesce(properties.email, distinct_id)",
+    )
     sched_total = _count_by_host("event = 'schedule_click'")
     get_started_total = _count_by_host(f"event IN {_GET_STARTED_EVENTS}")
     cross_product_total = _count_by_host("event = 'cross_product_click'")
