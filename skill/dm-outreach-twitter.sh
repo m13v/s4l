@@ -7,11 +7,17 @@
 
 set -euo pipefail
 
+# Bootstrap log paths early so the singleton-cleanup output below gets captured
+# in the same log file the rest of the run uses.
+LOG_DIR="$HOME/social-autoposter/skill/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/dm-outreach-twitter-$(date +%Y-%m-%d_%H%M%S).log"
+
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "twitter-browser" 3600
 # Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" || true
+bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 acquire_lock "dm-outreach-twitter" 2700
 
@@ -21,15 +27,12 @@ acquire_lock "dm-outreach-twitter" 2700
 
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
-LOG_DIR="$REPO_DIR/skill/logs"
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
     exit 1
 fi
-
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/dm-outreach-twitter-$(date +%Y-%m-%d_%H%M%S).log"
+# (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
