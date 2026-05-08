@@ -594,6 +594,43 @@ def _seo_pages_count(conn, name, days):
     return int((row and row[0]) or 0)
 
 
+def _amplitude_signups_24h_from_cache(proj):
+    """For days==1, read the precomputed rolling-24h count from the cache
+    written by scripts/amplitude_24h_signups.py.
+
+    That script uses our own server-side PostHog `newsletter_subscribed`
+    event (real-time, partner_outcome IN ('partner_created','partner_reused'))
+    as the primary source, because Amplitude segmentation/export both lag
+    several hours behind real time and bucket by calendar day in the
+    project's display timezone.
+
+    Returns int (count) or None when:
+      - cache file missing / unreadable
+      - project not present in cache
+      - cache is older than 30 minutes (stale, fall back to live segmentation)
+    """
+    cache_path = os.path.expanduser(
+        "~/social-autoposter/skill/cache/amplitude_24h_signups.json"
+    )
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path) as f:
+            cur = json.load(f)
+        gen = cur.get("generated_at_utc")
+        if gen:
+            age_min = (datetime.now(timezone.utc) - datetime.fromisoformat(gen)).total_seconds() / 60
+            if age_min > 30:
+                return None
+        for p in cur.get("projects") or []:
+            if p.get("name") == proj.get("name"):
+                v = p.get("count_24h")
+                return int(v) if v is not None else None
+    except Exception:
+        return None
+    return None
+
+
 def _amplitude_signups(proj, days, env):
     """Pull attributed end-product signup count from the client's Amplitude.
 
@@ -602,10 +639,20 @@ def _amplitude_signups(proj, days, env):
     matching the filter over the last `days`, or None if not configured /
     creds missing / API errors. Errors are non-fatal — they collapse to None
     so the dashboard falls back to the click-based metric.
+
+    Special case: days == 1 reads from the rolling-24h cache populated by
+    scripts/amplitude_24h_signups.py, which uses real-time PostHog data
+    instead of Amplitude segmentation (which lags hours and buckets by
+    calendar day in the project's display timezone). Falls through to the
+    segmentation path if the cache is missing or stale.
     """
     amp = proj.get("amplitude")
     if not amp:
         return None
+    if days == 1:
+        cached = _amplitude_signups_24h_from_cache(proj)
+        if cached is not None:
+            return cached
     api_key = env.get(amp.get("api_key_env", ""))
     secret_key = env.get(amp.get("secret_key_env", ""))
     if not api_key or not secret_key:
