@@ -100,15 +100,39 @@ def project_for_url(url, idx):
     return d, None
 
 
-def posthog_count_pageviews(api_key, project_id, code, after_iso, timeout=30):
-    """HogQL count of $pageview matching utm_content=code AND ts >= after."""
+def utm_content_from_url(url):
+    """Pull the utm_content query param from a target_url, if any."""
+    try:
+        qs = urllib.parse.urlparse(url).query
+        params = urllib.parse.parse_qs(qs)
+    except Exception:
+        return None
+    vals = params.get("utm_content")
+    if vals:
+        return vals[0]
+    # also check metadata[utm_content] used in cal.com links
+    for k, v in params.items():
+        if k.endswith("[utm_content]") and v:
+            return v[0]
+    return None
+
+
+def posthog_count_pageviews(api_key, project_id, utm_content_value, after_iso, host=None, timeout=30):
+    """HogQL count of $pageview matching utm_content AND ts >= after.
+
+    If `host` is supplied it is added to the WHERE so cross-domain noise from
+    shared PostHog projects (project 330744 hosts ~14 different sites) does
+    not leak in.
+    """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
-    hogql = (
-        "SELECT count() FROM events "
-        "WHERE event = '$pageview' "
-        f"AND properties.utm_content = {sql_str(code)} "
-        f"AND timestamp >= toDateTime({sql_str(after_iso)})"
-    )
+    where = [
+        "event = '$pageview'",
+        f"properties.utm_content = {sql_str(utm_content_value)}",
+        f"timestamp >= toDateTime({sql_str(after_iso)})",
+    ]
+    if host:
+        where.append(f"properties.$host = {sql_str(host)}")
+    hogql = "SELECT count() FROM events WHERE " + " AND ".join(where)
     body = json.dumps({"query": {"kind": "HogQLQuery", "query": hogql}}).encode()
     req = urllib.request.Request(
         url,
@@ -181,8 +205,12 @@ def backfill_table(conn, table, idx, dry_run=False, limit=None):
             time.sleep(0.5)
         last_pid = pid
         after = to_iso(minted)
+        # Each target_url already carries its own utm_content (the post UUID
+        # for posts, dm_<id> for DMs); the redirector's short code isn't what
+        # PostHog sees, so we read the embedded utm_content instead.
+        utm_val = utm_content_from_url(url) or code
         try:
-            count = posthog_count_pageviews(api_key, pid, code, after)
+            count = posthog_count_pageviews(api_key, pid, utm_val, after, host=domain)
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
             print(f"  [{i:3d}/{len(rows)}] {code} domain={domain} pid={pid} HTTP ERR {e}", flush=True)
             counters["errors"] += 1
@@ -196,7 +224,7 @@ def backfill_table(conn, table, idx, dry_run=False, limit=None):
         if count == 0:
             counters["zero"] += 1
         counters["updated"] += 1
-        print(f"  [{i:3d}/{len(rows)}] {code} domain={domain} pid={pid} real_clicks={count}", flush=True)
+        print(f"  [{i:3d}/{len(rows)}] {code} domain={domain} pid={pid} utm={utm_val[:50]} real_clicks={count}", flush=True)
 
     if not dry_run:
         conn.commit()
