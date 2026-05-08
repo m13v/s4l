@@ -310,11 +310,15 @@ def post_one(c: dict) -> tuple[str, str]:
     if not post_id:
         print(f"[post] candidate {cid} log_post.py did not return post_id; raw={out!r}",
               flush=True)
-        # The reply IS posted; the data layer just lost the row. Mark
-        # candidate posted anyway with post_id=NULL so we don't double-post
-        # next cycle. 'failed' would re-rank it for retry which is worse.
+        # The reply IS posted; the data layer just lost the row. We MUST keep
+        # the candidate's DB status as 'skipped' so it isn't retried (which
+        # would double-post on x.com). But the run-summary outcome should be
+        # 'failed' so the dashboard reflects reality: posted=0, failed=N.
+        # Previously this returned 'skipped', which silently hid backend
+        # logging outages (e.g. the /api/v1/posts 5000/24h rate-limit cap)
+        # behind a benign-looking metric.
         update_candidate(cid, "skipped")
-        return ("skipped", "log_post_no_id")
+        return ("failed", "log_post_no_id")
 
     # Stamp post_links.post_id for the URLs minted at wrap time. Idempotent;
     # no-op when minted_session is None (no URLs in the original text).
