@@ -82,20 +82,27 @@ Process ALL of them. For each post:
    g. Use THAT page URL in the link edit. If deploy fails, fall back to the project's website URL.
    If no landing_pages config: use website if available, otherwise github.
 4. Write 1 sentence + project link (GitHub peer tone, claim ownership): "fwiw we built an implementation of this, URL" or "I shipped a tool that does this, URL". ALWAYS frame as our own creation, never as a third-party tool we just discovered. NEVER write "I found this", "there's a tool", "came across this implementation". We are the authors of this code. Say so.
-5. Extract OWNER/REPO from thread_url. Extract COMMENT_ID from our_url; if not directly available, use gh api to find our comment on that issue.
-6. Edit the existing comment (append the new line to the existing content) using gh:
+5. URL-WRAP THE LINK TEXT for click attribution. Run:
+     python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
+       --text "YOUR_LINK_SENTENCE_WITH_URL" \\
+       --platform github_issues \\
+       --project PROJECT_NAME
+   Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
+6. Extract OWNER/REPO from thread_url. Extract COMMENT_ID from our_url; if not directly available, use gh api to find our comment on that issue.
+7. Edit the existing comment (append the wrapped LINK_TEXT to the existing content) using gh:
    gh api repos/OWNER/REPO/issues/comments/COMMENT_ID -X PATCH -f body="EXISTING_CONTENT
 
-   fwiw we built an implementation of this, URL"
-7. After each successful edit, update the DB:
+   WRAPPED_LINK_TEXT"
+8. After each successful edit, update the DB and backfill short-link attribution:
    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
-8. COMMITMENT GUARDRAILS (never violate these):
+   python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
+9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
    - NEVER promise to share links, files, or resources you don't have right now. Only share links from config.json projects (plus any new landing page you just deployed).
    - NEVER offer to DM or send anything outside the comment.
    - NEVER make time-bound promises.
-9. If a post is SKIPPED (no project match, comment not found, issue locked, 404, bad URL), ALWAYS mark it so it won't be retried:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+10. If a post is SKIPPED (no project match, comment not found, issue locked, 404, bad URL), ALWAYS mark it so it won't be retried:
+    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
 PROMPT_EOF
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "link-edit-github" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/no-agents-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: GitHub link-edit claude exited with code $?"
