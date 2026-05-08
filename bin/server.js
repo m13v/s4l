@@ -4332,6 +4332,7 @@ async function handleApi(req, res) {
         "COALESCE(pl.total_clicks, 0)::int AS link_clicks, " +
         "COALESCE(pl.real_clicks, 0)::int AS link_real_clicks, " +
         "COALESCE(pl.bot_clicks, 0)::int AS link_bot_clicks, " +
+        "COALESCE(pl.backfill_real, 0)::int AS link_backfill_real, " +
         "COALESCE(pl.link_count, 0)::int AS link_count, " +
         "pl.first_code AS link_code " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
@@ -4339,13 +4340,16 @@ async function handleApi(req, res) {
       // (humans-only after 2026-05-07; pre-existing rows include bots).
       // real_clicks / bot_clicks come from post_link_clicks, the per-hit log,
       // and split by UA bot regex. Posts minted before 2026-05-07 will have
-      // real_clicks=bot_clicks=0 and the legacy column carries the conflated
-      // historical count, the dashboard renders that as "(legacy)".
+      // real_clicks=bot_clicks=0 and instead carry a backfilled estimate in
+      // post_links.real_clicks (populated from PostHog $pageview counts by
+      // scripts/backfill_real_clicks.py); the UI surfaces that as
+      // "(estimated from PostHog)".
       "LEFT JOIN (" +
         "SELECT pl0.post_id, " +
         "  SUM(pl0.clicks)::int AS total_clicks, " +
         "  COUNT(*)::int AS link_count, " +
         "  MIN(pl0.code) AS first_code, " +
+        "  COALESCE(SUM(pl0.real_clicks), 0)::int AS backfill_real, " +
         "  COALESCE(SUM(plc.real_clicks), 0)::int AS real_clicks, " +
         "  COALESCE(SUM(plc.bot_clicks), 0)::int AS bot_clicks " +
         "FROM post_links pl0 " +
@@ -4399,9 +4403,11 @@ async function handleApi(req, res) {
         "pl.post_id, pl.reply_id, pl.kind, " +
         // Humans vs bots split from post_link_clicks. Pre-2026-05-07 rows
         // have no per-click log entries, so real_clicks/bot_clicks=0 for
-        // them; the UI falls back to pl.clicks rendered as "(legacy)".
+        // them; the UI then prefers pl.real_clicks (PostHog backfill) and
+        // falls back to pl.clicks rendered as "(legacy)" if neither exists.
         "COALESCE(plc.real_clicks, 0)::int AS real_clicks, " +
         "COALESCE(plc.bot_clicks, 0)::int AS bot_clicks, " +
+        "COALESCE(pl.real_clicks, 0)::int AS backfill_real, " +
         "CASE WHEN pl.reply_id IS NOT NULL THEN 'comment' ELSE 'thread' END AS link_kind, " +
         "LEFT(COALESCE(p.our_content, ''), 200) AS our_content, " +
         "p.our_url, p.thread_url, p.thread_title, p.posted_at, " +
@@ -10190,10 +10196,13 @@ function renderTopPosts(payload) {
     link_clicks:   Number(p.link_clicks) || 0,
     // real_clicks / bot_clicks come from the new post_link_clicks per-hit
     // log (rolled up server-side). For posts minted before 2026-05-07
-    // they will both be 0 even when link_clicks > 0; the UI falls back to
-    // showing the legacy conflated count with a "(legacy)" marker.
-    link_real_clicks: Number(p.link_real_clicks) || 0,
-    link_bot_clicks:  Number(p.link_bot_clicks)  || 0,
+    // they will both be 0 even when link_clicks > 0; the UI then prefers
+    // backfill_real (PostHog $pageview count, written by
+    // scripts/backfill_real_clicks.py) and finally falls back to the
+    // legacy conflated count with a "(legacy)" marker.
+    link_real_clicks:    Number(p.link_real_clicks)    || 0,
+    link_bot_clicks:     Number(p.link_bot_clicks)     || 0,
+    link_backfill_real:  Number(p.link_backfill_real)  || 0,
     link_count:    Number(p.link_count)  || 0,
     link_code:     p.link_code || '',
   }));
@@ -10253,18 +10262,22 @@ function renderTopPosts(payload) {
       { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
         formatter: (_v, r) => {
           const hasLink = r.link_count > 0;
-          const real    = Number(r.link_real_clicks) || 0;
-          const bots    = Number(r.link_bot_clicks)  || 0;
-          const legacy  = Number(r.link_clicks)      || 0;
+          const real    = Number(r.link_real_clicks)   || 0;
+          const bots    = Number(r.link_bot_clicks)    || 0;
+          const backfill= Number(r.link_backfill_real) || 0;
+          const legacy  = Number(r.link_clicks)        || 0;
           const havePerClick = real > 0 || bots > 0;
           const linkLine  = '<span class="top-stats-bit"><span class="top-stats-k">link</span>'
             + (hasLink ? '\u2714' : '\u2014') + '</span>';
-          // Two display modes:
+          // Three display modes:
           //   1. Per-click log present: "humans / bots" with bots dimmed.
           //      Real human clicks drive sort + filter going forward.
-          //   2. Legacy only (post pre-dates 2026-05-07 bot-filter rollout):
-          //      show the conflated counter with "(legacy)" tag in tooltip
-          //      so the operator knows it includes Twitter card prefetches.
+          //   2. PostHog backfill present (pre 2026-05-07 row, but the
+          //      destination domain has PostHog wired): show backfill as
+          //      "(estimated from PostHog)".
+          //   3. Legacy only (no per-click log, no backfill possible
+          //      because destination has no PostHog): show the conflated
+          //      counter with "(legacy)" tag.
           let clickLine = '';
           if (hasLink) {
             if (havePerClick) {
@@ -10274,8 +10287,15 @@ function renderTopPosts(payload) {
                 + real
                 + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
                 + '</span>';
+            } else if (backfill > 0) {
+              const tip = 'Estimated from PostHog $pageview events with matching utm_content (real humans only, bots already filtered by PostHog). Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py.';
+              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + backfill
+                + ' <span style="color:var(--text-muted);">(estimated)</span>'
+                + '</span>';
             } else if (legacy > 0) {
-              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks.';
+              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number.';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + legacy
@@ -10316,10 +10336,13 @@ function renderTopPosts(payload) {
           if (fv === 'has_link' || fv === '>=1') return hasLink;
           if (fv === 'has_clicks') {
             // Prefer real (human) clicks when the per-click log has anything,
-            // fall back to legacy link_clicks so historical rows still match.
-            const real = Number(row.link_real_clicks) || 0;
-            const bots = Number(row.link_bot_clicks)  || 0;
+            // then fall back to PostHog backfill, then legacy link_clicks so
+            // historical rows still match.
+            const real = Number(row.link_real_clicks)   || 0;
+            const bots = Number(row.link_bot_clicks)    || 0;
+            const back = Number(row.link_backfill_real) || 0;
             if (real > 0 || bots > 0) return real >= 1;
+            if (back > 0) return true;
             return Number(row.link_clicks) >= 1;
           }
           if (fv === 'no_link') return !hasLink;
