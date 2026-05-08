@@ -93,7 +93,13 @@ if [ -f "$GLOBAL_LOCK" ]; then
     rm -f "$GLOBAL_LOCK"
 fi
 echo "$$" > "$GLOBAL_LOCK"
-trap '__e=$?; rm -f "$GLOBAL_LOCK"; python3 "$SCRIPT_DIR/log_seo_run.py" --script "seo_top_posts" --since "$RUN_START" --failed "$__e" --elapsed "$(( $(date +%s) - RUN_START ))" >/dev/null 2>&1 || true' EXIT
+# SKIP_TARGETS / OK_TARGETS / FAIL_TARGETS get populated as the loop runs.
+# Initialize them here so the EXIT trap can reference them safely even if
+# we exit before the loop (e.g. an early `set -u` violation).
+OK_TARGETS=()
+SKIP_TARGETS=()
+FAIL_TARGETS=()
+trap '__e=$?; rm -f "$GLOBAL_LOCK"; python3 "$SCRIPT_DIR/log_seo_run.py" --script "seo_top_posts" --since "$RUN_START" --failed "$__e" --elapsed "$(( $(date +%s) - RUN_START ))" --skipped-override "${#SKIP_TARGETS[@]}" --posted-override "${#OK_TARGETS[@]}" >/dev/null 2>&1 || true' EXIT
 
 TS=$(_timestamp)
 LOG_DIR="$LOG_ROOT/_global/top_posts"
@@ -113,9 +119,9 @@ fi
 QUOTA_MARKERS='monthly usage limit|429 Too Many|insufficient_quota|"api_error_status":429|hit your limit|"status":"rejected"'
 QUOTA_HIT=0
 
-OK_TARGETS=()
-SKIP_TARGETS=()
-FAIL_TARGETS=()
+# OK_TARGETS / SKIP_TARGETS / FAIL_TARGETS are initialized earlier (right
+# after the global lock) so the EXIT trap can read their counts safely even
+# on an early-exit path. Don't re-declare here.
 
 while read -r TARGET_PRODUCT; do
     [ -z "$TARGET_PRODUCT" ] && continue
