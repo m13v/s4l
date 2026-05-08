@@ -669,6 +669,29 @@ def cmd_mint(args):
         conn.close()
 
 
+# Bot User-Agent regex. Matches Twitter card prefetch, LinkedIn unfurl,
+# Slack/Discord/Telegram/WhatsApp link previews, generic Google/Bing crawlers,
+# and Pinterest/Embedly/Snapchat. We discovered 97 percent of /r/<code> hits
+# fired within 30 seconds of mint, average 17s, which is the link-preview
+# fingerprint. Real human ratio cross-referenced against PostHog pageviews
+# was 5-8 percent. When a UA matches:
+#   1. Skip the legacy `clicks` counter increment (so post-2026-05-07 the
+#      legacy column is humans-only).
+#   2. Skip the [CLICK_SIGNAL] insert into dm_messages so the engage pipeline
+#      isn't woken up by a Slackbot.
+#   3. Still log a row in dm_link_clicks with is_bot=true so historical
+#      splits stay accurate.
+#   4. Still return target_url so previews render.
+import hashlib
+import re
+BOT_UA_RE = re.compile(
+    r'bot|crawler|spider|Twitterbot|LinkedInBot|Slackbot|facebookexternalhit'
+    r'|Discordbot|TelegramBot|WhatsApp|Applebot|Googlebot|Bingbot|YandexBot'
+    r'|DuckDuckBot|redditbot|Pinterest|Embedly|Snapchat',
+    re.IGNORECASE,
+)
+
+
 def cmd_resolve(args):
     conn = dbmod.get_conn()
     try:
@@ -688,24 +711,44 @@ def cmd_resolve(args):
         if platform == 'x':
             platform = 'twitter'
 
+        ua = (getattr(args, 'user_agent', '') or '').strip()
+        referrer = (getattr(args, 'referrer', '') or '').strip() or None
+        is_bot = bool(ua and BOT_UA_RE.search(ua))
+        ip_raw = (getattr(args, 'ip', '') or '').strip()
+        ip_hash = (
+            hashlib.sha256(ip_raw.encode('utf-8')).hexdigest()[:16]
+            if ip_raw else None
+        )
+
         if not args.no_count:
-            conn.execute(
-                "UPDATE dm_links SET "
-                "  clicks = clicks + 1, "
-                "  first_click_at = COALESCE(first_click_at, NOW()), "
-                "  last_click_at = NOW() "
-                "WHERE code = %s",
-                (args.code,),
-            )
+            # Per-click log row, captures every hit (human or bot).
             try:
                 conn.execute(
-                    "INSERT INTO dm_messages (dm_id, direction, author, content, message_at, logged_at) "
-                    "VALUES (%s, 'inbound', '__click_signal__', "
-                    "        '[CLICK_SIGNAL] short link clicked', NOW(), NOW())",
-                    (row['dm_id'],),
+                    "INSERT INTO dm_link_clicks (code, ip_hash, user_agent, is_bot, referrer) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (args.code, ip_hash, ua[:500] if ua else None, is_bot, referrer[:500] if referrer else None),
                 )
             except Exception as e:
-                sys.stderr.write(f"[dm_short_links] click_signal insert failed (non-fatal): {e}\n")
+                sys.stderr.write(f"[dm_short_links] dm_link_clicks insert failed (non-fatal): {e}\n")
+
+            if not is_bot:
+                conn.execute(
+                    "UPDATE dm_links SET "
+                    "  clicks = clicks + 1, "
+                    "  first_click_at = COALESCE(first_click_at, NOW()), "
+                    "  last_click_at = NOW() "
+                    "WHERE code = %s",
+                    (args.code,),
+                )
+                try:
+                    conn.execute(
+                        "INSERT INTO dm_messages (dm_id, direction, author, content, message_at, logged_at) "
+                        "VALUES (%s, 'inbound', '__click_signal__', "
+                        "        '[CLICK_SIGNAL] short link clicked', NOW(), NOW())",
+                        (row['dm_id'],),
+                    )
+                except Exception as e:
+                    sys.stderr.write(f"[dm_short_links] click_signal insert failed (non-fatal): {e}\n")
             conn.commit()
 
         print(json.dumps({
@@ -714,6 +757,7 @@ def cmd_resolve(args):
             'project': row.get('target_project') or row.get('project_name'),
             'kind': row.get('kind'),
             'target_url': row['target_url'],
+            'is_bot': is_bot,
         }))
     finally:
         conn.close()
@@ -773,6 +817,13 @@ def main():
     p_res = sub.add_parser('resolve', help='Look up code, increment clicks, return target URL')
     p_res.add_argument('--code', required=True)
     p_res.add_argument('--no-count', action='store_true', help='Skip click counter update (debugging)')
+    # Bot detection inputs. When --user-agent matches the bot regex (Twitterbot,
+    # LinkedInBot, Slackbot, facebookexternalhit, etc.), the legacy clicks
+    # counter is NOT bumped, [CLICK_SIGNAL] is NOT inserted, but a row IS
+    # appended to dm_link_clicks with is_bot=true so historical splits work.
+    p_res.add_argument('--user-agent', default='', help='Caller User-Agent for bot detection')
+    p_res.add_argument('--referrer', default='', help='Caller Referer header for analytics')
+    p_res.add_argument('--ip', default='', help='Caller IP (sha256 hashed before storage)')
 
     p_wrap = sub.add_parser('wrap-text', help='Wrap every URL in TEXT through the mint pipeline')
     p_wrap.add_argument('--dm-id', type=int, required=True)
