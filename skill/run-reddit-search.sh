@@ -183,111 +183,117 @@ add_reason() {
     fi
 }
 
-for i in $(seq 1 "$ITERATIONS"); do
-    log "--- Iteration $i/$ITERATIONS ---"
-    DISCOVER_FILE=$(mktemp -t post_reddit_discover.XXXXXX.json)
-    ITER_SALVAGED=0  # 1 = this iteration is replaying a salvaged candidate
+# =============================================================================
+# SALVAGE LANE — already-vetted retries, skip ripen, post early
+# =============================================================================
+# Salvage rows were ripened (and survived, or CDP-failed mid-post) in a prior
+# cycle. Re-ripening them now would burn 10 min of wall-clock for stale signal.
+# Pull up to LIMIT rows from one project, draft any that lack a fresh persisted
+# draft, then post. Lock is held briefly here so peers can use the browser
+# during the discover lane's 10-min ripen sleep below.
+SALVAGE_FILE=$(mktemp -t post_reddit_salvage.XXXXXX.json)
+SALVAGE_DRAFT_FILE=$(mktemp -t post_reddit_salvage_draft.XXXXXX.json)
+HAS_SALVAGE=0
+SALVAGE_COUNT=0
 
-    # Salvage-first: try to pull a pending row that Phase 0 re-assigned to
-    # this batch BEFORE paying the discover cost. Salvaged rows skip the
-    # Claude discover spend entirely; ripen re-measures fresh deltas, draft
-    # reuses any persisted text (<60min old), and post retries the CDP step.
+set +e
+python3 "$REPO_DIR/scripts/post_reddit.py" \
+    --phase salvage \
+    --batch-id "$BATCH_ID" \
+    --limit "$LIMIT" \
+    --out "$SALVAGE_FILE" 2>&1 | tee -a "$LOG_FILE"
+SALVAGE_RC=${PIPESTATUS[0]}
+set -e
+
+if [ "$SALVAGE_RC" = "0" ]; then
+    SALVAGE_COUNT=$(python3 -c "import json;print(len(json.load(open('$SALVAGE_FILE')).get('decisions',[])))" 2>/dev/null || echo 1)
+    HAS_SALVAGE=1
+    TOTAL_SALVAGED=$((TOTAL_SALVAGED + ${SALVAGE_COUNT:-1}))
+    TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + ${SALVAGE_COUNT:-1}))
+    log "Salvage lane: pulled $SALVAGE_COUNT candidate(s); skipping ripen."
+else
+    log "Salvage lane: nothing to salvage this cycle (rc=$SALVAGE_RC)."
+fi
+
+# --- Salvage draft (no browser; skips rows with fresh persisted draft_text) ---
+if [ "$HAS_SALVAGE" = "1" ]; then
+    log "Salvage lane: drafting $SALVAGE_COUNT candidate(s)..."
     set +e
     python3 "$REPO_DIR/scripts/post_reddit.py" \
-        --phase salvage \
-        --batch-id "$BATCH_ID" \
-        --limit "$LIMIT" \
-        --out "$DISCOVER_FILE" 2>&1 | tee -a "$LOG_FILE"
-    SALVAGE_RC=${PIPESTATUS[0]}
+        --phase draft \
+        --in "$SALVAGE_FILE" \
+        --out "$SALVAGE_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE"
+    SALVAGE_DRAFT_RC=${PIPESTATUS[0]}
     set -e
 
-    if [ "$SALVAGE_RC" = "0" ]; then
-        ITER_SALVAGED=1
-        TOTAL_SALVAGED=$((TOTAL_SALVAGED + 1))
-        # Count actual salvaged decisions (the batched salvage path can return
-        # up to LIMIT rows per iteration). Falls back to 1 if the file isn't
-        # parseable so the dashboard still shows non-zero candidates.
-        SALVAGE_COUNT=$(python3 -c "import json;print(len(json.load(open('$DISCOVER_FILE')).get('decisions',[])))" 2>/dev/null || echo 1)
-        TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + ${SALVAGE_COUNT:-1}))
-        # Salvaged iterations bypass the project-exclude mechanism: we're
-        # retrying specific rows, not picking a fresh project.
-        log "Iteration $i: replaying $SALVAGE_COUNT salvaged candidate(s)."
-    else
-        # Phase 1: Discover — search and select threads. No browser, no drafting.
-        set +e
-        python3 "$REPO_DIR/scripts/post_reddit.py" \
-            --phase discover \
-            --batch-id "$BATCH_ID" \
-            --out "$DISCOVER_FILE" \
-            --exclude "$EXCLUDE" \
-            --limit "$LIMIT" 2>&1 | tee -a "$LOG_FILE"
-        DISCOVER_RC=${PIPESTATUS[0]}
-        set -e
+    case "$SALVAGE_DRAFT_RC" in
+        0) : ;;
+        5) log "Salvage draft: Claude failed; skipping salvage post."; HAS_SALVAGE=0; TOTAL_FAILED=$((TOTAL_FAILED + ${SALVAGE_COUNT:-1})) ;;
+        6) log "Salvage draft: no drafted decisions; skipping salvage post."; HAS_SALVAGE=0; TOTAL_SKIPPED=$((TOTAL_SKIPPED + ${SALVAGE_COUNT:-1})) ;;
+        *) log "Salvage draft: rc=$SALVAGE_DRAFT_RC; skipping salvage post."; HAS_SALVAGE=0; TOTAL_FAILED=$((TOTAL_FAILED + ${SALVAGE_COUNT:-1})) ;;
+    esac
+fi
 
-        case "$DISCOVER_RC" in
-            0)
-                : # discover succeeded with candidates
-                ;;
-            3)
-                log "Discover phase: rate-limited; ending run."
-                rm -f "$DISCOVER_FILE"
-                break
-                ;;
-            4)
-                log "Discover phase: no eligible project left; ending run."
-                rm -f "$DISCOVER_FILE"
-                break
-                ;;
-            5)
-                log "Discover phase: Claude failed; counting as failed and continuing."
-                TOTAL_FAILED=$((TOTAL_FAILED + 1))
-                rm -f "$DISCOVER_FILE"
-                continue
-                ;;
-            6)
-                log "Discover phase: no candidates found; counting as skipped and continuing."
-                TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
-                PICKED=$(python3 -c "import json,sys;print(json.load(open('$DISCOVER_FILE')).get('project_name',''))" 2>/dev/null || echo "")
-                [ -n "$PICKED" ] && EXCLUDE="${EXCLUDE:+$EXCLUDE,}$PICKED"
-                rm -f "$DISCOVER_FILE"
-                continue
-                ;;
-            *)
-                log "Discover phase: unexpected exit code $DISCOVER_RC; counting as failed."
-                TOTAL_FAILED=$((TOTAL_FAILED + 1))
-                rm -f "$DISCOVER_FILE"
-                continue
-                ;;
-        esac
+# --- Salvage post (acquire lock briefly, post, release before ripen sleep) ---
+if [ "$HAS_SALVAGE" = "1" ]; then
+    log "Salvage lane: acquiring reddit-browser lock for post..."
+    acquire_lock "reddit-browser" 3600
+    ensure_browser_healthy "reddit"
 
-        # Count freshly-discovered candidates so the dashboard's queue
-        # tooltip distinguishes new finds from salvaged retries.
+    set +e
+    SALVAGE_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$SALVAGE_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
+    SALVAGE_POST_RC=${PIPESTATUS[0]}
+    set -e
+
+    release_lock "reddit-browser"
+
+    SALVAGE_POSTED_FAILED=$(_accumulate_post_results "$SALVAGE_POST_OUT" "$SALVAGE_POST_RC")
+    log "Salvage lane: $SALVAGE_POSTED_FAILED (posted failed)"
+    _accumulate_cdp_reasons "$SALVAGE_POST_OUT"
+fi
+
+# =============================================================================
+# DISCOVER LANE — fresh threads, full ripen gate
+# =============================================================================
+# Discover always runs every cycle (independent of salvage). Picks one project
+# via select_project.py, fans out search topics, and emits all matching threads
+# as candidates for ripen. The 10-min ripen sleep happens here; salvage
+# already finished posting above so this sleep doesn't block any output.
+DISCOVER_FILE=$(mktemp -t post_reddit_discover.XXXXXX.json)
+RIPEN_FILE=$(mktemp -t post_reddit_ripened.XXXXXX.json)
+DISCOVER_DRAFT_FILE=$(mktemp -t post_reddit_discover_draft.XXXXXX.json)
+HAS_DISCOVER=0
+
+set +e
+python3 "$REPO_DIR/scripts/post_reddit.py" \
+    --phase discover \
+    --batch-id "$BATCH_ID" \
+    --out "$DISCOVER_FILE" \
+    --exclude "$EXCLUDE" \
+    --limit "$LIMIT" 2>&1 | tee -a "$LOG_FILE"
+DISCOVER_RC=${PIPESTATUS[0]}
+set -e
+
+case "$DISCOVER_RC" in
+    0)
         DISCOVER_COUNT=$(python3 -c "import json;print(len(json.load(open('$DISCOVER_FILE')).get('decisions',[])))" 2>/dev/null || echo 0)
         TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + DISCOVER_COUNT))
+        HAS_DISCOVER=1
+        log "Discover lane: found $DISCOVER_COUNT candidate(s)."
+        ;;
+    3) log "Discover lane: rate-limited; skipping discover this cycle." ;;
+    4) log "Discover lane: no eligible project; skipping discover this cycle." ;;
+    5) log "Discover lane: Claude failed; counting as failed."; TOTAL_FAILED=$((TOTAL_FAILED + 1)) ;;
+    6) log "Discover lane: no candidates found; counting as skipped."; TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)) ;;
+    *) log "Discover lane: unexpected rc=$DISCOVER_RC; counting as failed."; TOTAL_FAILED=$((TOTAL_FAILED + 1)) ;;
+esac
 
-        PICKED=$(python3 -c "import json,sys;print(json.load(open('$DISCOVER_FILE')).get('project_name',''))" 2>/dev/null || echo "")
-        [ -n "$PICKED" ] && EXCLUDE="${EXCLUDE:+$EXCLUDE,}$PICKED"
-    fi
-
-    # Phase 2: Ripen — T0 snapshot, 5-min sleep, T1 re-poll, composite delta gate.
-    # composite = Δup + 4*Δcomments, floor>=1. Runs without browser lock.
-    # Floor flipped from strict > to >= 2026-05-06: a +1 upvote in 5min is
-    # enough signal that the thread is still alive — strict > rejected those
-    # exact-floor cases as wholesale losses.
-    # --top-k LIMIT (post 2026-05-06 refactor): the discover phase now emits
-    # ALL search results (no LLM selection), so ripen typically receives
-    # 20-50 candidates per iteration. Sort survivors by composite DESC and
-    # keep only the top LIMIT (default 1) so the draft phase only pays LLM
-    # cost for the most-momentum thread. Mirrors twitter_post_plan.py's
-    # `LIMIT 15` SQL cap.
-    RIPEN_FILE=$(mktemp -t post_reddit_ripened.XXXXXX.json)
-    # 2026-05-07: bumped ripen sleep from 5min (default) to 10min (--sleep 600)
-    # to get a stronger momentum signal per candidate. Trade-off: only 1
-    # iteration completes per 15-min launchd cycle (was 1-2 with 5min), but
-    # each iteration now batches up to LIMIT=10 candidates (post 2026-05-07
-    # salvage refactor), so per-cycle output stays at ~10 instead of dropping.
+# --- Ripen discover (10-min sleep, top-k=LIMIT survivors) ---
+if [ "$HAS_DISCOVER" = "1" ]; then
+    # Floor>=1 (a +1 upvote in 10min is enough signal the thread is alive).
+    # composite = Δup + 4*Δcomments. top-k LIMIT keeps draft cost bounded.
     RIPEN_SLEEP=600
-    log "Ripening candidates (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
+    log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
     set +e
     python3 "$REPO_DIR/scripts/ripen_reddit_plan.py" \
         --in "$DISCOVER_FILE" \
@@ -298,95 +304,58 @@ for i in $(seq 1 "$ITERATIONS"); do
     set -e
 
     if [ "$RIPEN_RC" != "0" ]; then
-        log "Ripen phase: exit code $RIPEN_RC; falling back to unfiltered discover output."
+        log "Discover ripen: rc=$RIPEN_RC; falling back to unfiltered discover output."
         cp "$DISCOVER_FILE" "$RIPEN_FILE"
     fi
 
     SURVIVORS=$(python3 -c "import json;print(len(json.load(open('$RIPEN_FILE')).get('decisions',[])))" 2>/dev/null || echo 0)
     if [ "$SURVIVORS" = "0" ]; then
-        log "Ripen phase: 0 survivors; skipping draft and post for this iteration."
+        log "Discover ripen: 0 survivors; skipping discover draft+post."
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
-        rm -f "$DISCOVER_FILE" "$RIPEN_FILE"
-        continue
+        HAS_DISCOVER=0
+    else
+        log "Discover ripen: $SURVIVORS candidate(s) passed delta gate."
     fi
-    log "Ripen phase: $SURVIVORS candidate(s) passed delta gate."
+fi
 
-    # Phase 3: Draft — Claude writes comments for survivors only. No browser.
-    DRAFT_FILE=$(mktemp -t post_reddit_draft.XXXXXX.json)
-    log "Drafting comments for $SURVIVORS survivor(s)..."
+# --- Discover draft ---
+if [ "$HAS_DISCOVER" = "1" ]; then
+    log "Discover lane: drafting $SURVIVORS survivor(s)..."
     set +e
     python3 "$REPO_DIR/scripts/post_reddit.py" \
         --phase draft \
         --in "$RIPEN_FILE" \
-        --out "$DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE"
+        --out "$DISCOVER_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE"
     DRAFT_RC=${PIPESTATUS[0]}
     set -e
 
     case "$DRAFT_RC" in
-        0)
-            : # draft succeeded
-            ;;
-        5)
-            log "Draft phase: Claude failed; counting as failed and continuing."
-            TOTAL_FAILED=$((TOTAL_FAILED + 1))
-            rm -f "$DISCOVER_FILE" "$RIPEN_FILE" "$DRAFT_FILE"
-            continue
-            ;;
-        6)
-            log "Draft phase: no drafted decisions; counting as skipped."
-            TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
-            rm -f "$DISCOVER_FILE" "$RIPEN_FILE" "$DRAFT_FILE"
-            continue
-            ;;
-        *)
-            log "Draft phase: unexpected exit code $DRAFT_RC; counting as failed."
-            TOTAL_FAILED=$((TOTAL_FAILED + 1))
-            rm -f "$DISCOVER_FILE" "$RIPEN_FILE" "$DRAFT_FILE"
-            continue
-            ;;
+        0) : ;;
+        5) log "Discover draft: Claude failed."; TOTAL_FAILED=$((TOTAL_FAILED + 1)); HAS_DISCOVER=0 ;;
+        6) log "Discover draft: no drafted decisions."; TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)); HAS_DISCOVER=0 ;;
+        *) log "Discover draft: rc=$DRAFT_RC."; TOTAL_FAILED=$((TOTAL_FAILED + 1)); HAS_DISCOVER=0 ;;
     esac
+fi
 
-    # Phase 4: Post — needs browser. Acquire lock, post, release immediately.
-    log "Acquiring reddit-browser lock for post phase..."
+# --- Discover post (acquire lock briefly, post, release) ---
+if [ "$HAS_DISCOVER" = "1" ]; then
+    log "Discover lane: acquiring reddit-browser lock for post..."
     acquire_lock "reddit-browser" 3600
     ensure_browser_healthy "reddit"
 
     set +e
-    POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
-    POST_RC=${PIPESTATUS[0]}
+    DISCOVER_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$DISCOVER_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
+    DISCOVER_POST_RC=${PIPESTATUS[0]}
     set -e
 
     release_lock "reddit-browser"
 
-    if [ "$POST_RC" = "0" ]; then
-        ITER_POSTED=$(echo "$POST_OUT" | grep -oE 'posted=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
-        ITER_FAILED=$(echo "$POST_OUT" | grep -oE 'failed=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
-        TOTAL_POSTED=$((TOTAL_POSTED + ${ITER_POSTED:-0}))
-        TOTAL_FAILED=$((TOTAL_FAILED + ${ITER_FAILED:-0}))
-    else
-        log "Post phase: exit code $POST_RC; counting as failed."
-        TOTAL_FAILED=$((TOTAL_FAILED + 1))
-    fi
+    DISCOVER_POSTED_FAILED=$(_accumulate_post_results "$DISCOVER_POST_OUT" "$DISCOVER_POST_RC")
+    log "Discover lane: $DISCOVER_POSTED_FAILED (posted failed)"
+    _accumulate_cdp_reasons "$DISCOVER_POST_OUT"
+fi
 
-    # Parse CDP failure reasons from post output and accumulate into FAILURE_REASONS.
-    # Mirrors Twitter's EXEC_REASONS pattern so the dashboard pill shows the breakdown.
-    while IFS= read -r line; do
-        cdp_key=$(echo "$line" | grep -oE '\[post_reddit\] CDP FAILED: [a-z_]+' | awk '{print $NF}')
-        case "$cdp_key" in
-            thread_locked)          add_reason reddit_locked ;;
-            thread_archived)        add_reason reddit_archived ;;
-            thread_not_found)       add_reason reddit_deleted ;;
-            account_blocked_in_sub) add_reason account_blocked ;;
-            not_logged_in)          add_reason reddit_logged_out ;;
-            all_attempts_failed)    add_reason cdp_no_response ;;
-            comment_box_not_found)  add_reason comment_box_missing ;;
-            "")                     : ;; # no match on this line
-            *)                      add_reason "cdp_${cdp_key}" ;;
-        esac
-    done <<< "$POST_OUT"
-
-    rm -f "$DISCOVER_FILE" "$RIPEN_FILE" "$DRAFT_FILE"
-done
+rm -f "$SALVAGE_FILE" "$SALVAGE_DRAFT_FILE" "$DISCOVER_FILE" "$RIPEN_FILE" "$DISCOVER_DRAFT_FILE"
 
 ELAPSED=$(( $(date +%s) - RUN_START ))
 # Sum claude_sessions.total_cost_usd for every post_reddit session started
