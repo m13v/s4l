@@ -34,6 +34,7 @@ SUPPORTED_SCRIPTS = [
     'gsc_seo',
     'seo_improve',
     'seo_top_pages',
+    'seo_top_posts',
     'seo_weekly_roundup',
 ]
 
@@ -123,8 +124,13 @@ def main():
             )
             cost = float(cur.fetchone()[0] or 0)
 
-        elif args.script in ('seo_top_pages', 'seo_weekly_roundup'):
-            source = 'top_page' if args.script == 'seo_top_pages' else 'roundup'
+        elif args.script in ('seo_top_pages', 'seo_top_posts', 'seo_weekly_roundup'):
+            if args.script == 'seo_top_pages':
+                source = 'top_page'
+            elif args.script == 'seo_top_posts':
+                source = 'top_post'
+            else:
+                source = 'roundup'
             # posted = rows that reached 'done'. skipped = explicit 'skip'. The
             # remainder of rows touched in the window (still 'pending' or
             # 'in_progress') are lane failures where the generator never marked
