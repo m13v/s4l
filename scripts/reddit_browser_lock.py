@@ -239,7 +239,15 @@ def gc_stale_tickets(queue_dir: Path) -> None:
 
 
 def lock_is_stale(lock_dir: Path, pid_file: Path) -> tuple[bool, str]:
-    """Return (is_stale, reason) for a lock dir we found existing."""
+    """Return (is_stale, reason) for a lock dir we found existing.
+
+    Checked in order:
+      1. pid file missing / unparseable / zero
+      2. holder PID is dead
+      3. lease TTL expired (`now() > expires_at`) — primary stale signal
+      4. lock dir mtime older than STALE_LOCK_AGE (final backstop, only
+         matters for legacy locks that never wrote `expires_at`)
+    """
     if not pid_file.is_file():
         return True, "no_pid_file"
     try:
@@ -250,6 +258,12 @@ def lock_is_stale(lock_dir: Path, pid_file: Path) -> tuple[bool, str]:
         return True, "zero_pid"
     if not pid_alive(holder):
         return True, f"dead_holder_{holder}"
+    # Primary staleness signal: TTL expired (no heartbeat in TTL window).
+    expires_at = read_expires_at(lock_dir)
+    if expires_at is not None:
+        idle = time.time() - expires_at
+        if idle > 0:
+            return True, f"ttl_expired_idle_{int(idle)}s_holder_{holder}"
     try:
         age = time.time() - lock_dir.stat().st_mtime
         if age > STALE_LOCK_AGE:
@@ -266,7 +280,7 @@ def remove_lock(lock_dir: Path) -> None:
         pass
 
 
-def cmd_acquire(name: str, timeout: int) -> int:
+def cmd_acquire(name: str, timeout: int, ttl: int) -> int:
     lock_dir, pid_file, queue_dir = lock_paths(name)
     queue_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,8 +303,18 @@ def cmd_acquire(name: str, timeout: int) -> int:
                 # Try to acquire by mkdir
                 try:
                     lock_dir.mkdir()
+                    # Write expires_at FIRST, then pid_file. Order matters:
+                    # peers reading a partially-initialized lock during the
+                    # tiny window between the two writes will see an absent
+                    # pid_file → `no_pid_file` → treated as stale → safe
+                    # steal. They never see "valid pid + no TTL" which would
+                    # mean "respect lock indefinitely".
+                    write_expires_at(lock_dir, time.time() + ttl)
                     pid_file.write_text(f"{owner_pid}\n")
-                    print(f"OK owner_pid={owner_pid} waited={waited:.1f}", flush=True)
+                    print(
+                        f"OK owner_pid={owner_pid} waited={waited:.1f} ttl={ttl}",
+                        flush=True,
+                    )
                     return 0
                 except FileExistsError:
                     stale, reason = lock_is_stale(lock_dir, pid_file)
@@ -351,9 +375,54 @@ def cmd_release(name: str) -> int:
     return 0
 
 
+def cmd_heartbeat(name: str, ttl: int) -> int:
+    """Bump the lease expiry. Called by the MCP wrapper on browser activity.
+
+    Refuses to bump if the lock is held by someone other than us (defends
+    against a peer claude session's MCP wrapper accidentally extending the
+    holder's lease). Refuses if the lock dir is gone entirely.
+    """
+    lock_dir, pid_file, _ = lock_paths(name)
+    if not lock_dir.is_dir():
+        print("NOT_HELD", flush=True)
+        return 1
+    holder_pid = None
+    if pid_file.is_file():
+        try:
+            holder_pid = int(pid_file.read_text().strip() or "0")
+        except Exception:
+            holder_pid = None
+    expected_owner = find_owner_pid()
+    if (
+        holder_pid is not None
+        and holder_pid != expected_owner
+        and pid_alive(holder_pid)
+    ):
+        print(
+            f"HELD_BY_OTHER holder_pid={holder_pid} our_owner={expected_owner}",
+            flush=True,
+        )
+        return 1
+    new_expires = time.time() + ttl
+    if not write_expires_at(lock_dir, new_expires):
+        print("NOT_HELD", flush=True)
+        return 1
+    print(f"OK expires_at={new_expires:.0f}", flush=True)
+    return 0
+
+
 def cmd_status(name: str) -> int:
     lock_dir, pid_file, queue_dir = lock_paths(name)
-    info = {"name": name, "held": False, "holder_pid": None, "age_sec": None, "queue": []}
+    info = {
+        "name": name,
+        "held": False,
+        "holder_pid": None,
+        "age_sec": None,
+        "expires_at": None,
+        "ttl_remaining_sec": None,
+        "expired": False,
+        "queue": [],
+    }
     if lock_dir.is_dir():
         info["held"] = True
         if pid_file.is_file():
@@ -365,6 +434,12 @@ def cmd_status(name: str) -> int:
             info["age_sec"] = int(time.time() - lock_dir.stat().st_mtime)
         except FileNotFoundError:
             pass
+        expires_at = read_expires_at(lock_dir)
+        if expires_at is not None:
+            info["expires_at"] = expires_at
+            remaining = expires_at - time.time()
+            info["ttl_remaining_sec"] = round(remaining, 1)
+            info["expired"] = remaining <= 0
     if queue_dir.is_dir():
         info["queue"] = sorted([t.name for t in queue_dir.iterdir() if t.is_file()])
     print(json.dumps(info), flush=True)
@@ -379,18 +454,28 @@ def main() -> int:
     p_acq.add_argument("--name", default=DEFAULT_NAME)
     p_acq.add_argument("--timeout", type=int, default=DEFAULT_ACQUIRE_TIMEOUT,
                        help=f"Max seconds to wait (default {DEFAULT_ACQUIRE_TIMEOUT}).")
+    p_acq.add_argument("--ttl", type=int, default=DEFAULT_LEASE_TTL_SECONDS,
+                       help=f"Initial lease TTL in seconds (default {DEFAULT_LEASE_TTL_SECONDS}). "
+                            "MCP browser wrapper will heartbeat to keep this fresh during real activity.")
 
     p_rel = sub.add_parser("release", help="Release the lock if held by us.")
     p_rel.add_argument("--name", default=DEFAULT_NAME)
+
+    p_hb = sub.add_parser("heartbeat", help="Extend the lease (called by the MCP wrapper on browser activity).")
+    p_hb.add_argument("--name", default=DEFAULT_NAME)
+    p_hb.add_argument("--ttl", type=int, default=DEFAULT_LEASE_TTL_SECONDS,
+                      help=f"Seconds to extend from now (default {DEFAULT_LEASE_TTL_SECONDS}).")
 
     p_stat = sub.add_parser("status", help="Print JSON state of the lock.")
     p_stat.add_argument("--name", default=DEFAULT_NAME)
 
     args = p.parse_args()
     if args.cmd == "acquire":
-        return cmd_acquire(args.name, args.timeout)
+        return cmd_acquire(args.name, args.timeout, args.ttl)
     if args.cmd == "release":
         return cmd_release(args.name)
+    if args.cmd == "heartbeat":
+        return cmd_heartbeat(args.name, args.ttl)
     if args.cmd == "status":
         return cmd_status(args.name)
     return 2
