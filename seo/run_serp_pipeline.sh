@@ -135,7 +135,14 @@ if [ "$STATUS" = "unscored" ] && [ "$MODE" != "--generate-only" ]; then
     # Mark as scoring in Postgres
     $DB update "$PRODUCT" "$KEYWORD" scoring
 
-    # Run Claude to score the SERP (with retry wrapper for auto-update races)
+    # Run Claude to score the SERP (with retry wrapper for auto-update races).
+    #
+    # Output protocol: XML-tagged fields, NOT a single JSON object. The prior
+    # JSON-blob format was vulnerable to the same truncation failure that
+    # broke Terminator in run_top_pages_pipeline.sh on 2026-05-07: the model
+    # dropped the closing `}` and the `find('{')...rfind('}')` parser lost
+    # the whole envelope. Independently delimited XML tags are recoverable
+    # on their own, three regex extractions, no nested-JSON walk.
     claude_with_retry -p "You are a SERP analyst. Score this keyword for the product '$PRODUCT'.
 
 Product: $PRODUCT
@@ -163,63 +170,102 @@ Signal 3: Commercial Fit (25% weight)
 - Score 1: Moderate fit, some caveats
 - Score 0: Poor fit for the product
 
-RESPOND IN EXACTLY THIS JSON FORMAT (nothing else):
-{
-  \"keyword\": \"$KEYWORD\",
-  \"signal1\": <0-2>,
-  \"signal2\": <0-2>,
-  \"signal3\": <0-2>,
-  \"score\": <weighted composite>,
-  \"notes\": \"<1-2 sentence SERP observation>\"
-}
+OUTPUT FORMAT (STRICT, read carefully):
+Respond with EXACTLY these five XML tags, on separate lines, in this order, and nothing else. No preamble. No JSON. No code fences. No trailing commentary. Each field is independently parsed; do not nest tags or wrap them in any container.
+
+  <signal1>0|1|2</signal1>
+  <signal2>0|1|2</signal2>
+  <signal3>0|1|2</signal3>
+  <score>weighted composite e.g. 1.45</score>
+  <notes>1-2 sentence SERP observation</notes>
 " --output-format json 2>"$LOG_FILE" | tee "$LOG_FILE.score"
 
-    # Parse score and update Postgres (use env vars to avoid quoting issues)
+    # Parse XML-tagged score and update Postgres. Three steps:
+    #   1. Peel off the CLI's stream-result envelope (`{type:result, result:"<text>"}`)
+    #      to get the model's actual response text.
+    #   2. Extract each tag with its own regex; no nested-JSON walk.
+    #   3. Coerce numeric fields and update DB.
     SEO_SCORE_FILE="$LOG_FILE.score" SEO_PRODUCT="$PRODUCT" SEO_KEYWORD="$KEYWORD" SEO_SCRIPT_DIR="$SCRIPT_DIR" \
     python3 -c "
-import json, sys, os
+import json, re, sys, os
 sys.path.insert(0, os.environ['SEO_SCRIPT_DIR'])
 from db_helpers import update_status
 
 product = os.environ['SEO_PRODUCT']
 keyword = os.environ['SEO_KEYWORD']
 
+def extract_inner(raw):
+    # Iterate every line; take the LAST is_error:false envelope (skips 429
+    # auto-retry's first error line). Falls back to whole-blob, then to raw.
+    inner = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(line)
+            if isinstance(obj, dict):
+                if obj.get('is_error'):
+                    raise RuntimeError(f'Claude error: {obj.get(\"result\",\"unknown\")}')
+                if isinstance(obj.get('result'), str):
+                    inner = obj['result']
+        except json.JSONDecodeError:
+            pass
+    if inner is None:
+        s = raw.find('{')
+        if s >= 0:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(raw[s:])
+                if isinstance(obj, dict):
+                    if obj.get('is_error'):
+                        raise RuntimeError(f'Claude error: {obj.get(\"result\",\"unknown\")}')
+                    if isinstance(obj.get('result'), str):
+                        inner = obj['result']
+            except json.JSONDecodeError:
+                pass
+    return inner if inner is not None else raw
+
+def grab(tag, text):
+    m = re.search(rf'<{tag}>\s*(.*?)\s*</{tag}>', text, flags=re.DOTALL)
+    return m.group(1).strip() if m else ''
+
+def to_int(v, default=0):
+    try:
+        return int(float(v))
+    except Exception:
+        return default
+
+def to_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
 try:
     raw = open(os.environ['SEO_SCORE_FILE']).read().strip()
-    start = raw.find('{')
-    end = raw.rfind('}') + 1
-    if start >= 0 and end > start:
-        outer = json.loads(raw[start:end])
+    inner = extract_inner(raw)
+
+    s1 = to_int(grab('signal1', inner))
+    s2 = to_int(grab('signal2', inner))
+    s3 = to_int(grab('signal3', inner))
+    score_raw = grab('score', inner)
+    notes = grab('notes', inner)
+
+    if score_raw:
+        score = to_float(score_raw)
     else:
-        raise RuntimeError('Could not parse score output')
+        # Compute from signals if score tag was omitted/garbled.
+        score = round(s1 * 0.40 * 2 + s2 * 0.35 * 2 + s3 * 0.25 * 2, 2) / 2
 
-    # Detect Claude CLI errors (e.g. rate limit) and treat as transient failure
-    if outer.get('is_error'):
-        raise RuntimeError(f'Claude error: {outer.get(\"result\", \"unknown error\")}')
+    if not (s1 or s2 or s3 or score_raw):
+        snippet = inner.replace('\n', ' ')[:240]
+        raise RuntimeError(f'No XML signals parsed; got={snippet!r}')
 
-    # --output-format json wraps the score JSON inside a 'result' string field
-    if 'result' in outer and isinstance(outer['result'], str) and 'score' not in outer:
-        inner_raw = outer['result']
-        inner_start = inner_raw.find('{')
-        inner_end = inner_raw.rfind('}') + 1
-        if inner_start >= 0 and inner_end > inner_start:
-            result = json.loads(inner_raw[inner_start:inner_end])
-        else:
-            raise RuntimeError('Could not parse inner score JSON from envelope')
-    else:
-        result = outer
-
-    score = result.get('score', 0)
     status = 'pending' if score >= 1.5 else 'skip'  # raised 2026-05-05 from 1.0 to cut dead-weight pages
 
     update_status(product, keyword, status,
-        score=score,
-        signal1=result.get('signal1', 0),
-        signal2=result.get('signal2', 0),
-        signal3=result.get('signal3', 0),
-        notes=result.get('notes', ''))
-
-    print(f'SCORED: {score} -> {status}')
+        score=score, signal1=s1, signal2=s2, signal3=s3, notes=notes)
+    print(f'SCORED: {score} -> {status} (signals: {s1},{s2},{s3})')
 
 except Exception as e:
     print(f'ERROR parsing score: {e}')
