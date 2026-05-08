@@ -160,6 +160,15 @@ For each DM row, BEFORE you compose or send, do this in order:
 
 1. Look at the row's \`target_project\`. If it's NULL, skip the ICP evaluation (set icp_precheck=unknown with notes="no_target_project") and move to step 4 — but still fetch the profile if it's cheap.
 
+1.5. ACQUIRE the reddit-browser lock NOW (just before any reddit-agent browser call for this DM). This is the ONLY moment you may touch the browser for this DM:
+   \`\`\`bash
+   LOCK_OUT=\$(python3 $REPO_DIR/scripts/reddit_browser_lock.py acquire --timeout 600 2>&1)
+   \`\`\`
+   - If stdout starts with "OK", proceed to step 2.
+   - If "BUSY", a peer reddit pipeline owns the browser and didn't release within 10 min. Mark this DM error/transient and move on to the NEXT DM:
+     \`psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='reddit_browser_busy', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"\`
+   - If "ERROR", same handling as BUSY: mark error, move on. Do NOT call browser tools without the lock — collisions on the same chrome profile crash both runs.
+
 2. Fetch the prospect's Reddit profile with mcp__reddit-agent__* tools:
    - Navigate to https://www.reddit.com/user/THEIR_AUTHOR/
    - browser_snapshot. Pull:
@@ -219,17 +228,39 @@ Inspect the tool's return value. There are exactly three outcomes:
 DMs/Chat disabled (recipient setting, not a send failure):
   psql "\$DATABASE_URL" -c "UPDATE dms SET status='skipped', skip_reason='chat_disabled', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
 
+7.5. RELEASE the reddit-browser lock IMMEDIATELY after the DM result is logged (success, error, or skip). This is mandatory — failing to release blocks every other reddit pipeline:
+   \`\`\`bash
+   python3 $REPO_DIR/scripts/reddit_browser_lock.py release
+   \`\`\`
+   Run this even if step 2 (profile fetch) raised, the send threw, or you're skipping the DM. Wrap the per-DM browser block (steps 2 → 7) in a way that step 7.5 ALWAYS executes (mental try/finally). The release is idempotent and safe to call multiple times. Move to the NEXT DM only after the release.
+
 CRITICAL: ALL browser calls MUST use mcp__reddit-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a reddit-agent tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 PROMPT_EOF
 
-# Acquire the browser lock now, immediately before the only step that needs
-# Chrome (the Claude/reddit-agent MCP session). Blocks if a peer is mid-run.
-log "Acquiring reddit-browser lock for Claude/MCP step..."
-acquire_lock "reddit-browser" 3600
+# NOTE: We do NOT acquire reddit-browser at the bash level. Claude itself
+# acquires/releases it per DM via scripts/reddit_browser_lock.py
+# (steps 1.5 and 7.5 in the prompt). This keeps the lock held only during
+# the actual ~30-90s reddit-agent browser ops per DM (profile fetch +
+# compose), not the full ~45-min run. Peer pipelines (engage-reddit,
+# dm-replies-reddit, link-edit-reddit, post-reddit) can use the profile
+# during our DB queries, ICP scoring, and psql update phases.
+#
+# Pre-flight: ensure the profile isn't wedged by a prior crashed run. We
+# briefly take and release the browser lock so any orphan-Chrome sweep
+# happens once before claude starts; this is fast (mkdir + rm).
+log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
+acquire_lock "reddit-browser" 60
 ensure_browser_healthy "reddit"
+release_lock "reddit-browser"
 
 gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
+
+# Belt-and-suspenders: if claude exited without releasing the lock (e.g.
+# crashed mid-DM before reaching step 7.5), free it now so peer
+# pipelines aren't stuck behind a phantom holder. release_lock checks
+# the lock_dir and rm-rf's it; safe even if claude already released.
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 SENT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='reddit' AND status='sent';" 2>/dev/null || echo "0")
 STILL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='reddit' AND status='pending';" 2>/dev/null || echo "0")
