@@ -9,6 +9,11 @@
 
 set -euo pipefail
 
+# Ensure Homebrew bins (gtimeout, jq, psql) AND the user's npm-global bin
+# (claude) are findable regardless of how the script is invoked. Launchd has
+# these via the plist's PATH; manual / sandboxed shells may not.
+export PATH="/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 source "$(dirname "$0")/lock.sh"
 acquire_lock "check-web-chats" 60
 
