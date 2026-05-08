@@ -181,27 +181,32 @@ _sa_emit_run_summary_oneshot() {
         && [ "${CANDIDATE_COUNT:-0}" -gt 0 ]; then
         local phase2b_log
         phase2b_log=$(awk '/Phase 1: drafting queries|Phase 2b-prep: Claude reading|Phase 2b-post:/,EOF' "$LOG_FILE" 2>/dev/null || echo "")
-        local _add() {
-            failure_reasons="${failure_reasons:+$failure_reasons,}${1}:${2}"
-            failed_ct=$(( failed_ct + $2 ))
-        }
+        # Inline reason-add: bash doesn't support `local` on function decls,
+        # and a free-standing nested function would leak into the outer
+        # scope, so we just expand the assignments at each call site.
         if echo "$phase2b_log" | grep -qiE '"api_error_status":429|hit your limit|monthly usage limit'; then
-            _add monthly_limit 1
+            failure_reasons="${failure_reasons:+$failure_reasons,}monthly_limit:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
         if echo "$phase2b_log" | grep -qiE 'auth redirect|re-authenticat|browser profile.*auth|profile.*needs.*re-auth'; then
-            _add auth_redirect 1
+            failure_reasons="${failure_reasons:+$failure_reasons,}auth_redirect:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
         if echo "$phase2b_log" | grep -qiE '"error":"rate_limited"|RATE_LIMITED_TWITTER'; then
-            _add rate_limited 1
+            failure_reasons="${failure_reasons:+$failure_reasons,}rate_limited:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
         if echo "$phase2b_log" | grep -qiE 'page.load.timeout|navigation timeout|timed out|Timeout exceeded'; then
-            _add timeout 1
+            failure_reasons="${failure_reasons:+$failure_reasons,}timeout:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
         if echo "$phase2b_log" | grep -qiE 'reply_box_not_found|tweet_not_found'; then
-            _add posting_blocked 1
+            failure_reasons="${failure_reasons:+$failure_reasons,}posting_blocked:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
         if [ -z "$failure_reasons" ]; then
-            _add phase2b_silent 1
+            failure_reasons="phase2b_silent:1"
+            failed_ct=$(( failed_ct + 1 ))
         fi
     fi
 
@@ -865,6 +870,7 @@ if [ "${PLAN_COUNT:-0}" = "0" ]; then
             --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
             --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
     fi
+    _SA_RUN_SUMMARY_EMITTED=1
     exit 0
 fi
 
@@ -904,83 +910,15 @@ rm -f "$PLAN_FILE"
 # This avoids losing work to transient infra failures.
 
 # --- Summary ---------------------------------------------------------------
+# Per-run-log human readout. The persistent run_monitor.log row is written
+# by _sa_emit_run_summary_oneshot (defined near the top of this script) so
+# SIGTERM during the summary block still produces a dashboard-visible row.
 SUMMARY=$(psql "$DATABASE_URL" -t -A -F '|' -c "
 SELECT status, COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' GROUP BY status
 " 2>/dev/null)
 log "Batch summary: $SUMMARY"
 
-# --- Persist to run_monitor.log so Job History picks up Twitter Post rows ---
-POSTED_CT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='posted'" 2>/dev/null || echo 0)
-SKIPPED_CT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status IN ('skipped','expired')" 2>/dev/null || echo 0)
-_COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-prep" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-
-# --- Phase 2b failure-reason detection -------------------------------------
-# Source of truth = the JSON summary from twitter_post_plan.py
-# (EXEC_FAILED + EXEC_REASONS, captured at line ~627 above). We only synthesize
-# additional reasons when the cycle never reached Phase 2b-post at all
-# (monthly_limit, auth_redirect, browser crash during prep) — i.e.,
-# posted=0 AND failed=0 AND skipped=0 AND we still had candidates pending.
-# Pre-2026-05-01 this block fired whenever POSTED_CT=0 with candidates,
-# so legitimate clean skips (DUPLICATE_THREAD on a thread we already
-# replied to, empty_reply_text) were silently re-tagged as
-# "failed: phase2b_silent" — observed false-positive 14:38 cycle on
-# 2026-05-01 when log_post.py rejected a duplicate but EXEC_FAILED=0.
-# Reason keys are kept consistent with the unified failure_reasons schema
-# (engage_reddit.py, engage_github, etc.) so one rendering pass in
-# bin/server.js covers every platform.
-FAILED_CT="${EXEC_FAILED:-0}"
-FAILURE_REASONS="${EXEC_REASONS:-}"
-if [ "${POSTED_CT:-0}" = "0" ] \
-    && [ "${FAILED_CT:-0}" = "0" ] \
-    && [ "${EXEC_SKIPPED:-0}" = "0" ] \
-    && [ -z "$FAILURE_REASONS" ] \
-    && [ "${CANDIDATE_COUNT:-0}" -gt 0 ]; then
-    # Scan from Phase 1 onward; the prep/post phases are sub-markers but
-    # all the error signatures we care about (Anthropic 429, auth
-    # redirect, X rate limit, browser timeout) only ever appear in
-    # those phases. Pre-2026-05-01 anchor was "Phase 2b: Claude
-    # reviewing" which the new prep/post split renamed to
-    # "Phase 2b-prep: Claude reading", so the awk window was empty
-    # and every matcher silently false-negatived.
-    PHASE2B_LOG=$(awk '/Phase 1: drafting queries|Phase 2b-prep: Claude reading|Phase 2b-post:/,EOF' "$LOG_FILE" 2>/dev/null || echo "")
-    add_reason() {
-        # $1 = reason key, $2 = count
-        FAILURE_REASONS="${FAILURE_REASONS:+$FAILURE_REASONS,}${1}:${2}"
-        FAILED_CT=$(( FAILED_CT + $2 ))
-    }
-    # Anthropic 429 / monthly cap. Reason key matches engage_reddit.py.
-    if echo "$PHASE2B_LOG" | grep -qiE '"api_error_status":429|hit your limit|monthly usage limit'; then
-        add_reason monthly_limit 1
-    fi
-    # twitter-agent Playwright profile served auth redirect (the 14:45 case).
-    if echo "$PHASE2B_LOG" | grep -qiE 'auth redirect|re-authenticat|browser profile.*auth|profile.*needs.*re-auth'; then
-        add_reason auth_redirect 1
-    fi
-    # X-side hard signals from twitter_browser.py.
-    if echo "$PHASE2B_LOG" | grep -qiE '"error":"rate_limited"|RATE_LIMITED_TWITTER'; then
-        add_reason rate_limited 1
-    fi
-    if echo "$PHASE2B_LOG" | grep -qiE 'page.load.timeout|navigation timeout|timed out|Timeout exceeded'; then
-        add_reason timeout 1
-    fi
-    if echo "$PHASE2B_LOG" | grep -qiE 'reply_box_not_found|tweet_not_found'; then
-        add_reason posting_blocked 1
-    fi
-    # Fallback: cycle aborted with zero progress and no specific marker
-    # surfaced. Better to render a generic reason than a silent "—".
-    if [ -z "$FAILURE_REASONS" ]; then
-        add_reason phase2b_silent 1
-    fi
-fi
-
-LOG_ARGS=(--script "post_twitter" --posted "${POSTED_CT:-0}" --skipped "${SKIPPED_CT:-0}" --failed "$FAILED_CT" --salvaged "${SALVAGED:-0}")
-# Discovery counters: each only emits a segment when non-zero, so passing
-# 0 here is safe and just omits the corresponding `key=N` from the log line.
-LOG_ARGS+=(--queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}")
-LOG_ARGS+=(--tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}")
-LOG_ARGS+=(--cost "$_COST" --elapsed $(( $(date +%s) - RUN_START )))
-[ -n "$FAILURE_REASONS" ] && LOG_ARGS+=(--failure-reasons "$FAILURE_REASONS")
-python3 "$REPO_DIR/scripts/log_run.py" "${LOG_ARGS[@]}"
+_sa_emit_run_summary_oneshot
 
 log "=== Cycle complete: $(date) ==="
 find "$LOG_DIR" -name "twitter-cycle-*.log" -mtime +7 -delete 2>/dev/null || true
