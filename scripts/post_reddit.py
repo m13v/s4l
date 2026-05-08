@@ -65,11 +65,11 @@ RETRY_BACKOFF_MIN = 30
 DRAFT_TTL_MIN = 60
 
 # Discover-phase search budget. Was hardcoded as "AT MOST 2 searches" inline
-# in build_discover_prompt; bumped to 5 (2026-05-08) so each cycle gets a
+# in build_discover_prompt; bumped to 10 (2026-05-08) so each cycle gets a
 # wider top-of-funnel and the new draft-gate-omit feedback report can steer
 # rephrasings without starving the next attempt of fresh angles. Override via
 # SAPS_REDDIT_MAX_SEARCHES env var without code change.
-MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "5"))
+MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "10"))
 
 # CDP-error → permanence map. Permanent failures mark status='failed' and are
 # never re-evaluated. Transient failures stay status='pending' with
