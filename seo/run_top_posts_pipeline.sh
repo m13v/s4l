@@ -22,7 +22,7 @@
 #
 # Eligibility (per pick_top_posts.py):
 #   - posts.project_name = <product>
-#   - posts.posted_at >= NOW() - 7 days
+#   - posts.posted_at >= NOW() - 14 days
 #   - posts.views >= 10000
 #   - posts.link_source IS NULL or LIKE 'plain_url_%'  (no /t/ page yet)
 #   - status NOT in ('deleted', 'removed')
@@ -156,11 +156,11 @@ while read -r TARGET_PRODUCT; do
         # "skip"). That bug caused every dry-night fire to report 15 fake
         # failures (and a launchd exit 1) on 2026-05-08 11:41 PT. Capture
         # $? on the line immediately after the call instead.
-        $PICK --product "$TARGET_PRODUCT" --days 7 --min-views 10000 --out "$BRIEF_FILE" 2>>"$PER_LOG"
+        $PICK --product "$TARGET_PRODUCT" --days 14 --min-views 10000 --out "$BRIEF_FILE" 2>>"$PER_LOG"
         RC=$?
         if [ "$RC" -ne 0 ]; then
             if [ "$RC" -eq 2 ]; then
-                echo "  no eligible viral post in last 7d for $TARGET_PRODUCT, skip"
+                echo "  no eligible viral post in last 14d for $TARGET_PRODUCT, skip"
                 exit 13   # treated as "skip ok" by case below
             fi
             echo "  picker failed (rc=$RC); see $PER_LOG"
