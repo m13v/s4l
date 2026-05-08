@@ -28,10 +28,12 @@ Usage:
 """
 
 import argparse
+import atexit
 import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -40,6 +42,84 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+
+# ---------------------------------------------------------------------------
+# Run-summary safety net (atexit + SIGTERM/SIGHUP handlers).
+# ---------------------------------------------------------------------------
+# Mirrors the bash-side fix shipped to run-reddit-search.sh / run-twitter-cycle.sh
+# / run-linkedin.sh: under SIGTERM the orchestrator can land between a
+# successful gh-comment post (`posted += 1`) and the inline log_run.py call
+# at the bottom of main(), silently dropping the run from run_monitor.log
+# while the `posts` table already shows the comment.
+#
+# Mechanism:
+#   - _RUN_STATE is a module-level dict main() updates as it runs
+#     (run_start, cost, posted, skipped, failed).
+#   - _emit_run_summary_oneshot() shells out to scripts/log_run.py with
+#     whatever state is current. Idempotent via _RUN_STATE['emitted'].
+#   - atexit.register catches normal exits + uncaught exceptions.
+#   - signal.signal() converts SIGTERM/SIGHUP into a sys.exit(128+signum)
+#     call so atexit handlers actually run (Python's default SIGTERM
+#     handler is to exit immediately, BYPASSING atexit).
+#   - SIGINT / KeyboardInterrupt: Python's default already raises an
+#     exception that unwinds through atexit, no extra wiring needed.
+#
+# Each existing inline log_run.py call (Claude failure path, success path)
+# sets _RUN_STATE['emitted'] = True after running so the atexit handler
+# becomes a no-op for those branches and we don't double-write.
+_RUN_STATE = {
+    "emitted": False,
+    "run_start": None,
+    "posted": 0,
+    "skipped": 0,
+    "failed": 0,
+    "cost": 0.0,
+}
+
+
+def _emit_run_summary_oneshot():
+    if _RUN_STATE["emitted"] or _RUN_STATE["run_start"] is None:
+        return
+    _RUN_STATE["emitted"] = True
+    elapsed = int(time.time() - _RUN_STATE["run_start"])
+    try:
+        subprocess.run(
+            [
+                "python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
+                "--script", "post_github",
+                "--posted", str(_RUN_STATE["posted"]),
+                "--skipped", str(_RUN_STATE["skipped"]),
+                "--failed", str(_RUN_STATE["failed"]),
+                "--cost", f"{_RUN_STATE['cost']:.4f}",
+                "--elapsed", str(elapsed),
+            ],
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        # Trap context: never raise from the safety net. Better to lose this
+        # one summary line than to crash a shutdown sequence that might be
+        # holding a browser lock or DB connection that other peers need.
+        pass
+
+
+def _signal_to_exit(signum, _frame):
+    # Convert the signal into a normal-looking exit so atexit fires.
+    sys.exit(128 + signum)
+
+
+atexit.register(_emit_run_summary_oneshot)
+# Only install handlers when running as the main entry point so importing
+# post_github (e.g. for unit tests, or when SCRIPTS adds it to PYTHONPATH)
+# doesn't override the parent process's signal handling.
+if __name__ == "__main__" or os.environ.get("POST_GITHUB_INSTALL_TRAPS") == "1":
+    for _sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _signal_to_exit)
+        except (ValueError, OSError):
+            # Non-main-thread import or unsupported signal: skip silently.
+            pass
+
 from engagement_styles import (
     VALID_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns,
     validate_or_register,
@@ -609,6 +689,9 @@ def main():
     args = parser.parse_args()
 
     run_start = time.time()
+    # Arm the atexit/SIGTERM safety net: it skips emit until run_start is
+    # set, so any pre-main exit (argparse, etc.) is a no-op.
+    _RUN_STATE["run_start"] = run_start
     log(f"=== GitHub run: sleep={args.sleep}s ===")
 
     config = load_config()
@@ -784,9 +867,13 @@ def main():
     claude_start = time.time()
     ok, output, usage = run_claude(prompt, timeout=args.timeout)
     log(f"Claude finished in {time.time() - claude_start:.0f}s (${usage['cost_usd']:.4f})")
+    # Mirror cost into the safety-net state so a SIGTERM after this point
+    # records the spend even if we never reach the post loop.
+    _RUN_STATE["cost"] = usage["cost_usd"]
 
     if not ok:
         log(f"Claude FAILED: {output[:300]}")
+        _RUN_STATE["failed"] = 1
         subprocess.run([
             "python3", os.path.join(SCRIPTS, "log_run.py"),
             "--script", "post_github",
@@ -794,6 +881,9 @@ def main():
             "--cost", f"{usage['cost_usd']:.4f}",
             "--elapsed", f"{int(time.time() - run_start)}",
         ])
+        # Mark emitted so the atexit handler doesn't double-write the
+        # tailored Claude-failure summary above.
+        _RUN_STATE["emitted"] = True
         sys.exit(1)
 
     decisions = parse_claude_json(output) or {}
@@ -857,6 +947,7 @@ def main():
         if not owner or not text:
             log(f"SKIP: bad URL or empty text: {thread_url}")
             failed += 1
+            _RUN_STATE["failed"] = failed
             continue
 
         # URL-wrap before sending to GitHub. project for wrapping is the
@@ -885,6 +976,7 @@ def main():
         if not ok_post:
             log(f"POST FAILED: {url_or_err}")
             failed += 1
+            _RUN_STATE["failed"] = failed
             time.sleep(3)
             continue
 
@@ -907,6 +999,11 @@ def main():
             except Exception as e:
                 log(f"WARNING: backfill_post_id failed ({e})")
         posted += 1
+        # Keep the safety-net counters in sync after each successful post so
+        # a SIGTERM mid-loop still emits the partial-but-correct count.
+        _RUN_STATE["posted"] = posted
+        _RUN_STATE["failed"] = failed
+        _RUN_STATE["skipped"] = len(skipped)
         log(f"POSTED: {url_or_err or 'ok'}")
         time.sleep(3)
 
@@ -916,6 +1013,13 @@ def main():
         f"cache_read={usage['cache_read']} cache_create={usage['cache_create']}")
     log(f"Cost: ${usage['cost_usd']:.4f}")
 
+    # Final happy-path summary write. Sync the safety-net state in case the
+    # last post-loop iteration didn't (e.g. zero candidates kept), then mark
+    # emitted so the atexit handler short-circuits.
+    _RUN_STATE["posted"] = posted
+    _RUN_STATE["failed"] = failed
+    _RUN_STATE["skipped"] = len(skipped)
+    _RUN_STATE["cost"] = usage["cost_usd"]
     subprocess.run([
         "python3", os.path.join(SCRIPTS, "log_run.py"),
         "--script", "post_github",
@@ -925,6 +1029,7 @@ def main():
         "--cost", f"{usage['cost_usd']:.4f}",
         "--elapsed", f"{int(total_elapsed)}",
     ])
+    _RUN_STATE["emitted"] = True
 
 
 if __name__ == "__main__":
