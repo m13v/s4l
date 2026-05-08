@@ -10301,6 +10301,22 @@ function renderTopPosts(payload) {
         filterOptions: numericThresholdOptions(normalized, 'score'),
         filterPredicate: filterPredicateGte },
       { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
+        // Sort by what the cell ACTUALLY displays. Display priority:
+        //   1. per-click log present (real/bot split) -> sort by real (humans only)
+        //   2. PostHog backfill present              -> sort by backfill
+        //   3. legacy conflated counter              -> sort by link_clicks
+        // Without this accessor, sort uses the raw link_clicks integer which
+        // includes Twitter card / LinkedIn unfurl / Slack preview bot prefetches
+        // (~20x inflation pre 2026-05-07), so the visible "humans / bots" split
+        // and the row order disagree. Filed as the "Links sort weird" bug.
+        accessor: r => {
+          const real     = Number(r.link_real_clicks)   || 0;
+          const bots     = Number(r.link_bot_clicks)    || 0;
+          const backfill = Number(r.link_backfill_real) || 0;
+          if (real > 0 || bots > 0) return real;
+          if (backfill > 0) return backfill;
+          return Number(r.link_clicks) || 0;
+        },
         formatter: (_v, r) => {
           // Match the filterPredicate below: a post counts as "has link"
           // if either post_links has a row OR the comment text itself
