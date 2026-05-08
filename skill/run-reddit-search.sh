@@ -39,6 +39,62 @@ TOTAL_CANDIDATES=0  # total reddit_candidates rows touched (discovered + salvage
 RUN_START=$(date +%s)
 FAILURE_REASONS=""
 
+# Idempotent run_monitor.log emitter wired to EXIT/INT/TERM/HUP. Without this,
+# a SIGTERM landing between the post phase (where post_reddit.py has already
+# committed to the `posts` table via log_post) and the historical inline
+# log_run.py call at the bottom of the script silently drops the run from
+# run_monitor.log. The dashboard reads run_monitor.log, so the operator-
+# visible "last post_reddit cycle" stays stuck on a stale entry while real
+# posts continue landing in the DB unrecorded. Concretely: in one observed
+# 4-cycle window, three of four 15-min cycles SIGTERMed mid-post and the
+# dashboard surfaced none of the two posts (r/aiToolForBusiness,
+# r/SideProject) that DID land in `posts`.
+#
+# Mechanism:
+#   - The function reads the cycle's accumulator globals (TOTAL_*,
+#     FAILURE_REASONS, RUN_START) and shells out to scripts/log_run.py with
+#     the same arg shape the historical inline call used.
+#   - _SA_RUN_SUMMARY_EMITTED guards against double-write: the happy path
+#     calls the function explicitly once at the bottom (so cost can be
+#     computed without the trap's 10s timeout), and the trap fires on EXIT
+#     to catch SIGTERM/error paths. The flag makes either order a no-op
+#     after first emission.
+#   - On SIGTERM the get_run_cost.py call is wrapped in `timeout 10` so a
+#     hung Neon query doesn't wedge the trap; cost falls back to 0.0000.
+#
+# Trap chaining: lock.sh sourced above already installed `_sa_release_locks`
+# on EXIT INT TERM HUP. Bash trap REPLACES, not appends, so we re-set with
+# both handlers explicitly. Order matters: emit summary first (it shells
+# out, harmless if locks are still held), then release locks. _sa_release_locks
+# is defined by lock.sh and stays in scope after sourcing.
+_SA_RUN_SUMMARY_EMITTED=0
+_SA_PRECOMPUTED_COST=""
+_sa_emit_run_summary_oneshot() {
+    [ "${_SA_RUN_SUMMARY_EMITTED:-0}" = "1" ] && return 0
+    _SA_RUN_SUMMARY_EMITTED=1
+    local elapsed cost
+    elapsed=$(( $(date +%s) - ${RUN_START:-$(date +%s)} ))
+    if [ -n "${_SA_PRECOMPUTED_COST:-}" ]; then
+        cost="$_SA_PRECOMPUTED_COST"
+    else
+        cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                    --since "${RUN_START:-0}" \
+                    --scripts "post_reddit" 2>/dev/null || echo "0.0000")
+    fi
+    local args
+    args=(--script "post_reddit" \
+          --posted "${TOTAL_POSTED:-0}" \
+          --skipped "${TOTAL_SKIPPED:-0}" \
+          --failed "${TOTAL_FAILED:-0}" \
+          --cost "$cost" \
+          --elapsed "$elapsed")
+    [ "${TOTAL_SALVAGED:-0}" -gt 0 ] && args+=(--salvaged "$TOTAL_SALVAGED")
+    [ "${TOTAL_CANDIDATES:-0}" -gt 0 ] && args+=(--candidates "$TOTAL_CANDIDATES")
+    [ -n "${FAILURE_REASONS:-}" ] && args+=(--failure-reasons "$FAILURE_REASONS")
+    python3 "$REPO_DIR/scripts/log_run.py" "${args[@]}" 2>/dev/null || true
+}
+trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
+
 # Cycle-level batch_id, mirrors the Twitter cycle's twcycle-* convention.
 # Used by --phase phase0 / --phase salvage / --phase discover to attribute
 # rows in reddit_candidates and to drive the persistent retry queue.
@@ -282,17 +338,11 @@ ELAPSED=$(( $(date +%s) - RUN_START ))
 _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "post_reddit" 2>/dev/null || echo "0.0000")
 log "=== Run summary: posted=$TOTAL_POSTED failed=$TOTAL_FAILED skipped=$TOTAL_SKIPPED salvaged=$TOTAL_SALVAGED candidates=$TOTAL_CANDIDATES projects=[$EXCLUDE] cost=\$$_COST elapsed=${ELAPSED}s ==="
 
-LOG_ARGS=(--script "post_reddit" --posted "$TOTAL_POSTED" --skipped "$TOTAL_SKIPPED" --failed "$TOTAL_FAILED" --cost "$_COST" --elapsed "$ELAPSED")
-# Queue counters surface in the dashboard Result column:
-#   --salvaged   how many iterations replayed a row from a prior cycle
-#                (parsed by RUN_LINE_RE and rendered as a "salvaged: N" pill,
-#                same key as Twitter's run-twitter-cycle.sh)
-#   --candidates total reddit_candidates rows the cycle TOUCHED across discover
-#                + salvage iterations. Lets an operator see "discover hit 4
-#                candidates, queue replayed 2" at a glance.
-[ "${TOTAL_SALVAGED:-0}" -gt 0 ] && LOG_ARGS+=(--salvaged "$TOTAL_SALVAGED")
-[ "${TOTAL_CANDIDATES:-0}" -gt 0 ] && LOG_ARGS+=(--candidates "$TOTAL_CANDIDATES")
-[ -n "$FAILURE_REASONS" ] && LOG_ARGS+=(--failure-reasons "$FAILURE_REASONS")
-python3 "$REPO_DIR/scripts/log_run.py" "${LOG_ARGS[@]}" || true
+# Hand the precomputed cost to the trap-installed emitter so the happy path
+# pays the (slow) Neon query once, without the 10s clamp the SIGTERM path
+# uses. _sa_emit_run_summary_oneshot is idempotent; the EXIT trap will
+# no-op after this call.
+_SA_PRECOMPUTED_COST="$_COST"
+_sa_emit_run_summary_oneshot
 
 log "=== Done: $(date) ==="
