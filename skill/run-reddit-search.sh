@@ -149,6 +149,7 @@ for i in $(seq 1 "$ITERATIONS"); do
     python3 "$REPO_DIR/scripts/post_reddit.py" \
         --phase salvage \
         --batch-id "$BATCH_ID" \
+        --limit "$LIMIT" \
         --out "$DISCOVER_FILE" 2>&1 | tee -a "$LOG_FILE"
     SALVAGE_RC=${PIPESTATUS[0]}
     set -e
@@ -156,10 +157,14 @@ for i in $(seq 1 "$ITERATIONS"); do
     if [ "$SALVAGE_RC" = "0" ]; then
         ITER_SALVAGED=1
         TOTAL_SALVAGED=$((TOTAL_SALVAGED + 1))
-        TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + 1))
+        # Count actual salvaged decisions (the batched salvage path can return
+        # up to LIMIT rows per iteration). Falls back to 1 if the file isn't
+        # parseable so the dashboard still shows non-zero candidates.
+        SALVAGE_COUNT=$(python3 -c "import json;print(len(json.load(open('$DISCOVER_FILE')).get('decisions',[])))" 2>/dev/null || echo 1)
+        TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + ${SALVAGE_COUNT:-1}))
         # Salvaged iterations bypass the project-exclude mechanism: we're
-        # retrying a specific row, not picking a fresh project.
-        log "Iteration $i: replaying salvaged candidate."
+        # retrying specific rows, not picking a fresh project.
+        log "Iteration $i: replaying $SALVAGE_COUNT salvaged candidate(s)."
     else
         # Phase 1: Discover — search and select threads. No browser, no drafting.
         set +e
@@ -229,11 +234,18 @@ for i in $(seq 1 "$ITERATIONS"); do
     # cost for the most-momentum thread. Mirrors twitter_post_plan.py's
     # `LIMIT 15` SQL cap.
     RIPEN_FILE=$(mktemp -t post_reddit_ripened.XXXXXX.json)
-    log "Ripening candidates (5-min delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
+    # 2026-05-07: bumped ripen sleep from 5min (default) to 10min (--sleep 600)
+    # to get a stronger momentum signal per candidate. Trade-off: only 1
+    # iteration completes per 15-min launchd cycle (was 1-2 with 5min), but
+    # each iteration now batches up to LIMIT=10 candidates (post 2026-05-07
+    # salvage refactor), so per-cycle output stays at ~10 instead of dropping.
+    RIPEN_SLEEP=600
+    log "Ripening candidates (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
     set +e
     python3 "$REPO_DIR/scripts/ripen_reddit_plan.py" \
         --in "$DISCOVER_FILE" \
         --out "$RIPEN_FILE" \
+        --sleep "$RIPEN_SLEEP" \
         --top-k "$LIMIT" 2>&1 | tee -a "$LOG_FILE"
     RIPEN_RC=${PIPESTATUS[0]}
     set -e
