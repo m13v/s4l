@@ -492,6 +492,7 @@ const STANDALONE_JOBS = {
   gsc_seo: { job_type: 'seo', job_label: 'GSC SEO' },
   seo_improve: { job_type: 'seo', job_label: 'SEO Improve' },
   seo_top_pages: { job_type: 'seo', job_label: 'SEO Top Pages' },
+  seo_top_posts: { job_type: 'seo', job_label: 'SEO Top Posts' },
   seo_weekly_roundup: { job_type: 'seo', job_label: 'SEO Weekly Roundup' },
   seo_expire: { job_type: 'seo', job_label: 'SEO Expire (delete dead-weight pages)' },
   seo_daily_report: { job_type: 'report', job_label: 'SEO Daily Report' },
@@ -1571,6 +1572,7 @@ const SEO_LOG_ROOT = path.join(DEST, 'seo', 'logs');
 const SEO_JOB_LAYOUT = {
   seo_improve:        { kind: 'subdir-ts', phaseDir: 'improve' },
   seo_top_pages:      { kind: 'subdir-ts', phaseDir: 'top_pages' },
+  seo_top_posts:      { kind: 'subdir-ts', phaseDir: 'top_posts' },
   serp_seo:           { kind: 'root-slug' },
   gsc_seo:            { kind: 'root-slug' },
   seo_weekly_roundup: { kind: 'roundup' },
@@ -3270,10 +3272,11 @@ async function handleApi(req, res) {
       "UNION ALL SELECT * FROM (SELECT COALESCE(source_timestamp, received_at), 'mention', platform, author, COALESCE(title, LEFT(body, 140)), sentiment, url, ('m' || id), NULL::text, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM octolens_mentions ORDER BY COALESCE(source_timestamp, received_at) DESC LIMIT 150) x4 " +
       "UNION ALL SELECT * FROM (SELECT sent_at, 'dm_sent', platform, their_author, LEFT(our_dm_content, 140), NULL::text, chat_url, ('d' || dms.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id WHERE status='sent' AND sent_at IS NOT NULL ORDER BY sent_at DESC LIMIT 150) x5 " +
       "UNION ALL SELECT * FROM (SELECT m.message_at, 'dm_reply_sent', d.platform, d.their_author, LEFT(m.content, 140), NULL::text, d.chat_url, ('dr' || m.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, c5.name, NULL::text, NULL::text, NULL::text FROM dm_messages m JOIN dms d ON d.id = m.dm_id LEFT JOIN session_cost sc ON sc.session_id = m.claude_session_id LEFT JOIN campaigns c5 ON c5.id = m.campaign_id WHERE m.direction = 'outbound' AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction = 'inbound' AND m2.message_at < m.message_at) ORDER BY m.message_at DESC LIMIT 150) x5b " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_serp', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'roundup') ORDER BY completed_at DESC LIMIT 150) x6 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_serp', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup') ORDER BY completed_at DESC LIMIT 150) x6 " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_gsc', 'seo', product, query, page_slug, page_url, ('g' || gq.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM gsc_queries gq LEFT JOIN session_cost sc ON sc.session_id = gq.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL ORDER BY completed_at DESC LIMIT 150) x7 " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_reddit', 'seo', product, keyword, slug, page_url, ('kr' || sk2.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk2 LEFT JOIN session_cost sc ON sc.session_id = sk2.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'reddit' ORDER BY completed_at DESC LIMIT 150) x8 " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top', 'seo', product, keyword, slug, page_url, ('kt' || sk3.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk3 LEFT JOIN session_cost sc ON sc.session_id = sk3.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_page' ORDER BY completed_at DESC LIMIT 150) x8b " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top_post', 'seo', product, keyword, slug, page_url, ('ktp' || sk5.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk5 LEFT JOIN session_cost sc ON sc.session_id = sk5.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_post' ORDER BY completed_at DESC LIMIT 150) x8tp " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_roundup', 'seo', product, keyword, slug, page_url, ('kru' || sk4.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk4 LEFT JOIN session_cost sc ON sc.session_id = sk4.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'roundup' ORDER BY completed_at DESC LIMIT 150) x8r " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_improved', 'seo', product, LEFT(COALESCE(rationale, diff_summary, page_path), 140), page_path, page_url, ('pi' || spi.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_page_improvements spi LEFT JOIN session_cost sc ON sc.session_id = spi.claude_session_id WHERE completed_at IS NOT NULL AND status = 'committed' ORDER BY completed_at DESC LIMIT 150) x8c " +
       "UNION ALL SELECT * FROM (SELECT expired_at, 'page_expired', 'seo', product, regexp_replace(source_path, '^.*/', ''), 'imp=' || impressions_30d || ' clicks=0 age=' || COALESCE(file_age_days::int, 0) || 'd ' || COALESCE(reason,''), page_url, ('xp' || sep.id), product, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_expired_pages sep ORDER BY expired_at DESC LIMIT 150) x8d " +
@@ -3583,10 +3586,11 @@ async function handleApi(req, res) {
     // started with a prospect."
     parts.push("SELECT 'dm_sent' AS type, d.platform AS pl FROM dms d WHERE EXISTS (SELECT 1 FROM dm_messages m WHERE m.dm_id = d.id AND m.direction='outbound' AND m.message_at >= NOW() - " + win + " AND NOT EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = d.id AND m2.direction='outbound' AND m2.message_at < m.message_at))" + dmsAliasedPc.clause);
     parts.push("SELECT 'dm_reply_sent' AS type, d.platform AS pl FROM dm_messages m JOIN dms d ON d.id = m.dm_id WHERE m.direction='outbound' AND m.message_at >= NOW() - " + win + " AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction='inbound' AND m2.message_at < m.message_at)" + dmsAliasedPc.clause);
-    parts.push("SELECT 'page_published_serp' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'roundup')" + seoProdPc.clause);
+    parts.push("SELECT 'page_published_serp' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup')" + seoProdPc.clause);
     parts.push("SELECT 'page_published_gsc' AS type, 'seo' AS pl FROM gsc_queries WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL" + seoProdPc.clause);
     parts.push("SELECT 'page_published_reddit' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='reddit'" + seoProdPc.clause);
     parts.push("SELECT 'page_published_top' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_page'" + seoProdPc.clause);
+    parts.push("SELECT 'page_published_top_post' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_post'" + seoProdPc.clause);
     parts.push("SELECT 'page_published_roundup' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='roundup'" + seoProdPc.clause);
     parts.push("SELECT 'page_improved' AS type, 'seo' AS pl FROM seo_page_improvements WHERE completed_at >= NOW() - " + win + " AND status='committed'" + seoProdPc.clause);
     parts.push("SELECT 'resurrected' AS type, platform AS pl FROM posts WHERE resurrected_at >= NOW() - " + win + postsPc.clause);
@@ -5781,6 +5785,7 @@ const HTML = `<!DOCTYPE html>
           <button type="button" class="style-stats-pill" data-value="gsc_seo">GSC SEO</button>
           <button type="button" class="style-stats-pill" data-value="seo_improve">SEO Improve</button>
           <button type="button" class="style-stats-pill" data-value="seo_top_pages">SEO Top Pages</button>
+          <button type="button" class="style-stats-pill" data-value="seo_top_posts">SEO Top Posts</button>
           <button type="button" class="style-stats-pill" data-value="seo_weekly_roundup">SEO Roundup</button>
           <button type="button" class="style-stats-pill" data-value="seo_expire">SEO Expire</button>
           <button type="button" class="style-stats-pill" data-value="report">Report</button>
@@ -7728,8 +7733,8 @@ async function saveSettings() {
 }
 
 // Activity tab
-const EVENT_TYPES = ['posted_thread', 'posted_comment', 'replied', 'skipped', 'mention', 'dm_sent', 'dm_reply_sent', 'page_published_serp', 'page_published_gsc', 'page_published_reddit', 'page_published_top', 'page_published_roundup', 'page_improved', 'page_expired', 'resurrected'];
-const EVENT_LABELS = { posted_thread: 'thread posted', posted_comment: 'comment posted', replied: 'engage replied', skipped: 'engage skipped', mention: 'mention', dm_sent: 'dm sent', dm_reply_sent: 'dm reply', page_published_serp: 'page (serp)', page_published_gsc: 'page (gsc)', page_published_reddit: 'page (reddit)', page_published_top: 'page (top)', page_published_roundup: 'page (roundup)', page_improved: 'page (improved)', page_expired: 'page expired', resurrected: 'resurrected' };
+const EVENT_TYPES = ['posted_thread', 'posted_comment', 'replied', 'skipped', 'mention', 'dm_sent', 'dm_reply_sent', 'page_published_serp', 'page_published_gsc', 'page_published_reddit', 'page_published_top', 'page_published_top_post', 'page_published_roundup', 'page_improved', 'page_expired', 'resurrected'];
+const EVENT_LABELS = { posted_thread: 'thread posted', posted_comment: 'comment posted', replied: 'engage replied', skipped: 'engage skipped', mention: 'mention', dm_sent: 'dm sent', dm_reply_sent: 'dm reply', page_published_serp: 'page (serp)', page_published_gsc: 'page (gsc)', page_published_reddit: 'page (reddit)', page_published_top: 'page (top)', page_published_top_post: 'page (top post)', page_published_roundup: 'page (roundup)', page_improved: 'page (improved)', page_expired: 'page expired', resurrected: 'resurrected' };
 const EVENT_DESCRIPTIONS = {
   posted_thread: 'Original thread the bot published (Post Threads job): a new top-level Reddit submission, tweet/X post, LinkedIn post, etc. Identified by thread_url = our_url AND thread_author is empty or matches our_account.',
   posted_comment: 'Comment the bot left on someone else’s thread (Post Comments job): a Reddit/Twitter/LinkedIn/Moltbook/GitHub reply where thread_url ≠ our_url, or where thread_url = our_url but thread_author is someone else (LinkedIn comment job stores the parent URL in both columns).',
@@ -7742,6 +7747,7 @@ const EVENT_DESCRIPTIONS = {
   page_published_gsc: 'SEO page generated from a Google Search Console query the site already gets impressions for.',
   page_published_reddit: 'SEO page generated from a high-intent Reddit thread.',
   page_published_top: 'SEO page generated for a top-of-funnel ranking opportunity.',
+  page_published_top_post: 'SEO page generated retroactively for a viral social-autoposter post (>=10k views, last 7d) whose link still points at the homepage. Pipeline also mounts a NewsStrip on the homepage routing existing organic clickthroughs to the new /t/ page.',
   page_published_roundup: 'Roundup or list-style SEO page (comparisons, best-of, alternatives).',
   page_improved: 'Existing SEO page that was updated or rewritten to improve rankings.',
   page_expired: 'SEO page deleted by the daily expire pipeline because it had zero clicks in the last 30 days. The on-disk source file was removed; Next.js now returns 404 for the URL. Logged for audit/revert in seo_expired_pages.',
