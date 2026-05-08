@@ -64,6 +64,13 @@ MAX_ATTEMPTS = 3
 RETRY_BACKOFF_MIN = 30
 DRAFT_TTL_MIN = 60
 
+# Discover-phase search budget. Was hardcoded as "AT MOST 2 searches" inline
+# in build_discover_prompt; bumped to 5 (2026-05-08) so each cycle gets a
+# wider top-of-funnel and the new draft-gate-omit feedback report can steer
+# rephrasings without starving the next attempt of fresh angles. Override via
+# SAPS_REDDIT_MAX_SEARCHES env var without code change.
+MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "5"))
+
 # CDP-error → permanence map. Permanent failures mark status='failed' and are
 # never re-evaluated. Transient failures stay status='pending' with
 # attempt_count++; Phase 0 salvages them on the next cycle.
@@ -647,6 +654,32 @@ def get_top_search_topics(project_name, platform="reddit", limit=8, window_days=
     return ""
 
 
+def get_omitted_reddit_topics(project_name, limit=10, window_hours=168, min_omits=2):
+    """Return a JSON list (as a string) of search_topic seeds that have
+    consistently produced threads which survive the ripen gate but get
+    OMITTED by the draft-time SELECTION GATE (build_draft_prompt's bridge
+    test). These are category-level mismatches the LLM should drop or
+    rephrase. See scripts/top_omitted_reddit_topics.py.
+
+    `min_omits=2` suppresses one-off omits (could be noise) and surfaces
+    only seeds where the pattern has repeated.
+    """
+    try:
+        result = subprocess.run(
+            ["python3", os.path.join(REPO_DIR, "scripts", "top_omitted_reddit_topics.py"),
+             "--project", project_name,
+             "--window-hours", str(window_hours),
+             "--limit", str(limit),
+             "--min-omits", str(min_omits)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def get_dud_reddit_queries(project_name, limit=15, window_hours=168):
     """Return a JSON list (as a string) of recent dud Reddit queries for this
     project so build_prompt can paste an anti-list into the LLM scanner.
@@ -756,7 +789,8 @@ def build_content_angle(project, config):
 
 
 def build_discover_prompt(project, config, limit, top_report, recent_comments,
-                          top_topics_report="", dud_queries_report=""):
+                          top_topics_report="", dud_queries_report="",
+                          omitted_topics_report=""):
     """DISCOVER phase: search and select threads only. No drafting.
 
     Claude outputs action=candidate JSON objects (thread_url, title, author,
@@ -789,11 +823,25 @@ def build_discover_prompt(project, config, limit, top_report, recent_comments,
     if dud_queries_report and dud_queries_report.strip() not in ("[]", ""):
         dud_queries_ctx = f"\n## Dead queries (skip these exact phrasings):\n{dud_queries_report}\n"
 
+    omitted_topics_ctx = ""
+    if omitted_topics_report and omitted_topics_report.strip() not in ("[]", ""):
+        omitted_topics_ctx = (
+            "\n## Category-mismatch seeds (returned alive threads but the draft "
+            "SELECTION GATE killed them — i.e. this seed surfaces wrong-audience "
+            "subs; rephrase MORE NARROWLY around your project's actual domain, "
+            "or drop the seed entirely):\n"
+            f"{omitted_topics_report}\n"
+        )
+
+    max_searches = MAX_DISCOVER_SEARCHES
+    pick_low = min(2, max_searches)
+    pick_high = max_searches
+
     return f"""You generate Reddit search queries. The search tool runs in OPAQUE mode this cycle: it dumps every returned thread to a side file for the ripen pipeline and prints back ONLY a one-line summary count. You do NOT see thread content, titles, scores, or URLs. You cannot filter results — the ripen step (numerical delta gate) is the only filter.
 
 Topic area: {project_json}
 Content angle: {content_angle}
-{recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
+{recent_ctx}{top_ctx}{top_topics_ctx}{omitted_topics_ctx}{dud_queries_ctx}
 ## Tool (via Bash)
 - Search: python3 {REDDIT_TOOLS} search "QUERY" --limit 25
 - Search by sub: python3 {REDDIT_TOOLS} search "QUERY" --subreddits AI_Agents,SaaS --time month
@@ -808,18 +856,24 @@ read the threads themselves. They are already on disk for ripen.
 
 ## CRITICAL Bash rules
 - NEVER use run_in_background=true. All commands run foreground.
-- Run AT MOST 2 searches total. Each search dumps up to 25 threads.
+- Run AT MOST {max_searches} searches total. Each search dumps up to 25 threads.
 - Do NOT cat, ls, find, or otherwise inspect /tmp or any dump file. The dump
   directory is private to the ripen step. You don't need to know the path.
 - If rate-limited, stop. The ripen step uses whatever was dumped before the limit.
 
 ## Steps
-1. Pick 1-2 concepts from the project's search_topics: {json.dumps(topics_list)}.
+1. Pick {pick_low}-{pick_high} concepts from the project's search_topics: {json.dumps(topics_list)}.
    Rephrase each into a natural Reddit search query (vernacular, pain points).
-   Avoid the dud queries listed above.
-2. Run the search(es). Watch the stdout/stderr summary for each call.
+   Avoid the dud queries listed above. If a seed appears in the
+   "Category-mismatch seeds" section above, EITHER rephrase it MUCH more
+   narrowly (constrain to your project's exact audience/subreddit) OR skip
+   it and pick a different seed.
+2. Run the searches. Watch the stdout/stderr summary for each call. Prefer
+   covering DIFFERENT angles across queries (e.g. don't run 5 near-duplicate
+   rephrasings of one seed).
 3. (Optional) If a query returns `returned=0`, you may try ONE more rephrasing.
-   Otherwise, after 1-2 queries, your job is done.
+   You may also stop early at {pick_low} if your queries returned plenty of
+   results — quality > quota. Never exceed {max_searches} total.
 4. Output DONE on its own line.
 
 ## OUTPUT FORMAT
