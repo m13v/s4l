@@ -1,0 +1,47 @@
+{
+  "_comment": "Add this `web_chat` block to each project entry in config.json that should host the FounderChatPanel widget. Per-project values override the defaults shown here.",
+
+  "_example_full_project_entry_with_web_chat": {
+    "name": "Mediar",
+    "website": "https://mediar.ai",
+    "web_chat": {
+      "enabled": true,
+      "notify_email": "matt@mediar.ai",
+      "founder_name": "matt",
+      "greeting": "hey, i'm matt, the founder. drop a question or feedback and i'll get back to you.",
+      "reply_eta": "usually replies within a couple hours",
+      "from_email": "Matt from Mediar <matt@mediar.ai>"
+    }
+  },
+
+  "_recommended_per_project_overrides": {
+    "Mediar":         { "notify_email": "matt@mediar.ai",        "from_email": "Matt from Mediar <matt@mediar.ai>" },
+    "fazm":           { "notify_email": "i@m13v.com",            "from_email": "Matt from Fazm <matt@fazm.ai>" },
+    "Assrt":          { "notify_email": "i@m13v.com",            "from_email": "Matt from Assrt <hello@assrt.ai>" },
+    "Cyrano":         { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "Terminator":     { "notify_email": "matt@mediar.ai",        "from_email": "Matt <matt@mediar.ai>" },
+    "macOS MCP":      { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "WhatsApp MCP":   { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "AI Browser Profile": { "notify_email": "i@m13v.com",        "from_email": "Matt <matt@mail.omi.me>" },
+    "macOS Session Replay": { "notify_email": "i@m13v.com",      "from_email": "Matt <matt@mail.omi.me>" },
+    "Vipassana":      { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "S4L":            { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "PieLine":        { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "Clone":          { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "mk0r":           { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "fde10x":         { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "claude-meter":   { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "c0nsl":          { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "tenxats":        { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" },
+    "paperback-expert": { "notify_email": "i@m13v.com",          "from_email": "Matt <matt@mail.omi.me>" },
+    "studyly":        { "notify_email": "i@m13v.com",            "from_email": "Matt <matt@mail.omi.me>" }
+  },
+
+  "_dogfood_first_three": [
+    "Mediar",
+    "fazm",
+    "Assrt"
+  ],
+
+  "_apply_with_jq": "for project in Mediar fazm Assrt; do jq --arg n \"$project\" '(.projects[] | select(.name==$n)) += {\"web_chat\":{\"enabled\":true,\"notify_email\":\"i@m13v.com\",\"founder_name\":\"matt\",\"reply_eta\":\"usually replies within a couple hours\"}}' ~/social-autoposter/config.json > /tmp/c.json && mv /tmp/c.json ~/social-autoposter/config.json; done"
+}
