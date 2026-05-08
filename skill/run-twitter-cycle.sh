@@ -738,6 +738,7 @@ STYLES_BLOCK=$(generate_styles_block twitter posting)
 #                        log_post.py, campaign_bump.py, marks link_edited_at.
 
 PLAN_FILE="/tmp/twitter_cycle_plan_${BATCH_ID}.json"
+SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 
 # --- Phase 2b-prep: pick + draft + plan -------------------------------------
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
@@ -757,7 +758,7 @@ log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replie
 CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}}},"required":["candidates"]}'
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p --output-format json --json-schema "$PREP_SCHEMA" "You are the Social Autoposter prep step.
 
@@ -809,7 +810,11 @@ For each chosen candidate:
    - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
    - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
 
-If a thread is unfit: just OMIT it from the candidates array. Do NOT update twitter_candidates yourself; the shell marks unhandled rows as expired or salvages them next cycle.
+5. ACCOUNT FOR EVERY PRE-SCORED CANDIDATE: every Candidate ID listed in the PRE-SCORED CANDIDATES section above MUST appear in EXACTLY ONE of the two output arrays this cycle:
+   - 'candidates' (chosen, capped at $POST_LIMIT) per step 4 above, OR
+   - 'rejected' with a SHORT one-line reason explaining why this thread is not worth replying to (off-topic for the matched project, toxic / hateful, low-quality / spam, audience mismatch, near-duplicate of something we already replied to, etc.). Reason must be <=200 chars, plain text, no quotes.
+   It is fine for 'candidates' to be empty if no thread is on-brand; in that case every candidate id goes into 'rejected'. The reverse (every id in 'candidates') is also allowed up to POST_LIMIT, with the rest in 'rejected'.
+   Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you forgot.
 
 CRITICAL:
 - DO NOT post anything. The shell handles posting.
@@ -822,7 +827,9 @@ CRITICAL:
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
 
-# Parse the prep envelope and write the plan to \$PLAN_FILE.
+# Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
+# 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
+# reason against every twitter_candidates row Claude reviewed but didn't pick.
 python3 -c "
 import json, sys
 text = sys.stdin.read().strip()
@@ -837,11 +844,21 @@ if isinstance(so, str):
     try: so = json.loads(so)
     except Exception: pass
 candidates = so.get('candidates', []) if isinstance(so, dict) else []
+rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
 json.dump({'candidates': candidates, 'session_id': '$CLAUDE_SESSION_ID'}, open('$PLAN_FILE', 'w'), indent=2)
-print(f'prep: wrote {len(candidates)} candidates to $PLAN_FILE', file=sys.stderr)
+json.dump({'skips': rejected}, open('$SKIP_FILE', 'w'), indent=2)
+print(f'prep: wrote {len(candidates)} candidates and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
 " <<< "$PREP_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
 
 PREP_PARSE_EXIT=${PIPESTATUS[0]:-1}
+
+# Persist the rejected list to twitter_candidates (status='skipped' with reason)
+# scoped to this batch so we never clobber rows from peer cycles. Non-fatal.
+if [ -f "$SKIP_FILE" ]; then
+    python3 "$REPO_DIR/scripts/log_twitter_skips.py" \
+        --file "$SKIP_FILE" --require-batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE" || true
+    rm -f "$SKIP_FILE"
+fi
 
 # Detect Anthropic monthly cap so the dashboard surfaces a reason rather than
 # a silent failure when prep returns no plan.
