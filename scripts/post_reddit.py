@@ -1562,7 +1562,17 @@ def _draft_iteration(plan, config, reddit_username):
             merged.append(merged_d)
             _db_save_draft(url, merged_d["text"], merged_d.get("engagement_style"))
         else:
-            print(f"[post_reddit] WARNING: no draft for {url}, skipping")
+            # Claude OMITted this thread (build_draft_prompt's SELECTION GATE
+            # decided no plausible bridge between the thread's audience and
+            # the project — token-overlap false positive, off-topic sub, etc.).
+            # Mark status='failed' with reason='draft_gate_omit' so Phase 0
+            # salvage on the next cycle stops re-pulling it. Without this the
+            # same dead thread would keep clearing ripen (engagement is real)
+            # and burning ~$0.05/cycle on a fetch + gate decision that always
+            # lands the same way. Mirrors the one-strike rule at ripen time,
+            # applied at draft time for active-but-unfit threads.
+            print(f"[post_reddit] Draft gate OMIT for {url}: marking status=failed")
+            _db_mark_candidate_attempt(url, reason="draft_gate_omit", permanent=True)
 
     plan = dict(plan)
     plan["decisions"] = merged
