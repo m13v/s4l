@@ -78,7 +78,30 @@ PENDING_COUNT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHER
 if [ "$PENDING_COUNT" -eq 0 ]; then
     log "Phase B: No pending GitHub replies. Done!"
     RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
-    python3 "$REPO_DIR/scripts/log_run.py" --script "engage_github" --posted 0 --skipped 0 --failed 0 --cost 0 --elapsed "$RUN_ELAPSED"
+    # Pull scan-stage counters from Phase A so the empty-engage row still shows
+    # "scanned N / 0 new" instead of all-zeros. scan_github_replies.py prints:
+    #   Scanning N GitHub issues for replies...
+    #   GitHub scan complete: N new pending, N skipped, N errors
+    GH_SCAN_PROC_LINE=$(grep -m1 -E "^Scanning [0-9]+ GitHub issues" "$LOG_FILE" 2>/dev/null || true)
+    GH_SCAN_DONE_LINE=$(grep -m1 "^GitHub scan complete:" "$LOG_FILE" 2>/dev/null || true)
+    GH_SCAN_ARG=""
+    if [ -n "$GH_SCAN_PROC_LINE" ] || [ -n "$GH_SCAN_DONE_LINE" ]; then
+      gh_scanned=$(echo "$GH_SCAN_PROC_LINE" | grep -oE "[0-9]+" | head -1)
+      gh_new=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ new pending" | grep -oE "[0-9]+" | head -1)
+      gh_skip=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1)
+      gh_err=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ errors" | grep -oE "[0-9]+" | head -1)
+      parts=""
+      [ -n "$gh_scanned" ] && parts="${parts}scanned=${gh_scanned},"
+      [ -n "$gh_new" ]     && parts="${parts}new=${gh_new},"
+      [ -n "$gh_skip" ] && [ "$gh_skip" -gt 0 ] && parts="${parts}backfill=${gh_skip},"
+      [ -n "$gh_err"  ] && [ "$gh_err"  -gt 0 ] && parts="${parts}unmatched=${gh_err},"
+      GH_SCAN_ARG="${parts%,}"
+    fi
+    if [ -n "$GH_SCAN_ARG" ]; then
+      python3 "$REPO_DIR/scripts/log_run.py" --script "engage_github" --posted 0 --skipped 0 --failed 0 --cost 0 --elapsed "$RUN_ELAPSED" --scan "$GH_SCAN_ARG"
+    else
+      python3 "$REPO_DIR/scripts/log_run.py" --script "engage_github" --posted 0 --skipped 0 --failed 0 --cost 0 --elapsed "$RUN_ELAPSED"
+    fi
     find "$LOG_DIR" -name "github-engage-*.log" -mtime +7 -delete 2>/dev/null || true
     exit 0
 fi
