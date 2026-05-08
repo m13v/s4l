@@ -1390,9 +1390,11 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     recent_comments = get_recent_comments()
     top_topics_report = get_top_search_topics(project_name, platform="reddit")
     dud_queries_report = get_dud_reddit_queries(project_name)
+    omitted_topics_report = get_omitted_reddit_topics(project_name)
     prompt = build_discover_prompt(project, config, args.limit, top_report, recent_comments,
                                    top_topics_report=top_topics_report,
-                                   dud_queries_report=dud_queries_report)
+                                   dud_queries_report=dud_queries_report,
+                                   omitted_topics_report=omitted_topics_report)
 
     if args.dry_run:
         print(f"=== DRY RUN discover (project={project_name}) ===")
