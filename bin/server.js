@@ -477,7 +477,7 @@ const RUN_MONITOR_PATH = path.join(LOG_DIR, 'run_monitor.log');
 // queries+candidates+above_floor only. Each sub-key is omitted when zero, so
 // `discover=` itself is absent on lines from pipelines that don't emit it.
 // Old log lines without the segment still parse cleanly via the optional `?`.
-const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?/;
+const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?/;
 
 // posts.platform is lowercase; UI labels are capitalized.
 const PLATFORM_LABELS = {
@@ -576,7 +576,7 @@ function parseRunMonitorLog(maxLines) {
   for (const line of tail) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
-    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, cost, elapsed, failureReasonsStr] = m;
+    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr] = m;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
     // correct since the dashboard server runs on the same host.
@@ -611,6 +611,18 @@ function parseRunMonitorLog(maxLines) {
         if (Number.isFinite(n) && n >= 0) discover[k.trim()] = n;
       }
     }
+    // Parse "scanned=51,new=0,excluded=1,unmatched=0,backfill=0" into a flat
+    // object. Renders as scan-stage pills (scanned / new / excluded) on engage
+    // rows so empty-inbox cycles show real granularity instead of "0/0/0/0".
+    const scan = {};
+    if (scanStr) {
+      for (const part of scanStr.split(',')) {
+        const [k, v] = part.split('=');
+        if (!k || v == null) continue;
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 0) scan[k.trim()] = n;
+      }
+    }
     runs.push({
       script,
       job_type: cls.job_type,
@@ -634,6 +646,7 @@ function parseRunMonitorLog(maxLines) {
         not_found: notFound ? parseInt(notFound, 10) : 0,
         salvaged: salvaged ? parseInt(salvaged, 10) : 0,
         discover, // {} when no `discover=` segment was present on the line
+        scan, // {} when no `scan=` segment was present on the line
         cost_usd: parseFloat(cost),
         failure_reasons: failureReasons,
       },
@@ -879,6 +892,10 @@ async function enrichEngageRuns(runs) {
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
       pending_now: pendingByPlatform[dbPlatform] || 0,
       cost_usd: prior.cost_usd || 0,
+      // Carry forward the scan-stage counters (seen / new / excluded /
+      // unmatched / backfill) that the shell wrapper extracted from the
+      // pipeline log. Empty {} when the run didn't emit a scan= segment.
+      scan: (prior.scan && typeof prior.scan === 'object') ? prior.scan : {},
     };
   }
 }
@@ -6919,7 +6936,33 @@ function renderResult(run) {
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         label + ' <span style="color:var(--text);font-weight:600;">' + failed + '</span></span>';
     };
+    // Scan-stage pills: surface inbox/feed scan granularity (seen / new /
+    // excluded) on engage runs so empty-inbox cycles read as "scanned 100 /
+    // 0 new" instead of "0 0 0 0". scan is {} on runs that didn't emit a
+    // scan= segment (older log lines, non-Reddit engage jobs).
+    const scan = (r.scan && typeof r.scan === 'object') ? r.scan : {};
+    const scannedN = scan.scanned || 0;
+    const newN = scan.new || 0;
+    const excludedN = scan.excluded || 0;
+    const unmatchedN = scan.unmatched || 0;
+    const backfillN = scan.backfill || 0;
+    const hasScan = scannedN || newN || excludedN || unmatchedN || backfillN;
+    const scanTooltip = hasScan
+      ? ('inbox scan: seen=' + scannedN +
+         ' / new=' + newN +
+         ' / excluded=' + excludedN +
+         ' / unmatched=' + unmatchedN +
+         ' / backfill_skipped=' + backfillN)
+      : '';
+    const scanPills = hasScan
+      ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+         pill('scanned', scannedN, scannedN > 0 ? 'var(--text)' : 'var(--muted)') +
+         pill('new', newN, newN > 0 ? '#22c55e' : 'var(--muted)') +
+         (excludedN ? pill('excluded', excludedN, 'var(--muted)') : '') +
+         '</span>')
+      : '';
     return (
+      scanPills +
       pill('replied', replied, replied > 0 ? '#22c55e' : 'var(--muted)') +
       pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
       pill('errored', errored, errored > 0 ? '#ef4444' : 'var(--muted)') +
