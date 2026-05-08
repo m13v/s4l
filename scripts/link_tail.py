@@ -156,8 +156,16 @@ def call_claude(prompt: str, *, timeout_sec: int = 120,
 
     # Pre-strip MCP config (we don't need any tools for plain text gen). Some
     # claude installs auto-load MCP from ~/.claude/mcp.json — pass an empty
-    # config to force-disable.
-    cmd += ["--strict-mcp-config", "--mcp-config", "/dev/null"]
+    # JSON config to force-disable. /dev/null doesn't parse as JSON, so we
+    # use a real file written once into /tmp.
+    empty_mcp = "/tmp/.link_tail_empty_mcp.json"
+    if not os.path.exists(empty_mcp):
+        try:
+            Path(empty_mcp).write_text('{"mcpServers": {}}', encoding="utf-8")
+        except Exception:
+            empty_mcp = ""
+    if empty_mcp:
+        cmd += ["--strict-mcp-config", "--mcp-config", empty_mcp]
 
     try:
         r = subprocess.run(
