@@ -10214,39 +10214,60 @@ function renderTopPosts(payload) {
     return;
   }
   const fmt = n => (Number(n) || 0).toLocaleString();
-  const normalized = posts.map(p => ({
-    id:            p.id,
-    platform:      String(p.platform || '').toLowerCase(),
-    upvotes:       Number(p.upvotes)        || 0,
-    comments_count:Number(p.comments_count) || 0,
-    views:         p.views == null ? null : Number(p.views),
-    score:         Number(p.score)          || 0,
-    is_thread:     !!p.is_thread,
-    posted_at:     p.posted_at || null,
-    posted_ts:     p.posted_at ? new Date(p.posted_at).getTime() : 0,
-    engagement_updated_at: p.engagement_updated_at || null,
-    engagement_ts: p.engagement_updated_at ? new Date(p.engagement_updated_at).getTime() : 0,
-    our_content:   p.our_content || '',
-    our_url:       p.our_url || '',
-    thread_url:    p.thread_url || '',
-    thread_title:  p.thread_title || '',
-    thread_content:p.thread_content || '',
-    our_account:   p.our_account || '',
-    project_name:  p.project_name || '',
-    is_recommendation: !!p.is_recommendation,
-    link_clicks:   Number(p.link_clicks) || 0,
-    // real_clicks / bot_clicks come from the new post_link_clicks per-hit
-    // log (rolled up server-side). For posts minted before 2026-05-07
-    // they will both be 0 even when link_clicks > 0; the UI then prefers
-    // backfill_real (PostHog $pageview count, written by
-    // scripts/backfill_real_clicks.py) and finally falls back to the
-    // legacy conflated count with a "(legacy)" marker.
-    link_real_clicks:    Number(p.link_real_clicks)    || 0,
-    link_bot_clicks:     Number(p.link_bot_clicks)     || 0,
-    link_backfill_real:  Number(p.link_backfill_real)  || 0,
-    link_count:    Number(p.link_count)  || 0,
-    link_code:     p.link_code || '',
-  }));
+  const normalized = posts.map(p => {
+    const _views    = p.views == null ? null : Number(p.views);
+    const _real     = Number(p.link_real_clicks)   || 0;
+    const _bots     = Number(p.link_bot_clicks)    || 0;
+    const _backfill = Number(p.link_backfill_real) || 0;
+    const _legacy   = Number(p.link_clicks)        || 0;
+    // "filtered clicks" = the displayed numerator (humans only when we
+    // have the per-click log, PostHog backfill when the row predates the
+    // log, or the legacy conflated count as last resort). Same priority
+    // as the formatter so display + sort agree.
+    let _effective = 0;
+    if (_real > 0 || _bots > 0) _effective = _real;
+    else if (_backfill > 0)     _effective = _backfill;
+    else                        _effective = _legacy;
+    const _ctr = (_views != null && _views > 0) ? (_effective / _views) : 0;
+    return {
+      id:            p.id,
+      platform:      String(p.platform || '').toLowerCase(),
+      upvotes:       Number(p.upvotes)        || 0,
+      comments_count:Number(p.comments_count) || 0,
+      views:         _views,
+      score:         Number(p.score)          || 0,
+      is_thread:     !!p.is_thread,
+      posted_at:     p.posted_at || null,
+      posted_ts:     p.posted_at ? new Date(p.posted_at).getTime() : 0,
+      engagement_updated_at: p.engagement_updated_at || null,
+      engagement_ts: p.engagement_updated_at ? new Date(p.engagement_updated_at).getTime() : 0,
+      our_content:   p.our_content || '',
+      our_url:       p.our_url || '',
+      thread_url:    p.thread_url || '',
+      thread_title:  p.thread_title || '',
+      thread_content:p.thread_content || '',
+      our_account:   p.our_account || '',
+      project_name:  p.project_name || '',
+      is_recommendation: !!p.is_recommendation,
+      link_clicks:   _legacy,
+      // real_clicks / bot_clicks come from the new post_link_clicks per-hit
+      // log (rolled up server-side). For posts minted before 2026-05-07
+      // they will both be 0 even when link_clicks > 0; the UI then prefers
+      // backfill_real (PostHog $pageview count, written by
+      // scripts/backfill_real_clicks.py) and finally falls back to the
+      // legacy conflated count with a "(legacy)" marker.
+      link_real_clicks:    _real,
+      link_bot_clicks:     _bots,
+      link_backfill_real:  _backfill,
+      // link_ctr is the click-through rate of the displayed (filtered)
+      // click number over views, used as a secondary sort key on the
+      // Links column. 0 when views are missing/zero so rows without
+      // view data sort to the bottom on a desc-by-CTR pass.
+      link_ctr:      _ctr,
+      link_count:    Number(p.link_count)  || 0,
+      link_code:     p.link_code || '',
+    };
+  });
   _topTableHandle = mountSortableTable({
     containerId: 'top-table-container',
     rows: normalized,
@@ -10309,6 +10330,12 @@ function renderTopPosts(payload) {
         // includes Twitter card / LinkedIn unfurl / Slack preview bot prefetches
         // (~20x inflation pre 2026-05-07), so the visible "humans / bots" split
         // and the row order disagree. Filed as the "Links sort weird" bug.
+        //
+        // Header-click cycle (mountSortableTable): clicks desc -> clicks asc
+        // -> CTR desc -> CTR asc -> back to clicks desc. CTR = displayed
+        // (filtered) clicks / views, computed once during normalize as
+        // r.link_ctr.
+        sortKeys: ['link_clicks', 'link_ctr'],
         accessor: r => {
           const real     = Number(r.link_real_clicks)   || 0;
           const bots     = Number(r.link_bot_clicks)    || 0;
@@ -10335,6 +10362,19 @@ function renderTopPosts(payload) {
           const havePerClick = real > 0 || bots > 0;
           const linkLine  = '<span class="top-stats-bit"><span class="top-stats-k">link</span>'
             + (hasLink ? '\u2714' : '\u2014') + '</span>';
+          // Click-through rate: displayed (filtered) clicks / views. Shown
+          // in brackets next to the human number so the row order under
+          // the secondary "CTR" sort is legible. Only render when we
+          // actually have a views denominator AND a non-zero CTR.
+          const ctr = Number(r.link_ctr) || 0;
+          let ctrLabel = '';
+          if (ctr > 0) {
+            const pct = ctr * 100;
+            const pctStr = pct >= 10 ? pct.toFixed(0)
+                          : pct >= 1  ? pct.toFixed(1)
+                          :             pct.toFixed(2);
+            ctrLabel = ' <span style="color:var(--text-muted);">(' + pctStr + '%)</span>';
+          }
           // Three display modes:
           //   1. Per-click log present: "humans / bots" with bots dimmed.
           //      Real human clicks drive sort + filter going forward.
@@ -10347,24 +10387,27 @@ function renderTopPosts(payload) {
           let clickLine = '';
           if (hasLink) {
             if (havePerClick) {
-              const tip = 'Humans / bots split from post_link_clicks (UA bot regex). Real clicks are the human number. Bots are Twitter card / LinkedIn unfurl / Slack preview prefetches.';
+              const tip = 'Humans / bots split from post_link_clicks (UA bot regex). Real clicks are the human number. Bots are Twitter card / LinkedIn unfurl / Slack preview prefetches. CTR = humans / views.';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + real
+                + ctrLabel
                 + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
                 + '</span>';
             } else if (backfill > 0) {
-              const tip = 'Estimated from PostHog $pageview events with matching utm_content (real humans only, bots already filtered by PostHog). Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py.';
+              const tip = 'Estimated from PostHog $pageview events with matching utm_content (real humans only, bots already filtered by PostHog). Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py. CTR = backfill / views.';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + backfill
+                + ctrLabel
                 + ' <span style="color:var(--text-muted);">(estimated)</span>'
                 + '</span>';
             } else if (legacy > 0) {
-              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number.';
+              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number. CTR = legacy / views (also inflated).';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + legacy
+                + ctrLabel
                 + ' <span style="color:var(--text-muted);">(legacy)</span>'
                 + '</span>';
             } else {
