@@ -248,9 +248,14 @@ class InboxScanner:
                         consecutive_known += 1
                     else:
                         consecutive_known = 0
-                if consecutive_known >= 50:
-                    print(f"  hit {consecutive_known} consecutive already-known items, stopping pagination")
-                    return
+            # Always finish processing the current page before deciding whether
+            # to fetch the next one. Bailing mid-page (the previous behavior)
+            # could miss out-of-order items on the same page; the cost of
+            # finishing the page is essentially zero (idempotent INSERTs only).
+            # The 50-consecutive-known threshold now gates pagination only.
+            if consecutive_known >= 50:
+                print(f"  hit {consecutive_known} consecutive already-known items on page {page}, stopping pagination")
+                return
             after = data.get("after")
             if not after:
                 break
