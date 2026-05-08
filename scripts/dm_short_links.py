@@ -785,7 +785,7 @@ def main():
                                        'backfill via backfill-post or backfill-reply.')
     p_wrap_post.add_argument('--text', required=True)
     p_wrap_post.add_argument('--platform', required=True,
-                             choices=['reddit', 'twitter', 'x', 'linkedin', 'github_issues'])
+                             choices=['reddit', 'twitter', 'x', 'linkedin', 'github_issues', 'github', 'moltbook'])
     p_wrap_post.add_argument('--project', required=True,
                              help='project_name from config.json (drives wrapper hostname)')
 
