@@ -650,8 +650,15 @@ function parseRunMonitorLog(maxLines) {
 // `--platform <plat>` so we splice that into the synthesized script name to
 // route through classifyScript correctly (e.g. dm-replies-reddit ->
 // dm_replies / Reddit row in the matrix).
+// Infra/library shell files that should never appear in Job History as a
+// running pipeline. lock.sh is sourced (never executed standalone) but ps will
+// still show a line if someone runs it directly, hence the explicit skip.
+// stats.sh used to be on this list but was removed 2026-05-07: it IS a real
+// pipeline (Reddit profile scrape + per-platform API stats) and operators need
+// to see it queued / running, especially when it holds the reddit-browser lock.
+// classifyScript handles stats-<platform> via the stats_(\w+) matcher.
 const RUNNING_SCRIPT_SKIP = new Set([
-  'lock.sh', 'cleanup.sh', 'release.sh', 'launchd.sh', 'stats.sh',
+  'lock.sh', 'cleanup.sh', 'release.sh', 'launchd.sh',
 ]);
 function getRunningPipelines() {
   const skillDir = path.join(DEST, 'skill') + '/';
