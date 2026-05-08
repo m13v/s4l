@@ -83,7 +83,12 @@ def _enabled_products(cfg):
         lp = p.get("landing_pages") or {}
         # Reuse top_pages_enabled — same surface (homepage+/t/), same
         # constraint (must have a marketing site). No need for a new flag.
-        if lp.get("top_pages_enabled"):
+        # Also require weight > 0 so paused projects (Clone, tenxats,
+        # macOS Session Replay as of 2026-05-08) don't get a /t/ page +
+        # homepage NewsStrip swap they don't want. Posting + Moltbook +
+        # SERP/GSC all already honor weight > 0; this brings top-posts
+        # (and top-pages, see pick_top_pages.py) into line with the rest.
+        if lp.get("top_pages_enabled") and (p.get("weight") or 0) > 0:
             out.append(p.get("name"))
     return out
 
@@ -182,6 +187,18 @@ def build_brief(product, window_days=DEFAULT_WINDOW_DAYS, min_views=DEFAULT_MIN_
     proj = _find_project(cfg, product)
     if not proj:
         raise SystemExit(f"ERROR: product '{product}' not found in config.json")
+
+    # Defense in depth: even if someone runs the orchestrator with an
+    # explicit `./run_top_posts_pipeline.sh tenxats`, refuse if the project
+    # is paused (weight <= 0). Same exit code as "no eligible viral post"
+    # so the orchestrator's case branch treats it as a benign skip.
+    if (proj.get("weight") or 0) <= 0:
+        print(
+            f"SKIP: project '{product}' has weight <= 0 (paused), "
+            f"refusing to ship a top-post page for it",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     lp = proj.get("landing_pages") or {}
     repo_raw = lp.get("repo") or ""
