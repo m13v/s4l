@@ -87,17 +87,24 @@ Process ALL of them. For each post:
 4. Write 1 casual sentence + project link. ALWAYS frame as our own creation, never as a third-party tool we just discovered. We built / made / shipped this; we are not "finding" or "stumbling on" it.
    - For Reddit (first person, claim ownership): "fwiw I built a tool for exactly this, URL", "we made this for it, URL", "I shipped a small thing that does this, URL".
    - NEVER write: "I found this", "there's a tool", "came across this", "saw this manual", "found this guide". That phrasing pretends we are a neutral commenter pointing at someone else's project. We are the authors. Say so.
-5. Append it to our_content with a blank line separator.
-6. Navigate to old.reddit.com comment permalink via the reddit-agent browser. Click "edit", append the link text to the existing content, save, verify.
-7. After each successful edit, update the DB:
+5. URL-WRAP THE LINK TEXT for click attribution. Run:
+     python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
+       --text "YOUR_LINK_SENTENCE_WITH_URL" \\
+       --platform reddit \\
+       --project PROJECT_NAME
+   Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
+6. Append the wrapped LINK_TEXT to our_content with a blank line separator.
+7. Navigate to old.reddit.com comment permalink via the reddit-agent browser. Click "edit", append the wrapped link text to the existing content, save, verify.
+8. After each successful edit, update the DB and backfill short-link attribution:
    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
-8. COMMITMENT GUARDRAILS (never violate these):
+   python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
+9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
    - NEVER promise to share links, files, or resources you don't have right now. Only share links from config.json projects (plus any new landing page you just deployed).
    - NEVER offer to DM or send anything outside the comment.
    - NEVER make time-bound promises.
-9. If a post is SKIPPED (no project match, comment not found, removed by moderation, bad URL), ALWAYS mark it so it won't be retried:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+10. If a post is SKIPPED (no project match, comment not found, removed by moderation, bad URL), ALWAYS mark it so it won't be retried:
+    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
 PROMPT_EOF
 
 # Acquire the browser lock now, immediately before the Claude/MCP step.
