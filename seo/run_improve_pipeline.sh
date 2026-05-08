@@ -48,7 +48,11 @@ with open('$CONFIG') as f:
     c = json.load(f)
 for p in c.get('projects', []):
     lp = p.get('landing_pages') or {}
-    if lp.get('improve_enabled'):
+    # Also require weight > 0 so paused projects (Clone, tenxats,
+    # macOS Session Replay as of 2026-05-08) don't get SEO improve
+    # work. Posting + Moltbook + SERP/GSC + top-pages + top-posts
+    # all gate on weight > 0; this brings improve into line.
+    if lp.get('improve_enabled') and (p.get('weight') or 0) > 0:
         print(p.get('name'))
 "
 }
