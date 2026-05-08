@@ -279,6 +279,8 @@ export LINK_RULE
 
 # Acquire browser lock right before MCP step.
 acquire_lock "twitter-browser" 3600
+# Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
+bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" || true
 ensure_browser_healthy "twitter"
 
 # Campaign wiring: pre-submit suffix injection (Twitter has no edit API, so we
