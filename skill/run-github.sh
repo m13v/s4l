@@ -26,6 +26,52 @@ REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/github-$(date +%Y-%m-%d_%H%M%S).log"
+RUN_START=$(date +%s)
+
+# Idempotent run_monitor.log emitter wired to EXIT/INT/TERM/HUP. Without this,
+# a SIGTERM landing during the post_github.py loop (after `gh issue comment`
+# committed a comment but before the script's own log_run.py call at the
+# bottom of main()) silently drops the run from run_monitor.log. The
+# dashboard reads run_monitor.log, so the operator-visible "last post_github
+# cycle" stays stuck on a stale entry while real comments continue landing
+# unrecorded. Mirrors the same fix shipped to run-reddit-search.sh,
+# run-twitter-cycle.sh, and run-linkedin.sh.
+#
+# Detection mechanism: post_github.py writes a "=== SUMMARY: elapsed=" line
+# to stdout (teed into $LOG_FILE) IMMEDIATELY before its own log_run.py
+# call. Presence of that marker in $LOG_FILE means Python wrote its own
+# summary, so the trap no-ops. Absence means SIGTERM landed before Python
+# could finish, and the trap emits a "sigterm:1" placeholder so the cycle
+# is at least visible on the dashboard.
+#
+# We can't re-derive accurate POSTED counts from the DB at trap-time the way
+# linkedin/twitter do — github posts go through `gh issue comment` and only
+# get a posts-table row from inside post_github.py's log_post call, so a
+# SIGTERM mid-loop may leave 1-2 comments live on github.com with no posts
+# row yet. The placeholder marks the cycle as failed=1 + sigterm:1 so the
+# operator notices; manual reconciliation if the count matters.
+_SA_RUN_SUMMARY_EMITTED=0
+_sa_emit_run_summary_oneshot() {
+    [ "${_SA_RUN_SUMMARY_EMITTED:-0}" = "1" ] && return 0
+    _SA_RUN_SUMMARY_EMITTED=1
+    # Python wrote its own summary? Trust it.
+    if [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ] \
+        && grep -q "=== SUMMARY: elapsed=" "$LOG_FILE" 2>/dev/null; then
+        return 0
+    fi
+    local elapsed cost
+    elapsed=$(( $(date +%s) - ${RUN_START:-$(date +%s)} ))
+    cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                --since "${RUN_START:-0}" \
+                --scripts "post_github" \
+                2>/dev/null || echo "0.0000")
+    python3 "$REPO_DIR/scripts/log_run.py" \
+        --script post_github \
+        --posted 0 --skipped 0 --failed 1 \
+        --cost "$cost" --elapsed "$elapsed" \
+        --failure-reasons "sigterm:1" 2>/dev/null || true
+}
+trap _sa_emit_run_summary_oneshot EXIT INT TERM HUP
 
 echo "=== GitHub Issues Run: $(date) ===" | tee "$LOG_FILE"
 
