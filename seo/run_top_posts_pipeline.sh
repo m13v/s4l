@@ -440,30 +440,25 @@ cur.close(); conn.close()
 print(f"  seo_keywords row staked (provisional slug=$PROVISIONAL_SLUG)")
 PY
 
-        # Run Claude as agent (NOT --print). No --model flag: inherit the CLI
-        # default (matches generate_page.py, run_serp_pipeline.sh, run-*.sh).
-        # Opt-in opus via CLAUDE_MODEL=opus env if you want to force it.
-        # The agent can read the repo, WebFetch sources, write files, run
-        # npm/typecheck.
+        # Run Claude as agent (NOT --print). Sonnet by default for cost (this
+        # is a long agent loop, not a one-shot reasoning step), Opus via
+        # CLAUDE_MODEL=opus env override. The agent can read the repo,
+        # WebFetch sources, write files, run npm/typecheck. Restored from the
+        # auto-commit agent's CLI-default change in d1f7e4e on 2026-05-08.
         #
-        # NB: macOS bash 3.2 trips `set -u` on `"${EMPTY_ARRAY[@]}"` even when
-        # declared with `=()`. Use `${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}` so an
-        # empty array yields nothing instead of "unbound variable". This bug
-        # killed every top_pages target on 2026-05-08 in the sibling script.
-        MODEL_ARGS=()
-        if [ -n "${CLAUDE_MODEL:-}" ]; then
-            MODEL_ARGS=(--model "$CLAUDE_MODEL")
-        fi
+        # Parameter-expansion default avoids the bash 3.2 set -u empty-array
+        # bug that killed top_pages after the agent's array-form change.
+        MODEL="${CLAUDE_MODEL:-sonnet}"
         STREAM_FILE="$PER_LOG_DIR/${TS}_stream.jsonl"
         OUTPUT_FILE="$PER_LOG_DIR/${TS}.output.txt"
 
         REPO_PATH=$(python3 -c "import json; b=json.load(open('$BRIEF_FILE')); print(b['repo_path'])")
-        echo "  invoking Claude (model=${CLAUDE_MODEL:-cli-default}, agent mode, in $REPO_PATH)..."
+        echo "  invoking Claude (--model $MODEL, agent mode, in $REPO_PATH)..."
 
         cd "$REPO_PATH" || { echo "  cd failed: $REPO_PATH"; exit 14; }
 
         # Stream-json so we can grep for quota markers afterward.
-        if ! claude_with_retry ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
+        if ! claude_with_retry --model "$MODEL" \
                 --output-format stream-json \
                 --verbose \
                 --permission-mode acceptEdits \
