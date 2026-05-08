@@ -789,50 +789,42 @@ def build_discover_prompt(project, config, limit, top_report, recent_comments,
     if dud_queries_report and dud_queries_report.strip() not in ("[]", ""):
         dud_queries_ctx = f"\n## Dead queries (skip these exact phrasings):\n{dud_queries_report}\n"
 
-    return f"""Generate Reddit search queries and emit EVERY thread from each search result as a candidate. DO NOT pick, rank, or filter threads. The downstream pipeline applies a numerical delta filter (cumulative engagement gain over time) to decide which threads are worth posting on.
+    return f"""You generate Reddit search queries. The search tool runs in OPAQUE mode this cycle: it dumps every returned thread to a side file for the ripen pipeline and prints back ONLY a one-line summary count. You do NOT see thread content, titles, scores, or URLs. You cannot filter results — the ripen step (numerical delta gate) is the only filter.
 
 Topic area: {project_json}
 Content angle: {content_angle}
 {recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
-## Tools (via Bash)
+## Tool (via Bash)
 - Search: python3 {REDDIT_TOOLS} search "QUERY" --limit 25
 - Search by sub: python3 {REDDIT_TOOLS} search "QUERY" --subreddits AI_Agents,SaaS --time month
 - Search broader time: python3 {REDDIT_TOOLS} search "QUERY" --time month
 
+## What you'll see from the tool
+- stdout: one short line, e.g. `OK: 23 threads passed to ripen pipeline (results not shown)`
+- stderr: `[reddit_search] q="..." raw=25 returned=23 blocked_sub=2 archived=0 locked=0 too_old=0 already_posted_flagged=0 top_score=187 top_comments=48`
+
+You can use these counts to decide whether to run another query. You CANNOT
+read the threads themselves. They are already on disk for ripen.
+
 ## CRITICAL Bash rules
 - NEVER use run_in_background=true. All commands run foreground.
-- Run AT MOST 2 searches total. Each search returns up to 25 threads.
-- If rate-limited, use whatever results you already have.
-
-## Mission (no selection!)
-Your job is to RUN SEARCHES and DUMP every result. Reddit's persistent
-snapshot table tracks engagement deltas across cycles, and a separate
-ripen step measures fresh 5-min T0/T1 deltas on the entire candidate
-batch BEFORE deciding which threads to actually post on. Picking a winner
-here would short-circuit that data-driven gate.
+- Run AT MOST 2 searches total. Each search dumps up to 25 threads.
+- Do NOT cat, ls, find, or otherwise inspect /tmp or any dump file. The dump
+  directory is private to the ripen step. You don't need to know the path.
+- If rate-limited, stop. The ripen step uses whatever was dumped before the limit.
 
 ## Steps
 1. Pick 1-2 concepts from the project's search_topics: {json.dumps(topics_list)}.
    Rephrase each into a natural Reddit search query (vernacular, pain points).
    Avoid the dud queries listed above.
-2. Run the search(es). Each call returns a JSON array of threads with
-   `url`, `title`, `author`, `score`, `num_comments`, `subreddit`, and the
-   server-side `already_posted` flag (plus SKIP marker when truthy).
-3. For EACH thread in EACH search response, emit ONE candidate JSON line.
-   Include the raw `score` and `num_comments` from the search result so the
-   downstream ripen step can use them as T0 (no extra HTTP calls needed).
-   SKIP only:
-     - threads with already_posted=true (already commented in this thread)
-     - threads with the SKIP field set
-4. After every thread is emitted, output DONE on its own line.
+2. Run the search(es). Watch the stdout/stderr summary for each call.
+3. (Optional) If a query returns `returned=0`, you may try ONE more rephrasing.
+   Otherwise, after 1-2 queries, your job is done.
+4. Output DONE on its own line.
 
-## OUTPUT FORMAT (one JSON per line; no commentary)
-{{"action": "candidate", "thread_url": "https://old.reddit.com/r/sub/comments/abc/title/", "thread_title": "the thread title", "thread_author": "username", "score": 42, "num_comments": 7, "search_topic": "the seed concept you used"}}
-
-Do NOT add a `text` field. Do NOT pre-rank or pre-score. Do NOT skip threads
-because they "look uninteresting" — emit them all. The post pipeline will
-discard low-momentum candidates downstream after measuring engagement
-velocity.
+## OUTPUT FORMAT
+Just output `DONE` on its own line after running your searches. No JSON,
+no candidate lines, no commentary about thread content (you don't see any).
 """
 
 
@@ -1334,21 +1326,76 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     os.environ["SAPS_REDDIT_PROJECT"] = project_name
     os.environ["SAPS_REDDIT_BATCH_ID"] = plan_batch_id
 
-    print(f"[post_reddit] Starting discover session (limit={args.limit}, timeout={args.timeout}s)")
+    # Opaque-results discover (post 2026-05-07 refactor): create a private
+    # dump dir and tell reddit_tools.py via env var to write thread JSON
+    # there instead of stdout. Claude only sees count summaries, never
+    # individual threads, so it cannot pre-filter the way it did in the
+    # 20:16:39 cycle (returned 0 of 39 expected). After Claude exits we
+    # harvest every dumped file directly into the candidate plan.
+    import tempfile as _tempfile
+    import shutil as _shutil
+    import glob as _glob
+    dump_dir = _tempfile.mkdtemp(prefix=f"reddit-discover-{project_name}-")
+    os.environ["SAPS_REDDIT_DUMP_DIR"] = dump_dir
+
+    print(f"[post_reddit] Starting discover session (limit={args.limit}, timeout={args.timeout}s, dump_dir={dump_dir})")
     start = time.time()
-    ok, output, usage = run_claude(prompt, timeout=args.timeout)
+    try:
+        ok, output, usage = run_claude(prompt, timeout=args.timeout)
+    finally:
+        # Always unset so a subsequent (non-discover) reddit_tools call in
+        # this process doesn't accidentally inherit dump mode.
+        os.environ.pop("SAPS_REDDIT_DUMP_DIR", None)
     elapsed = time.time() - start
     print(f"[post_reddit] Discover finished in {elapsed:.0f}s (${usage['cost_usd']:.4f})")
 
+    # Harvest the dump dir BEFORE checking the Claude exit code: even if
+    # Claude crashed mid-run, any searches it completed before the crash
+    # produced dump files we should still feed to ripen.
+    candidates = []
+    seen_urls = set()
+    dump_files = sorted(_glob.glob(os.path.join(dump_dir, "result-*.json")))
+    print(f"[post_reddit] Discover dump dir contains {len(dump_files)} file(s)")
+    for dump_path in dump_files:
+        try:
+            with open(dump_path) as df:
+                payload = json.load(df)
+        except Exception as e:
+            print(f"[post_reddit] WARN: skipping unreadable dump {dump_path}: {e}",
+                  file=sys.stderr)
+            continue
+        query = payload.get("query") or ""
+        for t in payload.get("threads") or []:
+            url = t.get("url") or ""
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidates.append({
+                "action": "candidate",
+                "thread_url": url,
+                "thread_title": t.get("title") or "",
+                "thread_author": t.get("author") or "",
+                "score": int(t.get("score") or 0),
+                "num_comments": int(t.get("num_comments") or 0),
+                "search_topic": query,
+            })
+    # Best-effort cleanup; the OS will eventually reap /tmp anyway.
+    try:
+        _shutil.rmtree(dump_dir, ignore_errors=True)
+    except Exception:
+        pass
+
     if not ok:
         print(f"[post_reddit] Discover FAILED: {output[:300]}")
-        return {"project_name": project_name, "decisions": [], "cost": usage["cost_usd"],
-                "error": "claude_failed"}
+        # If Claude crashed but we have harvested candidates, keep them.
+        # Only fall through to claude_failed when we got nothing.
+        if not candidates:
+            return {"project_name": project_name, "decisions": [], "cost": usage["cost_usd"],
+                    "error": "claude_failed"}
 
-    candidates = parse_candidates(output)
-    print(f"[post_reddit] Discover found {len(candidates)} candidate(s)")
+    print(f"[post_reddit] Discover harvested {len(candidates)} candidate(s) from dump dir")
     if not candidates:
-        print(f"[post_reddit] No candidates in output (last 10 lines):")
+        print(f"[post_reddit] No candidates dumped — Claude may have skipped searches. Last 10 lines of output:")
         for line in output.strip().split("\n")[-10:]:
             print(f"  {line}")
 
