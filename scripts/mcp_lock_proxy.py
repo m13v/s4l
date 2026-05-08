@@ -63,8 +63,10 @@ heartbeat side effect.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -242,6 +244,45 @@ def _proxy_proc_to_stdout(proc: subprocess.Popen) -> None:
             break
 
 
+# ---- Subprocess lifecycle ---------------------------------------------------
+
+_subprocess_handle: subprocess.Popen | None = None
+
+
+def _cleanup_subprocess() -> None:
+    """Make sure the wrapped MCP server dies if our proxy goes away.
+
+    Without this, killing the proxy (e.g. when claude exits abnormally) would
+    leave `npx @playwright/mcp@latest` and its Chrome child running, which
+    permanently holds the reddit browser profile lock.
+    """
+    p = _subprocess_handle
+    if p is None:
+        return
+    try:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _signal_exit(signum, _frame) -> None:
+    _log(f"received signal {signum}, exiting")
+    _cleanup_subprocess()
+    # Use os._exit to skip atexit (already ran cleanup) and avoid stuck threads.
+    os._exit(0)
+
+
 # ---- Entrypoint -------------------------------------------------------------
 
 
@@ -286,14 +327,27 @@ def main() -> int:
 
     _log(f"starting wrapper lock_name={LOCK_NAME} ttl={LOCK_TTL} cmd={real_cmd}")
 
+    # Install lifecycle hooks BEFORE spawning the child, so any spawn-time
+    # crash still triggers cleanup.
+    atexit.register(_cleanup_subprocess)
     try:
-        proc = subprocess.Popen(
+        signal.signal(signal.SIGTERM, _signal_exit)
+        signal.signal(signal.SIGINT, _signal_exit)
+        signal.signal(signal.SIGHUP, _signal_exit)
+    except (ValueError, OSError):
+        # Not all platforms allow handler installation in non-main threads.
+        pass
+
+    global _subprocess_handle
+    try:
+        _subprocess_handle = subprocess.Popen(
             real_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
             bufsize=0,
         )
+        proc = _subprocess_handle
     except FileNotFoundError as e:
         print(f"mcp_lock_proxy: failed to spawn real MCP server: {e}", file=sys.stderr)
         return 127
