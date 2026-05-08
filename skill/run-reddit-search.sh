@@ -46,21 +46,22 @@ TOTAL_CANDIDATES=0  # total reddit_candidates rows touched (discovered + salvage
 RUN_START=$(date +%s)
 FAILURE_REASONS=""
 
-# Helper: parse `posted=N failed=M` from post-phase stdout and roll into the
-# cycle accumulators. Used by both salvage and discover post lanes.
-_accumulate_post_results() {
+# Helper: parse `posted=N failed=M` from post-phase stdout. Returns "posted failed"
+# on stdout. Caller MUST do the TOTAL_* accumulation in the parent shell;
+# previously this function tried to mutate TOTAL_POSTED/TOTAL_FAILED itself,
+# but bash's $() captures spawn a subshell where mutations to the parent's
+# variables are silently lost. The 21:01 salvage lane really posted 4 to DB
+# but run_monitor.log showed posted=0 because of this bug. (Fixed 2026-05-07.)
+_parse_post_results() {
     local out="$1"
     local rc="$2"
     if [ "$rc" = "0" ]; then
         local posted failed
         posted=$(echo "$out" | grep -oE 'posted=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
         failed=$(echo "$out" | grep -oE 'failed=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
-        TOTAL_POSTED=$((TOTAL_POSTED + ${posted:-0}))
-        TOTAL_FAILED=$((TOTAL_FAILED + ${failed:-0}))
-        echo "$posted $failed"
+        echo "${posted:-0} ${failed:-0}"
     else
         log "Post phase: exit code $rc; counting as failed."
-        TOTAL_FAILED=$((TOTAL_FAILED + 1))
         echo "0 1"
     fi
 }
@@ -247,8 +248,12 @@ if [ "$HAS_SALVAGE" = "1" ]; then
 
     release_lock "reddit-browser"
 
-    SALVAGE_POSTED_FAILED=$(_accumulate_post_results "$SALVAGE_POST_OUT" "$SALVAGE_POST_RC")
-    log "Salvage lane: $SALVAGE_POSTED_FAILED (posted failed)"
+    # Parse + accumulate in parent shell. $() spawns a subshell, so we must
+    # do the TOTAL_* increments AFTER capturing the helper's stdout.
+    read -r SALVAGE_POSTED SALVAGE_FAILED <<< "$(_parse_post_results "$SALVAGE_POST_OUT" "$SALVAGE_POST_RC")"
+    TOTAL_POSTED=$((TOTAL_POSTED + ${SALVAGE_POSTED:-0}))
+    TOTAL_FAILED=$((TOTAL_FAILED + ${SALVAGE_FAILED:-0}))
+    log "Salvage lane: posted=$SALVAGE_POSTED failed=$SALVAGE_FAILED"
     _accumulate_cdp_reasons "$SALVAGE_POST_OUT"
 fi
 
@@ -350,8 +355,10 @@ if [ "$HAS_DISCOVER" = "1" ]; then
 
     release_lock "reddit-browser"
 
-    DISCOVER_POSTED_FAILED=$(_accumulate_post_results "$DISCOVER_POST_OUT" "$DISCOVER_POST_RC")
-    log "Discover lane: $DISCOVER_POSTED_FAILED (posted failed)"
+    read -r DISCOVER_POSTED DISCOVER_FAILED <<< "$(_parse_post_results "$DISCOVER_POST_OUT" "$DISCOVER_POST_RC")"
+    TOTAL_POSTED=$((TOTAL_POSTED + ${DISCOVER_POSTED:-0}))
+    TOTAL_FAILED=$((TOTAL_FAILED + ${DISCOVER_FAILED:-0}))
+    log "Discover lane: posted=$DISCOVER_POSTED failed=$DISCOVER_FAILED"
     _accumulate_cdp_reasons "$DISCOVER_POST_OUT"
 fi
 
