@@ -50,8 +50,11 @@ _EVENT_CLAUSES = {
 
 # Metrics that need DISTINCT counting (e.g. dedupe client + server captures
 # of the same event by email). Other metrics use plain count().
+# `coalesce(properties.email, distinct_id)` because some emitters (studyly's
+# /api/signup, custom routes) set only distinct_id=email and leave
+# properties.email null; without coalesce those rows fall out of the count.
 _DISTINCT_KEY = {
-    "email_signups": "properties.email",
+    "email_signups": "coalesce(properties.email, distinct_id)",
 }
 
 
