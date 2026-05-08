@@ -60,6 +60,21 @@ if [ -z "${POSTHOG_PERSONAL_API_KEY:-}" ]; then
     export POSTHOG_PERSONAL_API_KEY
 fi
 
+# Anthropic API key for the structured-output proposal step (propose_keyword.py).
+# Tries project-specific key first, then existing user keys. propose_keyword.py
+# itself has the same fallback logic, so this export is just a fast-path that
+# also surfaces a missing-key warning early.
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    for _svc in "Anthropic API Key Social-Autoposter" "Anthropic API Key Hindsight" "Anthropic API Key Fazm" "Claude API"; do
+        ANTHROPIC_API_KEY=$(security find-generic-password -s "$_svc" -w 2>/dev/null || true)
+        [ -n "$ANTHROPIC_API_KEY" ] && break
+    done
+    export ANTHROPIC_API_KEY
+    if [ -z "$ANTHROPIC_API_KEY" ]; then
+        echo "WARN: no ANTHROPIC_API_KEY available; propose_keyword.py will fail" >&2
+    fi
+fi
+
 _timestamp() { date -u +%Y-%m-%d_%H%M%S; }
 
 _insert_keyword() {
