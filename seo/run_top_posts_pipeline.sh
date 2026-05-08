@@ -440,25 +440,26 @@ cur.close(); conn.close()
 print(f"  seo_keywords row staked (provisional slug=$PROVISIONAL_SLUG)")
 PY
 
-        # Run Claude as agent (NOT --print). Sonnet by default for cost (this
-        # is a long agent loop, not a one-shot reasoning step), Opus via
-        # CLAUDE_MODEL=opus env override. The agent can read the repo,
-        # WebFetch sources, write files, run npm/typecheck. Restored from the
-        # auto-commit agent's CLI-default change in d1f7e4e on 2026-05-08.
+        # Run Claude as agent (NOT --print). Inherit the global default model
+        # from ~/.claude/settings.json (currently "claude-opus-4-7") so the
+        # whole social-autoposter stack stays on the same opus build without
+        # each pipeline pinning its own version string. CLAUDE_MODEL env wins
+        # for one-off overrides. The agent reads the repo, WebFetches sources,
+        # writes files, runs npm/typecheck.
         #
-        # Parameter-expansion default avoids the bash 3.2 set -u empty-array
-        # bug that killed top_pages after the agent's array-form change.
-        MODEL="${CLAUDE_MODEL:-sonnet}"
+        # The conditional `${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"}` expands
+        # to nothing when unset (CLI uses settings.json) and to `--model X`
+        # when set. Sidesteps the bash 3.2 set -u empty-array bug.
         STREAM_FILE="$PER_LOG_DIR/${TS}_stream.jsonl"
         OUTPUT_FILE="$PER_LOG_DIR/${TS}.output.txt"
 
         REPO_PATH=$(python3 -c "import json; b=json.load(open('$BRIEF_FILE')); print(b['repo_path'])")
-        echo "  invoking Claude (--model $MODEL, agent mode, in $REPO_PATH)..."
+        echo "  invoking Claude (model=${CLAUDE_MODEL:-settings.json default}, agent mode, in $REPO_PATH)..."
 
         cd "$REPO_PATH" || { echo "  cd failed: $REPO_PATH"; exit 14; }
 
         # Stream-json so we can grep for quota markers afterward.
-        if ! claude_with_retry --model "$MODEL" \
+        if ! claude_with_retry ${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"} \
                 --output-format stream-json \
                 --verbose \
                 --permission-mode acceptEdits \
