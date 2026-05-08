@@ -8,22 +8,26 @@
 
 set -euo pipefail
 
+# Bootstrap log paths early so the singleton-cleanup output below gets captured
+# in the same log file the rest of the run uses.
+LOG_DIR="$HOME/social-autoposter/skill/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/scan-twitter-followups-$(date +%Y-%m-%d_%H%M%S).log"
+
 # Browser-profile lock shared with all twitter pipelines.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "twitter-browser" 0
 # Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" || true
+bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 acquire_lock "scan-twitter-followups" 0
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
 
 REPO_DIR="$HOME/social-autoposter"
-LOG_DIR="$REPO_DIR/skill/logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/scan-twitter-followups-$(date +%Y-%m-%d_%H%M%S).log"
+# (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
-echo "=== Scan Twitter Follow-ups Run: $(date) ===" | tee "$LOG_FILE"
+echo "=== Scan Twitter Follow-ups Run: $(date) ===" | tee -a "$LOG_FILE"
 START_TS=$(date +%s)
 
 DAYS="${FOLLOWUP_DAYS:-14}"
