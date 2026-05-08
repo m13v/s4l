@@ -440,20 +440,25 @@ cur.close(); conn.close()
 print(f"  seo_keywords row staked (provisional slug=$PROVISIONAL_SLUG)")
 PY
 
-        # Run Claude as agent (NOT --print). Sonnet by default for cost; Opus
-        # via env CLAUDE_MODEL=opus override. The agent can read the repo,
-        # WebFetch sources, write files, run npm/typecheck.
-        MODEL="${CLAUDE_MODEL:-sonnet}"
+        # Run Claude as agent (NOT --print). No --model flag: inherit the CLI
+        # default (matches generate_page.py, run_serp_pipeline.sh, run-*.sh).
+        # Opt-in opus via CLAUDE_MODEL=opus env if you want to force it.
+        # The agent can read the repo, WebFetch sources, write files, run
+        # npm/typecheck.
+        MODEL_ARGS=()
+        if [ -n "${CLAUDE_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$CLAUDE_MODEL")
+        fi
         STREAM_FILE="$PER_LOG_DIR/${TS}_stream.jsonl"
         OUTPUT_FILE="$PER_LOG_DIR/${TS}.output.txt"
 
         REPO_PATH=$(python3 -c "import json; b=json.load(open('$BRIEF_FILE')); print(b['repo_path'])")
-        echo "  invoking Claude (--model $MODEL, agent mode, in $REPO_PATH)..."
+        echo "  invoking Claude (model=${CLAUDE_MODEL:-cli-default}, agent mode, in $REPO_PATH)..."
 
         cd "$REPO_PATH" || { echo "  cd failed: $REPO_PATH"; exit 14; }
 
         # Stream-json so we can grep for quota markers afterward.
-        if ! claude_with_retry --model "$MODEL" \
+        if ! claude_with_retry "${MODEL_ARGS[@]}" \
                 --output-format stream-json \
                 --verbose \
                 --permission-mode acceptEdits \
