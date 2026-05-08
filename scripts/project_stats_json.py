@@ -558,23 +558,35 @@ def _windowed_post_engagement(conn, name, days):
 
     project_stats.get_post_stats aggregates engagement over ALL time for the
     project, which is misleading when the window is a day or a week. Here we
-    filter by posted_at so upvotes/comments/views match the same 24h slice as
-    the 'recent' post count.
+    filter by posted_at so upvotes/comments/views/post_clicks match the same
+    24h slice as the 'recent' post count.
+
+    post_clicks: SUM of post_links.clicks attributable to short links minted
+    for posts in this project's window (post_id-keyed; reply-keyed clicks
+    excluded so we don't double-count engagement on replies hanging off
+    someone else's thread).
     """
     cur = conn.execute(
-        "SELECT COALESCE(SUM(upvotes), 0), "
-        "COALESCE(SUM(comments_count), 0), "
-        "COALESCE(SUM(views) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0), "
-        "COUNT(*) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')) "
-        "FROM posts WHERE project_name = %s AND posted_at >= NOW() - INTERVAL '" + str(days) + " days'",
+        "SELECT COALESCE(SUM(p.upvotes), 0), "
+        "COALESCE(SUM(p.comments_count), 0), "
+        "COALESCE(SUM(p.views) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), 0), "
+        "COUNT(*) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), "
+        "COALESCE(SUM(pl.total_clicks), 0) "
+        "FROM posts p "
+        "LEFT JOIN ("
+        "  SELECT post_id, SUM(clicks)::int AS total_clicks "
+        "  FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+        ") pl ON pl.post_id = p.id "
+        "WHERE p.project_name = %s AND p.posted_at >= NOW() - INTERVAL '" + str(days) + " days'",
         (name,),
     )
-    row = cur.fetchone() or (0, 0, 0, 0)
+    row = cur.fetchone() or (0, 0, 0, 0, 0)
     return {
         "upvotes": int(row[0] or 0),
         "comments": int(row[1] or 0),
         "views": int(row[2] or 0),
         "views_posts": int(row[3] or 0),
+        "post_clicks": int(row[4] or 0),
     }
 
 
@@ -838,6 +850,12 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
             "upvotes_recent": eng_recent["upvotes"],
             "comments_recent": eng_recent["comments"],
             "views_recent": eng_recent["views"] if eng_recent["views_posts"] > 0 else None,
+            # post_clicks_recent: SUM of post_links.clicks for short links
+            # minted for posts in this project's window. Pre-2026-05-07 rows
+            # may include bot prefetches; post-2026-05-07 rows are humans-only
+            # (Twitter card / LinkedIn unfurl / Slack preview filtered at the
+            # resolver via post_link_clicks.is_bot). See server.js /api/top.
+            "post_clicks_recent": eng_recent["post_clicks"],
         },
         "seo": {"pages_recent": seo_pages_recent},
         "platforms": platforms,
