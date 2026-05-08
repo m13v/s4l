@@ -348,40 +348,53 @@ for r in brief.get("ranking", [])[:10]:
     prompt += f"  {r['score']:>6} {r['product']:20} {r['page_url']}\n"
 
 prompt += f"""
-RESEARCH FIRST (REQUIRED):
-You have WebSearch. Use it before proposing anything. The model knowledge
-cutoff predates {CURRENT_DATE_HUMAN}, so you do NOT know what is actually
-fresh right now from priors alone. Run at least 3 WebSearch queries to
-ground your proposal in real {CURRENT_DATE_HUMAN} news:
+RESEARCH FIRST (HARD REQUIREMENT — do not skip):
+Your training cutoff predates {CURRENT_DATE_HUMAN}. You do NOT know what
+shipped recently. You MUST call WebSearch before proposing anything.
+A proposal without web-grounded evidence is invalid output.
 
-  1. Search the global winner's topical area filtered to recent news. Examples:
+Run AT LEAST 3 WebSearch queries (more is fine). Suggested queries:
+
+  1. Topical area from the global winner, filtered to recent news:
      - "<topic from winner> {CURRENT_MONTH} {CURRENT_YEAR}"
      - "<topic> news {CURRENT_YEAR}" / "<topic> latest release"
      - "<vendor or category> announcement {CURRENT_MONTH} {CURRENT_YEAR}"
-  2. Search for the TARGET project's audience-specific news. Examples:
+  2. TARGET project's audience-specific news:
      - "<target ICP / use case> new tool {CURRENT_YEAR}"
      - "<target category> launch {CURRENT_MONTH} {CURRENT_YEAR}"
-  3. If a specific model, product, or release surfaces (e.g. a new LLM,
-     a new framework, a new API), search that thing by name to confirm it
-     actually shipped in the last ~30 days and pull 1-2 concrete details
-     (version number, release date, capability claim).
+  3. If a specific model / product / release surfaces (e.g. a new LLM, a
+     new framework, a new API, a vendor announcement), search that thing
+     by name to confirm it actually shipped in the last ~30 days and pull
+     1-2 concrete details (version number, release date, capability claim).
+     Use WebFetch on the most relevant result if a search snippet alone is
+     not enough.
 
-Use what you find. The proposed page should ride the global winner's
-momentum AND be grounded in something that actually happened recently.
+Use what you find. The proposed page must ride the global winner's
+topical momentum AND be grounded in something that demonstrably happened
+recently (cite the source URL in your concept field).
 
-PROPOSAL SHAPES (pick whichever fits what you found):
-- Single-blockbuster post about ONE specific recent release (e.g. a new
-  model, framework, vendor launch). The keyword can be the product name
-  itself or a how-to/explainer about it. Date does NOT need to appear in
-  the slug or keyword if the post is about a single named thing — its
-  freshness comes from being about a real {CURRENT_DATE_HUMAN} event.
-- Roundup/digest post covering multiple recent releases in the topical
-  area. These SHOULD include "{CURRENT_MONTH_LOWER} {CURRENT_YEAR}" or
-  "{CURRENT_YEAR}" in the keyword/slug.
-- Comparison or how-to that's genuinely new because of a recent change
-  (e.g. "X vs Y after the new Z release"). Dated phrasing optional.
-- Evergreen comparison/how-to is acceptable ONLY if WebSearch returned
-  no relevant recent news. Default to a fresh-news angle if one exists.
+PROPOSAL SHAPES (pick whichever best fits what your research surfaced):
+
+A. SINGLE-BLOCKBUSTER (preferred when a single notable release dominates).
+   One post about ONE specific recent thing — a new model, a new product,
+   a vendor launch, a feature drop. The keyword can be the product/model
+   name itself ("claude opus 4.7 deep dive") or a how-to/explainer about
+   it ("how to use <new thing> for <use case>"). Date does NOT need to
+   appear in the slug or keyword — freshness comes from the post being
+   about a real {CURRENT_DATE_HUMAN} event.
+
+B. ROUNDUP/DIGEST (preferred when multiple notable releases happened).
+   Covers several recent releases in the topical area. SHOULD include
+   "{CURRENT_MONTH_LOWER} {CURRENT_YEAR}" or "{CURRENT_YEAR}" in the
+   keyword/slug ("ai model releases {CURRENT_MONTH_LOWER} {CURRENT_YEAR}").
+
+C. COMPARISON / HOW-TO with a fresh hook (acceptable when one specific
+   recent change makes an old comparison newly relevant). Example:
+   "X vs Y after the new Z release". Dated phrasing optional.
+
+D. EVERGREEN comparison/how-to. Use ONLY if WebSearch returned no
+   relevant recent news. Default to A or B whenever your research
+   surfaced something concrete.
 
 Rules:
 - keyword must be a 3-8 word search phrase a human would actually type
@@ -401,7 +414,21 @@ PY
 
     # Use Opus for the per-project keyword/slug proposal (needs reasoning to
     # translate the concept across different audiences/positioning).
-    if ! claude_with_retry --model opus --print --output-format json < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
+    #
+    # WebSearch + WebFetch are REQUIRED for this call. The prompt instructs
+    # the model to run >=3 WebSearch queries to ground proposals in real
+    # current-month news (since the model's training cutoff predates today).
+    # Without --allowed-tools and --dangerously-skip-permissions, headless
+    # Claude silently denies tool calls and the model falls back to priors —
+    # which is how we ended up with zero "may-2026" pages despite April having
+    # 28 of them.
+    #
+    # No --max-turns: the model needs an unbounded number of tool turns to
+    # do real research (search, optionally fetch a result page, then propose).
+    if ! claude_with_retry --model opus --print --output-format json \
+            --allowed-tools "WebSearch,WebFetch" \
+            --dangerously-skip-permissions \
+            < "$PROPOSAL_PROMPT" > "$PROPOSAL_FILE" 2>>"$PER_LOG"; then
         echo "  claude opus proposal failed (after retries)"
         exit 10
     fi
