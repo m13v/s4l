@@ -378,30 +378,28 @@ def cmd_release(name: str) -> int:
 def cmd_heartbeat(name: str, ttl: int) -> int:
     """Bump the lease expiry. Called by the MCP wrapper on browser activity.
 
-    Refuses to bump if the lock is held by someone other than us (defends
-    against a peer claude session's MCP wrapper accidentally extending the
-    holder's lease). Refuses if the lock dir is gone entirely.
+    Design intent: the heartbeat IS the activity signal. If any reddit-agent
+    MCP browser call is happening anywhere on the box, the lease should stay
+    alive — independent of which process tree branch is firing the bump. So
+    we bump unconditionally as long as the lock dir exists.
+
+    Why no ownership check: the orchestrator's bash subprocess (which calls
+    `acquire`) and the MCP wrapper's heartbeat subprocess descend from
+    different parents, so a strict `holder_pid == find_owner_pid()` check
+    can falsely reject legit heartbeats in test environments and even in
+    edge cases in prod (e.g. when the launchd → script → claude chain
+    walks differently for a python subprocess vs. a bash subprocess).
+    The lock's correctness is enforced at acquire/release; heartbeat is
+    just a "yes, work is happening, don't expire me yet" pulse.
+
+    Worst case if a peer's wrapper accidentally bumps the holder's lease:
+    the holder keeps the lock 90s longer than strictly necessary. Bounded
+    by `--ttl`. The peer's `acquire` queue still proceeds in FIFO order
+    once activity ceases.
     """
-    lock_dir, pid_file, _ = lock_paths(name)
+    lock_dir, _pid_file, _ = lock_paths(name)
     if not lock_dir.is_dir():
         print("NOT_HELD", flush=True)
-        return 1
-    holder_pid = None
-    if pid_file.is_file():
-        try:
-            holder_pid = int(pid_file.read_text().strip() or "0")
-        except Exception:
-            holder_pid = None
-    expected_owner = find_owner_pid()
-    if (
-        holder_pid is not None
-        and holder_pid != expected_owner
-        and pid_alive(holder_pid)
-    ):
-        print(
-            f"HELD_BY_OTHER holder_pid={holder_pid} our_owner={expected_owner}",
-            flush=True,
-        )
         return 1
     new_expires = time.time() + ttl
     if not write_expires_at(lock_dir, new_expires):
