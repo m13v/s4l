@@ -452,7 +452,26 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
     if apply_campaigns:
         for cid, suffix, sample_rate in _load_active_twitter_campaigns():
             if random.random() < sample_rate:
-                text = text + suffix
+                # Wrap any URLs in the suffix through dm_short_links so clicks
+                # attribute. Falls back to raw suffix if wrap fails (defensive;
+                # most active suffixes are plain text like " written with ai").
+                wrapped_suffix = suffix
+                if 'http' in suffix:
+                    try:
+                        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                        from dm_short_links import wrap_text_for_post
+                        # project_name unknown at suffix layer; pass empty so the
+                        # wrapper auto-detects via URL hostname against config.json.
+                        wrap_res = wrap_text_for_post(text=suffix, platform='twitter',
+                                                      project_name='')
+                        if wrap_res.get('ok') and wrap_res.get('codes'):
+                            wrapped_suffix = wrap_res['text']
+                            print(f"[reply_to_tweet] suffix wrap codes={wrap_res['codes']}",
+                                  file=sys.stderr)
+                    except Exception as _e:
+                        print(f"[reply_to_tweet] suffix wrap failed ({_e}); raw",
+                              file=sys.stderr)
+                text = text + wrapped_suffix
                 applied_campaigns.append(cid)
         print(f"[reply_to_tweet] applied_campaigns={applied_campaigns} text_len={len(text)}",
               file=sys.stderr)
