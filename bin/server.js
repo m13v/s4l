@@ -10296,7 +10296,16 @@ function renderTopPosts(payload) {
         filterPredicate: filterPredicateGte },
       { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
         formatter: (_v, r) => {
-          const hasLink = r.link_count > 0;
+          // Match the filterPredicate below: a post counts as "has link"
+          // if either post_links has a row OR the comment text itself
+          // contains a URL (the plain_url_ab_skip / plain_url_no_lp paths
+          // post the URL inline without going through dm_short_links, so
+          // link_count stays 0 even though the user clearly sent a link).
+          // Doubled backslashes because we live inside a server template
+          // literal (see feedback_server_js_template_regex memory).
+          const URL_RE_DISPLAY = /https?:\\/\\/\\S+|(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[\\w\\-./?#=&%+~:@!$,;*]+/i;
+          const hasInlineUrl = !!(r.our_content && URL_RE_DISPLAY.test(String(r.our_content)));
+          const hasLink = Number(r.link_count) > 0 || hasInlineUrl;
           const real    = Number(r.link_real_clicks)   || 0;
           const bots    = Number(r.link_bot_clicks)    || 0;
           const backfill= Number(r.link_backfill_real) || 0;
