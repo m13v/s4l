@@ -348,25 +348,50 @@ for r in brief.get("ranking", [])[:10]:
     prompt += f"  {r['score']:>6} {r['product']:20} {r['page_url']}\n"
 
 prompt += f"""
+RESEARCH FIRST (REQUIRED):
+You have WebSearch. Use it before proposing anything. The model knowledge
+cutoff predates {CURRENT_DATE_HUMAN}, so you do NOT know what is actually
+fresh right now from priors alone. Run at least 3 WebSearch queries to
+ground your proposal in real {CURRENT_DATE_HUMAN} news:
+
+  1. Search the global winner's topical area filtered to recent news. Examples:
+     - "<topic from winner> {CURRENT_MONTH} {CURRENT_YEAR}"
+     - "<topic> news {CURRENT_YEAR}" / "<topic> latest release"
+     - "<vendor or category> announcement {CURRENT_MONTH} {CURRENT_YEAR}"
+  2. Search for the TARGET project's audience-specific news. Examples:
+     - "<target ICP / use case> new tool {CURRENT_YEAR}"
+     - "<target category> launch {CURRENT_MONTH} {CURRENT_YEAR}"
+  3. If a specific model, product, or release surfaces (e.g. a new LLM,
+     a new framework, a new API), search that thing by name to confirm it
+     actually shipped in the last ~30 days and pull 1-2 concrete details
+     (version number, release date, capability claim).
+
+Use what you find. The proposed page should ride the global winner's
+momentum AND be grounded in something that actually happened recently.
+
+PROPOSAL SHAPES (pick whichever fits what you found):
+- Single-blockbuster post about ONE specific recent release (e.g. a new
+  model, framework, vendor launch). The keyword can be the product name
+  itself or a how-to/explainer about it. Date does NOT need to appear in
+  the slug or keyword if the post is about a single named thing — its
+  freshness comes from being about a real {CURRENT_DATE_HUMAN} event.
+- Roundup/digest post covering multiple recent releases in the topical
+  area. These SHOULD include "{CURRENT_MONTH_LOWER} {CURRENT_YEAR}" or
+  "{CURRENT_YEAR}" in the keyword/slug.
+- Comparison or how-to that's genuinely new because of a recent change
+  (e.g. "X vs Y after the new Z release"). Dated phrasing optional.
+- Evergreen comparison/how-to is acceptable ONLY if WebSearch returned
+  no relevant recent news. Default to a fresh-news angle if one exists.
+
 Rules:
 - keyword must be a 3-8 word search phrase a human would actually type
   for the TARGET project's audience.
 - slug must be kebab-case, ASCII, <= 64 chars, unique on the target site.
-- concept must be 1-2 sentences explaining the angle and how it adapts the
-  global winner's topic to the target's audience without being a trivial
-  rename.
-
-DATE-SENSITIVE KEYWORD RULES (CRITICAL):
-- TODAY is {CURRENT_DATE_HUMAN}. If the global winner's slug or keyword
-  contains a stale month or year (any month != "{CURRENT_MONTH_LOWER}", or
-  year != "{CURRENT_YEAR}"), DO NOT echo that stale date into your proposal.
-- If your proposed keyword is inherently time-sensitive (release notes,
-  changelog roundup, news digest, "best X for <month>", "latest releases",
-  "what shipped"), use "{CURRENT_MONTH_LOWER} {CURRENT_YEAR}" or
-  "{CURRENT_YEAR}" only. Never propose a keyword for a past month.
-- If the global winner's topic is dated and there's no fresh angle for
-  {CURRENT_DATE_HUMAN}, prefer an evergreen or comparison-style keyword
-  (e.g. "vs", "alternative", "for <use case>") over another dated variant.
+- concept must be 1-2 sentences explaining the angle, citing the specific
+  news/release you found via WebSearch (vendor name, version, or event)
+  so the downstream generator can verify and write a grounded page.
+- Never echo a stale month/year (any month != "{CURRENT_MONTH_LOWER}"
+  or year != "{CURRENT_YEAR}") into a dated slug/keyword.
 
 Respond with a SINGLE JSON object on one line, nothing else:
   {{"keyword": "...", "slug": "...", "concept": "..."}}
