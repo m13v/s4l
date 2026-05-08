@@ -227,21 +227,18 @@ export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 acquire_lock "reddit-browser" 3600
 ensure_browser_healthy "reddit"
 
-# Pre-flight: fail fast if reddit-agent Chrome didn't come up healthy.
-# ensure_browser_healthy triggers a cold-restart but always returns 0; without
-# this re-probe, an unhealthy Chrome leads to the orchestrator drafting for ~13
-# min ($4-5), failing to find mcp__reddit-agent__* tools, then falling back to
-# a banned Python Playwright path that CHECK-aborts a second Chrome on the
-# locked profile (incident 2026-05-04 08:27 r/Buddhism). Skip the run instead.
-sleep 2  # give a cold-started Chrome a beat to come up
-PROFILE_DIR="$HOME/.claude/browser-profiles/reddit"
-CDP_PORT=$(ps -A -o command= 2>/dev/null \
-  | awk -v p="user-data-dir=$PROFILE_DIR" \
-      'index($0,p)>0 { if (match($0,/remote-debugging-port=[0-9]+/)) { print substr($0,RSTART+22,RLENGTH-22); exit } }')
-if [ -z "$CDP_PORT" ] || ! curl -fsS --max-time 2 "http://localhost:${CDP_PORT}/json/version" >/dev/null 2>&1; then
-  echo "PREFLIGHT_FAILED: reddit-agent Chrome unhealthy after ensure_browser_healthy (port=${CDP_PORT:-none}). Skipping run to avoid burning a Claude orchestrator session on an undriveable browser." | tee -a "$LOG_FILE"
-  exit 0
-fi
+# NOTE 2026-05-07: removed broken pre-flight Chrome health check (commit
+# 971844d, 2026-05-04). Intent was to short-circuit before Claude drafted for
+# $4-5 in a session where reddit-agent MCP tools wouldn't load. But the check
+# probed for an already-running Chrome with a CDP port; Chrome only launches
+# INSIDE the Claude session via launch_persistent_context, so the probe always
+# saw "no port" and aborted every fire. 22 launchd fires, 0 posts from
+# 2026-05-04 12:13 through 2026-05-07. Aligned with run-reddit-search.sh and
+# engage-reddit.sh, which call ensure_browser_healthy and then trust the
+# Claude/MCP step to launch Chrome — they kept posting comments fine the whole
+# time. Re-introducing a real "MCP loaded?" probe is Phase 2 (separate cheap
+# claude -p tool-list call before drafting); for now we accept the same $5
+# tail-risk per fire that every other reddit pipeline already accepts.
 
 # Capture Claude output to a temp file so a non-zero exit doesn't swallow stderr
 # before we get a chance to log it. Without this, run_claude.sh failures look
