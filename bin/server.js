@@ -10102,7 +10102,7 @@ function renderTopPosts(payload) {
     containerId: 'top-table-container',
     rows: normalized,
     state: _topTableState,
-    storageKey: 'sa.topTable.v1',
+    storageKey: 'sa.topTable.v2',
     inlineFilters: true,
     columns: [
       { key: 'platform',       label: 'Platform', type: 'text',    align: 'left',  widthPct: 6,
