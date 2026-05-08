@@ -10567,7 +10567,20 @@ function initTopFilters() {
   wireTopPillRow('top-dm-link-pills', (v) => {
     _topDmLink = v || 'all';
     saSave('sa.top.dmLink.v1', _topDmLink);
+    // DMs path: re-render the DMs table.
     if (_topDmsPayload) renderTopDms(_topDmsPayload);
+    // Posts path: route the same yes/no/all to the link_clicks column filter
+    // on the Posts table. mountSortableTable's apply() handles the actual
+    // filtering via the column's filterPredicate (which already understands
+    // has_link / no_link / has_clicks / '').
+    const postsFv = _topDmLink === 'yes' ? 'has_link'
+                  : _topDmLink === 'no'  ? 'no_link'
+                  : '';
+    _topTableState.filters['link_clicks'] = postsFv;
+    // Sync the inline column dropdown so the user sees them stay aligned.
+    const colDd = document.querySelector('select.activity-col-filter[data-filter-key="link_clicks"]');
+    if (colDd && colDd.value !== postsFv) colDd.value = postsFv;
+    if (_topTableHandle && _topTableHandle.apply) _topTableHandle.apply();
   });
   const searchEl = document.getElementById('top-search');
   if (searchEl && !searchEl._wired) {
@@ -10630,7 +10643,11 @@ function applyTopSubtabState(sub, loadData) {
   const projRowEl = document.getElementById('top-project-pills');
   const campRowEl = document.getElementById('top-campaign-pills');
   const srcRowEl  = document.getElementById('top-pages-source-pills');
-  const dmOnlyRowIds = ['top-dm-dir-pills', 'top-dm-interest-pills', 'top-dm-mode-pills', 'top-dm-tier-pills', 'top-dm-qual-pills', 'top-dm-status-pills', 'top-dm-link-pills'];
+  // Note: top-dm-link-pills used to live here, but the user wanted to filter
+  // Posts by "link sent" too. The pill row now stays visible across DMs +
+  // Posts subtabs, and its callback (wireTopPillRow below) routes the value
+  // to the right table.
+  const dmOnlyRowIds = ['top-dm-dir-pills', 'top-dm-interest-pills', 'top-dm-mode-pills', 'top-dm-tier-pills', 'top-dm-qual-pills', 'top-dm-status-pills'];
   const setDmRowsHidden = (hidden) => {
     dmOnlyRowIds.forEach(id => {
       const el = document.getElementById(id);
@@ -10638,6 +10655,12 @@ function applyTopSubtabState(sub, loadData) {
     });
   };
   const totalEl = document.getElementById('top-total');
+  // The Link sent pill row shows on DMs and Posts (threads + comments) but
+  // not on Pages. setLinkPillHidden routes that single decision in one place.
+  const setLinkPillHidden = (hidden) => {
+    const el = document.getElementById('top-dm-link-pills');
+    if (el) el.classList.toggle('hidden', hidden);
+  };
   if (projRowEl) projRowEl.classList.remove('hidden');
   if (sub === 'pages') {
     if (postsC) postsC.classList.add('hidden');
@@ -10648,6 +10671,7 @@ function applyTopSubtabState(sub, loadData) {
     if (srcRowEl) srcRowEl.classList.remove('hidden');
     if (campRowEl) campRowEl.classList.add('hidden');
     setDmRowsHidden(true);
+    setLinkPillHidden(true);
     if (totalEl) totalEl.textContent = '';
     if (loadData) loadTopPages();
   } else if (sub === 'dms') {
@@ -10659,6 +10683,7 @@ function applyTopSubtabState(sub, loadData) {
     if (srcRowEl) srcRowEl.classList.add('hidden');
     if (campRowEl) campRowEl.classList.remove('hidden');
     setDmRowsHidden(false);
+    setLinkPillHidden(false);
     if (totalEl) totalEl.textContent = '';
     const searchElDm = document.getElementById('top-search');
     if (searchElDm) {
@@ -10675,6 +10700,7 @@ function applyTopSubtabState(sub, loadData) {
     if (srcRowEl) srcRowEl.classList.add('hidden');
     if (campRowEl) campRowEl.classList.remove('hidden');
     setDmRowsHidden(true);
+    setLinkPillHidden(false);
     if (totalEl) totalEl.textContent = '';
     const searchElPosts = document.getElementById('top-search');
     if (searchElPosts) {
