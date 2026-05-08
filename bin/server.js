@@ -10166,8 +10166,24 @@ function renderTopPosts(payload) {
           return '<div class="top-stats-cell">' + linkLine + clickLine + ctaLine + '</div>';
         },
         filterMode: 'dropdown',
-        filterOptions: [{ label: 'Any', value: '' }, { label: 'Has link', value: '>=1' }],
-        filterPredicate: filterPredicateGte },
+        filterOptions: [
+          { label: 'Any', value: '' },
+          { label: 'Has link', value: 'has_link' },
+          { label: 'Has clicks', value: 'has_clicks' },
+          { label: 'No link', value: 'no_link' },
+        ],
+        // The column key is link_clicks (so sort works on clicks), but "Has link"
+        // must read link_count, not link_clicks. The legacy ">=1" value from the
+        // earlier (broken) version is mapped onto has_link so persisted state
+        // upgrades cleanly. has_clicks gives the user the "clicks >= 1" option
+        // explicitly.
+        filterPredicate: (fv, row, _raw) => {
+          if (!fv) return true;
+          if (fv === 'has_link' || fv === '>=1') return Number(row.link_count) >= 1;
+          if (fv === 'has_clicks') return Number(row.link_clicks) >= 1;
+          if (fv === 'no_link') return !(Number(row.link_count) >= 1);
+          return true;
+        } },
       { key: 'posted_ts',      label: 'Posted',   type: 'numeric', align: 'right', widthPct: 6,
         formatter: (_v, r) => {
           const abs = r.posted_at ? new Date(r.posted_at).toLocaleString() : '';
