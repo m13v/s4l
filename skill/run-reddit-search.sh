@@ -1,15 +1,23 @@
 #!/bin/bash
 # Social Autoposter - Reddit comment posting via search API + CDP browser
 #
-# 4-phase pipeline per iteration (mirrors Twitter's discover/T1/post split):
-#   1. Discover  - Claude searches and selects threads only (no drafting, no browser)
-#   2. Ripen     - T0 snapshot, 5-min sleep, T1 re-poll, composite delta gate
-#   3. Draft     - Claude writes comments ONLY for ripen-survivors (no browser)
-#   4. Post      - CDP browser posts survivors with drafted text
+# Two-lane single-pass cycle (post 2026-05-07 refactor):
 #
-# Browser lock is held ONLY around post phase. All other phases run unlocked
-# so peers (dm-outreach, link-edit, engage-dm-replies, audit) can use the
-# browser during our HTTP/Claude work.
+#   SALVAGE LANE (already-vetted retries, skip ripen):
+#     Phase 0 → Salvage pull → Salvage draft → Salvage post
+#
+#   DISCOVER LANE (fresh threads, full ripen gate):
+#     Discover → Ripen (10-min sleep, top-k=LIMIT) → Discover draft → Discover post
+#
+# Both lanes run every cycle. Salvage rows skip ripen because they were
+# already ripened in a prior cycle (either CDP-failed mid-post or already
+# delta-validated); re-ripening burns 10 min of wall-clock for no signal.
+# Salvage posts FIRST so the browser lock releases before the 10-min ripen
+# sleep, letting peer agents use the browser during the wait.
+#
+# Browser lock is held ONLY around post phases (twice per cycle, briefly).
+# All other phases run unlocked so peers (dm-outreach, link-edit,
+# engage-dm-replies, audit) can use the browser during our HTTP/Claude work.
 #
 # Called by launchd every 15 minutes via run-reddit-search-launchd.sh.
 
@@ -28,16 +36,55 @@ log "=== Reddit Search Post Run: $(date) ==="
 
 source "$REPO_DIR/skill/lock.sh"
 
-ITERATIONS=5
 LIMIT=10
 EXCLUDE=""
 TOTAL_POSTED=0
 TOTAL_FAILED=0
 TOTAL_SKIPPED=0
-TOTAL_SALVAGED=0  # how many iterations this cycle ran a salvaged candidate
+TOTAL_SALVAGED=0  # actual salvaged decisions (rows pulled + drafted/posted) this cycle
 TOTAL_CANDIDATES=0  # total reddit_candidates rows touched (discovered + salvaged)
 RUN_START=$(date +%s)
 FAILURE_REASONS=""
+
+# Helper: parse `posted=N failed=M` from post-phase stdout and roll into the
+# cycle accumulators. Used by both salvage and discover post lanes.
+_accumulate_post_results() {
+    local out="$1"
+    local rc="$2"
+    if [ "$rc" = "0" ]; then
+        local posted failed
+        posted=$(echo "$out" | grep -oE 'posted=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
+        failed=$(echo "$out" | grep -oE 'failed=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
+        TOTAL_POSTED=$((TOTAL_POSTED + ${posted:-0}))
+        TOTAL_FAILED=$((TOTAL_FAILED + ${failed:-0}))
+        echo "$posted $failed"
+    else
+        log "Post phase: exit code $rc; counting as failed."
+        TOTAL_FAILED=$((TOTAL_FAILED + 1))
+        echo "0 1"
+    fi
+}
+
+# Helper: parse CDP failure reasons from post-phase stdout and accumulate
+# into FAILURE_REASONS (Twitter pipeline schema). Mirrored across both lanes.
+_accumulate_cdp_reasons() {
+    local out="$1"
+    while IFS= read -r line; do
+        local cdp_key
+        cdp_key=$(echo "$line" | grep -oE '\[post_reddit\] CDP FAILED: [a-z_]+' | awk '{print $NF}')
+        case "$cdp_key" in
+            thread_locked)          add_reason reddit_locked ;;
+            thread_archived)        add_reason reddit_archived ;;
+            thread_not_found)       add_reason reddit_deleted ;;
+            account_blocked_in_sub) add_reason account_blocked ;;
+            not_logged_in)          add_reason reddit_logged_out ;;
+            all_attempts_failed)    add_reason cdp_no_response ;;
+            comment_box_not_found)  add_reason comment_box_missing ;;
+            "")                     : ;;
+            *)                      add_reason "cdp_${cdp_key}" ;;
+        esac
+    done <<< "$out"
+}
 
 # Idempotent run_monitor.log emitter wired to EXIT/INT/TERM/HUP. Without this,
 # a SIGTERM landing between the post phase (where post_reddit.py has already
