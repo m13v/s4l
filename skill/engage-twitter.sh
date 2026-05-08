@@ -10,6 +10,12 @@ set -euo pipefail
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "twitter-browser" 3600
+# Drop stale Chrome singleton symlinks before launch. Background ungraceful-
+# exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
+# pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
+# went wrong when opening your profile" 7x and the pipeline hangs. See
+# scripts/clean_stale_singleton.sh — refuses to clean if PID is alive.
+bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" || true
 ensure_browser_healthy "twitter"
 acquire_lock "twitter" 3600
 
