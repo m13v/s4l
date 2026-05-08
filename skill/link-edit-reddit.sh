@@ -6,9 +6,12 @@
 
 set -euo pipefail
 
-# Pipeline lock at top. The reddit-browser lock is acquired later, just
-# before the Claude/MCP step that drives the browser, so peers can use the
-# profile during our DB queries and prompt build.
+# Pipeline lock at top. We DO NOT acquire reddit-browser at the bash level
+# anymore — claude itself acquires it per-post via
+# scripts/reddit_browser_lock.py, only around the actual MCP browser
+# operations (~15-60s per post). This unblocks peer reddit pipelines
+# (engage-reddit, dm-replies-reddit, post-reddit) during the long
+# generate_page.py / WebFetch / DB phases of each post.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "link-edit-reddit" 5400
 
@@ -65,10 +68,16 @@ CRITICAL: ALL browser calls MUST use mcp__reddit-agent__* tools (e.g. mcp__reddi
 
 CRITICAL: This is a single-shot run. NEVER call ScheduleWakeup, CronCreate, CronDelete, CronList, EnterPlanMode, EnterWorktree, or any deferred-execution / scheduling tool. You MUST complete or skip every post in this one run; do not defer work to "a future run". If you hit a hard block, mark the post SKIPPED via step 9 and move on to the next post.
 
+EXECUTION MODEL — STRICT SEQUENTIAL, NO BATCHING (read this twice):
+- Process posts ONE AT A TIME. Run the FULL chain (steps 1 → 8) end-to-end for post N before reading post N+1.
+- NEVER batch generate_page.py calls in parallel. NEVER spawn page-gen subprocesses with double-fork (\`nohup ... &\`, \`disown\`, \`setsid\`, \`os.fork\`). NEVER write a polling loop that watches /tmp/seo_*.json. Each generate_page.py is a foreground call that you wait for synchronously.
+- Step 8's DB UPDATE for post N MUST complete before you start step 1 for post N+1. This protects interim work: if the run is killed mid-stream, the first N-1 posts are fully shipped and only ONE post is in flight at most.
+- The reddit-browser lock is NOT held by the parent shell. You acquire/release it explicitly per post (steps 6.5 and 7.5), so peer reddit pipelines can use the browser during your generate_page.py / WebFetch / DB phases.
+
 Reddit posts eligible for editing:
 $EDITABLE
 
-Process ALL of them. For each post:
+Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each post:
 1. Read ~/social-autoposter/config.json to get the projects list.
 2. Pick the project whose topics are the CLOSEST match to thread_title + our_content.
    a. First check the project_name column. If it is set AND its topics/description fit the thread, use it.
@@ -106,8 +115,16 @@ Process ALL of them. For each post:
        --project PROJECT_NAME
    PROJECT_NAME must be the EXACT \`name\` field from config.json (case-sensitive; e.g. "fazm" lowercase, "Cyrano", "WhatsApp MCP"). Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
 6. Append the wrapped LINK_TEXT to our_content with a blank line separator.
+6.5. ACQUIRE the reddit-browser lock NOW (just before any reddit-agent browser call). This is the ONLY moment you may touch the browser:
+       LOCK_OUT=\$(python3 ~/social-autoposter/scripts/reddit_browser_lock.py acquire --timeout 600 2>&1)
+     - If stdout starts with "OK", proceed to step 7.
+     - If "BUSY", a peer reddit pipeline owns the browser and didn't release within 10 min. Treat as a TRANSIENT skip (step 10B): leave link_edited_at NULL, log the reason, move on to the NEXT post. Do NOT call step 7 without the lock — collisions on the same chrome profile crash both runs.
+     - If "ERROR", same handling as BUSY: TRANSIENT skip, leave link_edited_at NULL, move on.
 7. Navigate to old.reddit.com comment permalink via the reddit-agent browser. Click "edit", append the wrapped link text to the existing content, save, verify.
-8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py) and backfill short-link attribution:
+7.5. RELEASE the reddit-browser lock IMMEDIATELY after the edit confirms or fails. This is mandatory — failing to release it blocks every other reddit pipeline:
+       python3 ~/social-autoposter/scripts/reddit_browser_lock.py release
+     Run this even if step 7 raised, errored, or you're skipping the post. Wrap step 7 in a way that step 7.5 ALWAYS executes (mental try/finally). The release is idempotent and safe to call multiple times.
+8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py) and backfill short-link attribution. THIS MUST RUN BEFORE YOU START THE NEXT POST:
    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
@@ -123,13 +140,30 @@ Process ALL of them. For each post:
     If unsure which class a skip falls into, treat it as TRANSIENT (default to retry, not to swallow). Stamping link_edited_at is permanent — once set, the post is excluded from future eligibility queries forever.
 PROMPT_EOF
 
-# Acquire the browser lock now, immediately before the Claude/MCP step.
-log "Acquiring reddit-browser lock for Claude/MCP step..."
-acquire_lock "reddit-browser" 3600
+# NOTE: We do NOT acquire reddit-browser at the bash level. Claude itself
+# acquires/releases it per post via scripts/reddit_browser_lock.py
+# (steps 6.5 and 7.5 in the prompt). This keeps the lock held only during
+# the actual ~15-60s reddit-agent browser ops per post, not the full
+# 90-min run. Peer pipelines (engage-reddit, dm-replies-reddit,
+# post-reddit) can use the profile during our generate_page.py / WebFetch
+# / DB phases.
+#
+# Pre-flight: ensure the profile isn't wedged by a prior crashed run. We
+# briefly take and release the browser lock so any orphan-Chrome sweep
+# happens once before claude starts; this is fast (mkdir + rm).
+log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
+acquire_lock "reddit-browser" 60
 ensure_browser_healthy "reddit"
+release_lock "reddit-browser"
 
 gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
+
+# Belt-and-suspenders: if claude exited without releasing the lock (e.g.
+# crashed mid-edit before reaching step 7.5), free it now so peer
+# pipelines aren't stuck behind a phantom holder. release_lock checks
+# the lock_dir and rm-rf's it; safe even if claude already released.
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='reddit' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
 log "Reddit link-edit complete. Total reddit posts edited (all-time): $EDITED"
