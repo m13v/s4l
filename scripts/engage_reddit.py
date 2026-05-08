@@ -923,12 +923,16 @@ def main():
                             time.sleep(2)
                             continue
 
-                        # Mark as replied in DB
+                        # Mark as replied in DB. patch_replied_with_retry adds
+                        # rate-limit-aware retries so a transient s4l 429 after a
+                        # successful platform post does not leave the row in
+                        # 'processing' (which 2h reset_stuck_processing would flip
+                        # back to 'pending' and cause a duplicate post).
                         reply_url = post_result.get("url", "")
                         cmd_args = ["python3", REPLY_DB, "replied", str(reply["id"]), reply_text, reply_url]
                         if engagement_style:
                             cmd_args.append(engagement_style)
-                        subprocess.run(cmd_args)
+                        patch_replied_with_retry(cmd_args, reply["id"])
                         # Attribute reply to any campaigns that applied a suffix
                         bump_campaigns("replies", reply["id"], applied_campaign_ids)
                         # Stamp post_links.reply_id for the URLs minted before
