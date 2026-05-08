@@ -738,8 +738,31 @@ def main():
                     failed += 1
                     print(f"[engage_reddit] #{reply['id']} empty reply text")
                 else:
-                    # Mark as processing
-                    subprocess.run(["python3", REPLY_DB, "processing", str(reply["id"])])
+                    # Mark as processing. CRITICAL: this PATCH must succeed before we
+                    # post to the platform. If it fails (e.g. s4l rate-limit 429), the
+                    # row stays `pending` and the next iteration of the while-loop
+                    # would re-fetch it, draft a new reply, and post again, creating
+                    # duplicates on the platform. Confirmed in production 2026-05-07
+                    # where 423+ duplicate comments landed on a single Moltbook
+                    # parent during a 5000/24h s4l rate-limit storm. Hard-fail the
+                    # entire run on any non-zero exit so the row stays untouched and
+                    # no platform side-effect occurs.
+                    proc_result = subprocess.run(
+                        ["python3", REPLY_DB, "processing", str(reply["id"])],
+                        capture_output=True,
+                    )
+                    if proc_result.returncode != 0:
+                        err_txt = (proc_result.stderr or b"").decode(errors="replace")
+                        print(f"[engage_reddit] #{reply['id']} PROCESSING PATCH FAILED "
+                              f"rc={proc_result.returncode}: {err_txt[:300]}")
+                        print(f"[engage_reddit] Aborting run to prevent duplicate posts. "
+                              f"Row stays pending; next launchd cycle will retry once "
+                              f"the rate-limit window clears.")
+                        failed += 1
+                        skip_reasons["processing_patch_failed"] = (
+                            skip_reasons.get("processing_patch_failed", 0) + 1
+                        )
+                        break
 
                     # Tool-level campaign suffix injection (Reddit only).
                     # The LLM never sees the campaign; we append the literal
