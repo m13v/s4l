@@ -157,6 +157,15 @@ print(f\"scraped {data.get('total', 0)} urls, {data.get('with_views', 0)} with v
 else
     log "Step 1: SKIPPED, no Reddit username in config.json"
 fi
+# Release the reddit-browser lock NOW. Step 2 (update_stats.py --reddit-only)
+# is pure unauthenticated HTTPS to old.reddit.com/api/info.json: no Playwright,
+# no logged-in session, different rate-limit bucket from reddit-agent. Holding
+# the lock through Step 2's paced API loop (~100 req / 10 min) starves the
+# post_reddit + run-reddit-search + dm-replies queue for 5-15 min every cycle.
+# Releasing here keeps Step 1's serialization guarantee for the actual browser
+# work and frees the queue immediately.
+release_lock "reddit-browser"
+log "Step 1: released reddit-browser lock (Step 2 is HTTP-only)"
 else
     log "Step 1: SKIPPED (platform=$PLATFORM)"
 fi
