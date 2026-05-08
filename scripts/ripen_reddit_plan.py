@@ -61,6 +61,15 @@ def _db_update_ripen_metrics(thread_url, t0_score, t0_comments,
         dbmod.load_env()
         conn = dbmod.get_conn()
         if bump_attempt:
+            # ONE-STRIKE rule (2026-05-07): a thread that scored Δ<floor in
+            # a 5-min window once is unlikely to suddenly catch fire 30 min
+            # later. Re-salvaging dead candidates was burning the entire
+            # cycle on rows that re-failed at the same gate (147 of 158
+            # pending rows had last_failure_reason='ripen_floor_miss' on
+            # 2026-05-07, capping throughput at ~1 post/cycle). Mark failed
+            # immediately so Phase 0 salvage (status='pending' filter)
+            # excludes them. Net effect: one ripen miss = permanent fail,
+            # queue drains itself organically, throughput rises to LIMIT.
             conn.execute(
                 "UPDATE reddit_candidates SET "
                 "  score_t0 = %s, comments_t0 = %s, "
@@ -69,7 +78,7 @@ def _db_update_ripen_metrics(thread_url, t0_score, t0_comments,
                 "  attempt_count = attempt_count + 1, "
                 "  last_attempt_at = NOW(), "
                 "  last_failure_reason = 'ripen_floor_miss', "
-                "  status = CASE WHEN attempt_count + 1 >= 3 THEN 'failed' ELSE status END "
+                "  status = 'failed' "
                 "WHERE thread_url = %s",
                 [t0_score, t0_comments, t1_score, t1_comments, composite, thread_url],
             )
