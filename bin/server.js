@@ -9408,7 +9408,9 @@ function renderFunnelStats(payload) {
   const fmt = n => (Number(n) || 0).toLocaleString();
   const totals = projects.reduce((a, p) => {
     const f = p.funnel || {};
+    const ppst = p.posts || {};
     a.posts            += (p.posts && p.posts.recent)             || 0;
+    a.post_clicks      += Number(ppst.post_clicks_recent) || 0;
     a.seo              += (p.seo && p.seo.pages_recent)           || 0;
     a.pageviews        += Number(f.pageviews)        || 0;
     a.email_signups    += Number(f.email_signups)    || 0;
@@ -9427,7 +9429,7 @@ function renderFunnelStats(payload) {
     a.dm_clicks        += Number(f.dm_clicks)        || 0;
     a.dm_bookings      += Number(f.dm_bookings)      || 0;
     return a;
-  }, { posts: 0, seo: 0, pageviews: 0, email_signups: 0, schedule_clicks: 0, get_started_clicks: 0, cross_product_clicks: 0, d_pageviews: 0, d_email_signups: 0, d_schedule_clicks: 0, d_get_started_clicks: 0, bookings: 0, dm_clicks: 0, dm_bookings: 0 });
+  }, { posts: 0, post_clicks: 0, seo: 0, pageviews: 0, email_signups: 0, schedule_clicks: 0, get_started_clicks: 0, cross_product_clicks: 0, d_pageviews: 0, d_email_signups: 0, d_schedule_clicks: 0, d_get_started_clicks: 0, bookings: 0, dm_clicks: 0, dm_bookings: 0 });
   // Compact cell: "<scoped> (<domain>)" when they differ, just "<scoped>"
   // when equal. Keeps the table scannable while still exposing domain-wide
   // traffic that doesn't happen to land on pages generated this window.
@@ -9457,6 +9459,10 @@ function renderFunnelStats(payload) {
       upvotes:          Number(pst.upvotes_recent)  || 0,
       comments:         Number(pst.comments_recent) || 0,
       views:            pst.views_recent == null ? null : Number(pst.views_recent),
+      // post_clicks_recent: SUM of post_links.clicks for short links minted
+      // for posts in this project's window. Sourced from project_stats_json
+      // _windowed_post_engagement.
+      post_clicks:      Number(pst.post_clicks_recent) || 0,
       seo_pages:        Number(seo.pages_recent)    || 0,
       pageviews:        asNum(f.pageviews),
       email_signups:    asNum(f.email_signups),
@@ -9519,6 +9525,16 @@ function renderFunnelStats(payload) {
       { key: 'upvotes',          label: 'Upvotes',         type: 'numeric', align: 'right', formatter: fmt },
       { key: 'comments',         label: 'Comments',        type: 'numeric', align: 'right', formatter: fmt },
       { key: 'views',            label: 'Views',           type: 'numeric', align: 'right', formatter: v => v == null ? '\u2014' : fmt(v) },
+      // Post Clicks: SUM(post_links.clicks) for short links minted for
+      // posts in this project's window. /r/<code> short-link traffic on the
+      // public post itself, not on-site CTAs (Schedule Clicks / Get Started)
+      // or DM-targeted links (DM Clicks).
+      { key: 'post_clicks',      label: 'Post Clicks',     type: 'numeric', align: 'right',
+        formatter: (v, _r) => {
+          const n = Number(v) || 0;
+          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
+          return '<span data-tooltip="Clicks on /r/&lt;code&gt; short links minted for this project\u2019s posts in the selected window. Excludes DM-link clicks and on-site CTA clicks." style="font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+        } },
       { key: 'seo_pages',        label: 'SEO Pages',       type: 'numeric', align: 'right', formatter: fmt },
       // Funnel cells use makeFunnelFmt, which reads a sibling "domain_*"
       // field off the row. The synthetic footer row carries summed
