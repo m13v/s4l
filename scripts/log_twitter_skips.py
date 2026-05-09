@@ -10,7 +10,8 @@ Input shape (stdin or --file):
     {
       "skips": [
         {"candidate_id": 1234, "reason": "off-topic for Mediar"},
-        {"candidate_id": 1235, "reason": "thread is toxic crypto promo"}
+        {"candidate_id": 1235, "reason": "thread is toxic crypto promo",
+         "proposed_excludes": ["cricket", "kohli", "ipl"]}
       ]
     }
 
@@ -23,6 +24,12 @@ Behavior per row:
            skipped_at  = NOW()
      WHERE id = <candidate_id>
        AND status = 'pending';
+
+Optional `proposed_excludes` (per skip): each term is fed into
+project_excludes.propose() with platform='twitter' and project read from the
+candidate's matched_project column. Validation, reservation guards, and the
+distinct-batch activation gate all live in project_excludes.py — this script
+just forwards the proposals.
 
 Pending guard prevents clobbering rows Phase 2b-post already flipped to
 'posted', or rows Phase 0 will salvage on the next cycle. We deliberately do
@@ -42,9 +49,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+import project_excludes as pe_mod
 
 
 REASON_MAX = 500
+EXCLUDES_PER_SKIP_CAP = 3   # cap proposed_excludes per rejected entry
 
 
 def _coerce_payload(raw):
@@ -88,6 +97,7 @@ def main():
     no_match = 0
     bad = 0
     seen_ids = set()
+    excludes_pending = []   # collect (candidate_id, project, term, batch_id, reason) tuples
 
     for entry in skips:
         if not isinstance(entry, dict):
@@ -154,12 +164,64 @@ def main():
         else:
             no_match += 1
 
+        # Stage proposed_excludes for THIS skip (only if status flipped to skipped).
+        # Look up the candidate's matched_project for project routing of the exclude.
+        proposed = entry.get("proposed_excludes")
+        if proposed and isinstance(proposed, list) and (rc is None or rc >= 1):
+            row = conn.execute(
+                "SELECT matched_project, batch_id FROM twitter_candidates WHERE id=%s",
+                [cid],
+            ).fetchone()
+            if row and row[0]:
+                project = row[0]
+                cand_batch = row[1] or args.require_batch_id
+                for term in proposed[:EXCLUDES_PER_SKIP_CAP]:
+                    excludes_pending.append((cid, project, term, cand_batch, reason))
+
     conn.commit()
     conn.close()
+
+    # Persist proposed excludes via project_excludes.propose(). Each call has
+    # its own DB connection (cheap, the volume is tiny: <=POST_LIMIT*EXCLUDES_PER_SKIP_CAP per cycle).
+    pe_inserted = 0
+    pe_bumped = 0
+    pe_dup = 0
+    pe_rejected_invalid = 0
+    pe_rejected_reserved = 0
+    for cid, project, term, batch_id, reason in excludes_pending:
+        try:
+            out = pe_mod.propose(
+                platform="twitter",
+                project=project,
+                term=term,
+                candidate_id=cid,
+                batch_id=batch_id,
+                reason=reason,
+            )
+        except Exception as e:
+            print(f"log_twitter_skips: propose error for {project}/{term}: {e}", file=sys.stderr)
+            continue
+        action = out.get("action")
+        if action == "inserted":
+            pe_inserted += 1
+        elif action == "bumped":
+            pe_bumped += 1
+        elif action == "duplicate_batch":
+            pe_dup += 1
+        elif action == "rejected_invalid":
+            pe_rejected_invalid += 1
+        elif action == "rejected_reserved":
+            pe_rejected_reserved += 1
 
     print(
         f"log_twitter_skips: updated={updated} no_match={no_match} bad_entries={bad} input={len(skips)}"
     )
+    if excludes_pending:
+        print(
+            f"log_twitter_skips: excludes proposed={len(excludes_pending)} "
+            f"inserted={pe_inserted} bumped={pe_bumped} dup_batch={pe_dup} "
+            f"invalid={pe_rejected_invalid} reserved={pe_rejected_reserved}"
+        )
     return 0
 
 
