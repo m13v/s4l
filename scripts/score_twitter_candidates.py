@@ -5,7 +5,10 @@ score_twitter_candidates.py
 Reads raw tweet data (JSON from stdin or file), calculates virality scores,
 and upserts into the twitter_candidates table.
 
-Also expires old candidates (>12h) and prunes posted/expired rows older than 7 days.
+Also expires stale pending candidates by flipping status to 'expired'.
+NO PRUNING: rows are kept forever for analytics (skip-reason audit, engagement
+dynamics, project routing review). Per user instruction 2026-05-08, do not
+re-introduce DELETE-by-age here under any retention window.
 
 Can be called standalone or piped from the scanner:
     echo '[{...}]' | python3 scripts/score_twitter_candidates.py
@@ -245,20 +248,18 @@ def upsert_candidates(tweets, config, batch_id=None):
 
     conn.commit()
 
-    # Expire old pending candidates (> 18h)
+    # Expire old pending candidates (> 18h). This is a freshness GATE
+    # (status flip), not a delete — we keep the row forever for analytics.
     conn.execute(
         "UPDATE twitter_candidates SET status='expired' "
         "WHERE status='pending' AND discovered_at < NOW() - INTERVAL '18 hours'"
     )
     conn.commit()
 
-    # Prune old rows (> 7 days)
-    conn.execute(
-        "DELETE FROM twitter_candidates "
-        "WHERE status IN ('posted', 'expired', 'skipped') "
-        "AND discovered_at < NOW() - INTERVAL '7 days'"
-    )
-    conn.commit()
+    # NO PRUNING. We keep every twitter_candidates row forever (chosen, skipped,
+    # expired) so we can audit project routing, skip reasons, growth dynamics,
+    # and engagement curves over time. Per user instruction (2026-05-08): never
+    # add DELETE-by-age back here, regardless of retention window.
     conn.close()
 
     print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or too old)")
@@ -268,7 +269,7 @@ def upsert_candidates(tweets, config, batch_id=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", help="Read tweets from JSON file instead of stdin")
-    parser.add_argument("--expire-only", action="store_true", help="Only expire/prune, no scoring")
+    parser.add_argument("--expire-only", action="store_true", help="Only expire stale pending rows (status flip; no row deletion)")
     parser.add_argument("--batch-id", help="Tag these candidates with a batch id and populate T0 columns")
     args = parser.parse_args()
 
@@ -279,20 +280,15 @@ def main():
             config = json.load(f)
 
     if args.expire_only:
+        # Freshness gate only. NO PRUNING — see note in upsert_candidates().
         conn = dbmod.get_conn()
         conn.execute(
             "UPDATE twitter_candidates SET status='expired' "
             "WHERE status='pending' AND discovered_at < NOW() - INTERVAL '18 hours'"
         )
         conn.commit()
-        conn.execute(
-            "DELETE FROM twitter_candidates "
-            "WHERE status IN ('posted', 'expired', 'skipped') "
-            "AND discovered_at < NOW() - INTERVAL '7 days'"
-        )
-        conn.commit()
         conn.close()
-        print("Expired/pruned old candidates")
+        print("Expired old pending candidates (no row deletion)")
         return
 
     if args.file:
