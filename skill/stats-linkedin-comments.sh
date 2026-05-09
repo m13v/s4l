@@ -88,14 +88,30 @@ FEED_JSON="$LOG_DIR/stats-linkedin-comments-feed-$(date +%Y%m%d_%H%M%S).json"
 SUMMARY_JSON=$(mktemp -t fazm-li-comments-summary.XXXXXX).json
 SCRAPER_STDOUT=$(mktemp -t fazm-li-comments-scrape.XXXXXX).json
 
-# 1. Acquire lock + ensure browser healthy (kills any stale MCP Chrome).
-# ensure_browser_healthy can return 141 (SIGPIPE) from its `ps | awk 'exit'`
-# pipeline when matching Chrome procs exist; relax set -e around it. This
-# matches the pattern run-linkedin.sh uses around its risky sections.
+# 1. Acquire the bash linkedin-browser lock to serialize against
+#    run-linkedin.sh / engage-linkedin.sh / dm-outreach-linkedin.sh /
+#    engage-dm-replies.sh. Two CDP clients hammering the same DOM
+#    corrupt each other's evaluate() calls, so the lock still matters
+#    even though we no longer launch a second Chrome.
+#
+# 2. DELIBERATELY do NOT call ensure_browser_healthy "linkedin" here.
+#    That helper SIGKILLs the linkedin-agent MCP Chrome and clears
+#    SingletonLock/Cookie/Socket so a second Chrome can launch on the
+#    same profile dir. With the 2026-05-08 cutover,
+#    scrape_linkedin_comment_stats.py CDP-attaches to the running MCP
+#    Chrome via _connect_to_running_or_launch (reads
+#    DevToolsActivePort), opens a tab in the existing BrowserContext,
+#    runs the harvest, then closes ONLY the tab. There is no second
+#    Chrome to make room for, and killing the MCP would just be the
+#    exact kill+reopen cadence that LinkedIn anti-bot flagged on
+#    2026-05-06.
+#
+#    The Python helper still falls back to launch_persistent_context
+#    if the MCP is genuinely cold (DevToolsActivePort missing or
+#    socket dead). In that case the profile dir is free and no kill
+#    is needed there either; the helper just clears stale Singleton*
+#    files and launches.
 acquire_lock "linkedin-browser" 1800
-set +e
-ensure_browser_healthy "linkedin"
-set -e
 
 # 2. Run the headed-Chromium scraper.
 log "Launching headed Chromium scraper..."
