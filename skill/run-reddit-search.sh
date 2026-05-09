@@ -61,7 +61,13 @@ _parse_post_results() {
         failed=$(echo "$out" | grep -oE 'failed=[0-9]+' | tail -1 | cut -d= -f2 || echo 0)
         echo "${posted:-0} ${failed:-0}"
     else
-        log "Post phase: exit code $rc; counting as failed."
+        # CRITICAL: write directly to LOG_FILE, NEVER to stdout. This function's
+        # stdout is captured by $(...) in the caller's `read SALVAGE_POSTED ...`,
+        # so any stray timestamp here corrupts arithmetic at TOTAL_POSTED += $X.
+        # Bug observed 2026-05-08: a leaked "[14:57:04] Post phase: ..." line
+        # produced "TOTAL_POSTED + [14:57:04]: syntax error" and `set -e` aborted
+        # the script BEFORE the discover lane ran.
+        echo "[$(date +%H:%M:%S)] Post phase: exit code $rc; counting as failed." >> "$LOG_FILE"
         echo "0 1"
     fi
 }
@@ -241,10 +247,15 @@ if [ "$HAS_SALVAGE" = "1" ]; then
     acquire_lock "reddit-browser" 3600
     ensure_browser_healthy "reddit"
 
+    # set +e covers the entire post + cleanup block. Discover lane MUST run
+    # every cycle (per design comment at line 263), so any failure in salvage
+    # cleanup (lock release, _parse_post_results contamination, arithmetic
+    # over malformed reads, _accumulate_cdp_reasons) must NOT abort the script.
+    # 2026-05-08 bug: cycle 16:38 finished salvage (posted=2) then died on a
+    # set -e trap mid-cleanup; discover lane never ran for the rest of the day.
     set +e
     SALVAGE_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$SALVAGE_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
     SALVAGE_POST_RC=${PIPESTATUS[0]}
-    set -e
 
     release_lock "reddit-browser"
 
@@ -255,6 +266,7 @@ if [ "$HAS_SALVAGE" = "1" ]; then
     TOTAL_FAILED=$((TOTAL_FAILED + ${SALVAGE_FAILED:-0}))
     log "Salvage lane: posted=$SALVAGE_POSTED failed=$SALVAGE_FAILED"
     _accumulate_cdp_reasons "$SALVAGE_POST_OUT"
+    set -e
 fi
 
 # =============================================================================
@@ -348,10 +360,12 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     acquire_lock "reddit-browser" 3600
     ensure_browser_healthy "reddit"
 
+    # set +e covers the entire post + cleanup block. The script must reach
+    # the trap-installed cost emitter at the bottom even if discover cleanup
+    # errors (mirrors the salvage block above).
     set +e
     DISCOVER_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$DISCOVER_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
     DISCOVER_POST_RC=${PIPESTATUS[0]}
-    set -e
 
     release_lock "reddit-browser"
 
@@ -360,6 +374,7 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     TOTAL_FAILED=$((TOTAL_FAILED + ${DISCOVER_FAILED:-0}))
     log "Discover lane: posted=$DISCOVER_POSTED failed=$DISCOVER_FAILED"
     _accumulate_cdp_reasons "$DISCOVER_POST_OUT"
+    set -e
 fi
 
 rm -f "$SALVAGE_FILE" "$SALVAGE_DRAFT_FILE" "$DISCOVER_FILE" "$RIPEN_FILE" "$DISCOVER_DRAFT_FILE"
