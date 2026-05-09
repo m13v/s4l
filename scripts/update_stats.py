@@ -169,7 +169,14 @@ def update_reddit(db, user_agent, config=None, quiet=False):
     ).fetchall()
 
     BATCH_SIZE = 200
-    total = updated = deleted = removed = errors = skipped = 0
+    total = updated = changed = deleted = removed = errors = skipped = 0
+    # `updated`: rows the Reddit JSON API answered for and we wrote back
+    #   (every successful poll). Effectively `total - errors - skipped - frozen`.
+    # `changed`: subset of `updated` where score OR comments_count actually
+    #   shifted since the prior scan. The dashboard's "updated" pill renders
+    #   this (see log_run.py --updated docstring) — before 2026-05-08 it
+    #   showed the polled count, which trivially matched "checked" whenever
+    #   errors were zero and hid that ~90% of Reddit polls observe no change.
     skipped_fresh = 0
     errors_404 = errors_rate_limited = errors_empty = errors_other = 0
     results = []
@@ -187,7 +194,7 @@ def update_reddit(db, user_agent, config=None, quiet=False):
         if total % BATCH_SIZE == 0:
             db.commit()
             progress.tick("reddit", total, len(posts),
-                          updated=updated, errors=errors,
+                          updated=updated, changed=changed, errors=errors,
                           errors_404=errors_404,
                           errors_rate_limited=errors_rate_limited,
                           errors_empty=errors_empty,
@@ -195,7 +202,7 @@ def update_reddit(db, user_agent, config=None, quiet=False):
             if not quiet:
                 rem = _reddit_rate_state.get("remaining")
                 rem_str = f", rem={int(rem)}" if rem is not None else ""
-                print(f"  Committed batch ({total}/{len(posts)} iterated, {updated} updated, {errors} errors [404={errors_404} rl={errors_rate_limited} empty={errors_empty} other={errors_other}]{rem_str})", flush=True)
+                print(f"  Committed batch ({total}/{len(posts)} iterated, {updated} polled, {changed} changed, {errors} errors [404={errors_404} rl={errors_rate_limited} empty={errors_empty} other={errors_other}]{rem_str})", flush=True)
         post_id, our_url, thread_url = post[0], post[1], post[2]
         prev_upvotes, prev_comments = post[3], post[4]
         no_change = post[5]
@@ -328,6 +335,8 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                 [score, comment_reply_count, post_id],
             )
             updated += 1
+            if score != prev_upvotes or comment_reply_count != prev_comments:
+                changed += 1
             results.append({"id": post_id, "score": score, "comment_replies": comment_reply_count,
                             "thread_score": thread_score, "thread_comments": thread_comments,
                             "title": thread_title})
@@ -362,6 +371,8 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                     [thread_score, thread_comments, post_id],
                 )
                 updated += 1
+                if thread_score != prev_upvotes or thread_comments != prev_comments:
+                    changed += 1
                 results.append({"id": post_id, "score": thread_score, "thread_score": thread_score,
                                 "thread_comments": thread_comments, "title": thread_title})
             else:
@@ -389,6 +400,11 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                                 [score, post_id],
                             )
                             updated += 1
+                            # No comments_count write in this branch (no-permalink
+                            # comments lack per-comment reply visibility), so the
+                            # change check is score-only.
+                            if score != prev_upvotes:
+                                changed += 1
                             results.append({"id": post_id, "score": score, "thread_score": thread_score,
                                             "thread_comments": thread_comments, "title": thread_title})
                         break
@@ -431,13 +447,14 @@ def update_reddit(db, user_agent, config=None, quiet=False):
 
     db.commit()
     progress.done("reddit", len(posts),
-                  updated=updated, deleted=deleted, removed=removed,
+                  updated=updated, changed=changed, deleted=deleted, removed=removed,
                   errors=errors, skipped=skipped, skipped_fresh=skipped_fresh)
     if skipped and not quiet:
         print(f"  Skipped {skipped} stable posts (2+ scans unchanged, older than 3 days)")
     if skipped_fresh and not quiet:
         print(f"  Skipped {skipped_fresh} rows refreshed by Step 1 within 4h")
-    return {"total": total, "updated": updated, "deleted": deleted, "removed": removed,
+    return {"total": total, "updated": updated, "changed": changed,
+            "deleted": deleted, "removed": removed,
             "errors": errors,
             "errors_404": errors_404,
             "errors_rate_limited": errors_rate_limited,
@@ -1713,8 +1730,13 @@ def main():
                 f"empty={r.get('errors_empty', 0)} "
                 f"other={r.get('errors_other', 0)}]"
             )
+            # See update_twitter() print line for the rationale: surface
+            # `changed` (rows whose score/comments actually moved) under the
+            # "updated" label so stats.sh -> log_run.py -> dashboard pill
+            # reflects real activity instead of "every successful poll".
             print(f"\nReddit: {r['total']} total, {r.get('skipped', 0)} skipped, "
-                  f"{r['total'] - r.get('skipped', 0)} checked, {r['updated']} updated, "
+                  f"{r['total'] - r.get('skipped', 0)} checked, "
+                  f"{r.get('changed', r['updated'])} updated, "
                   f"{r['deleted']} deleted, {r['removed']} removed, {r['errors']} errors" + err_break)
             if not args.quiet and r["results"]:
                 print(f"{'ID':>4} {'Score':>5} {'Thread':>7} {'Comments':>8}  Title")
