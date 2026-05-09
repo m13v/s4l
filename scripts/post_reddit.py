@@ -319,8 +319,17 @@ def _db_phase0_salvage(batch_id, freshness_hours=FRESHNESS_HOURS,
             "      AND attempt_count < %s "
             "      AND batch_id IS DISTINCT FROM %s "
             "      AND discovered_at >= NOW() - INTERVAL '%s hours' "
-            "      AND (last_attempt_at IS NULL "
-            "           OR last_attempt_at < NOW() - INTERVAL '%s minutes') "
+            # Salvage is a RETRY rail: only pick rows that previously had a
+            # post attempt and failed. Fresh-pending rows (attempt_count=0,
+            # last_attempt_at IS NULL) belong to the cycle that discovered
+            # them; if that cycle didn't ripen+draft+post them, they expire
+            # naturally via the 24h freshness gate. Without this guard, every
+            # newly-discovered candidate gets scooped into salvage on the
+            # next cycle, drafted blind without ripening, and ~90% omit at
+            # the gate, burning ~$30/cycle for ~0-1 actual posts.
+            # (2026-05-08 fix.)
+            "      AND last_attempt_at IS NOT NULL "
+            "      AND last_attempt_at < NOW() - INTERVAL '%s minutes' "
             "    RETURNING id "
             ") "
             "SELECT (SELECT COUNT(*) FROM expired), (SELECT COUNT(*) FROM salvaged)",
@@ -370,6 +379,12 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
             "WHERE batch_id = %s "
             "  AND status = 'pending' "
             "  AND attempt_count < %s "
+            # Defense-in-depth: salvage is a RETRY rail; never pick rows
+            # that haven't had a post attempt yet. Phase 0 already enforces
+            # this on batch_id assignment, but a freshly-discovered row
+            # (written by discover with batch_id=current) could otherwise
+            # match. (2026-05-08 fix.)
+            "  AND last_attempt_at IS NOT NULL "
             "GROUP BY matched_project "
             "ORDER BY c DESC, MAX(COALESCE(delta_score, 0)) DESC "
             "LIMIT 1",
@@ -396,6 +411,9 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
             "  AND status = 'pending' "
             "  AND attempt_count < %s "
             "  AND matched_project = %s "
+            # Same defense-in-depth as the project-pick query above:
+            # salvage retries previously-attempted failures only.
+            "  AND last_attempt_at IS NOT NULL "
             "ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
             "LIMIT %s",
             [DRAFT_TTL_MIN, batch_id, MAX_ATTEMPTS, project_name, limit],
