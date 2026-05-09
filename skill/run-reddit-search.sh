@@ -309,7 +309,14 @@ esac
 if [ "$HAS_DISCOVER" = "1" ]; then
     # Floor>=1 (a +1 upvote in 10min is enough signal the thread is alive).
     # composite = Δup + 4*Δcomments. top-k LIMIT keeps draft cost bounded.
-    RIPEN_SLEEP=600
+    # 2026-05-08: bumped 600s → 1800s (30 min). 10 min wasn't enough time for
+    # mature long-tail threads to show fresh momentum, killing all 162 ripen
+    # candidates in cycle 17:45 (Δup=0/Δcomm=0 across the board). 30 min gives
+    # genuinely-active threads a wider sampling window, while dead threads
+    # still correctly drop. Trade-off: cycles overlap more (launchd fires every
+    # 15 min); watchdog_hung_runs.py cap for run-reddit-search.sh is 60 min so
+    # this stays well under the kill threshold.
+    RIPEN_SLEEP=1800
     log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
     set +e
     # 2026-05-08: top-k cap REMOVED. Previously we trimmed ripen survivors to
