@@ -336,8 +336,15 @@ SALVAGED=$(echo "$PHASE0_RESULT" | cut -d'|' -f2)
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase1 2>&1 | tee -a "$LOG_FILE" || true
 
 # --- Weighted project sample -------------------------------------------------
+# Each chosen project is enriched with an `excludes_for_search` array sourced
+# from project_search_excludes (only terms past the 2-distinct-batch activation
+# gate). The Phase 1 scanner is required to mechanically append these as
+# `-term` operators to whatever query it drafts for the project. See
+# scripts/project_excludes.py for proposal/activation/decay rules.
 PROJECTS_JSON=$(python3 - <<'PY'
-import json, os, random
+import json, os, random, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import project_excludes as pe
 c = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 projects = [p for p in c.get('projects', []) if p.get('weight', 0) > 0]
 weights = [(p, p.get('weight', 0)) for p in projects]
@@ -351,11 +358,18 @@ for _ in range(min(k, len(remaining))):
     for i, (p, w) in enumerate(remaining):
         acc += w
         if acc >= r:
+            try:
+                excludes = pe.active_excludes('twitter', p.get('name'))
+            except Exception:
+                excludes = []
             chosen.append({
                 'name': p.get('name'),
                 'description': p.get('description', ''),
                 # Unified search_topics (post 2026-04-30 legacy field cleanup).
                 'search_topics': p.get('search_topics') or [],
+                # Self-improving exclusion list (2026-05-09): MUST be appended
+                # as `-term` to every query drafted for this project.
+                'excludes_for_search': excludes,
             })
             remaining.pop(i)
             break
@@ -364,6 +378,8 @@ PY
 )
 
 log "Selected projects: $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(", ".join(p["name"] for p in json.load(sys.stdin)))')"
+EXCLUDES_TOTAL=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(p.get("excludes_for_search") or []) for p in d))')
+[ "${EXCLUDES_TOTAL:-0}" -gt 0 ] && log "Active project-wide excludes loaded across selected projects: $EXCLUDES_TOTAL"
 
 # --- Top past queries for style inspiration ---------------------------------
 TOP_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_twitter_queries.py" --limit 20 2>/dev/null || echo "[]")
@@ -412,6 +428,7 @@ $DUD_QUERIES_JSON
 
 Query guidelines:
 - MANDATORY: every query MUST include the operator \`since:$(date -u -v-1d +%Y-%m-%d)\` so X returns only tweets from the last ~24h. Evergreen tweets waste budget — we want momentum, not history.
+- MANDATORY: if a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EACH listed term to that project's query, verbatim. This is mechanical, not optional. These terms were learned from prior false-positive rejections and are the ONLY upstream block against recurring noise (e.g. for Vipassana, terms like \`-cricket -kohli -ipl\` block IPL/Sanjiv-Goenka tweets that collide with the meditation teacher S.N. Goenka). DO NOT second-guess or omit them; the activation gate (>=2 distinct batches) already filtered out one-off proposals.
 - Favor high engagement: include 'min_faves:50' for broad terms, 'min_faves:20' for narrower ones
 - Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways
 - Pick a query likely to surface tweets RELEVANT to that project's actual domain
@@ -758,7 +775,7 @@ log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replie
 CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p --output-format json --json-schema "$PREP_SCHEMA" "You are the Social Autoposter prep step.
 
