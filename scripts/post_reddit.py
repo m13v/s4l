@@ -130,27 +130,35 @@ def _db_upsert_discovered_candidate(candidate, batch_id, project_name):
         conn = dbmod.get_conn()
         conn.execute(
             "INSERT INTO reddit_candidates "
-            "(thread_url, thread_author, thread_title, subreddit, "
+            "(thread_url, thread_author, thread_title, thread_selftext, subreddit, "
             " matched_project, search_topic, status, batch_id, "
             " draft_engagement_style, score_t0, comments_t0) "
-            "VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s) "
             "ON CONFLICT (thread_url) DO UPDATE SET "
-            "  batch_id        = EXCLUDED.batch_id, "
-            "  matched_project = COALESCE(reddit_candidates.matched_project, EXCLUDED.matched_project), "
-            "  search_topic    = COALESCE(reddit_candidates.search_topic, EXCLUDED.search_topic), "
-            "  thread_title    = COALESCE(reddit_candidates.thread_title, EXCLUDED.thread_title), "
-            "  thread_author   = COALESCE(reddit_candidates.thread_author, EXCLUDED.thread_author), "
-            "  subreddit       = COALESCE(reddit_candidates.subreddit, EXCLUDED.subreddit) "
+            "  batch_id         = EXCLUDED.batch_id, "
+            "  matched_project  = COALESCE(reddit_candidates.matched_project, EXCLUDED.matched_project), "
+            "  search_topic     = COALESCE(reddit_candidates.search_topic, EXCLUDED.search_topic), "
+            "  thread_title     = COALESCE(reddit_candidates.thread_title, EXCLUDED.thread_title), "
+            "  thread_author    = COALESCE(reddit_candidates.thread_author, EXCLUDED.thread_author), "
+            "  thread_selftext  = COALESCE(reddit_candidates.thread_selftext, EXCLUDED.thread_selftext), "
+            "  subreddit        = COALESCE(reddit_candidates.subreddit, EXCLUDED.subreddit) "
             # Critical: do NOT touch status, attempt_count, post_id, posted_at,
             # or score_t0/comments_t0. Re-discovered rows that previously hit
             # a permanent failure should stay 'failed'; ones that already
             # posted should stay 'posted'; first-sighting T0 must persist so
             # cumulative delta keeps working across cycles.
+            #
+            # thread_selftext (added 2026-05-08): preserve OP body text for
+            # downstream analytics (relevance scoring, content classification,
+            # second-pass LLM review). Per user instruction, every candidate's
+            # content + engagement stats are retained forever — we want the
+            # full corpus to power future selection logic, not just status flags.
             ,
             [
                 thread_url,
                 candidate.get("thread_author"),
                 candidate.get("thread_title"),
+                candidate.get("selftext") or candidate.get("thread_selftext"),
                 _subreddit_from_url(thread_url),
                 project_name,
                 candidate.get("search_topic"),
@@ -1455,6 +1463,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 "thread_url": url,
                 "thread_title": t.get("title") or "",
                 "thread_author": t.get("author") or "",
+                "selftext": t.get("selftext") or "",  # captured for analytics + future relevance gates
                 "score": int(t.get("score") or 0),
                 "num_comments": int(t.get("num_comments") or 0),
                 "search_topic": query,
