@@ -230,8 +230,15 @@ def _parse_search_results(data, already_posted, blocked_subs):
             "already_posted": already,
         }
         if already:
-            entry["SKIP"] = ">>> ALREADY POSTED IN THIS THREAD - DO NOT POST AGAIN <<<"
+            # HARD FILTER (added 2026-05-08): drop already-posted threads at parse
+            # time. Previously this only attached a SKIP marker to the entry and
+            # let it flow through to the LLM gate, which cost ~$0.20/thread to
+            # confirm "yep, already posted" — observed 6+/cycle on studyly. The
+            # set of permalinks comes from `posts.thread_url` (every comment
+            # we've ever landed), so an entry here means we definitely already
+            # engaged this thread; posting again = obvious astroturfing.
             stats["already_posted_flagged"] += 1
+            continue
         if post.get("archived"):
             stats["archived"] += 1
             continue
