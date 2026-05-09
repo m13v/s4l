@@ -1313,10 +1313,18 @@ async function enrichPostCommentsRedditRuns(runs) {
   const planRateRe = /Plan phase: rate-limited/;
   const iterationRe = /^\[\d{2}:\d{2}:\d{2}\] --- Iteration \d+\//;
   // New 4-phase pipeline markers (discover/ripen/draft/post split).
-  const discoverFoundRe = /\[post_reddit\] Discover found (\d+) candidate/;
+  // 2026-05-08: discover output is logged as either "Discover found N" (legacy)
+  // or "Discover harvested N candidate(s) from dump dir" (current opaque-mode
+  // path). Match both forms so the discovered/preRipenLabel pill stays correct.
+  const discoverFoundRe = /\[post_reddit\] Discover (?:found|harvested) (\d+) candidate/;
   const discoverFailedRe = /Discover phase: Claude failed/;
   const draftStartRe = /Drafting comments for (\d+) survivor/;
   const draftFailedRe = /Draft phase: Claude failed/;
+  // 2026-05-08: drafted = decisions actually produced by the LLM gate (the
+  // "Draft produced N post(s)" line emitted by post_reddit.py:_draft_iteration).
+  // Distinct from `discoverFound` (which counts pre-gate candidates). Replaces
+  // the legacy `drafted` value that was sometimes the same as discoverFound.
+  const draftProducedRe = /\[post_reddit\] Draft produced (\d+) post/;
   // Ripen phase summary marker (one per iteration that reaches ripen). Emitted
   // by scripts/ripen_reddit_plan.py. Carries the per-iteration delta-gate
   // stats so the dashboard can show ripen_input/survivors/drops + the best
@@ -1413,6 +1421,11 @@ async function enrichPostCommentsRedditRuns(runs) {
       if (mm) { raw += parseInt(mm[1], 10); passed += parseInt(mm[2], 10); }
       const dm = ln.match(draftedRe);
       if (dm) drafted += parseInt(dm[1], 10);
+      // 2026-05-08: also match "Draft produced N post(s)" — the new opaque-
+      // mode path emits this AFTER the LLM gate filters survivors. Treat as
+      // the authoritative drafted count when present.
+      const dpm = ln.match(draftProducedRe);
+      if (dpm) drafted += parseInt(dpm[1], 10);
       if (postedRe.test(ln)) postedCount++;
       const pm = ln.match(phaseRollupRe);
       if (pm) failedCount += parseInt(pm[2], 10);
@@ -6940,8 +6953,14 @@ function renderResult(run) {
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('passed', passed, passed > 0 ? '#22c55e' : 'var(--muted)') +
-        pill(preRipenLabel, preRipenCount, preRipenCount > 0 ? 'var(--text)' : 'var(--muted)') +
+        // 2026-05-08: pill chain explicitly reordered per user instruction
+        // to read: raw → passed → ripened → drafted → posted.
+        // The legacy "discovered"/"drafted" pre-ripen pill (preRipenLabel)
+        // is removed because it duplicates "passed" once dedup is applied.
+        // "ripened" now means survivors (renamed from the legacy survivors
+        // pill inside renderRipenPills); "drafted" now means LLM-gate output.
         renderRipenPills() +
+        pill('drafted', drafted, drafted > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
         renderQueuePill() +
         renderFailedPill() +
