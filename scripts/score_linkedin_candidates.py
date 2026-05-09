@@ -84,9 +84,10 @@ AGE_FLOOR_HOURS = 0.5
 # longer (multi-day).
 MAX_AGE_HOURS = 96.0  # 4 days
 
-# Pruning windows.
+# Freshness gate. We flip stale pending rows to 'expired' so they stop
+# burning judgment tokens, but we NEVER delete rows. Per user instruction
+# 2026-05-08, terminal rows are kept forever for analytics.
 EXPIRE_PENDING_AFTER_HOURS = 96.0  # match MAX_AGE_HOURS
-PRUNE_TERMINAL_AFTER_DAYS = 7
 
 
 def calculate_velocity_score(cand):
@@ -358,17 +359,15 @@ def upsert_candidates(candidates, batch_id=None):
 
 
 def expire_and_prune(conn):
-    """Move stale pending rows to expired, then drop ancient terminal rows."""
+    """Flip stale pending rows to 'expired'. We do NOT prune terminal rows
+    by age (per user instruction 2026-05-08); every linkedin_candidates row
+    is kept forever so we can audit skip reasons, engagement dynamics, and
+    project routing across time. Function name kept for caller compatibility.
+    """
     conn.execute(
         f"UPDATE linkedin_candidates SET status='expired' "
         f"WHERE status='pending' "
         f"AND discovered_at < NOW() - INTERVAL '{int(EXPIRE_PENDING_AFTER_HOURS)} hours'"
-    )
-    conn.commit()
-    conn.execute(
-        f"DELETE FROM linkedin_candidates "
-        f"WHERE status IN ('posted', 'expired', 'skipped') "
-        f"AND discovered_at < NOW() - INTERVAL '{PRUNE_TERMINAL_AFTER_DAYS} days'"
     )
     conn.commit()
 
