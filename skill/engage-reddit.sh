@@ -29,11 +29,6 @@ START_TS=$(date +%s)
 PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_reddit_replies.py" 2>&1 | tee -a "$LOG_FILE" || true
 
 ELAPSED=$(( $(date +%s) - START_TS ))
-# grep -c prints "0" AND exits 1 on zero matches, so `|| echo 0` was
-# appending a second "0" and making FOUND multiline, which silently broke
-# log_run.py. Use `|| FOUND=0` so the fallback only fires when the file is
-# unreadable.
-FOUND=$(grep -ci "new repl" "$LOG_FILE" 2>/dev/null) || FOUND=0
 # Pull scan-stage counters out of the "Inbox scan complete:" line so the
 # dashboard Result column can show "scanned N / new N / excluded N" on empty
 # cycles instead of all-zeros. Format on disk:
@@ -58,11 +53,30 @@ if [ -n "$SCAN_LINE" ]; then
   [ -n "$scan_back" ] && parts="${parts}backfill=${scan_back},"
   SCAN_ARG="${parts%,}"
 fi
-if [ -n "$SCAN_ARG" ]; then
-  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_reddit" --posted "$FOUND" --skipped 0 --failed 0 --cost 0 --elapsed "$ELAPSED" --scan "$SCAN_ARG" || true
-else
-  python3 "$REPO_DIR/scripts/log_run.py" --script "engage_reddit" --posted "$FOUND" --skipped 0 --failed 0 --cost 0 --elapsed "$ELAPSED" || true
+
+# Pull engage-stage counters from the canonical LOG_RUN_SUMMARY line that
+# engage_reddit.py prints right before exiting. Previously engage_reddit.py
+# wrote its own log_run.py row AND we wrote one here, producing two rows per
+# cycle in run_monitor.log -- the python-side row had no scan info and showed
+# as zeros on the dashboard. Now python emits the line, the shell parses it,
+# and we write ONE row that combines engage + scan counters.
+SUMMARY_LINE=$(grep -m1 "^\[engage_reddit\] LOG_RUN_SUMMARY" "$LOG_FILE" 2>/dev/null || true)
+ENG_POSTED=0; ENG_SKIPPED=0; ENG_FAILED=0; ENG_COST="0.0000"; ENG_ELAPSED="$ELAPSED"; ENG_FAILURE_REASONS=""
+if [ -n "$SUMMARY_LINE" ]; then
+  ENG_POSTED=$(echo "$SUMMARY_LINE" | grep -oE "posted=[0-9]+" | head -1 | cut -d= -f2)
+  ENG_SKIPPED=$(echo "$SUMMARY_LINE" | grep -oE "skipped=[0-9]+" | head -1 | cut -d= -f2)
+  ENG_FAILED=$(echo "$SUMMARY_LINE" | grep -oE "failed=[0-9]+" | head -1 | cut -d= -f2)
+  ENG_COST=$(echo "$SUMMARY_LINE" | grep -oE "cost=[0-9.]+" | head -1 | cut -d= -f2)
+  # `failure_reasons=` is the last key on the line; it may be empty. Capture
+  # everything after the literal token, trim trailing whitespace.
+  ENG_FAILURE_REASONS=$(echo "$SUMMARY_LINE" | sed -n 's/.* failure_reasons=\([^ ]*\).*/\1/p')
+  : "${ENG_POSTED:=0}" "${ENG_SKIPPED:=0}" "${ENG_FAILED:=0}" "${ENG_COST:=0.0000}"
 fi
+
+LOG_RUN_ARGS=(--script "engage_reddit" --posted "$ENG_POSTED" --skipped "$ENG_SKIPPED" --failed "$ENG_FAILED" --cost "$ENG_COST" --elapsed "$ENG_ELAPSED")
+[ -n "$SCAN_ARG" ] && LOG_RUN_ARGS+=(--scan "$SCAN_ARG")
+[ -n "$ENG_FAILURE_REASONS" ] && LOG_RUN_ARGS+=(--failure-reasons "$ENG_FAILURE_REASONS")
+python3 "$REPO_DIR/scripts/log_run.py" "${LOG_RUN_ARGS[@]}" || true
 
 echo "=== Engage Reddit complete: $(date) (elapsed ${ELAPSED}s) ===" | tee -a "$LOG_FILE"
 find "$LOG_DIR" -name "engage-reddit-*.log" -mtime +7 -delete 2>/dev/null || true
