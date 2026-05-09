@@ -1428,16 +1428,22 @@ async function enrichPostCommentsRedditRuns(runs) {
     // array preserves first-seen order while deduping repeats within a cycle.
     const projectsSeen = new Set();
     const projectsList = [];
+    const recordProject = (raw) => {
+      if (!raw) return;
+      const proj = raw.trim();
+      if (proj && !projectsSeen.has(proj)) {
+        projectsSeen.add(proj);
+        projectsList.push(proj);
+      }
+    };
     for (const ln of body.split('\n')) {
       if (iterationRe.test(ln)) iterations++;
+      const sm = ln.match(salvageProjectRe);
+      if (sm) recordProject(sm[1]);
+      const dpm2 = ln.match(discoverProjectRe);
+      if (dpm2) recordProject(dpm2[1]);
       const ppm = ln.match(phaseProjectRe);
-      if (ppm) {
-        const proj = ppm[1].trim();
-        if (proj && !projectsSeen.has(proj)) {
-          projectsSeen.add(proj);
-          projectsList.push(proj);
-        }
-      }
+      if (ppm) recordProject(ppm[1]);
       if (searchRe.test(ln) && ln.includes('tool: Bash')) searches++;
       if (fetchRe.test(ln) && ln.includes('tool: Bash')) fetched++;
       const mm = ln.match(redditSearchMarkerRe);
