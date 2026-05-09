@@ -98,6 +98,11 @@ acquire_lock() {
         # Won the lock. Write PID, register for trap-cleanup, drop our ticket,
         # then break out into the post-acquire (Chrome sweep + return).
         echo $$ > "$lock_dir/pid"
+        # Initial 90s lease so watchdog reads lease_remaining instead of
+        # "missing" before the first heartbeat fires. Pipelines that go
+        # through reddit_browser.py or MCP hooks will bump this on each CDP
+        # op; bash-only acquires get the 90s grace window.
+        echo $(($(date +%s) + 90)) > "$lock_dir/expires_at" 2>/dev/null || true
         _SA_LOCK_DIRS+=("$lock_dir")
         rm -f "$ticket_file"
         # Remove our ticket from _SA_LOCK_TICKETS so the EXIT trap doesn't
