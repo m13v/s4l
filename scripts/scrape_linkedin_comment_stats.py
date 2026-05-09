@@ -72,6 +72,7 @@ from linkedin_browser import (  # noqa: E402
     SYSTEM_CHROME,
     VIEWPORT,
     _acquire_browser_lock,
+    _connect_to_running_or_launch,
     _is_login_or_checkpoint,
 )
 
@@ -280,52 +281,33 @@ def _comments_tab_present(page) -> bool:
 
 
 def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
-    """Run the scrape. Returns result dict."""
+    """Run the scrape. Returns result dict.
+
+    2026-05-08: switched from launch_persistent_context (which forced
+    skill/stats-linkedin-comments.sh to first SIGKILL the linkedin-agent
+    MCP Chrome via ensure_browser_healthy, producing a kill+reopen
+    cadence that LinkedIn anti-bot flagged on 2026-05-06) to a
+    CDP-attach via _connect_to_running_or_launch. New tabs land in the
+    existing MCP Chrome's BrowserContext, so cookies/fingerprint match
+    perfectly and no second Chrome process is ever spawned. The
+    launch_persistent_context fallback inside the helper still exists
+    for the cold-MCP case.
+    """
     from playwright.sync_api import sync_playwright
 
     _acquire_browser_lock()
 
     with sync_playwright() as p:
-        deadline = time.time() + LOCK_WAIT_MAX
-        context = None
-        last_err: Optional[Exception] = None
-        while True:
-            for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                try:
-                    os.remove(os.path.join(PROFILE_DIR, fname))
-                except OSError:
-                    pass
-            try:
-                context = p.chromium.launch_persistent_context(
-                    PROFILE_DIR,
-                    headless=False,
-                    executable_path=(
-                        SYSTEM_CHROME
-                        if os.path.exists(SYSTEM_CHROME) else None
-                    ),
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--window-position=3953,-1032",
-                        "--window-size=911,1016",
-                    ],
-                    viewport=VIEWPORT,
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                )
-                break
-            except Exception as e:
-                last_err = e
-                if time.time() >= deadline:
-                    return {
-                        "ok": False,
-                        "error": "profile_locked",
-                        "detail": f"launch_persistent_context failed: {e}",
-                    }
-                time.sleep(LOCK_POLL_INTERVAL)
+        try:
+            context, owns_context = _connect_to_running_or_launch(p)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": "profile_locked",
+                "detail": str(e),
+            }
 
+        page = None
         try:
             page = context.new_page()
             try:
@@ -437,10 +419,23 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
 
             return out
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            # Always close OUR page so the MCP Chrome doesn't accumulate
+            # tabs across fires.
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            # Only close the context when we own it (cold-MCP fallback
+            # path). When CDP-attached to the linkedin-agent MCP, the
+            # context belongs to that MCP and closing it terminates the
+            # MCP's Chrome — exactly the kill+reopen cadence we are
+            # trying to eliminate.
+            if owns_context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
 
 def main():
