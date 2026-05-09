@@ -170,10 +170,21 @@ PROMPT_EOF
                 echo "[$(date)] Unclaimed $THREAD_ID (retry $FAILS/3)" >> "$LOG_DIR/web-chat.log"
             fi
         else
+            # Claude finished cleanly (replied OR explicitly skipped). Stamp
+            # processed_at so the recovery query in check_unread_web_chats.py
+            # won't re-flag this thread next cycle. Without this, threads where
+            # Claude legitimately skipped (smoke test, off-topic, no useful
+            # answer) loop every 5min for 24h, since last_message_sender stays
+            # 'visitor' (no agent message inserted on skip).
+            "$PYTHON_BIN" "$SCRIPTS_DIR/mark_web_chat_processed.py" "$THREAD_ID" >> "$LOG_DIR/web-chat.log" 2>&1
             rm -f "$FAIL_COUNT_FILE"
         fi
 
-        # No-output guard (silent rate limits sometimes).
+        # No-output guard (silent rate limits sometimes). If Claude exited 0
+        # but produced almost no output, treat as a silent failure: unclaim
+        # so the next cycle retries via the main unread>0 path. The
+        # processed_at stamp above is harmless here because the main SELECT
+        # gates on unread_by_founder>0, not on processed_at.
         LINE_COUNT=$(wc -l < "$SESSION_LOG" 2>/dev/null || echo "0")
         if [ "$LINE_COUNT" -le 2 ] && [ "$EXIT_CODE" -eq 0 ]; then
             echo "[$(date)] WARN: $THREAD_ID produced no output, unclaiming" >> "$LOG_DIR/web-chat.log"
