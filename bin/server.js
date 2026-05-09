@@ -1308,6 +1308,17 @@ async function enrichPostCommentsRedditRuns(runs) {
   const draftedRe = /\[post_reddit\] Claude drafted (\d+) post/;
   const postedRe = /\[post_reddit\] POSTED:/;
   const phaseRollupRe = /\[post_reddit\] phase=post .*? posted=(\d+) failed=(\d+)/;
+  // Capture which project(s) this cycle actually worked on. Multiple projects
+  // can appear in a single cycle (e.g. salvage lane = project A, discover lane
+  // = project B). Three sources, all captured so a salvage lane that posted 0
+  // still surfaces its project (the work happened, gate just omitted everything):
+  //   - "[post_reddit] SALVAGED N candidate(s) (max attempt=N/N) project=X" (salvage lane)
+  //   - "[post_reddit] Project: X" (discover lane header)
+  //   - "[post_reddit] phase=post project=X posted=N failed=N" (post rollup, fallback)
+  // Render order: order of first appearance.
+  const salvageProjectRe = /\[post_reddit\] SALVAGED \d+ candidate\(s\) .*? project=(\S+)/;
+  const discoverProjectRe = /^\[post_reddit\] Project: (.+?)\s*$/;
+  const phaseProjectRe = /\[post_reddit\] phase=post project=(.+?) posted=\d+ failed=\d+/;
   const redditSearchMarkerRe = /^\[reddit_search\] .*? raw=(\d+) returned=(\d+)/;
   const planFailedRe = /Plan phase: Claude failed/;
   const planRateRe = /Plan phase: rate-limited/;
@@ -1413,8 +1424,20 @@ async function enrichPostCommentsRedditRuns(runs) {
       already_replied: 'already_replied',
     };
     let lastPlanReason = null;
+    // Project labels surfaced at the end of the pill row. Set + insertion-order
+    // array preserves first-seen order while deduping repeats within a cycle.
+    const projectsSeen = new Set();
+    const projectsList = [];
     for (const ln of body.split('\n')) {
       if (iterationRe.test(ln)) iterations++;
+      const ppm = ln.match(phaseProjectRe);
+      if (ppm) {
+        const proj = ppm[1].trim();
+        if (proj && !projectsSeen.has(proj)) {
+          projectsSeen.add(proj);
+          projectsList.push(proj);
+        }
+      }
       if (searchRe.test(ln) && ln.includes('tool: Bash')) searches++;
       if (fetchRe.test(ln) && ln.includes('tool: Bash')) fetched++;
       const mm = ln.match(redditSearchMarkerRe);
@@ -1538,6 +1561,11 @@ async function enrichPostCommentsRedditRuns(runs) {
       cost_usd: prior.cost_usd || 0,
       failure_reasons: failureReasonsFinal,
       log_file: chosen,
+      // Project(s) this cycle actually posted-or-attempted-to-post for, parsed
+      // from "[post_reddit] phase=post project=X" rollup lines. Surfaces at the
+      // end of the dashboard pill row so the operator can see at a glance which
+      // project(s) consumed the cycle (often 2 distinct: salvage lane + discover).
+      projects_worked: projectsList,
       // Ripen phase (5-min delta gate, scripts/ripen_reddit_plan.py). Reflects
       // the per-run sum across all iterations that reached the ripen step.
       // ripen_iters counts iterations where the [ripen] summary marker fired
@@ -6964,6 +6992,13 @@ function renderResult(run) {
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
         renderQueuePill() +
         renderFailedPill() +
+        (Array.isArray(r.projects_worked) && r.projects_worked.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+            + 'projects '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.projects_worked.join(', ')
+            + '</span></span>'
+          : '') +
       '</span>'
     );
   }
