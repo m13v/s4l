@@ -25,6 +25,25 @@ Already shipped (partial): `InlineCta`, `StickyBottomCta`, `BookCallCTA`, `GetSt
 
 Consumer sites import via the `@seo/components` alias. When adding a new component: build in `~/seo-components/src/components/`, bump version, then update each consumer (the `bump:consumers` script automates this).
 
+## No retention pruning, ever (per user instruction 2026-05-08)
+
+**Never delete `*_candidates` rows by age.** The user explicitly requires that every candidate row (`twitter_candidates`, `linkedin_candidates`, `reddit_candidates`, etc.) be kept forever, regardless of `status`. The full history (chosen, skipped, expired, posted) powers analytics on skip reasons, project routing, engagement curves, and growth dynamics; pruning destroys that signal.
+
+Forbidden patterns anywhere in this repo (Python, shell, SQL, schedulers):
+
+```sql
+-- DO NOT REINTRODUCE
+DELETE FROM <table>_candidates
+ WHERE status IN ('posted', 'expired', 'skipped')
+   AND discovered_at < NOW() - INTERVAL 'N days';
+```
+
+This was previously present in `scripts/score_twitter_candidates.py` (7-day prune, two call sites) and `scripts/score_linkedin_candidates.py` (`PRUNE_TERMINAL_AFTER_DAYS = 7` via `expire_and_prune()`); both were removed on 2026-05-08. Do not add a `PRUNE_TERMINAL_AFTER_DAYS` / `RETENTION_DAYS` constant or a "delete old" cleanup job back. No 30-day, 90-day, or any other retention window is acceptable. If the table grows enough to hurt query performance, add an index or a partitioned archive table; never delete rows.
+
+What IS allowed: status flips (e.g. `UPDATE ... SET status='expired' WHERE status='pending' AND discovered_at < NOW() - INTERVAL 'N hours'`). Those are freshness gates that prevent stale candidates from burning judgment tokens; they do not lose data.
+
+If a future agent (including the auto-commit agent) reintroduces a `DELETE ... FROM <table>_candidates` by-age, revert immediately and surface to the user.
+
 ## Analytics wiring check
 
 `scripts/check_analytics_wiring.py` audits every project in `config.json` for correct PostHog + `@m13v/seo-components` wiring. Catches silent-failure bugs where `window.posthog` is never set and helpers (NewsletterSignup, trackScheduleClick) no-op.
