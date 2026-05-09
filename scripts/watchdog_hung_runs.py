@@ -47,6 +47,11 @@ PER_SCRIPT_CAP_SEC = {
     ("link-edit-moltbook.sh", None): 120 * 60,
     ("link-edit-github.sh", None): 120 * 60,
     ("precompute-stats.sh", None): 120 * 60,
+    # 2026-05-08: ripen sleep raised from 10 min to 30 min. Worst-case cycle:
+    # phase0 + salvage post (5 min) + discover claude (3 min) + ripen sleep
+    # 30 min + ripen re-fetch (2 min) + draft (3 min) + post (5 min) ≈ 48 min.
+    # Bump to 60 min so the natural cycle stays under the kill threshold.
+    ("run-reddit-search.sh", None): 60 * 60,
 }
 WATCHDOG_LOG = REPO / "skill" / "logs" / "watchdog.log"
 RUN_MONITOR_LOG = REPO / "skill" / "logs" / "run_monitor.log"
