@@ -1120,7 +1120,16 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
             "ORDER BY id"
         ).fetchall()
 
-    total = updated = deleted = suspended = errors = skipped = 0
+    total = updated = changed = deleted = suspended = errors = skipped = 0
+    # `updated`: rows the fxtwitter API answered for and we wrote back (i.e.
+    #   successful polls). Effectively `total - errors - skipped - 404s`.
+    # `changed`: subset of `updated` where views OR likes actually moved since
+    #   the prior scan. This is the signal the dashboard's "updated" pill
+    #   surfaces (per log_run.py --updated docstring), so the printed summary
+    #   below uses `changed` for the "updated" field. Before 2026-05-08 the
+    #   summary printed `updated` (= every successful poll), making
+    #   "checked == updated" identically equal whenever there were no errors,
+    #   which hid the fact that ~55% of hot-tier polls return identical stats.
     results = []
 
     for post in posts:
@@ -1222,10 +1231,13 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         results.append({"id": post_id, "views": views, "likes": likes,
                         "replies": replies, "retweets": retweets})
 
-        # Track no-change for skip optimization
+        # Track no-change for skip optimization. The "actually moved" branch
+        # also bumps `changed` so the printed summary can distinguish a
+        # successful poll (updated) from one where views/likes shifted.
         if likes == prev_upvotes and views == prev_views:
             db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s", [post_id])
         else:
+            changed += 1
             db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id = %s", [post_id])
 
         # Rate limit: 1 request per second to be safe with fxtwitter
@@ -1235,16 +1247,17 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         if total % 50 == 0:
             db.commit()
             progress.tick("twitter", total, len(posts),
-                          updated=updated, deleted=deleted,
+                          updated=updated, changed=changed, deleted=deleted,
                           suspended=suspended, errors=errors, skipped=skipped)
 
     db.commit()
     progress.done("twitter", len(posts),
-                  updated=updated, deleted=deleted,
+                  updated=updated, changed=changed, deleted=deleted,
                   suspended=suspended, errors=errors, skipped=skipped)
     if skipped and not quiet:
         print(f"  Skipped {skipped} stable tweets (3+ scans unchanged, older than 5 days)")
-    return {"total": total, "updated": updated, "deleted": deleted, "suspended": suspended,
+    return {"total": total, "updated": updated, "changed": changed,
+            "deleted": deleted, "suspended": suspended,
             "errors": errors, "skipped": skipped, "results": results}
 
 
