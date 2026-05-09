@@ -582,6 +582,32 @@ if [ -f "$QUERIES_FILE" ]; then
         < "$QUERIES_FILE" 2>&1 | tee -a "$LOG_FILE"
     rm -f "$QUERIES_FILE"
 fi
+
+# Stamp last_used_at on every active project-wide exclude we surfaced to
+# Claude this cycle. These are the terms Claude was REQUIRED to append as
+# `-term` to its drafted queries, so even if Claude omits one, the term is
+# still considered "in use" for decay purposes — drafter compliance is its
+# own problem, not a reason to prune a learned exclude. Done after the
+# search_attempts log so a Phase 1 abort still leaves the marks behind.
+python3 - "$PROJECTS_JSON" <<'PY' 2>&1 | tee -a "$LOG_FILE" || true
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import project_excludes as pe
+projects = json.loads(sys.argv[1] or '[]')
+total = 0
+for p in projects:
+    terms = p.get('excludes_for_search') or []
+    if not terms:
+        continue
+    try:
+        n = pe.mark_used('twitter', p.get('name'), terms)
+    except Exception as exc:
+        print(f"mark_used error for {p.get('name')}: {exc}", file=sys.stderr)
+        continue
+    total += n
+if total:
+    print(f"project_excludes: marked {total} term(s) used across selected projects")
+PY
 if [ "$EXTRACT_EXIT" -ne 0 ] || [ ! -f "$RAW_FILE" ]; then
     log "No tweets extracted in Phase 1. Aborting cycle."
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
@@ -832,6 +858,26 @@ For each chosen candidate:
    - 'rejected' with a SHORT one-line reason explaining why this thread is not worth replying to (off-topic for the matched project, toxic / hateful, low-quality / spam, audience mismatch, near-duplicate of something we already replied to, etc.). Reason must be <=200 chars, plain text, no quotes.
    It is fine for 'candidates' to be empty if no thread is on-brand; in that case every candidate id goes into 'rejected'. The reverse (every id in 'candidates') is also allowed up to POST_LIMIT, with the rest in 'rejected'.
    Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you forgot.
+
+5a. SELF-IMPROVING PROJECT-WIDE EXCLUSION LIST (optional, on rejected entries only):
+    When you put a candidate in 'rejected' BECAUSE of a stable, recurring CLASS of false-positive (not a one-off bad tweet), you MAY include a 'proposed_excludes' array of 1-3 specific keywords. If you do, the pipeline will (after a 2-distinct-batch activation gate) automatically append \`-keyword\` to ALL future Twitter searches for the matched_project, project-wide and persistent. This is the ONLY upstream block against the entire class of false-positive that a tighter Phase 1 query alone cannot prevent.
+
+    USE THIS POWER NARROWLY. False-negatives (legit tweets being filtered out) are far worse than the cost of seeing one more cricket tweet. Apply ALL of these rules:
+
+    - DO emit when: the false-positive is caused by a SPECIFIC ambiguous proper noun, brand, or domain term that has a wholly unrelated meaning collisional with the project. Example for Vipassana: an IPL/cricket thread surfaced because the search query included \`Goenka\` (the meditation teacher S.N. Goenka shares a surname with Sanjiv Goenka, owner of an IPL team). Right proposed_excludes: ['cricket','kohli','ipl','lsg','rcb']. WRONG proposed_excludes: ['goenka'] (would mute legit S.N. Goenka tweets).
+
+    - DO NOT emit when: the candidate is just personally low-quality (spam, low engagement, generic), the language is wrong, the author is bot-like, or the thread is just slightly off-topic. Those are one-offs, NOT classes. Use the 'reason' field instead.
+
+    - Each proposed term must be:
+      * a SINGLE token, lowercase, ascii letters/digits/hyphen only, no spaces, length 3-32. (e.g. 'cricket', 'kohli', 'ipl', 'lsg', 'rcb-fan', 'crypto', 'memecoin').
+      * SPECIFIC and unambiguous in the project's domain. Proper nouns, brand names, narrow jargon, sport/team/franchise terms preferred. Generic words like 'practice', 'retreat', 'meditation', 'work', 'tips', 'app', 'tool', 'help' are FORBIDDEN — they will produce false-negatives.
+      * NOT a core search topic of the matched_project (the validator rejects any term in the project's search_topics, so don't waste tokens proposing one).
+
+    - Cap: at most 3 terms per rejected entry. If you need more, you're probably proposing too generically — narrow the list.
+
+    - Activation gate: each term needs >=2 SEPARATE batches to propose it before it goes live, so a single false-rejection cannot mute a search. You don't need to think about this — propose if you'd be confident a future cycle's Claude would also propose it; if not, leave proposed_excludes off.
+
+    - When in doubt, omit the field entirely. The default behavior (no proposed_excludes) is safe; over-proposing is not.
 
 CRITICAL:
 - DO NOT post anything. The shell handles posting.
