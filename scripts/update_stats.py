@@ -339,7 +339,12 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                 changed += 1
             results.append({"id": post_id, "score": score, "comment_replies": comment_reply_count,
                             "thread_score": thread_score, "thread_comments": thread_comments,
-                            "title": thread_title})
+                            "title": thread_title,
+                            # _comments_written = the value we wrote to
+                            # posts.comments_count (used by the skip-optimization
+                            # block below to gate scan_no_change_count on
+                            # comment-count change as well as score change).
+                            "_comments_written": comment_reply_count})
         else:
             # our_url is a thread URL without a comment ID
             # Check if it's our original post (we are the thread author)
@@ -374,7 +379,8 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                 if thread_score != prev_upvotes or thread_comments != prev_comments:
                     changed += 1
                 results.append({"id": post_id, "score": thread_score, "thread_score": thread_score,
-                                "thread_comments": thread_comments, "title": thread_title})
+                                "thread_comments": thread_comments, "title": thread_title,
+                                "_comments_written": thread_comments})
             else:
                 # Comment without permalink — we can't get comment-specific stats
                 # Only update thread engagement metadata, don't touch upvotes/comments_count
@@ -401,12 +407,14 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                             )
                             updated += 1
                             # No comments_count write in this branch (no-permalink
-                            # comments lack per-comment reply visibility), so the
-                            # change check is score-only.
+                            # comments lack per-comment reply visibility), so
+                            # change detection is score-only and the skip block
+                            # reads _comments_written=None and ignores comments.
                             if score != prev_upvotes:
                                 changed += 1
                             results.append({"id": post_id, "score": score, "thread_score": thread_score,
-                                            "thread_comments": thread_comments, "title": thread_title})
+                                            "thread_comments": thread_comments, "title": thread_title,
+                                            "_comments_written": None})
                         break
 
                 if our_removed:
@@ -434,11 +442,17 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                     if not quiet:
                         print(f"SKIP (no permalink, comment not in top-level) [{post_id}]")
 
-        # Track whether stats changed for skip optimization
-        # Compare current score to previous — if same, increment no-change counter
+        # Track whether stats changed for skip optimization. A row counts as
+        # "no change" only when BOTH score and comments_count are unchanged
+        # since the prior scan. _comments_written = None means this branch
+        # didn't write comments_count (no-permalink case), so we don't gate
+        # the skip on comments — score-only.
         if results and results[-1]["id"] == post_id:
             new_score = results[-1]["score"]
-            if new_score == prev_upvotes:
+            new_comments = results[-1].get("_comments_written")
+            score_unchanged = (new_score == prev_upvotes)
+            comments_unchanged = (new_comments is None or new_comments == prev_comments)
+            if score_unchanged and comments_unchanged:
                 db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s", [post_id])
             else:
                 db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id = %s", [post_id])
