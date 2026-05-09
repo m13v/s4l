@@ -6802,7 +6802,14 @@ function renderResult(run) {
     const searches = r.searches || 0;
     const fetched = r.fetched || 0;
     const raw = r.candidates_raw || 0;
-    const passed = r.candidates_passed || 0;
+    // 2026-05-08: "passed" now means UNIQUE-URL post-filter count, not the
+    // sum-of-per-query-returned value (which double-counts URLs surfaced by
+    // multiple seed phrases). When ripen ran, ripen_input == the deduped
+    // count harvested into the candidate pool, so we use that. When ripen
+    // didn't run (e.g. salvage-only cycle), fall back to candidates_passed.
+    const candidatesPassedRaw = r.candidates_passed || 0;
+    const ripenInputForPassed = r.ripen_input || 0;
+    const passed = ripenInputForPassed > 0 ? ripenInputForPassed : candidatesPassedRaw;
     const dropped = r.candidates_dropped || 0;
     const drafted = r.drafted || 0;
     const discoverFound = r.discover_found || 0;
@@ -6854,9 +6861,17 @@ function renderResult(run) {
     // feedback_server_js_template_regex memory.)
     const renderRipenPills = () => {
       if (!ripenIters && !ripenSkipped && !ripenPassthrough) return '';
+      // 2026-05-08 dashboard rename (per user instruction):
+      //   - Drop the legacy "ripened" pill (which showed the INPUT to ripen).
+      //     That count is now folded into "passed" since they're the same set
+      //     once dedup is applied (passed-with-dedup == ripen_input).
+      //   - Rename the legacy "survivors" pill to "ripened" — i.e. "ripened"
+      //     now means "threads that ACTUALLY came through the ripen step
+      //     with positive momentum", which is what the word implies in plain
+      //     English. Final chain: raw → passed → ripened → drafted → posted.
       const ripenTip = 'ripen iters: ' + ripenIters +
-        ' / input decisions: ' + ripenInput +
-        ' / survivors (composite > ' + (ripenFloor != null ? ripenFloor : '?') + '): ' + ripenSurvivors +
+        ' / input decisions (=passed): ' + ripenInput +
+        ' / ripened (composite > ' + (ripenFloor != null ? ripenFloor : '?') + '): ' + ripenSurvivors +
         ' / drops: ' + ripenDrops +
         ' / iters skipped (0 survivors): ' + ripenSkipped +
         ' / iters passthrough (no urls / rate limit): ' + ripenPassthrough +
@@ -6870,8 +6885,7 @@ function renderResult(run) {
         : (ripenSurvivors > 0 ? 'best Δ?' : 'no Δ');
       const bestColor = bestComp != null && bestComp > 0 ? '#22c55e' : 'var(--muted)';
       return '<span title="' + ripenTip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
-        pill('ripened', ripenInput, ripenInput > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('survivors', ripenSurvivors, ripenSurvivors > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('ripened', ripenSurvivors, ripenSurvivors > 0 ? '#22c55e' : 'var(--muted)') +
         pill(bestLabel, '', bestColor) +
         '</span>';
     };
