@@ -69,7 +69,7 @@ DRAFT_TTL_MIN = 60
 # wider top-of-funnel and the new draft-gate-omit feedback report can steer
 # rephrasings without starving the next attempt of fresh angles. Override via
 # SAPS_REDDIT_MAX_SEARCHES env var without code change.
-MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "10"))
+MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "3"))
 
 # CDP-error → permanence map. Permanent failures mark status='failed' and are
 # never re-evaluated. Transient failures stay status='pending' with
