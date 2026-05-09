@@ -925,34 +925,39 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments)
         )
     candidates_block = "\n".join(candidate_lines)
 
-    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to PICK only the ones that genuinely fit the project below, and draft a comment for those.
+    return f"""You will be handed up to {len(candidates)} Reddit thread(s) that survived the engagement-velocity (ripen) gate. Your job is to draft comments for the ones where you can write something genuinely useful to that audience. Lean toward DRAFTING when the audience overlaps even partially with the project's user, and only OMIT on clear no-bridge cases.
 
 Content angle: {content_angle}
 {recent_ctx}{top_ctx}
 ## Candidate threads (post-ripen):
 {candidates_block}
 
-## SELECTION GATE — read this before drafting anything
+## SELECTION GATE — soft fits are OK; reject only clear mismatches
 
-The ripen step proves a thread is alive (people are voting/commenting). It does NOT prove the thread fits the project. Reddit search returns false positives based on raw token overlap (e.g. a search for "no-code app maker" surfaces r/gamemaker shader threads because of the word "maker"; a search for "E2E testing developer productivity QA" can surface a JonBenet murder thread because of how Reddit indexes acronyms). Ripen cannot detect that.
+The ripen step proves a thread is alive (people are voting/commenting). It does NOT prove the thread fits the project. Reddit search returns false positives based on raw token overlap (e.g. a search for "no-code app maker" surfaces r/gamemaker shader threads because of the word "maker"; a search for "E2E testing developer productivity QA" can surface a JonBenet murder thread because of how Reddit indexes acronyms). The gate exists to catch those token-overlap false positives, NOT to demand a perfect product fit on every thread.
 
-You MUST. Before drafting for any thread, ask yourself the **bridge test**:
-"If a stranger reads my comment and later clicks through to {project.get('name', 'this project')}, does the project actually solve a problem the thread's audience cares about?"
+For each thread, ask the **bridge test**:
+"Could a thoughtful person from {project.get('name', 'this project')}'s audience plausibly read my comment and find it useful, regardless of whether they ever try the product?"
 
-If the answer is no, OMIT the thread entirely. Do NOT emit a JSON line for it. Optimize for FIT, not VOLUME. Returning 0 of {len(candidates)} is a valid outcome on a bad batch. Returning all {len(candidates)} is also fine on a good batch. Never force entries to hit a quota; we'd rather post nothing this cycle than burn karma on a mismatch.
+DRAFT it if YES. OMIT only if NO bridge exists at all (clear off-topic / hostile audience / token-overlap false positive). Soft / partial / adjacent fits are GOOD enough — a useful comment in an adjacent sub builds reputation even when no one converts. Don't optimize for purity. Don't artificially cap output. The post-phase will cap actual posting at a reasonable number, so feel free to draft for any thread that passes the soft bridge test.
 
-GOOD MATCHES (draft a comment):
-- Project: AI test automation (Assrt). Thread: "Playwright selectors keep breaking on every refactor" → direct fit, audience is QA engineers.
-- Project: AI app builder (mk0r). Thread: "I want to prototype a tip calculator UI without learning React" → direct fit, audience wants no-code app generation.
-- Project: Home security camera assistant (Cyrano). Thread: "Wired NVR vs wireless Eufy for a long-term setup" → direct fit, audience cares about camera systems.
+DRAFT THESE (broad, inclusive — not just direct hits):
+- Project: AI test automation (Assrt). Thread: "Playwright selectors keep breaking on every refactor" → direct fit. DRAFT.
+- Project: AI test automation. Thread: r/QualityAssurance "How are people handling flaky CI tests?" → adjacent topic, same audience. DRAFT.
+- Project: AI app builder (mk0r). Thread: "I want to prototype a tip calculator without learning React" → direct fit. DRAFT.
+- Project: AI app builder. Thread: r/SaaS "Indie hackers shipping MVPs in a weekend" → adjacent: same builder mindset. DRAFT (helpful comment about iteration speed).
+- Project: study tool (Studyly). Thread: r/medschool "best way to handle 200-slide lectures" → direct fit. DRAFT.
+- Project: study tool. Thread: r/GetStudying "I'm burnt out, can't retain anything" → adjacent: study-habit audience. DRAFT (empathetic comment about active recall, even if no product mention).
+- Project: home security camera (Cyrano). Thread: r/HomeImprovement "wired vs wireless cameras" → direct fit. DRAFT.
 
-BAD MATCHES (OMIT, do not draft):
-- Project: AI test automation. Thread: r/JonBenet "The Absurdity of the BDI Theory" → search query token-overlap false positive ("BDI" parsed as a testing acronym). Audience cares about a 1996 murder case, not QA tooling. No bridge.
-- Project: AI app builder. Thread: r/BostonSocialClub "Events worth leaving the house for this weekend" → matched on "tried" / "maker" tokens. Audience is locals looking for weekend plans. No bridge.
-- Project: AI app builder. Thread: r/gamemaker "Using surfaces to create paper-like behavior" → matched on "maker" but GameMaker is a code-based game-dev IDE, not a no-code prompt tool. Audience writes GML shaders. No bridge.
-- Any thread on a clearly off-topic subreddit relative to the project's domain (true-crime, local events, niche fandoms, political debate) where you'd be embarrassed to leave a comment that later points to {project.get('name', 'this project')}.
-
-If you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread, OMIT it.
+OMIT THESE (clear no-bridge cases only):
+- Project: AI test automation. Thread: r/JonBenet "The Absurdity of the BDI Theory" → token-overlap false positive (BDI ≠ a testing acronym here). 1996 murder case audience. NO bridge. OMIT.
+- Project: AI app builder. Thread: r/BostonSocialClub "Events worth leaving the house for this weekend" → matched on "tried"/"maker". Locals planning weekends. NO bridge. OMIT.
+- Project: AI app builder. Thread: r/gamemaker "Using surfaces to create paper-like behavior" → GameMaker is a code IDE, not a no-code generator. Audience writes GML shaders. NO bridge. OMIT.
+- Project: study tool. Thread: r/SubredditDrama "the alternative option is still running" → meta drama, no study angle. OMIT.
+- Project: study tool. Thread: r/trichotillomania "the trich trance" → medical condition, not studying. OMIT.
+- Project: study tool. Thread where you've ALREADY commented under any of our accounts (`already_posted=true` or our usernames in the comment list): obvious astroturfing. OMIT.
+- Any thread where you'd be embarrassed to have your comment shown next to a {project.get('name', 'this project')} link in the same Reddit thread.
 
 ## Tools (via Bash)
 - Fetch thread: python3 {REDDIT_TOOLS} fetch "THREAD_URL"
@@ -1654,6 +1659,19 @@ def _post_iteration(plan, reddit_username):
 
     if not decisions:
         return 0, 0
+
+    # MAX_POSTS_PER_CYCLE cap (added 2026-05-08): the ripen top-K cap was
+    # removed so the LLM gate can evaluate the full ripen-survivor set with
+    # a softened relevance bar. Without this cap, a wide cycle could try to
+    # post 30+ comments through a single browser instance, hitting Reddit
+    # CAPTCHA / rate-limits and burning karma. Trim to the highest-engagement
+    # decisions (already sorted by composite DESC at ripen output, draft
+    # preserves order). Override per-cycle via SAPS_REDDIT_MAX_POSTS_PER_CYCLE.
+    max_posts = int(os.environ.get("SAPS_REDDIT_MAX_POSTS_PER_CYCLE", "10"))
+    if len(decisions) > max_posts:
+        print(f"[post_reddit] post-phase cap: {len(decisions)} drafted, "
+              f"trimming to top {max_posts} by composite-DESC order")
+        decisions = decisions[:max_posts]
 
     # In two-phase mode (plan in process A, post in process B), the env var
     # set by run_claude in process A is gone. Re-export here so log_post →
