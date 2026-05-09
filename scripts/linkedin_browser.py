@@ -179,6 +179,122 @@ def _is_login_or_checkpoint(url: str) -> bool:
     )
 
 
+def _read_devtools_active_port() -> Optional[int]:
+    """Return the CDP port the linkedin-agent MCP Chrome is listening on.
+
+    The persistent profile dir holds a `DevToolsActivePort` file written
+    by Chrome on startup whenever `--remote-debugging-port=0` is passed
+    (the linkedin-agent MCP launches Chrome that way). First line is the
+    port, second line is the browser uuid path. Missing file -> None
+    (MCP is cold; caller should fall back to launch_persistent_context).
+    """
+    port_file = os.path.join(PROFILE_DIR, "DevToolsActivePort")
+    try:
+        with open(port_file) as f:
+            first = f.readline().strip()
+        port = int(first)
+        if port <= 0 or port >= 65536:
+            return None
+        return port
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
+    """Get a BrowserContext for the LinkedIn profile without a kill+reopen.
+
+    Strategy:
+      1. If `prefer_cdp` (default) and DevToolsActivePort exists, try
+         `chromium.connect_over_cdp(http://localhost:<port>)` to attach
+         to the linkedin-agent MCP's already-running Chrome. New tabs
+         go into the existing persistent BrowserContext, so cookies
+         and fingerprint match perfectly. Returns owns_context=False:
+         caller MUST close only the page they opened, never the
+         context (would terminate the MCP's Chrome).
+      2. If CDP is unavailable (port file missing, socket dead, MCP
+         cold), fall back to `launch_persistent_context(PROFILE_DIR,
+         headless=False)` on the same profile dir. We're the only
+         Chrome on it, so SingletonLock collisions are limited to
+         ungraceful prior crashes; we clear stale Singleton* files
+         and retry until LOCK_WAIT_MAX seconds elapse. Returns
+         owns_context=True: caller MUST close the context in finally.
+
+    This is the architectural fix for the 2026-05-06 lockout incident,
+    where stats-linkedin-comments.sh would `pkill` the live MCP Chrome
+    via ensure_browser_healthy and then immediately relaunch on the
+    same profile, producing a kill+reopen cadence LinkedIn anti-bot
+    flagged. With CDP-attach, the MCP Chrome is never killed.
+
+    Returns:
+        (context, owns_context)
+
+    Raises:
+        RuntimeError if neither path produces a usable context within
+        LOCK_WAIT_MAX seconds.
+    """
+    from playwright.sync_api import sync_playwright  # noqa: F401
+
+    if prefer_cdp:
+        port = _read_devtools_active_port()
+        if port is not None:
+            try:
+                browser = p.chromium.connect_over_cdp(
+                    f"http://localhost:{port}",
+                    timeout=5000,
+                )
+                contexts = browser.contexts
+                if contexts:
+                    # A persistent profile = exactly one default context;
+                    # any tabs the MCP already opened live there. Our new
+                    # page goes into the same context so cookies match.
+                    return contexts[0], False
+                # Edge case: connected but no context. Treat as cold.
+            except Exception:
+                # connect_over_cdp can raise PlaywrightError /
+                # ConnectionRefusedError when the port is stale (Chrome
+                # quit but didn't clean up DevToolsActivePort). Fall
+                # through to launch_persistent_context.
+                pass
+
+    deadline = time.time() + LOCK_WAIT_MAX
+    last_err: Optional[Exception] = None
+    while True:
+        for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                os.remove(os.path.join(PROFILE_DIR, fname))
+            except OSError:
+                pass
+        try:
+            context = p.chromium.launch_persistent_context(
+                PROFILE_DIR,
+                headless=False,
+                executable_path=(
+                    SYSTEM_CHROME
+                    if os.path.exists(SYSTEM_CHROME) else None
+                ),
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--window-position=3953,-1032",
+                    "--window-size=911,1016",
+                ],
+                viewport=VIEWPORT,
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            )
+            return context, True
+        except Exception as e:
+            last_err = e
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    "linkedin profile unreachable: cdp-attach failed and "
+                    f"launch_persistent_context failed: {last_err}"
+                )
+            time.sleep(LOCK_POLL_INTERVAL)
+
+
 def unread_dms() -> dict:
     """Scan LinkedIn /messaging/ sidebar in headed mode, read-only."""
     from playwright.sync_api import sync_playwright
