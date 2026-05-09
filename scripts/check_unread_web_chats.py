@@ -26,6 +26,14 @@ def main():
     conn = dbmod.get_conn()
 
     # Recover stuck threads first.
+    #
+    # `processed_at` is the idempotency gate: it's stamped at the END of a
+    # successful Claude session (replied OR explicitly skipped). Without it,
+    # the recovery loop re-fires forever on legit smoke tests where Claude
+    # correctly chose not to reply (last_message_sender stays 'visitor', so
+    # every cooldown expiry would re-flag unread). With it, we only recover
+    # when the visitor sent a NEW message after Claude last finished (i.e.
+    # last_message_at > processed_at), which is the true "stuck Claude" case.
     conn.execute(
         """
         UPDATE web_chat_threads
@@ -35,6 +43,7 @@ def main():
            AND (claimed_until IS NULL OR claimed_until < NOW())
            AND (rate_limited_until IS NULL OR rate_limited_until < NOW())
            AND last_message_at > NOW() - INTERVAL '24 hours'
+           AND (processed_at IS NULL OR last_message_at > processed_at)
         """
     )
     conn.commit()
