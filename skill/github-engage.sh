@@ -117,8 +117,43 @@ python3 "$REPO_DIR/scripts/engage_github.py" --timeout 3000 2>&1 | tee -a "$LOG_
 # ═══════════════════════════════════════════════════════
 # PHASE C: Summary
 # ═══════════════════════════════════════════════════════
-# engage_github.py already calls log_run.py itself with per-run counts.
-# Here we just print the cumulative status for visibility in the log file.
+# engage_github.py prints a canonical LOG_RUN_SUMMARY line; we parse it and
+# write ONE log_run.py row that also carries Phase A scan counters. Previously
+# engage_github.py wrote its own row with no scan info and the shell wrote
+# nothing on the has-work branch -- so productive cycles lost scan visibility
+# and empty cycles wrote two rows (one with scan, one without).
+RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
+GH_SCAN_PROC_LINE=$(grep -m1 -E "^Scanning [0-9]+ GitHub issues" "$LOG_FILE" 2>/dev/null || true)
+GH_SCAN_DONE_LINE=$(grep -m1 "^GitHub scan complete:" "$LOG_FILE" 2>/dev/null || true)
+GH_SCAN_ARG=""
+if [ -n "$GH_SCAN_PROC_LINE" ] || [ -n "$GH_SCAN_DONE_LINE" ]; then
+  gh_scanned=$(echo "$GH_SCAN_PROC_LINE" | grep -oE "[0-9]+" | head -1)
+  gh_new=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ new pending" | grep -oE "[0-9]+" | head -1)
+  gh_skip=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1)
+  gh_err=$(echo "$GH_SCAN_DONE_LINE" | grep -oE "[0-9]+ errors" | grep -oE "[0-9]+" | head -1)
+  parts=""
+  [ -n "$gh_scanned" ] && parts="${parts}scanned=${gh_scanned},"
+  [ -n "$gh_new" ]     && parts="${parts}new=${gh_new},"
+  [ -n "$gh_skip" ] && [ "$gh_skip" -gt 0 ] && parts="${parts}backfill=${gh_skip},"
+  [ -n "$gh_err"  ] && [ "$gh_err"  -gt 0 ] && parts="${parts}unmatched=${gh_err},"
+  GH_SCAN_ARG="${parts%,}"
+fi
+
+GH_SUMMARY_LINE=$(grep -m1 "^\[engage_github\] LOG_RUN_SUMMARY" "$LOG_FILE" 2>/dev/null || true)
+GH_POSTED=0; GH_SKIPPED=0; GH_FAILED=0; GH_COST="0.0000"
+if [ -n "$GH_SUMMARY_LINE" ]; then
+  GH_POSTED=$(echo "$GH_SUMMARY_LINE"  | grep -oE "posted=[0-9]+"  | head -1 | cut -d= -f2)
+  GH_SKIPPED=$(echo "$GH_SUMMARY_LINE" | grep -oE "skipped=[0-9]+" | head -1 | cut -d= -f2)
+  GH_FAILED=$(echo "$GH_SUMMARY_LINE"  | grep -oE "failed=[0-9]+"  | head -1 | cut -d= -f2)
+  GH_COST=$(echo "$GH_SUMMARY_LINE"    | grep -oE "cost=[0-9.]+"   | head -1 | cut -d= -f2)
+  : "${GH_POSTED:=0}" "${GH_SKIPPED:=0}" "${GH_FAILED:=0}" "${GH_COST:=0.0000}"
+fi
+
+GH_LOG_RUN_ARGS=(--script "engage_github" --posted "$GH_POSTED" --skipped "$GH_SKIPPED" --failed "$GH_FAILED" --cost "$GH_COST" --elapsed "$RUN_ELAPSED")
+[ -n "$GH_SCAN_ARG" ] && GH_LOG_RUN_ARGS+=(--scan "$GH_SCAN_ARG")
+python3 "$REPO_DIR/scripts/log_run.py" "${GH_LOG_RUN_ARGS[@]}" || true
+
+# Print cumulative status for visibility in the log file.
 TOTAL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='pending';")
 TOTAL_REPLIED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='replied';")
 TOTAL_SKIPPED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='skipped';")
