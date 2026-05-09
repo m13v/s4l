@@ -238,8 +238,11 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
         port = _read_devtools_active_port()
         if port is not None:
             try:
+                # Pin to 127.0.0.1; localhost resolves IPv6 first on macOS
+                # and Chrome --remote-debugging-port listens IPv4-only,
+                # producing ECONNREFUSED ::1:<port> on the first attempt.
                 browser = p.chromium.connect_over_cdp(
-                    f"http://localhost:{port}",
+                    f"http://127.0.0.1:{port}",
                     timeout=5000,
                 )
                 contexts = browser.contexts
