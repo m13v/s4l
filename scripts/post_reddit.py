@@ -1664,13 +1664,18 @@ def _post_iteration(plan, reddit_username):
     # removed so the LLM gate can evaluate the full ripen-survivor set with
     # a softened relevance bar. Without this cap, a wide cycle could try to
     # post 30+ comments through a single browser instance, hitting Reddit
-    # CAPTCHA / rate-limits and burning karma. Trim to the highest-engagement
-    # decisions (already sorted by composite DESC at ripen output, draft
-    # preserves order). Override per-cycle via SAPS_REDDIT_MAX_POSTS_PER_CYCLE.
+    # CAPTCHA / rate-limits and burning karma. Sort by ripen composite DESC
+    # so the highest-engagement threads win the cap. Decisions without a
+    # composite (e.g. salvage path) sort to 0 and lose ties to fresh discoveries.
+    # Override per-cycle via SAPS_REDDIT_MAX_POSTS_PER_CYCLE.
     max_posts = int(os.environ.get("SAPS_REDDIT_MAX_POSTS_PER_CYCLE", "10"))
     if len(decisions) > max_posts:
+        decisions.sort(
+            key=lambda d: float((d.get("ripen") or {}).get("composite") or 0.0),
+            reverse=True,
+        )
         print(f"[post_reddit] post-phase cap: {len(decisions)} drafted, "
-              f"trimming to top {max_posts} by composite-DESC order")
+              f"trimming to top {max_posts} by ripen composite DESC")
         decisions = decisions[:max_posts]
 
     # In two-phase mode (plan in process A, post in process B), the env var
