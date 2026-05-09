@@ -312,11 +312,18 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     RIPEN_SLEEP=600
     log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
     set +e
+    # 2026-05-08: top-k cap REMOVED. Previously we trimmed ripen survivors to
+    # LIMIT=10 BEFORE the LLM relevance gate, which threw away potentially-
+    # good fits below the engagement-velocity cutoff. Now ALL floor-passers
+    # flow into the draft phase; the softened gate decides relevance, and
+    # _post_iteration enforces the final post cap (SAPS_REDDIT_MAX_POSTS_PER_CYCLE,
+    # default 10) by sorting decisions by ripen composite DESC and taking
+    # the top N. --top-k 0 = unlimited.
     python3 "$REPO_DIR/scripts/ripen_reddit_plan.py" \
         --in "$DISCOVER_FILE" \
         --out "$RIPEN_FILE" \
         --sleep "$RIPEN_SLEEP" \
-        --top-k "$LIMIT" 2>&1 | tee -a "$LOG_FILE"
+        --top-k 0 2>&1 | tee -a "$LOG_FILE"
     RIPEN_RC=${PIPESTATUS[0]}
     set -e
 
