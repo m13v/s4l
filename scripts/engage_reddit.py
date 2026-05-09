@@ -1032,19 +1032,22 @@ def main():
         fr_pairs.append(f"cdp_error:{cdp_total}")
     failure_reasons_arg = ",".join(fr_pairs)
 
-    # Log run summary for monitoring
-    log_run_cmd = [
-        "python3", os.path.join(REPO_DIR, "scripts", "log_run.py"),
-        "--script", "engage_reddit",
-        "--posted", str(succeeded),
-        "--skipped", str(skipped),
-        "--failed", str(failed),
-        "--cost", f"{total_usage['cost_usd']:.4f}",
-        "--elapsed", f"{total_elapsed:.0f}",
-    ]
-    if failure_reasons_arg:
-        log_run_cmd += ["--failure-reasons", failure_reasons_arg]
-    subprocess.run(log_run_cmd)
+    # Canonical machine-readable summary line for the shell wrapper
+    # (engage-reddit.sh) to grep. The wrapper combines these engage-stage
+    # counters with its own scan-stage counters and writes ONE log_run.py row.
+    # Previously we wrote our own log_run row here AND the shell wrote one too,
+    # producing two rows per cycle in run_monitor.log -- the duplicate without
+    # scan info was the row the dashboard surfaced, which is why empty cycles
+    # rendered as "0 0 0 0" instead of "scanned N / 0 new".
+    print(
+        f"[engage_reddit] LOG_RUN_SUMMARY"
+        f" posted={succeeded}"
+        f" skipped={skipped}"
+        f" failed={failed}"
+        f" cost={total_usage['cost_usd']:.4f}"
+        f" elapsed={int(total_elapsed)}"
+        f" failure_reasons={failure_reasons_arg}"
+    )
 
     # Print final status
     subprocess.run(["python3", REPLY_DB, "status"])
