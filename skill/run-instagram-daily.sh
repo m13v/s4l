@@ -77,12 +77,18 @@ if [ ! -f "$VIDEO_PATH" ]; then
 fi
 
 # Step 2: post
-log "step 2: post_to_ig.py --file $(basename "$VIDEO_PATH") --post-type $POST_TYPE"
+DRY_FLAG=""
+if [ "${IG_DRY_RUN:-0}" = "1" ]; then
+  DRY_FLAG="--dry-run"
+  log "IG_DRY_RUN=1 — passing --dry-run to post_to_ig.py"
+fi
+
+log "step 2: post_to_ig.py --file $(basename "$VIDEO_PATH") --post-type $POST_TYPE $DRY_FLAG"
 if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/mixer/post_to_ig.py" \
-        --file "$VIDEO_PATH" --post-type "$POST_TYPE" >>"$LOG_FILE" 2>&1; then
+        --file "$VIDEO_PATH" --post-type "$POST_TYPE" $DRY_FLAG >>"$LOG_FILE" 2>&1; then
   log "post_to_ig.py failed — exiting non-zero"
   exit 1
 fi
 
-log "=== posted post-${POST_NUMBER} (${POST_TYPE}) successfully ==="
+log "=== finished post-${POST_NUMBER} (${POST_TYPE}) successfully ==="
 exit 0
