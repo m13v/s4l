@@ -1119,7 +1119,7 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         posts = db.execute(
             "SELECT id, our_url, "
             "COALESCE(scan_no_change_count, 0) as scan_no_change_count, posted_at, "
-            "upvotes, views "
+            "upvotes, views, comments_count "
             "FROM posts "
             "WHERE platform='twitter' AND status='active' AND our_url IS NOT NULL "
             "AND posted_at <= NOW() - INTERVAL '7 days' "
@@ -1129,7 +1129,7 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         posts = db.execute(
             "SELECT id, our_url, "
             "COALESCE(scan_no_change_count, 0) as scan_no_change_count, posted_at, "
-            "upvotes, views "
+            "upvotes, views, comments_count "
             "FROM posts "
             "WHERE platform='twitter' AND status='active' AND our_url IS NOT NULL "
             "AND posted_at > NOW() - INTERVAL '7 days' "
@@ -1156,6 +1156,7 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         posted_at = post[3]
         prev_upvotes = post[4]
         prev_views = post[5]
+        prev_comments = post[6]
 
         # Stable-skip applies only to the cold tier (audit). The hot tier's
         # SQL filter restricts to posted_at > NOW() - 7d, so the "older than
@@ -1250,8 +1251,13 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
 
         # Track no-change for skip optimization. The "actually moved" branch
         # also bumps `changed` so the printed summary can distinguish a
-        # successful poll (updated) from one where views/likes shifted.
-        if likes == prev_upvotes and views == prev_views:
+        # successful poll (updated) from one where any tracked stat shifted.
+        # All three signals are watched (views, likes, replies) so a tweet
+        # that stays flat on views/likes but is still picking up replies is
+        # NOT mistakenly classified as "stable" and isn't skip-optimized.
+        if (likes == prev_upvotes
+                and views == prev_views
+                and replies == prev_comments):
             db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s", [post_id])
         else:
             changed += 1
