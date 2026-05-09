@@ -1740,8 +1740,15 @@ def main():
 
         if twitter_stats is not None:
             t = twitter_stats
+            # Note: the "updated" field intentionally reports `changed` (rows
+            # whose views/likes actually moved), not `updated` (every successful
+            # poll). The downstream `stats.sh` greps this line for "updated"
+            # and forwards to log_run.py --updated, which the dashboard renders
+            # as the "updated" pill. Surfacing the no-op poll count there made
+            # "checked == updated" trivially true and hid the real signal.
             print(f"\nTwitter: {t['total']} total, {t.get('skipped', 0)} skipped, "
-                  f"{t['total'] - t.get('skipped', 0)} checked, {t['updated']} updated, "
+                  f"{t['total'] - t.get('skipped', 0)} checked, "
+                  f"{t.get('changed', t['updated'])} updated, "
                   f"{t['deleted']} deleted, {t['errors']} errors")
             if not args.quiet and t["results"]:
                 top = sorted(t["results"], key=lambda x: x.get("views", 0), reverse=True)[:30]
