@@ -546,15 +546,17 @@ def main():
     if succeeded > 0:
         print(f"[engage_github] Avg cost per reply: ${total_usage['cost_usd'] / succeeded:.4f}")
 
-    subprocess.run([
-        "python3", os.path.join(REPO_DIR, "scripts", "log_run.py"),
-        "--script", "engage_github",
-        "--posted", str(succeeded),
-        "--skipped", str(skipped),
-        "--failed", str(failed),
-        "--cost", f"{total_usage['cost_usd']:.4f}",
-        "--elapsed", f"{total_elapsed:.0f}",
-    ])
+    # Canonical machine-readable summary line. github-engage.sh greps this and
+    # writes ONE log_run.py row that also carries Phase A scan counters. See
+    # the comment in engage_reddit.py for the duplicate-row history.
+    print(
+        f"[engage_github] LOG_RUN_SUMMARY"
+        f" posted={succeeded}"
+        f" skipped={skipped}"
+        f" failed={failed}"
+        f" cost={total_usage['cost_usd']:.4f}"
+        f" elapsed={int(total_elapsed)}"
+    )
 
     subprocess.run(["python3", REPLY_DB, "status"])
     conn.close()
