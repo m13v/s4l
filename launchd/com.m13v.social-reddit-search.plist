@@ -9,8 +9,13 @@
 		<string>/bin/bash</string>
 		<string>/Users/matthewdi/social-autoposter/skill/run-reddit-search-launchd.sh</string>
 	</array>
-	<key>StartInterval</key>
-	<integer>900</integer>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Minute</key><integer>45</integer></dict>
+	</array>
 	<key>StandardOutPath</key>
 	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-reddit-search-stdout.log</string>
 	<key>StandardErrorPath</key>
