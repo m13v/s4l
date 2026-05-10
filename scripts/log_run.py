@@ -90,6 +90,16 @@ def main():
                              "opening the log file. Reason keys are free-form "
                              "snake_case; the dashboard sorts by count desc "
                              "and shows the top one with the rest in tooltip.")
+    parser.add_argument("--skip-reasons", dest="skip_reasons", default="",
+                        help="Optional comma-separated `reason:count` pairs "
+                             "describing why a run reported skipped>0 "
+                             "(e.g. 'duplicate_thread_pre_post:3,empty_reply_text:1'). "
+                             "Distinct from --failure-reasons: skips are "
+                             "intentional (dedup race guards, empty drafts, "
+                             "rate-limited threads) and the dashboard renders "
+                             "them as a yellow 'skipped: <reason>' pill rather "
+                             "than the red 'failed: <reason>' pill. Same "
+                             "sanitization rules as --failure-reasons.")
     # Inbox/feed scan counters (engage-reddit, engage-twitter, etc.). Lets a
     # pipeline that scans an inbox before engaging surface scan-stage
     # granularity (seen / new / excluded / unmatched) in the dashboard Result
@@ -158,6 +168,13 @@ def main():
     fr_raw = (args.failure_reasons or "").strip()
     fr_clean = fr_raw.replace("|", "").replace(" ", "")
     failure_segment = f" failure_reasons={fr_clean}" if fr_clean else ""
+    # `skip_reasons=` segment is the skip-side companion to failure_reasons.
+    # Tails after failure_reasons so the existing positional regex stays
+    # back-compat: old log lines that ended at failure_reasons (or earlier)
+    # still parse, the new group is optional. Same sanitization rules.
+    sr_raw = (args.skip_reasons or "").strip()
+    sr_clean = sr_raw.replace("|", "").replace(" ", "")
+    skip_segment = f" skip_reasons={sr_clean}" if sr_clean else ""
     # `scan=` segment carries inbox/feed scan-stage counters. Same sanitization
     # rules as failure_reasons (strip whitespace + pipe). Appended after
     # discover= so the existing positional regex in bin/server.js can extend
@@ -169,7 +186,7 @@ def main():
         f"{timestamp} | {args.script} | "
         f"posted={args.posted} skipped={args.skipped} failed={args.failed}"
         f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment}{scan_segment} "
-        f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}"
+        f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}{skip_segment}"
     )
 
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
