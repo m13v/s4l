@@ -382,17 +382,38 @@ EXCLUDES_TOTAL=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.loa
 [ "${EXCLUDES_TOTAL:-0}" -gt 0 ] && log "Active project-wide excludes loaded across selected projects: $EXCLUDES_TOTAL"
 
 # --- Top past queries for style inspiration ---------------------------------
-TOP_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_twitter_queries.py" --limit 20 2>/dev/null || echo "[]")
+# Now scored by composite (clicks×100 + likes + views×0.001) and tagged with
+# tweets_found_avg, posts, views, likes, clicks per query so the model can
+# see the full conversion funnel for each historical query — not just "this
+# query produced posts" but "this min_faves:30 query for mk0r found 7
+# tweets, produced 8 posts, drove 2 clicks". Clicks are the ultimate signal;
+# weighting them ×100 makes a single click outvalue 100 likes worth of vibes.
+TOP_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_twitter_queries.py" --limit 20 --window-days 14 2>/dev/null || echo "[]")
 TOP_COUNT=$(echo "$TOP_QUERIES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-log "Top past queries loaded: $TOP_COUNT"
+log "Top past queries loaded: $TOP_COUNT (composite-scored)"
 
 # --- Dud queries: phrasings that returned 0 tweets in the last 48h ----------
 # Fed into the prompt as a negative-signal anti-list so the LLM stops
 # redrafting the same flat queries every 20-min cycle. Source is
 # twitter_search_attempts, populated below from this run's queries_used.
+# Now also surfaces the parsed `min_faves` value per dud so the model can
+# spot patterns like "every studyly dud last 48h used min_faves:20 — drop
+# the floor for that project".
 DUD_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_dud_twitter_queries.py" --limit 30 --window-hours 48 2>/dev/null || echo "[]")
 DUD_COUNT=$(echo "$DUD_QUERIES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-log "Dud queries loaded: $DUD_COUNT (last 48h, 0-result)"
+log "Dud queries loaded: $DUD_COUNT (last 48h, 0-result, with min_faves parsed)"
+
+# --- Per-project supply signal: what min_faves tier returns tweets? ----------
+# Replaces the old flat "broad=50 / narrow=20" rule. For each project the
+# model is currently drafting for, this table shows the median tweets_found
+# at each min_faves tier we've ever tried, plus zero-result %. The model
+# is instructed to pick the LOWEST min_faves tier that historically yields
+# >=3 median tweets for that project (or step down one tier if every tier
+# is >=3 — supply signal trumps the flat rule). For studyly this auto-
+# selects min_faves:15; for mk0r it stays at 30-50.
+SUPPLY_SIGNAL_JSON=$(python3 "$REPO_DIR/scripts/twitter_supply_signal.py" --window-days 14 2>/dev/null || echo "[]")
+SUPPLY_COUNT=$(echo "$SUPPLY_SIGNAL_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+log "Per-project supply signal loaded: $SUPPLY_COUNT projects"
 
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
@@ -420,16 +441,19 @@ You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.l
 Projects:
 $PROJECTS_JSON
 
-Past top-performing query STYLES (use these only as inspiration for phrasing, operators, and specificity level; do NOT copy keywords blindly, adapt them to each project):
+Past top-performing queries (composite-scored: clicks×100 + likes + views×0.001). Each entry has the FULL conversion funnel — \`tweets_found_avg\` (X's supply for that query), \`posts\` (replies we shipped), \`views_total\`, \`likes_total\`, \`clicks_total\`. Treat clicks_total as the ultimate signal: queries with >0 clicks are gold standard (clicks are extremely sparse on Twitter, so a single click is meaningful). Use these as STYLE inspiration for phrasing, operators, and the min_faves tier that worked — adapt the keywords to each project's domain, do not copy literally:
 $TOP_QUERIES_JSON
 
-DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt. Pick a different angle, different operators, or different keyword cluster:
+DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt; \`min_faves\` is the floor that produced zero supply (look for patterns: if EVERY dud for a project uses the same min_faves tier, the floor is too high for that project's audience and you should DROP it). Pick a different angle, different operators, or different keyword cluster:
 $DUD_QUERIES_JSON
+
+PER-PROJECT SUPPLY SIGNAL — for each project, the historical median tweets_found at each \`min_faves:N\` tier you've drafted for them in the last 14d. This REPLACES the old flat "broad=50 / narrow=20" rule. Pick the LOWEST min_faves tier where \`median_tweets_found\` >= 3 for the project you're drafting for; if every tier is below 3, drop one tier lower than the lowest you've tried. Niche audiences (med students, meditators) cluster at min_faves:5–15; tech audiences (devs, AI) cluster at min_faves:20–50. Trust this table over your priors:
+$SUPPLY_SIGNAL_JSON
 
 Query guidelines:
 - MANDATORY: every query MUST include the operator \`since:$(date -u -v-1d +%Y-%m-%d)\` so X returns only tweets from the last ~24h. Evergreen tweets waste budget — we want momentum, not history.
 - MANDATORY: if a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EACH listed term to that project's query, verbatim. This is mechanical, not optional. These terms were learned from prior false-positive rejections and are the ONLY upstream block against recurring noise (e.g. for Vipassana, terms like \`-cricket -kohli -ipl\` block IPL/Sanjiv-Goenka tweets that collide with the meditation teacher S.N. Goenka). DO NOT second-guess or omit them; the activation gate (>=2 distinct batches) already filtered out one-off proposals.
-- Favor high engagement: include 'min_faves:50' for broad terms, 'min_faves:20' for narrower ones
+- MANDATORY: pick \`min_faves:N\` per the PER-PROJECT SUPPLY SIGNAL above. If the project has no entry in the supply table (new project or first cycle), use min_faves:20 as a starting point; the next cycle will see your attempt and self-tune. Never hardcode min_faves:50 for a project whose supply table shows zero results at that tier.
 - Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways
 - Pick a query likely to surface tweets RELEVANT to that project's actual domain
 - Mix it up each run, don't always use the same query for the same project
