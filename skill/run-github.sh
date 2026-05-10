@@ -28,6 +28,14 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/github-$(date +%Y-%m-%d_%H%M%S).log"
 RUN_START=$(date +%s)
 
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# run (via SA_CYCLE_ID env -> log_claude_session.py). Lets the dashboard /
+# get_run_cost.py --cycle-id report exact per-cycle cost instead of the
+# legacy script+since query which bleeds costs across concurrent runs.
+# 2026-05-10 cycle_id rollout.
+BATCH_ID="ghcycle-$(date +%Y%m%d-%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Idempotent run_monitor.log emitter wired to EXIT/INT/TERM/HUP. Without this,
 # a SIGTERM landing during the post_github.py loop (after `gh issue comment`
 # committed a comment but before the script's own log_run.py call at the
