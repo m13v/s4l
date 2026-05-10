@@ -163,7 +163,20 @@ _sa_emit_run_summary_oneshot() {
     _SA_RUN_SUMMARY_EMITTED=1
 
     local posted_ct=0 skipped_ct=0 cost="0.0000" failed_ct failure_reasons
-    if [ -n "${BATCH_ID:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+    # Prefer the in-memory counters captured from twitter_post_plan.py's JSON
+    # summary (EXEC_POSTED / EXEC_SKIPPED). Those are the ground truth for what
+    # THIS cycle did. The fallback SQL count is needed when SIGTERM hits before
+    # Phase 2b-post records a count, but it's UNRELIABLE during normal exit:
+    # peer cycles' Phase 0 may have salvaged this batch's candidates into a new
+    # batch_id mid-Phase-2b (documented edge case, mitigated by the phase2b-*
+    # advance stamps but not 100% eliminated under heavy parallel load), in
+    # which case the WHERE batch_id='$BATCH_ID' query returns 0 even though we
+    # successfully posted N replies. That false-zero is what historically
+    # synthesized phase2b_silent failure_reasons against successful runs.
+    if [ -n "${EXEC_POSTED:-}" ] || [ -n "${EXEC_SKIPPED:-}" ]; then
+        posted_ct="${EXEC_POSTED:-0}"
+        skipped_ct="${EXEC_SKIPPED:-0}"
+    elif [ -n "${BATCH_ID:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
         posted_ct=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
             "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='posted'" \
             2>/dev/null || echo 0)
