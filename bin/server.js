@@ -3237,6 +3237,16 @@ async function handleApi(req, res) {
       // started before the window is still relevant right now.
       const running = getRunningPipelines();
       runs = running.concat(runs);
+      // Explicit sort by `finished_at` descending (newest-finished first). Rows
+      // with no `finished_at` (still running) sort to the top via Infinity.
+      // This is the documented contract for the Job history table; do not
+      // change it to sort by `started_at` without updating the column headers
+      // and the dashboard CLAUDE.md note.
+      runs.sort((a, b) => {
+        const aT = a.finished_at ? Date.parse(a.finished_at) : Infinity;
+        const bT = b.finished_at ? Date.parse(b.finished_at) : Infinity;
+        return bT - aT;
+      });
       return json(res, { runs });
     })().catch(e => json(res, { error: e.message }, 500));
   }
@@ -7334,8 +7344,8 @@ function _buildJobHistoryRowGroup(r, idx) {
           (r.pid ? ' <span style="color:var(--muted);font-size:11px;">PID ' + r.pid + '</span>' : '') +
         '</td>' +
         '<td>' + (r.platform || '<span style="color:var(--muted);">—</span>') + '</td>' +
-        '<td>' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
-        '<td><span class="sa-running-elapsed" style="color:var(--muted);font-size:12px;">' + fmtElapsed(r.elapsed_s) + '</span></td>' +
+        '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
+        '<td style="text-align:left;"><span class="sa-running-elapsed" style="color:var(--muted);font-size:12px;">' + fmtElapsed(r.elapsed_s) + '</span></td>' +
         '<td style="text-align:left;"><span class="badge running">Running…</span></td>' +
         '<td style="color:var(--muted);font-size:12px;">—</td>' +
       '</tr>'
@@ -7347,8 +7357,8 @@ function _buildJobHistoryRowGroup(r, idx) {
       (hasDetails ? ' style="cursor:pointer;"' : '') + '>' +
       '<td style="text-align:left;padding-left:16px;">' + caret + (r.job_label || r.script) + '</td>' +
       '<td>' + (r.platform || '<span style="color:var(--muted);">—</span>') + '</td>' +
-      '<td>' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
-      '<td>' + fmtLocalTime(r.finished_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span></td>' +
+      '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
+      '<td style="text-align:left;">' + fmtLocalTime(r.finished_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span></td>' +
       '<td style="text-align:left;">' + renderResult(r) + '</td>' +
       '<td style="color:var(--muted);font-size:12px;">' + costCell + '</td>' +
     '</tr>'
@@ -7365,8 +7375,8 @@ function buildJobsHistoryTable(runs) {
       '<thead><tr>' +
         '<th style="text-align:left;padding-left:16px;">Job</th>' +
         '<th>Platform</th>' +
-        '<th>Kicked off</th>' +
-        '<th>Finished</th>' +
+        '<th style="text-align:left;">Kicked off</th>' +
+        '<th style="text-align:left;">Finished</th>' +
         '<th style="text-align:left;">Result</th>' +
         '<th>Cost</th>' +
       '</tr></thead>' +
