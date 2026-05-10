@@ -319,17 +319,25 @@ def _db_phase0_salvage(batch_id, freshness_hours=FRESHNESS_HOURS,
             "      AND attempt_count < %s "
             "      AND batch_id IS DISTINCT FROM %s "
             "      AND discovered_at >= NOW() - INTERVAL '%s hours' "
-            # Salvage is a RETRY rail: only pick rows that previously had a
-            # post attempt and failed. Fresh-pending rows (attempt_count=0,
-            # last_attempt_at IS NULL) belong to the cycle that discovered
-            # them; if that cycle didn't ripen+draft+post them, they expire
-            # naturally via the 24h freshness gate. Without this guard, every
-            # newly-discovered candidate gets scooped into salvage on the
-            # next cycle, drafted blind without ripening, and ~90% omit at
-            # the gate, burning ~$30/cycle for ~0-1 actual posts.
-            # (2026-05-08 fix.)
-            "      AND last_attempt_at IS NOT NULL "
-            "      AND last_attempt_at < NOW() - INTERVAL '%s minutes' "
+            # Salvage is a RETRY rail for two distinct row classes:
+            #   (a) previously-attempted rows past the retry backoff
+            #       (transient post failures) — the original 2026-05-08 case.
+            #   (b) drafted-but-never-attempted rows — rows whose discover
+            #       cycle wrote `draft_text` but never reached the post phase
+            #       (e.g. watchdog SIGTERMed the cycle while it waited for
+            #       the reddit-browser lock; observed 2026-05-10 cycle 11:30
+            #       killed at 5400s with 7 drafts queued, posted=0). These
+            #       rows have `attempt_count=0`, `last_attempt_at IS NULL`,
+            #       `draft_text IS NOT NULL` — recoverable but invisible to
+            #       the original gate.
+            # We still EXCLUDE fresh-discovered-but-not-yet-drafted rows
+            # (`draft_text IS NULL AND last_attempt_at IS NULL`), preserving
+            # the 2026-05-08 fix's intent: don't scoop the discoverer's own
+            # in-flight pool and waste $30/cycle re-drafting blind.
+            "      AND ( "
+            "          (last_attempt_at IS NOT NULL AND last_attempt_at < NOW() - INTERVAL '%s minutes') "
+            "          OR (last_attempt_at IS NULL AND draft_text IS NOT NULL) "
+            "      ) "
             "    RETURNING id "
             ") "
             "SELECT (SELECT COUNT(*) FROM expired), (SELECT COUNT(*) FROM salvaged)",
@@ -379,12 +387,12 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
             "WHERE batch_id = %s "
             "  AND status = 'pending' "
             "  AND attempt_count < %s "
-            # Defense-in-depth: salvage is a RETRY rail; never pick rows
-            # that haven't had a post attempt yet. Phase 0 already enforces
-            # this on batch_id assignment, but a freshly-discovered row
-            # (written by discover with batch_id=current) could otherwise
-            # match. (2026-05-08 fix.)
-            "  AND last_attempt_at IS NOT NULL "
+            # Defense-in-depth: salvage retries previously-attempted failures
+            # OR drafted-but-never-attempted rows (orphaned drafts from a
+            # killed cycle — see Phase 0 comment on the (a)/(b) split).
+            # Still excludes fresh-discovered rows with no draft.
+            # (2026-05-08 baseline; (b) added 2026-05-10.)
+            "  AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
             "GROUP BY matched_project "
             "ORDER BY c DESC, MAX(COALESCE(delta_score, 0)) DESC "
             "LIMIT 1",
@@ -412,8 +420,9 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
             "  AND attempt_count < %s "
             "  AND matched_project = %s "
             # Same defense-in-depth as the project-pick query above:
-            # salvage retries previously-attempted failures only.
-            "  AND last_attempt_at IS NOT NULL "
+            # salvage retries previously-attempted failures OR orphaned
+            # drafts from a killed cycle. (2026-05-10.)
+            "  AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
             "ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
             "LIMIT %s",
             [DRAFT_TTL_MIN, batch_id, MAX_ATTEMPTS, project_name, limit],
