@@ -61,10 +61,57 @@ CODE_LEN = 8
 # "i.e." or "S.F." or version numbers. Greedy on the path; trailing punctuation
 # is stripped by the caller. Both branches are normalized through
 # _ensure_scheme() before classification.
+#
+# Third branch (added 2026-05-10): bare project hostnames with NO path. Built
+# dynamically from config.json project websites + booking_link + github hosts.
+# A 7d audit found 47/2094 Reddit DMs and 7/319 X DMs mention a project URL,
+# but ZERO short links got minted because the model casually drops domains
+# like "fazm.ai is the link" or "main one is fazm, ai agent for macos,
+# github.com/m13v/fazm" without https:// or trailing path. Branches 1 and 2
+# both miss those, so we never wrap them. The new branch matches a known
+# project host as a bare token, with a negative lookahead so it doesn't
+# overlap with branch 2 ('fazm.ai/path' still goes through branch 2).
+def _build_project_bare_host_pattern():
+    """Build an alternation of known project hostnames, longest-first."""
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            cfg = json.load(f)
+        projs = cfg.get('projects') or []
+    except Exception:
+        return None
+    hosts = set()
+    for p in projs:
+        for field in ('website', 'booking_link', 'github'):
+            v = (p.get(field) or '').strip()
+            if not v:
+                continue
+            try:
+                netloc = urlsplit(v if '://' in v else 'https://' + v).netloc
+            except Exception:
+                continue
+            host = (netloc or '').lower().split(':', 1)[0]
+            # Strip a literal 'www.' prefix only (lstrip would chew chars).
+            if host.startswith('www.'):
+                host = host[4:]
+            if host and '.' in host:
+                hosts.add(host)
+    if not hosts:
+        return None
+    parts = sorted({re.escape(h) for h in hosts}, key=len, reverse=True)
+    # \b on left, lookahead on right rejects '.tld/' (branch 2 would catch
+    # that) and any continuation char (digit/letter/dot/slash) so we don't
+    # misfire mid-token. The trailing punctuation stripper at call time
+    # handles the period-after-prose case ('check fazm.ai.').
+    return r'\b(?:' + '|'.join(parts) + r')\b(?![\w./])'
+
+_PROJECT_BARE_HOST_PAT = _build_project_bare_host_pattern()
 _URL_RE = re.compile(
-    r'https?://[^\s<>"\']+'
-    r'|'
-    r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}/[^\s<>"\']*',
+    (
+        r'https?://[^\s<>"\']+'
+        r'|'
+        r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}/[^\s<>"\']*'
+        + (r'|' + _PROJECT_BARE_HOST_PAT if _PROJECT_BARE_HOST_PAT else '')
+    ),
     re.IGNORECASE,
 )
 _TRAILING_PUNCT = '.,;:!?)]}>\'"'
