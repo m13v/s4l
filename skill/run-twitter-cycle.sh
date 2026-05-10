@@ -441,7 +441,22 @@ You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.l
 Projects:
 $PROJECTS_JSON
 
-Past top-performing queries (composite-scored: clicks×100 + likes + views×0.001). Each entry has the FULL conversion funnel — \`tweets_found_avg\` (X's supply for that query), \`posts\` (replies we shipped), \`views_total\`, \`likes_total\`, \`clicks_total\`. Treat clicks_total as the ultimate signal: queries with >0 clicks are gold standard (clicks are extremely sparse on Twitter, so a single click is meaningful). Use these as STYLE inspiration for phrasing, operators, and the min_faves tier that worked — adapt the keywords to each project's domain, do not copy literally:
+Past top-performing queries (composite-scored: clicks×100 + likes + views×0.001). Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so you can diagnose query failure modes:
+
+  Funnel signals (downstream — only meaningful for posted candidates):
+  - \`tweets_found_avg\`: X's supply for that query (how many tweets it returned per search attempt)
+  - \`posts\`: replies we actually shipped from this query
+  - \`views_total\`, \`likes_total\`: engagement on OUR replies
+  - \`clicks_total\`: link clicks attributed to our replies (CTA tracking).
+    THIS IS THE ULTIMATE SIGNAL — clicks on Twitter are extremely sparse, so a single click is a strong endorsement of the query+reply combo. Composite score weights clicks ×100 deliberately.
+
+  Source-thread split (read these together, they tell you WHY the query did or did not produce posts):
+  - \`posted_n\`: count of candidates with status='posted'
+  - \`skipped_n\`: count of candidates we discovered but did NOT post (status='skipped' or 'expired')
+  - \`avg_virality_posted\`: avg source-thread virality_score for the threads we DID post to. High = the query surfaces threads that are both viral AND on-topic enough that Claude judged them post-worthy.
+  - \`avg_virality_skipped\`: avg source-thread virality_score for the threads we did NOT post to. Diagnostic: if \`avg_virality_skipped\` is high but \`posts\` is low, the query is finding viral NOISE (loud but off-topic threads — the keyword cluster is mismatched even though the engagement floor is fine). Reword the query in that case rather than dropping it. If both \`avg_virality_skipped\` and \`avg_virality_posted\` are low, the query is just dead supply — drop the keyword cluster.
+
+Use these as STYLE inspiration for phrasing, operators, and the min_faves tier that worked. Do NOT copy keywords literally; adapt them to each project's domain.
 $TOP_QUERIES_JSON
 
 DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt; \`min_faves\` is the floor that produced zero supply (look for patterns: if EVERY dud for a project uses the same min_faves tier, the floor is too high for that project's audience and you should DROP it). Pick a different angle, different operators, or different keyword cluster:
