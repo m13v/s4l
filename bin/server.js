@@ -6838,7 +6838,7 @@ function renderResult(run) {
       : '';
     const queuePill =
       '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      'queue <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
+      'pending <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
       queueDeltaSuffix +
       '</span>';
     const tooltip = 'searches: ' + searches +
@@ -6848,10 +6848,10 @@ function renderResult(run) {
       ' / expired (delta<1 floor): ' + expired +
       ' / above review cap (delta>=10, gates POST_LIMIT=3): ' + aboveFloor +
       ' / posted: ' + posted +
-      ' / queue end-of-run: ' + queue +
+      ' / pending end-of-run: ' + queue +
       ' (start: ' + queueStart + ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
         qDrainedPosted + ' posted + ' + qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
-      ' / queue right now (live): ' + pendingLive;
+      ' / pending right now (live): ' + pendingLive;
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
@@ -6985,14 +6985,14 @@ function renderResult(run) {
             '+' + qAdded + '/-' + qDrained +
             ')</span>'
         : '';
-      const qTip = 'queue end-of-run: ' + queue +
+      const qTip = 'pending end-of-run: ' + queue +
         ' (start: ' + queueStartV + ', +' + qAdded + ' added, -' + qDrained +
         ' drained = ' + qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
         qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
-        ' / queue right now (live): ' + pendingLive;
+        ' / pending right now (live): ' + pendingLive;
       return '<span title="' + qTip.replace(/"/g, '&quot;') + '" ' +
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        'queue <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
+        'pending <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
         queueDeltaSuffix + '</span>';
     };
 
@@ -7006,7 +7006,7 @@ function renderResult(run) {
       (ripenIters ? ' / ripen survivors: ' + ripenSurvivors + '/' + ripenInput +
         (bestComp != null ? ' (best composite ' + bestComp.toFixed(1) + ')' : '') : '') +
       ' / posted: ' + posted +
-      (queue || pendingLive ? ' / queue (pending in DB): ' + queue : '');
+      (queue || pendingLive ? ' / pending in DB: ' + queue : '');
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('iterations', iterations, iterations > 0 ? 'var(--text)' : 'var(--muted)') +
