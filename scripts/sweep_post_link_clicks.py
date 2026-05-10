@@ -113,41 +113,58 @@ def ensure_bot_reason_column(conn) -> None:
 
 
 def apply_rule_r1(conn, since_iso: str, dry_run: bool) -> int:
-    """R1: same ip_hash + same code + >=3 hits → bot."""
+    """R1: same ip_hash + same code + >=3 hits inside a 240s sliding window → bot.
+
+    Window: a row is bursty if there are >=3 hits (same ip+code, including
+    itself) within +/-120s of it. That's the scripted-loop signature.
+
+    Replaces the old "any 3 hits ever from same ip+code" rule (2026-05-10),
+    which over-flagged real Twitter-for-iPhone in-app users who tap a link,
+    close the in-app browser, scroll back, and re-tap minutes later. A 24h
+    audit showed ~300 hits/day were misclassified by the old rule.
+
+    Only the rows actually inside the burst get flagged; isolated re-taps
+    hours apart from the same fingerprint stay as humans.
+    """
     sql = """
-    WITH abusive AS (
-      SELECT code, ip_hash, COUNT(*) AS n
+    WITH events AS (
+      SELECT id,
+        COUNT(*) OVER (
+          PARTITION BY ip_hash, code
+          ORDER BY ts
+          RANGE BETWEEN INTERVAL '120 seconds' PRECEDING
+                    AND INTERVAL '120 seconds' FOLLOWING
+        ) AS hits_in_window
       FROM post_link_clicks
       WHERE ts >= %s AND ip_hash IS NOT NULL
-      GROUP BY code, ip_hash
-      HAVING COUNT(*) >= 3
-    )
+    ),
+    burst_ids AS (SELECT id FROM events WHERE hits_in_window >= 3)
     UPDATE post_link_clicks plc
        SET is_bot = true,
-           bot_reason = COALESCE(bot_reason, 'R1:repeat-ip-on-code')
-      FROM abusive a
-     WHERE plc.code = a.code
-       AND plc.ip_hash = a.ip_hash
+           bot_reason = COALESCE(bot_reason, 'R1:burst-3-in-240s')
+      FROM burst_ids b
+     WHERE plc.id = b.id
        AND plc.is_bot = false
-       AND plc.ts >= %s
     """
     if dry_run:
-        # count via select-only
         sel = """
-        WITH abusive AS (
-          SELECT code, ip_hash
+        WITH events AS (
+          SELECT id, is_bot,
+            COUNT(*) OVER (
+              PARTITION BY ip_hash, code
+              ORDER BY ts
+              RANGE BETWEEN INTERVAL '120 seconds' PRECEDING
+                        AND INTERVAL '120 seconds' FOLLOWING
+            ) AS hits_in_window
           FROM post_link_clicks
           WHERE ts >= %s AND ip_hash IS NOT NULL
-          GROUP BY code, ip_hash
-          HAVING COUNT(*) >= 3
         )
-        SELECT COUNT(*) FROM post_link_clicks plc
-         JOIN abusive a USING (code, ip_hash)
-        WHERE plc.is_bot = false AND plc.ts >= %s
+        SELECT COUNT(*) FROM events
+         WHERE hits_in_window >= 3 AND is_bot = false
         """
-        return fetch_count(conn, sel, (since_iso, since_iso))
-    conn.execute(sql, (since_iso, since_iso))
-    n = fetch_count(conn, "SELECT COUNT(*) FROM post_link_clicks WHERE bot_reason = 'R1:repeat-ip-on-code' AND ts >= %s", (since_iso,))
+        return fetch_count(conn, sel, (since_iso,))
+    conn.execute(sql, (since_iso,))
+    n = fetch_count(conn, "SELECT COUNT(*) FROM post_link_clicks WHERE bot_reason = 'R1:burst-3-in-240s' AND ts >= %s", (since_iso,))
     return n
 
 
