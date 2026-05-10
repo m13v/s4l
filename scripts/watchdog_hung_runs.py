@@ -47,11 +47,17 @@ PER_SCRIPT_CAP_SEC = {
     ("link-edit-moltbook.sh", None): 120 * 60,
     ("link-edit-github.sh", None): 120 * 60,
     ("precompute-stats.sh", None): 120 * 60,
-    # 2026-05-08: ripen sleep raised from 10 min to 30 min. Worst-case cycle:
-    # phase0 + salvage post (5 min) + discover claude (3 min) + ripen sleep
-    # 30 min + ripen re-fetch (2 min) + draft (3 min) + post (5 min) ≈ 48 min.
-    # Bump to 60 min so the natural cycle stays under the kill threshold.
-    ("run-reddit-search.sh", None): 60 * 60,
+    # 2026-05-10: bumped 60 min → 90 min. The 60-min cap was killing every
+    # cycle with >2 posts mid-post-phase (e.g. 11:00 cycle on 2026-05-10 ran
+    # 63 min, killed at minute 17 of post phase, lost 4 drafts). Real-world
+    # numbers (not the optimistic 2026-05-08 estimate): discover claude 5 min,
+    # ripen sleep 30 min, draft claude 9-10 min on 16 candidates, post phase
+    # 12-15 min for 4 posts × 3-min inter-post sleep, plus phase0/salvage
+    # overhead. Worst-case ≈ 65-70 min. 90 min cap gives headroom for slow
+    # CDP browser launches and Reddit rate-limit retries without prematurely
+    # killing the post phase. Drafts are persisted before the post phase
+    # starts, so a kill loses posting work but not drafting work.
+    ("run-reddit-search.sh", None): 90 * 60,
 }
 WATCHDOG_LOG = REPO / "skill" / "logs" / "watchdog.log"
 RUN_MONITOR_LOG = REPO / "skill" / "logs" / "run_monitor.log"
