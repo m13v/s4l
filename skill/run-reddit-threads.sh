@@ -224,8 +224,24 @@ RESULT_SCHEMA='{"type":"object","properties":{"research_files_read":{"type":"arr
 export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 
 # Acquire the browser lock now, immediately before the Claude/MCP step.
-acquire_lock "reddit-browser" 3600
+#
+# Lock strategy (changed 2026-05-10): switched from 3600s bash lock held for
+# the entire Claude session to a 90s Python lease lock. The reddit-agent MCP
+# proxy (scripts/mcp_lock_proxy.py) heartbeats expires_at on every browser
+# tool call, so the lease stays held during real activity but auto-decays
+# within 90s of idleness (Claude reasoning gaps, research file reads, etc.).
+# Peer pipelines (run-reddit-search post phase, engage-reddit, dm-replies-reddit,
+# link-edit-reddit) can use the profile during our long Claude thinking phases.
+#
+# Pre-flight: brief bash-lock acquire+release just to run ensure_browser_healthy
+# under mutex (matches link-edit-reddit.sh:174-176 and engage-dm-replies.sh).
+log "Pre-flight: ensure_browser_healthy under brief mutex..."
+acquire_lock "reddit-browser" 60
 ensure_browser_healthy "reddit"
+release_lock "reddit-browser"
+log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+    log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
 
 # NOTE 2026-05-07: removed broken pre-flight Chrome health check (commit
 # 971844d, 2026-05-04). Intent was to short-circuit before Claude drafted for
@@ -434,6 +450,14 @@ fi  # end RETRY_MODE branch
 set -e
 CLAUDE_OUTPUT=$(cat "$CLAUDE_TMP")
 rm -f "$CLAUDE_TMP"
+
+# Belt-and-suspenders: free the reddit-browser lease if it's still held.
+# Idempotent — release prints OK / NOT_HELD / HELD_BY_OTHER. Mirrors
+# link-edit-reddit.sh:185 and engage-dm-replies.sh:1439. If Claude crashed
+# mid-post the lease auto-decays in 90s, but explicit release frees peers
+# immediately so they can use the profile during the rest of this run's
+# DB writes / logging.
+timeout 3 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 # Parse structured output and log results
 echo "$CLAUDE_OUTPUT" | tee -a "$LOG_FILE"
