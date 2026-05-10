@@ -477,7 +477,7 @@ const RUN_MONITOR_PATH = path.join(LOG_DIR, 'run_monitor.log');
 // queries+candidates+above_floor only. Each sub-key is omitted when zero, so
 // `discover=` itself is absent on lines from pipelines that don't emit it.
 // Old log lines without the segment still parse cleanly via the optional `?`.
-const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?/;
+const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?/;
 
 // posts.platform is lowercase; UI labels are capitalized.
 const PLATFORM_LABELS = {
@@ -576,7 +576,7 @@ function parseRunMonitorLog(maxLines) {
   for (const line of tail) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
-    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr] = m;
+    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr] = m;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
     // correct since the dashboard server runs on the same host.
@@ -589,6 +589,21 @@ function parseRunMonitorLog(maxLines) {
     let failureReasons = [];
     if (failureReasonsStr) {
       failureReasons = failureReasonsStr.split(',')
+        .map(p => {
+          const [reason, n] = p.split(':');
+          return { reason: (reason || '').trim(), count: parseInt(n, 10) || 0 };
+        })
+        .filter(x => x.reason && x.count > 0)
+        .sort((a, b) => b.count - a.count);
+    }
+    // Parse "duplicate_thread_pre_post:3,empty_reply_text:1" the same way.
+    // Skip reasons are intentional outcomes (dedup race, empty draft, rate-
+    // limited thread); the dashboard renders them under a yellow "skipped"
+    // pill, never the red "failed" pill, so a clean dedup-only cycle does
+    // NOT misrender as a failure.
+    let skipReasons = [];
+    if (skipReasonsStr) {
+      skipReasons = skipReasonsStr.split(',')
         .map(p => {
           const [reason, n] = p.split(':');
           return { reason: (reason || '').trim(), count: parseInt(n, 10) || 0 };
@@ -649,6 +664,7 @@ function parseRunMonitorLog(maxLines) {
         scan, // {} when no `scan=` segment was present on the line
         cost_usd: parseFloat(cost),
         failure_reasons: failureReasons,
+        skip_reasons: skipReasons,
       },
     });
   }
