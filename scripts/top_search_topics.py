@@ -78,7 +78,18 @@ NON_REDDIT_COMPOSITE_SQL = (
 
 
 def _query_reddit(conn, project, window_days, limit):
-    """Reddit-specific path: joins reddit_candidates, splits posted vs skipped."""
+    """Reddit-specific path: joins reddit_candidates, splits posted vs skipped.
+
+    Click attribution: real clicks come from `post_link_clicks` (per-hit log
+    joined via `pl.code = plc.code`, COUNT WHERE is_bot=false). The legacy
+    `post_links.real_clicks` column is a stale PostHog-backfill rollup and is
+    permanently 0 for reddit (the backfill never ran for the reddit rail).
+    Using the per-hit log here matches what the dashboard shows on the Top
+    Comments tab and recovers the ~10x of clicks that were silently lost.
+    Bug observed 2026-05-10: pl.real_clicks reported 0/30d, per-hit log
+    reported 10/30d for reddit; twitter same column underreported 148 vs
+    actual 1028. Always join through plc to count clicks.
+    """
     where_proj = ""
     params = [str(window_days)]
     if project:
@@ -86,31 +97,35 @@ def _query_reddit(conn, project, window_days, limit):
         params.append(project)
     params.append(int(limit))
 
+    # NOTE: a candidate can have multiple post_link rows (rare, but possible
+    # if a draft was redrafted then re-minted). We aggregate at the candidate
+    # row by counting distinct (plc.code, plc.id) pairs through the join.
     sql = f"""
         SELECT c.search_topic AS search_topic,
                c.matched_project AS project_name,
                COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
-               COUNT(*) FILTER (WHERE c.status='posted') AS posted_n,
-               COUNT(*) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
+               COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
+               COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
                AVG(c.delta_score) FILTER (WHERE c.status='posted')                        AS avg_delta_posted,
                AVG(c.delta_score) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS avg_delta_skipped,
                COALESCE(SUM(p.upvotes)        FILTER (WHERE c.status='posted'), 0) AS upvotes_total,
                COALESCE(SUM(p.comments_count) FILTER (WHERE c.status='posted'), 0) AS comments_total,
-               COALESCE(SUM(pl.real_clicks)   FILTER (WHERE c.status='posted'), 0) AS clicks_total,
-               (COALESCE(SUM(pl.real_clicks)   FILTER (WHERE c.status='posted'), 0) * 100
+               COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
+               (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
                 + COALESCE(SUM(p.comments_count) FILTER (WHERE c.status='posted'), 0)
                 + COALESCE(SUM(p.upvotes)        FILTER (WHERE c.status='posted'), 0)) AS composite_score,
                MAX(c.posted_at)                   AS last_posted
         FROM reddit_candidates c
-        LEFT JOIN posts      p  ON p.id  = c.post_id
-        LEFT JOIN post_links pl ON pl.post_id = c.post_id
+        LEFT JOIN posts      p   ON p.id  = c.post_id
+        LEFT JOIN post_links pl  ON pl.post_id = c.post_id
+        LEFT JOIN post_link_clicks plc ON plc.code = pl.code
         WHERE c.discovered_at > NOW() - (%s || ' days')::interval
           AND c.search_topic IS NOT NULL
           AND c.search_topic <> ''
           {where_proj}
         GROUP BY c.search_topic, c.matched_project
-        HAVING COUNT(*) FILTER (WHERE c.status='posted') > 0
-            OR COUNT(*) FILTER (WHERE c.status IN ('skipped','expired','failed')) > 0
+        HAVING COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') > 0
+            OR COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) > 0
         ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_posted DESC NULLS LAST
         LIMIT %s
     """
@@ -135,7 +150,15 @@ def _query_reddit(conn, project, window_days, limit):
 
 
 def _query_posts(conn, project, platform, window_days, limit):
-    """Non-reddit path (github + fallback): posts-based, posts.platform filter."""
+    """Non-reddit path (github + fallback): posts-based, posts.platform filter.
+
+    Click attribution: same per-hit-log fix as the reddit path. We join
+    `post_link_clicks` via `pl.code = plc.code` and COUNT WHERE is_bot=false.
+    `post_links.real_clicks` (the legacy PostHog backfill column) is wildly
+    inaccurate (twitter reports ~7x undercount, reddit ~∞x), so we don't use
+    it. Each post can have multiple post_link rows; COUNT(DISTINCT p.id) is
+    the post tally, COUNT(plc.id) is the click tally.
+    """
     filters = [
         "p.search_topic IS NOT NULL",
         "p.search_topic <> ''",
@@ -151,16 +174,17 @@ def _query_posts(conn, project, platform, window_days, limit):
     where = " AND ".join(filters)
     sql = (
         f"SELECT p.search_topic, "
-        f"       COUNT(*) AS posts, "
-        f"       COALESCE(SUM(pl.real_clicks), 0) AS clicks_total, "
+        f"       COUNT(DISTINCT p.id) AS posts, "
+        f"       COUNT(plc.id) FILTER (WHERE plc.is_bot = false) AS clicks_total, "
         f"       COALESCE(SUM(p.comments_count), 0) AS comments_total, "
         f"       COALESCE(SUM(p.upvotes), 0) AS upvotes_total, "
-        f"       (COALESCE(SUM(pl.real_clicks), 0) * 100 "
+        f"       (COUNT(plc.id) FILTER (WHERE plc.is_bot = false) * 100 "
         f"        + COALESCE(SUM(p.comments_count), 0) * 3 "
         f"        + COALESCE(SUM(p.upvotes), 0)) AS composite_score, "
         f"       MAX(p.posted_at) AS last_used "
         f"FROM posts p "
         f"LEFT JOIN post_links pl ON pl.post_id = p.id "
+        f"LEFT JOIN post_link_clicks plc ON plc.code = pl.code "
         f"WHERE {where} "
         f"GROUP BY p.search_topic "
         f"ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_used DESC NULLS LAST "
