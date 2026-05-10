@@ -167,13 +167,16 @@ PROMPT_EOF
 # post-reddit) can use the profile during our generate_page.py / WebFetch
 # / DB phases.
 #
-# Pre-flight: ensure the profile isn't wedged by a prior crashed run. We
-# briefly take and release the browser lock so any orphan-Chrome sweep
-# happens once before claude starts; this is fast (mkdir + rm).
+# Pre-flight: ensure the profile isn't wedged by a prior crashed run.
+# Unified lock (2026-05-10): brief Python acquire+release so the orphan-Chrome
+# sweep happens once before claude starts. Python acquire honors expires_at,
+# so a TTL-stale-but-PID-alive holder gets reclaimed automatically instead of
+# blocking us for the full bash timeout.
 log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
-acquire_lock "reddit-browser" 60
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
+    log "WARNING: reddit_browser_lock.py pre-flight acquire failed; proceeding (claude will retry per-post)."
 ensure_browser_healthy "reddit"
-release_lock "reddit-browser"
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
