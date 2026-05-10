@@ -280,6 +280,89 @@ def remove_lock(lock_dir: Path) -> None:
         pass
 
 
+def sweep_orphan_browser_processes(name: str) -> None:
+    """Kill orphan Chrome / playwright-mcp processes reparented to PID 1.
+
+    Ported from skill/lock.sh:175-198 on 2026-05-10 as part of the migration
+    that consolidates reddit-browser locking onto a single TTL-aware system.
+
+    A prior holder may have exited without cleanly closing Chrome (parent
+    playwright-mcp died with SIGKILL/OOM, Chrome reparented to PID 1, profile
+    stays locked). Since we just acquired the exclusive lock, any Chrome on
+    this profile is an orphan and safe to kill before the caller launches
+    a fresh MCP session.
+
+    The ppid==1 filter is load-bearing: a live peer's Chromium is parented
+    to its mcp wrapper (alive). Without the guard, a peer that acquired
+    concurrently would SIGTERM the legitimate holder's Chrome and trigger
+    crashes like the GPU exit_code=15 we saw on 2026-04-28 14:12 PT.
+
+    Only fires for `*-browser` locks; no-op for pipeline locks.
+    """
+    if not name.endswith("-browser"):
+        return
+    platform = name[: -len("-browser")]
+    profile_marker = f"browser-profiles/{platform}"
+    agent_marker = f"{platform}-agent.json"
+
+    try:
+        r = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return
+
+    chrome_pids: list[int] = []
+    mcp_pids: list[int] = []
+    for line in r.stdout.splitlines():
+        # ps output: "  PID  PPID command..."
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_s, ppid_s, cmd = parts
+        if ppid_s != "1":
+            continue
+        if "user-data-dir=" in cmd and profile_marker in cmd:
+            try:
+                chrome_pids.append(int(pid_s))
+            except ValueError:
+                pass
+        elif agent_marker in cmd:
+            try:
+                mcp_pids.append(int(pid_s))
+            except ValueError:
+                pass
+
+    for pid in chrome_pids:
+        try:
+            os.kill(pid, 15)  # SIGTERM
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            pass
+    if chrome_pids:
+        print(
+            f"# swept orphan Chrome (ppid=1) holding {platform} profile: {chrome_pids}",
+            flush=True,
+        )
+        time.sleep(1)
+
+    for pid in mcp_pids:
+        try:
+            os.kill(pid, 15)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            pass
+    if mcp_pids:
+        print(
+            f"# swept orphan MCP wrappers (ppid=1) for {platform}-agent: {mcp_pids}",
+            flush=True,
+        )
+        time.sleep(1)
+
+
 def cmd_acquire(name: str, timeout: int, ttl: int) -> int:
     lock_dir, pid_file, queue_dir = lock_paths(name)
     queue_dir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +394,11 @@ def cmd_acquire(name: str, timeout: int, ttl: int) -> int:
                     # mean "respect lock indefinitely".
                     write_expires_at(lock_dir, time.time() + ttl)
                     pid_file.write_text(f"{owner_pid}\n")
+                    # Sweep orphan Chrome / MCP wrappers reparented to PID 1
+                    # before the caller launches a fresh MCP session. Ported
+                    # from lock.sh:175-198 (2026-05-10) so the bash and Python
+                    # locks no longer diverge in housekeeping behavior.
+                    sweep_orphan_browser_processes(name)
                     print(
                         f"OK owner_pid={owner_pid} waited={waited:.1f} ttl={ttl}",
                         flush=True,
