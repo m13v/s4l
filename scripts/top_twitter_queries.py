@@ -152,7 +152,13 @@ def main():
         LEFT JOIN supply_agg sa
                ON sa.query = ca.query
               AND sa.project_name = ca.project_name
-        ORDER BY composite_score DESC, ca.posts DESC
+        -- clicks_total DESC is the explicit tiebreaker that guarantees any
+        -- query with at least one tracked click sorts above queries with
+        -- pure view/like score equivalent. Without it, "1 click = 100 likes"
+        -- ties under composite_score alone and the wrong one can win.
+        -- Conversion (clicks) is the priority signal; views and likes are
+        -- only used to rank within the no-click strata.
+        ORDER BY clicks_total DESC, composite_score DESC, ca.posts DESC
         LIMIT %s
     """
 
