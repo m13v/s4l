@@ -1267,7 +1267,8 @@ async function enrichPostCommentsRedditRuns(runs) {
   }
   const since = new Date(oldestMs - 2 * 60 * 1000).toISOString();
   const candidateRows = await pq(
-    "SELECT discovered_at, posted_at, last_attempt_at, t1_checked_at, status, batch_id " +
+    "SELECT discovered_at, posted_at, last_attempt_at, t1_checked_at, drafted_at, " +
+    "       attempt_count, (draft_text IS NOT NULL) AS has_draft, status, batch_id " +
     "FROM reddit_candidates " +
     "WHERE discovered_at >= $1::timestamp " +
     "   OR posted_at >= $1::timestamp " +
@@ -1279,6 +1280,20 @@ async function enrichPostCommentsRedditRuns(runs) {
     "SELECT COUNT(*)::int AS n FROM reddit_candidates WHERE status='pending'"
   );
   const pendingNow = (pendingRow && pendingRow[0]) ? pendingRow[0].n : 0;
+  // Live salvageable count: pending rows that match Phase 0 salvage criteria
+  // (mirrors _db_phase0_salvage WHERE clause in scripts/post_reddit.py).
+  // These are the rows that COULD be picked up by salvage on the next cycle.
+  const salvageableRow = await pq(
+    "SELECT COUNT(*)::int AS n FROM reddit_candidates " +
+    "WHERE status='pending' " +
+    "  AND attempt_count < 3 " +
+    "  AND discovered_at >= NOW() - INTERVAL '24 hours' " +
+    "  AND ( " +
+    "    (last_attempt_at IS NOT NULL AND last_attempt_at < NOW() - INTERVAL '30 minutes') " +
+    "    OR (last_attempt_at IS NULL AND draft_text IS NOT NULL) " +
+    "  )"
+  );
+  const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
 
   const toMs = (d) => {
     if (!d) return null;
@@ -1298,6 +1313,7 @@ async function enrichPostCommentsRedditRuns(runs) {
     const lastAttemptMs = toMs(r.last_attempt_at);
     const t1Ms = toMs(r.t1_checked_at);
     const discoveredMs = toMs(r.discovered_at);
+    const draftedMs = toMs(r.drafted_at);
     let exitMs = null;
     if (r.status === 'posted') exitMs = postedMs;
     else if (r.status === 'failed' || r.status === 'expired' || r.status === 'skipped') {
@@ -1307,6 +1323,9 @@ async function enrichPostCommentsRedditRuns(runs) {
       discoveredMs,
       postedMs,
       lastAttemptMs,
+      draftedMs,
+      attemptCount: r.attempt_count || 0,
+      hasDraft: !!r.has_draft,
       exitMs,
       status: r.status,
       batch_id: r.batch_id || '',
@@ -1401,6 +1420,9 @@ async function enrichPostCommentsRedditRuns(runs) {
         queue_start: pendingNow,
         queue_added: 0,
         queue_drained: 0,
+        salvageable_now: salvageableNow,
+        salvageable_added: 0,
+        salvageable_drained: 0,
         log_missing: true,
       };
       continue;
@@ -1523,6 +1545,18 @@ async function enrichPostCommentsRedditRuns(runs) {
     let queueDrainedPosted = 0, queueDrainedFailed = 0;
     let queueDrainedExpired = 0, queueDrainedSkipped = 0;
     let queueStart = 0, queueEnd = 0;
+    // Salvageable pool deltas. A row is "salvageable" when it matches the
+    // Phase 0 salvage WHERE clause (status='pending' AND attempt_count<3 AND
+    // <24h old AND has either a draft or a past-backoff attempt).
+    // ADDED = rows that became salvageable during this run window. The simple
+    //   trigger is `drafted_at` falling in window (transition from no-draft to
+    //   has-draft). The other transition (last_attempt_at aging past 30 min)
+    //   is harder to attribute to a specific run, so we approximate with
+    //   drafted_at only — accurate for the dominant entry path.
+    // DRAINED = rows that exited the salvageable pool during this run window.
+    //   Approximated as exit timestamp (posted_at / last_attempt_at) in window
+    //   AND the row had a draft or a prior attempt at exit time.
+    let salvAdded = 0, salvDrained = 0;
     for (const c of candNorm) {
       if (c.discoveredMs != null && c.discoveredMs >= startMs && c.discoveredMs <= endMs) {
         queueAdded++;
@@ -1548,6 +1582,14 @@ async function enrichPostCommentsRedditRuns(runs) {
       }
       if (c.discoveredMs != null && c.discoveredMs <= endMs) {
         if (c.status === 'pending' || (c.exitMs != null && c.exitMs > endMs)) queueEnd++;
+      }
+      // Salvageable pool deltas
+      if (c.draftedMs != null && c.draftedMs >= startMs && c.draftedMs <= endMs) {
+        salvAdded++;
+      }
+      if (c.exitMs != null && c.exitMs >= startMs && c.exitMs <= endMs
+          && (c.hasDraft || c.attemptCount > 0)) {
+        salvDrained++;
       }
     }
     const queueDrained = queueDrainedPosted + queueDrainedFailed
@@ -1626,6 +1668,13 @@ async function enrichPostCommentsRedditRuns(runs) {
       queue_drained_failed: queueDrainedFailed,
       queue_drained_expired: queueDrainedExpired,
       queue_drained_skipped: queueDrainedSkipped,
+      // Salvageable pool: pending rows that match Phase 0 salvage criteria.
+      // _now = live snapshot at render time (matches the same WHERE clause
+      // used by post_reddit.py:_db_phase0_salvage to pick salvage candidates).
+      // _added / _drained = per-run delta within the run window.
+      salvageable_now: salvageableNow,
+      salvageable_added: salvAdded,
+      salvageable_drained: salvDrained,
     };
   }
 }
