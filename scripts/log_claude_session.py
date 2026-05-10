@@ -477,7 +477,7 @@ def parse_transcript(path: str):
         "first_ts": first_ts,
         "last_ts": last_ts,
         "task_call_count": task_call_count,
-        "subagent_count": len(sidechain_groups),
+        "subagent_count": subagent_count,
         "subagent_cost_usd": round(subagent_cost_usd, 6),
         "subagent_breakdown": subagent_breakdown,
     }
