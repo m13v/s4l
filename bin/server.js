@@ -1101,11 +1101,29 @@ async function enrichPostCommentsTwitterRuns(runs) {
     "SELECT COUNT(*)::int AS n FROM twitter_candidates WHERE status='pending'"
   );
   const pendingNow = (pendingRow && pendingRow[0]) ? pendingRow[0].n : 0;
-  // Live salvageable count: pending rows with a persisted draft (orphaned
-  // drafts from prior cycles that Phase 0 salvage will retry on next run).
+  // Live salvageable count: pending rows that match Twitter's Phase 0 salvage
+  // criteria (mirrors run-twitter-cycle.sh:295-348). Salvage picks rows whose
+  // owner batch has stalled past its phase budget (or is older than the 20-min
+  // legacy cutoff), excluding rows we've already posted to. We omit the
+  // "batch_id != current" filter because the dashboard isn't running inside
+  // a cycle; the count is otherwise identical.
   const salvageableRow = await pq(
-    "SELECT COUNT(*)::int AS n FROM twitter_candidates " +
-    "WHERE status='pending' AND draft_reply_text IS NOT NULL"
+    "SELECT COUNT(*)::int AS n FROM twitter_candidates tc " +
+    "WHERE tc.status='pending' " +
+    "  AND tc.batch_id LIKE 'twcycle-%' " +
+    "  AND tc.tweet_posted_at >= NOW() - INTERVAL '6 hours' " +
+    "  AND tc.tweet_url NOT IN ( " +
+    "      SELECT thread_url FROM posts " +
+    "      WHERE platform='twitter' AND thread_url IS NOT NULL " +
+    "  ) " +
+    "  AND ( " +
+    "      EXISTS ( " +
+    "          SELECT 1 FROM twitter_batches tb " +
+    "          WHERE tb.batch_id = tc.batch_id " +
+    "            AND tb.phase_started_at < NOW() - INTERVAL '20 minutes' " +
+    "      ) " +
+    "      OR NOT EXISTS (SELECT 1 FROM twitter_batches tb WHERE tb.batch_id = tc.batch_id) " +
+    "  )"
   );
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
 
@@ -1168,11 +1186,19 @@ async function enrichPostCommentsTwitterRuns(runs) {
     // decision). Counted across ALL batches, not just this run's, because
     // Phase 2b drains rows queued by earlier cycles too.
     let queueAdded = 0, queueDrainedPosted = 0, queueDrainedExpired = 0, queueDrainedSkipped = 0;
-    // Salvageable pool deltas (Twitter equivalent of Reddit's). Salvageable =
-    // pending rows with a persisted draft. ADDED = rows whose drafted_at fell
-    // in this run window (became salvageable). DRAINED = drafts that exited
-    // pending in this run window (got salvaged out).
+    // Salvageable pool deltas (Twitter): salvage criteria is "pending row from
+    // a stale batch (>20min)". Per-run delta is approximate because exact
+    // staleness-crossing requires historical phase_started_at lookup:
+    //   ADDED = rows discovered before (run_start - 20min) that are now still
+    //           pending — i.e., rows that crossed the staleness threshold
+    //           during the window. Approximated as rows discovered in
+    //           [run_start - 20min - run_duration, run_start - 20min] that
+    //           remained pending past run_start.
+    //   DRAINED = rows that exited pending during this run window (any reason).
+    // Both are approximations; the live `salvageable_now` SQL is exact.
     let salvAdded = 0, salvDrained = 0;
+    const STALENESS_MS = 20 * 60 * 1000;
+    const runDurationMs = endMs - startMs;
     for (const c of candNorm) {
       if (c.discoveredMs != null && c.discoveredMs >= startMs && c.discoveredMs <= endMs) {
         queueAdded++;
@@ -1186,10 +1212,16 @@ async function enrichPostCommentsTwitterRuns(runs) {
       if (c.status === 'skipped' && c.t1CheckedMs != null && c.t1CheckedMs >= startMs && c.t1CheckedMs <= endMs) {
         queueDrainedSkipped++;
       }
-      if (c.draftedMs != null && c.draftedMs >= startMs && c.draftedMs <= endMs) {
+      // ADDED: row crossed 20-min staleness during this window. Discovered in
+      // a window starting (startMs - STALENESS - duration) and ending (startMs - STALENESS).
+      if (c.discoveredMs != null
+          && c.discoveredMs <= (startMs - STALENESS_MS)
+          && c.discoveredMs >= (startMs - STALENESS_MS - runDurationMs)) {
         salvAdded++;
       }
-      if (c.exitMs != null && c.exitMs >= startMs && c.exitMs <= endMs && c.hasDraft) {
+      // DRAINED: row exited pending during this run window (from a stale batch).
+      if (c.exitMs != null && c.exitMs >= startMs && c.exitMs <= endMs
+          && c.discoveredMs != null && c.discoveredMs <= (c.exitMs - STALENESS_MS)) {
         salvDrained++;
       }
     }
