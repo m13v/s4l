@@ -23,7 +23,14 @@ is written to stdout for the caller to read counts back.
 
 Stdout summary (one JSON object on the last line):
     {"posted": N, "skipped": N, "failed": N,
-     "failure_reasons": "rate_limited:1,timeout:1,..."}
+     "failure_reasons": "timeout:1,log_post_no_id:1,...",
+     "skip_reasons":    "duplicate_thread_pre_post:3,empty_reply_text:1,..."}
+
+`failure_reasons` is real failures only (the dashboard renders it as a
+"failed: <reason>" pill, so dedup skips do NOT belong here). `skip_reasons`
+captures the per-skip breakdown (duplicate_thread_pre_post,
+empty_reply_text, rate_limited, tweet_not_found, reply_box_not_found,
+no_reply_url_captured) without misclassifying them as failures.
 
 Usage:
     python3 twitter_post_plan.py --plan /tmp/twitter_cycle_plan_<batch>.json
@@ -426,7 +433,14 @@ def main() -> int:
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     posted = skipped = failed = 0
-    reasons: dict[str, int] = {}
+    # Split skip vs fail reasons. The dashboard renders `failure_reasons` as
+    # a "failed: <reason>" pill, so intentional skips (duplicate_thread_pre_post,
+    # empty_reply_text, rate_limited, tweet_not_found, reply_box_not_found,
+    # no_reply_url_captured) MUST NOT land in this bucket; otherwise a clean
+    # dedup-only cycle (posted=2, failed=0) misrenders as
+    # "failed: duplicate_thread_pre_post 3" which is exactly the wrong signal.
+    fail_reasons: dict[str, int] = {}
+    skip_reasons: dict[str, int] = {}
 
     for c in candidates:
         try:
@@ -443,17 +457,18 @@ def main() -> int:
         elif outcome == "skipped":
             skipped += 1
             if reason:
-                reasons[reason] = reasons.get(reason, 0) + 1
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
         else:
             failed += 1
             if reason:
-                reasons[reason] = reasons.get(reason, 0) + 1
+                fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
 
     summary = {
         "posted": posted,
         "skipped": skipped,
         "failed": failed,
-        "failure_reasons": ",".join(f"{k}:{v}" for k, v in reasons.items()),
+        "failure_reasons": ",".join(f"{k}:{v}" for k, v in fail_reasons.items()),
+        "skip_reasons":    ",".join(f"{k}:{v}" for k, v in skip_reasons.items()),
     }
     # The shell harvests this as the last json line in our stdout.
     print(json.dumps(summary), flush=True)
