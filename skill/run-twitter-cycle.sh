@@ -35,6 +35,13 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 
 BATCH_ID="twcycle-$(date +%Y%m%d-%H%M%S)"
+# Export the same id as SA_CYCLE_ID so every Claude session spawned by this
+# cycle (via run_claude.sh -> log_claude_session.py) stamps its claude_sessions
+# row with cycle_id=$BATCH_ID. Enables exact per-cycle cost accounting via
+# get_run_cost.py --cycle-id, instead of the legacy script+since query which
+# bleeds costs across concurrent stacked cycles. See 2026-05-10 cycle_id
+# rollout (started on reddit, extended here).
+export SA_CYCLE_ID="$BATCH_ID"
 LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
 QUERIES_FILE="/tmp/twitter_cycle_queries_$(date +%s).json"
