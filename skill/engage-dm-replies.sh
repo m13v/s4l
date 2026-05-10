@@ -32,6 +32,13 @@ fi
 LOCK_NAME="dm-replies"
 [ -n "$PLATFORM" ] && LOCK_NAME="dm-replies-$PLATFORM"
 
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# DM-reply run (via SA_CYCLE_ID env -> log_claude_session.py). 2026-05-10
+# cycle_id rollout. Suffix carries platform so multi-platform fan-outs from
+# the same launchd cadence stay distinguishable.
+BATCH_ID="endm-${PLATFORM:-all}-$(date +%Y%m%d-%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Pipeline lock at top. Platform-browser locks are acquired later, just
 # before the Claude/MCP step that drives the browser, so peers can use the
 # profile during our Phase 0 (Gmail + matrix-js-sdk IndexedDB ingest), DB
