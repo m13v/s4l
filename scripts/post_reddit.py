@@ -852,7 +852,22 @@ def build_discover_prompt(project, config, limit, top_report, recent_comments,
 
     top_topics_ctx = ""
     if top_topics_report:
-        top_topics_ctx = f"\n## Search-topic feedback (seeds with best engagement):\n{top_topics_report}\n"
+        top_topics_ctx = (
+            "\n## Past top-performing search topics "
+            "(sorted by clicks DESC first, then composite-scored: "
+            "clicks*100 + comments + upvotes). "
+            "CLICKS ARE THE PRIORITY SIGNAL. Any topic with `clicks > 0` is "
+            "GOLD TIER, clicks are the only metric that proves our reply drove "
+            "someone to actually visit the project's link. Comments and upvotes "
+            "are vanity. If a project in your draft set has a gold-tier topic "
+            "in this list, mimic ITS framing (subreddit fit, keyword cluster, "
+            "specificity) FIRST before falling back to other styles. The "
+            "Δpost / Δskip columns also matter: high Δskip + few posts = the "
+            "topic surfaces alive but off-topic threads (reword more narrowly); "
+            "low Δskip + few posts = dead supply (drop the topic). Optimize the "
+            "entire pipeline for clicks; everything else is leading indicators.\n"
+            f"{top_topics_report}\n"
+        )
 
     dud_queries_ctx = ""
     if dud_queries_report and dud_queries_report.strip() not in ("[]", ""):
@@ -1072,12 +1087,22 @@ Your last {len(recent_comments)} comments (don't repeat talking points):
     top_topics_ctx = ""
     if top_topics_report:
         top_topics_ctx = f"""
-## Search-topic feedback (which seeds actually led to engagement):
+## Past top-performing search topics (sorted by clicks DESC first, then composite-scored: clicks*100 + comments + upvotes)
+CLICKS ARE THE PRIORITY SIGNAL. Any topic with `clicks > 0` is GOLD TIER, clicks
+are the only metric that proves our reply drove someone to actually visit the
+project's link. Comments and upvotes are vanity. If a project in your draft set
+has a gold-tier topic in this list, mimic ITS framing (subreddit fit, keyword
+cluster, specificity) FIRST before falling back to other styles. The Δpost /
+Δskip columns also matter: high Δskip + few posts = topic surfaces alive but
+off-topic threads (reword more narrowly); low Δskip + few posts = dead supply
+(drop the topic). Optimize the entire pipeline for clicks; everything else is
+leading indicators.
+
 {top_topics_report}
 
-Prefer seeds with higher total/avg scores when they fit. If none of the top
-seeds match this run's angle, pick any seed from the project's search_topics
-list. New seeds with 0 posts are fine — we need to explore.
+If none of the top topics match this run's angle, pick any seed from the
+project's search_topics list. New topics with 0 clicks are fine — we still need
+to explore — but a gold-tier topic that fits should beat any unproven topic.
 """
 
     # NEGATIVE-signal feedback: queries that have produced zero post-filter
