@@ -7175,6 +7175,7 @@ function renderResult(run) {
   const repliesRefreshed = r.replies_refreshed || 0;
   const salvaged = r.salvaged || 0;
   const reasons = Array.isArray(r.failure_reasons) ? r.failure_reasons : [];
+  const skipBreakdown = Array.isArray(r.skip_reasons) ? r.skip_reasons : [];
   // Compose a unified "failed: <top_reason> +N" pill with full breakdown in
   // tooltip. Same shape as the engage branch above so operators see one
   // consistent error format across every job type.
@@ -7191,6 +7192,22 @@ function renderResult(run) {
     return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
       'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
       label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
+  };
+  // Twin of renderFailedPill, but for intentional skips (dedup race guard,
+  // empty draft, rate-limited thread). Yellow tint matches the existing
+  // generic "skipped" pill so operators read this as "skip with reason"
+  // rather than misclassifying it as a failure. Hidden when skipped=0.
+  const renderSkipReasonsPill = () => {
+    if (!skipBreakdown.length) return '';
+    const top = skipBreakdown[0];
+    const tooltip = skipBreakdown
+      .map(function (x) { return x.reason + ' x' + x.count; }).join(', ');
+    const label = 'skipped: ' + top.reason +
+      (skipBreakdown.length > 1 ? ' +' + (skipBreakdown.length - 1) : '');
+    const count = top.count;
+    return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
+      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
+      label + ' <span style="color:#eab308;font-weight:600;">' + count + '</span></span>';
   };
   // Discovery counters (Twitter cycle today, LinkedIn next): condense the
   // queries/duds/tweets_pulled/candidates/above_floor breakdown into a single
@@ -7219,6 +7236,7 @@ function renderResult(run) {
   return (
     pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
     pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
+    renderSkipReasonsPill() +
     renderFailedPill() +
     pill('salvaged', salvaged, salvaged > 0 ? '#3b82f6' : 'var(--muted)') +
     renderDiscoverPill() +
