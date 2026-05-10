@@ -41,15 +41,30 @@ LOCK_NAME="audit${PLATFORM:+-$PLATFORM}"
 
 # Browser-profile lock first (shared across pipelines using the same browser),
 # then the pipeline-specific lock. moltbook has no shared browser profile.
+#
+# Reddit uses the unified Python lease (2026-05-10) — TTL-aware, auto-decays
+# during Claude idle gaps so peer pipelines can use the profile. The MCP
+# proxy heartbeats expires_at on every reddit-agent call. LinkedIn/Twitter
+# still use the bash lock (no MCP-proxy heartbeat wiring yet).
 source "$(dirname "$0")/lock.sh"
+REPO_DIR_FOR_LOCK="$HOME/social-autoposter"
+_release_reddit_lease() {
+    timeout 3 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+}
 case "${PLATFORM:-all}" in
     linkedin) acquire_lock "linkedin-browser" 3600 ;;
-    reddit)   acquire_lock "reddit-browser" 3600 ;;
+    reddit)
+        python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
+            echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
+        trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
+        ;;
     twitter|x) acquire_lock "twitter-browser" 3600 ;;
     moltbook) ;;
     all)
         acquire_lock "linkedin-browser" 3600
-        acquire_lock "reddit-browser" 3600
+        python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
+            echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
+        trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
         acquire_lock "twitter-browser" 3600
         ;;
 esac
