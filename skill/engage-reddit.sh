@@ -23,7 +23,15 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/engage-reddit-$(date +%Y-%m-%d_%H%M%S).log"
 
-echo "=== Engage Reddit Run: $(date) ===" | tee "$LOG_FILE"
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# engagement run (via SA_CYCLE_ID env -> log_claude_session.py). Lets the
+# dashboard / get_run_cost.py --cycle-id report exact per-cycle cost instead
+# of the legacy script+since query that bleeds across concurrent runs.
+# 2026-05-10 cycle_id rollout.
+BATCH_ID="enrdt-$(date +%Y%m%d-%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
+echo "=== Engage Reddit Run: $(date) (cycle=$BATCH_ID) ===" | tee "$LOG_FILE"
 START_TS=$(date +%s)
 
 # Reddit-browser lease (added 2026-05-10): scan_reddit_replies.py is HTTP-only
