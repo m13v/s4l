@@ -26,7 +26,39 @@ LOG_FILE="$LOG_DIR/engage-reddit-$(date +%Y-%m-%d_%H%M%S).log"
 echo "=== Engage Reddit Run: $(date) ===" | tee "$LOG_FILE"
 START_TS=$(date +%s)
 
+# Reddit-browser lease (added 2026-05-10): scan_reddit_replies.py is HTTP-only
+# (no browser) but it auto-fires engage_reddit.py, which runs Claude with the
+# reddit-agent MCP profile and DOES drive the browser. Without the lease,
+# engage_reddit.py's Claude session can collide with peer reddit pipelines
+# (run-reddit-search post phase, run-reddit-threads, link-edit-reddit) all
+# driving the same Chrome profile concurrently.
+#
+# Lease pattern: acquire before scan, release after. The scan HTTP phase
+# doesn't heartbeat, but it's fast (<30s typical). Once engage_reddit.py
+# starts Claude, the reddit-agent MCP proxy heartbeats expires_at on every
+# tool call. The 90s TTL gives us plenty of headroom for Claude startup
+# (~20s) before the first heartbeat fires.
+echo "[engage-reddit] Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..." | tee -a "$LOG_FILE"
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+    echo "[engage-reddit] WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)." | tee -a "$LOG_FILE"
+
+# Belt-and-suspenders trap: free the lease on any exit path. Idempotent.
+# Without this, a SIGTERM mid-engage_reddit.py would leave the lease held
+# for ~90s before peers could steal it.
+#
+# Trap chaining: lock.sh sourced above installed `_sa_release_locks` on
+# EXIT INT TERM HUP. Bash trap REPLACES, not appends, so we re-set with
+# both handlers. Order: release the lease first (cheap, lets peers in),
+# then release pipeline locks. Mirrors run-reddit-search.sh:158.
+_release_reddit_lease() {
+    timeout 3 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+}
+trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
+
 PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_reddit_replies.py" 2>&1 | tee -a "$LOG_FILE" || true
+
+# Explicit release after engage subprocess returns (the trap is the safety net).
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 ELAPSED=$(( $(date +%s) - START_TS ))
 # Pull scan-stage counters out of the "Inbox scan complete:" line so the
