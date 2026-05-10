@@ -428,11 +428,19 @@ Your last {len(recent_comments)} GitHub comments (don't repeat talking points):
     top_topics_ctx = ""
     if top_topics_report:
         top_topics_ctx = f"""
-## Search-topic feedback (which seeds actually led to engagement):
+## Past top-performing search topics (sorted by clicks DESC first, then composite-scored: clicks*100 + comments*3 + upvotes)
+CLICKS ARE THE PRIORITY SIGNAL. Any topic with `clicks > 0` is GOLD TIER, clicks
+are the only metric that proves our reply drove someone to actually visit the
+project's link. Comments and upvotes are vanity. If an issue's seed matches a
+gold-tier topic, prefer that issue; mimic ITS framing (repo type, language,
+issue keyword cluster) FIRST before falling back to other styles. Optimize the
+entire pipeline for clicks; everything else is leading indicators.
+
 {top_topics_report}
 
-Prefer issues whose seed has a higher total/avg score when the fit is genuine.
-New seeds with 0 posts are fine, we still need to explore.
+If none of the top topics match this run's candidates, prefer issues with
+strong delta scores. New topics with 0 clicks are fine, we still need to
+explore, but a gold-tier topic that fits should beat any unproven topic.
 """
 
     project_name = project["name"]
