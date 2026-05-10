@@ -225,12 +225,67 @@ def _db_load_fresh_draft(thread_url):
 
 
 def _db_mark_candidate_posted(thread_url, post_id):
-    """Mark a candidate as successfully posted with linkage to posts.id."""
+    """Mark a candidate as successfully posted with linkage to posts.id.
+
+    Guard added 2026-05-10: when `post_id is None` we used to write
+    status='posted' with post_id=NULL anyway. That created 38% of posted
+    candidates with broken linkage and made them invisible to the
+    candidate-keyed feedback feed (top_search_topics --platform reddit).
+    Two recovery layers now:
+      1) try to recover post_id from posts.thread_url (covers the case where
+         log_post() actually inserted the row but the caller's parse of the
+         return payload failed — most common log_post=None mode).
+      2) if recovery fails, mark status='failed' with reason
+         'log_post_returned_null' instead of 'posted'. The comment IS live
+         on Reddit (we have a permalink upstream), but we lost the link to
+         posts(id), so a downstream backfill job can target this exact
+         reason. status='failed' prevents Phase 0 salvage from re-posting
+         and creating a duplicate.
+    """
     if not thread_url:
         return
     try:
         dbmod.load_env()
         conn = dbmod.get_conn()
+        if post_id is None:
+            # Recovery layer 1: maybe log_post inserted into posts but the
+            # caller's return-payload parse dropped the id.
+            row = conn.execute(
+                "SELECT id FROM posts WHERE thread_url = %s "
+                "AND LOWER(platform)='reddit' "
+                "ORDER BY posted_at DESC LIMIT 1",
+                [thread_url],
+            ).fetchone()
+            if row:
+                post_id = int(row[0])
+                print(
+                    f"[post_reddit] WARNING: recovered post_id={post_id} via posts.thread_url "
+                    f"after log_post returned None for {thread_url}",
+                    file=sys.stderr,
+                )
+
+        if post_id is None:
+            # Recovery layer 2: tag failure reason and bail. Comment is live
+            # but linkage is lost; a backfill cron can repair it later.
+            conn.execute(
+                "UPDATE reddit_candidates SET "
+                "  status = 'failed', "
+                "  last_attempt_at = NOW(), "
+                "  last_failure_reason = 'log_post_returned_null' "
+                "WHERE thread_url = %s AND post_id IS NULL",
+                [thread_url],
+            )
+            conn.commit()
+            conn.close()
+            print(
+                f"[post_reddit] WARNING: log_post returned None and posts.thread_url "
+                f"lookup failed for {thread_url}. Marking status='failed' to prevent "
+                f"Phase 0 re-post (would dupe). Comment is live on Reddit; backfill "
+                f"required for click attribution.",
+                file=sys.stderr,
+            )
+            return
+
         conn.execute(
             "UPDATE reddit_candidates SET "
             "  status = 'posted', "
