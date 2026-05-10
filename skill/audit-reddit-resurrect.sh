@@ -5,7 +5,16 @@
 set -uo pipefail
 
 source "$(dirname "$0")/lock.sh"
-acquire_lock "reddit-browser" 3600
+# Unified reddit lock (2026-05-10): TTL-aware Python lease. The MCP proxy
+# heartbeats expires_at on every reddit-agent call, so the lease stays held
+# during real browser activity but auto-decays within 90s of idleness.
+REPO_DIR_FOR_LOCK="$HOME/social-autoposter"
+_release_reddit_lease() {
+    timeout 3 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+}
+python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
+    echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
+trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
 ensure_browser_healthy "reddit"
 acquire_lock "audit-reddit-resurrect" 3600
 
