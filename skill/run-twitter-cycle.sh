@@ -11,9 +11,17 @@
 #
 # Phase 2 (t=5m):
 #   - re-fetch the same candidates via fxtwitter -> T1 snapshot + delta_score
-#   - SQL gate: only candidates with delta_score >= 1 (skip zero-momentum duds)
-#   - Claude reads top 15 by delta, drops unsuitable, posts top N where N is
-#     adaptive: 4 if ≥3 candidates cleared Δ≥10 (strong momentum), else 1
+#   - SQL gate: floor lowered to delta_score >= 0 so zero-momentum but on-theme
+#     product-discussion tweets (asking for a tool, venting a pain point) can
+#     compete; ranking still favors growth via hybrid sort
+#   - Hybrid sort: ORDER BY (delta_score + product_intent_boost) where
+#     product_intent_boost is +5 when tweet text matches an intent-signal regex
+#     (wish/need/looking for/recommend/alternative/frustrated/etc); raw growth
+#     remains the dominant signal, but a slow-burn "anyone know a tool for..."
+#     tweet now ranks alongside fast-growing news/drama
+#   - Claude reads top 25 (raised from 15 so the long tail reaches the model),
+#     drops unsuitable, posts top N where N is adaptive: 4 if ≥3 candidates
+#     cleared Δ≥10 (strong momentum), else 1
 #   - keep remaining pending rows: salvaged into the next cycle, hard-expired
 #     by Phase 0 once tweet age crosses FRESHNESS_HOURS
 #
@@ -726,7 +734,13 @@ sleep 300
 log "Phase 2a: re-polling fxtwitter for T1 engagement..."
 python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE"
 
-# --- Phase 2b: top 15 by delta (Δ≥1 floor), adaptive post cap 1 or 4 --------
+# --- Phase 2b: top 25 by hybrid score (delta + product-discussion intent boost), adaptive post cap 1 or 4 --------
+# Hybrid sort: keep raw growth (delta_score) as the dominant signal, but add a +5 boost
+# when the tweet text shows a "product-discussion intent" pattern (someone asking for a tool,
+# venting a pain point, comparing alternatives, asking for recs). This lets slow-growing but
+# on-theme tweets compete with fast-growing news/drama instead of being truncated.
+# Floor lowered from delta_score >= 1 to >= 0 so zero-growth product-asks still qualify;
+# limit raised from 15 to 25 so the long tail reaches the model.
 CANDIDATES=$(psql "$DATABASE_URL" -t -A -F '|' -c "
     SELECT id, tweet_url, author_handle,
            REPLACE(REPLACE(COALESCE(tweet_text, ''), E'\n', ' '), E'\r', ' '),
@@ -740,9 +754,12 @@ CANDIDATES=$(psql "$DATABASE_URL" -t -A -F '|' -c "
                 ELSE EXTRACT(EPOCH FROM (NOW() - drafted_at))/60
            END
     FROM twitter_candidates
-    WHERE batch_id='$BATCH_ID' AND status='pending' AND delta_score >= 1
-    ORDER BY delta_score DESC
-    LIMIT 15;
+    WHERE batch_id='$BATCH_ID' AND status='pending' AND COALESCE(delta_score, 0) >= 0
+    ORDER BY (
+        COALESCE(delta_score, 0)
+        + CASE WHEN tweet_text ~* '\m(wish|need a|need an|looking for|recommend|alternative to|frustrated|hate (that|when)|should exist|would pay|missing.*(feature|tool|app)|why (is there no|doesn''t)|anyone know|anyone use|how do you|what do you use|best (tool|app))\M' THEN 5 ELSE 0 END
+    ) DESC
+    LIMIT 25;
 " 2>/dev/null || echo "")
 
 if [ -z "$CANDIDATES" ]; then
@@ -750,7 +767,8 @@ if [ -z "$CANDIDATES" ]; then
     psql "$DATABASE_URL" -c "UPDATE twitter_candidates SET status='expired' WHERE batch_id='$BATCH_ID' AND status='pending'" 2>&1 | tee -a "$LOG_FILE"
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
     EXPIRED_BATCH=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='expired'" 2>/dev/null || echo 0)
-    # Not a hard error — batch had candidates but none cleared the Δ≥1 floor.
+    # Not a hard error — batch had candidates but none cleared the Δ≥0 floor
+    # (would only happen if every row had a NULL or negative delta_score).
     # Report as skipped (not failed) so the row reads "skipped: N" rather than
     # the silent "—" we used to render. failure_reasons stays empty.
     python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped "${EXPIRED_BATCH:-0}" --failed 0 \
