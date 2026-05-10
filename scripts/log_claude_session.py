@@ -227,7 +227,22 @@ def main():
                              "(see anthropics/claude-code #43945). When omitted, "
                              "the column stays NULL and dashboards fall back to "
                              "total_cost_usd (manual transcript-derived estimate).")
+    parser.add_argument("--cycle-id", default=None,
+                        help="Optional per-cycle batch identifier (e.g. "
+                             "'rdcycle-20260510-110005'). Lets get_run_cost.py / "
+                             "the dashboard scope cost to ONE pipeline cycle "
+                             "even when multiple cycles of the same script "
+                             "(double-forked run-reddit-search.sh / "
+                             "run-twitter-cycle.sh) overlap in wall-clock time. "
+                             "Falls back to env SA_CYCLE_ID; NULL if unset.")
     args = parser.parse_args()
+
+    # Allow callers (run_claude.sh, post_reddit.py spawning a child claude) to
+    # propagate cycle_id via env without re-plumbing every call site. CLI flag
+    # takes precedence so explicit overrides still work.
+    cycle_id = args.cycle_id or os.environ.get("SA_CYCLE_ID") or None
+    if cycle_id == "":
+        cycle_id = None
 
     transcript = find_transcript(args.session_id)
     # Archive the transcript BEFORE parsing so even an empty/short session
@@ -277,8 +292,9 @@ def main():
             session_id, script, started_at, ended_at, duration_ms,
             total_cost_usd, orchestrator_cost_usd,
             input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, model_breakdown, model
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+            cache_read_tokens, cache_creation_tokens, model_breakdown, model,
+            cycle_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
         ON CONFLICT (session_id) DO UPDATE SET
             ended_at = EXCLUDED.ended_at,
             duration_ms = EXCLUDED.duration_ms,
@@ -290,7 +306,8 @@ def main():
             cache_read_tokens = EXCLUDED.cache_read_tokens,
             cache_creation_tokens = EXCLUDED.cache_creation_tokens,
             model_breakdown = EXCLUDED.model_breakdown,
-            model = EXCLUDED.model
+            model = EXCLUDED.model,
+            cycle_id = COALESCE(EXCLUDED.cycle_id, claude_sessions.cycle_id)
         """,
         [
             args.session_id, args.script, started, ended, duration_ms,
@@ -300,6 +317,7 @@ def main():
             parsed["totals"]["cache_read"], parsed["totals"]["cache_creation"],
             json.dumps(parsed["by_model"]),
             parsed["primary_model"],
+            cycle_id,
         ],
     )
 
