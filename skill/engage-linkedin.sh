@@ -38,6 +38,12 @@ fi
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/engage-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# engagement run (via SA_CYCLE_ID env -> log_claude_session.py). 2026-05-10
+# cycle_id rollout.
+BATCH_ID="enli-$(date +%Y%m%d_%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 RUN_START=$(date +%s)
