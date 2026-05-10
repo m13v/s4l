@@ -274,12 +274,6 @@ def main():
                    help="Composite delta must be GREATER THAN OR EQUAL to this "
                         "(default: 1.0). composite = Δup + 4*Δcomments; +1 upvote in 5min "
                         "is enough signal that the thread is still alive.")
-    p.add_argument("--top-k", type=int, default=0,
-                   help="After applying the floor, sort survivors by composite "
-                        "DESC and keep only the top K. 0 = unlimited (default). "
-                        "Mirrors twitter_post_plan.py's `LIMIT 15` SQL cap so a "
-                        "wide discover doesn't flood the draft phase. Typical: "
-                        "1 for per-iteration cycles, 5+ for a single-batch cycle.")
     p.add_argument("--w-comments", type=float, default=4.0,
                    help="Comment weight in composite formula (default: 4.0)")
     p.add_argument("--sleep", type=int, default=300,
@@ -430,29 +424,11 @@ def main():
             print(f"[ripen] DROP composite={composite:.1f} (Δup={d_up}, Δcomm={d_co}) "
                   f"{url}", file=sys.stderr)
 
-    # ---- Top-K cap: rank survivors by composite delta and keep the best ----
-    # Wide-discover cycles (post 2026-05-06 refactor) can produce dozens of
-    # survivors. Sort DESC by composite and trim to args.top_k so the draft
-    # phase doesn't pay LLM cost for the long tail. 0 = unlimited (legacy
-    # behavior preserved). Mirrors twitter_post_plan.py's `LIMIT 15` SQL cap.
-    if survivors and args.top_k > 0 and len(survivors) > args.top_k:
-        survivors.sort(
-            key=lambda d: (d.get("ripen") or {}).get("composite", 0.0),
-            reverse=True,
-        )
-        excess = survivors[args.top_k:]
-        survivors = survivors[:args.top_k]
-        for ex in excess:
-            rip = ex.get("ripen") or {}
-            drops.append({
-                "url": ex.get("thread_url") or ex.get("target_thread_url"),
-                "reason": f"top_k_cap: composite={rip.get('composite', 0):.1f} "
-                          f"below cutoff (kept top {args.top_k})",
-                "delta_up": rip.get("delta_up"),
-                "delta_comments": rip.get("delta_comments"),
-            })
-        print(f"[ripen] top-K cap: kept {len(survivors)}/{len(survivors) + len(excess)} "
-              f"by composite DESC", file=sys.stderr)
+    # 2026-05-10: top-k cap removed. The cap was disabled (--top-k 0) since
+    # 2026-05-08 because trimming survivors before the LLM relevance gate threw
+    # away potentially-good fits below the engagement-velocity cutoff. The
+    # final cap now lives in _post_iteration via SAPS_REDDIT_MAX_POSTS_PER_CYCLE
+    # (default 10), which sorts decisions by ripen composite DESC.
 
     # ---- HTML lock pre-flight for delta-gate survivors ----------------------
     # cmd_repoll checks the JSON locked flag, but Reddit's AutoMod sometimes
