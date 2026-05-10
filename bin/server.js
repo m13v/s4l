@@ -9933,13 +9933,13 @@ function renderSearchQueriesStats(payload) {
     storageKey: 'sa.searchQueriesStatsTable.v1',
     showTotals: false,
     columns: [
-      { key: 'query',       label: 'Query',     type: 'text',    align: 'left', widthPct: 56,
+      { key: 'query',       label: 'Query',     type: 'text',    align: 'left', widthPct: 28,
         formatter: v => {
           const s = String(v || '');
-          // Long Twitter boolean queries go up to ~200 chars. The 60% column
-          // width + CSS truncation handles the visual clamp; we just hand the
-          // full string to the global tooltip and let CSS ellipsize.
-          return '<span data-tooltip="' + escapeHtml(s) + '" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;">' + escapeHtml(s) + '</span>';
+          // Long Twitter boolean queries go up to ~200 chars. Half-width column
+          // wraps text inside the cell instead of truncating; we still hand the
+          // full string to the global tooltip in case wrapping clips visually.
+          return '<span data-tooltip="' + escapeHtml(s) + '" style="display:block;white-space:normal;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.35;">' + escapeHtml(s) + '</span>';
         } },
       { key: 'platform',    label: 'Platform',  type: 'text',    align: 'center', widthPct: 4,
         formatter: v => '<span data-tooltip="' + escapeHtml(String(v || '')) + '" style="text-transform:capitalize;">' + platformIconHtml(v) + '</span>' },
