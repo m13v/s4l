@@ -278,13 +278,16 @@ fi
 # steal the lease during sleep; post_reddit.post_via_cdp() retries 5x on the
 # python-level lock collision (the actual mutual-exclusion gate).
 if [ "$HAS_SALVAGE" = "1" ]; then
-    log "Salvage lane: pre-flight ensure_browser_healthy under brief mutex..."
-    acquire_lock "reddit-browser" 60
-    ensure_browser_healthy "reddit"
-    release_lock "reddit-browser"
+    # Unified lock (2026-05-10): only the Python lease. The bash pre-flight
+    # was removed because lock.sh did not honor expires_at, so it could block
+    # 60s on a TTL-stale-but-PID-alive holder while the Python acquire on the
+    # next line would have stolen immediately. Python acquire now performs
+    # the orphan-Chrome sweep (ported from lock.sh:175-198) itself, then
+    # ensure_browser_healthy runs under the Python lease's exclusivity.
     log "Salvage lane: acquiring reddit-browser lease (TTL 90s, heartbeated by reddit_browser.py CDP work)..."
     python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
         log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+    ensure_browser_healthy "reddit"
 
     # set +e covers the entire post + cleanup block. Discover lane MUST run
     # every cycle (per design comment at line 263), so any failure in salvage
@@ -415,13 +418,13 @@ fi
 # Same lease-lock pattern as the salvage block above (see comment at line 264
 # for design rationale).
 if [ "$HAS_DISCOVER" = "1" ]; then
-    log "Discover lane: pre-flight ensure_browser_healthy under brief mutex..."
-    acquire_lock "reddit-browser" 60
-    ensure_browser_healthy "reddit"
-    release_lock "reddit-browser"
+    # Unified lock (2026-05-10): same pattern as salvage lane above. Python
+    # acquire performs the orphan-Chrome sweep internally; ensure_browser_healthy
+    # runs under the exclusive Python lease that follows.
     log "Discover lane: acquiring reddit-browser lease (TTL 90s, heartbeated by reddit_browser.py CDP work)..."
     python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
         log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+    ensure_browser_healthy "reddit"
 
     # set +e covers the entire post + cleanup block. The script must reach
     # the trap-installed cost emitter at the bottom even if discover cleanup
