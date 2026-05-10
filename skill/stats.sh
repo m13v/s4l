@@ -109,10 +109,10 @@ if [ "$RUN_STEP1" -eq 1 ]; then
 log "Step 1: Reddit profile scrape (headless Playwright)"
 
 # Serialize with other reddit-agent consumers (post_reddit, run-reddit-threads,
-# engage-dm-replies, audit-reddit*). Without this, the thread/comment pipelines
-# acquire the shell-level reddit-browser file lock while this script holds only
-# the MCP hook lock, causing Claude's mcp__reddit-agent__* calls to abort mid-run.
-acquire_lock "reddit-browser" 3600
+# engage-dm-replies, audit-reddit*). Unified Python lease (2026-05-10) —
+# TTL-aware, MCP-proxy heartbeated during reddit-agent calls.
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
+    log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
 
 REDDIT_USERNAME=$(python3 -c "import json; print(json.load(open('$REPO_DIR/config.json'))['accounts']['reddit']['username'])" 2>/dev/null || echo "")
 
@@ -164,8 +164,8 @@ fi
 # post_reddit + run-reddit-search + dm-replies queue for 5-15 min every cycle.
 # Releasing here keeps Step 1's serialization guarantee for the actual browser
 # work and frees the queue immediately.
-release_lock "reddit-browser"
-log "Step 1: released reddit-browser lock (Step 2 is HTTP-only)"
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+log "Step 1: released reddit-browser lease (Step 2 is HTTP-only)"
 else
     log "Step 1: SKIPPED (platform=$PLATFORM)"
 fi
