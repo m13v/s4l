@@ -136,34 +136,125 @@ def cost_from_usage(model: str, usage: dict) -> float:
     ) / 1_000_000
 
 
+def _parse_subagent_transcript(path: str, meta: dict):
+    """Parse a single agent-<id>.jsonl into a cost summary.
+
+    Subagent transcripts have the same per-turn shape as the orchestrator
+    (assistant turns with usage), but every event carries ``isSidechain:
+    true``, an ``agentId``, and references back to the parent via
+    ``sessionId`` (matches orchestrator's session id).
+    """
+    if not os.path.exists(path):
+        return None
+    by_model = {}
+    first_ts = None
+    last_ts = None
+    turns = 0
+    with open(path) as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = ev.get("timestamp")
+            if ts:
+                first_ts = first_ts or ts
+                last_ts = ts
+            if ev.get("type") != "assistant":
+                continue
+            msg = ev.get("message") or {}
+            usage = msg.get("usage") or {}
+            if not usage:
+                continue
+            model = msg.get("model") or "unknown"
+            entry = by_model.setdefault(model, {
+                "input_tokens": 0, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                "cost_usd": 0.0,
+            })
+            inp = usage.get("input_tokens", 0) or 0
+            out = usage.get("output_tokens", 0) or 0
+            cr = usage.get("cache_read_input_tokens", 0) or 0
+            cc = usage.get("cache_creation_input_tokens", 0) or 0
+            entry["input_tokens"] += inp
+            entry["output_tokens"] += out
+            entry["cache_read_tokens"] += cr
+            entry["cache_creation_tokens"] += cc
+            entry["cost_usd"] += cost_from_usage(model, usage)
+            turns += 1
+    cost = sum(v["cost_usd"] for v in by_model.values())
+    primary = None
+    if by_model:
+        primary = max(
+            by_model.items(),
+            key=lambda kv: (kv[1].get("output_tokens", 0), kv[1].get("input_tokens", 0)),
+        )[0]
+    return {
+        "by_model": {
+            m: {**v, "cost_usd": round(v["cost_usd"], 6)}
+            for m, v in by_model.items()
+        },
+        "cost_usd": round(cost, 6),
+        "turns": turns,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "model": primary or "unknown",
+        "agent_type": (meta or {}).get("agentType"),
+        "description": (meta or {}).get("description"),
+    }
+
+
+def _find_subagent_dir(orchestrator_path: str) -> str:
+    """Given path .../<session_id>.jsonl, return .../<session_id>/subagents/."""
+    if not orchestrator_path:
+        return None
+    base = orchestrator_path[:-len(".jsonl")] if orchestrator_path.endswith(".jsonl") else orchestrator_path
+    candidate = os.path.join(base, "subagents")
+    return candidate if os.path.isdir(candidate) else None
+
+
 def parse_transcript(path: str):
     """Parse a Claude Code transcript .jsonl into per-session cost.
 
-    Subagent (Task tool) handling
-    -----------------------------
-    Claude Code embeds subagent turns into the SAME parent transcript .jsonl
-    rather than writing a separate file. Subagent entries are flagged with
-    ``"isSidechain": true`` at the top level of each event. Their token
-    usage is otherwise structured identically to parent (orchestrator) turns.
+    Subagent (Agent tool) handling
+    ------------------------------
+    Claude Code SDK >= 2.1.x writes subagent transcripts to a SEPARATE
+    sibling directory, NOT inline in the orchestrator's .jsonl. Layout:
+
+        ~/.claude/projects/<encoded-cwd>/<orchestrator-session-id>.jsonl
+        ~/.claude/projects/<encoded-cwd>/<orchestrator-session-id>/
+                                                    subagents/
+                                                        agent-<short-id>.jsonl
+                                                        agent-<short-id>.meta.json
+
+    The orchestrator's .jsonl only records the ``tool_use`` block (name
+    "Agent", with ``subagent_type``/``description``/``prompt`` input) and
+    the consolidated ``tool_result`` carrying the agent's final reply. The
+    Agent's internal chain of assistant turns lives entirely in
+    ``agent-<id>.jsonl`` with ``isSidechain: true`` on every event.
 
     This parser:
       * Sums orchestrator-only token usage and cost into by_model/totals
-        (so the headline total_cost_usd matches the parent thread, not
-        parent+subagent — that's what `cost_from_usage` callers expect).
-      * Counts Task tool_use blocks in orchestrator turns -> task_call_count.
-        Each Task call is one subagent invocation from the parent's point
-        of view (even though the subagent itself may chain through several
-        assistant turns).
-      * Tallies sidechain (subagent) turns into a separate bucket grouped
-        by ``parentUuid`` chain root, producing a per-subagent breakdown
-        suitable for the subagent_breakdown jsonb column.
-      * Surfaces ``subagent_count`` (distinct sidechain roots) and
-        ``subagent_cost_usd`` (sum across all sidechain turns).
+        (so total_cost_usd matches the parent thread only — subagent cost
+        is broken out separately so the user can see exactly what the
+        subagents added).
+      * Counts ``Agent`` tool_use blocks in orchestrator turns -> the
+        legacy ``task_call_count`` field (kept the name for back-compat
+        even though the tool name is "Agent", not "Task").
+      * Scans the sibling ``subagents/`` directory; for each
+        agent-<id>.jsonl, parses it as an independent transcript and adds
+        its cost to ``subagent_cost_usd``. Per-subagent details land in
+        ``subagent_breakdown`` keyed by short agent id, with the
+        agentType/description from the .meta.json sidecar.
+      * As a defensive fallback, also detects legacy ``isSidechain: true``
+        events inside the same .jsonl (older SDK versions may have used
+        that layout). Currently zero hits across 14k+ historical sessions,
+        but kept so we don't have to revisit when the SDK changes again.
 
-    All four fields are 0/empty/None when the session has no subagent
-    activity, which is the current steady state for every social-autoposter
-    pipeline (verified 2026-05-10 across 3141 archived sessions: zero
-    isSidechain events, zero Task tool_use calls).
+    Historical note (2026-05-10): the prior parser version looked for
+    tool_use name="Task" and inline isSidechain entries. Both miss the
+    actual SDK layout. The corpus has 2041 Agent invocations (mostly in
+    seo_generate_page sessions) whose cost was previously invisible.
     """
     if not os.path.exists(path):
         return None
@@ -221,17 +312,22 @@ def parse_transcript(path: str):
             ev_uuid = ev.get("uuid")
             parent_uuid = ev.get("parentUuid")
 
-            # Count Task tool_use blocks even in orchestrator turns so we
-            # have an authoritative subagent-invocation count, independent
-            # of whether subagent transcripts came through fully (a
-            # watchdog SIGTERM mid-subagent can leave Task tool_use without
-            # the corresponding sidechain turns).
+            # Count subagent tool_use blocks (both legacy "Task" name and
+            # current "Agent" name) in orchestrator turns. This gives us an
+            # authoritative subagent-invocation count, independent of whether
+            # the sibling subagents/ transcripts came through fully (a
+            # watchdog SIGTERM mid-subagent can leave the tool_use stamped
+            # but the sibling .jsonl never finished). 2026-05-10 the actual
+            # SDK tool name is "Agent"; "Task" kept for forward-compat if
+            # the SDK ever renames it again.
             msg = ev.get("message") or {}
             if not is_sidechain and ev.get("type") == "assistant":
                 content = msg.get("content")
                 if isinstance(content, list):
                     for c in content:
-                        if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Task":
+                        if (isinstance(c, dict)
+                                and c.get("type") == "tool_use"
+                                and c.get("name") in ("Task", "Agent")):
                             task_call_count += 1
 
             if ev.get("type") != "assistant":
@@ -304,9 +400,11 @@ def parse_transcript(path: str):
         )[0] if all_models else "unknown"
 
     # Compact per-subagent breakdown for the subagent_breakdown jsonb column.
-    # Keys are stringified root uuids (or 'unknown'); values carry cost +
-    # turn count + duration + dominant model so dashboards can show "Task #N
-    # cost $X" without rescanning the transcript.
+    # Two sources feed this map:
+    #   1. Inline isSidechain entries (legacy SDK layout, ~0 hits today).
+    #      Keyed by chain-root uuid.
+    #   2. Sibling agent-<id>.jsonl files (current SDK layout, post-2.1.x).
+    #      Keyed by short agent id (e.g. "ab24e352623c7d99b").
     subagent_breakdown = {}
     for root, grp in sidechain_groups.items():
         # Dominant model for this subagent group.
@@ -319,6 +417,7 @@ def parse_transcript(path: str):
         else:
             sg_model = "unknown"
         subagent_breakdown[root] = {
+            "source": "inline_sidechain",
             "cost_usd": round(grp["cost_usd"], 6),
             "turns": grp["turns"],
             "first_ts": grp["first_ts"],
@@ -336,6 +435,39 @@ def parse_transcript(path: str):
             },
         }
     subagent_cost_usd = sum(grp["cost_usd"] for grp in sidechain_groups.values())
+
+    # ------- Scan sibling subagents/ directory for current-SDK transcripts -------
+    sub_dir = _find_subagent_dir(path)
+    if sub_dir:
+        for agent_file in sorted(os.listdir(sub_dir)):
+            if not agent_file.endswith(".jsonl"):
+                continue
+            short_id = agent_file[len("agent-"):-len(".jsonl")] if agent_file.startswith("agent-") else agent_file
+            meta_path = os.path.join(sub_dir, agent_file.replace(".jsonl", ".meta.json"))
+            meta = {}
+            try:
+                if os.path.exists(meta_path):
+                    with open(meta_path) as mf:
+                        meta = json.load(mf)
+            except Exception:
+                meta = {}
+            sub = _parse_subagent_transcript(os.path.join(sub_dir, agent_file), meta)
+            if not sub:
+                continue
+            subagent_breakdown[short_id] = {
+                "source": "sibling_dir",
+                "cost_usd": sub["cost_usd"],
+                "turns": sub["turns"],
+                "first_ts": sub["first_ts"],
+                "last_ts": sub["last_ts"],
+                "model": sub["model"],
+                "agent_type": sub["agent_type"],
+                "description": sub["description"],
+                "by_model": sub["by_model"],
+            }
+            subagent_cost_usd += sub["cost_usd"]
+    # Total distinct subagents (inline + sibling-dir) for the count column.
+    subagent_count = len(subagent_breakdown)
 
     return {
         "by_model": by_model,
