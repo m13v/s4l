@@ -7040,13 +7040,18 @@ function renderResult(run) {
         pill(bestLabel, '', bestColor) +
         '</span>';
     };
-    // ---- queue pill (added 2026-05-06) -----------------------------------
-    // Mirrors Twitter's queue rendering: shows end-of-run depth with a
-    // (+added/-drained) suffix so the operator sees how this cycle moved
-    // the queue. Falls back to the live pending count when queue_end isn't
-    // populated (pre-migration runs). Pill is omitted entirely when nothing
-    // is in the queue and nothing moved this run, so older "no queue"
-    // Reddit rows stay visually clean.
+    // ---- salvaged pill (2026-05-10) --------------------------------------
+    // Replaces the prior queue/pending pill. Shows the salvageable pool: live
+    // count of pending rows that match Phase 0 salvage criteria, plus per-run
+    // delta. The salvageable pool is what actually carries over for retry
+    // next cycle (pending rows that lack a draft OR have aged out of backoff
+    // just sit in the table until they expire at 24h, so they're not useful
+    // to surface).
+    const salvageableLive = r.salvageable_now || 0;
+    const salvAdded = r.salvageable_added || 0;
+    const salvDrained = r.salvageable_drained || 0;
+    // Legacy queue fields kept for the tooltip so operator can still see the
+    // raw queue depth + drain breakdown if curious.
     const queue = (r.queue_end != null) ? r.queue_end : (r.pending_queue || 0);
     const queueStartV = r.queue_start || 0;
     const pendingLive = r.pending_queue || 0;
@@ -7057,21 +7062,23 @@ function renderResult(run) {
     const qDrainedExpired = r.queue_drained_expired || 0;
     const qDrainedSkipped = r.queue_drained_skipped || 0;
     const renderQueuePill = () => {
-      if (!queue && !qAdded && !qDrained && !pendingLive) return '';
-      const queueDeltaSuffix = (qAdded || qDrained)
+      if (!salvageableLive && !salvAdded && !salvDrained) return '';
+      const salvDeltaSuffix = (salvAdded || salvDrained)
         ? ' <span style="color:var(--muted);font-weight:400;">(' +
-            '+' + qAdded + '/-' + qDrained +
+            '+' + salvAdded + '/-' + salvDrained +
             ')</span>'
         : '';
-      const qTip = 'pending end-of-run: ' + queue +
-        ' (start: ' + queueStartV + ', +' + qAdded + ' added, -' + qDrained +
-        ' drained = ' + qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
+      const qTip = 'salvageable now (pending with draft, eligible for next-cycle salvage): ' + salvageableLive +
+        ' (+' + salvAdded + ' became salvageable this run / -' + salvDrained + ' drained out this run)' +
+        ' / pending pool end-of-run: ' + queue + ' (start: ' + queueStartV +
+        ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
+        qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
         qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
         ' / pending right now (live): ' + pendingLive;
       return '<span title="' + qTip.replace(/"/g, '&quot;') + '" ' +
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        'pending <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
-        queueDeltaSuffix + '</span>';
+        'salvaged <span style="color:var(--text);font-weight:600;">' + salvageableLive + '</span>' +
+        salvDeltaSuffix + '</span>';
     };
 
     const tooltip = 'iterations: ' + iterations +
@@ -7084,7 +7091,7 @@ function renderResult(run) {
       (ripenIters ? ' / ripen survivors: ' + ripenSurvivors + '/' + ripenInput +
         (bestComp != null ? ' (best composite ' + bestComp.toFixed(1) + ')' : '') : '') +
       ' / posted: ' + posted +
-      (queue || pendingLive ? ' / pending in DB: ' + queue : '');
+      (salvageableLive ? ' / salvageable in DB: ' + salvageableLive : '');
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('iterations', iterations, iterations > 0 ? 'var(--text)' : 'var(--muted)') +
