@@ -1226,16 +1226,42 @@ fi
 # Acquire platform-browser lock(s) now, immediately before the Claude/MCP
 # step. Alphabetical order in the multi-platform branch prevents deadlock
 # with other pipelines that also acquire multiple browser locks.
+#
+# Reddit lock strategy (changed 2026-05-10): instead of holding the bash
+# `reddit-browser` lock for the full 5400s Claude turn (which blocks every
+# other reddit pipeline even while Claude is just thinking), we acquire the
+# Python lease lock with a 90s TTL. The reddit-agent MCP proxy
+# (scripts/mcp_lock_proxy.py) heartbeats the lease on every browser call, so
+# the lock stays held during actual MCP activity but auto-decays within 90s
+# of idleness. Peer pipelines (run-reddit-search post phase, engage-reddit,
+# link-edit-reddit) can steal the lock during long Claude reasoning gaps.
+#
+# Pre-flight: brief bash-lock acquire+release just to run ensure_browser_healthy
+# under mutex (mirrors link-edit-reddit.sh:174-176). LinkedIn/Twitter still use
+# the long bash lock because they don't have the per-MCP-call heartbeat proxy
+# wired through their MCP configs yet.
 log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
     linkedin) acquire_lock "linkedin-browser" 3600; ensure_browser_healthy "linkedin" ;;
-    reddit)   acquire_lock "reddit-browser" 3600; ensure_browser_healthy "reddit" ;;
+    reddit)
+        acquire_lock "reddit-browser" 60
+        ensure_browser_healthy "reddit"
+        release_lock "reddit-browser"
+        log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+            log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+        ;;
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_browser_healthy "twitter" ;;
     all)
         acquire_lock "linkedin-browser" 3600
         ensure_browser_healthy "linkedin"
-        acquire_lock "reddit-browser" 3600
+        # reddit: same lease-lock pattern as the reddit-only branch above
+        acquire_lock "reddit-browser" 60
         ensure_browser_healthy "reddit"
+        release_lock "reddit-browser"
+        log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+            log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
         acquire_lock "twitter-browser" 3600
         ensure_browser_healthy "twitter"
         ;;
@@ -1404,6 +1430,15 @@ fi
 
 gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-dm-replies" --strict-mcp-config --mcp-config "$DM_MCP_CONFIG" -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: DM reply claude exited with code $?"
 rm -f "$PHASE_A_PROMPT"
+
+# Belt-and-suspenders: free the reddit-browser lease if it's still held.
+# Idempotent — release prints OK / NOT_HELD / HELD_BY_OTHER. Mirrors
+# link-edit-reddit.sh:185. Only fires when reddit was in scope this run.
+case "${PLATFORM:-all}" in
+    reddit|all)
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+        ;;
+esac
 
 # ═══════════════════════════════════════════════════════
 # Cleanup
