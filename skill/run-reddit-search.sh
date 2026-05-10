@@ -155,7 +155,16 @@ _sa_emit_run_summary_oneshot() {
     [ -n "${FAILURE_REASONS:-}" ] && args+=(--failure-reasons "$FAILURE_REASONS")
     python3 "$REPO_DIR/scripts/log_run.py" "${args[@]}" 2>/dev/null || true
 }
-trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
+_sa_release_lease_oneshot() {
+    # Belt-and-suspenders for SIGTERM/crash paths: free the reddit-browser
+    # lease in case post_reddit.py died mid-post and didn't get to the explicit
+    # release. Idempotent (NOT_HELD is fine). Safe to call even if we never
+    # acquired the lease this run. Bounded 3s so a hung helper can't stall the
+    # trap. Without this, a SIGTERM mid-post would leave the lease alive for
+    # ~90s before peers could steal it; with this, peers proceed within seconds.
+    timeout 3 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
+}
+trap '_sa_emit_run_summary_oneshot; _sa_release_lease_oneshot; _sa_release_locks' EXIT INT TERM HUP
 
 # Cycle-level batch_id, mirrors the Twitter cycle's twcycle-* convention.
 # Used by --phase phase0 / --phase salvage / --phase discover to attribute
@@ -260,11 +269,22 @@ if [ "$HAS_SALVAGE" = "1" ]; then
     esac
 fi
 
-# --- Salvage post (acquire lock briefly, post, release before ripen sleep) ---
+# --- Salvage post (acquire lease briefly, post, release before ripen sleep) ---
+# Lock strategy (changed 2026-05-10): switched from 3600s bash lock to 90s
+# Python lease lock + belt-and-suspenders release. reddit_browser.py heartbeats
+# expires_at on every CDP subprocess via _heartbeat_bash_lease(), so the lease
+# stays alive during real posting work and auto-decays within 90s of idleness
+# (e.g. 3-min between-post sleeps inside post_reddit.py). Peer pipelines can
+# steal the lease during sleep; post_reddit.post_via_cdp() retries 5x on the
+# python-level lock collision (the actual mutual-exclusion gate).
 if [ "$HAS_SALVAGE" = "1" ]; then
-    log "Salvage lane: acquiring reddit-browser lock for post..."
-    acquire_lock "reddit-browser" 3600
+    log "Salvage lane: pre-flight ensure_browser_healthy under brief mutex..."
+    acquire_lock "reddit-browser" 60
     ensure_browser_healthy "reddit"
+    release_lock "reddit-browser"
+    log "Salvage lane: acquiring reddit-browser lease (TTL 90s, heartbeated by reddit_browser.py CDP work)..."
+    python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+        log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
 
     # set +e covers the entire post + cleanup block. Discover lane MUST run
     # every cycle (per design comment at line 263), so any failure in salvage
@@ -276,7 +296,11 @@ if [ "$HAS_SALVAGE" = "1" ]; then
     SALVAGE_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$SALVAGE_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
     SALVAGE_POST_RC=${PIPESTATUS[0]}
 
-    release_lock "reddit-browser"
+    # Belt-and-suspenders: release the lease. Idempotent — release prints
+    # OK / NOT_HELD / HELD_BY_OTHER. If post_reddit.py crashed mid-cycle the
+    # lease auto-decays within 90s anyway, but explicit release frees peers
+    # immediately during the 30-min ripen sleep that follows.
+    python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
     # Parse + accumulate in parent shell. $() spawns a subshell, so we must
     # do the TOTAL_* increments AFTER capturing the helper's stdout.
@@ -387,11 +411,17 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     esac
 fi
 
-# --- Discover post (acquire lock briefly, post, release) ---
+# --- Discover post (acquire lease briefly, post, release) ---
+# Same lease-lock pattern as the salvage block above (see comment at line 264
+# for design rationale).
 if [ "$HAS_DISCOVER" = "1" ]; then
-    log "Discover lane: acquiring reddit-browser lock for post..."
-    acquire_lock "reddit-browser" 3600
+    log "Discover lane: pre-flight ensure_browser_healthy under brief mutex..."
+    acquire_lock "reddit-browser" 60
     ensure_browser_healthy "reddit"
+    release_lock "reddit-browser"
+    log "Discover lane: acquiring reddit-browser lease (TTL 90s, heartbeated by reddit_browser.py CDP work)..."
+    python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
+        log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
 
     # set +e covers the entire post + cleanup block. The script must reach
     # the trap-installed cost emitter at the bottom even if discover cleanup
@@ -400,7 +430,8 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     DISCOVER_POST_OUT=$(python3 "$REPO_DIR/scripts/post_reddit.py" --phase post --in "$DISCOVER_DRAFT_FILE" 2>&1 | tee -a "$LOG_FILE")
     DISCOVER_POST_RC=${PIPESTATUS[0]}
 
-    release_lock "reddit-browser"
+    # Belt-and-suspenders: release the lease (idempotent).
+    python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
     read -r DISCOVER_POSTED DISCOVER_FAILED <<< "$(_parse_post_results "$DISCOVER_POST_OUT" "$DISCOVER_POST_RC")"
     TOTAL_POSTED=$((TOTAL_POSTED + ${DISCOVER_POSTED:-0}))
