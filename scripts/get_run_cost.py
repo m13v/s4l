@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Query claude_sessions to get total cost for sessions started after a given Unix timestamp.
+"""Query claude_sessions to get total cost for a pipeline cycle.
 
-Usage:
-    python3 scripts/get_run_cost.py --since <unix_ts> --scripts tag1 tag2 ...
+Two modes:
 
-Prints the total cost as a float (4 decimal places), or 0.0000 on any error.
+1) Cycle mode (preferred): `--cycle-id rdcycle-...`
+   Sums total_cost_usd for every row stamped with this cycle_id. Accurate
+   even when multiple cycles of the same script overlap in wall-clock time
+   (run-reddit-search.sh, run-twitter-cycle.sh double-fork their work so
+   stacked cycles are normal).
+
+2) Legacy time-window mode: `--since <unix_ts> --scripts tag1 tag2 ...`
+   Filters by script + started_at. Kept for backward compatibility with
+   callers that don't pass cycle_id (older pipelines, historical reports).
+   IMPORTANT: this mode over-counts when multiple cycles of the same script
+   overlap, because it has no way to distinguish them. Migrate callers to
+   --cycle-id when possible.
+
+Either mode is acceptable; --cycle-id wins if both are passed. Prints the
+total cost as a float (4 decimal places), or 0.0000 on any error.
 Designed to be called from shell script EXIT traps to get real cost per run.
 """
 import argparse
@@ -29,28 +42,49 @@ def _load_env():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--since', type=int, required=True,
-                   help='Unix timestamp of run start')
-    p.add_argument('--scripts', nargs='+', required=True,
-                   help='claude_sessions.script values to sum')
+    p.add_argument('--cycle-id', default=None,
+                   help='Pipeline cycle batch id (e.g. rdcycle-20260510-110005). '
+                        'Sums cost across every claude_sessions row stamped with '
+                        'this id. Wins over --since/--scripts when both passed.')
+    p.add_argument('--since', type=int, default=None,
+                   help='Unix timestamp of run start (legacy mode; use cycle-id '
+                        'instead when possible).')
+    p.add_argument('--scripts', nargs='*', default=None,
+                   help='claude_sessions.script values to sum (legacy mode).')
     args = p.parse_args()
 
-    since_ts = datetime.fromtimestamp(args.since, tz=timezone.utc).isoformat()
     _load_env()
 
+    # Resolve which mode we're running in. Cycle id is authoritative if
+    # given (and non-empty). Otherwise require the legacy pair.
+    cycle_id = args.cycle_id.strip() if args.cycle_id else None
+    if not cycle_id and (args.since is None or not args.scripts):
+        # Bash EXIT traps shell out blind; keep the contract simple: any
+        # missing-arg condition prints 0.0000 and exits 0 so the caller
+        # never crashes its log_run.py emit on a malformed cost call.
+        print("0.0000")
+        return
+
     try:
-        import psycopg2
-        conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        cur = conn.cursor()
-        placeholders = ','.join(['%s'] * len(args.scripts))
-        cur.execute(
-            f"SELECT COALESCE(SUM(total_cost_usd), 0) FROM claude_sessions "
-            f"WHERE script IN ({placeholders}) AND started_at >= %s",
-            args.scripts + [since_ts],
-        )
+        import psycopg2  # noqa: F401  (psycopg2 only needed via dbmod transitively)
+        sys.path.insert(0, os.path.join(ROOT_DIR, 'scripts'))
+        import db as dbmod
+        conn = dbmod.get_conn()
+        if cycle_id:
+            cur = conn.execute(
+                "SELECT COALESCE(SUM(total_cost_usd), 0) FROM claude_sessions "
+                "WHERE cycle_id = %s",
+                [cycle_id],
+            )
+        else:
+            since_ts = datetime.fromtimestamp(args.since, tz=timezone.utc).isoformat()
+            placeholders = ','.join(['%s'] * len(args.scripts))
+            cur = conn.execute(
+                f"SELECT COALESCE(SUM(total_cost_usd), 0) FROM claude_sessions "
+                f"WHERE script IN ({placeholders}) AND started_at >= %s",
+                args.scripts + [since_ts],
+            )
         cost = float(cur.fetchone()[0] or 0)
-        cur.close()
-        conn.close()
         print(f"{cost:.4f}")
     except Exception:
         print("0.0000")
