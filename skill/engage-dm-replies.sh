@@ -955,9 +955,22 @@ Reddit dms split into two surfaces — pick by whether \`chat_url\` is set on th
 cd ~/social-autoposter && python3 scripts/reddit_browser.py send-dm "CHAT_URL" "YOUR_REPLY_TEXT" DM_ID
 \`\`\`
 Pass the conversation's DM_ID as the third positional arg so the tool can self-log the outbound (some rows have empty chat_url which would otherwise miss). The tool may append a campaign suffix to the message before typing; trust its return — \`message_sent\` is what was actually delivered.
-If the CDP script returns {ok:false} (Reddit Chat SPA may not render via CDP), fall back to using mcp__reddit-agent__* browser tools:
+If the CDP script returns {ok:false} (Reddit Chat SPA may not render via CDP), fall back to using mcp__reddit-agent__* browser tools. **The CDP path wraps URLs into /r/<code> automatically; the MCP fallback bypasses that wrap, so any project URL in the reply must be wrapped here explicitly or click attribution is lost. A 7d audit found 41 real-DM messages mentioning project URLs and ZERO of them produced a minted short link, almost entirely traceable to this fallback gap.** **STDERR_FALLBACK_MARKER (REQUIRED FIRST STEP):** before doing anything else on the MCP fallback path, emit a single line to stderr exactly: \`[reddit-chat-mcp-fallback] dm_id=DM_ID reason="<short>"\`. This is the only stable trace we have for fallback frequency; cron logs are grepped for this marker.
+
+0. **Pre-send URL wrap (REQUIRED if YOUR_REPLY_TEXT contains any URL, bare-domain shorthands like fazm.ai included).** Run the same wrap CLI the LinkedIn flow uses:
+   \`\`\`bash
+   WRAPPED_TEXT=\$(python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT" 2>/tmp/dm_wrap_err)
+   if [ \$? -ne 0 ]; then
+     cat /tmp/dm_wrap_err >&2
+     # Common failure: target_project_required. Append the project to the union and retry:
+     #   python3 scripts/dm_conversation.py set-target-project --dm-id DM_ID --append --project "X"
+     # Then re-run the wrap-text command above.
+     exit 1
+   fi
+   \`\`\`
+   Use \$WRAPPED_TEXT (NOT YOUR_REPLY_TEXT) as the input to browser_type AND as the \`--content\` for the post-send log-outbound. If YOUR_REPLY_TEXT has no URLs, wrap-text returns it unchanged; running it is still cheap and harmless, so always run it.
 1. Navigate to the chat room (use chat_url if available, or find via sidebar)
-2. Type the reply in the message input
+2. Type \$WRAPPED_TEXT in the message input
 3. Press Enter to send
 4. **Campaign suffix on the MCP fallback:** if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is non-empty (the shell precomputes it from the active reddit campaign), flip a coin AT $REDDIT_CAMPAIGN_SAMPLE_RATE and, on heads, type the suffix verbatim at the end of the message before pressing Enter. The CDP path does this automatically; the MCP fallback must do it by hand or the campaign attribution is lost.
 
@@ -967,7 +980,7 @@ cd ~/social-autoposter && python3 scripts/reddit_browser.py reply "COMMENT_PERMA
 \`\`\`
 Pass DM_ID as the third positional arg so the tool logs to dm_messages with auto-attribution. The tool injects the active campaign suffix at \`sample_rate\`; \`reply_text\` in the JSON return is what was actually posted. \`COMMENT_PERMALINK\` is the inbound comment URL on reddit.com (the tool normalizes to old.reddit.com internally).
 If CDP returns {ok:false, error:"subreddit_blocked"}, the comment is in a sub on \`subreddit_bans.comment_blocked\` and the tool has already auto-closed the DM (when dm_id was passed). Treat this as a clean SKIP — do NOT fall back to MCP, do NOT flag-human, do NOT retry. Move on to the next conversation.
-If CDP returns {ok:false} with any other non-recoverable error, fall back to mcp__reddit-agent__* browser to type the reply on the post page. On the MCP fallback path, the same Step-4 suffix rule applies — if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is set, append it verbatim at $REDDIT_CAMPAIGN_SAMPLE_RATE before submitting; if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is empty, do nothing extra.
+If CDP returns {ok:false} with any other non-recoverable error, fall back to mcp__reddit-agent__* browser to type the reply on the post page. On the MCP fallback path, the same Step-4 suffix rule applies — if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is set, append it verbatim at $REDDIT_CAMPAIGN_SAMPLE_RATE before submitting; if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is empty, do nothing extra. **Also: emit \`[reddit-comment-mcp-fallback] dm_id=DM_ID reason="<short>"\` to stderr first, then run the same Pre-send URL wrap step (\`python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT"\`) and use \$WRAPPED_TEXT as the input to browser_type. The wrap is cheap and harmless on URL-free replies; required when any URL is present so click attribution survives.**
 
 **LinkedIn Messages** (mcp__linkedin-agent__* tools ONLY, no Python CDP, no /voyager/api/):
 
