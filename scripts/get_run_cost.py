@@ -51,6 +51,10 @@ def main():
                         'instead when possible).')
     p.add_argument('--scripts', nargs='*', default=None,
                    help='claude_sessions.script values to sum (legacy mode).')
+    p.add_argument('--breakdown', action='store_true',
+                   help='Print "parent_cost subagent_cost task_count subagent_count" '
+                        'instead of just the parent total. Useful when investigating '
+                        'whether Task() subagents are inflating cost.')
     args = p.parse_args()
 
     _load_env()
@@ -72,20 +76,35 @@ def main():
         conn = dbmod.get_conn()
         if cycle_id:
             cur = conn.execute(
-                "SELECT COALESCE(SUM(total_cost_usd), 0) FROM claude_sessions "
-                "WHERE cycle_id = %s",
+                """SELECT COALESCE(SUM(total_cost_usd), 0),
+                          COALESCE(SUM(subagent_cost_usd), 0),
+                          COALESCE(SUM(task_call_count), 0),
+                          COALESCE(SUM(subagent_count), 0)
+                   FROM claude_sessions
+                   WHERE cycle_id = %s""",
                 [cycle_id],
             )
         else:
             since_ts = datetime.fromtimestamp(args.since, tz=timezone.utc).isoformat()
             placeholders = ','.join(['%s'] * len(args.scripts))
             cur = conn.execute(
-                f"SELECT COALESCE(SUM(total_cost_usd), 0) FROM claude_sessions "
-                f"WHERE script IN ({placeholders}) AND started_at >= %s",
+                f"""SELECT COALESCE(SUM(total_cost_usd), 0),
+                           COALESCE(SUM(subagent_cost_usd), 0),
+                           COALESCE(SUM(task_call_count), 0),
+                           COALESCE(SUM(subagent_count), 0)
+                    FROM claude_sessions
+                    WHERE script IN ({placeholders}) AND started_at >= %s""",
                 args.scripts + [since_ts],
             )
-        cost = float(cur.fetchone()[0] or 0)
-        print(f"{cost:.4f}")
+        row = cur.fetchone()
+        parent_cost = float(row[0] or 0)
+        subagent_cost = float(row[1] or 0)
+        task_count = int(row[2] or 0)
+        subagent_count = int(row[3] or 0)
+        if args.breakdown:
+            print(f"{parent_cost:.4f} {subagent_cost:.4f} {task_count} {subagent_count}")
+        else:
+            print(f"{parent_cost:.4f}")
     except Exception:
         print("0.0000")
 
