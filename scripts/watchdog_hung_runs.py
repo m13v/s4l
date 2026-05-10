@@ -47,17 +47,23 @@ PER_SCRIPT_CAP_SEC = {
     ("link-edit-moltbook.sh", None): 120 * 60,
     ("link-edit-github.sh", None): 120 * 60,
     ("precompute-stats.sh", None): 120 * 60,
-    # 2026-05-10: bumped 60 min → 90 min. The 60-min cap was killing every
-    # cycle with >2 posts mid-post-phase (e.g. 11:00 cycle on 2026-05-10 ran
-    # 63 min, killed at minute 17 of post phase, lost 4 drafts). Real-world
-    # numbers (not the optimistic 2026-05-08 estimate): discover claude 5 min,
-    # ripen sleep 30 min, draft claude 9-10 min on 16 candidates, post phase
-    # 12-15 min for 4 posts × 3-min inter-post sleep, plus phase0/salvage
-    # overhead. Worst-case ≈ 65-70 min. 90 min cap gives headroom for slow
-    # CDP browser launches and Reddit rate-limit retries without prematurely
-    # killing the post phase. Drafts are persisted before the post phase
-    # starts, so a kill loses posting work but not drafting work.
-    ("run-reddit-search.sh", None): 90 * 60,
+    # 2026-05-10: bumped 60 min → 90 min → 120 min for all post-* runners.
+    # Rationale: a single cycle = discover claude (~5 min) + ripen sleep
+    # (30 min hardcoded) + draft claude (~9-10 min) + post phase (~12-15 min
+    # for 4 posts × 3-min inter-post sleep) + phase0/salvage overhead, with
+    # extra headroom for browser-lock contention with peer pipelines, slow
+    # CDP launches, and platform rate-limit retries. 120 min keeps premature
+    # kills from costing us drafted-but-unposted work; the lease-based
+    # reddit-browser lock + draft-aware salvage gate (both shipped 2026-05-10)
+    # mean a kill at the cap loses at most one cycle's posting work, never
+    # the drafts themselves. All post-runners share this cap so behavior is
+    # uniform across platforms.
+    ("run-reddit-search.sh", None): 120 * 60,
+    ("run-reddit-threads.sh", None): 120 * 60,
+    ("run-twitter-cycle.sh", None): 120 * 60,
+    ("run-linkedin.sh", None): 120 * 60,
+    ("run-moltbook.sh", None): 120 * 60,
+    ("run-github.sh", None): 120 * 60,
 }
 WATCHDOG_LOG = REPO / "skill" / "logs" / "watchdog.log"
 RUN_MONITOR_LOG = REPO / "skill" / "logs" / "run_monitor.log"
