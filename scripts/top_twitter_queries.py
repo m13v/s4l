@@ -98,6 +98,13 @@ def main():
     # rows. The HAVING posts > 0 below keeps the result set focused on
     # queries that actually produced replies — queries that never posted
     # are surfaced via the dud-queries feed instead.
+    #
+    # Click attribution (fixed 2026-05-10): real clicks come from the
+    # `post_link_clicks` per-hit log joined via `pl.code = plc.code`,
+    # COUNT WHERE is_bot=false. The legacy `pl.real_clicks` PostHog-backfill
+    # column was reporting 148 vs the actual 1028 (7x undercount) for
+    # twitter and was permanently 0 for reddit. The dashboard reads the
+    # per-hit log; this query now matches.
     sql = f"""
         WITH cand_agg AS (
             SELECT c.search_topic AS query,
@@ -106,23 +113,24 @@ def main():
                    COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
                    COALESCE(SUM(p.views)         FILTER (WHERE c.status='posted'), 0) AS views_total,
                    COALESCE(SUM(p.upvotes)       FILTER (WHERE c.status='posted'), 0) AS likes_total,
-                   COALESCE(SUM(pl.real_clicks)  FILTER (WHERE c.status='posted'), 0) AS clicks_total,
+                   COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
                    -- sample sizes per status group so the model can weight the averages
-                   COUNT(*) FILTER (WHERE c.status='posted')                          AS posted_n,
-                   COUNT(*) FILTER (WHERE c.status IN ('skipped', 'expired'))         AS skipped_n,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted')                          AS posted_n,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped', 'expired'))         AS skipped_n,
                    -- source-thread virality, split by what we did with the candidate.
                    -- Both AVGs are over twitter_candidates.virality_score (set at discovery).
                    AVG(c.virality_score) FILTER (WHERE c.status='posted')             AS avg_virality_posted,
                    AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped', 'expired')) AS avg_virality_skipped
             FROM twitter_candidates c
-            LEFT JOIN posts      p  ON p.id  = c.post_id
-            LEFT JOIN post_links pl ON pl.post_id = c.post_id
+            LEFT JOIN posts      p   ON p.id  = c.post_id
+            LEFT JOIN post_links pl  ON pl.post_id = c.post_id
+            LEFT JOIN post_link_clicks plc ON plc.code = pl.code
             WHERE c.discovered_at > NOW() - (%s || ' days')::interval
               AND c.search_topic IS NOT NULL
               AND c.search_topic <> ''
               {where_proj}
             GROUP BY c.search_topic, c.matched_project
-            HAVING COUNT(*) FILTER (WHERE c.status='posted') > 0
+            HAVING COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') > 0
         ),
         supply_agg AS (
             SELECT query,
