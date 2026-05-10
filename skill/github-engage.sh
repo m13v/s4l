@@ -22,8 +22,14 @@ LOG_FILE="$LOG_DIR/github-engage-$(date +%Y-%m-%d_%H%M%S).log"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# engagement run (via SA_CYCLE_ID env -> log_claude_session.py). 2026-05-10
+# cycle_id rollout.
+BATCH_ID="engh-$(date +%Y%m%d-%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
 RUN_START=$(date +%s)
-log "=== GitHub Engagement Run: $(date) ==="
+log "=== GitHub Engagement Run: $(date) (cycle=$BATCH_ID) ==="
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
