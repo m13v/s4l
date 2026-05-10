@@ -12,11 +12,17 @@ Survivors are written to --out as a new plan JSON consumed by
 `post_reddit.py --phase post`. Dropped decisions are logged to stderr and
 into the output JSON under `ripen_dropped_details`.
 
-Defaults match the design agreed on 2026-05-06:
-    composite = Δup + 4*Δcomments
-    floor = composite >= 1  (any positive momentum passes; +1 upvote in 5min
-            is enough signal that the thread is still alive)
-    sleep = 300s (5 min)
+Defaults match the design agreed on 2026-05-06, with a 2026-05-10 product-intent
+boost added to mirror the Twitter cycle's hybrid sort:
+    raw_composite = Δup + 4*Δcomments
+    intent_boost  = +5 if title/selftext matches a product-discussion regex
+                    (asking for a tool, venting a pain, comparing alternatives,
+                    "anyone know a way to...", etc), else 0
+    composite     = raw_composite + intent_boost
+    floor         = composite >= 1  (any positive momentum OR an on-theme
+                    intent signal passes; +1 upvote OR a clearly stated need
+                    is enough to reach the LLM relevance gate)
+    sleep         = 300s (5 min) by default; run-reddit-search.sh sets 1800s
 
 Failure modes:
     - T0 fetch fails for a URL: drop that decision (fail-closed; we cannot
@@ -28,6 +34,7 @@ Failure modes:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +43,60 @@ REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(REPO_DIR, "scripts")
 
 sys.path.insert(0, SCRIPTS_DIR)
+
+# Mirrors the Twitter cycle's product-discussion intent regex (run-twitter-cycle.sh
+# Phase 2b). When a thread title or selftext contains an explicit "asking for a
+# tool / venting a pain point / comparing alternatives" signal, add a +5 boost
+# to the composite delta before the floor check. This lets quiet on-theme
+# threads ("anyone know a way to track Claude Code usage?" with 1 upvote and 0
+# new comments in 30 min) compete with viral drama on raw growth.
+_INTENT_REGEX = re.compile(
+    r"\b("
+    r"wish|need a|need an|looking for|recommend|alternative to|frustrated|"
+    r"hate (that|when)|should exist|would pay|missing.*(feature|tool|app)|"
+    r"why (is there no|doesn't|don't)|anyone (know|use|tried|using)|"
+    r"how do you|what do you use|best (tool|app|way)|any (good|decent) (tool|app|way)"
+    r")\b",
+    re.IGNORECASE,
+)
+INTENT_BOOST = 5.0
+
+
+def _intent_boost(title, selftext):
+    """Return INTENT_BOOST if title+selftext shows product-discussion intent, else 0.
+
+    Cheap regex match. False positives are acceptable here — the LLM relevance
+    gate downstream (post_reddit.py draft phase, draft_gate_omit) is the real
+    safety net. The boost only changes ranking + lets zero-momentum on-theme
+    threads clear the floor; it does not auto-post anything.
+    """
+    text = ((title or "") + " " + (selftext or "")).strip()
+    if not text:
+        return 0.0
+    return INTENT_BOOST if _INTENT_REGEX.search(text) else 0.0
+
+
+def _fetch_thread_text_map(thread_urls):
+    """Batch-fetch (thread_title, thread_selftext) for a list of URLs.
+
+    Returns {url: (title, selftext)}. Missing rows return ('', '').
+    """
+    if not thread_urls:
+        return {}
+    try:
+        import db as dbmod  # local import to avoid hard dep at module import
+        dbmod.load_env()
+        conn = dbmod.get_conn()
+        rows = conn.execute(
+            "SELECT thread_url, COALESCE(thread_title, ''), COALESCE(thread_selftext, '') "
+            "FROM reddit_candidates WHERE thread_url = ANY(%s)",
+            [list(thread_urls)],
+        ).fetchall()
+        conn.close()
+        return {r[0]: (r[1], r[2]) for r in rows}
+    except Exception as e:
+        print(f"[ripen] _fetch_thread_text_map: {e}", file=sys.stderr)
+        return {}
 
 
 def _db_update_ripen_metrics(thread_url, t0_score, t0_comments,
@@ -289,6 +350,15 @@ def main():
     print(f"[ripen] T1: re-fetching {len(t0_ok)} thread(s)...", file=sys.stderr)
     t1 = repoll(list(t0_ok.keys()))
 
+    # ---- Batch-fetch title+selftext for product-intent boost ----------------
+    # Mirrors the Twitter cycle's hybrid sort: a thread asking for a tool /
+    # venting a pain point gets +5 added to composite, so quiet on-theme rows
+    # clear the floor and rank above pure noise of equivalent raw growth.
+    intent_text_map = _fetch_thread_text_map(
+        [(d.get("thread_url") or d.get("target_thread_url") or "").strip()
+         for d in decisions]
+    )
+
     # ---- Filter -------------------------------------------------------------
     survivors = []
     drops = []
@@ -307,9 +377,13 @@ def main():
             continue
         d_up = int(t1r["score"]) - int(t0r["score"])
         d_co = int(t1r["comments"]) - int(t0r["comments"])
-        composite = d_up + args.w_comments * d_co
+        raw_composite = d_up + args.w_comments * d_co
+        title, selftext = intent_text_map.get(url, ("", ""))
+        intent = _intent_boost(title, selftext)
+        composite = raw_composite + intent
         # Annotate decision with measurement (always, even if dropped — useful
-        # for downstream analysis/debug)
+        # for downstream analysis/debug). Both raw and boosted composites are
+        # surfaced so post-hoc analysis can separate growth signal from intent.
         d["ripen"] = {
             "t0_score": t0r["score"],
             "t0_comments": t0r["comments"],
@@ -317,6 +391,8 @@ def main():
             "t1_comments": t1r["comments"],
             "delta_up": d_up,
             "delta_comments": d_co,
+            "raw_composite": raw_composite,
+            "intent_boost": intent,
             "composite": composite,
             "window_sec": args.sleep if not args.no_sleep else 0,
             "floor": args.floor,
