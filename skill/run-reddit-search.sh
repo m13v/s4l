@@ -131,9 +131,17 @@ _sa_emit_run_summary_oneshot() {
     if [ -n "${_SA_PRECOMPUTED_COST:-}" ]; then
         cost="$_SA_PRECOMPUTED_COST"
     else
-        cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
-                    --since "${RUN_START:-0}" \
-                    --scripts "post_reddit" 2>/dev/null || echo "0.0000")
+        # Prefer cycle_id when BATCH_ID is set (after Phase 0). Falls back to
+        # the legacy since+scripts query if the trap fires before BATCH_ID was
+        # initialised (very early SIGTERM, e.g. from a stale .env source).
+        if [ -n "${BATCH_ID:-}" ]; then
+            cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                        --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
+        else
+            cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
+                        --since "${RUN_START:-0}" \
+                        --scripts "post_reddit" 2>/dev/null || echo "0.0000")
+        fi
     fi
     local args
     args=(--script "post_reddit" \
@@ -154,6 +162,17 @@ trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
 # rows in reddit_candidates and to drive the persistent retry queue.
 BATCH_ID="rdcycle-$(date +%Y%m%d-%H%M%S)"
 log "Cycle batch_id=$BATCH_ID"
+
+# Export the same id as SA_CYCLE_ID so every Claude session spawned downstream
+# (post_reddit.py → run_claude(), run_claude.sh → claude -p, log_claude_session.py)
+# stamps claude_sessions.cycle_id with this cycle. Without this, concurrent
+# overlapping cycles (double-fork wrapper added 2026-04-30 lets cycles stack)
+# all share the same script tag 'post_reddit' and get_run_cost.py was summing
+# costs across every cycle in the time window, producing absurd $150+ per-cycle
+# reports (observed 2026-05-10: 11:00 cycle reported $166 when its own work
+# was ~$32; the rest belonged to the 11:15/11:30/11:45 cycles that started
+# during the same window). cycle_id makes per-cycle cost attribution accurate.
+export SA_CYCLE_ID="$BATCH_ID"
 
 # --- Phase 0: hard-expire stale pending rows + salvage truly-orphaned rows ---
 # Pending rows from prior cycles fall into two buckets:
@@ -399,7 +418,7 @@ ELAPSED=$(( $(date +%s) - RUN_START ))
 # script value here is the same tag passed to log_claude_session.py inside
 # scripts/post_reddit.py (~line 1141). Falls back to 0.0000 if the DB is
 # unreachable so the dashboard never shows blank.
-_COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "post_reddit" 2>/dev/null || echo "0.0000")
+_COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
 log "=== Run summary: posted=$TOTAL_POSTED failed=$TOTAL_FAILED skipped=$TOTAL_SKIPPED salvaged=$TOTAL_SALVAGED candidates=$TOTAL_CANDIDATES projects=[$EXCLUDE] cost=\$$_COST elapsed=${ELAPSED}s ==="
 
 # Hand the precomputed cost to the trap-installed emitter so the happy path
