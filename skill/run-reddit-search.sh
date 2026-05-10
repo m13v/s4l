@@ -7,7 +7,7 @@
 #     Phase 0 → Salvage pull → Salvage draft → Salvage post
 #
 #   DISCOVER LANE (fresh threads, full ripen gate):
-#     Discover → Ripen (10-min sleep, top-k=LIMIT) → Discover draft → Discover post
+#     Discover → Ripen (30-min delta gate, floor>=1) → Discover draft → Discover post
 #
 # Both lanes run every cycle. Salvage rows skip ripen because they were
 # already ripened in a prior cycle (either CDP-failed mid-post or already
@@ -351,10 +351,10 @@ case "$DISCOVER_RC" in
     *) log "Discover lane: unexpected rc=$DISCOVER_RC; counting as failed."; TOTAL_FAILED=$((TOTAL_FAILED + 1)) ;;
 esac
 
-# --- Ripen discover (10-min sleep, top-k=LIMIT survivors) ---
+# --- Ripen discover (30-min delta gate, all floor-passers flow to draft) ---
 if [ "$HAS_DISCOVER" = "1" ]; then
-    # Floor>=1 (a +1 upvote in 10min is enough signal the thread is alive).
-    # composite = Δup + 4*Δcomments. top-k LIMIT keeps draft cost bounded.
+    # Floor>=1 (a +1 upvote in 30min is enough signal the thread is alive).
+    # composite = Δup + 4*Δcomments.
     # 2026-05-08: bumped 600s → 1800s (30 min). 10 min wasn't enough time for
     # mature long-tail threads to show fresh momentum, killing all 162 ripen
     # candidates in cycle 17:45 (Δup=0/Δcomm=0 across the board). 30 min gives
@@ -362,21 +362,16 @@ if [ "$HAS_DISCOVER" = "1" ]; then
     # still correctly drop. Trade-off: cycles overlap more (launchd fires every
     # 15 min); watchdog_hung_runs.py cap for run-reddit-search.sh is 60 min so
     # this stays well under the kill threshold.
+    # 2026-05-10: top-k cap removed entirely (was disabled with --top-k 0
+    # since 2026-05-08). All floor-passers flow into draft; _post_iteration
+    # enforces the final cap (SAPS_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
     RIPEN_SLEEP=1800
-    log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, top-k=$LIMIT, w_comments=4)..."
+    log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, w_comments=4)..."
     set +e
-    # 2026-05-08: top-k cap REMOVED. Previously we trimmed ripen survivors to
-    # LIMIT=10 BEFORE the LLM relevance gate, which threw away potentially-
-    # good fits below the engagement-velocity cutoff. Now ALL floor-passers
-    # flow into the draft phase; the softened gate decides relevance, and
-    # _post_iteration enforces the final post cap (SAPS_REDDIT_MAX_POSTS_PER_CYCLE,
-    # default 10) by sorting decisions by ripen composite DESC and taking
-    # the top N. --top-k 0 = unlimited.
     python3 "$REPO_DIR/scripts/ripen_reddit_plan.py" \
         --in "$DISCOVER_FILE" \
         --out "$RIPEN_FILE" \
-        --sleep "$RIPEN_SLEEP" \
-        --top-k 0 2>&1 | tee -a "$LOG_FILE"
+        --sleep "$RIPEN_SLEEP" 2>&1 | tee -a "$LOG_FILE"
     RIPEN_RC=${PIPESTATUS[0]}
     set -e
 
