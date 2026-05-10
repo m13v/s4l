@@ -233,15 +233,15 @@ export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 # Peer pipelines (run-reddit-search post phase, engage-reddit, dm-replies-reddit,
 # link-edit-reddit) can use the profile during our long Claude thinking phases.
 #
-# Pre-flight: brief bash-lock acquire+release just to run ensure_browser_healthy
-# under mutex (matches link-edit-reddit.sh:174-176 and engage-dm-replies.sh).
-log "Pre-flight: ensure_browser_healthy under brief mutex..."
-acquire_lock "reddit-browser" 60
-ensure_browser_healthy "reddit"
-release_lock "reddit-browser"
+# Unified lock (2026-05-10): only the Python lease. The bash pre-flight was
+# removed because lock.sh did not honor expires_at and would block on
+# TTL-stale-but-PID-alive holders. Python acquire performs the orphan-Chrome
+# sweep internally (ported from lock.sh:175-198); ensure_browser_healthy then
+# runs under the exclusive Python lease that follows.
 log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+ensure_browser_healthy "reddit"
 
 # NOTE 2026-05-07: removed broken pre-flight Chrome health check (commit
 # 971844d, 2026-05-04). Intent was to short-circuit before Claude drafted for
