@@ -13,6 +13,12 @@ LOG_DIR="$HOME/social-autoposter/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/engage-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 
+# Per-cycle batch id stamped onto every claude_sessions row spawned by this
+# engagement run (via SA_CYCLE_ID env -> log_claude_session.py). 2026-05-10
+# cycle_id rollout.
+BATCH_ID="entw-$(date +%Y%m%d-%H%M%S)-$$"
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "twitter-browser" 3600
