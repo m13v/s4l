@@ -38,6 +38,10 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 RUN_START_EPOCH=$(date +%s)
 BATCH_ID="li-$(date +%Y%m%d_%H%M%S)-$$"
+# Export as SA_CYCLE_ID so log_claude_session.py stamps cycle_id on every
+# claude_sessions row spawned by this cycle. Enables per-cycle cost queries
+# via get_run_cost.py --cycle-id. 2026-05-10 cycle_id rollout.
+export SA_CYCLE_ID="$BATCH_ID"
 
 echo "=== LinkedIn Post Run: $(date) (batch=$BATCH_ID) ===" | tee "$LOG_FILE"
 
