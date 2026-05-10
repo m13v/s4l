@@ -441,7 +441,9 @@ You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.l
 Projects:
 $PROJECTS_JSON
 
-Past top-performing queries (composite-scored: clicks×100 + likes + views×0.001). Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so you can diagnose query failure modes:
+Past top-performing queries (sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Any query with \`clicks_total > 0\` is GOLD TIER — clicks are the only metric that proves our reply drove someone to actually visit the project's link. Likes and views are vanity. If a project in your draft set has a gold-tier query in this list, mimic ITS structure (operators, min_faves tier, keyword density, length) FIRST before falling back to other styles. Optimize the entire pipeline for clicks; everything else is leading indicators.
+
+Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so you can diagnose query failure modes:
 
   Funnel signals (downstream — only meaningful for posted candidates):
   - \`tweets_found_avg\`: X's supply for that query (how many tweets it returned per search attempt)
