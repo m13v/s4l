@@ -1244,24 +1244,23 @@ log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
     linkedin) acquire_lock "linkedin-browser" 3600; ensure_browser_healthy "linkedin" ;;
     reddit)
-        acquire_lock "reddit-browser" 60
-        ensure_browser_healthy "reddit"
-        release_lock "reddit-browser"
+        # Unified reddit lock (2026-05-10): only the Python lease. Python
+        # acquire performs the orphan-Chrome sweep internally; ensure_browser_healthy
+        # runs under the exclusive lease that follows.
         log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+        ensure_browser_healthy "reddit"
         ;;
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_browser_healthy "twitter" ;;
     all)
         acquire_lock "linkedin-browser" 3600
         ensure_browser_healthy "linkedin"
-        # reddit: same lease-lock pattern as the reddit-only branch above
-        acquire_lock "reddit-browser" 60
-        ensure_browser_healthy "reddit"
-        release_lock "reddit-browser"
+        # reddit: unified lease (2026-05-10), Python lock only.
         log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
+        ensure_browser_healthy "reddit"
         acquire_lock "twitter-browser" 3600
         ensure_browser_healthy "twitter"
         ;;
