@@ -1091,7 +1091,9 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // (discovered before our `since` cutoff but still in queue), which would
   // otherwise undercount the per-run queue snapshot at older runs.
   const candidateRows = await pq(
-    "SELECT discovered_at, posted_at, t1_checked_at, status, batch_id FROM twitter_candidates " +
+    "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
+    "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id " +
+    "FROM twitter_candidates " +
     "WHERE discovered_at >= $1::timestamp OR posted_at >= $1::timestamp OR t1_checked_at >= $1::timestamp OR status='pending'",
     [since]
   ) || [];
@@ -1099,6 +1101,13 @@ async function enrichPostCommentsTwitterRuns(runs) {
     "SELECT COUNT(*)::int AS n FROM twitter_candidates WHERE status='pending'"
   );
   const pendingNow = (pendingRow && pendingRow[0]) ? pendingRow[0].n : 0;
+  // Live salvageable count: pending rows with a persisted draft (orphaned
+  // drafts from prior cycles that Phase 0 salvage will retry on next run).
+  const salvageableRow = await pq(
+    "SELECT COUNT(*)::int AS n FROM twitter_candidates " +
+    "WHERE status='pending' AND draft_reply_text IS NOT NULL"
+  );
+  const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
 
   const toMs = (d) => {
     if (!d) return null;
@@ -1116,6 +1125,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   const candNorm = candidateRows.map(r => {
     const postedMs = toMs(r.posted_at);
     const t1Ms = toMs(r.t1_checked_at);
+    const draftedMs = toMs(r.drafted_at);
     let exitMs = null;
     if (r.status === 'posted') exitMs = postedMs;
     else if (r.status === 'expired' || r.status === 'skipped') exitMs = t1Ms;
@@ -1123,6 +1133,8 @@ async function enrichPostCommentsTwitterRuns(runs) {
       discoveredMs: toMs(r.discovered_at),
       postedMs,
       t1CheckedMs: t1Ms,
+      draftedMs,
+      hasDraft: !!r.has_draft,
       exitMs,
       status: r.status,
       batch_id: r.batch_id || '',
@@ -1156,6 +1168,11 @@ async function enrichPostCommentsTwitterRuns(runs) {
     // decision). Counted across ALL batches, not just this run's, because
     // Phase 2b drains rows queued by earlier cycles too.
     let queueAdded = 0, queueDrainedPosted = 0, queueDrainedExpired = 0, queueDrainedSkipped = 0;
+    // Salvageable pool deltas (Twitter equivalent of Reddit's). Salvageable =
+    // pending rows with a persisted draft. ADDED = rows whose drafted_at fell
+    // in this run window (became salvageable). DRAINED = drafts that exited
+    // pending in this run window (got salvaged out).
+    let salvAdded = 0, salvDrained = 0;
     for (const c of candNorm) {
       if (c.discoveredMs != null && c.discoveredMs >= startMs && c.discoveredMs <= endMs) {
         queueAdded++;
@@ -1168,6 +1185,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
       }
       if (c.status === 'skipped' && c.t1CheckedMs != null && c.t1CheckedMs >= startMs && c.t1CheckedMs <= endMs) {
         queueDrainedSkipped++;
+      }
+      if (c.draftedMs != null && c.draftedMs >= startMs && c.draftedMs <= endMs) {
+        salvAdded++;
+      }
+      if (c.exitMs != null && c.exitMs >= startMs && c.exitMs <= endMs && c.hasDraft) {
+        salvDrained++;
       }
     }
     const queueDrained = queueDrainedPosted + queueDrainedExpired + queueDrainedSkipped;
@@ -1204,13 +1227,18 @@ async function enrichPostCommentsTwitterRuns(runs) {
       above_floor: priorDiscover.above_floor || 0,
       posted,
       pending_queue: pendingNow,    // live snapshot, kept for backward compat
-      queue_end: queueEnd,           // primary number shown in the pill
+      queue_end: queueEnd,           // shown in tooltip
       queue_start: queueStart,       // shown in tooltip
       queue_added: queueAdded,
       queue_drained: queueDrained,
       queue_drained_posted: queueDrainedPosted,
       queue_drained_expired: queueDrainedExpired,
       queue_drained_skipped: queueDrainedSkipped,
+      // Salvageable pool: pending rows with a persisted draft (the orphans
+      // Phase 0 salvage will retry next cycle). Replaces queue pill in render.
+      salvageable_now: salvageableNow,
+      salvageable_added: salvAdded,
+      salvageable_drained: salvDrained,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -6841,15 +6869,16 @@ function renderResult(run) {
     const expired = r.candidates_expired || 0;
     const aboveFloor = r.above_floor || 0;
     const posted = r.posted || 0;
-    // queue = end-of-run snapshot (per-row, derived from candidate timestamps)
-    // when present; falls back to the live pending count for old (pre-patch)
-    // rows so they don't render as 0.
+    // Salvageable pool = pending rows with a persisted draft (Phase 0 salvage
+    // candidates for the next cycle). Replaces the old queue/pending pill.
+    const salvageableLive = r.salvageable_now || 0;
+    const salvAdded = r.salvageable_added || 0;
+    const salvDrained = r.salvageable_drained || 0;
+    // Legacy queue fields kept for the tooltip (operator can still see queue
+    // depth + drain breakdown if they hover the pill).
     const queue = (r.queue_end != null) ? r.queue_end : (r.pending_queue || 0);
     const queueStart = r.queue_start || 0;
     const pendingLive = r.pending_queue || 0;
-    // Per-run queue delta (computed in enrichPostCommentsTwitterRuns).
-    // Shown as queue-N-(+A/-D) so the operator can see how THIS run moved
-    // the queue, not just the live count that's stamped on every row.
     const qAdded = r.queue_added || 0;
     const qDrained = r.queue_drained || 0;
     const qDrainedPosted = r.queue_drained_posted || 0;
@@ -6871,24 +6900,22 @@ function renderResult(run) {
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
-    // Queue pill with per-run delta. Format: queue N (+A/-D)
-    // N = live pending count (snapshot at render time).
-    // +A = candidates added to queue during this run's window.
-    // -D = candidates that left pending during this run's window
-    //      (D = posted + expired; tooltip breaks it down).
+    // Salvaged pill with per-run delta. Format: salvaged N (+A/-D)
+    // N = live count of pending rows with a persisted draft (Phase 0 salvage
+    //     pool — orphaned drafts that the next cycle's salvage lane will retry).
+    // +A = drafts created during this run's window (became salvageable).
+    // -D = drafts that exited pending during this run's window.
     // Delta omitted when both sides are zero so old (pre-patch) rows stay
     // clean instead of showing noisy (+0/-0).
-    const queueDeltaSuffix = (qAdded || qDrained)
+    const salvDeltaSuffix = (salvAdded || salvDrained)
       ? ' <span style="color:var(--muted);font-weight:400;">(' +
-          (qAdded ? '+' + qAdded : '+0') +
-          '/' +
-          (qDrained ? '-' + qDrained : '-0') +
+          '+' + salvAdded + '/-' + salvDrained +
           ')</span>'
       : '';
     const queuePill =
       '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      'pending <span style="color:var(--text);font-weight:600;">' + queue + '</span>' +
-      queueDeltaSuffix +
+      'salvaged <span style="color:var(--text);font-weight:600;">' + salvageableLive + '</span>' +
+      salvDeltaSuffix +
       '</span>';
     const tooltip = 'searches: ' + searches +
       ' / raw tweets: ' + raw +
@@ -6897,6 +6924,8 @@ function renderResult(run) {
       ' / expired (delta<1 floor): ' + expired +
       ' / above review cap (delta>=10, gates POST_LIMIT=3): ' + aboveFloor +
       ' / posted: ' + posted +
+      ' / salvageable now (pending+drafted): ' + salvageableLive +
+      ' (+' + salvAdded + ' became salvageable / -' + salvDrained + ' drained this run)' +
       ' / pending end-of-run: ' + queue +
       ' (start: ' + queueStart + ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
         qDrainedPosted + ' posted + ' + qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
