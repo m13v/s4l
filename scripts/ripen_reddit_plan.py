@@ -63,17 +63,24 @@ INTENT_BOOST = 5.0
 
 
 def _intent_boost(title, selftext):
-    """Return INTENT_BOOST if title+selftext shows product-discussion intent, else 0.
+    """Return INTENT_BOOST if the title shows product-discussion intent, else 0.
 
-    Cheap regex match. False positives are acceptable here — the LLM relevance
-    gate downstream (post_reddit.py draft phase, draft_gate_omit) is the real
-    safety net. The boost only changes ranking + lets zero-momentum on-theme
-    threads clear the floor; it does not auto-post anything.
+    TITLE-ONLY by design. Earlier versions matched title+selftext, but Reddit
+    selftext can be 30k chars of narrative (camping ghost stories, long reviews)
+    where words like "looking for", "wish", "recommend" appear in their plain-
+    English sense ("looking for a spot to hang a bear bag"), causing 30%+ false-
+    positive rates. Titles are short, deliberate, and intent-rich; if "anyone
+    know" appears in the title, it's almost always a real product ask. The
+    `selftext` arg is kept in the signature for future use but ignored today.
+
+    The LLM relevance gate downstream (post_reddit.py draft phase, surfaces as
+    `draft_gate_omit`) is still the real safety net for the small remaining
+    false-positive rate. The boost only changes ranking + lets zero-momentum
+    on-theme threads clear the floor; it does not auto-post anything.
     """
-    text = ((title or "") + " " + (selftext or "")).strip()
-    if not text:
+    if not title:
         return 0.0
-    return INTENT_BOOST if _INTENT_REGEX.search(text) else 0.0
+    return INTENT_BOOST if _INTENT_REGEX.search(title) else 0.0
 
 
 def _fetch_thread_text_map(thread_urls):
