@@ -843,6 +843,12 @@ PLAN_FILE="/tmp/twitter_cycle_plan_${BATCH_ID}.json"
 SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 
 # --- Phase 2b-prep: pick + draft + plan -------------------------------------
+# Stamp phase2b-prep BEFORE the long-running Claude read/draft so peer cycles'
+# Phase 0 salvage SQL sees current_phase='phase2b-prep' (15-min budget) instead
+# of stale phase2a (20-min budget). Without this stamp, mid-Phase-2b runs get
+# wrongly salvaged once 20 min elapse past phase2a's start, creating false
+# phase2b_silent run-monitor rows even when posts succeeded.
+python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
@@ -1022,6 +1028,10 @@ if [ "${PLAN_COUNT:-0}" = "0" ]; then
 fi
 
 # --- Phase 2b-gen: SEO landing pages (no browser lock) ----------------------
+# phase2b-gen has the longest budget (60 min) because the SEO landing-page
+# build can legitimately run 10-40 min. Stamping it here is what protects
+# this cycle from being salvaged out from under itself.
+python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-gen 2>&1 | tee -a "$LOG_FILE" || true
 log "Phase 2b-gen: generating SEO pages for $PLAN_COUNT candidate(s) without holding the browser lock..."
 python3 "$REPO_DIR/scripts/twitter_gen_links.py" --plan "$PLAN_FILE" 2>&1 | tee -a "$LOG_FILE"
 GEN_EXIT=${PIPESTATUS[0]:-1}
@@ -1030,6 +1040,10 @@ if [ "$GEN_EXIT" -ne 0 ]; then
 fi
 
 # --- Phase 2b-post: re-acquire browser lock and post ------------------------
+# Stamp phase2b-post (15-min budget) before the browser-side reply loop. After
+# 2b-gen's potentially long run, peer cycles' 20-min phase2a fallback would
+# already be tripping if we left the row at phase2a.
+python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
