@@ -740,9 +740,9 @@ release_lock "twitter-browser"
 # already does this; explicit repeat covers SIGKILL of the wrapper.
 rm -f "$HOME/.claude/twitter-agent-lock.json"
 
-# --- Sleep 5 min before T1 measurement --------------------------------------
-log "Sleeping 300s before T1 re-measurement..."
-sleep 300
+# --- Sleep 20 min before T1 measurement -------------------------------------
+log "Sleeping 1200s before T1 re-measurement..."
+sleep 1200
 
 # --- Phase 2a: re-fetch T1 engagement ---------------------------------------
 log "Phase 2a: re-polling fxtwitter for T1 engagement..."
