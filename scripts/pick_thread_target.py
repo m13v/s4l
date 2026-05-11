@@ -47,22 +47,43 @@ def norm_sub(s):
     return s.lower()
 
 
+def _ban_entry_to_slug(entry):
+    """Extract the sub slug from a comment_blocked / thread_blocked entry.
+
+    Entries are either bare strings (pre-2026-05-11) or audit dicts
+    {"sub": ..., "added_at": ..., "reason": ..., "project": ...}.
+    Returns lowercased slug (no r/ prefix) or empty string.
+    """
+    if isinstance(entry, str):
+        return norm_sub(entry)
+    if isinstance(entry, dict):
+        return norm_sub(entry.get("sub") or "")
+    return ""
+
+
 def load_thread_blocked_subs(config):
     """Load subreddits where we cannot create new threads.
 
     Reads subreddit_bans.thread_blocked. For the thread-creation pipeline
-    only — the comment pipeline uses subreddit_bans.comment_blocked via
+    only, the comment pipeline uses subreddit_bans.comment_blocked via
     reddit_tools._load_comment_blocked_subs().
+
+    Handles both ban-list shapes: bare string (pre-2026-05-11) and audit
+    dict {"sub": ..., "added_at": ..., "reason": ..., "project": ...}.
     """
     bans = config.get("subreddit_bans") or {}
     out = set()
     if isinstance(bans, dict):
-        for s in bans.get("thread_blocked") or []:
-            out.add(norm_sub(s))
+        for entry in bans.get("thread_blocked") or []:
+            slug = _ban_entry_to_slug(entry)
+            if slug:
+                out.add(slug)
     elif isinstance(bans, list):
-        # Legacy flat-list form — treat as thread_blocked.
-        for s in bans:
-            out.add(norm_sub(s))
+        # Legacy flat-list form, treat as thread_blocked.
+        for entry in bans:
+            slug = _ban_entry_to_slug(entry)
+            if slug:
+                out.add(slug)
     return out
 
 
