@@ -342,6 +342,27 @@ def build_brief(product, cooldown_days=3, candidate_limit=10):
         print(f"SKIP: no pageviews in last 24h for {domain}", file=sys.stderr)
         sys.exit(2)
 
+    # Homepage protection: when landing_pages.homepage_protected is true on a
+    # project, the client owns the brand site's homepage visually and we must
+    # never edit it. Cyrano 2026-05-11 was the first case: cyrano.systems is
+    # Soorya's brand domain and the homepage is a hand-tuned static design we
+    # ported into the Next.js shell only to wire integrations, not to mutate.
+    # Strip the homepage row out of the candidate list BEFORE cooldown / pick.
+    homepage_protected = bool(lp.get("homepage_protected"))
+    if homepage_protected:
+        before = len(candidates)
+        candidates = [
+            (p, n) for (p, n) in candidates
+            if p not in ("/", "", "/index", "/index.html")
+        ]
+        if not candidates:
+            print(
+                f"SKIP: homepage_protected=true on {product}; "
+                f"all {before} top candidates were the homepage",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     # Rotation: skip pages we've already touched in the cooldown window.
     # Fall through to the next candidate. If everything is on cooldown,
     # take the top page anyway so the pipeline never goes dark.
@@ -361,13 +382,19 @@ def build_brief(product, cooldown_days=3, candidate_limit=10):
             f"all top {len(candidates)} pages on {cooldown_days}d cooldown; "
             f"falling back to highest-traffic page"
         )
+        if homepage_protected:
+            selection_reason += " (homepage filtered: homepage_protected=true)"
     elif skipped:
         selection_reason = (
             f"rotation: skipped {len(skipped)} page(s) on {cooldown_days}d cooldown, "
             f"picked next-highest-traffic page"
         )
+        if homepage_protected:
+            selection_reason += " (homepage filtered: homepage_protected=true)"
     else:
         selection_reason = "highest-traffic page in last 24h"
+        if homepage_protected:
+            selection_reason += " (homepage filtered: homepage_protected=true)"
 
     path, views_24h = chosen
     if views_24h <= 0:
