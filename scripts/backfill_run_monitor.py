@@ -26,6 +26,8 @@ Usage:
 The --since window applies to the per-run log file's mtime (so an old
 backfill won't touch ancient runs by accident). Default 24h.
 """
+from __future__ import annotations  # PEP 604 unions (str | None) for Python 3.9 launchd
+
 import argparse
 import os
 import re
