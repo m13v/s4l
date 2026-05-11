@@ -73,11 +73,28 @@ if os.path.exists(_config_path):
         pass
 
 
+def _ban_entry_to_slug(entry):
+    """Extract sub slug from a comment_blocked / thread_blocked entry.
+
+    Handles both shapes: bare string (pre-2026-05-11) and audit dict
+    {"sub": ..., "added_at": ..., "reason": ..., "project": ...}.
+    Returns lowercased slug or None.
+    """
+    if isinstance(entry, str):
+        s = entry.strip().lower()
+        return s or None
+    if isinstance(entry, dict):
+        s = (entry.get("sub") or "").strip().lower()
+        return s or None
+    return None
+
+
 def _load_comment_blocked_subs():
     """Return the set of subreddits (lowercased) we cannot post comments in.
 
     Mirrors reddit_tools._load_comment_blocked_subs so the reply path can
     pre-flight without taking that import (and its db dependency).
+    Handles both ban-list shapes.
     """
     try:
         with open(_config_path) as f:
@@ -85,8 +102,10 @@ def _load_comment_blocked_subs():
         blocked = set()
         bans = cfg.get("subreddit_bans") or {}
         if isinstance(bans, dict):
-            for s in bans.get("comment_blocked") or []:
-                blocked.add(s.lower())
+            for entry in bans.get("comment_blocked") or []:
+                slug = _ban_entry_to_slug(entry)
+                if slug:
+                    blocked.add(slug)
         for s in cfg.get("exclusions", {}).get("subreddits", []):
             blocked.add(s.lower())
         return blocked
