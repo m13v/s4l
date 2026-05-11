@@ -144,6 +144,22 @@ def batch_fetch_info(thing_ids, user_agent=USER_AGENT):
     return results
 
 
+def _ban_entry_to_slug(entry):
+    """Extract the sub slug from a comment_blocked / thread_blocked entry.
+
+    Entries are either bare strings (pre-2026-05-11 shape) or audit dicts
+    {"sub": "foo", "added_at": ..., "reason": ..., "project": ...}.
+    Returns lowercased slug or None.
+    """
+    if isinstance(entry, str):
+        s = entry.strip().lower()
+        return s or None
+    if isinstance(entry, dict):
+        s = (entry.get("sub") or "").strip().lower()
+        return s or None
+    return None
+
+
 def _load_comment_blocked_subs():
     """Load subreddits where we cannot post comments.
 
@@ -154,6 +170,9 @@ def _load_comment_blocked_subs():
     subreddit_bans.thread_blocked is NOT read here — a sub can block new
     thread creation while still allowing comments, so it must not leak into
     the comment pipeline.
+
+    Handles both ban-list shapes: bare-string entries (pre-2026-05-11) and
+    {"sub": ..., "added_at": ..., "reason": ..., "project": ...} audit dicts.
     """
     try:
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
@@ -162,8 +181,10 @@ def _load_comment_blocked_subs():
         blocked = set()
         bans = config.get("subreddit_bans") or {}
         if isinstance(bans, dict):
-            for s in bans.get("comment_blocked") or []:
-                blocked.add(s.lower())
+            for entry in bans.get("comment_blocked") or []:
+                slug = _ban_entry_to_slug(entry)
+                if slug:
+                    blocked.add(slug)
         blocked.update(s.lower() for s in config.get("exclusions", {}).get("subreddits", []))
         return blocked
     except Exception:
