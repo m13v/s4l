@@ -65,10 +65,16 @@ SCROLL_DY_MIN = 600
 SCROLL_DY_MAX = 1100
 HARVEST_SETTLE_MS = 3000
 # How many consecutive stagnant ticks (no new comments AND no scroll-height
-# growth) before we give up. Increased from 5 to 20 on 2026-05-11 so the
-# backfill harvest tolerates LinkedIn's lazy-loader's occasionally long
-# pauses; with 5, we were stopping ~22 comments in.
-STAGNANT_TOLERANCE = 20
+# growth) before we give up OR (if "Show more results" button exists) click
+# it. Bumped to 40 on 2026-05-11 PM for the aggressive deep backfill pass.
+STAGNANT_TOLERANCE = 40
+# Maximum number of "Show more results" button clicks per fire. Each click
+# typically reveals ~400 more comments. 10 clicks is more than enough for
+# the 838-row legacy backlog (4 months of activity). Wait 15-20s after each
+# click before resuming scroll so LinkedIn's loader has time to render.
+MAX_SHOW_MORE_CLICKS = 10
+SHOW_MORE_PAUSE_MIN_MS = 15000
+SHOW_MORE_PAUSE_MAX_MS = 20000
 
 
 # JS to extract per-article: URN + visible comment text. Mirrors the
@@ -134,6 +140,7 @@ HARVEST_JS = r"""
 
   let ticks = 0;
   let stagnant = 0;
+  let clickCount = 0;
   let lastH = document.documentElement.scrollHeight;
 
   const tick = () => {
@@ -152,6 +159,39 @@ HARVEST_JS = r"""
     window.scrollTo(0, document.documentElement.scrollHeight - 200);
     ticks++;
 
+    // If we've stagnated and there's a "Show more results" button at the
+    // bottom (LinkedIn's pagination gate past the auto-load window), give
+    // it ONE click and resume scrolling. Cap at opts.max_clicks per fire
+    // so a runaway pattern can't develop.
+    if (stagnant >= opts.stagnant_tol && clickCount < opts.max_clicks) {
+      let clicked = false;
+      document.querySelectorAll('button').forEach(b => {
+        if (clicked) return;
+        const t = (b.innerText || '').trim();
+        // Match "Show more results" exactly (not the inline comment "Show more"
+        // expander which has different shorter text).
+        if (/^show more results$/i.test(t)) {
+          // Confirm it's near the page bottom (not a stray Show more in a side
+          // module) to be safe.
+          const r = b.getBoundingClientRect();
+          if (r.top > 0 && r.top < document.documentElement.scrollHeight) {
+            b.scrollIntoView({block: 'center'});
+            b.click();
+            clicked = true;
+            clickCount++;
+            ticksLog.push({tick: ticks, event: 'show_more_click', count: clickCount});
+            stagnant = 0;  // reset so we continue past the click
+          }
+        }
+      });
+      if (clicked) {
+        const longWait = opts.show_more_pause_min_ms
+                       + Math.random() * (opts.show_more_pause_max_ms - opts.show_more_pause_min_ms);
+        setTimeout(tick, longWait);
+        return;  // skip the normal short-wait path
+      }
+    }
+
     const wait = opts.pause_min_ms
                + Math.random() * (opts.pause_max_ms - opts.pause_min_ms);
 
@@ -164,6 +204,7 @@ HARVEST_JS = r"""
           records: [...acc.values()],
           ticks,
           stagnant,
+          show_more_clicks: clickCount,
           scroll_height_final: document.documentElement.scrollHeight,
           ticks_log: ticksLog,
         });
@@ -218,6 +259,9 @@ def do_scrape(out_path: str, max_scrolls: int) -> dict:
                     "dy_max": SCROLL_DY_MAX,
                     "settle_ms": HARVEST_SETTLE_MS,
                     "stagnant_tol": STAGNANT_TOLERANCE,
+                    "max_clicks": MAX_SHOW_MORE_CLICKS,
+                    "show_more_pause_min_ms": SHOW_MORE_PAUSE_MIN_MS,
+                    "show_more_pause_max_ms": SHOW_MORE_PAUSE_MAX_MS,
                 })
             except Exception as e:
                 return {"ok": False, "error": "evaluate_failed", "detail": str(e)}
@@ -232,6 +276,7 @@ def do_scrape(out_path: str, max_scrolls: int) -> dict:
                 "url": page.url,
                 "ticks": result.get("ticks"),
                 "stagnant_at_stop": result.get("stagnant"),
+                "show_more_clicks": result.get("show_more_clicks"),
                 "scroll_height_final": result.get("scroll_height_final"),
                 "record_count": len(records),
                 "with_text": with_text,
