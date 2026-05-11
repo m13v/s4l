@@ -35,6 +35,13 @@ from project_stats_json import _hogql, _SAFE_DOMAIN_RE, HogqlError, _GET_STARTED
 
 _EVENT_CLAUSES = {
     "pageviews":            "event = '$pageview'",
+    # Sessions: count distinct $session_id on $pageview events. PostHog sets
+    # $session_id on every autocapture/pageview, so this gives "web sessions"
+    # in the standard sense (one session per visitor per ~30min of activity).
+    # Used as the denominator for conversion-rate ratios on the Trends tab,
+    # since signups/sessions is the meaningful conversion metric (one user
+    # hitting 4 pages is one session, not four chances to convert).
+    "sessions":             "event = '$pageview'",
     # Email signups: client `newsletter_subscribed` is ad-blocker-lossy
     # (~57% capture). Server-side `newsletter_subscribed_server` (added in
     # @m13v/seo-components v0.38) fires from the API route after the Resend
@@ -55,6 +62,7 @@ _EVENT_CLAUSES = {
 # properties.email null; without coalesce those rows fall out of the count.
 _DISTINCT_KEY = {
     "email_signups": "coalesce(properties.email, distinct_id)",
+    "sessions": "properties.$session_id",
 }
 
 
