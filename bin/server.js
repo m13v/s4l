@@ -2296,6 +2296,11 @@ const upvotesPerDayCache = new Map();
 const commentsPerDayCache = new Map();
 // Bookings-per-day: cached by days. Value shape: { at, value }.
 const bookingsPerDayCache = new Map();
+// Clicks-per-day: cached by days|platform|project. Value shape: { at, value }.
+// Backs the Trends-tab clicks series (raw) + clicks/views ratio. Reads from
+// post_link_clicks (per-hit log) filtered to is_bot=false so we count humans
+// only; joins to post_links + posts so platform/project filters apply.
+const clicksPerDayCache = new Map();
 // Funnel-per-day (PostHog-backed metrics): cached by days.
 const funnelPerDayCache = new Map();
 
@@ -3897,6 +3902,62 @@ async function handleApi(req, res) {
   }
   if (p === '/api/comments/per-day' && req.method === 'GET') {
     return perDayMetric('comments', commentsPerDayCache, 'comments_gained', 'comments_gained');
+  }
+
+  // GET /api/clicks/per-day?days=N&platform=X&project=Y - human short-link
+  // clicks per day, sourced from post_link_clicks (per-hit log, is_bot=false
+  // gates out Twitter card / LinkedIn unfurl / Slackbot preview prefetches).
+  // Joins to post_links to recover post_id, then posts to apply platform +
+  // project filters; same WHERE shape as views/upvotes/comments so the
+  // Trends-tab filters behave identically.
+  //
+  // No aggregate-backfill branch: per-click logging only started 2026-05-07,
+  // pre-existing post_links.clicks integer counters are not split humans/bots
+  // (they were inflated by ~20x bot traffic), so we deliberately return 0
+  // for days before that rather than pretend a backfilled total is comparable.
+  if (p === '/api/clicks/per-day' && req.method === 'GET') {
+    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+    const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
+    const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
+                     (rawPlatform === 'x' ? 'twitter' : rawPlatform);
+    const platformOk = platform === '' || /^[a-z0-9_]{1,32}$/.test(platform);
+    if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
+    const rawProject = (url.searchParams.get('project') || '').trim();
+    const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
+    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    if (!projectOk) return json(res, { error: 'invalid project' }, 400);
+    const cacheKey = days + '|' + platform + '|' + project;
+    const cached = clicksPerDayCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 300000) {
+      return json(res, { days, rows: cached.value, cachedAt: cached.at });
+    }
+    const platformFilter = platform
+      ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
+      : '';
+    const projectFilter = project
+      ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
+      : '';
+    const q =
+      "SELECT json_agg(row_to_json(r)) FROM (" +
+        "SELECT to_char((plc.ts AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
+          "COUNT(*)::bigint AS clicks_gained " +
+        "FROM post_link_clicks plc " +
+        "JOIN post_links pl ON pl.code = plc.code " +
+        "JOIN posts p ON p.id = pl.post_id " +
+        "WHERE plc.ts >= CURRENT_DATE - INTERVAL '" + days + " days' " +
+          "AND plc.is_bot = FALSE " +
+          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')" +
+          platformFilter + projectFilter + " " +
+        "GROUP BY day ORDER BY day ASC" +
+      ") r";
+    return (async () => {
+      const rows = await pq(q);
+      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      clicksPerDayCache.set(cacheKey, { at: Date.now(), value });
+      return json(res, { days, rows: value });
+    })().catch(e => json(res, { error: e.message }, 500));
   }
 
   // GET /api/bookings/per-day?days=N - real Cal.com bookings per day from
@@ -6106,6 +6167,18 @@ const HTML = `<!DOCTYPE html>
       <div id="daily-metrics-legend" class="daily-metrics-legend"></div>
       <div id="daily-metrics-chart" class="daily-metrics-chart">
         <div class="views-chart-empty">Loading…</div>
+      </div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="ratio-metrics" open>
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="ratio-metrics-heading">Engagement Ratios (last 30 days)</span></span>
+      <span class="style-stats-total" id="ratio-metrics-status"></span>
+    </summary>
+    <div id="ratio-metrics-body">
+      <div id="ratio-metrics-legend" class="daily-metrics-legend"></div>
+      <div id="ratio-metrics-chart" class="daily-metrics-chart">
+        <div class="views-chart-empty">Loading&hellip;</div>
       </div>
     </div>
   </details>
@@ -8631,8 +8704,10 @@ const DAILY_METRICS = [
   { id: 'views',           label: 'Views',             color: '#6366f1', endpoint: '/api/views/per-day',    valueKey: 'views_gained',     platformAware: true },
   { id: 'upvotes',         label: 'Upvotes',           color: '#f97316', endpoint: '/api/upvotes/per-day',  valueKey: 'upvotes_gained',   platformAware: true },
   { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
+  { id: 'clicks',          label: 'Clicks',            color: '#0ea5e9', endpoint: '/api/clicks/per-day',   valueKey: 'clicks_gained',    platformAware: true },
   { id: 'bookings',        label: 'Bookings',          color: '#ef4444', endpoint: '/api/bookings/per-day', valueKey: 'bookings_gained',  platformAware: false },
   { id: 'pageviews',       label: 'Pageviews',         color: '#8b5cf6', funnel: true, valueKey: 'pageviews',              platformAware: false },
+  { id: 'sessions',        label: 'Sessions',          color: '#a78bfa', funnel: true, valueKey: 'sessions',               platformAware: false },
   { id: 'email_signups',   label: 'Email Signups',     color: '#10b981', funnel: true, valueKey: 'email_signups',          platformAware: false },
   { id: 'schedule_clicks', label: 'Schedule Clicks',   color: '#f59e0b', funnel: true, valueKey: 'schedule_clicks',        platformAware: false },
   { id: 'get_started',     label: 'Get Started',       color: '#06b6d4', funnel: true, valueKey: 'get_started_clicks',     platformAware: false },
@@ -8917,6 +8992,237 @@ function renderDailyMetrics() {
   }
 }
 
+// Ratio metrics: derived per-day percentages computed from the base series
+// the chart above already fetched (views, upvotes, comments, clicks). Honors
+// the same Trends-tab filters because it reuses _dailyMetricsSeries directly,
+// no new fetch needed. Values are percentages (0-100), formatted to one
+// decimal place; days with views=0 are dropped (ratios are undefined).
+const RATIO_METRICS = [
+  { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views' },
+  { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views' },
+  { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views' },
+  { id: 'email_signups_per_session',     label: 'Email Signups / Sessions',   color: '#10b981', numerator: 'email_signups',   denominator: 'sessions' },
+  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Sessions', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'sessions' },
+  { id: 'get_started_per_session',       label: 'Get Started / Sessions',     color: '#06b6d4', numerator: 'get_started',     denominator: 'sessions' },
+];
+const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session'];
+const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v1';
+let _ratioMetricsActive = null;
+function _loadRatioMetricsActive() {
+  if (_ratioMetricsActive) return _ratioMetricsActive;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(RATIO_METRICS_STORAGE_KEY) || 'null'); } catch {}
+  const set = new Set(Array.isArray(saved) ? saved : RATIO_METRICS_DEFAULTS);
+  _ratioMetricsActive = set;
+  return set;
+}
+function _saveRatioMetricsActive() {
+  try { localStorage.setItem(RATIO_METRICS_STORAGE_KEY, JSON.stringify(Array.from(_ratioMetricsActive))); } catch {}
+}
+function _fmtPct(n) {
+  if (n == null || !isFinite(n)) return '—';
+  if (n >= 100) return n.toFixed(0) + '%';
+  if (n >= 10)  return n.toFixed(1) + '%';
+  return n.toFixed(2) + '%';
+}
+
+function renderRatioMetrics() {
+  const legendEl = document.getElementById('ratio-metrics-legend');
+  const chartEl  = document.getElementById('ratio-metrics-chart');
+  const statusEl = document.getElementById('ratio-metrics-status');
+  const headingEl = document.getElementById('ratio-metrics-heading');
+  if (!legendEl || !chartEl) return;
+  if (!_dailyMetricsSeries) {
+    chartEl.innerHTML = '<div class="views-chart-empty">Loading\u2026</div>';
+    return;
+  }
+  // Match the parent chart's heading granularity wording.
+  if (headingEl) {
+    const gran = currentTrendsGranularity();
+    const win = gran === 'weekly'
+      ? 'last ' + Math.round(DAILY_METRICS_DAYS_WEEKLY / 7) + ' weeks'
+      : 'last ' + DAILY_METRICS_DAYS_DAILY + ' days';
+    headingEl.textContent = (gran === 'weekly' ? 'Weekly' : 'Daily') + ' Engagement Ratios (' + win + ')';
+  }
+  const days = _dailyMetricsDays;
+  const active = _loadRatioMetricsActive();
+  // Build per-ratio series: percentage = numerator / denominator * 100.
+  // Days where denominator=0 yield NaN, rendered as gaps (no bar, no label).
+  const ratioSeries = {};
+  RATIO_METRICS.forEach(r => {
+    const numByDay = _dailyMetricsSeries[r.numerator]   || {};
+    const denByDay = _dailyMetricsSeries[r.denominator] || {};
+    const map = {};
+    days.forEach(d => {
+      const num = Number(numByDay[d]) || 0;
+      const den = Number(denByDay[d]) || 0;
+      map[d] = (den > 0) ? (num / den * 100) : null;
+    });
+    ratioSeries[r.id] = map;
+  });
+  // Window averages for the legend pill count cell: mean of finite per-day
+  // values (NOT sum(num)/sum(den), which would weight high-volume days more).
+  // For a "what's typical?" eyeball metric, per-day mean is the cleaner read.
+  const avgs = {};
+  RATIO_METRICS.forEach(r => {
+    const vals = days.map(d => ratioSeries[r.id][d]).filter(v => v != null && isFinite(v));
+    avgs[r.id] = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  });
+  legendEl.innerHTML = RATIO_METRICS.map(r => {
+    const off = !active.has(r.id);
+    return '<button type="button" class="daily-metrics-legend-pill' + (off ? ' off' : '') +
+      '" data-ratio="' + escapeHtml(r.id) + '" aria-pressed="' + (off ? 'false' : 'true') + '">' +
+      '<span class="swatch" style="background:' + r.color + ';"></span>' +
+      '<span class="label">' + escapeHtml(r.label) + '</span>' +
+      '<span class="count">' + escapeHtml(_fmtPct(avgs[r.id])) + '</span>' +
+      '</button>';
+  }).join('');
+  legendEl.querySelectorAll('.daily-metrics-legend-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.ratio;
+      if (active.has(id)) active.delete(id); else active.add(id);
+      _saveRatioMetricsActive();
+      renderRatioMetrics();
+    });
+  });
+  const visible = RATIO_METRICS.filter(r => active.has(r.id));
+  if (!visible.length) {
+    chartEl.innerHTML = '<div class="views-chart-empty">Select at least one ratio above to render the chart.</div>';
+    if (statusEl) statusEl.textContent = '0 of ' + RATIO_METRICS.length + ' ratios';
+    return;
+  }
+  // Per-series peak (always >0, capped to 100 for clarity if peak<=100,
+  // otherwise rounded up to a nice number so extreme outliers don't squash
+  // the rest of the bars flat).
+  const seriesPeak = {};
+  visible.forEach(r => {
+    let p = 0;
+    days.forEach(d => {
+      const v = ratioSeries[r.id][d];
+      if (v != null && isFinite(v)) p = Math.max(p, v);
+    });
+    seriesPeak[r.id] = p;
+  });
+  const isSingle = visible.length === 1;
+  const yMax = isSingle ? _niceMax(Math.max(0.01, seriesPeak[visible[0].id] || 0)) : 0;
+  const width = 960;
+  const height = 260;
+  const padL = isSingle ? 44 : 12;
+  const padR = 12, padT = 16, padB = 24;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const groupWidth = days.length > 0 ? plotW / days.length : 0;
+  const groupGap = Math.max(1, groupWidth * 0.18);
+  const barCount = visible.length;
+  const barSpacing = barCount > 1 ? 1 : 0;
+  const innerWidth = Math.max(1, groupWidth - groupGap);
+  const barWidth = Math.max(1, (innerWidth - barSpacing * (barCount - 1)) / barCount);
+  const yOfFor = (r) => {
+    const peak = isSingle ? yMax : (seriesPeak[r.id] || 0);
+    return v => padT + plotH - (peak > 0 ? (v / peak) * plotH : 0);
+  };
+  const xCenter = i => padL + groupWidth * i + groupWidth / 2;
+  const yGrid = [0, 0.25, 0.5, 0.75, 1].map(t => {
+    const y = padT + plotH - t * plotH;
+    let label = '';
+    if (isSingle) {
+      const v = yMax * t;
+      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(_fmtPct(v)) + '</text>';
+    }
+    return '<line class="gridline" x1="' + padL + '" x2="' + (width - padR) + '" y1="' + y + '" y2="' + y + '"/>' + label;
+  }).join('');
+  const xLabelIdxs = days.length <= 1
+    ? [0]
+    : [0, Math.floor(days.length * 0.25), Math.floor(days.length / 2), Math.floor(days.length * 0.75), days.length - 1];
+  const xLabels = Array.from(new Set(xLabelIdxs)).map(i => {
+    return '<text class="axis-text" x="' + xCenter(i) + '" y="' + (height - 6) + '" text-anchor="middle">' + escapeHtml(_fmtDay(days[i])) + '</text>';
+  }).join('');
+  const bars = days.map((d, i) => {
+    const groupX = padL + groupWidth * i + groupGap / 2;
+    return visible.map((r, mi) => {
+      const v = ratioSeries[r.id][d];
+      if (v == null || !isFinite(v)) return '';
+      const x = groupX + (barWidth + barSpacing) * mi;
+      const yOf = yOfFor(r);
+      const y = yOf(v);
+      const h = Math.max(0, padT + plotH - y);
+      const barRect = '<rect class="series-bar" data-day="' + escapeHtml(d) + '" data-ratio="' + escapeHtml(r.id) + '" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barWidth.toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + r.color + '"/>';
+      const valueLabel = (v > 0)
+        ? '<text class="series-value" x="' + (x + barWidth / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2) + '" text-anchor="middle" fill="' + r.color + '">' + escapeHtml(_fmtPct(v)) + '</text>'
+        : '';
+      return barRect + valueLabel;
+    }).join('');
+  }).join('');
+  const svg =
+    '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" role="img" aria-label="Engagement ratios column chart">' +
+      yGrid + xLabels + bars +
+      '<line class="hover-line" id="ratio-metrics-hover-line" x1="0" y1="' + padT + '" x2="0" y2="' + (padT + plotH) + '"/>' +
+      '<rect id="ratio-metrics-hover-rect" x="' + padL + '" y="' + padT + '" width="' + plotW + '" height="' + plotH + '" fill="transparent"/>' +
+    '</svg>' +
+    '<div class="daily-metrics-tooltip" id="ratio-metrics-tooltip"></div>';
+  chartEl.innerHTML = svg;
+  if (statusEl) statusEl.textContent = visible.length + ' of ' + RATIO_METRICS.length + ' ratios';
+
+  // Hover interactions: same shape as renderDailyMetrics, but values are
+  // formatted as percentages and we explicitly show "no data" on days
+  // where views=0 (denominator zero) instead of an empty row.
+  const rect = chartEl.querySelector('#ratio-metrics-hover-rect');
+  const hoverLine = chartEl.querySelector('#ratio-metrics-hover-line');
+  const tip = chartEl.querySelector('#ratio-metrics-tooltip');
+  if (rect && hoverLine && tip) {
+    const show = e => {
+      const svgEl = chartEl.querySelector('svg');
+      const box = svgEl.getBoundingClientRect();
+      const relX = e.clientX - box.left;
+      const scale = width / box.width;
+      const svgX = relX * scale;
+      const idxRaw = (svgX - padL) / (groupWidth || 1);
+      const idx = Math.max(0, Math.min(days.length - 1, Math.floor(idxRaw)));
+      const snapX = xCenter(idx);
+      hoverLine.setAttribute('x1', snapX);
+      hoverLine.setAttribute('x2', snapX);
+      hoverLine.style.opacity = '1';
+      const day = days[idx];
+      const rows = visible.map(r => {
+        const v = ratioSeries[r.id][day];
+        const display = (v == null || !isFinite(v)) ? 'no views' : _fmtPct(v);
+        return '<div class="tt-row"><span class="swatch" style="background:' + r.color + ';"></span>' +
+               '<span>' + escapeHtml(r.label) + '</span>' +
+               '<span class="val">' + escapeHtml(display) + '</span></div>';
+      }).join('');
+      tip.innerHTML = '<div class="tt-day">' + escapeHtml(_fmtDay(day)) + '</div>' + rows;
+      const cssX = snapX / scale;
+      tip.style.transform = 'none';
+      tip.style.visibility = 'hidden';
+      tip.style.opacity = '1';
+      const tipW = tip.offsetWidth;
+      const tipH = tip.offsetHeight;
+      const cw = chartEl.clientWidth;
+      const margin = 4;
+      const gap = 12;
+      const chartBox = chartEl.getBoundingClientRect();
+      const svgOffsetLeft = box.left - chartBox.left;
+      const cursorPx = svgOffsetLeft + cssX;
+      let leftPx = cursorPx - tipW / 2;
+      if (leftPx + tipW > cw - margin) {
+        leftPx = cursorPx - tipW - gap;
+        if (leftPx < margin) leftPx = Math.max(margin, cw - margin - tipW);
+      } else if (leftPx < margin) {
+        leftPx = cursorPx + gap;
+        if (leftPx + tipW > cw - margin) leftPx = Math.max(margin, cw - margin - tipW);
+      }
+      let topPx = padT - 8 - tipH;
+      if (topPx < margin) topPx = padT + 16;
+      tip.style.left = leftPx + 'px';
+      tip.style.top = topPx + 'px';
+      tip.style.visibility = '';
+    };
+    const hide = () => { hoverLine.style.opacity = '0'; tip.style.opacity = '0'; };
+    rect.addEventListener('mousemove', show);
+    rect.addEventListener('mouseleave', hide);
+  }
+}
+
 // Trends-tab filter state. Selection is read off the trends pill rows by
 // data-selected; granularity drives the day count and axis bucketing.
 function currentTrendsPlatform() {
@@ -9026,14 +9332,15 @@ async function loadDailyMetrics() {
   const qsAware = platformAwareParams.join('&');
   const qsProj  = projectOnlyParams.join('&');
   try {
-    const [views, upvotes, comments, bookings, funnel] = await Promise.all([
+    const [views, upvotes, comments, clicks, bookings, funnel] = await Promise.all([
       fetchOne('/api/views/per-day?'    + qsAware),
       fetchOne('/api/upvotes/per-day?'  + qsAware),
       fetchOne('/api/comments/per-day?' + qsAware),
+      fetchOne('/api/clicks/per-day?'   + qsAware),
       fetchOne('/api/bookings/per-day?' + qsProj),
       fetchOne('/api/funnel/per-day?'   + qsProj),
     ]);
-    const allFailed = [views, upvotes, comments, bookings, funnel].every(r => r.failed);
+    const allFailed = [views, upvotes, comments, clicks, bookings, funnel].every(r => r.failed);
     if (allFailed) {
       if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
       return;
@@ -9046,6 +9353,7 @@ async function loadDailyMetrics() {
     intoSeries('views',    views.rows,    'views_gained');
     intoSeries('upvotes',  upvotes.rows,  'upvotes_gained');
     intoSeries('comments', comments.rows, 'comments_gained');
+    intoSeries('clicks',   clicks.rows,   'clicks_gained');
     intoSeries('bookings', bookings.rows, 'bookings_gained');
     DAILY_METRICS.filter(m => m.funnel).forEach(m => {
       intoSeries(m.id, funnel.rows, m.valueKey);
@@ -9069,11 +9377,12 @@ async function loadDailyMetrics() {
     // Stash a list of failed endpoints so renderDailyMetrics can surface a
     // small "(N timed out)" hint in the status pill rather than silently
     // showing flat zeros for those series.
-    const fetchResults = { views, upvotes, comments, bookings, funnel };
+    const fetchResults = { views, upvotes, comments, clicks, bookings, funnel };
     _dailyMetricsFailed = Object.keys(fetchResults)
       .filter(k => fetchResults[k].failed)
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
     renderDailyMetrics();
+    renderRatioMetrics();
   } catch (e) {
     if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
   }
