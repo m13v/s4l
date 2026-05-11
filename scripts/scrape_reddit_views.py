@@ -197,8 +197,18 @@ def main():
     # Get aggregate totals
     from datetime import datetime
     db = dbmod.get_conn()
+    # upvotes is NET of the Reddit/Moltbook OP self-upvote (Reddit auto-applies
+    # +1 on every post, our moltbook_post.py self_upvote() does the same for
+    # Moltbook). Strip the +1 per row, clamped at 0, so the printed total
+    # reflects organic engagement rather than (posts * 1) + organic. Moltbook
+    # is already filtered out of this query, but the discount is kept anyway
+    # so any future widening of the platform filter Just Works.
     row = db.execute(
-        "SELECT SUM(views), SUM(upvotes), SUM(comments_count), COUNT(*), MIN(posted_at) "
+        "SELECT SUM(views), "
+        "SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+        "  THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+        "  ELSE COALESCE(upvotes, 0) END), "
+        "SUM(comments_count), COUNT(*), MIN(posted_at) "
         "FROM posts WHERE status='active' AND platform NOT IN ('github_issues', 'moltbook')"
     ).fetchone()
     total_views = row[0] or 0
