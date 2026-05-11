@@ -92,7 +92,26 @@ Locked files (do NOT unlock or edit without explicit user instruction):
 - `scripts/update_stats.py` (central stats engine; flips `posts.status='deleted'`; GraphQL isMinimized pre-pass for github)
 - `scripts/strike_alert.py`, `skill/strike-alert.sh` (strike escalation rail; emails i@m13v.com on every newly-detected `status='deleted'` or `'removed'` post)
 - `scripts/watchdog_hung_runs.py`, `skill/stats.sh`
+- `skill/stats-linkedin.sh`, `scripts/scrape_linkedin_comment_stats.py`, `scripts/update_linkedin_stats_from_feed.py` (unified LinkedIn stats pipeline 2026-05-11: one scrape of `/in/me/recent-activity/comments/` via CDP-attach to the linkedin-agent MCP Chrome, single writer into `posts` table. Replaces the deprecated `scrape_linkedin_stats_browser.py` and the retired `stats-linkedin-comments.sh` + `update_linkedin_comment_stats_from_feed.py` pair. Do NOT re-introduce a per-permalink scrape, a second Chrome launch, or any Voyager-API path.)
 
+
+## LinkedIn stats pipeline architecture (2026-05-11)
+
+LinkedIn stats follow the Twitter logic shape: ALL engagement (top-level posts AND engagement-comments) lives in the `posts` table, identified uniquely by `our_url`. There is no LinkedIn-specific replies table anymore. The 2026-05-11 migration moved the 257 legacy `replies` rows into `posts` and marked the originals `status='migrated'`; the dashboard feed query already filters `WHERE r.status='replied'` so migrated rows naturally drop out of the replies surface and re-appear under the `posts` surface as `posted_comment` events.
+
+URL convention for LinkedIn `posts.our_url`:
+- Top-level post: `https://www.linkedin.com/feed/update/urn:li:{share|activity|ugcPost}:<post_id>/`
+- Engagement-comment on someone else's post: `.../urn:li:{ns}:<parent_id>/?commentUrn=urn%3Ali%3Acomment%3A%28<ns>%3A<parent_id>%2C<our_comment_id>%29`
+
+The `?commentUrn=...` suffix is what makes the post-stats updater able to read OUR comment's stats from the activity feed instead of leaking the parent post's reactions / comments. `linkedin_api.py:comment_on_post` was patched on 2026-05-11 to embed it (mirroring what `reply_to_comment` already did). Posts written before that patch (~1,022 rows where `our_url == thread_url`) cannot be backfilled without per-permalink scraping (banned), so their stats stay frozen at the parent-post leak until LinkedIn naturally re-surfaces them on the activity tab.
+
+### Migration day cleanup (2026-05-11)
+
+- Migrated 257 LinkedIn rows from `replies` to `posts` (225 inserts + 32 dedup-skipped); originals flagged `status='migrated'`.
+- Deleted ONE true duplicate: `posts.id=5081` (placeholder "comment on MCP post") was the same logical comment as `posts.id=24872` (which has the real content). Re-pointed `replies.id=5288.post_id` from 5081 to 24872 before deletion so the FK stayed valid.
+- 4 placeholder-content rows (`5512` "comment on DR growth post", `5513` "comment on Overseer post", `5514` "comment on AI building post", `5515` "comment on Sora shutdown post") were NOT deleted; they are the only record of those engagement-comments and their dashboard-paired 24xxx rows differ by `replyUrn` (so they are follow-up sub-replies, not duplicates).
+- 6 "duplicate-looking" pairs (5459/24895, 5484/24894, 6808/24956, 6809/24957, 6810/24958, 6811/24959) are actually distinct comments in the same thread: the 5xxx row holds the original comment and the 24xxx row carries a `&replyUrn=` for a follow-up sub-reply. NOT duplicates; both kept.
+- 2 same-URL-different-content pairs (24952/24953, 24960/24965) are a remaining data-quality anomaly worth a future look but not blocking; both rows have real content.
 
 ## Known unresolved issue: hung runs from BSD grep on /tmp FIFOs
 
