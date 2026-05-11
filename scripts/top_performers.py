@@ -35,6 +35,18 @@ SCORE_SQL = (
     "ELSE COALESCE(upvotes,0) END)"
 )
 
+# Per-row net upvotes: Reddit and Moltbook auto-apply a +1 OP self-upvote on
+# every post, so the raw `upvotes` column starts at 1 for a brand-new post with
+# zero real engagement. Strip that +1 per row (clamped at 0 so downvoted posts
+# don't go negative). All human-facing display, AVG, MAX, etc. in this script
+# should aggregate this expression instead of `upvotes` directly so the report
+# matches the score and the dashboard.
+UPVOTES_NET_SQL = (
+    "(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+    "THEN GREATEST(0, COALESCE(upvotes,0) - 1) "
+    "ELSE COALESCE(upvotes,0) END)"
+)
+
 # Per-platform "meaningful engagement" floor for the SCORE_SQL composite.
 # Twitter/LinkedIn reactions are rarer than Reddit upvotes, so thresholds differ.
 PLATFORM_MIN_SCORE = {
@@ -146,9 +158,9 @@ def get_style_performance(conn, platform=None):
     where = " AND ".join(where_clauses)
     cur = conn.execute(
         f"SELECT engagement_style, COUNT(*) as cnt, "
-        f"AVG(COALESCE(upvotes,0))::numeric(10,2) as avg_up, "
+        f"AVG({UPVOTES_NET_SQL})::numeric(10,2) as avg_up, "
         f"AVG(COALESCE(comments_count,0))::numeric(10,2) as avg_cm, "
-        f"MAX(upvotes) as max_up, "
+        f"MAX({UPVOTES_NET_SQL}) as max_up, "
         f"MAX(comments_count) as max_cm "
         f"FROM posts WHERE {where} "
         f"GROUP BY engagement_style ORDER BY avg_cm DESC, avg_up DESC",
@@ -192,9 +204,9 @@ def get_project_platform_summary(conn, project=None, platform=None):
     cur = conn.execute(
         f"SELECT COALESCE(project_name, '(no project)') as proj, platform, "
         f"COUNT(*) as cnt, "
-        f"AVG(COALESCE(upvotes,0))::numeric(10,1) as avg_up, "
+        f"AVG({UPVOTES_NET_SQL})::numeric(10,1) as avg_up, "
         f"AVG(COALESCE(comments_count,0))::numeric(10,1) as avg_cm, "
-        f"MAX(upvotes) as max_up, "
+        f"MAX({UPVOTES_NET_SQL}) as max_up, "
         f"MAX(comments_count) as max_cm "
         f"FROM posts WHERE {where} "
         f"GROUP BY project_name, platform ORDER BY proj, avg_cm DESC, avg_up DESC",
@@ -231,14 +243,17 @@ def get_top_posts(conn, project=None, platform=None, limit=15, min_score=None):
         params.append(platform)
 
     where = " AND ".join(where_clauses)
-    # Fetch extra rows so we can filter out anti-pattern examples
+    # Fetch extra rows so we can filter out anti-pattern examples.
+    # Tiebreaker uses UPVOTES_NET_SQL so two posts with identical scores on
+    # Reddit/Moltbook order by net upvotes (not net + self-upvote noise) —
+    # matches every other display in this script and on the dashboard.
     fetch_limit = limit * 3
     cur = conn.execute(
         f"SELECT id, platform, upvotes, comments_count, views, "
         f"our_content, thread_title, thread_content, "
         f"project_name, posted_at::date, our_account "
         f"FROM posts WHERE {where} "
-        f"ORDER BY {SCORE_SQL} DESC, upvotes DESC LIMIT %s",
+        f"ORDER BY {SCORE_SQL} DESC, {UPVOTES_NET_SQL} DESC LIMIT %s",
         params + [fetch_limit]
     )
     rows = cur.fetchall()
@@ -285,9 +300,20 @@ def get_bottom_posts(conn, project=None, platform=None, limit=10):
 
 
 def format_post(row, include_thread_content=True):
-    """Format a single post as factual text."""
+    """Format a single post as factual text.
+
+    Upvotes are reported NET on Reddit and Moltbook: both platforms auto-apply
+    a +1 OP self-upvote on every post, so the raw `upvotes` column starts at 1
+    for a brand-new post with zero real engagement. Strip that +1 here so the
+    display matches SCORE_SQL and the dashboard. Other platforms pass through.
+    """
     lines = []
-    upvotes = row[2] if row[2] is not None else 0
+    platform_lc = str(row[1] or "").lower()
+    raw_upvotes = row[2] if row[2] is not None else 0
+    if platform_lc in ("reddit", "moltbook"):
+        upvotes = max(0, raw_upvotes - 1)
+    else:
+        upvotes = raw_upvotes
     comments = row[3] if row[3] is not None else 0
     views = row[4] if row[4] is not None else 0
     our_content = row[5] or ""
@@ -451,7 +477,7 @@ def main():
                 f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
                 f"AND platform NOT IN ('github_issues') "
                 f"{where_extra} {platform_filter} "
-                f"ORDER BY {SCORE_SQL} DESC, upvotes DESC LIMIT 5",
+                f"ORDER BY {SCORE_SQL} DESC, {UPVOTES_NET_SQL} DESC LIMIT 5",
                 params
             )
             top_by_group[proj] = cur.fetchall()
