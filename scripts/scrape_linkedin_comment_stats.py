@@ -453,7 +453,9 @@ def main():
                 "error": "unauthorized_caller",
                 "detail": (
                     "scrape_linkedin_comment_stats.py is invoked only by "
-                    "stats-linkedin-comments.sh. Set "
+                    "stats-linkedin.sh (2026-05-11: the standalone "
+                    "stats-linkedin-comments.sh was retired after the "
+                    "replies-table rows were migrated into posts). Set "
                     "SOCIAL_AUTOPOSTER_LINKEDIN_COMMENT_STATS=1 from the "
                     "caller if this invocation is legitimate."
                 ),
