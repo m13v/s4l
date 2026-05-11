@@ -45,7 +45,7 @@ fi
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
-cleanup() { rm -f "$PICK_FILE"; }
+cleanup() { rm -f "$PICK_FILE" "${UNPROVEN_JSON_FILE:-}"; }
 trap cleanup EXIT INT TERM HUP
 
 log "=== instagram-render fire: $(date) ==="
@@ -136,6 +136,86 @@ if [ "${FORCE_RENDER:-0}" != "1" ] && [ "$DRAFT_COUNT" -ge 3 ]; then
   exit 0
 fi
 
+# Step 1.5: organic only — 50% rotation injects one untried clip from
+# 'mixer/unproven new content/' as one of the TLH slots. "Tried once" is
+# tracked by media_posts.metadata->>'unproven_clip_basename'; once that
+# basename appears on any row, the clip is retired from the rotation pool.
+# Override with FORCE_UNPROVEN=1 (always pick if any untried) or
+# FORCE_UNPROVEN=0 (never pick). Default: probabilistic 50%.
+UNPROVEN_JSON_FILE="/tmp/ig_unproven_pick_$(date +%s)_$$.json"
+echo '{"use": false, "reason": "default"}' > "$UNPROVEN_JSON_FILE"
+if [ "$TARGET" = "organic" ]; then
+  /opt/homebrew/bin/python3.11 - "$UNPROVEN_JSON_FILE" > /dev/null 2>>"$LOG_FILE" <<'PY'
+import json, os, random, sys, glob, psycopg2
+out_path = sys.argv[1]
+unproven_dir = os.path.expanduser('~/social-autoposter/mixer/unproven new content')
+env = {}
+for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
+    if '=' in ln and not ln.strip().startswith('#'):
+        k, v = ln.split('=', 1)
+        env[k.strip()] = v.strip()
+result = {"use": False}
+try:
+    conn = psycopg2.connect(env['DATABASE_URL'])
+    c = conn.cursor()
+    c.execute(
+        "SELECT DISTINCT metadata->>'unproven_clip_basename' "
+        "FROM media_posts WHERE metadata ? 'unproven_clip_basename'"
+    )
+    used = {r[0] for r in c.fetchall() if r[0]}
+    conn.close()
+    if not os.path.isdir(unproven_dir):
+        result = {"use": False, "reason": "unproven dir missing", "dir": unproven_dir}
+    else:
+        candidates = []
+        for ext in ('*.MP4', '*.mp4', '*.MOV', '*.mov', '*.m4v', '*.M4V'):
+            candidates.extend(glob.glob(os.path.join(unproven_dir, ext)))
+        untried = [p for p in candidates if os.path.basename(p) not in used]
+        force = os.environ.get('FORCE_UNPROVEN')
+        if force == '0':
+            roll_use = False
+        elif force == '1':
+            roll_use = True
+        else:
+            roll_use = (random.random() < 0.5)
+        if roll_use and untried:
+            pick = random.choice(untried)
+            result = {
+                "use": True,
+                "basename": os.path.basename(pick),
+                "path": pick,
+                "untried_count": len(untried),
+                "total_count": len(candidates),
+                "used_count": len(used),
+                "force": force,
+            }
+        else:
+            result = {
+                "use": False,
+                "reason": (
+                    "no untried clips" if not untried
+                    else f"coin flip skipped (force={force})"
+                ),
+                "untried_count": len(untried),
+                "total_count": len(candidates),
+                "used_count": len(used),
+                "force": force,
+            }
+except Exception as e:
+    result = {"use": False, "reason": f"error: {e}"}
+with open(out_path, 'w') as f:
+    json.dump(result, f, indent=2)
+PY
+  UNPROVEN_USE=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$UNPROVEN_JSON_FILE')).get('use', False))")
+  if [ "$UNPROVEN_USE" = "True" ]; then
+    UNPROVEN_BASENAME=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$UNPROVEN_JSON_FILE'))['basename'])")
+    log "unproven clip injected: $UNPROVEN_BASENAME"
+  else
+    UNPROVEN_REASON=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$UNPROVEN_JSON_FILE')).get('reason', 'n/a'))")
+    log "unproven clip not injected: $UNPROVEN_REASON"
+  fi
+fi
+
 # Step 2: build prompt and spawn claude
 PROMPT_FILE="/tmp/ig_render_prompt_$(date +%s)_$$.txt"
 
@@ -152,6 +232,16 @@ shape. Follow it exactly. When SKILL and this prompt disagree, SKILL wins.
 
 REQUEST ENVELOPE FOR THIS RUN:
 $(cat "$PICK_FILE")
+
+UNPROVEN CLIP INJECTION (organic runs only):
+$(cat "$UNPROVEN_JSON_FILE")
+If "use": true above, you MUST include the clip at "path" as ONE of the 3-6
+TLH slots in this render, encoded via the same pure-speedup ffmpeg recipe
+SKILL Section 3 step 2 uses for any raw clip from '5. time lapse hooks/'.
+After insert, set metadata.unproven_clip_basename = "<basename>" on the
+media_posts row. The render-cycle uses this to retire the clip from future
+rotation. See SKILL Section 3 "Unproven clip injection" for details.
+If "use": false, ignore this block; render normally from the existing pool.
 
 TYPE MAPPING (do NOT swap these):
 - post_type='organic' -> TLH format. AI-themed lesson, NO product mention by
