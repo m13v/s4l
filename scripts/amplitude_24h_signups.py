@@ -153,9 +153,13 @@ def posthog_24h_count(proj, posthog_key, now_utc):
     if not posthog_key:
         return {"count": None, "error": "no PostHog key"}
 
-    # HogQL: count `newsletter_subscribed` per partner_outcome in last 24h for $host = website
+    # HogQL: count unique signups per partner_outcome in last 24h for $host = website.
+    # DISTINCT on (email, distinct_id) so client + server captures of the
+    # same submission collapse to one (consistent with project_stats_json.py),
+    # and a user that retries the form 3 times still counts as 1 signup.
     query = (
-        "SELECT properties.partner_outcome AS outcome, count() AS n, "
+        "SELECT properties.partner_outcome AS outcome, "
+        "count(DISTINCT coalesce(properties.email, distinct_id)) AS n, "
         "max(timestamp) AS latest "
         "FROM events "
         "WHERE event = 'newsletter_subscribed' "
