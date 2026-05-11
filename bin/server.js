@@ -84,7 +84,7 @@ const JOBS = [
   // Stats row
   { label: 'com.m13v.social-stats-reddit', name: 'Stats Reddit', type: 'Stats', platform: 'Reddit', script: 'stats-reddit.sh', logPrefix: 'stats-reddit-', plist: 'com.m13v.social-stats-reddit.plist' },
   { label: 'com.m13v.social-stats-twitter', name: 'Stats Twitter', type: 'Stats', platform: 'Twitter', script: 'stats-twitter.sh', logPrefix: 'stats-twitter-', plist: 'com.m13v.social-stats-twitter.plist' },
-  { label: 'com.m13v.social-linkedin-stats-comments', name: 'Stats LinkedIn', type: 'Stats', platform: 'LinkedIn', script: 'stats-linkedin-comments.sh', logPrefix: 'stats-linkedin-comments-', plist: 'com.m13v.social-linkedin-stats-comments.plist' },
+  { label: 'com.m13v.social-stats-linkedin', name: 'Stats LinkedIn', type: 'Stats', platform: 'LinkedIn', script: 'stats-linkedin.sh', logPrefix: 'stats-linkedin-', plist: 'com.m13v.social-stats-linkedin.plist' },
   { label: 'com.m13v.social-stats-moltbook', name: 'Stats MoltBook', type: 'Stats', platform: 'MoltBook', script: 'stats-moltbook.sh', logPrefix: 'stats-moltbook-', plist: 'com.m13v.social-stats-moltbook.plist' },
   // Post Audit row (verify posts still exist / API health)
   { label: 'com.m13v.social-audit-reddit', name: 'Post Audit Reddit', type: 'Post Audit', platform: 'Reddit', script: 'audit-reddit.sh', logPrefix: 'audit-reddit-', plist: 'com.m13v.social-audit-reddit.plist' },
@@ -3554,10 +3554,16 @@ async function handleApi(req, res) {
     // upvotes_discounted applies the Reddit/Moltbook -1 clamp per row (OP self-upvote
     // is on by default for both platforms) before summing, matching top_performers.SCORE_SQL
     // so the UI score aligns with the Python feedback report. Per-post score is computed client-side.
+    // The plain `upvotes` alias is also discounted; we used to expose a raw sum here
+    // alongside the discounted one but it overstated engagement by ~+1 per Reddit/
+    // Moltbook post in the style-table display, so the two are now identical (kept
+    // both aliases for any downstream consumer reading either field).
     const q = "SELECT json_agg(row_to_json(r)) FROM (" +
       "SELECT COALESCE(engagement_style, '(none)') AS style, COUNT(*)::int AS posts, " +
         "COUNT(*) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues'))::int AS views_posts, " +
-        "COALESCE(SUM(upvotes), 0)::int AS upvotes, " +
+        "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') " +
+          "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
+          "ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes, " +
         "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') " +
           "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
           "ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes_discounted, " +
@@ -3647,15 +3653,22 @@ async function handleApi(req, res) {
     // platforms); use FILTER so the views range only reflects platforms that
     // actually report it.
     const viewsFilter = "FILTER (WHERE LOWER(platform) NOT IN ('moltbook','github','github_issues'))";
+    // upvotes_net per row strips the OP self-upvote on Reddit/Moltbook so the
+    // cohort min/max/avg upvote columns reflect organic engagement, not
+    // posts * 1. Same shape as scoreExpr above.
+    const upvotesNetExpr =
+      "CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') " +
+        "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
+        "ELSE COALESCE(upvotes,0) END";
     const q = "SELECT json_agg(row_to_json(r)) FROM (" +
       "SELECT cohort, " +
         "COUNT(*)::int AS posts, " +
         "MIN(score)::int AS min_score, " +
         "MAX(score)::int AS max_score, " +
         "AVG(score)::numeric(10,1) AS avg_score, " +
-        "MIN(COALESCE(upvotes,0))::int AS min_up, " +
-        "MAX(COALESCE(upvotes,0))::int AS max_up, " +
-        "AVG(COALESCE(upvotes,0))::numeric(10,1) AS avg_up, " +
+        "MIN(upvotes_net)::int AS min_up, " +
+        "MAX(upvotes_net)::int AS max_up, " +
+        "AVG(upvotes_net)::numeric(10,1) AS avg_up, " +
         "MIN(COALESCE(comments_count,0))::int AS min_cm, " +
         "MAX(COALESCE(comments_count,0))::int AS max_cm, " +
         "AVG(COALESCE(comments_count,0))::numeric(10,1) AS avg_cm, " +
@@ -3663,7 +3676,8 @@ async function handleApi(req, res) {
         "MAX(COALESCE(views,0)) " + viewsFilter + " AS max_views, " +
         "(AVG(COALESCE(views,0)) " + viewsFilter + ")::numeric(10,0) AS avg_views " +
       "FROM (" +
-        "SELECT platform, upvotes, comments_count, views, " +
+        "SELECT platform, " + upvotesNetExpr + " AS upvotes_net, " +
+          "comments_count, views, " +
           scoreExpr + " AS score, " +
           cohortExpr + " AS cohort " +
         "FROM posts " +
@@ -4589,7 +4603,13 @@ async function handleApi(req, res) {
     // rank alongside other platforms based on upvotes + comments only.
     const q = "SELECT json_agg(row_to_json(r)) FROM (" +
       "SELECT posts.id, posts.platform, " +
-        "COALESCE(upvotes, 0)::int AS upvotes, " +
+        // Upvotes are reported NET on Reddit/Moltbook (both auto-apply a +1 OP
+        // self-upvote on every post). Strip it per row, clamped at 0 so
+        // downvoted posts don't go negative; pass other platforms through.
+        // Matches the score discount below and bin/server.js upvotes_discounted.
+        "CASE WHEN LOWER(posts.platform) IN ('reddit', 'moltbook') " +
+          "THEN GREATEST(0, COALESCE(upvotes, 0) - 1) " +
+          "ELSE COALESCE(upvotes, 0) END::int AS upvotes, " +
         "COALESCE(comments_count, 0)::int AS comments_count, " +
         "CASE WHEN LOWER(posts.platform) IN ('moltbook', 'github', 'github_issues') " +
           "THEN NULL ELSE COALESCE(views, 0)::int END AS views, " +
@@ -9682,7 +9702,7 @@ const STYLE_STATS_HELP = {
   style:    'Engagement tone Claude used to draft this first-touch comment/post (slug from scripts/engagement_styles.py). The A/B testing system uses these stats to decide which tones to imitate next. Note: a row in the posts table = our FIRST-TOUCH engagement on a thread, not (usually) an original thread we authored. Reddit/Moltbook/GitHub = our top-level comment on someone else’s thread; X = our reply; LinkedIn = our comment. Subsequent back-and-forth replies live in a separate replies pipeline and are not counted here.',
   score:    'Per-post quality signal computed on engagement that landed on OUR comment/post (replies to it, upvotes on it), not on the underlying third-party thread. Formula: (comments * 3 + upvotes_discounted) / posts. upvotes_discounted subtracts the OP self-upvote on Reddit and Moltbook so those platforms compare fairly with X/LinkedIn. Views are deliberately excluded so low-volume styles compare fairly with high-volume ones. Same signal the feedback report uses.',
   posts:    'Count of first-touch comments/posts published in this style during the selected window. (Reddit comments on others’ threads, X replies, LinkedIn comments, etc. The rare run-reddit-threads.sh original-thread rows are also counted.)',
-  upvotes:  'Sum of upvotes/likes received by OUR comment (or our thread, in the rare original-thread case). Per-post average in parentheses, raw and not discounted.',
+  upvotes:  'Sum of upvotes/likes received by OUR comment (or our thread, in the rare original-thread case). Net of the Reddit/Moltbook OP self-upvote (both platforms auto-apply +1 on every post; we strip it so a brand-new post starts at 0, not 1). Other platforms (X, LinkedIn, GitHub) pass through unchanged. Per-post average shown in parentheses.',
   comments: 'Sum of replies received by OUR comment (or comments under our thread). Per-post average in parentheses. Tracked in the posts.comments_count column, independent of the separate replies pipeline that records replies WE author.',
   views:    'Sum of impressions on OUR comment/post. Per-post average in parentheses. Moltbook and GitHub are excluded from both the total and the per-post denominator since neither platform exposes a views metric.',
   recommendations: 'Number of posts in this tone that ALSO carried a project recommendation (is_recommendation = true). Independent dimension from style: tells you how often this tone was used to deliver a product mention.',
