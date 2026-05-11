@@ -160,7 +160,7 @@ def _ban_entry_to_slug(entry):
     return None
 
 
-def _load_comment_blocked_subs():
+def _load_comment_blocked_subs(project_name=None):
     """Load subreddits where we cannot post comments.
 
     Reads subreddit_bans.comment_blocked plus exclusions.subreddits. Used by
@@ -170,6 +170,18 @@ def _load_comment_blocked_subs():
     subreddit_bans.thread_blocked is NOT read here — a sub can block new
     thread creation while still allowing comments, so it must not leak into
     the comment pipeline.
+
+    Per-project layer (added 2026-05-11): when project_name is provided, also
+    pulls active `subreddit:<slug>` excludes from project_search_excludes
+    (platform='reddit'). These are LLM-proposed and have cleared the 2-batch
+    activation gate. Failures here MUST NOT break search: if project_excludes
+    import / DB call fails for any reason, we fall back to the global list
+    alone so the pipeline degrades gracefully.
+
+    config.json subreddit_bans entries gain optional .project semantics in the
+    same change: an entry with `"project": "studyly"` ONLY blocks for that
+    project; an entry with no .project (or .project=null) blocks globally.
+    Match is case-insensitive against the canonical config.json project name.
 
     Handles both ban-list shapes: bare-string entries (pre-2026-05-11) and
     {"sub": ..., "added_at": ..., "reason": ..., "project": ...} audit dicts.
@@ -183,9 +195,33 @@ def _load_comment_blocked_subs():
         if isinstance(bans, dict):
             for entry in bans.get("comment_blocked") or []:
                 slug = _ban_entry_to_slug(entry)
-                if slug:
+                if not slug:
+                    continue
+                entry_project = None
+                if isinstance(entry, dict):
+                    entry_project = entry.get("project") or None
+                if entry_project is None:
                     blocked.add(slug)
+                elif project_name and entry_project.lower() == project_name.lower():
+                    blocked.add(slug)
+                # else: scoped to a different project, skip
         blocked.update(s.lower() for s in config.get("exclusions", {}).get("subreddits", []))
+
+        # Per-project self-improving sub denylist (2026-05-11). Reads
+        # project_search_excludes where platform='reddit' and term starts
+        # with 'subreddit:'. Only active terms (passed the 2-batch gate) are
+        # returned by active_excludes_by_kind, so a one-off false reject can't
+        # mute a sub.
+        if project_name:
+            try:
+                import project_excludes as _pe
+                split = _pe.active_excludes_by_kind('reddit', project_name)
+                for sub in (split.get('subreddit') or []):
+                    if sub:
+                        blocked.add(sub.lower())
+            except Exception as e:
+                print(f"[reddit_search] WARN: project_excludes load failed: {e}",
+                      file=sys.stderr, flush=True)
         return blocked
     except Exception:
         return set()
@@ -417,7 +453,20 @@ def cmd_search(args):
     already_posted = {row[0] for row in cur.fetchall()}
     conn.close()
 
-    blocked_subs = _load_comment_blocked_subs()
+    # Read project env BEFORE building the blocked-subs set so per-project
+    # excludes (subreddit:<slug> rows in project_search_excludes) layer onto
+    # the global denylist. The same env var is reused below for the feedback-
+    # log side effect, so this reordering is free.
+    project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
+    batch_env = os.environ.get("SAPS_REDDIT_BATCH_ID") or None
+
+    # Compute global vs project-augmented denylist sizes so the stderr marker
+    # below shows how much of the block bucket came from the per-project
+    # layer. Empty diff means project_search_excludes had no active sub rows
+    # for this project (which is the normal state for new projects).
+    blocked_subs_global = _load_comment_blocked_subs(project_name=None)
+    blocked_subs = _load_comment_blocked_subs(project_name=project_env)
+    project_block_extra = len(blocked_subs) - len(blocked_subs_global)
 
     # Determine subreddit scoping
     target_subs = None
@@ -427,14 +476,7 @@ def cmd_search(args):
     url = _build_search_url(query, args.sort, args.limit, time_filter, subreddits=target_subs)
     data = _do_request(url)
     threads, stats = _parse_search_results(data, already_posted, blocked_subs)
-
-    # Feedback-loop side effect: log this query attempt + upsert per-thread
-    # snapshots, mutating `threads` in place to attach delta_* fields. project
-    # + batch_id come from env vars exported by post_reddit.py:run_claude
-    # before invoking the Claude session, so the tool-call signature the LLM
-    # uses stays unchanged.
-    project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
-    batch_env = os.environ.get("SAPS_REDDIT_BATCH_ID") or None
+    stats["project_block_extra"] = project_block_extra
     _log_search_and_attach_deltas(
         query, args.subreddits, project_env, batch_env, threads, stats,
     )
@@ -449,7 +491,8 @@ def cmd_search(args):
         f'blocked_sub={stats["blocked_sub"]} archived={stats["archived"]} '
         f'locked={stats["locked"]} too_old={stats["too_old"]} '
         f'already_posted_flagged={stats["already_posted_flagged"]} '
-        f'top_score={stats["top_score"]} top_comments={stats["top_comments"]}',
+        f'top_score={stats["top_score"]} top_comments={stats["top_comments"]} '
+        f'project_block_extra={stats.get("project_block_extra", 0)}',
         file=sys.stderr, flush=True,
     )
 
@@ -520,11 +563,15 @@ def _html_postable_check(thread_url):
 
 def cmd_fetch(args):
     """Fetch a thread's comments via Reddit JSON API."""
-    # Check if subreddit is blocked
+    # Check if subreddit is blocked. Honors per-project excludes via the
+    # SAPS_REDDIT_PROJECT env var (same shape as cmd_search), so a sub on
+    # a project's private denylist (or in project_search_excludes) returns
+    # the same `subreddit_blocked` error and the LLM stops fetching it.
     import re as _re
     sub_match = _re.search(r'/r/([^/]+)', args.url)
     if sub_match:
-        blocked = _load_comment_blocked_subs()
+        project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
+        blocked = _load_comment_blocked_subs(project_name=project_env)
         if sub_match.group(1).lower() in blocked:
             print(json.dumps({"error": "subreddit_blocked", "subreddit": sub_match.group(1)}))
             return
