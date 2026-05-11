@@ -7,6 +7,13 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (see run-twitter-cycle.sh for the
+# same pattern). Stamps claude_sessions.cycle_id so get_run_cost.py --cycle-id
+# returns just this cycle's spend.
+BATCH_ID="${BATCH_ID:-dmtw-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Bootstrap log paths early so the singleton-cleanup output below gets captured
 # in the same log file the rest of the run uses.
 LOG_DIR="$HOME/social-autoposter/skill/logs"

@@ -9,6 +9,16 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (matches the pattern in
+# run-reddit-search.sh, engage-reddit.sh, dm-outreach-*.sh, link-edit-*.sh,
+# etc.). Every claude session spawned in this script inherits SA_CYCLE_ID via
+# env so log_claude_session.py stamps claude_sessions.cycle_id. Lets
+# get_run_cost.py --cycle-id report THIS run's spend instead of bleeding into
+# overlapping engagement cycles.
+BATCH_ID="${BATCH_ID:-octolens-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Parse args.
 PLATFORM=""
 while [ $# -gt 0 ]; do

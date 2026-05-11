@@ -7,6 +7,15 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (matches the pattern in
+# run-reddit-search.sh, engage-reddit.sh, etc.). Every claude session spawned
+# in this script inherits SA_CYCLE_ID via env so log_claude_session.py stamps
+# claude_sessions.cycle_id. Lets get_run_cost.py --cycle-id report THIS run's
+# spend instead of bleeding into overlapping outreach cycles.
+BATCH_ID="${BATCH_ID:-dmrd-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Pipeline lock at top (only-one-of-us guard). We DO NOT acquire
 # reddit-browser at the bash level anymore — claude itself acquires it
 # per-DM via scripts/reddit_browser_lock.py, only around the actual MCP

@@ -20,6 +20,12 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting. Stamps claude_sessions.cycle_id
+# via env inheritance through run_gsc_pipeline.sh + generate_page.py.
+BATCH_ID="${BATCH_ID:-seogsc-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TICK_ID=$(date +%Y-%m-%d_%H%M%S)

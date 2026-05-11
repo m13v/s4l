@@ -52,6 +52,11 @@
 
 set -uo pipefail
 
+# Cycle ID for cross-cycle cost accounting.
+BATCH_ID="${BATCH_ID:-seotpost-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.json"

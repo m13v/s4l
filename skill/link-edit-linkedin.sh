@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (see run-linkedin.sh for the same
+# pattern). Stamps claude_sessions.cycle_id via env inheritance.
+BATCH_ID="${BATCH_ID:-leli-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Browser-profile lock first (shared with other linkedin pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "linkedin-browser" 3600

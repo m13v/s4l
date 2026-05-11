@@ -23,6 +23,14 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (matches the pattern in
+# run-reddit-search.sh, etc.). Every claude session spawned via run_serp_pipeline.sh
+# and generate_page.py inherits SA_CYCLE_ID via env, so log_claude_session.py
+# stamps claude_sessions.cycle_id correctly.
+BATCH_ID="${BATCH_ID:-seoserp-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TICK_ID=$(date +%Y-%m-%d_%H%M%S)

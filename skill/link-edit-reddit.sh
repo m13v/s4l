@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+# Cycle ID for cross-cycle cost accounting (see run-reddit-search.sh / engage-reddit.sh
+# for the same pattern). Stamps claude_sessions.cycle_id via env inheritance.
+BATCH_ID="${BATCH_ID:-lerd-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Pipeline lock at top. We DO NOT acquire reddit-browser at the bash level
 # anymore — claude itself acquires it per-post via
 # scripts/reddit_browser_lock.py, only around the actual MCP browser

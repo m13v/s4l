@@ -29,6 +29,12 @@
 
 set -uo pipefail
 
+# Cycle ID for cross-cycle cost accounting. Stamps claude_sessions.cycle_id
+# via env inheritance.
+BATCH_ID="${BATCH_ID:-seotp-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.json"
