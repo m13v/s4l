@@ -11,6 +11,13 @@ acquire_lock "engage-moltbook" 3600
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
 
+# Cycle ID for cross-cycle cost accounting (see engage.sh / run-reddit-search.sh
+# for the same pattern). engage_reddit.py's claude subprocess inherits this via
+# env, and log_claude_session.py stamps claude_sessions.cycle_id.
+BATCH_ID="${BATCH_ID:-enmb-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
