@@ -597,13 +597,66 @@ def preflight_rate_limit(budget_seconds=PREFLIGHT_WAIT_BUDGET_SECONDS):
     )
 
 
-def mark_comment_blocked(thread_url: str) -> None:
+# ---------------------------------------------------------------------------
+# subreddit_bans audit shape (introduced 2026-05-11)
+# ---------------------------------------------------------------------------
+# Each entry in subreddit_bans.comment_blocked / .thread_blocked is now an
+# object with the audit metadata we wished we'd been recording all along:
+#   {"sub": "powerbi", "added_at": "2026-05-11T00:31:49Z",
+#    "reason": "account_blocked_in_sub", "project": "WhatsApp MCP"}
+#
+# Pre-migration entries are bare strings; the readers/writers handle both
+# shapes transparently. The migration script
+# (scripts/migrate_subreddit_bans_to_objects.py) backfills existing strings to
+# objects with null metadata.
+#
+# _ban_entry_sub(entry):   extract the sub slug from either shape (returns
+#                           lowercase string or None).
+# _ban_entries_to_subs(L): set of lowercase sub slugs in a ban list.
+# _make_ban_entry(...):    build a fresh entry with current UTC timestamp.
+
+def _ban_entry_sub(entry) -> str | None:
+    """Return the lowercased sub slug from a ban-list entry (str or dict)."""
+    if isinstance(entry, str):
+        s = entry.strip().lower()
+        return s or None
+    if isinstance(entry, dict):
+        s = (entry.get("sub") or "").strip().lower()
+        return s or None
+    return None
+
+
+def _ban_entries_to_subs(entries) -> set[str]:
+    out: set[str] = set()
+    for e in entries or []:
+        s = _ban_entry_sub(e)
+        if s:
+            out.add(s)
+    return out
+
+
+def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
+    """Build a new ban-list entry with the current UTC timestamp."""
+    from datetime import datetime, timezone
+    return {
+        "sub": sub.strip().lower(),
+        "added_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reason": reason or None,
+        "project": project or None,
+    }
+
+
+def mark_comment_blocked(thread_url: str,
+                          reason: str | None = "account_blocked_in_sub",
+                          project: str | None = None) -> None:
     """Add a subreddit to config.json subreddit_bans.comment_blocked at runtime.
 
     Called when the bot's comment attempt is rejected (no comment form, locked,
     restricted). The sub gets blocked for future comment attempts so the
     drafter never targets it again. Thread-posting eligibility is tracked
     separately in subreddit_bans.thread_blocked.
+
+    Records audit metadata (added_at / reason / project) on the entry.
     """
     sub_match = re.search(r'/r/([^/]+)/', thread_url)
     if not sub_match:
@@ -614,13 +667,15 @@ def mark_comment_blocked(thread_url: str) -> None:
             config = json.load(f)
         bans = config.setdefault("subreddit_bans", {})
         blocked = bans.setdefault("comment_blocked", [])
-        existing = {s.lower() for s in blocked}
+        existing = _ban_entries_to_subs(blocked)
         if sub not in existing:
-            blocked.append(sub)
-            blocked.sort(key=str.lower)
+            blocked.append(_make_ban_entry(sub, reason, project))
+            blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
             with open(CONFIG_PATH, "w") as f:
                 json.dump(config, f, indent=2)
-            print(f"[post_reddit] Added r/{sub} to subreddit_bans.comment_blocked")
+                f.write("\n")
+            print(f"[post_reddit] Added r/{sub} to subreddit_bans.comment_blocked "
+                  f"(reason={reason!r} project={project!r})")
     except Exception as e:
         print(f"[post_reddit] WARNING: could not persist blocked sub r/{sub}: {e}")
 
@@ -660,7 +715,9 @@ def _abort_is_permanent_block(abort_reason: str) -> bool:
     return False
 
 
-def mark_thread_blocked(subreddit: str, abort_reason: str = "") -> None:
+def mark_thread_blocked(subreddit: str, abort_reason: str = "",
+                         project: str | None = None,
+                         force: bool = False) -> None:
     """Add a subreddit to config.json subreddit_bans.thread_blocked at runtime.
 
     Called when a thread-post attempt is permanently blocked (account banned,
@@ -669,25 +726,35 @@ def mark_thread_blocked(subreddit: str, abort_reason: str = "") -> None:
     separately in subreddit_bans.comment_blocked.
 
     subreddit may be bare ('programming') or prefixed ('r/programming').
+
+    Records audit metadata (added_at / reason / project) on the entry.
+    The reason field captures the abort_reason verbatim (truncated to 280
+    chars) so we can audit why the sub got blocked months later.
+
+    force=True bypasses the abort_reason regex gate (used when an upstream
+    signal — e.g. the model's permanent_block=true — has already decided
+    this is permanent and the reason text alone wouldn't match the patterns).
     """
     sub = re.sub(r"^r/", "", subreddit, flags=re.IGNORECASE).strip().lower()
     if not sub:
         return
-    if abort_reason and not _abort_is_permanent_block(abort_reason):
+    if not force and abort_reason and not _abort_is_permanent_block(abort_reason):
         return
+    reason_str: str | None = (abort_reason or "").strip()[:280] or None
     try:
         with open(CONFIG_PATH) as f:
             config = json.load(f)
         bans = config.setdefault("subreddit_bans", {})
         blocked = bans.setdefault("thread_blocked", [])
-        existing = {s.lower() for s in blocked}
+        existing = _ban_entries_to_subs(blocked)
         if sub not in existing:
-            blocked.append(sub)
-            blocked.sort(key=str.lower)
+            blocked.append(_make_ban_entry(sub, reason_str, project))
+            blocked.sort(key=lambda e: _ban_entry_sub(e) or "")
             with open(CONFIG_PATH, "w") as f:
                 json.dump(config, f, indent=2)
                 f.write("\n")
-            print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts (permanent block detected)")
+            print(f"[post_reddit] Auto-blocked r/{sub} from future thread posts "
+                  f"(reason={reason_str!r} project={project!r})")
         else:
             print(f"[post_reddit] r/{sub} already in thread_blocked, skipping")
     except Exception as e:
@@ -1884,7 +1951,7 @@ def _post_iteration(plan, reddit_username):
             failed += 1
             print(f"[post_reddit] CDP FAILED: {err}")
             if err == "account_blocked_in_sub":
-                mark_comment_blocked(thread_url)
+                mark_comment_blocked(thread_url, reason=err, project=project_name)
             # Classify the CDP error for queue retry. Unknown errors default
             # to TRANSIENT so we don't permanently kill candidates on a new
             # error string we haven't classified yet; the MAX_ATTEMPTS cap
