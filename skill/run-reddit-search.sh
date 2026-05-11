@@ -322,6 +322,16 @@ fi
 # via select_project.py, fans out search topics, and emits all matching threads
 # as candidates for ripen. The 10-min ripen sleep happens here; salvage
 # already finished posting above so this sleep doesn't block any output.
+#
+# Project-scoped subreddit excludes (added 2026-05-11): post_reddit.py's
+# discover phase logs `[project_excludes] platform=reddit project=...
+# active_subs=N active_keywords=N subs=[...] keywords=[...]` for visibility.
+# Enforcement happens server-side inside reddit_tools._load_comment_blocked_
+# subs via the SAPS_REDDIT_PROJECT env var that post_reddit.py exports below.
+# Claude's draft prompt can propose new subreddit:<slug> excludes when it
+# rejects a thread; they accumulate in project_search_excludes and go live
+# after >=2 distinct batch_ids propose them (activation gate). See
+# scripts/project_excludes.py for the full spec.
 DISCOVER_FILE=$(mktemp -t post_reddit_discover.XXXXXX.json)
 RIPEN_FILE=$(mktemp -t post_reddit_ripened.XXXXXX.json)
 DISCOVER_DRAFT_FILE=$(mktemp -t post_reddit_discover_draft.XXXXXX.json)
