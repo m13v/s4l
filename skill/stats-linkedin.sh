@@ -18,21 +18,22 @@
 #      the kill+reopen cadence flagged on 2026-05-06 is gone), opens a
 #      tab to /in/me/recent-activity/comments/, harvests per-comment
 #      impressions / reactions / replies into a single JSON feed.
-#   3. Run scripts/update_linkedin_comment_stats_from_feed.py — writes
-#      the feed into the legacy `replies` table (older pipeline shape;
-#      ~173 rows total).
-#   4. Run scripts/update_linkedin_stats_from_feed.py — writes the feed
+#   3. Run scripts/update_linkedin_stats_from_feed.py — writes the feed
 #      into the `posts` table for rows whose `our_url` carries a
-#      `?commentUrn=` (the 97 pre-existing rows that already had it
-#      from reply_to_comment + all new rows posted 2026-05-11 onward
-#      after linkedin_api.py:comment_on_post was patched to embed it).
-#   5. Release the browser lock; updaters are DB-only.
+#      `?commentUrn=` (the 97 pre-existing rows from reply_to_comment +
+#      the 225 rows migrated from the legacy `replies` table on
+#      2026-05-11 + every new row posted 2026-05-11 onward after
+#      linkedin_api.py:comment_on_post was patched to embed it).
+#   4. Release the browser lock; the updater is DB-only.
 #
-# Why one scrape, two writers:
-#   The same activity feed contains every comment we made. Scraping twice
-#   would double LinkedIn fingerprint risk for zero new data. One scrape
-#   + two updaters keeps the URN→stats mapping consistent across both
-#   tables and stays well inside the anti-bot envelope.
+# History note (2026-05-11): there used to be a second writer that wrote
+# the same feed into the legacy `replies` table (~257 LinkedIn rows). On
+# 2026-05-11 those rows were migrated into `posts` (Twitter-parity) and
+# the source rows marked status='migrated'. The replies-table writer
+# (scripts/update_linkedin_comment_stats_from_feed.py) and its standalone
+# entrypoint (skill/stats-linkedin-comments.sh) were retired in the same
+# pass. If you see references to them anywhere, they are stale and
+# should be removed.
 #
 # Bot-detection prevention (carries over the carve-out from
 # stats-linkedin-comments.sh; do NOT loosen):
@@ -76,24 +77,18 @@ RUN_START=$(date +%s)
 log "=== LinkedIn Stats Run (unified): $(date) ==="
 log "mode: python (no LLM); MAX_SCROLLS=$MAX_SCROLLS; timeout=${SCRAPER_TIMEOUT_SEC}s"
 
-# Coverage hint across both tables.
+# Coverage hint.
 COVERAGE=$("$PYTHON_BIN" -c "
 import sys; sys.path.insert(0, '$REPO_DIR/scripts')
 import db as dbmod; dbmod.load_env(); db = dbmod.get_conn()
-cur = db.execute(\"\"\"SELECT
-    (SELECT COUNT(*) FROM replies
-       WHERE platform='linkedin' AND status IN ('replied','posted')
-         AND our_reply_url IS NOT NULL AND our_reply_url ~ 'commentUrn') AS replies_n,
-    (SELECT COUNT(*) FROM posts
-       WHERE platform='linkedin' AND status IN ('active','removed')
-         AND our_url IS NOT NULL AND our_url ILIKE '%commentUrn%')        AS posts_n
-\"\"\")
-r = cur.fetchone(); print(f\"replies={r['replies_n']} posts={r['posts_n']}\")
-" 2>/dev/null || echo "replies=? posts=?")
+cur = db.execute(\"\"\"SELECT COUNT(*) AS n FROM posts
+                     WHERE platform='linkedin' AND status IN ('active','removed')
+                       AND our_url IS NOT NULL AND our_url ILIKE '%commentUrn%'\"\"\")
+print(f\"posts={cur.fetchone()['n']}\")
+" 2>/dev/null || echo "posts=?")
 log "Active LinkedIn comments addressable by this feed: $COVERAGE"
 
 FEED_JSON="$LOG_DIR/stats-linkedin-feed-$(date +%Y%m%d_%H%M%S).json"
-REPLIES_SUMMARY_JSON=$(mktemp -t fazm-li-replies-summary.XXXXXX).json
 POSTS_SUMMARY_JSON=$(mktemp -t fazm-li-posts-summary.XXXXXX).json
 SCRAPER_STDOUT=$(mktemp -t fazm-li-scrape.XXXXXX).json
 
@@ -148,8 +143,8 @@ except Exception:
     fi
 
     if [ ! -s "$FEED_JSON" ]; then
-        log "No feed JSON produced; skipping both updaters."
-        rm -f "$SCRAPER_STDOUT" "$REPLIES_SUMMARY_JSON" "$POSTS_SUMMARY_JSON"
+        log "No feed JSON produced; skipping updater."
+        rm -f "$SCRAPER_STDOUT" "$POSTS_SUMMARY_JSON"
         RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
         "$PYTHON_BIN" "$REPO_DIR/scripts/log_run.py" \
             --script "stats_linkedin" \
@@ -159,48 +154,35 @@ except Exception:
         log "=== LinkedIn stats failed: $(date) ==="
         exit 1
     fi
-    log "Feed JSON exists despite rc=$SCRAPER_RC; running updaters anyway."
+    log "Feed JSON exists despite rc=$SCRAPER_RC; running updater anyway."
 fi
 
-# 3. Apply to `replies` (legacy table).
-log "Writer 1/2: replies table..."
-"$PYTHON_BIN" "$REPO_DIR/scripts/update_linkedin_comment_stats_from_feed.py" \
-    --from-json "$FEED_JSON" \
-    --summary   "$REPLIES_SUMMARY_JSON" \
-    2>&1 | tee -a "$LOG_FILE" \
-    || log "WARNING: replies updater exited with code $?"
-
-# 4. Apply to `posts` (Twitter-parity table).
-log "Writer 2/2: posts table..."
+# 3. Apply to `posts` (Twitter-parity table; sole stats target).
+log "Writer: posts table..."
 "$PYTHON_BIN" "$REPO_DIR/scripts/update_linkedin_stats_from_feed.py" \
     --from-json "$FEED_JSON" \
     --summary   "$POSTS_SUMMARY_JSON" \
     2>&1 | tee -a "$LOG_FILE" \
     || log "WARNING: posts updater exited with code $?"
 
-# 5. Surface combined counters.
-REFRESHED_REPLIES=0
+# 4. Surface counters.
 REFRESHED_POSTS=0
 NOT_FOUND=0
-if [ -s "$REPLIES_SUMMARY_JSON" ]; then
-    REFRESHED_REPLIES=$("$PYTHON_BIN" -c "import json; print(json.load(open('$REPLIES_SUMMARY_JSON')).get('refreshed', 0))" 2>/dev/null || echo 0)
-fi
 if [ -s "$POSTS_SUMMARY_JSON" ]; then
     REFRESHED_POSTS=$("$PYTHON_BIN" -c "import json; print(json.load(open('$POSTS_SUMMARY_JSON')).get('refreshed', 0))" 2>/dev/null || echo 0)
     NOT_FOUND=$("$PYTHON_BIN" -c "import json; print(json.load(open('$POSTS_SUMMARY_JSON')).get('not_found', 0))" 2>/dev/null || echo 0)
 fi
-TOTAL_REFRESHED=$(( REFRESHED_REPLIES + REFRESHED_POSTS ))
-log "Comment stats refresh: replies=$REFRESHED_REPLIES posts=$REFRESHED_POSTS total=$TOTAL_REFRESHED unmatched=$NOT_FOUND"
+log "Comment stats refresh: posts=$REFRESHED_POSTS total=$REFRESHED_POSTS unmatched=$NOT_FOUND"
 
-# 6. Log run to persistent monitor.
+# 5. Log run to persistent monitor.
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 "$PYTHON_BIN" "$REPO_DIR/scripts/log_run.py" --script "stats_linkedin" \
-    --posted "$TOTAL_REFRESHED" --skipped 0 --failed 0 \
+    --posted "$REFRESHED_POSTS" --skipped 0 --failed 0 \
     --cost "0.0000" --elapsed "$RUN_ELAPSED" \
     2>/dev/null || true
 
 # Cleanup.
-rm -f "$REPLIES_SUMMARY_JSON" "$POSTS_SUMMARY_JSON" "$SCRAPER_STDOUT"
+rm -f "$POSTS_SUMMARY_JSON" "$SCRAPER_STDOUT"
 find "$LOG_DIR" -name "stats-linkedin-*.log"  -mtime +14 -delete 2>/dev/null || true
 find "$LOG_DIR" -name "stats-linkedin-feed-*.json" -mtime +7 -delete 2>/dev/null || true
 
