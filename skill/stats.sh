@@ -296,12 +296,30 @@ if [ "$LINKEDIN_POSTS" -gt 0 ]; then
     # against linkedin_browser.PROFILE_DIR), so cookies + fingerprint match
     # the post pipeline regardless of which lifecycle mode is active.
 
-    SOCIAL_AUTOPOSTER_LINKEDIN_STATS=1 "$GTIMEOUT_BIN" 1800 "$PY_BIN" \
-        "$REPO_DIR/scripts/scrape_linkedin_stats_browser.py" \
-        --limit 30 --summary "$LINKEDIN_SUMMARY_FILE" $QUIET \
+    # 2026-05-11: scrape_linkedin_stats_browser.py was deprecated 2026-05-05
+    # (the per-permalink scrape loop pattern triggered LinkedIn's anti-bot on
+    # 2026-05-05). It still exits 2. We now call skill/stats-linkedin.sh, the
+    # unified orchestrator: one CDP-attached scrape of /in/me/recent-activity/
+    # comments/, two DB writers (replies + posts tables sharing one feed).
+    # The orchestrator manages its OWN linkedin-browser lock acquire/release
+    # internally, so we release ours first to avoid a self-deadlock.
+    release_lock "linkedin-browser"
+    "$GTIMEOUT_BIN" 1800 bash "$REPO_DIR/skill/stats-linkedin.sh" \
         >> "$LOGFILE" 2>&1
     STEP4_EXIT=$?
-    release_lock "linkedin-browser"
+    # Bridge the unified-orchestrator's summary into the legacy
+    # $LINKEDIN_SUMMARY_FILE shape that the dashboard parser downstream still
+    # expects. The orchestrator writes its posts-table summary internally
+    # then deletes it; for the dashboard, surface the combined refresh count
+    # via a fresh sidecar populated from the orchestrator's per-fire log.
+    LAST_STATS_LOG=$(ls -t "$REPO_DIR/skill/logs/stats-linkedin-"*.log 2>/dev/null | head -1)
+    if [ -n "$LAST_STATS_LOG" ] && [ -f "$LAST_STATS_LOG" ]; then
+        REFRESHED_TOTAL=$(grep -oE 'total=[0-9]+' "$LAST_STATS_LOG" | tail -1 | sed 's/total=//' || echo 0)
+        NOT_FOUND_TOTAL=$(grep -oE 'unmatched=[0-9]+' "$LAST_STATS_LOG" | tail -1 | sed 's/unmatched=//' || echo 0)
+        printf '{"refreshed":%s,"removed":0,"unavailable":0,"not_found":%s}\n' \
+            "${REFRESHED_TOTAL:-0}" "${NOT_FOUND_TOTAL:-0}" \
+            > "$LINKEDIN_SUMMARY_FILE" 2>/dev/null || true
+    fi
 
     if [ "$STEP4_EXIT" -eq 124 ]; then
         log "Step 4: TIMEOUT (30 min limit reached)"
