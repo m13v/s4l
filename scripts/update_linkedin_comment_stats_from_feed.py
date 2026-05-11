@@ -66,11 +66,20 @@ import db as dbmod  # noqa: E402
 
 # `urn:li:comment:(urn:li:activity:<parent>,<comment_id>)`
 # `urn:li:comment:(urn:li:ugcPost:<parent>,<comment_id>)`
+# `urn:li:comment:(activity:<parent>,<comment_id>)`        ← bare-kind form
+# `urn:li:comment:(ugcPost:<parent>,<comment_id>)`         ← bare-kind form
 # After URL-decoding our_reply_url, we extract the SECOND numeric run as
 # comment_id. Take it from inside the parens to avoid catching activity
 # IDs that LinkedIn also embeds in the same URL's path.
+#
+# LinkedIn stores the inner URN in two interchangeable formats. As of 2026,
+# the link-share endpoint (used by our reply pipeline) returns the bare-kind
+# form (no `urn:li:` prefix on the parent), while older / Voyager-derived
+# URLs use the fully-qualified form. The `(?:urn:li:)?` non-capturing group
+# matches both. Before this fix, 95/173 of our LinkedIn replies never got
+# stats updated because their our_reply_url was the bare form (2026-05-11).
 COMMENT_URN_RE = re.compile(
-    r"urn:li:comment:\(urn:li:(?P<kind>\w+):(?P<parent>\d+),(?P<cid>\d+)\)"
+    r"urn:li:comment:\((?:urn:li:)?(?P<kind>\w+):(?P<parent>\d+),(?P<cid>\d+)\)"
 )
 
 
