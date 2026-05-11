@@ -6281,7 +6281,7 @@ const HTML = `<!DOCTYPE html>
         <span class="top-subtab-label">Comments</span>
         <span class="top-subtab-sub">your replies</span>
       </span>
-      <span class="top-subtab" data-subtab="pages" role="tab" aria-selected="false" title="Top landing/SEO pages on your sites by pageviews">
+      <span class="top-subtab" data-subtab="pages" role="tab" aria-selected="false" title="Top landing/SEO pages on your sites by unique visitors">
         <span class="top-subtab-icon" aria-hidden="true">\ud83d\udcc4</span>
         <span class="top-subtab-label">Pages</span>
         <span class="top-subtab-sub">SEO traffic</span>
@@ -8726,8 +8726,16 @@ const DAILY_METRICS = [
   { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
   { id: 'clicks',          label: 'Clicks',            color: '#0ea5e9', endpoint: '/api/clicks/per-day',   valueKey: 'clicks_gained',    platformAware: true },
   { id: 'bookings',        label: 'Bookings',          color: '#ef4444', endpoint: '/api/bookings/per-day', valueKey: 'bookings_gained',  platformAware: false },
-  { id: 'pageviews',       label: 'Pageviews',         color: '#8b5cf6', funnel: true, valueKey: 'pageviews',              platformAware: false },
-  { id: 'sessions',        label: 'Sessions',          color: '#a78bfa', funnel: true, valueKey: 'sessions',               platformAware: false },
+  // All funnel metrics count UNIQUE VISITORS (distinct_id), not raw events.
+  // A user iterating on the same project (multiple prompts, multiple
+  // schedule retries, multiple pageviews) is 1, not N. See
+  // scripts/project_stats_json.py and scripts/funnel_per_day.py.
+  // The data-layer key is still "pageviews" for back-compat; the label is
+  // what the user sees, so call it "Visitors". The "sessions" metric used
+  // to count distinct $session_id; we collapsed it to distinct_id too so
+  // it's identical to pageviews. Dropped from the chart to avoid showing
+  // two lines that always overlap.
+  { id: 'pageviews',       label: 'Visitors',          color: '#8b5cf6', funnel: true, valueKey: 'pageviews',              platformAware: false },
   { id: 'email_signups',   label: 'Email Signups',     color: '#10b981', funnel: true, valueKey: 'email_signups',          platformAware: false },
   { id: 'schedule_clicks', label: 'Schedule Clicks',   color: '#f59e0b', funnel: true, valueKey: 'schedule_clicks',        platformAware: false },
   { id: 'get_started',     label: 'Get Started',       color: '#06b6d4', funnel: true, valueKey: 'get_started_clicks',     platformAware: false },
@@ -9021,9 +9029,13 @@ const RATIO_METRICS = [
   { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views' },
   { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views' },
   { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views' },
-  { id: 'email_signups_per_session',     label: 'Email Signups / Sessions',   color: '#10b981', numerator: 'email_signups',   denominator: 'sessions' },
-  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Sessions', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'sessions' },
-  { id: 'get_started_per_session',       label: 'Get Started / Sessions',     color: '#06b6d4', numerator: 'get_started',     denominator: 'sessions' },
+  // Conversion ratios are per VISITOR (one unique distinct_id), not per
+  // session. The metric IDs keep the _per_session suffix for back-compat
+  // with persisted localStorage keys (RATIO_METRICS_STORAGE_KEY); only the
+  // label + denominator key changed.
+  { id: 'email_signups_per_session',     label: 'Email Signups / Visitors',   color: '#10b981', numerator: 'email_signups',   denominator: 'pageviews' },
+  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Visitors', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'pageviews' },
+  { id: 'get_started_per_session',       label: 'Get Started / Visitors',     color: '#06b6d4', numerator: 'get_started',     denominator: 'pageviews' },
 ];
 const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session'];
 const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v1';
@@ -10135,7 +10147,7 @@ function renderFunnelStats(payload) {
       return name + ' <span title="' + tip + '" style="color:#dc2626;cursor:help;margin-left:4px;" aria-label="analytics fetch error">\u26A0</span>';
     }
     if (r && r.analytics_suspected_broken) {
-      const tip = escapeHtml('High pageviews but zero tracked signups, schedule clicks, or get-started clicks; posthog likely not wired on this site. See https://github.com/m13v/seo-components#posthog-setup');
+      const tip = escapeHtml('High visitor count but zero tracked signups, schedule clicks, or get-started clicks; posthog likely not wired on this site. See https://github.com/m13v/seo-components#posthog-setup');
       return name + ' <span title="' + tip + '" style="color:#dc2626;cursor:help;margin-left:4px;" aria-label="analytics suspected broken">\u26A0</span>';
     }
     return name;
@@ -10185,10 +10197,10 @@ function renderFunnelStats(payload) {
       // domain_* totals too, so the same formatter renders "<scoped> (<domain>)".
       // Header click cycles through scoped \u2192 domain pageviews so users can
       // sort by either side of the "<scoped> (<domain>)" cell.
-      { key: 'pageviews',        label: 'Pageviews',       type: 'numeric', align: 'right',
+      { key: 'pageviews',        label: 'Visitors',        type: 'numeric', align: 'right',
         formatter: makeFunnelFmt('domain_pageviews'),
         sortKeys: ['pageviews', 'domain_pageviews'],
-        helpText: 'Click cycles: scoped pageviews \u25bc/\u25b2 \u2192 domain pageviews \u25bc/\u25b2. The cell shows scoped (domain) in the same order.' },
+        helpText: 'Unique visitors (PostHog distinct_id) on $pageview events. Click cycles: scoped visitors \u25bc/\u25b2 \u2192 domain visitors \u25bc/\u25b2. The cell shows scoped (domain) in the same order.' },
       { key: 'email_signups',    label: 'Email Signups',   type: 'numeric', align: 'right', formatter: makeFunnelFmt('domain_email_signups') },
       { key: 'schedule_clicks',  label: 'Schedule Clicks', type: 'numeric', align: 'right', formatter: makeFunnelFmt('domain_schedule_clicks') },
       // Get Started: prefer Amplitude-attributed end-product signups
@@ -10246,7 +10258,8 @@ function renderFunnelStats(payload) {
   // Must come after mountSortableTable, which replaces container innerHTML.
   body.insertAdjacentHTML('beforeend',
     '<div style="font-size:11px;color:var(--text-muted);padding:6px 2px 2px;">' +
-      'Pageviews shows <b>scoped</b> (traffic on pages generated in the selected window) ' +
+      'All counts are <b>unique visitors</b> (PostHog distinct_id), not raw events. ' +
+      'Visitors shows <b>scoped</b> (visitors on pages generated in the selected window) ' +
       'followed by <b>(domain-wide)</b> totals in parens when they differ. ' +
       'Email signups, schedule clicks, and get-started clicks are domain-wide ' +
       '(those events fire on landing pages, not on freshly-generated SEO pages).' +
@@ -11509,7 +11522,7 @@ function renderTopPages(payload) {
   const columns = [
     { key: 'project',         label: 'Project',         type: 'text',    align: 'left',  widthPct: 12, formatter: v => escapeHtml(v) },
     { key: 'path',            label: 'Content',         type: 'text',    align: 'left',  widthPct: 42, formatter: fmtContent },
-    { key: 'pageviews',       label: 'Pageviews',       type: 'numeric', align: 'right', widthPct: 9,  formatter: fmt },
+    { key: 'pageviews',       label: 'Visitors',        type: 'numeric', align: 'right', widthPct: 9,  formatter: fmt },
     { key: 'email_signups',   label: 'Email Signups',   type: 'numeric', align: 'right', widthPct: 9,  formatter: fmt },
     { key: 'schedule_clicks', label: 'Schedule Clicks', type: 'numeric', align: 'right', widthPct: 9,  formatter: fmt },
     { key: 'get_started_clicks', label: 'Get Started', type: 'numeric', align: 'right', widthPct: 9,  formatter: fmt },
@@ -11535,7 +11548,7 @@ function renderTopPages(payload) {
         '<details class="style-stats-section" style="margin-top:16px;">'
         + '<summary>'
         + '<span class="style-stats-title"><span class="style-stats-caret">\u25B6</span>Unknown / 404 inbound traffic</span>'
-        + '<span class="style-stats-total">' + unknownRows.length + ' path' + (unknownRows.length === 1 ? '' : 's') + ' \u00b7 ' + fmt(unkPv) + ' pv</span>'
+        + '<span class="style-stats-total">' + unknownRows.length + ' path' + (unknownRows.length === 1 ? '' : 's') + ' \u00b7 ' + fmt(unkPv) + ' visitors</span>'
         + '</summary>'
         + '<div id="top-pages-unknown-table"></div>'
         + '</details>';
