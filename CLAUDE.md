@@ -89,11 +89,27 @@ Locked files (do NOT unlock or edit without explicit user instruction):
 - `scripts/scan_twitter_mentions_browser.py` (browser-based mention discovery, replaces deprecated API path)
 - `scripts/_li_discover_pending.py`, `scripts/li_discover_insert.py` (LinkedIn DM discovery, hardcoded EXCLUDED_AUTHORS guardrail)
 - `scripts/reddit_chat_sync.py` (Reddit Chat IndexedDB reader, brittle external coupling)
+- `scripts/reddit_tools.py` (Reddit search/fetch CLI; carries per-project sub-denylist merge from project_search_excludes — see Reddit project-scoped excludes section below)
 - `scripts/update_stats.py` (central stats engine; flips `posts.status='deleted'`; GraphQL isMinimized pre-pass for github)
 - `scripts/strike_alert.py`, `skill/strike-alert.sh` (strike escalation rail; emails i@m13v.com on every newly-detected `status='deleted'` or `'removed'` post)
 - `scripts/watchdog_hung_runs.py`, `skill/stats.sh`
 - `skill/stats-linkedin.sh`, `scripts/scrape_linkedin_comment_stats.py`, `scripts/update_linkedin_stats_from_feed.py` (unified LinkedIn stats pipeline 2026-05-11: one scrape of `/in/me/recent-activity/comments/` via CDP-attach to the linkedin-agent MCP Chrome, single writer into `posts` table. Replaces the deprecated `scrape_linkedin_stats_browser.py` and the retired `stats-linkedin-comments.sh` + `update_linkedin_comment_stats_from_feed.py` pair. Do NOT re-introduce a per-permalink scrape, a second Chrome launch, or any Voyager-API path.)
 
+
+## Reddit project-scoped excludes (Option C, 2026-05-11)
+
+Self-improving per-project subreddit denylist for Reddit, mirroring the Twitter cycle's keyword-exclude pattern. Same DB table (`project_search_excludes`), same activation gate (≥2 distinct batches), same 60-day decay. The wiring lives in four files:
+
+- `scripts/project_excludes.py` — adds typed-term forms (`subreddit:<slug>`, `keyword:<word>`) alongside the legacy twitter bare-keyword form. Platform gate (`ALLOWED_KINDS`) prevents cross-contamination: twitter can only write `bare`, reddit can only write `subreddit:` / `keyword:`. New helper `active_excludes_by_kind('reddit', project)` returns `{subreddit:[…], keyword:[…], bare:[…]}`. New CLI subcommand `active-split` exposes the same.
+- `scripts/reddit_tools.py` — `_load_comment_blocked_subs(project_name=...)` reads (1) `config.json: subreddit_bans.comment_blocked` with optional `.project` field for per-project scoping, and (2) active `subreddit:` rows from `project_search_excludes`. Server-side enforcement at parse time in `cmd_search` and `cmd_fetch` via the `SAPS_REDDIT_PROJECT` env var. New `project_block_extra` counter on the `[reddit_search]` stderr marker shows how many of the blocked subs came from the per-project layer.
+- `scripts/post_reddit.py` — draft prompt now accepts `action="reject"` JSON lines with a `proposed_excludes: ["subreddit:<slug>"]` array; `parse_reject_decisions()` + `_propose_excludes_from_rejects()` forward each into `project_excludes.propose('reddit', project, term, batch_id, ...)`. Discover phase logs `[project_excludes] platform=reddit project=… active_subs=N active_keywords=N subs=[…]` and calls `mark_used` to keep decay honest.
+- `skill/run-reddit-search.sh` — documentation-only update; enforcement is fully Python.
+
+Why subreddit-form, not keyword-form, as the primary lever: Reddit false positives are 90% structural-subreddit mismatches (`r/bestofredditorupdates` family drama matching on "alternative", `r/hfy` sci-fi matching on "spaced", `r/superstonk` meme stocks matching on stray words), not keyword collisions. Twitter is the inverse (brand-name collisions like `cricket`/`kohli` for Vipassana). Both forms are supported on both platforms via the schema but only the platform-natural form is wired into the prompts today.
+
+Forbidden patterns (don't reintroduce):
+- Bare-keyword `term` on reddit (e.g. writing `"anki"` as a reddit exclude). The platform gate rejects it (`rejected_invalid`); the post_reddit prompt instructs Claude to always emit typed form. A bare reddit term would have no callsite to read it back.
+- Auto-proposing a top-performing sub for any project (e.g. `subreddit:medicalschool` for studyly). The prompt's "WRONG proposals" examples cover this, and `_load_reserved_terms_for_project` keeps the keyword side of the reserved list intact, but the **subreddit form bypasses keyword-reserved checks by design** — the sub name shares tokens with search topics legitimately. Trust the 2-batch activation gate to filter false rejects.
 
 ## LinkedIn stats pipeline architecture (2026-05-11)
 
