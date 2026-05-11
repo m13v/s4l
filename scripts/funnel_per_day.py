@@ -62,7 +62,24 @@ _EVENT_CLAUSES = {
 # properties.email null; without coalesce those rows fall out of the count.
 _DISTINCT_KEY = {
     "email_signups": "coalesce(properties.email, distinct_id)",
-    "sessions": "properties.$session_id",
+    # Everything else counts unique visitors (distinct_id), not raw events.
+    # Matches `project_stats_json.py` so the Trends tab and the Status tab
+    # tell the same story: a user iterating on mk0r with 4 prompts in a
+    # session is 1 get_started, not 4. The "sessions" row was previously
+    # DISTINCT $session_id; we collapse it to distinct_id so it now reads
+    # as "unique visitors per day" rather than "unique sessions per day",
+    # which is the metric we actually care about for conversion rates.
+    # Pageviews now also count unique visitors per day rather than raw
+    # pageview events, so the column header "Pageviews" is effectively
+    # "Unique visitors". Kept the key name as `pageviews` so the dashboard
+    # JS, server rollups, and historical persisted JSON files don't need
+    # a coordinated rename.
+    "pageviews": "distinct_id",
+    "sessions": "distinct_id",
+    "schedule_clicks": "distinct_id",
+    "get_started_clicks": "distinct_id",
+    "cross_product_clicks": "distinct_id",
+    "cta_clicks": "distinct_id",
 }
 
 
