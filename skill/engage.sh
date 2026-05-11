@@ -17,6 +17,15 @@ set -euo pipefail
 # shellcheck source=/dev/null
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
 
+# Cycle ID for cross-cycle cost accounting. Every claude session spawned in this
+# script (directly or via subprocess) inherits SA_CYCLE_ID via env, and
+# log_claude_session.py stamps it onto claude_sessions.cycle_id. Lets
+# get_run_cost.py --cycle-id return THIS cycle's spend instead of summing every
+# concurrent engage cycle in the same time window.
+BATCH_ID="${BATCH_ID:-engmix-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 # Portable platform helpers (gtimeout, stat_mtime, platform_notify)
 # shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/lib/platform.sh"
