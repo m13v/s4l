@@ -27,6 +27,12 @@ REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 
+# Cycle ID for cross-cycle cost accounting. The single claude -p invocation
+# inherits this via env so log_claude_session.py stamps claude_sessions.cycle_id.
+BATCH_ID="${BATCH_ID:-igren-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 LOG_FILE="$LOG_DIR/instagram-render-$(date +%Y-%m-%d_%H%M%S).log"
 PICK_FILE="/tmp/ig_render_pick_$(date +%s)_$$.json"
 
