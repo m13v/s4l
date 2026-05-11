@@ -346,7 +346,16 @@ def comment_on_post(token, person_urn, activity_id, text, project=None, reply_id
         comment_id = resp.get("id", "")
         ns, real_id = extract_post_urn_parts(resp, activity_id)
         comment_urn = resp.get("$URN", f"urn:li:comment:(urn:li:{ns}:{real_id},{comment_id})")
-        our_url = f"https://www.linkedin.com/feed/update/urn:li:{ns}:{real_id}/"
+        # 2026-05-11: embed ?commentUrn=... so log_post.py stores a URL that
+        # uniquely identifies OUR comment, not just the parent post. Before
+        # this fix, `our_url` was the bare parent post URL, which made the
+        # post-stats pipeline scrape the parent post's reactions (e.g., 188)
+        # instead of OUR comment's (e.g., 1). Mirrors the URL shape that
+        # reply_to_comment already produces (line ~414).
+        our_url = (
+            f"https://www.linkedin.com/feed/update/urn:li:{ns}:{real_id}/"
+            f"?commentUrn={urllib.parse.quote(comment_urn, safe='')}"
+        )
         _backfill_after_success(minted_session, reply_id=reply_id, post_id=post_id)
         print(json.dumps({"ok": True, "comment_urn": comment_urn, "our_url": our_url,
                           "post_namespace": ns, "post_id": real_id,
