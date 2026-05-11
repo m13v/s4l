@@ -108,7 +108,14 @@ HARVEST_JS_TEMPLATE = r"""
       if (!urnEl) return;
       const urn = urnEl.getAttribute('data-urn')
                 || urnEl.getAttribute('data-id') || '';
-      const m = urn.match(/^urn:li:comment:\((\w+):(\d+),(\d+)\)$/);
+      // Accept BOTH the bare-kind form `urn:li:comment:(ugcPost:X,Y)`
+      // (current LinkedIn DOM) and the fully-qualified form
+      // `urn:li:comment:(urn:li:ugcPost:X,Y)` (legacy / Voyager-derived).
+      // The `(?:urn:li:)?` non-capturing group makes the inner prefix
+      // optional so we don't silently drop articles if LinkedIn switches
+      // formats. Mirror of the Python regex fix in
+      // update_linkedin_comment_stats_from_feed.py (2026-05-11).
+      const m = urn.match(/^urn:li:comment:\((?:urn:li:)?(\w+):(\d+),(\d+)\)$/);
       if (!m) return;
       const parent_kind = m[1], parent_id = m[2], comment_id = m[3];
 
