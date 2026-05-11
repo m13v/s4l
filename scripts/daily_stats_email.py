@@ -76,10 +76,23 @@ def query_all(conn, sql, params=None):
 def gather_stats(conn):
     stats = {}
 
+    # Net upvotes: Reddit and Moltbook both auto-apply a +1 OP self-upvote on
+    # every post, so a freshly published post shows upvotes=1 with zero real
+    # engagement. Strip that +1 per row before summing (clamped at 0 so
+    # downvoted posts don't go negative) so the email reflects ORGANIC
+    # engagement, not (posts * 1 self-upvote) + organic. X / LinkedIn / GitHub
+    # have no equivalent auto-vote so they pass through unchanged.
+    # Matches top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
+    upvotes_net = (
+        "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+        "THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+        "ELSE COALESCE(upvotes, 0) END), 0) AS upvotes"
+    )
+
     # 1. Posts by platform
-    stats["posts_by_platform"] = query_all(conn, """
+    stats["posts_by_platform"] = query_all(conn, f"""
         SELECT platform, COUNT(*) AS posts,
-               COALESCE(SUM(upvotes), 0) AS upvotes,
+               {upvotes_net},
                COALESCE(SUM(comments_count), 0) AS comments,
                COALESCE(SUM(views), 0) AS views
         FROM posts WHERE posted_at >= NOW() - INTERVAL '24 hours'
@@ -87,9 +100,9 @@ def gather_stats(conn):
     """)
 
     # 2. Posts by project
-    stats["posts_by_project"] = query_all(conn, """
+    stats["posts_by_project"] = query_all(conn, f"""
         SELECT COALESCE(project_name, '(none)') AS project, COUNT(*) AS posts,
-               COALESCE(SUM(upvotes), 0) AS upvotes,
+               {upvotes_net},
                COALESCE(SUM(comments_count), 0) AS comments,
                COALESCE(SUM(views), 0) AS views
         FROM posts WHERE posted_at >= NOW() - INTERVAL '24 hours'
@@ -97,9 +110,9 @@ def gather_stats(conn):
     """)
 
     # 3. Posts by style
-    stats["posts_by_style"] = query_all(conn, """
+    stats["posts_by_style"] = query_all(conn, f"""
         SELECT COALESCE(engagement_style, '(none)') AS style, COUNT(*) AS posts,
-               COALESCE(SUM(upvotes), 0) AS upvotes,
+               {upvotes_net},
                COALESCE(SUM(comments_count), 0) AS comments,
                COALESCE(SUM(views), 0) AS views
         FROM posts WHERE posted_at >= NOW() - INTERVAL '24 hours'
@@ -107,11 +120,11 @@ def gather_stats(conn):
     """)
 
     # 4. Posts by platform x project x style
-    stats["posts_detail"] = query_all(conn, """
+    stats["posts_detail"] = query_all(conn, f"""
         SELECT platform, COALESCE(project_name, '(none)') AS project,
                COALESCE(engagement_style, '(none)') AS style,
                COUNT(*) AS posts,
-               COALESCE(SUM(upvotes), 0) AS upvotes,
+               {upvotes_net},
                COALESCE(SUM(comments_count), 0) AS comments,
                COALESCE(SUM(views), 0) AS views
         FROM posts WHERE posted_at >= NOW() - INTERVAL '24 hours'
