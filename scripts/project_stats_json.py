@@ -319,12 +319,12 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
     )
 
     pv_total = _count_by_host("event = '$pageview'")
-    cta_total = _count_by_host("event = 'cta_click'")
+    cta_total = _count_by_host("event = 'cta_click'", distinct_key="distinct_id")
     signup_total = _count_by_host(
         _SIGNUP_CLAUSE,
         distinct_key="coalesce(properties.email, distinct_id)",
     )
-    sched_total = _count_by_host("event = 'schedule_click'")
+    sched_total = _count_by_host("event = 'schedule_click'", distinct_key="distinct_id")
     # Get Started = unique users who took the conversion action, not raw clicks.
     # A user iterating on the same project (multiple prompts, multiple
     # download retries, multiple install button presses in a session) is
@@ -333,7 +333,7 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
         f"event IN {_GET_STARTED_EVENTS}",
         distinct_key="distinct_id",
     )
-    cross_product_total = _count_by_host("event = 'cross_product_click'")
+    cross_product_total = _count_by_host("event = 'cross_product_click'", distinct_key="distinct_id")
 
     top_pv = _top_pages_by_host("event = '$pageview'", row_cap=5000)
     top_signup = _top_pages_by_host(_SIGNUP_CLAUSE, row_cap=500)
@@ -373,7 +373,7 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
     if fallback_hosts:
         fb_in = ", ".join(f"'{d}'" for d in fallback_hosts)
         ac_total_q = (
-            "SELECT properties.$host AS host, count() AS c FROM events "
+            "SELECT properties.$host AS host, count(DISTINCT distinct_id) AS c FROM events "
             "WHERE event = '$autocapture' "
             f"AND properties.$host IN ({fb_in}) "
             f"AND timestamp >= toDateTime('{after_str}') "
