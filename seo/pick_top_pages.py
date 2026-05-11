@@ -455,12 +455,19 @@ def build_global_brief(days=1, top_n=10, cooldown_days=7):
             print(f"  skip {name}: missing domain/project_id/repo", file=sys.stderr)
             continue
 
+        # Homepage protection: when landing_pages.homepage_protected is true,
+        # the client owns the homepage visually and we must NEVER touch it.
+        # Surface the flag on the target so the downstream replication step
+        # can refuse to write to `/` even on an adjacent-slug adaptation.
+        homepage_protected = bool(lp.get("homepage_protected"))
+
         targets.append({
             "product": name,
             "domain": domain,
             "website": website,
             "base_url": base_url,
             "repo_path": repo_abs,
+            "homepage_protected": homepage_protected,
             "project_config": proj,
         })
 
@@ -470,17 +477,30 @@ def build_global_brief(days=1, top_n=10, cooldown_days=7):
             print(f"  {name} metrics failed: {e}", file=sys.stderr)
             continue
         allowed = _created_paths_for_project(proj, days=days)
-        kept = 0; dropped = 0
+        kept = 0; dropped = 0; dropped_homepage = 0
         for r in ranking:
             path = r["path"]
             if path not in allowed:
                 dropped += 1
+                continue
+            # Strip the homepage from the global winner candidate pool when
+            # the source project is homepage_protected: we don't want the
+            # cross-project replicator to study and clone a hand-tuned brand
+            # homepage as a SEO template.
+            if homepage_protected and path in ("/", "", "/index", "/index.html"):
+                dropped_homepage += 1
                 continue
             kept += 1
             r["product"] = name
             r["domain"] = domain
             r["page_url"] = base_url + (path if path.startswith("/") else "/" + path)
             all_rows.append(r)
+        if dropped_homepage:
+            print(
+                f"  {name}: stripped {dropped_homepage} homepage row(s) "
+                f"(homepage_protected=true)",
+                file=sys.stderr,
+            )
         dropped_counts[name] = (kept, dropped)
 
     print(
