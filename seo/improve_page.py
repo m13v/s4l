@@ -416,6 +416,20 @@ def main():
     if not os.path.isdir(repo_path):
         raise SystemExit(f"ERROR: repo_path does not exist: {repo_path}")
 
+    # Belt-and-suspenders homepage guard. pick_top_page.py already filters the
+    # homepage out of the candidate list when project_config.landing_pages.
+    # homepage_protected is true, but operators sometimes invoke improve_page.py
+    # directly with a hand-built brief. Refuse to run on `/` when the source
+    # project says the homepage is off-limits.
+    page_path = (brief.get("page_path") or "").strip()
+    project_cfg = brief.get("project_config") or {}
+    lp = project_cfg.get("landing_pages") or {}
+    if lp.get("homepage_protected") and page_path in ("/", "", "/index", "/index.html"):
+        raise SystemExit(
+            f"ERROR: refusing to improve homepage of '{brief.get('product')}' "
+            f"(page_path={page_path!r}); landing_pages.homepage_protected=true"
+        )
+
     commit_subject = f"{brief['page_path']} (top-traffic improve run)"
     prompt = PROMPT_TEMPLATE.format(
         brief_block=_render_brief_block(brief),
