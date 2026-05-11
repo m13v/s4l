@@ -746,6 +746,7 @@ print(f'[pending] ABANDON — id={os.environ[\"PENDING_ID_ENV\"]} due to permane
   SUB_SLUG_ENV="$SUB_SLUG" \
   ABORT_REASON_ENV="$ABORT_REASON" \
   PERMANENT_BLOCK_ENV="$PERMANENT_BLOCK" \
+  PROJECT_NAME_ENV="${PROJECT_ENV:-}" \
   REPO_DIR="$REPO_DIR" \
   /usr/bin/python3 <<'PYEOF' 2>&1 | tee -a "$LOG_FILE" || true
 import os, sys
@@ -754,16 +755,18 @@ from post_reddit import mark_thread_blocked, _abort_is_permanent_block
 
 sub = os.environ.get("SUB_SLUG_ENV", "")
 reason = os.environ.get("ABORT_REASON_ENV", "")
+project = os.environ.get("PROJECT_NAME_ENV") or None
 explicit = os.environ.get("PERMANENT_BLOCK_ENV", "0") == "1"
 
 if explicit:
-    # Pass empty reason so mark_thread_blocked skips the regex check and
-    # writes unconditionally (the model already made the decision).
-    mark_thread_blocked(sub, "")
-    print(f"[auto-block] r/{sub} added via explicit permanent_block=true from model")
+    # Model declared the block explicitly. Bypass the regex gate via force=True
+    # so the audit record still captures the model's verbatim abort_reason
+    # even when the text doesn't match _THREAD_BLOCK_PATTERNS.
+    mark_thread_blocked(sub, reason or "permanent_block=true", project=project, force=True)
+    print(f"[auto-block] r/{sub} added via explicit permanent_block=true from model (project={project!r})")
 elif _abort_is_permanent_block(reason):
-    mark_thread_blocked(sub, reason)
-    print(f"[auto-block] r/{sub} added via regex fallback on abort_reason")
+    mark_thread_blocked(sub, reason, project=project)
+    print(f"[auto-block] r/{sub} added via regex fallback on abort_reason (project={project!r})")
 else:
     print(f"[auto-block] r/{sub} NOT auto-blocked (permanent_block=false, abort reason looks transient)")
 PYEOF
