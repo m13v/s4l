@@ -70,7 +70,44 @@ CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 ACTIVATION_BATCH_FLOOR = 2          # term must appear in this many distinct batches before applying
 DECAY_DAYS_DEFAULT = 60             # prune unused terms older than this with <3 distinct batches
 TERM_MIN_LEN = 3
+# Bare-keyword form (Twitter): "cricket", "kohli". Kept for back-compat.
 TERM_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,30}$")
+# Reddit-only typed form: "subreddit:bestofredditorupdates" (sub bans) or
+# "keyword:foo" (explicit keyword ban). The 2026-05-11 reddit wiring writes
+# subreddit: rows; keyword: is kept as a future-proof typed-keyword path so
+# reddit and twitter never collide on the same row even if they share a name.
+TYPED_TERM_RE = re.compile(r"^(subreddit|keyword):[a-z0-9][a-z0-9_\-]{1,40}$")
+
+# Per-platform allowed term kinds. Twitter stays bare-keyword-only (legacy
+# behavior unchanged); reddit accepts subreddit: and keyword: typed forms only,
+# so an accidentally-bare term ("anki") can never silently kill a core seed.
+ALLOWED_KINDS = {
+    "twitter": {"bare"},
+    "reddit": {"subreddit", "keyword"},
+}
+
+
+def parse_term(term):
+    """Return (kind, value) for a normalized term.
+
+    - Bare "cricket"               -> ("bare", "cricket")           [twitter form]
+    - "subreddit:bestofredditorupdates" -> ("subreddit", "bestofredditorupdates")
+    - "keyword:powerpoint"         -> ("keyword", "powerpoint")
+    Returns (None, None) for unrecognized shapes.
+    """
+    if not isinstance(term, str):
+        return None, None
+    t = term.strip().lower()
+    if ":" in t:
+        kind, _, val = t.partition(":")
+        kind = kind.strip()
+        val = val.strip()
+        if kind in ("subreddit", "keyword") and val:
+            return kind, val
+        return None, None
+    if TERM_RE.match(t):
+        return "bare", t
+    return None, None
 
 
 def _load_reserved_terms_for_project(project_name):
@@ -106,15 +143,40 @@ def _load_reserved_terms_for_project(project_name):
 
 
 def normalize_term(term):
-    """Return a normalized term, or None if invalid."""
+    """Return a normalized term, or None if invalid.
+
+    Accepts:
+      - bare-keyword form (twitter legacy): "cricket"
+      - typed reddit form: "subreddit:bestofredditorupdates" or "keyword:powerpoint"
+
+    Normalizes by lower-casing and stripping surrounding quotes/whitespace.
+    Empty / too-short / wrong-shape inputs return None.
+    """
     if not isinstance(term, str):
         return None
     t = term.strip().lower().strip("\"'")
     if len(t) < TERM_MIN_LEN:
         return None
-    if not TERM_RE.match(t):
-        return None
-    return t
+    # Try typed first so "subreddit:foo" doesn't get mis-rejected by TERM_RE.
+    if TYPED_TERM_RE.match(t):
+        return t
+    if TERM_RE.match(t):
+        return t
+    return None
+
+
+def _kind_allowed_for_platform(kind, platform):
+    """Gate which term kinds a given platform may write/read.
+
+    Prevents twitter from accidentally getting a `subreddit:` row and reddit
+    from getting a bare keyword that might accidentally mute a core seed.
+    """
+    if not kind:
+        return False
+    allowed = ALLOWED_KINDS.get(platform)
+    if not allowed:
+        return False
+    return kind in allowed
 
 
 def active_excludes(platform, project):
@@ -142,6 +204,22 @@ def active_excludes(platform, project):
     return [r[0] for r in rows]
 
 
+def active_excludes_by_kind(platform, project):
+    """Same as active_excludes() but split by kind for reddit callers.
+
+    Returns a dict {"subreddit": [...], "keyword": [...], "bare": [...]}.
+    Empty lists for absent kinds. Order within each list is longest-first (the
+    same lex order as active_excludes() — keeps audit output stable).
+    """
+    terms = active_excludes(platform, project)
+    out = {"subreddit": [], "keyword": [], "bare": []}
+    for t in terms:
+        kind, value = parse_term(t)
+        if kind in out and value:
+            out[kind].append(value)
+    return out
+
+
 def propose(platform, project, term, candidate_id=None, batch_id=None, reason=None):
     """UPSERT a single proposed exclude. Returns dict with the outcome.
 
@@ -156,9 +234,20 @@ def propose(platform, project, term, candidate_id=None, batch_id=None, reason=No
     if norm is None:
         return {"ok": False, "term": None, "action": "rejected_invalid", "active": False}
 
-    reserved = _load_reserved_terms_for_project(project)
-    if norm in reserved:
-        return {"ok": False, "term": norm, "action": "rejected_reserved", "active": False}
+    kind, value = parse_term(norm)
+    if not _kind_allowed_for_platform(kind, platform):
+        # e.g. trying to write a bare "anki" to reddit, or "subreddit:foo" to
+        # twitter. Reject so platforms can't cross-contaminate.
+        return {"ok": False, "term": norm, "action": "rejected_invalid", "active": False}
+
+    # Reserved-keyword check only applies to bare + typed-keyword terms.
+    # "subreddit:foo" never mutes a search topic since reddit search treats
+    # the sub name as a separate scope from the query terms.
+    if kind in ("bare", "keyword"):
+        reserved = _load_reserved_terms_for_project(project)
+        check_val = value if kind == "keyword" else norm
+        if check_val in reserved:
+            return {"ok": False, "term": norm, "action": "rejected_reserved", "active": False}
 
     conn = dbmod.get_conn()
     try:
@@ -300,6 +389,11 @@ def main():
     a.add_argument("--as-flags", action="store_true",
                    help="Print as space-joined `-term` flags instead of JSON list.")
 
+    asplit = sub.add_parser("active-split",
+                            help="Active excludes split by kind {subreddit, keyword, bare}. Reddit-friendly.")
+    asplit.add_argument("--platform", required=True)
+    asplit.add_argument("--project", required=True)
+
     p = sub.add_parser("propose", help="Propose a new exclude term")
     p.add_argument("--platform", required=True)
     p.add_argument("--project", required=True)
@@ -327,6 +421,12 @@ def main():
         else:
             json.dump(terms, sys.stdout)
             sys.stdout.write("\n")
+        return 0
+
+    if args.cmd == "active-split":
+        split = active_excludes_by_kind(args.platform, args.project)
+        json.dump(split, sys.stdout)
+        sys.stdout.write("\n")
         return 0
 
     if args.cmd == "propose":
