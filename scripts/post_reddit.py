@@ -12,6 +12,8 @@ Usage:
     python3 scripts/post_reddit.py --project Cyrano    # Override project selection
 """
 
+from __future__ import annotations  # PEP 604 unions (str | None) for Python 3.9 launchd
+
 import argparse
 import errno
 import json
