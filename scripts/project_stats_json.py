@@ -292,9 +292,18 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
         rows = _hogql(api_key, project_id, q)
         return {r[0]: int(r[1]) for r in (rows or []) if r and r[0]}
 
-    def _top_pages_by_host(event_clause, row_cap=5000):
+    def _top_pages_by_host(event_clause, row_cap=5000, distinct_key="distinct_id"):
+        # All per-page breakdowns count unique users (distinct_id) rather than
+        # raw events. A visitor that views the same /pricing twice or rage-
+        # clicks the same CTA still counts as 1. Pass `distinct_key=None` to
+        # opt back into raw count() for legacy callers.
+        count_expr = (
+            f"count(DISTINCT {distinct_key}) AS c"
+            if distinct_key
+            else "count() AS c"
+        )
         q = (
-            "SELECT properties.$host AS host, properties.$pathname AS path, count() AS c FROM events "
+            f"SELECT properties.$host AS host, properties.$pathname AS path, {count_expr} FROM events "
             f"WHERE {event_clause} "
             f"AND properties.$host IN ({in_list}) "
             f"AND timestamp >= toDateTime('{after_str}') "
@@ -318,7 +327,11 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
         "event IN ('newsletter_subscribed', 'newsletter_subscribed_server')"
     )
 
-    pv_total = _count_by_host("event = '$pageview'")
+    # Visitors, not raw pageviews. Globally consistent with every other
+    # column in this batch (cta_clicks, schedule_clicks, get_started_clicks,
+    # cross_product_clicks, email_signups all count unique users). A visitor
+    # bouncing between /pricing and /docs still counts as 1.
+    pv_total = _count_by_host("event = '$pageview'", distinct_key="distinct_id")
     cta_total = _count_by_host("event = 'cta_click'", distinct_key="distinct_id")
     signup_total = _count_by_host(
         _SIGNUP_CLAUSE,
