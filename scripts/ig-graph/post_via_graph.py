@@ -28,6 +28,8 @@ Usage:
   ./post_via_graph.py status --container <id>     # poll publishing status
 """
 
+from __future__ import annotations  # PEP 604 unions (str | None) for Python 3.9 launchd
+
 import argparse
 import json
 import sys
