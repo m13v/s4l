@@ -12,6 +12,13 @@ set -euo pipefail
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
 
+# Cycle ID for cross-cycle cost accounting (see run-reddit-search.sh / engage.sh
+# for the same pattern). Stamps claude_sessions.cycle_id so get_run_cost.py
+# --cycle-id reports per-cycle spend instead of bleeding across concurrent runs.
+BATCH_ID="${BATCH_ID:-rdthr-$(date +%Y%m%d-%H%M%S)}"
+export BATCH_ID
+export SA_CYCLE_ID="$BATCH_ID"
+
 REPO_DIR="$HOME/social-autoposter"
 CONFIG_FILE="$REPO_DIR/config.json"
 SKILL_FILE="$REPO_DIR/SKILL.md"
