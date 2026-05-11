@@ -325,7 +325,14 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
         distinct_key="coalesce(properties.email, distinct_id)",
     )
     sched_total = _count_by_host("event = 'schedule_click'")
-    get_started_total = _count_by_host(f"event IN {_GET_STARTED_EVENTS}")
+    # Get Started = unique users who took the conversion action, not raw clicks.
+    # A user iterating on the same project (multiple prompts, multiple
+    # download retries, multiple install button presses in a session) is
+    # still one conversion. Mirrors the signup_total dedup pattern above.
+    get_started_total = _count_by_host(
+        f"event IN {_GET_STARTED_EVENTS}",
+        distinct_key="distinct_id",
+    )
     cross_product_total = _count_by_host("event = 'cross_product_click'")
 
     top_pv = _top_pages_by_host("event = '$pageview'", row_cap=5000)
