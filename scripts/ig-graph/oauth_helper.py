@@ -27,6 +27,8 @@ Token storage:
   ~/.config/fazm/ig_graph_token.json   # {access_token, ig_user_id, username, expires_at}
 """
 
+from __future__ import annotations  # PEP 604 unions (dict | None) for Python 3.9 launchd
+
 import http.server
 import json
 import os
