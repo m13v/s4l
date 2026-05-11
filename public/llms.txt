@@ -66,7 +66,7 @@ Automated engagement on relevant open-source issues. Separate launchd schedules 
 ### Engagement Stats and Analytics
 - `update_stats.py`: Fetches engagement metrics (upvotes, comments, views) from platform APIs. No browser needed.
 - `top_performers.py`: Generates feedback reports from top and bottom performing posts, organized by project and platform. This self-improvement loop feeds back into future comment drafting.
-- `project_stats.py`: Unified funnel metrics per project covering social posts, pageviews (via PostHog), CTA clicks, and bookings.
+- `project_stats.py`: Unified funnel metrics per project covering social posts, unique visitors (via PostHog), CTA clicks, and bookings. All conversion metrics count distinct visitors, not raw events.
 - Live stats dashboard at `https://s4l.ai/stats/[handle]` (one URL per platform account).
 
 ### Draft Dashboard
