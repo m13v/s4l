@@ -36,6 +36,8 @@ Usage:
     python3 twitter_post_plan.py --plan /tmp/twitter_cycle_plan_<batch>.json
 """
 
+from __future__ import annotations  # PEP 604 unions (int | None) for Python 3.9 launchd
+
 import argparse
 import json
 import os
