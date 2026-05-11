@@ -72,9 +72,14 @@ STAGNANT_TOLERANCE = 40
 # typically reveals ~400 more comments. 10 clicks is more than enough for
 # the 838-row legacy backlog (4 months of activity). Wait 15-20s after each
 # click before resuming scroll so LinkedIn's loader has time to render.
-MAX_SHOW_MORE_CLICKS = 10
+MAX_SHOW_MORE_CLICKS = 30
 SHOW_MORE_PAUSE_MIN_MS = 15000
 SHOW_MORE_PAUSE_MAX_MS = 20000
+# Check for "Show more results" button every CLICK_PROBE_INTERVAL ticks
+# regardless of stagnation state. Manual MCP test on 2026-05-11 confirmed
+# the button persists across clicks (1 click added 12 articles, button
+# stayed). Click-eagerly is more effective than waiting for stagnant=40.
+CLICK_PROBE_INTERVAL = 10
 
 
 # JS to extract per-article: URN + visible comment text. Mirrors the
@@ -159,36 +164,37 @@ HARVEST_JS = r"""
     window.scrollTo(0, document.documentElement.scrollHeight - 200);
     ticks++;
 
-    // If we've stagnated and there's a "Show more results" button at the
-    // bottom (LinkedIn's pagination gate past the auto-load window), give
-    // it ONE click and resume scrolling. Cap at opts.max_clicks per fire
-    // so a runaway pattern can't develop.
-    if (stagnant >= opts.stagnant_tol && clickCount < opts.max_clicks) {
+    // Click "Show more results" pagination gate. Two triggers:
+    //   - Every `click_probe_interval` ticks (eager polling), OR
+    //   - On stagnant >= stagnant_tol (auto-load truly capped).
+    // Manual MCP test 2026-05-11 confirmed the button persists across
+    // clicks; 1 click added 12 articles. No rect filter — text-match only.
+    const shouldProbe = (ticks % opts.click_probe_interval === 0)
+                      || (stagnant >= opts.stagnant_tol);
+    if (shouldProbe && clickCount < opts.max_clicks) {
       let clicked = false;
       document.querySelectorAll('button').forEach(b => {
         if (clicked) return;
         const t = (b.innerText || '').trim();
-        // Match "Show more results" exactly (not the inline comment "Show more"
-        // expander which has different shorter text).
+        // Strict text match: "Show more results" only (the inline comment
+        // "Show more" / "Load more comments" expanders are DIFFERENT text).
         if (/^show more results$/i.test(t)) {
-          // Confirm it's near the page bottom (not a stray Show more in a side
-          // module) to be safe.
-          const r = b.getBoundingClientRect();
-          if (r.top > 0 && r.top < document.documentElement.scrollHeight) {
-            b.scrollIntoView({block: 'center'});
-            b.click();
-            clicked = true;
-            clickCount++;
-            ticksLog.push({tick: ticks, event: 'show_more_click', count: clickCount});
-            stagnant = 0;  // reset so we continue past the click
-          }
+          b.scrollIntoView({block: 'center'});
+          b.click();
+          clicked = true;
+          clickCount++;
+          ticksLog.push({tick: ticks, event: 'show_more_click', count: clickCount, total: acc.size});
+          stagnant = 0;
         }
       });
       if (clicked) {
         const longWait = opts.show_more_pause_min_ms
                        + Math.random() * (opts.show_more_pause_max_ms - opts.show_more_pause_min_ms);
         setTimeout(tick, longWait);
-        return;  // skip the normal short-wait path
+        return;
+      } else if (stagnant >= opts.stagnant_tol) {
+        // No button found AND auto-load stagnant. Log and bail next loop.
+        ticksLog.push({tick: ticks, event: 'no_show_more_button', stagnant, total: acc.size});
       }
     }
 
@@ -262,6 +268,7 @@ def do_scrape(out_path: str, max_scrolls: int) -> dict:
                     "max_clicks": MAX_SHOW_MORE_CLICKS,
                     "show_more_pause_min_ms": SHOW_MORE_PAUSE_MIN_MS,
                     "show_more_pause_max_ms": SHOW_MORE_PAUSE_MAX_MS,
+                    "click_probe_interval": CLICK_PROBE_INTERVAL,
                 })
             except Exception as e:
                 return {"ok": False, "error": "evaluate_failed", "detail": str(e)}
