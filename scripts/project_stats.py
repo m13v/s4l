@@ -42,13 +42,22 @@ def load_config():
 
 
 def get_post_stats(conn, project_name, days):
-    """Get social post stats for a project from the posts DB."""
+    """Get social post stats for a project from the posts DB.
+
+    upvotes is reported NET of the OP self-upvote on Reddit and Moltbook
+    (those platforms automatically +1 every post; we strip that per row,
+    clamped at 0, so the dashboard total reflects organic engagement
+    rather than (posts * 1) + organic). Other platforms pass through.
+    Mirrors top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
+    """
     cur = conn.execute(
         "SELECT COUNT(*), "
         "COUNT(*) FILTER (WHERE posted_at >= NOW() - INTERVAL '" + str(days) + " days'), "
         "COUNT(*) FILTER (WHERE status = 'active'), "
         "COUNT(*) FILTER (WHERE status IN ('removed', 'deleted')), "
-        "COALESCE(SUM(upvotes), 0), "
+        "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+        "  THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+        "  ELSE COALESCE(upvotes, 0) END), 0), "
         "COALESCE(SUM(comments_count), 0), "
         "COALESCE(SUM(views), 0) "
         "FROM posts WHERE project_name = %s",
