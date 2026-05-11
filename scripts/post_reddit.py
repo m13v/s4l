@@ -1150,9 +1150,32 @@ OMIT THESE (clear no-bridge cases only):
 For each thread that PASSES the SELECTION GATE, output one JSON object per line:
 {{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "style_name", "search_topic": "the seed concept", "new_style": null}}
 
-For threads that FAIL the gate, simply omit them. Do NOT emit a JSON line; do NOT draft a comment. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
+For threads that FAIL the gate, simply omit the post JSON above. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
 
-Output DONE after all JSONs. Do NOT narrate. Fetch, gate, draft (or omit), output JSON, DONE.
+## OPTIONAL: proposed_excludes (self-improving denylist)
+When you OMIT a thread because of a recurring CLASS of false-positive (the SUB itself surfaces wrong-audience threads, not just this one thread), you MAY emit a second JSON line for that thread:
+
+{{"action": "reject", "thread_url": "SAME_URL_AS_GIVEN", "reason": "short reason", "proposed_excludes": ["subreddit:bestofredditorupdates"]}}
+
+Rules:
+- proposed_excludes entries MUST use the typed form `subreddit:<slug>` (lowercase, no `r/` prefix). Future shape: `keyword:<word>` is accepted but unused today.
+- DO emit when: the false-positive is structural — e.g. r/bestofredditorupdates is family drama matching on the word "alternative"; r/hfy is sci-fi narrative matching on the word "spaced"; r/superstonk is GME meme stock matching on "anki" via a random comment. The SUB is the false positive, not just this one post.
+- DO NOT emit when: this specific thread is bad but the sub is fine in general (e.g. r/{project.get('name', 'project')}'s natural audience like r/medicalschool, r/anki, r/getstudying — never propose excluding a top-performing sub).
+- Activation gate: a term needs >=2 SEPARATE batches to propose it before it goes live on future Reddit searches. A single mistaken proposal cannot mute a sub. Propose if a thoughtful future cycle would likely agree; otherwise omit.
+- 1-3 entries per reject is plenty. When in doubt, omit the field. Default (no reject line) is safe.
+
+Examples of GOOD proposals:
+- Reject r/bestofredditorupdates "Husband lied" → ["subreddit:bestofredditorupdates"]
+- Reject r/hfy "The Trial of Humanity" → ["subreddit:hfy"]
+- Reject r/battlefield6 "GAME UPDATE 1.3.1.0" → ["subreddit:battlefield6"]
+- Reject r/superstonk "GMERICA acquisition" → ["subreddit:superstonk"]
+- Reject r/nosleep "cursed doll" → ["subreddit:nosleep"]
+
+Examples of WRONG proposals (do not emit):
+- Reject a specific r/nursing thread because OP is venting → DO NOT exclude r/nursing (it's our target audience; just omit this thread)
+- Reject one r/anki thread that's off-topic → DO NOT exclude r/anki (core ICP)
+
+Output DONE after all JSONs (both post and reject lines, in any order). Do NOT narrate. Fetch, gate, draft-or-reject, output JSONs, DONE.
 """
 
 
@@ -1549,6 +1572,106 @@ def parse_post_decisions(output):
     return decisions
 
 
+def parse_reject_decisions(output):
+    """Extract action='reject' JSON lines from the draft prompt (2026-05-11).
+
+    Reject lines may carry a `proposed_excludes` array of typed exclude terms
+    (`subreddit:<slug>` or `keyword:<word>`). These get fed to
+    project_excludes.propose() so the 2-batch activation gate accumulates
+    them without auto-trusting a single false rejection. The "thread itself
+    is bad" reasons (no proposed_excludes) are still parsed for audit but
+    have no side effect on the denylist.
+
+    Multiline-safe regex (the `proposed_excludes` array may contain commas
+    and span lines if Claude pretty-prints). Each JSON parse failure is
+    silently dropped — the JSON shape stamp `"action":"reject"` is the only
+    discriminator, so reject lines that don't parse are simply ignored.
+    """
+    rejects = []
+    seen_urls = set()
+    for match in re.finditer(
+        r'\{[^{}]*?"action"\s*:\s*"reject"[^{}]*?\}',
+        output, flags=re.DOTALL,
+    ):
+        try:
+            r = json.loads(match.group())
+            url = r.get("thread_url", "")
+            if not url or url in seen_urls:
+                continue
+            rejects.append(r)
+            seen_urls.add(url)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return rejects
+
+
+def _propose_excludes_from_rejects(rejects, project_name, batch_id, candidates_by_url):
+    """Forward Claude-proposed excludes into project_search_excludes (reddit).
+
+    Mirrors the twitter cycle's behavior at run-twitter-cycle.sh:929-966:
+    each proposed term is normalize/validated by project_excludes.propose()
+    against the platform's allowed kinds and the project's reserved-keyword
+    list. The activation gate (>=2 distinct batch_ids) is enforced inside
+    propose(); a single false-rejection in this cycle cannot mute a sub.
+
+    Best-effort: import / DB failures are logged once and the post pipeline
+    continues. The propose() side effect is not on the critical path for
+    posting; if it dies, the only consequence is that we don't accumulate
+    new exclude proposals this cycle.
+
+    Returns a dict with counters for logging.
+    """
+    if not rejects or not project_name:
+        return {"rejects_seen": len(rejects or []), "proposed": 0,
+                "inserted": 0, "bumped": 0, "rejected": 0, "active_now": 0}
+    counters = {"rejects_seen": len(rejects), "proposed": 0,
+                "inserted": 0, "bumped": 0, "rejected": 0, "active_now": 0}
+    try:
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import project_excludes as pe
+    except Exception as e:
+        print(f"[post_reddit] WARN: project_excludes import failed: {e}",
+              file=sys.stderr, flush=True)
+        return counters
+
+    for r in rejects:
+        url = r.get("thread_url") or ""
+        terms = r.get("proposed_excludes") or []
+        if not isinstance(terms, list):
+            continue
+        reason = (r.get("reason") or "")[:500]
+        cand = candidates_by_url.get(url) or {}
+        # candidate_id is the reddit_candidates.id for audit purposes; falls
+        # back to None when the candidate object doesn't carry it through.
+        cand_id = cand.get("id") or cand.get("candidate_id")
+        for t in terms[:5]:  # cap so a runaway prompt can't spam the table
+            counters["proposed"] += 1
+            try:
+                out = pe.propose(
+                    "reddit", project_name, t,
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    reason=reason or None,
+                )
+            except Exception as e:
+                print(f"[post_reddit] WARN: propose failed term={t!r}: {e}",
+                      file=sys.stderr, flush=True)
+                counters["rejected"] += 1
+                continue
+            action = out.get("action") or ""
+            if not out.get("ok"):
+                counters["rejected"] += 1
+            elif action == "inserted":
+                counters["inserted"] += 1
+            elif action in ("bumped", "duplicate_batch"):
+                counters["bumped"] += 1
+            if out.get("active"):
+                counters["active_now"] += 1
+    return counters
+
+
 def _discover_iteration(args, config, reddit_username, already_picked):
     """DISCOVER phase: search and select threads. No drafting.
 
@@ -1574,6 +1697,42 @@ def _discover_iteration(args, config, reddit_username, already_picked):
 
     project_name = project.get("name", "general")
     print(f"[post_reddit] Project: {project_name}")
+
+    # 2026-05-11: surface the per-project sub denylist for visibility in run
+    # logs (twitter cycle does the equivalent at run-twitter-cycle.sh:410).
+    # The actual *enforcement* happens server-side in reddit_tools._load_
+    # comment_blocked_subs via the SAPS_REDDIT_PROJECT env var set below.
+    # mark_used stamps last_used_at on every active term so decay (60d
+    # unused → prune) only fires on terms that truly stopped contributing.
+    try:
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import project_excludes as _pe
+        _split = _pe.active_excludes_by_kind("reddit", project_name)
+        _active_subs = _split.get("subreddit") or []
+        _active_kws = _split.get("keyword") or []
+        if _active_subs or _active_kws:
+            _sub_preview = ",".join(_active_subs[:8]) + ("..." if len(_active_subs) > 8 else "")
+            _kw_preview = ",".join(_active_kws[:8]) + ("..." if len(_active_kws) > 8 else "")
+            print(
+                f"[project_excludes] platform=reddit project={project_name} "
+                f"active_subs={len(_active_subs)} active_keywords={len(_active_kws)} "
+                f"subs=[{_sub_preview}] keywords=[{_kw_preview}]"
+            )
+            # Stamp last_used_at so decay doesn't prune still-live terms.
+            # mark_used wants the FULL typed-term form (subreddit:foo).
+            _full_terms = (
+                [f"subreddit:{s}" for s in _active_subs]
+                + [f"keyword:{k}" for k in _active_kws]
+            )
+            try:
+                _pe.mark_used("reddit", project_name, _full_terms)
+            except Exception as e:
+                print(f"[project_excludes] WARN: mark_used failed: {e}", file=sys.stderr)
+    except Exception as e:
+        # Visibility-only path. Never fail discover because of it.
+        print(f"[project_excludes] WARN: active-excludes log failed: {e}", file=sys.stderr)
 
     top_report = get_top_performers(project_name)
     recent_comments = get_recent_comments()
@@ -1787,6 +1946,29 @@ def _draft_iteration(plan, config, reddit_username):
 
     drafted = parse_post_decisions(output)
     print(f"[post_reddit] Draft produced {len(drafted)} post(s)")
+
+    # 2026-05-11: parse optional action=reject lines and forward any
+    # `proposed_excludes` arrays into project_search_excludes via the
+    # activation gate (>=2 distinct batches required before a term goes
+    # live). Self-improving denylist mirroring twitter's behavior. Errors
+    # here MUST NOT kill the draft phase; the post pipeline is the critical
+    # path. See parse_reject_decisions / _propose_excludes_from_rejects.
+    try:
+        rejects = parse_reject_decisions(output)
+        if rejects:
+            cand_by_url = {c.get("thread_url"): c for c in candidates if c.get("thread_url")}
+            counters = _propose_excludes_from_rejects(
+                rejects, project_name, plan.get("batch_id"), cand_by_url,
+            )
+            if counters["proposed"]:
+                print(
+                    f"[post_reddit] reject lines={counters['rejects_seen']} "
+                    f"proposed={counters['proposed']} inserted={counters['inserted']} "
+                    f"bumped={counters['bumped']} rejected={counters['rejected']} "
+                    f"active_now={counters['active_now']}"
+                )
+    except Exception as e:
+        print(f"[post_reddit] WARN: reject-line processing failed: {e}", file=sys.stderr)
 
     # Merge text back into the original candidates by thread_url so we
     # preserve ripen annotations, search_topic, etc. from discover phase.
