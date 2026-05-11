@@ -586,8 +586,15 @@ def _windowed_post_engagement(conn, name, days):
     excluded so we don't double-count engagement on replies hanging off
     someone else's thread).
     """
+    # upvotes is NET of the Reddit/Moltbook OP self-upvote (both platforms auto-
+    # apply a +1 to every post). Discounting per row before the SUM means the
+    # funnel reflects organic engagement, not (posts * 1) + organic. X /
+    # LinkedIn / GitHub have no equivalent auto-vote so they pass through.
+    # Matches top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
     cur = conn.execute(
-        "SELECT COALESCE(SUM(p.upvotes), 0), "
+        "SELECT COALESCE(SUM(CASE WHEN LOWER(p.platform) IN ('reddit', 'moltbook') "
+        "  THEN GREATEST(0, COALESCE(p.upvotes, 0) - 1) "
+        "  ELSE COALESCE(p.upvotes, 0) END), 0), "
         "COALESCE(SUM(p.comments_count), 0), "
         "COALESCE(SUM(p.views) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), 0), "
         "COUNT(*) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), "
