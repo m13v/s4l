@@ -9,11 +9,10 @@ blips (DNS, timeout, 5xx) so a single curl FAIL does not strand a row in
 'processing'. 4xx fast-fails because retrying a deterministic client error
 just burns the budget.
 
-The 'status' command is the one local-only path: it is a humans-only SELECT
-aggregate (counts by status) used as a heartbeat in the engage shell
-pipelines. There is no equivalent HTTP endpoint, so it stays on direct SQL
-against the local-trust DB. Removing it would break the per-10-replies
-heartbeat in skill/engage*.sh.
+The 'status' command is the per-cycle heartbeat for skill/engage*.sh — prints
+counts grouped by reply status. As of 2026-05-12 this also routes through
+HTTP (/api/v1/replies/counts) so there is no remaining direct-SQL path in
+the Reddit pipeline.
 """
 import sys, json, os
 sys.path.insert(0, os.path.dirname(__file__))
@@ -146,11 +145,13 @@ elif cmd == "set_project":
     _http_patch(rid, {"project_name": project})
     print(f"ok {rid}")
 elif cmd == "status":
-    # Local-only SELECT aggregate, used as a heartbeat in skill/engage*.sh.
-    # No equivalent HTTP endpoint exists; humans-only debug surface.
-    from db import load_env, get_conn
-    load_env()
-    db = get_conn()
-    cur = db.execute("SELECT status, COUNT(*) FROM replies GROUP BY status ORDER BY status")
-    for row in cur.fetchall():
-        print(f"{row[0]} {row[1]}")
+    # Per-cycle heartbeat used by skill/engage*.sh. Routes through the
+    # /api/v1/replies/counts aggregate endpoint so this module has zero
+    # direct-SQL paths.
+    from http_api import api_get
+    platform = sys.argv[2] if len(sys.argv) > 2 else None
+    query = {"platform": platform} if platform else None
+    resp = api_get("/api/v1/replies/counts", query=query)
+    counts = ((resp or {}).get("data") or {}).get("counts") or []
+    for row in counts:
+        print(f"{row.get('status', '')} {row.get('count', 0)}")
