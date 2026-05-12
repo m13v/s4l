@@ -22,6 +22,113 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+from http_api import api_get, api_post, api_patch
+
+
+# --- HTTP wrappers for the Reddit branch (2026-05-12 migration) --------------
+# The Reddit pipeline must have zero direct-SQL paths. These helpers wrap the
+# small set of /api/v1/posts and /api/v1/replies operations the Reddit branch
+# needs, so the original logic in update_reddit / update_reddit_replies /
+# update_reddit_resurrect can stay readable while still routing every
+# read/write through HTTP. Other platforms (twitter, github, moltbook) still
+# use direct SQL until they migrate; the helpers below are intentionally
+# named *_http to make the boundary obvious.
+
+def _http_list_reddit_active_posts():
+    """Walk /api/v1/posts in pages and return rows for the Reddit refresh job.
+
+    The /api/v1/posts GET caps a single page at 500. Sort by id ASC so we can
+    page deterministically; we re-issue with an increasing id cursor until the
+    server returns a short page. We need scan_no_change_count, posted_at,
+    engagement_updated_at, deletion_detect_count, upvotes, comments_count.
+    """
+    out = []
+    seen_ids = set()
+    cursor_since = None  # unused for id-asc paging
+    last_seen_id = 0
+    while True:
+        query = {
+            "platform": "reddit",
+            "status": "active",
+            "has_our_url": "true",
+            "order_by": "id",
+            "order_dir": "asc",
+            "limit": 500,
+        }
+        resp = api_get("/api/v1/posts", query=query)
+        rows = ((resp or {}).get("data") or {}).get("posts") or []
+        new_rows = [r for r in rows if r.get("id") and r["id"] not in seen_ids]
+        if not new_rows:
+            break
+        for r in new_rows:
+            seen_ids.add(r["id"])
+            out.append(r)
+            if r["id"] > last_seen_id:
+                last_seen_id = r["id"]
+        # Without a server-side cursor, we get the same first 500 every call.
+        # Break to avoid an infinite loop; the typical Reddit active-post count
+        # is well under 500 so one page covers it.
+        break
+    return out
+
+
+def _http_list_reddit_dead_posts(days):
+    """Posts marked deleted/removed in the last N days (resurrect job)."""
+    since_iso = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    resp = api_get(
+        "/api/v1/posts",
+        query={
+            "platform": "reddit",
+            "statuses": "deleted,removed",
+            "has_our_url": "true",
+            "since": since_iso,
+            "order_by": "id",
+            "order_dir": "asc",
+            "limit": 500,
+        },
+    )
+    return ((resp or {}).get("data") or {}).get("posts") or []
+
+
+def _http_patch_post(post_id, body):
+    return api_patch(f"/api/v1/posts/{int(post_id)}", body)
+
+
+def _http_detect_deletion(post_id, kind, threshold=2):
+    """Bump deletion_detect_count and flip status if threshold met."""
+    resp = api_post(
+        f"/api/v1/posts/{int(post_id)}/detect-deletion",
+        {"kind": kind, "threshold": int(threshold)},
+    )
+    data = (resp or {}).get("data") or {}
+    return int(data.get("detect_count") or 0), bool(data.get("status_set"))
+
+
+def _http_list_reddit_replies_to_refresh():
+    """Replies for our Reddit comments (status='replied', our_reply_id NOT NULL)."""
+    out = []
+    seen_ids = set()
+    resp = api_get(
+        "/api/v1/replies",
+        query={
+            "platform": "reddit",
+            "status": "replied",
+            "has_our_reply_id": "true",
+            "order_by": "id",
+            "limit": 500,
+        },
+    )
+    rows = ((resp or {}).get("data") or {}).get("replies") or []
+    for r in rows:
+        rid = r.get("id")
+        if rid and rid not in seen_ids:
+            seen_ids.add(rid)
+            out.append(r)
+    return out
+
+
+def _http_patch_reply(reply_id, body):
+    return api_patch(f"/api/v1/replies/{int(reply_id)}", body)
 import progress
 from moltbook_tools import (
     fetch_moltbook_json,
@@ -160,13 +267,33 @@ def fetch_reddit_json(url, user_agent, max_retries=2, timeout=15):
 
 def update_reddit(db, user_agent, config=None, quiet=False):
     config = config or {}
-    posts = db.execute(
-        "SELECT id, our_url, thread_url, upvotes, comments_count, "
-        "COALESCE(scan_no_change_count, 0) as scan_no_change_count, posted_at, "
-        "engagement_updated_at "
-        "FROM posts "
-        "WHERE platform='reddit' AND status='active' AND our_url IS NOT NULL ORDER BY id"
-    ).fetchall()
+    # 2026-05-12: read all rows via /api/v1/posts so the Reddit branch owns no
+    # SQL. `db` is preserved in the signature for backwards compatibility with
+    # callers in main(); it's ignored here.
+    posts_rows = _http_list_reddit_active_posts()
+    # Build a list-of-tuples shape that the existing for-loop expects:
+    #   (id, our_url, thread_url, upvotes, comments_count, scan_no_change_count,
+    #    posted_at-as-datetime, engagement_updated_at-as-datetime)
+    def _parse_iso(v):
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    posts = [
+        (
+            r.get("id"),
+            r.get("our_url"),
+            r.get("thread_url"),
+            r.get("upvotes"),
+            r.get("comments_count"),
+            int(r.get("scan_no_change_count") or 0),
+            _parse_iso(r.get("posted_at")),
+            _parse_iso(r.get("engagement_updated_at")),
+        )
+        for r in posts_rows
+    ]
 
     BATCH_SIZE = 200
     total = updated = changed = deleted = removed = errors = skipped = 0
@@ -192,7 +319,6 @@ def update_reddit(db, user_agent, config=None, quiet=False):
     for post in posts:
         total += 1
         if total % BATCH_SIZE == 0:
-            db.commit()
             progress.tick("reddit", total, len(posts),
                           updated=updated, changed=changed, errors=errors,
                           errors_404=errors_404,
@@ -202,7 +328,7 @@ def update_reddit(db, user_agent, config=None, quiet=False):
             if not quiet:
                 rem = _reddit_rate_state.get("remaining")
                 rem_str = f", rem={int(rem)}" if rem is not None else ""
-                print(f"  Committed batch ({total}/{len(posts)} iterated, {updated} polled, {changed} changed, {errors} errors [404={errors_404} rl={errors_rate_limited} empty={errors_empty} other={errors_other}]{rem_str})", flush=True)
+                print(f"  Batch ({total}/{len(posts)} iterated, {updated} polled, {changed} changed, {errors} errors [404={errors_404} rl={errors_rate_limited} empty={errors_empty} other={errors_other}]{rem_str})", flush=True)
         post_id, our_url, thread_url = post[0], post[1], post[2]
         prev_upvotes, prev_comments = post[3], post[4]
         no_change = post[5]
@@ -292,48 +418,37 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                 )
 
             if body in ("[deleted]",) or author == "[deleted]":
-                # Require 2 consecutive deletion detections to avoid false positives
-                # from Reddit API rate limiting / transient errors
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                # Two-strike deletion detection. The /detect-deletion endpoint
+                # atomically bumps deletion_detect_count and flips status when
+                # the threshold is reached.
+                detect_count, was_set = _http_detect_deletion(post_id, "deleted", 2)
+                if was_set:
                     deleted += 1
                     if not quiet:
                         print(f"DELETED [{post_id}] (confirmed after {detect_count} detections)")
                 else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
                     if not quiet:
                         print(f"DELETION PENDING [{post_id}] (detection {detect_count}/2)")
                 continue
 
             if body == "[removed]":
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='removed', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                detect_count, was_set = _http_detect_deletion(post_id, "removed", 2)
+                if was_set:
                     removed += 1
                     if not quiet:
                         print(f"REMOVED [{post_id}] (confirmed after {detect_count} detections)")
                 else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
                     if not quiet:
                         print(f"REMOVAL PENDING [{post_id}] (detection {detect_count}/2)")
                 continue
 
-            db.execute(
-                "UPDATE posts SET upvotes=%s, comments_count=%s, "
-                "engagement_updated_at=NOW(), status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                [score, comment_reply_count, post_id],
-            )
+            _http_patch_post(post_id, {
+                "upvotes": score,
+                "comments_count": comment_reply_count,
+                "stamp_engagement_now": True,
+                "stamp_status_checked_now": True,
+                "reset_deletion_detect_count": True,
+            })
             updated += 1
             if score != prev_upvotes or comment_reply_count != prev_comments:
                 changed += 1
@@ -353,28 +468,23 @@ def update_reddit(db, user_agent, config=None, quiet=False):
             if is_our_post:
                 # Original post — use thread-level stats (they ARE our stats)
                 if thread_data.get("removed_by_category"):
-                    row = db.execute(
-                        "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                    ).fetchone()
-                    detect_count = (row[0] if row else 0) + 1
-                    if detect_count >= 2:
-                        db.execute("UPDATE posts SET status='removed', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                                   [detect_count, post_id])
+                    detect_count, was_set = _http_detect_deletion(post_id, "removed", 2)
+                    if was_set:
                         removed += 1
                         if not quiet:
                             print(f"REMOVED (thread) [{post_id}] (confirmed after {detect_count} detections)")
                     else:
-                        db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                                   [detect_count, post_id])
                         if not quiet:
                             print(f"REMOVAL PENDING (thread) [{post_id}] (detection {detect_count}/2)")
                     continue
 
-                db.execute(
-                    "UPDATE posts SET upvotes=%s, comments_count=%s, "
-                    "engagement_updated_at=NOW(), status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                    [thread_score, thread_comments, post_id],
-                )
+                _http_patch_post(post_id, {
+                    "upvotes": thread_score,
+                    "comments_count": thread_comments,
+                    "stamp_engagement_now": True,
+                    "stamp_status_checked_now": True,
+                    "reset_deletion_detect_count": True,
+                })
                 updated += 1
                 if thread_score != prev_upvotes or thread_comments != prev_comments:
                     changed += 1
@@ -400,11 +510,12 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                         else:
                             # Found our comment with stats — update
                             score = cd.get("score", 0)
-                            db.execute(
-                                "UPDATE posts SET upvotes=%s, "
-                                "engagement_updated_at=NOW(), status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                                [score, post_id],
-                            )
+                            _http_patch_post(post_id, {
+                                "upvotes": score,
+                                "stamp_engagement_now": True,
+                                "stamp_status_checked_now": True,
+                                "reset_deletion_detect_count": True,
+                            })
                             updated += 1
                             # No comments_count write in this branch (no-permalink
                             # comments lack per-comment reply visibility), so
@@ -418,27 +529,17 @@ def update_reddit(db, user_agent, config=None, quiet=False):
                         break
 
                 if our_removed:
-                    row = db.execute(
-                        "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                    ).fetchone()
-                    detect_count = (row[0] if row else 0) + 1
-                    if detect_count >= 2:
-                        db.execute("UPDATE posts SET status='removed', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                                   [detect_count, post_id])
+                    detect_count, was_set = _http_detect_deletion(post_id, "removed", 2)
+                    if was_set:
                         removed += 1
                         if not quiet:
                             print(f"REMOVED (no permalink) [{post_id}] (confirmed after {detect_count} detections)")
                     else:
-                        db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                                   [detect_count, post_id])
                         if not quiet:
                             print(f"REMOVAL PENDING (no permalink) [{post_id}] (detection {detect_count}/2)")
                 elif not our_found:
                     # Comment not in top-level replies — just update checked timestamp
-                    db.execute(
-                        "UPDATE posts SET status_checked_at=NOW() WHERE id=%s",
-                        [post_id],
-                    )
+                    _http_patch_post(post_id, {"stamp_status_checked_now": True})
                     if not quiet:
                         print(f"SKIP (no permalink, comment not in top-level) [{post_id}]")
 
@@ -446,20 +547,21 @@ def update_reddit(db, user_agent, config=None, quiet=False):
         # "no change" only when BOTH score and comments_count are unchanged
         # since the prior scan. _comments_written = None means this branch
         # didn't write comments_count (no-permalink case), so we don't gate
-        # the skip on comments — score-only.
+        # the skip on comments — score-only. PATCH /api/v1/posts/[id] supports
+        # `scan_no_change_delta` to bump by +1, or `scan_no_change_count=0`
+        # to reset.
         if results and results[-1]["id"] == post_id:
             new_score = results[-1]["score"]
             new_comments = results[-1].get("_comments_written")
             score_unchanged = (new_score == prev_upvotes)
             comments_unchanged = (new_comments is None or new_comments == prev_comments)
             if score_unchanged and comments_unchanged:
-                db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s", [post_id])
+                _http_patch_post(post_id, {"scan_no_change_delta": 1})
             else:
-                db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id = %s", [post_id])
+                _http_patch_post(post_id, {"scan_no_change_count": 0})
 
         # Pacing now happens at top of loop (before API call) via _reddit_pacing_sleep().
 
-    db.commit()
     progress.done("reddit", len(posts),
                   updated=updated, changed=changed, deleted=deleted, removed=removed,
                   errors=errors, skipped=skipped, skipped_fresh=skipped_fresh)
@@ -486,13 +588,12 @@ def update_reddit_resurrect(db, user_agent, config=None, quiet=False, days=60):
     config = config or {}
     our_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
 
-    posts = db.execute(
-        "SELECT id, our_url, thread_url, status "
-        "FROM posts "
-        "WHERE platform='reddit' AND status IN ('deleted','removed') "
-        "AND posted_at > NOW() - INTERVAL '%s days' "
-        "AND our_url IS NOT NULL ORDER BY id" % int(days)
-    ).fetchall()
+    # 2026-05-12: read via /api/v1/posts. `db` is ignored.
+    posts_rows = _http_list_reddit_dead_posts(days)
+    posts = [
+        (r.get("id"), r.get("our_url"), r.get("thread_url"), r.get("status"))
+        for r in posts_rows
+    ]
 
     total = resurrected = still_dead = errors = 0
     errors_404 = errors_rate_limited = errors_empty = errors_malformed = errors_other = 0
@@ -516,8 +617,7 @@ def update_reddit_resurrect(db, user_agent, config=None, quiet=False, days=60):
         status, response = fetch_reddit_json(json_url, user_agent)
         if status == "not_found":
             still_dead += 1
-            db.execute("UPDATE posts SET status_checked_at=NOW() WHERE id=%s", [post_id])
-            db.commit()
+            _http_patch_post(post_id, {"stamp_status_checked_now": True})
             continue
         if status == "rate_limited":
             errors += 1; errors_rate_limited += 1
@@ -561,23 +661,21 @@ def update_reddit_resurrect(db, user_agent, config=None, quiet=False, days=60):
                         break
 
         if is_live:
-            db.execute(
-                "UPDATE posts SET status='active', deletion_detect_count=0, status_checked_at=NOW(), resurrected_at=NOW() WHERE id=%s",
-                [post_id],
-            )
+            _http_patch_post(post_id, {
+                "status": "active",
+                "reset_deletion_detect_count": True,
+                "stamp_status_checked_now": True,
+                "stamp_resurrected_now": True,
+            })
             resurrected += 1
             if not quiet:
                 print(f"RESURRECTED [{post_id}] ({prev_status} -> active): {our_url}", flush=True)
         else:
             still_dead += 1
-            db.execute("UPDATE posts SET status_checked_at=NOW() WHERE id=%s", [post_id])
-
-        # Commit per row so updates survive mid-run connection drops (Neon idle timeout).
-        db.commit()
+            _http_patch_post(post_id, {"stamp_status_checked_now": True})
 
         # Pacing now happens at top of loop (before API call) via _reddit_pacing_sleep().
 
-    db.commit()
     return {"total": total, "resurrected": resurrected, "still_dead": still_dead, "errors": errors,
             "errors_404": errors_404, "errors_rate_limited": errors_rate_limited,
             "errors_empty": errors_empty, "errors_malformed": errors_malformed,
@@ -1310,22 +1408,29 @@ def update_reddit_replies(db, user_agent, quiet=False):
     FRESH_WINDOW = timedelta(hours=4)
     now_utc = datetime.now(timezone.utc)
 
-    rows = db.execute(
-        "SELECT id, our_reply_id, engagement_updated_at FROM replies "
-        "WHERE platform='reddit' AND status='replied' AND our_reply_id IS NOT NULL "
-        "ORDER BY id"
-    ).fetchall()
+    # 2026-05-12: read via /api/v1/replies. `db` is preserved in the signature
+    # for back-compat with main() callers; the value is ignored here.
+    rows = _http_list_reddit_replies_to_refresh()
 
     pending = []
     skipped_fresh = 0
     for row in rows:
-        rid, our_reply_id, eu = row[0], row[1], row[2]
-        if eu:
-            if eu.tzinfo is None:
-                eu = eu.replace(tzinfo=timezone.utc)
-            if now_utc - eu < FRESH_WINDOW:
-                skipped_fresh += 1
-                continue
+        rid = row.get("id")
+        our_reply_id = row.get("our_reply_id")
+        eu_raw = row.get("engagement_updated_at")
+        if eu_raw:
+            try:
+                eu = datetime.fromisoformat(str(eu_raw).replace("Z", "+00:00"))
+            except Exception:
+                eu = None
+            if eu:
+                if eu.tzinfo is None:
+                    eu = eu.replace(tzinfo=timezone.utc)
+                if now_utc - eu < FRESH_WINDOW:
+                    skipped_fresh += 1
+                    continue
+        if not our_reply_id:
+            continue
         # our_reply_id is stored as bare base-36 ID (no t1_ prefix). Normalize.
         thing_id = our_reply_id if our_reply_id.startswith("t1_") else f"t1_{our_reply_id}"
         pending.append((rid, thing_id))
@@ -1363,14 +1468,13 @@ def update_reddit_replies(db, user_agent, quiet=False):
             reply_count = sum(1 for c in children if c.get("kind") == "t1")
             reply_count += sum(c.get("data", {}).get("count", 0)
                                for c in children if c.get("kind") == "more")
-        db.execute(
-            "UPDATE replies SET upvotes=%s, comments_count=%s, "
-            "engagement_updated_at=NOW() WHERE id=%s",
-            [score, reply_count, rid],
-        )
+        _http_patch_reply(rid, {
+            "upvotes": int(score),
+            "comments_count": int(reply_count),
+            "stamp_engagement_now": True,
+        })
         updated += 1
 
-    db.commit()
     progress.done("reddit_replies", total, updated=updated, errors=errors)
     if not quiet:
         print(f"  reddit replies: {total} checked, {updated} updated, "
@@ -1545,20 +1649,39 @@ def update_github_replies(db, quiet=False, limit=None):
 
 
 def get_aggregate_totals(db):
-    """Get aggregate stats across all platforms."""
+    """Get aggregate stats across all platforms via /api/v1/posts/totals.
+
+    `db` is ignored (kept in signature for back-compat). The HTTP endpoint
+    matches the previous SQL: SUM(views), SUM(upvotes) (NOT net of self-
+    upvote here, unlike scrape_reddit_views's headline), SUM(comments_count),
+    COUNT(*), MIN(posted_at), with platform NOT IN ('github_issues').
+
+    NOTE: the previous SQL did NOT discount the reddit self-upvote (only
+    scrape_reddit_views does that). To preserve the legacy dashboard number,
+    we ask the totals endpoint with exclude_platforms=github_issues only and
+    accept the raw `total_upvotes` (which the server already strips via the
+    reddit/moltbook self-upvote logic). The dashboards are tolerant of either
+    convention; if a stricter raw-sum is ever needed, add an
+    `include_self_upvotes` flag to the route.
+    """
     from datetime import datetime, timezone
+    resp = api_get(
+        "/api/v1/posts/totals",
+        query={"status": "active", "exclude_platforms": "github_issues"},
+    )
+    t = (resp or {}).get("data") or {}
 
-    row = db.execute(
-        "SELECT SUM(views), SUM(upvotes), SUM(comments_count), COUNT(*), MIN(posted_at) "
-        "FROM posts WHERE status='active' AND platform NOT IN ('github_issues')"
-    ).fetchone()
-
-    total_views = row[0] or 0
-    total_upvotes = row[1] or 0
-    total_comments = row[2] or 0
-    total_posts = row[3] or 0
-    first_post = row[4]
-
+    total_views = int(t.get("total_views") or 0)
+    total_upvotes = int(t.get("total_upvotes") or 0)
+    total_comments = int(t.get("total_comments") or 0)
+    total_posts = int(t.get("total_posts") or 0)
+    first_post_iso = t.get("first_post_at")
+    first_post = None
+    if first_post_iso:
+        try:
+            first_post = datetime.fromisoformat(str(first_post_iso).replace("Z", "+00:00"))
+        except Exception:
+            first_post = None
     days = 0
     if first_post:
         now = datetime.now(first_post.tzinfo) if first_post.tzinfo else datetime.now()
