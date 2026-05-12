@@ -10186,8 +10186,16 @@ function renderFunnelStats(payload) {
   // these come from our own DB, not PostHog.
   const makePostEngagementFmt = (totalKey, opts) => (v, r) => {
     const placeholder = (opts && opts.placeholder) || '\u2014';
-    if (v == null) return placeholder;
     const t = r && r[totalKey];
+    if (v == null) {
+      // No eligible posts in window for scoped, but old posts may have
+      // earned engagement during the window. Show "\u2014 (N)" so the
+      // period total stays visible.
+      if (t != null && Number(t) > 0) {
+        return placeholder + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+      }
+      return placeholder;
+    }
     if (t != null && Number(t) !== Number(v)) {
       return fmt(v) + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
     }
