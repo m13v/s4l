@@ -84,23 +84,27 @@ def _intent_boost(title, selftext):
 
 
 def _fetch_thread_text_map(thread_urls):
-    """Batch-fetch (thread_title, thread_selftext) for a list of URLs.
+    """Batch-fetch (thread_title, thread_selftext) via /api/v1/reddit-candidates.
 
     Returns {url: (title, selftext)}. Missing rows return ('', '').
     """
     if not thread_urls:
         return {}
     try:
-        import db as dbmod  # local import to avoid hard dep at module import
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        rows = conn.execute(
-            "SELECT thread_url, COALESCE(thread_title, ''), COALESCE(thread_selftext, '') "
-            "FROM reddit_candidates WHERE thread_url = ANY(%s)",
-            [list(thread_urls)],
-        ).fetchall()
-        conn.close()
-        return {r[0]: (r[1], r[2]) for r in rows}
+        from http_api import api_get
+        # The route accepts a CSV `thread_urls` query param (up to 500 URLs).
+        resp = api_get(
+            "/api/v1/reddit-candidates",
+            query={
+                "thread_urls": ",".join(thread_urls),
+                "limit": 500,
+            },
+        )
+        rows = ((resp or {}).get("data") or {}).get("candidates") or []
+        return {
+            r.get("thread_url"): (r.get("thread_title") or "", r.get("thread_selftext") or "")
+            for r in rows if r.get("thread_url")
+        }
     except Exception as e:
         print(f"[ripen] _fetch_thread_text_map: {e}", file=sys.stderr)
         return {}
@@ -108,100 +112,66 @@ def _fetch_thread_text_map(thread_urls):
 
 def _db_update_ripen_metrics(thread_url, t0_score, t0_comments,
                              t1_score, t1_comments, composite, bump_attempt):
-    """Persist T0/T1/delta to reddit_candidates and (optionally) bump attempt_count.
+    """Persist T0/T1/delta via /api/v1/reddit-candidates/by-thread-url action=set_ripen.
 
-    Called for every decision after T1 measurement. `bump_attempt` is True
-    when the candidate failed the floor or was HTML-locked, so the row counts
-    against the MAX_ATTEMPTS budget; it's False for survivors so a successful
-    later post phase doesn't need to dispute the count.
-
-    Locked-thread survivors (HTML lock check returned 'locked' / 'archived')
-    pass `bump_attempt=True` AND have status flipped to 'failed' so Phase 0
-    salvage skips them — see _db_mark_html_locked below.
-
-    Best-effort. If reddit_candidates doesn't have a row for this URL (e.g.
-    a stale tmpfile from before the migration), the UPDATE is a no-op.
+    Server-side: bump_attempt=True bumps attempt_count, sets
+    last_failure_reason='ripen_floor_miss', and flips status='failed' (one-strike
+    rule from 2026-05-07). bump_attempt=False just records the metrics.
     """
     if not thread_url:
         return
     try:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        if bump_attempt:
-            # ONE-STRIKE rule (2026-05-07): a thread that scored Δ<floor in
-            # a 5-min window once is unlikely to suddenly catch fire 30 min
-            # later. Re-salvaging dead candidates was burning the entire
-            # cycle on rows that re-failed at the same gate (147 of 158
-            # pending rows had last_failure_reason='ripen_floor_miss' on
-            # 2026-05-07, capping throughput at ~1 post/cycle). Mark failed
-            # immediately so Phase 0 salvage (status='pending' filter)
-            # excludes them. Net effect: one ripen miss = permanent fail,
-            # queue drains itself organically, throughput rises to LIMIT.
-            conn.execute(
-                "UPDATE reddit_candidates SET "
-                "  score_t0 = %s, comments_t0 = %s, "
-                "  score_t1 = %s, comments_t1 = %s, "
-                "  delta_score = %s, t1_checked_at = NOW(), "
-                "  attempt_count = attempt_count + 1, "
-                "  last_attempt_at = NOW(), "
-                "  last_failure_reason = 'ripen_floor_miss', "
-                "  status = 'failed' "
-                "WHERE thread_url = %s",
-                [t0_score, t0_comments, t1_score, t1_comments, composite, thread_url],
-            )
-        else:
-            conn.execute(
-                "UPDATE reddit_candidates SET "
-                "  score_t0 = %s, comments_t0 = %s, "
-                "  score_t1 = %s, comments_t1 = %s, "
-                "  delta_score = %s, t1_checked_at = NOW() "
-                "WHERE thread_url = %s",
-                [t0_score, t0_comments, t1_score, t1_comments, composite, thread_url],
-            )
-        conn.commit()
-        conn.close()
+        from http_api import api_patch
+        api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            {
+                "thread_url": thread_url,
+                "action": "set_ripen",
+                "score_t0": int(t0_score) if t0_score is not None else None,
+                "comments_t0": int(t0_comments) if t0_comments is not None else None,
+                "score_t1": int(t1_score) if t1_score is not None else None,
+                "comments_t1": int(t1_comments) if t1_comments is not None else None,
+                "delta_score": float(composite) if composite is not None else None,
+                "bump_attempt": bool(bump_attempt),
+            },
+            ok_on_404=True,
+        )
     except Exception as e:
         print(f"[ripen] WARN: db update failed for {thread_url}: {e}",
               file=sys.stderr)
 
 
 def _db_load_persisted_t0(urls):
-    """Load score_t0 / comments_t0 from reddit_candidates for a list of URLs.
-
-    Used by salvage iterations to pull the FIRST-SIGHTING T0 captured by an
-    earlier cycle's ripen, so the delta computed below is cumulative since
-    discovery (mirrors twitter_candidates' behavior, where Phase 0 salvage
-    leaves likes_t0 untouched and Phase 2a's fetch_twitter_t1.py compares
-    fresh T1 against the original T0). Catches slow-trickle threads that a
-    fresh 5-min window would never see grow.
+    """Load score_t0 / comments_t0 via /api/v1/reddit-candidates.
 
     Returns dict {url: {"score": s, "comments": c, "ok": True}} for every row
     where BOTH score_t0 and comments_t0 are non-null. URLs without persisted
-    T0 are absent from the returned dict so the caller falls back to a live
-    fetch (preserves the cumulative semantics for rows that DID ripen before
-    while still working for discover→ripen-crashed→re-discover edge cases).
+    T0 are absent so callers fall back to a live fetch.
     """
     if not urls:
         return {}
     try:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        cur = conn.execute(
-            "SELECT thread_url, score_t0, comments_t0 "
-            "FROM reddit_candidates "
-            "WHERE thread_url = ANY(%s) "
-            "  AND score_t0 IS NOT NULL "
-            "  AND comments_t0 IS NOT NULL",
-            [list(urls)],
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/reddit-candidates",
+            query={
+                "thread_urls": ",".join(urls),
+                "has_t0": "true",
+                "limit": 500,
+            },
         )
-        rows = cur.fetchall()
-        conn.close()
-        return {
-            r[0]: {"score": int(r[1]), "comments": int(r[2]), "ok": True}
-            for r in rows
-        }
+        rows = ((resp or {}).get("data") or {}).get("candidates") or []
+        out = {}
+        for r in rows:
+            url = r.get("thread_url")
+            if not url:
+                continue
+            s = r.get("score_t0")
+            c = r.get("comments_t0")
+            if s is None or c is None:
+                continue
+            out[url] = {"score": int(s), "comments": int(c), "ok": True}
+        return out
     except Exception as e:
         print(f"[ripen] WARN: load_persisted_t0 failed: {e}",
               file=sys.stderr)
@@ -209,29 +179,23 @@ def _db_load_persisted_t0(urls):
 
 
 def _db_mark_html_locked(thread_url, state):
-    """Mark a candidate as permanently failed because the HTML lock check
-    detected a state ('locked' or 'archived') the JSON API hadn't reported.
-
-    Permanent failure: Phase 0 salvage filters by status='pending', so
-    'failed' rows never come back. last_failure_reason captures the state
-    so the dashboard can render reddit_locked / reddit_archived breakdowns.
+    """Mark a candidate as permanently failed via the action=mark_html_locked
+    lane. The server flips status='failed', sets last_failure_reason='html_<state>',
+    and stamps last_attempt_at=NOW().
     """
     if not thread_url:
         return
     try:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        conn.execute(
-            "UPDATE reddit_candidates SET "
-            "  status = 'failed', "
-            "  last_failure_reason = %s, "
-            "  last_attempt_at = NOW() "
-            "WHERE thread_url = %s",
-            [f"html_{state}", thread_url],
+        from http_api import api_patch
+        api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            {
+                "thread_url": thread_url,
+                "action": "mark_html_locked",
+                "state": state,
+            },
+            ok_on_404=True,
         )
-        conn.commit()
-        conn.close()
     except Exception as e:
         print(f"[ripen] WARN: html_locked db update failed for {thread_url}: {e}",
               file=sys.stderr)
