@@ -613,34 +613,47 @@ def _period_total_engagement(conn, name, days):
     Pre-2026-05-07 click rows do not exist (is_bot logging started then), so
     the count returns 0 for older days rather than mixing inflated counters.
     """
+    # Period total = engagement gained during the last N days. Mirrors the
+    # Trends-tab daily-gain SQL (LAG over post_views_daily snapshots,
+    # WHERE day >= today - N) with one important tweak: when a post was
+    # *posted within the window*, its FIRST snapshot in the window is
+    # treated as "in-window gain = snapshot value" (all of it was earned
+    # in the window). Without this tweak the Trends-tab LAG approach
+    # silently drops every brand-new post's initial value, which is why
+    # the bracket can otherwise end up smaller than the scoped value for
+    # short windows.
+    #
+    # For older posts (posted before window): only LAG-diffs are summed,
+    # matching the Trends chart exactly so the panel total reconciles
+    # with the chart total.
+    days_sql = "INTERVAL '" + str(int(days)) + " days'"
     cur = conn.execute(
-        "WITH eligible_posts AS ("
-          "SELECT p.id FROM posts p "
-          "WHERE p.project_name = %s "
-            "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')"
-        "), "
-        "latest_in_window AS ("
-          "SELECT DISTINCT ON (pvd.post_id) "
-            "pvd.post_id, pvd.upvotes, pvd.comments, pvd.views "
+        "WITH per_post_daily AS ("
+          "SELECT pvd.post_id, pvd.day, p.posted_at, "
+            "pvd.upvotes,  LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
+            "pvd.comments, LAG(pvd.comments) OVER w AS prev_comments, "
+            "pvd.views,    LAG(pvd.views)    OVER w AS prev_views "
           "FROM post_views_daily pvd "
-          "JOIN eligible_posts ep ON ep.id = pvd.post_id "
-          "WHERE pvd.day >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
-          "ORDER BY pvd.post_id, pvd.day DESC"
-        "), "
-        "before_window AS ("
-          "SELECT DISTINCT ON (pvd.post_id) "
-            "pvd.post_id, pvd.upvotes, pvd.comments, pvd.views "
-          "FROM post_views_daily pvd "
-          "JOIN eligible_posts ep ON ep.id = pvd.post_id "
-          "WHERE pvd.day < CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
-          "ORDER BY pvd.post_id, pvd.day DESC"
+          "JOIN posts p ON p.id = pvd.post_id "
+          "WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
+            "AND pvd.day >= CURRENT_DATE - " + days_sql + " "
+            "AND p.project_name = %s "
+          "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
         ") "
         "SELECT "
-          "COALESCE(SUM(GREATEST(COALESCE(l.upvotes,  0) - COALESCE(b.upvotes,  0), 0)), 0)::bigint, "
-          "COALESCE(SUM(GREATEST(COALESCE(l.comments, 0) - COALESCE(b.comments, 0), 0)), 0)::bigint, "
-          "COALESCE(SUM(GREATEST(COALESCE(l.views,    0) - COALESCE(b.views,    0), 0)), 0)::bigint "
-        "FROM latest_in_window l "
-        "LEFT JOIN before_window b USING (post_id)",
+          "COALESCE(SUM(CASE "
+            "WHEN prev_upvotes IS NOT NULL THEN GREATEST(upvotes - prev_upvotes, 0) "
+            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(upvotes, 0) "
+            "ELSE 0 END), 0)::bigint, "
+          "COALESCE(SUM(CASE "
+            "WHEN prev_comments IS NOT NULL THEN GREATEST(comments - prev_comments, 0) "
+            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(comments, 0) "
+            "ELSE 0 END), 0)::bigint, "
+          "COALESCE(SUM(CASE "
+            "WHEN prev_views IS NOT NULL THEN GREATEST(views - prev_views, 0) "
+            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(views, 0) "
+            "ELSE 0 END), 0)::bigint "
+        "FROM per_post_daily",
         (name,),
     )
     row = cur.fetchone() or (0, 0, 0)
