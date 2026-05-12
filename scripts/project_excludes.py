@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
-"""project_excludes.py
+"""project_excludes.py — HTTP-backed exclude list (2026-05-12 migration).
 
 Self-improving per-project exclusion list. Claude proposes specific keywords
 during Phase 2b-prep when it rejects an off-topic candidate; those keywords
 get appended as `-term` to all future search queries for that project after
 they clear an activation gate (>=2 distinct batches).
 
+All reads and writes now route through /api/v1/project-excludes on the
+social-autoposter-website API. Direct SQL is GONE; the only Python state
+this module owns is the local reserved-keyword check (which reads
+config.json on disk).
+
 CLI usage
 ---------
     # List active excludes for a project (JSON to stdout):
     python3 scripts/project_excludes.py active --platform twitter --project Vipassana
 
-    # Propose a new exclude (used by log_twitter_skips.py):
+    # Active excludes split by kind (reddit):
+    python3 scripts/project_excludes.py active-split --platform reddit --project studyly
+
+    # Propose a new exclude (used by log_twitter_skips.py / post_reddit.py):
     python3 scripts/project_excludes.py propose \
-        --platform twitter --project Vipassana --term cricket \
-        --candidate-id 10196 --batch-id twcycle-20260508-163303 \
-        --reason 'cricket franchise Sanjiv Goenka, not S.N. Goenka'
+        --platform reddit --project studyly --term subreddit:bestofredditorupdates \
+        --candidate-id 10196 --batch-id rdtcycle-20260512-163303 \
+        --reason 'off-topic drama subreddit'
+
+    # Stamp last_used_at when terms get appended to a live query:
+    python3 scripts/project_excludes.py mark-used \
+        --platform reddit --project studyly --terms subreddit:foo subreddit:bar
 
     # Decay: prune terms unused in 60 days with <3 batches.
     python3 scripts/project_excludes.py decay [--days 60]
 
 Module API
 ----------
-    from project_excludes import active_excludes, propose, decay
+    from project_excludes import active_excludes, active_excludes_by_kind, \
+        propose, mark_used, decay
 
 Activation gate
 ---------------
@@ -30,30 +43,9 @@ A term is APPLIED to live queries only when array_length(batch_ids,1) >= 2,
 so one false-rejection can't mute the searches. The proposal IS recorded
 on first emission so we can audit "Claude proposed this once but never again".
 
-False-negative guards (enforced at propose time, NOT during query rendering):
-  - term must be >=3 chars, ascii-letters/digits/hyphen, single token
-  - term must NOT match (case-insensitive) any token of the project's
-    `search_topics` list in config.json (the reserved core list). The check
-    splits search_topics phrases on whitespace AND the OR/AND/parentheses
-    chars, so 'vipassana' is reserved even when search_topics has
-    '"vipassana" OR "Goenka"'.
-  - term is normalized: lowercase, stripped of surrounding quotes/whitespace.
-
-Schema
-------
-project_search_excludes (
-    platform          TEXT,
-    project           TEXT,
-    term              TEXT,
-    proposals         INTEGER,        -- count, includes duplicates from same batch
-    batch_ids         TEXT[],         -- DISTINCT batches that proposed it
-    candidate_ids     INTEGER[],      -- every candidate (kept for audit)
-    sample_reason     TEXT,           -- first reason recorded, for debugging
-    first_proposed_at TIMESTAMPTZ,
-    last_proposed_at  TIMESTAMPTZ,
-    last_used_at      TIMESTAMPTZ,    -- bumped by mark_used() when appended to a query
-    PRIMARY KEY (platform, project, term)
-);
+False-negative guards: structural validation (term shape, allowed kinds per
+platform) is enforced server-side. Reserved-keyword check is enforced LOCALLY
+before we hit the network, because config.json lives on the client.
 """
 
 import argparse
@@ -63,7 +55,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+
+from http_api import api_get, api_post, api_delete
 
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
@@ -90,9 +83,9 @@ ALLOWED_KINDS = {
 def parse_term(term):
     """Return (kind, value) for a normalized term.
 
-    - Bare "cricket"               -> ("bare", "cricket")           [twitter form]
+    - Bare "cricket"                    -> ("bare", "cricket")           [twitter form]
     - "subreddit:bestofredditorupdates" -> ("subreddit", "bestofredditorupdates")
-    - "keyword:powerpoint"         -> ("keyword", "powerpoint")
+    - "keyword:powerpoint"              -> ("keyword", "powerpoint")
     Returns (None, None) for unrecognized shapes.
     """
     if not isinstance(term, str):
@@ -143,21 +136,12 @@ def _load_reserved_terms_for_project(project_name):
 
 
 def normalize_term(term):
-    """Return a normalized term, or None if invalid.
-
-    Accepts:
-      - bare-keyword form (twitter legacy): "cricket"
-      - typed reddit form: "subreddit:bestofredditorupdates" or "keyword:powerpoint"
-
-    Normalizes by lower-casing and stripping surrounding quotes/whitespace.
-    Empty / too-short / wrong-shape inputs return None.
-    """
+    """Return a normalized term, or None if invalid."""
     if not isinstance(term, str):
         return None
     t = term.strip().lower().strip("\"'")
     if len(t) < TERM_MIN_LEN:
         return None
-    # Try typed first so "subreddit:foo" doesn't get mis-rejected by TERM_RE.
     if TYPED_TERM_RE.match(t):
         return t
     if TERM_RE.match(t):
@@ -166,11 +150,7 @@ def normalize_term(term):
 
 
 def _kind_allowed_for_platform(kind, platform):
-    """Gate which term kinds a given platform may write/read.
-
-    Prevents twitter from accidentally getting a `subreddit:` row and reddit
-    from getting a bare keyword that might accidentally mute a core seed.
-    """
+    """Gate which term kinds a given platform may write/read."""
     if not kind:
         return False
     allowed = ALLOWED_KINDS.get(platform)
@@ -179,38 +159,25 @@ def _kind_allowed_for_platform(kind, platform):
     return kind in allowed
 
 
-def active_excludes(platform, project):
+def active_excludes(platform, project, min_batches=ACTIVATION_BATCH_FLOOR):
     """Return the list of currently-active exclude terms for (platform, project).
 
     Only terms that have cleared the activation gate (>=ACTIVATION_BATCH_FLOOR
     distinct proposing batches) are returned. Order: longest-first so when
     the query drafter appends them, more-specific terms win lex-sort tooltips.
     """
-    conn = dbmod.get_conn()
-    try:
-        rows = conn.execute(
-            """
-            SELECT term
-            FROM project_search_excludes
-            WHERE platform=%s
-              AND project=%s
-              AND COALESCE(array_length(batch_ids, 1), 0) >= %s
-            ORDER BY LENGTH(term) DESC, term ASC
-            """,
-            [platform, project, ACTIVATION_BATCH_FLOOR],
-        ).fetchall()
-    finally:
-        conn.close()
-    return [r[0] for r in rows]
+    resp = api_get(
+        "/api/v1/project-excludes",
+        query={"platform": platform, "project": project, "min_batches": min_batches},
+    )
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not data:
+        return []
+    return list(data.get("terms") or [])
 
 
 def active_excludes_by_kind(platform, project):
-    """Same as active_excludes() but split by kind for reddit callers.
-
-    Returns a dict {"subreddit": [...], "keyword": [...], "bare": [...]}.
-    Empty lists for absent kinds. Order within each list is longest-first (the
-    same lex order as active_excludes() — keeps audit output stable).
-    """
+    """Same as active_excludes() but split by kind for reddit callers."""
     terms = active_excludes(platform, project)
     out = {"subreddit": [], "keyword": [], "bare": []}
     for t in terms:
@@ -221,7 +188,11 @@ def active_excludes_by_kind(platform, project):
 
 
 def propose(platform, project, term, candidate_id=None, batch_id=None, reason=None):
-    """UPSERT a single proposed exclude. Returns dict with the outcome.
+    """UPSERT a single proposed exclude via HTTP.
+
+    The reserved-keyword check runs LOCALLY (config.json is on the client).
+    Structural validation (regex, platform-kind allowed) runs on both sides;
+    the server is authoritative.
 
     outcome keys:
         ok (bool)         success
@@ -236,147 +207,75 @@ def propose(platform, project, term, candidate_id=None, batch_id=None, reason=No
 
     kind, value = parse_term(norm)
     if not _kind_allowed_for_platform(kind, platform):
-        # e.g. trying to write a bare "anki" to reddit, or "subreddit:foo" to
-        # twitter. Reject so platforms can't cross-contaminate.
         return {"ok": False, "term": norm, "action": "rejected_invalid", "active": False}
 
-    # Reserved-keyword check only applies to bare + typed-keyword terms.
-    # "subreddit:foo" never mutes a search topic since reddit search treats
-    # the sub name as a separate scope from the query terms.
     if kind in ("bare", "keyword"):
         reserved = _load_reserved_terms_for_project(project)
         check_val = value if kind == "keyword" else norm
         if check_val in reserved:
             return {"ok": False, "term": norm, "action": "rejected_reserved", "active": False}
+        reserved_for_post = sorted(reserved)
+    else:
+        reserved_for_post = []
 
-    conn = dbmod.get_conn()
-    try:
-        # Read current row (if any) so we can decide whether this batch_id is new.
-        existing = conn.execute(
-            "SELECT batch_ids, candidate_ids FROM project_search_excludes "
-            "WHERE platform=%s AND project=%s AND term=%s",
-            [platform, project, norm],
-        ).fetchone()
-
-        if existing is None:
-            cur = conn.execute(
-                """
-                INSERT INTO project_search_excludes
-                  (platform, project, term, proposals,
-                   batch_ids, candidate_ids, sample_reason)
-                VALUES (%s, %s, %s, 1, %s, %s, %s)
-                ON CONFLICT (platform, project, term) DO NOTHING
-                """,
-                [
-                    platform, project, norm,
-                    [batch_id] if batch_id else [],
-                    [candidate_id] if candidate_id is not None else [],
-                    (reason or "")[:500] or None,
-                ],
-            )
-            conn.commit()
-            action = "inserted"
-            new_batches = 1 if batch_id else 0
-        else:
-            current_batches, current_cands = existing
-            current_batches = list(current_batches or [])
-            current_cands = list(current_cands or [])
-
-            new_batch = bool(batch_id and batch_id not in current_batches)
-
-            if new_batch:
-                action = "bumped"
-                conn.execute(
-                    """
-                    UPDATE project_search_excludes
-                       SET proposals     = proposals + 1,
-                           batch_ids     = array_append(batch_ids, %s),
-                           candidate_ids = CASE WHEN %s IS NULL THEN candidate_ids
-                                                ELSE array_append(candidate_ids, %s) END,
-                           last_proposed_at = NOW()
-                     WHERE platform=%s AND project=%s AND term=%s
-                    """,
-                    [batch_id, candidate_id, candidate_id, platform, project, norm],
-                )
-            else:
-                action = "duplicate_batch"
-                # Same batch re-proposing: bump count + append candidate, leave batch_ids alone.
-                conn.execute(
-                    """
-                    UPDATE project_search_excludes
-                       SET proposals     = proposals + 1,
-                           candidate_ids = CASE WHEN %s IS NULL THEN candidate_ids
-                                                ELSE array_append(candidate_ids, %s) END,
-                           last_proposed_at = NOW()
-                     WHERE platform=%s AND project=%s AND term=%s
-                    """,
-                    [candidate_id, candidate_id, platform, project, norm],
-                )
-            conn.commit()
-            new_batches = len(current_batches) + (1 if new_batch else 0)
-
-        active = new_batches >= ACTIVATION_BATCH_FLOOR
-        return {"ok": True, "term": norm, "action": action, "active": active}
-    finally:
-        conn.close()
+    body = {
+        "platform": platform,
+        "project": project,
+        "term": norm,
+        "reserved_terms": reserved_for_post,
+    }
+    if candidate_id is not None:
+        body["candidate_id"] = int(candidate_id)
+    if batch_id:
+        body["batch_id"] = batch_id
+    if reason:
+        body["reason"] = reason[:500]
+    resp = api_post("/api/v1/project-excludes", body)
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not data:
+        return {"ok": False, "term": norm, "action": "rejected_invalid", "active": False}
+    return {
+        "ok": bool(data.get("ok")),
+        "term": data.get("term") or norm,
+        "action": data.get("action") or "unknown",
+        "active": bool(data.get("active")),
+    }
 
 
 def mark_used(platform, project, terms):
     """Stamp last_used_at for each term we just appended to a query."""
     if not terms:
         return 0
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            """
-            UPDATE project_search_excludes
-               SET last_used_at = NOW()
-             WHERE platform=%s AND project=%s AND term = ANY(%s)
-            """,
-            [platform, project, list(terms)],
-        )
-        conn.commit()
-        return getattr(cur, "rowcount", 0) or 0
-    finally:
-        conn.close()
+    resp = api_post(
+        "/api/v1/project-excludes/mark-used",
+        {"platform": platform, "project": project, "terms": list(terms)},
+    )
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not data:
+        return 0
+    return int(data.get("stamped") or 0)
 
 
 def decay(days=DECAY_DAYS_DEFAULT, dry_run=False):
     """Prune terms with <3 distinct batches that haven't been used in `days`."""
-    conn = dbmod.get_conn()
-    try:
-        if dry_run:
-            rows = conn.execute(
-                """
-                SELECT platform, project, term,
-                       COALESCE(array_length(batch_ids,1),0),
-                       last_used_at
-                FROM project_search_excludes
-                WHERE COALESCE(array_length(batch_ids,1),0) < 3
-                  AND (last_used_at IS NULL OR last_used_at < NOW() - (%s || ' days')::interval)
-                  AND last_proposed_at < NOW() - (%s || ' days')::interval
-                ORDER BY last_proposed_at ASC
-                """,
-                [str(days), str(days)],
-            ).fetchall()
-            return [
-                {"platform": r[0], "project": r[1], "term": r[2],
-                 "batches": r[3], "last_used_at": str(r[4]) if r[4] else None}
-                for r in rows
-            ]
-        cur = conn.execute(
-            """
-            DELETE FROM project_search_excludes
-            WHERE COALESCE(array_length(batch_ids,1),0) < 3
-              AND (last_used_at IS NULL OR last_used_at < NOW() - (%s || ' days')::interval)
-              AND last_proposed_at < NOW() - (%s || ' days')::interval
-            """,
-            [str(days), str(days)],
-        )
-        conn.commit()
-        return getattr(cur, "rowcount", 0) or 0
-    finally:
-        conn.close()
+    resp = api_delete(
+        "/api/v1/project-excludes",
+        query={"days": days, "dry_run": "true" if dry_run else None},
+    )
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if dry_run:
+        rows = (data or {}).get("rows") or []
+        return [
+            {
+                "platform": r.get("platform"),
+                "project": r.get("project"),
+                "term": r.get("term"),
+                "batches": r.get("batches"),
+                "last_used_at": r.get("last_used_at"),
+            }
+            for r in rows
+        ]
+    return int((data or {}).get("pruned_count") or 0)
 
 
 def main():
