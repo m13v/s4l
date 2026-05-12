@@ -19,7 +19,7 @@ import urllib.parse
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
@@ -335,92 +335,54 @@ def _log_search_and_attach_deltas(query, subreddits_csv, project_name, batch_id,
     whole call and starving the post pipeline.
     """
     try:
-        from datetime import datetime, timezone as _tz
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        try:
-            now = datetime.now(_tz.utc)
-
-            # 1) Per-thread upsert + delta attachment
-            for t in threads:
-                t_url = t.get("url")
-                if not t_url:
-                    continue
-                t_score = int(t.get("score") or 0)
-                t_comments = int(t.get("num_comments") or 0)
-                t_sub = (t.get("subreddit") or "").lstrip("r/")
-                t_title = (t.get("title") or "")[:500]
-
-                cur = conn.execute(
-                    """SELECT first_seen_at, first_seen_score, first_seen_comments,
-                              last_seen_score, last_seen_comments, sightings
-                       FROM reddit_thread_snapshots
-                       WHERE thread_url = %s""",
-                    [t_url],
-                )
-                existing = cur.fetchone()
-                if existing is not None:
-                    first_at, first_score, first_comments, prev_last_score, prev_last_comments, sightings = existing
-                    try:
-                        window_min = (now - first_at).total_seconds() / 60.0
-                    except Exception:
-                        window_min = 0.0
-                    t["delta_score"] = t_score - int(first_score or 0)
-                    t["delta_comments"] = t_comments - int(first_comments or 0)
-                    t["delta_window_min"] = round(window_min, 1)
-                    t["sightings"] = int(sightings or 1) + 1
-                    t["first_seen_at"] = first_at.isoformat() if first_at else None
-                    conn.execute(
-                        """UPDATE reddit_thread_snapshots
-                           SET last_seen_at = NOW(),
-                               last_seen_score = %s,
-                               last_seen_comments = %s,
-                               sightings = sightings + 1,
-                               subreddit = COALESCE(NULLIF(%s,''), subreddit),
-                               title = COALESCE(NULLIF(%s,''), title)
-                           WHERE thread_url = %s""",
-                        [t_score, t_comments, t_sub, t_title, t_url],
-                    )
-                else:
-                    # First sight: no delta yet, but still emit the keys at zero
-                    # so the JSON shape is consistent for the LLM.
-                    t["delta_score"] = 0
-                    t["delta_comments"] = 0
-                    t["delta_window_min"] = 0.0
-                    t["sightings"] = 1
-                    t["first_seen_at"] = now.isoformat()
-                    conn.execute(
-                        """INSERT INTO reddit_thread_snapshots
-                           (thread_url, subreddit, title,
-                            first_seen_at, first_seen_score, first_seen_comments,
-                            last_seen_at, last_seen_score, last_seen_comments,
-                            sightings)
-                           VALUES (%s, %s, %s, NOW(), %s, %s, NOW(), %s, %s, 1)
-                           ON CONFLICT (thread_url) DO NOTHING""",
-                        [t_url, t_sub, t_title, t_score, t_comments, t_score, t_comments],
-                    )
-
-            # 2) One row per query attempt
-            conn.execute(
-                """INSERT INTO reddit_search_attempts
-                   (query, subreddits, project_name,
-                    candidates_raw, candidates_post_filter,
-                    top_score, top_comments, batch_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                [
-                    query,
-                    subreddits_csv or None,
-                    project_name or None,
-                    int(stats.get("raw") or 0),
-                    int(stats.get("returned") or 0),
-                    int(stats.get("top_score") or 0),
-                    int(stats.get("top_comments") or 0),
-                    batch_id or None,
-                ],
+        # 1) Server computes deltas + persists thread snapshots in one call,
+        #    then returns the threads array with delta_score / delta_comments /
+        #    delta_window_min / sightings / first_seen_at attached. We mutate
+        #    in place to preserve the prior contract (caller's `threads` list).
+        snap_payload = [
+            {
+                "url": t.get("url"),
+                "score": int(t.get("score") or 0),
+                "num_comments": int(t.get("num_comments") or 0),
+                "subreddit": (t.get("subreddit") or "").lstrip("r/"),
+                "title": (t.get("title") or "")[:500],
+            }
+            for t in threads
+            if t.get("url")
+        ]
+        if snap_payload:
+            resp = api_post(
+                "/api/v1/reddit-thread-snapshots",
+                {"threads": snap_payload},
             )
-            conn.commit()
-        finally:
-            conn.close()
+            enriched = ((resp or {}).get("data") or {}).get("threads") or []
+            by_url = {e.get("url"): e for e in enriched if e.get("url")}
+            for t in threads:
+                u = t.get("url")
+                if not u:
+                    continue
+                e = by_url.get(u)
+                if not e:
+                    continue
+                for k in ("delta_score", "delta_comments", "delta_window_min",
+                          "sightings", "first_seen_at"):
+                    if k in e:
+                        t[k] = e[k]
+
+        # 2) One row per query attempt
+        api_post(
+            "/api/v1/reddit-search-attempts",
+            {
+                "query": query,
+                "subreddits": subreddits_csv or None,
+                "project_name": project_name or None,
+                "candidates_raw": int(stats.get("raw") or 0),
+                "candidates_post_filter": int(stats.get("returned") or 0),
+                "top_score": int(stats.get("top_score") or 0),
+                "top_comments": int(stats.get("top_comments") or 0),
+                "batch_id": batch_id or None,
+            },
+        )
     except Exception as e:
         # Side-effect-only logging: never raise. Print once to stderr so
         # the run log shows the failure without breaking the search.
@@ -446,12 +408,17 @@ def cmd_search(args):
     query = args.query
     time_filter = args.time
 
-    # Load already-posted URLs for filtering
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    cur = conn.execute("SELECT thread_url FROM posts WHERE thread_url IS NOT NULL")
-    already_posted = {row[0] for row in cur.fetchall()}
-    conn.close()
+    # Load already-posted URLs for filtering via /api/v1/posts/thread-urls.
+    try:
+        resp = api_get(
+            "/api/v1/posts/thread-urls",
+            query={"platform": "reddit"},
+        )
+        urls = ((resp or {}).get("data") or {}).get("thread_urls") or []
+        already_posted = {u for u in urls if u}
+    except Exception as e:
+        print(f"[reddit_search] WARN: thread-urls fetch failed: {e}", file=sys.stderr)
+        already_posted = set()
 
     # Read project env BEFORE building the blocked-subs set so per-project
     # excludes (subreddit:<slug> rows in project_search_excludes) layer onto
@@ -700,53 +667,61 @@ def cmd_check_locked(args):
 
 
 def cmd_already_posted(args):
-    """Check if we already posted in a thread."""
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='reddit' AND thread_url = %s LIMIT 1",
-        [args.url],
+    """Check if we already posted in a thread via /api/v1/posts/lookup."""
+    resp = api_get(
+        "/api/v1/posts/lookup",
+        query={"platform": "reddit", "thread_url": args.url},
     )
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        print(json.dumps({"already_posted": True, "post_id": row[0], "content_preview": row[1]}))
+    post = ((resp or {}).get("data") or {}).get("post")
+    if post:
+        print(json.dumps({
+            "already_posted": True,
+            "post_id": post.get("id"),
+            "content_preview": post.get("our_content"),
+        }))
     else:
         print(json.dumps({"already_posted": False}))
 
 
 def cmd_log_post(args):
-    """Log a posted comment to the database."""
-    dbmod.load_env()
-    conn = dbmod.get_conn()
+    """Log a posted comment via /api/v1/posts POST.
 
-    # Hard dedup: refuse to insert if we already posted in this thread
-    cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='reddit' AND thread_url = %s LIMIT 1",
-        [args.thread_url],
-    )
-    existing = cur.fetchone()
-    if existing:
-        conn.close()
-        print(json.dumps({"error": "DUPLICATE_THREAD", "message": "Already posted in this thread", "existing_post_id": existing[0], "content_preview": existing[1]}))
-        return
-
+    The route enforces the (platform, thread_url) dedup server-side and
+    returns 409 with existing_post_id when the thread is already in the
+    table; ok_on_conflict=True surfaces that as a structured body.
+    """
     session_id = os.environ.get("CLAUDE_SESSION_ID") or None
-    cur = conn.execute(
-        """INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
-           thread_title, thread_content, our_url, our_content, our_account,
-           source_summary, project_name, status, posted_at, feedback_report_used, engagement_style, claude_session_id, search_topic)
-           VALUES ('reddit', %s, %s, %s, %s, '', %s, %s, %s, '', %s, 'active', NOW(), TRUE, %s, %s, %s)
-           RETURNING id""",
-        [args.thread_url, args.thread_author, args.thread_author, args.thread_title,
-         args.our_url, args.our_text, args.account, args.project,
-         getattr(args, 'engagement_style', None), session_id,
-         getattr(args, 'search_topic', None)],
-    )
-    new_post_id = cur.fetchone()[0]
-    conn.commit()
-    conn.close()
-    print(json.dumps({"logged": True, "post_id": new_post_id, "claude_session_id": session_id}))
+    body = {
+        "platform": "reddit",
+        "thread_url": args.thread_url,
+        "thread_author": args.thread_author,
+        "thread_title": args.thread_title,
+        "our_url": args.our_url,
+        "our_content": args.our_text,
+        "our_account": args.account,
+        "project": args.project,
+        "engagement_style": getattr(args, "engagement_style", None),
+        "claude_session_id": session_id,
+        "language": None,
+        "is_recommendation": False,
+    }
+    resp = api_post("/api/v1/posts", body, ok_on_conflict=True)
+    err = resp.get("error") if isinstance(resp, dict) else None
+    if err:
+        details = (err.get("details") or {}) if isinstance(err, dict) else {}
+        print(json.dumps({
+            "error": "DUPLICATE_THREAD",
+            "message": "Already posted in this thread",
+            "existing_post_id": details.get("existing_post_id"),
+            "content_preview": details.get("content_preview"),
+        }))
+        return
+    post = ((resp or {}).get("data") or {}).get("post") or {}
+    print(json.dumps({
+        "logged": True,
+        "post_id": post.get("id"),
+        "claude_session_id": session_id,
+    }))
 
 
 def main():
