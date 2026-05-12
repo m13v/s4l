@@ -597,42 +597,50 @@ def _period_total_engagement(conn, name, days):
     """Total engagement *gained during the window* across ALL posts, regardless
     of when each post was created.
 
-    Mirrors the Trends-tab calculation (bin/server.js /api/{views,upvotes,
-    comments,clicks}/per-day) so the bracketed "(total)" rendered next to
-    each scoped value on the project panel uses the same numbers the Trends
-    chart sums up. Excludes moltbook/github/github_issues platforms in line
-    with the Trends tab.
+    Used to populate the "(total)" bracketed value on the project panel.
+    Logic per post:
+      gain = latest_snapshot_in_window - latest_snapshot_before_window
+    with the "before" leg treated as 0 when the post did not exist before
+    the window (new posts contribute their full current value, which is
+    why this differs from the Trends-tab LAG() approach: that one excludes
+    every post's first snapshot and therefore undercounts fresh activity).
 
-    For upvotes/comments/views: SUM of per-post daily gains via LAG() over
-    post_views_daily. First-snapshot rows (prev IS NULL) are excluded so a
-    post's pre-window cumulative does not get attributed to the window.
+    Same platform filter as the Trends tab: excludes moltbook / github /
+    github_issues. Same project filter via posts.project_name.
 
     For post_clicks: COUNT of post_link_clicks rows with is_bot=FALSE in the
-    window, joined to post_links -> posts so we can apply the project filter.
+    window, joined post_links -> posts so we can apply the project filter.
     Pre-2026-05-07 click rows do not exist (is_bot logging started then), so
     the count returns 0 for older days rather than mixing inflated counters.
     """
     cur = conn.execute(
-        "WITH per_post_daily AS ("
-          "SELECT pvd.post_id, pvd.day, pvd.upvotes, pvd.comments, pvd.views, "
-            "LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
-            "LAG(pvd.comments) OVER w AS prev_comments, "
-            "LAG(pvd.views)    OVER w AS prev_views "
+        "WITH eligible_posts AS ("
+          "SELECT p.id FROM posts p "
+          "WHERE p.project_name = %s "
+            "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')"
+        "), "
+        "latest_in_window AS ("
+          "SELECT DISTINCT ON (pvd.post_id) "
+            "pvd.post_id, pvd.upvotes, pvd.comments, pvd.views "
           "FROM post_views_daily pvd "
-          "JOIN posts p ON p.id = pvd.post_id "
-          "WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
-            "AND pvd.day >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
-            "AND p.project_name = %s "
-          "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
+          "JOIN eligible_posts ep ON ep.id = pvd.post_id "
+          "WHERE pvd.day >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
+          "ORDER BY pvd.post_id, pvd.day DESC"
+        "), "
+        "before_window AS ("
+          "SELECT DISTINCT ON (pvd.post_id) "
+            "pvd.post_id, pvd.upvotes, pvd.comments, pvd.views "
+          "FROM post_views_daily pvd "
+          "JOIN eligible_posts ep ON ep.id = pvd.post_id "
+          "WHERE pvd.day < CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
+          "ORDER BY pvd.post_id, pvd.day DESC"
         ") "
         "SELECT "
-          "COALESCE(SUM(GREATEST(upvotes  - prev_upvotes,  0)) "
-            "FILTER (WHERE prev_upvotes  IS NOT NULL AND upvotes  IS NOT NULL), 0)::bigint, "
-          "COALESCE(SUM(GREATEST(comments - prev_comments, 0)) "
-            "FILTER (WHERE prev_comments IS NOT NULL AND comments IS NOT NULL), 0)::bigint, "
-          "COALESCE(SUM(GREATEST(views    - prev_views,    0)) "
-            "FILTER (WHERE prev_views    IS NOT NULL AND views    IS NOT NULL), 0)::bigint "
-        "FROM per_post_daily",
+          "COALESCE(SUM(GREATEST(COALESCE(l.upvotes,  0) - COALESCE(b.upvotes,  0), 0)), 0)::bigint, "
+          "COALESCE(SUM(GREATEST(COALESCE(l.comments, 0) - COALESCE(b.comments, 0), 0)), 0)::bigint, "
+          "COALESCE(SUM(GREATEST(COALESCE(l.views,    0) - COALESCE(b.views,    0), 0)), 0)::bigint "
+        "FROM latest_in_window l "
+        "LEFT JOIN before_window b USING (post_id)",
         (name,),
     )
     row = cur.fetchone() or (0, 0, 0)
