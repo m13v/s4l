@@ -10119,6 +10119,14 @@ function renderFunnelStats(payload) {
       // for posts in this project's window. Sourced from project_stats_json
       // _windowed_post_engagement.
       post_clicks:      Number(pst.post_clicks_recent) || 0,
+      // Period totals: engagement GAINED during the window across ALL posts
+      // (regardless of when each post was created). Mirrors the Trends-tab
+      // SUM. Rendered in gray brackets next to the scoped value via
+      // makePostEngagementFmt. See project_stats_json._period_total_engagement.
+      upvotes_period_total:     Number(pst.upvotes_period_total)  || 0,
+      comments_period_total:    Number(pst.comments_period_total) || 0,
+      views_period_total:       pst.views_period_total == null ? null : Number(pst.views_period_total),
+      post_clicks_period_total: Number(pst.post_clicks_period_total) || 0,
       seo_pages:        Number(seo.pages_recent)    || 0,
       pageviews:        asNum(f.pageviews),
       email_signups:    asNum(f.email_signups),
@@ -10169,6 +10177,22 @@ function renderFunnelStats(payload) {
     }
     return fmt(v);
   };
+  // Post-engagement cell formatter factory. Mirrors makeFunnelFmt but
+  // reads a sibling "<key>_period_total" off the row, which carries the
+  // Trends-tab-style SUM of engagement gained during the window across
+  // ALL posts (not just posts created in the window). Renders
+  // "<scoped> (<period_total>)" with the total in gray brackets when the
+  // two differ; just "<scoped>" otherwise. No analytics_error branch —
+  // these come from our own DB, not PostHog.
+  const makePostEngagementFmt = (totalKey, opts) => (v, r) => {
+    const placeholder = (opts && opts.placeholder) || '\u2014';
+    if (v == null) return placeholder;
+    const t = r && r[totalKey];
+    if (t != null && Number(t) !== Number(v)) {
+      return fmt(v) + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+    }
+    return fmt(v);
+  };
   mountSortableTable({
     containerId: 'funnel-stats-body',
     state: _funnelStatsTableState,
@@ -10178,18 +10202,42 @@ function renderFunnelStats(payload) {
     columns: [
       { key: 'name',             label: 'Project',         type: 'text',    align: 'left',  formatter: fmtProjectName },
       { key: 'posts',            label: 'Posts',           type: 'numeric', align: 'right', formatter: fmt },
-      { key: 'upvotes',          label: 'Upvotes',         type: 'numeric', align: 'right', formatter: fmt },
-      { key: 'comments',         label: 'Comments',        type: 'numeric', align: 'right', formatter: fmt },
-      { key: 'views',            label: 'Views',           type: 'numeric', align: 'right', formatter: v => v == null ? '\u2014' : fmt(v) },
-      // Post Clicks: SUM(post_links.clicks) for short links minted for
-      // posts in this project's window. /r/<code> short-link traffic on the
-      // public post itself, not on-site CTAs (Schedule Clicks / Get Started)
-      // or DM-targeted links (DM Clicks).
+      // Upvotes / Comments / Views: scoped value is engagement on posts
+      // *created in the window*; the gray bracket is the Trends-tab
+      // period total (engagement gained during the window across ALL
+      // posts). See makePostEngagementFmt + project_stats_json
+      // _period_total_engagement. Header click cycles scoped \u2194 total.
+      { key: 'upvotes',          label: 'Upvotes',         type: 'numeric', align: 'right',
+        formatter: makePostEngagementFmt('upvotes_period_total'),
+        sortKeys: ['upvotes', 'upvotes_period_total'],
+        helpText: 'Scoped: upvotes on posts created in the selected window. Bracketed total: upvotes gained during the window across all posts (matches the Trends tab). Click cycles scoped \u25bc/\u25b2 \u2192 period total \u25bc/\u25b2.' },
+      { key: 'comments',         label: 'Comments',        type: 'numeric', align: 'right',
+        formatter: makePostEngagementFmt('comments_period_total'),
+        sortKeys: ['comments', 'comments_period_total'],
+        helpText: 'Scoped: comments on posts created in the selected window. Bracketed total: comments gained during the window across all posts (matches the Trends tab). Click cycles scoped \u25bc/\u25b2 \u2192 period total \u25bc/\u25b2.' },
+      { key: 'views',            label: 'Views',           type: 'numeric', align: 'right',
+        formatter: makePostEngagementFmt('views_period_total'),
+        sortKeys: ['views', 'views_period_total'],
+        helpText: 'Scoped: views on posts created in the selected window (null when no eligible posts). Bracketed total: views gained during the window across all posts (matches the Trends tab). Click cycles scoped \u25bc/\u25b2 \u2192 period total \u25bc/\u25b2.' },
+      // Post Clicks: scoped = SUM(post_links.clicks) for short links
+      // minted for posts in this project's window. Bracketed total = COUNT
+      // of post_link_clicks (is_bot=FALSE) joined to this project's posts
+      // during the window. /r/<code> short-link traffic on the public post
+      // itself, not on-site CTAs (Schedule Clicks / Get Started) or
+      // DM-targeted links (DM Clicks).
       { key: 'post_clicks',      label: 'Post Clicks',     type: 'numeric', align: 'right',
-        formatter: (v, _r) => {
+        sortKeys: ['post_clicks', 'post_clicks_period_total'],
+        helpText: 'Scoped: clicks on /r/<code> short links minted for posts created in the selected window. Bracketed total: clicks landing on any of this project\u2019s posts during the window (matches the Trends tab). Click cycles scoped \u25bc/\u25b2 \u2192 period total \u25bc/\u25b2.',
+        formatter: (v, r) => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
-          return '<span data-tooltip="Clicks on /r/&lt;code&gt; short links minted for this project\u2019s posts in the selected window. Excludes DM-link clicks and on-site CTA clicks." style="font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+          const t = r && r.post_clicks_period_total != null ? Number(r.post_clicks_period_total) : null;
+          const scopedHtml = n
+            ? '<span data-tooltip="Clicks on /r/&lt;code&gt; short links minted for this project\u2019s posts in the selected window. Excludes DM-link clicks and on-site CTA clicks." style="font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>'
+            : '<span style="color:var(--text-faint);">\u2014</span>';
+          if (t != null && t !== n) {
+            return scopedHtml + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+          }
+          return scopedHtml;
         } },
       { key: 'seo_pages',        label: 'SEO Pages',       type: 'numeric', align: 'right', formatter: fmt },
       // Funnel cells use makeFunnelFmt, which reads a sibling "domain_*"
@@ -10258,11 +10306,14 @@ function renderFunnelStats(payload) {
   // Must come after mountSortableTable, which replaces container innerHTML.
   body.insertAdjacentHTML('beforeend',
     '<div style="font-size:11px;color:var(--text-muted);padding:6px 2px 2px;">' +
-      'All counts are <b>unique visitors</b> (PostHog distinct_id), not raw events. ' +
+      'Visitor / signup / schedule / get-started counts are <b>unique visitors</b> (PostHog distinct_id), not raw events. ' +
       'Visitors shows <b>scoped</b> (visitors on pages generated in the selected window) ' +
       'followed by <b>(domain-wide)</b> totals in parens when they differ. ' +
       'Email signups, schedule clicks, and get-started clicks are domain-wide ' +
-      '(those events fire on landing pages, not on freshly-generated SEO pages).' +
+      '(those events fire on landing pages, not on freshly-generated SEO pages). ' +
+      'Upvotes, Comments, Views and Post Clicks show <b>scoped</b> (engagement on posts created in the window) ' +
+      'followed by <b>(period total)</b> in parens \u2014 the Trends-tab sum of engagement gained during the window ' +
+      'across <i>all</i> posts, regardless of when each post was created.' +
     '</div>');
 }
 
