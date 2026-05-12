@@ -27,7 +27,7 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post, api_patch
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -109,117 +109,86 @@ def _subreddit_from_url(thread_url):
 
 
 def _db_upsert_discovered_candidate(candidate, batch_id, project_name):
-    """INSERT a freshly-discovered candidate row.
+    """INSERT a freshly-discovered candidate row via /api/v1/reddit-candidates.
 
-    Called by _discover_iteration after Claude returns. The candidate dict
-    carries `score` and `num_comments` from the search response — those become
-    score_t0/comments_t0 (T0 captured at discover time, no extra HTTP call,
-    mirrors twitter_candidates likes_t0 capture in score_twitter_candidates).
-
-    ON CONFLICT keeps the existing row's status, attempt_count, post linkage,
-    AND original T0 intact, so:
-      - a row that's already 'posted' or 'failed' isn't reset to 'pending'
-      - a re-discovered row keeps the FIRST-SIGHTING T0 (cumulative delta
-        works automatically — same trick Twitter uses for salvage)
-    batch_id is updated to the current cycle so the dashboard's queue counts
-    surface this run.
+    Server-side ON CONFLICT keeps the existing row's status, attempt_count,
+    post linkage, AND original T0 intact (see route source); batch_id is
+    updated to the current cycle so the dashboard's queue counts surface
+    this run.
     """
     thread_url = (candidate.get("thread_url") or "").strip()
     if not thread_url:
         return
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        conn.execute(
-            "INSERT INTO reddit_candidates "
-            "(thread_url, thread_author, thread_title, thread_selftext, subreddit, "
-            " matched_project, search_topic, status, batch_id, "
-            " draft_engagement_style, score_t0, comments_t0) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s) "
-            "ON CONFLICT (thread_url) DO UPDATE SET "
-            "  batch_id         = EXCLUDED.batch_id, "
-            "  matched_project  = COALESCE(reddit_candidates.matched_project, EXCLUDED.matched_project), "
-            "  search_topic     = COALESCE(reddit_candidates.search_topic, EXCLUDED.search_topic), "
-            "  thread_title     = COALESCE(reddit_candidates.thread_title, EXCLUDED.thread_title), "
-            "  thread_author    = COALESCE(reddit_candidates.thread_author, EXCLUDED.thread_author), "
-            "  thread_selftext  = COALESCE(reddit_candidates.thread_selftext, EXCLUDED.thread_selftext), "
-            "  subreddit        = COALESCE(reddit_candidates.subreddit, EXCLUDED.subreddit) "
-            # Critical: do NOT touch status, attempt_count, post_id, posted_at,
-            # or score_t0/comments_t0. Re-discovered rows that previously hit
-            # a permanent failure should stay 'failed'; ones that already
-            # posted should stay 'posted'; first-sighting T0 must persist so
-            # cumulative delta keeps working across cycles.
-            #
-            # thread_selftext (added 2026-05-08): preserve OP body text for
-            # downstream analytics (relevance scoring, content classification,
-            # second-pass LLM review). Per user instruction, every candidate's
-            # content + engagement stats are retained forever — we want the
-            # full corpus to power future selection logic, not just status flags.
-            ,
-            [
-                thread_url,
-                candidate.get("thread_author"),
-                candidate.get("thread_title"),
-                candidate.get("selftext") or candidate.get("thread_selftext"),
-                _subreddit_from_url(thread_url),
-                project_name,
-                candidate.get("search_topic"),
-                batch_id,
-                candidate.get("engagement_style"),
-                # score / num_comments come from the Reddit search response;
-                # tolerate either name and missing values (live T0 fallback).
-                int(candidate["score"]) if candidate.get("score") is not None else None,
-                int(candidate["num_comments"]) if candidate.get("num_comments") is not None else None,
-            ],
-        )
-        conn.commit()
-        conn.close()
+        score_raw = candidate.get("score")
+        comments_raw = candidate.get("num_comments")
+        body = {
+            "thread_url": thread_url,
+            "thread_author": candidate.get("thread_author"),
+            "thread_title": candidate.get("thread_title"),
+            "thread_selftext": candidate.get("selftext") or candidate.get("thread_selftext"),
+            "subreddit": _subreddit_from_url(thread_url),
+            "matched_project": project_name,
+            "search_topic": candidate.get("search_topic"),
+            "batch_id": batch_id,
+            "draft_engagement_style": candidate.get("engagement_style"),
+            "score_t0": int(score_raw) if score_raw is not None else None,
+            "comments_t0": int(comments_raw) if comments_raw is not None else None,
+        }
+        api_post("/api/v1/reddit-candidates", body)
     except Exception as e:
         print(f"[post_reddit] WARNING: upsert candidate failed for {thread_url}: {e}",
               file=sys.stderr)
 
 
 def _db_save_draft(thread_url, text, engagement_style):
-    """Persist a freshly-written draft so a later salvage reuses it."""
+    """Persist a freshly-written draft so a later salvage reuses it.
+
+    Routes through /api/v1/reddit-candidates/by-thread-url action=save_draft.
+    Returns 404 silently when there is no pending row for the URL (e.g. when
+    the discover-side INSERT race hadn't completed yet); a save_draft on a
+    row that already moved past 'pending' would be a no-op anyway.
+    """
     if not thread_url or not text:
         return
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        conn.execute(
-            "UPDATE reddit_candidates SET "
-            "  draft_text = %s, "
-            "  draft_engagement_style = %s, "
-            "  drafted_at = NOW() "
-            "WHERE thread_url = %s AND status = 'pending'",
-            [text, engagement_style, thread_url],
+        api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            {
+                "thread_url": thread_url,
+                "action": "save_draft",
+                "draft_text": text,
+                "draft_engagement_style": engagement_style,
+            },
+            ok_on_404=True,
         )
-        conn.commit()
-        conn.close()
     except Exception as e:
         print(f"[post_reddit] WARNING: save_draft failed for {thread_url}: {e}",
               file=sys.stderr)
 
 
 def _db_load_fresh_draft(thread_url):
-    """Return (text, style) for a still-fresh draft, or (None, None)."""
+    """Return (text, style) for a still-fresh draft, or (None, None).
+
+    Calls /api/v1/reddit-candidates?thread_url=...&has_fresh_draft=true&fresh_draft_minutes=N
+    so the server enforces the TTL window at the SQL level.
+    """
     if not thread_url:
         return None, None
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        cur = conn.execute(
-            "SELECT draft_text, draft_engagement_style "
-            "FROM reddit_candidates "
-            "WHERE thread_url = %s "
-            "  AND draft_text IS NOT NULL "
-            "  AND drafted_at > NOW() - INTERVAL '%s minutes'",
-            [thread_url, DRAFT_TTL_MIN],
+        resp = api_get(
+            "/api/v1/reddit-candidates",
+            query={
+                "thread_url": thread_url,
+                "has_fresh_draft": "true",
+                "fresh_draft_minutes": DRAFT_TTL_MIN,
+                "limit": 1,
+            },
         )
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            return row[0], row[1]
+        rows = ((resp or {}).get("data") or {}).get("candidates") or []
+        if rows:
+            r = rows[0]
+            return r.get("draft_text"), r.get("draft_engagement_style")
     except Exception as e:
         print(f"[post_reddit] WARNING: load_fresh_draft failed for {thread_url}: {e}",
               file=sys.stderr)
@@ -465,26 +434,53 @@ def _db_pick_salvage_candidates(batch_id, limit=1):
         # first. The CASE on draft_text enforces draft_ttl_min freshness at
         # the SQL level so stale drafts don't ride into post (mirrors the
         # original single-row implementation).
+        #
+        # 2026-05-12 atomic-claim patch: the SELECT is wrapped in a CTE with
+        # FOR UPDATE SKIP LOCKED, and the outer query UPDATEs the picked rows'
+        # last_attempt_at = NOW() in the SAME transaction. Why: previously,
+        # path-(b) orphaned-draft rows (last_attempt_at IS NULL, draft_text
+        # IS NOT NULL) had no time gate, so a second cycle's Phase 0 salvage
+        # could re-assign the SAME row to its own batch while the first cycle
+        # was still mid-post (e.g. waiting on the reddit-browser lock). Both
+        # cycles then raced the browser for the same row, and the loser hit
+        # cdp_no_response (observed 2026-05-12 13:45 Cyrano salvage). Stamping
+        # last_attempt_at=NOW() at pick-time converts orphaned-draft rows
+        # into "freshly attempted" rows for the next 30 min (RETRY_BACKOFF_MIN),
+        # which Phase 0's existing time gate already respects, so re-salvage
+        # is blocked until the in-flight cycle either posts or expires.
+        # SKIP LOCKED ensures two concurrent post phases never block each
+        # other on the row lock; the loser sees fewer rows and moves on.
         cur = conn.execute(
-            "SELECT thread_url, thread_author, thread_title, subreddit, "
-            "       matched_project, search_topic, "
-            "       CASE WHEN drafted_at > NOW() - INTERVAL '%s minutes' "
-            "            THEN draft_text ELSE NULL END AS fresh_draft, "
-            "       draft_engagement_style, attempt_count "
-            "FROM reddit_candidates "
-            "WHERE batch_id = %s "
-            "  AND status = 'pending' "
-            "  AND attempt_count < %s "
-            "  AND matched_project = %s "
+            "WITH picked AS ( "
+            "    SELECT id, thread_url, thread_author, thread_title, subreddit, "
+            "           matched_project, search_topic, drafted_at, draft_text, "
+            "           draft_engagement_style, attempt_count "
+            "    FROM reddit_candidates "
+            "    WHERE batch_id = %s "
+            "      AND status = 'pending' "
+            "      AND attempt_count < %s "
+            "      AND matched_project = %s "
             # Same defense-in-depth as the project-pick query above:
             # salvage retries previously-attempted failures OR orphaned
             # drafts from a killed cycle. (2026-05-10.)
-            "  AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
-            "ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
-            "LIMIT %s",
-            [DRAFT_TTL_MIN, batch_id, MAX_ATTEMPTS, project_name, limit],
+            "      AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
+            "    ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
+            "    LIMIT %s "
+            "    FOR UPDATE SKIP LOCKED "
+            ") "
+            "UPDATE reddit_candidates c "
+            "SET last_attempt_at = NOW() "
+            "FROM picked "
+            "WHERE c.id = picked.id "
+            "RETURNING c.thread_url, c.thread_author, c.thread_title, c.subreddit, "
+            "          c.matched_project, c.search_topic, "
+            "          CASE WHEN picked.drafted_at > NOW() - INTERVAL '%s minutes' "
+            "               THEN picked.draft_text ELSE NULL END AS fresh_draft, "
+            "          picked.draft_engagement_style, picked.attempt_count",
+            [batch_id, MAX_ATTEMPTS, project_name, limit, DRAFT_TTL_MIN],
         )
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         if not rows:
             return None
