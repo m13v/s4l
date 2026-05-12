@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -46,26 +46,28 @@ def load_active_reddit_campaigns():
     Tool-level enforcement: the LLM never sees these. We append suffix to the
     drafted text in Python before the browser submits, so the literal text is
     guaranteed on Reddit. sample_rate gates the per-reply coin flip for A/B.
+
+    Reads /api/v1/campaigns?status=active&platform=reddit&has_suffix=true&with_budget_remaining=true.
     """
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            """SELECT id, suffix, COALESCE(sample_rate, 1.000)
-               FROM campaigns
-               WHERE status = 'active'
-                 AND (',' || platforms || ',') LIKE '%,reddit,%'
-                 AND max_posts_total IS NOT NULL
-                 AND posts_made < max_posts_total
-                 AND suffix IS NOT NULL AND suffix <> ''
-               ORDER BY id"""
-        )
-        return [
-            {"id": r[0], "suffix": r[1], "sample_rate": float(r[2])}
-            for r in cur.fetchall()
-        ]
-    finally:
-        conn.close()
+    resp = api_get(
+        "/api/v1/campaigns",
+        query={
+            "status": "active",
+            "platform": "reddit",
+            "has_suffix": "true",
+            "with_budget_remaining": "true",
+            "limit": 500,
+        },
+    )
+    rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+    return [
+        {
+            "id": int(r["id"]),
+            "suffix": r.get("suffix"),
+            "sample_rate": float(r.get("sample_rate") if r.get("sample_rate") is not None else 1.0),
+        }
+        for r in rows
+    ]
 
 
 def bump_campaigns(table, row_id, campaign_ids):
@@ -131,48 +133,51 @@ def patch_replied_with_retry(cmd_args, reply_id):
     return False
 
 
-def reset_stuck_processing(conn, platform):
-    result = conn.execute(
-        "UPDATE replies SET status='pending' WHERE status='processing' "
-        "AND platform = %s AND processing_at < NOW() - INTERVAL '2 hours' RETURNING id",
-        (platform,),
+def reset_stuck_processing(platform):
+    """Flip stuck 'processing' rows back to 'pending' (older than 2h).
+
+    Routes through /api/v1/replies/reset-stuck so this module owns no SQL.
+    """
+    resp = api_post(
+        "/api/v1/replies/reset-stuck",
+        {"platform": platform, "older_than_hours": 2},
     )
-    count = len(result.fetchall())
-    conn.commit()
+    data = (resp or {}).get("data") or {}
+    count = int(data.get("reset_count") or 0)
     if count > 0:
         print(f"[engage_reddit] Reset {count} stuck 'processing' {platform} items back to pending")
 
 
-def get_next_pending(conn, platform):
-    """Fetch the next pending reply for the given platform (one at a time)."""
-    cur = conn.execute("""
-        SELECT r.id, r.platform, r.their_author,
-               r.their_content as their_content,
-               r.their_comment_url, r.their_comment_id, r.depth,
-               p.thread_title as thread_title,
-               p.thread_url, p.our_content as our_content, p.our_url,
-               CASE WHEN p.thread_url = p.our_url THEN 1 ELSE 0 END as is_our_original_post,
-               p.project_name, r.post_id
-        FROM replies r
-        JOIN posts p ON r.post_id = p.id
-        WHERE r.status='pending' AND r.platform = %s
-        ORDER BY
-            CASE WHEN p.thread_url = p.our_url THEN 0 ELSE 1 END,
-            r.discovered_at ASC
-        LIMIT 1
-    """, (platform,))
-    row = cur.fetchone()
-    if not row:
+def get_next_pending(platform):
+    """Fetch the next pending reply for the given platform (one at a time).
+
+    Calls /api/v1/replies/next-pending which performs the JOIN to posts
+    server-side and returns the rows in the canonical priority order
+    (replies-to-our-original first, then oldest discovered_at).
+    """
+    resp = api_get(
+        "/api/v1/replies/next-pending",
+        query={"platform": platform, "limit": 1},
+    )
+    rows = ((resp or {}).get("data") or {}).get("replies") or []
+    if not rows:
         return None
+    row = rows[0]
     return {
-        "id": row[0], "platform": row[1], "their_author": row[2],
-        "their_content": row[3], "their_comment_url": row[4],
-        "their_comment_id": row[5], "depth": row[6],
-        "thread_title": row[7], "thread_url": row[8],
-        "our_content": row[9], "our_url": row[10],
-        "is_our_original_post": row[11],
-        "project_name": row[12],
-        "post_id": row[13],
+        "id": int(row["id"]),
+        "platform": row.get("platform"),
+        "their_author": row.get("their_author"),
+        "their_content": row.get("their_content"),
+        "their_comment_url": row.get("their_comment_url"),
+        "their_comment_id": row.get("their_comment_id"),
+        "depth": row.get("depth"),
+        "thread_title": row.get("thread_title"),
+        "thread_url": row.get("thread_url"),
+        "our_content": row.get("our_content"),
+        "our_url": row.get("our_url"),
+        "is_our_original_post": int(row.get("is_our_original_post") or 0),
+        "project_name": row.get("project_name"),
+        "post_id": row.get("post_id"),
     }
 
 
@@ -212,88 +217,86 @@ def detect_meta_callout(parent_content):
     return {"keyword": m.group(0), "evidence": snippet}
 
 
-def check_cross_pipeline_history(conn, platform, author, post_id):
+def _fmt_date(s):
+    """Format an ISO-ish timestamp string as YYYY-MM-DD, tolerant of None."""
+    if not s:
+        return "unknown"
+    try:
+        return str(s)[:10]
+    except Exception:
+        return "unknown"
+
+
+def check_cross_pipeline_history(platform, author, post_id):
     """Cross-pipeline check before posting a comment-reply.
 
-    Returns (same_post_disengage, prior_history_block).
-
-    same_post_disengage: dict {dm_id, interest_level, conversation_status,
-        qualification_status, last_message_at} if there is an existing dms
-        row on the SAME post for this author with a hard disengage signal
-        (declined / not_our_prospect / stale). Caller hard-skips. None means
-        proceed.
-
-    prior_history_block: human-readable text summarizing other-thread dms
-    history for this author (different post_id, last 5, message_count > 0,
-    plus the latest message direction + content). Empty string if no
-    prior history. Soft-surface for the LLM, never blocks.
-
-    Both are best-effort: any DB failure returns (None, "") rather than
-    aborting the reply, since this is enrichment and a soft loss-of-context
-    is preferable to dropping a pending reply because of a bad query.
+    Returns (same_post_disengage, prior_history_block). See module docstring
+    for the full semantics — unchanged from the previous direct-SQL
+    implementation. The /api/v1/dms GET supports `their_author`, `post_id`,
+    `exclude_post_id`, `interest_levels` (CSV), `conversation_statuses` (CSV),
+    `min_message_count`, `with_last_message`, and `order_by=last_message_at`,
+    which together replace the two SQL queries used previously.
     """
     if not author or not post_id:
         return None, ""
     try:
-        same_post = conn.execute(
-            """
-            SELECT id, interest_level, conversation_status, qualification_status,
-                   last_message_at
-            FROM dms
-            WHERE platform = %s AND their_author = %s AND post_id = %s
-              AND (
-                interest_level IN ('declined', 'not_our_prospect')
-                OR conversation_status = 'stale'
-              )
-            ORDER BY last_message_at DESC NULLS LAST
-            LIMIT 1
-            """,
-            (platform, author, post_id),
-        ).fetchone()
-        if same_post:
-            same_post_disengage = {
-                "dm_id": same_post["id"],
-                "interest_level": same_post["interest_level"],
-                "conversation_status": same_post["conversation_status"],
-                "qualification_status": same_post["qualification_status"],
-                "last_message_at": same_post["last_message_at"].isoformat()
-                                   if same_post["last_message_at"] else None,
-            }
-        else:
-            same_post_disengage = None
+        same_resp = api_get(
+            "/api/v1/dms",
+            query={
+                "platform": platform,
+                "their_author": author,
+                "post_id": post_id,
+                # Server reads either an interest_level match OR a
+                # conversation_status='stale' match. Easiest is two calls or
+                # do it client-side. Single call: pull all dms for this
+                # (author, post_id) and filter.
+                "limit": 25,
+                "order_by": "last_message_at",
+            },
+        )
+        same_rows = ((same_resp or {}).get("data") or {}).get("dms") or []
+        same_post_disengage = None
+        for d in same_rows:
+            interest = d.get("interest_level")
+            convo_status = d.get("conversation_status")
+            if interest in ("declined", "not_our_prospect") or convo_status == "stale":
+                same_post_disengage = {
+                    "dm_id": d.get("id"),
+                    "interest_level": interest,
+                    "conversation_status": convo_status,
+                    "qualification_status": d.get("qualification_status"),
+                    "last_message_at": d.get("last_message_at"),
+                }
+                break
 
-        other = conn.execute(
-            """
-            SELECT d.id, d.post_id, d.interest_level, d.mode, d.tier,
-                   d.conversation_status, d.target_project, d.message_count,
-                   d.last_message_at,
-                   (SELECT direction || ': ' || content
-                    FROM dm_messages WHERE dm_id = d.id
-                    ORDER BY message_at DESC LIMIT 1) AS last_msg
-            FROM dms d
-            WHERE d.platform = %s AND d.their_author = %s
-              AND COALESCE(d.post_id, -1) <> %s
-              AND COALESCE(d.message_count, 0) > 0
-            ORDER BY d.last_message_at DESC NULLS LAST
-            LIMIT 5
-            """,
-            (platform, author, post_id),
-        ).fetchall()
-        if not other:
+        other_resp = api_get(
+            "/api/v1/dms",
+            query={
+                "platform": platform,
+                "their_author": author,
+                "exclude_post_id": post_id,
+                "min_message_count": 1,
+                "with_last_message": "true",
+                "order_by": "last_message_at",
+                "limit": 5,
+            },
+        )
+        other_rows = ((other_resp or {}).get("data") or {}).get("dms") or []
+        if not other_rows:
             return same_post_disengage, ""
 
         lines = []
-        for r in other:
-            ts = r["last_message_at"].strftime("%Y-%m-%d") if r["last_message_at"] else "unknown"
-            interest = r["interest_level"] or "unset"
-            mode = r["mode"] or "unset"
-            status = r["conversation_status"] or "unset"
-            tier = r["tier"] if r["tier"] is not None else "?"
-            msgs = r["message_count"] or 0
-            target = r["target_project"] or "-"
-            last = (r["last_msg"] or "").replace("\n", " ").strip()
+        for r in other_rows:
+            ts = _fmt_date(r.get("last_message_at"))
+            interest = r.get("interest_level") or "unset"
+            mode = r.get("mode") or "unset"
+            status = r.get("conversation_status") or "unset"
+            tier = r.get("tier") if r.get("tier") is not None else "?"
+            msgs = r.get("message_count") or 0
+            target = r.get("target_project") or "-"
+            last = (r.get("last_msg") or "").replace("\n", " ").strip()
             lines.append(
-                f"- dm #{r['id']} on post #{r['post_id']} (last activity {ts}): "
+                f"- dm #{r.get('id')} on post #{r.get('post_id')} (last activity {ts}): "
                 f"interest={interest}, mode={mode}, status={status}, "
                 f"tier={tier}, messages={msgs}, target_project={target}\n"
                 f"    last: {last}"
@@ -312,17 +315,25 @@ def check_cross_pipeline_history(conn, platform, author, post_id):
         return None, ""
 
 
-def get_recent_archetypes(conn, platform, limit=3):
-    """Fetch archetypes of last N replied replies for rotation context."""
-    cur = conn.execute("""
-        SELECT our_reply_content
-        FROM replies
-        WHERE status='replied' AND our_reply_content IS NOT NULL
-            AND platform = %s
-        ORDER BY replied_at DESC
-        LIMIT %s
-    """, [platform, limit])
-    return [row[0] for row in cur.fetchall()]
+def get_recent_archetypes(platform, limit=3):
+    """Fetch archetypes of last N replied replies for rotation context.
+
+    Calls /api/v1/replies with order_by=replied_at and the new
+    has_our_reply_content filter so we only see rows whose our_reply_content
+    is populated (the previous SQL had AND our_reply_content IS NOT NULL).
+    """
+    resp = api_get(
+        "/api/v1/replies",
+        query={
+            "platform": platform,
+            "status": "replied",
+            "has_our_reply_content": "true",
+            "order_by": "replied_at",
+            "limit": int(limit) if limit else 3,
+        },
+    )
+    rows = ((resp or {}).get("data") or {}).get("replies") or []
+    return [r.get("our_reply_content") for r in rows if r.get("our_reply_content")]
 
 
 def build_prompt(reply, recent_replies, config, excluded_authors, top_report="", prior_history_block="", meta_callout=None):
@@ -563,12 +574,10 @@ def main():
     parser.add_argument("--per-reply-timeout", type=int, default=300, help="Timeout per claude session in seconds")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
     config = load_config()
     excluded_authors = config.get("exclusions", {}).get("authors", [])
 
-    reset_stuck_processing(conn, args.platform)
+    reset_stuck_processing(args.platform)
 
     try:
         top_report = subprocess.check_output(
@@ -602,7 +611,7 @@ def main():
             break
 
         # Fetch next pending reply
-        reply = get_next_pending(conn, args.platform)
+        reply = get_next_pending(args.platform)
         if not reply:
             print("[engage_reddit] No pending replies. Done!")
             break
@@ -621,7 +630,7 @@ def main():
         # / stale on THIS post. Soft-surface other-thread history into the
         # prompt so the LLM can adjust tone without being auto-blocked.
         same_post_disengage, prior_history_block = check_cross_pipeline_history(
-            conn, reply["platform"], reply["their_author"], reply.get("post_id")
+            reply["platform"], reply["their_author"], reply.get("post_id")
         )
         if same_post_disengage:
             reason = (
@@ -647,7 +656,7 @@ def main():
             print(f"[engage_reddit] #{reply['id']} meta-callout detected: keyword={meta_callout['keyword']!r}")
 
         # Get recent replies for archetype rotation
-        recent = get_recent_archetypes(conn, args.platform, limit=3)
+        recent = get_recent_archetypes(args.platform, limit=3)
 
         # Build prompt
         prompt = build_prompt(reply, recent, config, excluded_authors,
@@ -1049,9 +1058,9 @@ def main():
         f" failure_reasons={failure_reasons_arg}"
     )
 
-    # Print final status
-    subprocess.run(["python3", REPLY_DB, "status"])
-    conn.close()
+    # Print final status (per-platform counts) via reply_db.py status helper,
+    # which now reads /api/v1/replies/counts under the hood.
+    subprocess.run(["python3", REPLY_DB, "status", args.platform])
 
 
 if __name__ == "__main__":
