@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Shared reply-insertion helpers for scan_reddit_replies.py and scan_moltbook_replies.py.
+"""Shared reply-insertion helper for scan_*_replies.py scripts.
 
-`insert_reply` returns the status string on insert, or None if the row already existed.
-Callers use the return value to update their discovered/skipped counters.
+`insert_reply` returns the status string on a NEW insert, or None if the row
+already existed. Callers use the return value to update their discovered /
+skipped counters.
+
+2026-05-12: dedup now happens exclusively server-side. The /api/v1/replies
+POST endpoint has a UNIQUE (platform, their_comment_id) index and uses
+ON CONFLICT DO NOTHING; a duplicate returns 409 with the existing row, and
+api_post(ok_on_conflict=True) surfaces that as a body with an "error" key.
+Previously this module did a `SELECT COUNT(*)` probe before posting; that
+was the last direct-SQL hop in the scan-reddit-replies path and has been
+removed.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-
-def already_tracked(db, platform, comment_id):
-    row = db.execute(
-        "SELECT COUNT(*) FROM replies WHERE platform=%s AND their_comment_id=%s",
-        (platform, str(comment_id)),
-    ).fetchone()
-    return row[0] > 0
 
 
 def insert_reply(
@@ -37,9 +38,17 @@ def insert_reply(
     our_reply_url=None,
     replied_at=None,
 ):
+    """Insert a reply via /api/v1/replies POST.
+
+    The `db` arg is preserved in the signature for backwards compatibility
+    with callers that still pass a psycopg connection — the value is IGNORED.
+    All writes go through HTTP now.
+
+    Returns:
+        status string when this call performed the INSERT
+        None when the (platform, their_comment_id) was already in the table
+    """
     comment_id = str(comment_id)
-    if already_tracked(db, platform, comment_id):
-        return None
 
     from http_api import api_post
     body = {
@@ -77,6 +86,13 @@ def insert_reply(
         )
 
     resp = api_post("/api/v1/replies", body, ok_on_conflict=True)
-    if resp is None or resp.get("error"):
+    if resp is None:
+        return None
+    # 409 path returns a body with an "error" key (duplicate_reply); treat as
+    # "already in DB" -> None to mirror the previous behavior.
+    if resp.get("error"):
+        return None
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not data or not data.get("reply"):
         return None
     return status
