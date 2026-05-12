@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 from reply_insert import insert_reply as _insert_reply
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
@@ -151,7 +151,10 @@ def fetch_own_replies(reddit_account, cookie_header, user_agent,
 class InboxScanner:
     def __init__(self, reddit_account, user_agent, cookie_header, excluded_authors=None,
                  own_replies_map=None):
-        self.db = dbmod.get_conn()
+        # No DB handle anymore — every read/write hits the API. The `db` field
+        # is kept for back-compat with `_insert_reply(self.db, ...)` callers
+        # (they pass it through unchanged); the helper itself ignores the value.
+        self.db = None
         self.reddit_account = reddit_account
         self.reddit_account_lower = reddit_account.lower()
         self.user_agent = user_agent
@@ -159,6 +162,10 @@ class InboxScanner:
         self.excluded = {a.lower() for a in (excluded_authors or set())}
         self.excluded.update({"automoderator", "[deleted]", self.reddit_account_lower})
         self.own_replies_map = own_replies_map or {}
+        # Cache thread_id -> post_id lookups across a single scan so we don't
+        # hit /api/v1/posts once per inbox entry (the same thread often
+        # appears multiple times in a single page).
+        self._post_id_cache = {}
         self.discovered = 0
         self.skipped_old = 0
         self.skipped_other = 0
@@ -171,11 +178,28 @@ class InboxScanner:
         if not m:
             return None
         thread_id = m.group(1)
-        row = self.db.execute(
-            "SELECT id FROM posts WHERE platform='reddit' AND thread_url LIKE %s ORDER BY id DESC LIMIT 1",
-            (f"%/comments/{thread_id}/%",),
-        ).fetchone()
-        return row[0] if row else None
+        if thread_id in self._post_id_cache:
+            return self._post_id_cache[thread_id]
+        # /api/v1/posts GET supports a platform filter but not LIKE on
+        # thread_url. We fetch a window of recent reddit posts and match
+        # locally on the thread_id substring, falling back to the lookup
+        # endpoint with the same thread_id prefix.
+        post_id = None
+        try:
+            resp = api_get(
+                "/api/v1/posts",
+                query={"platform": "reddit", "limit": 500},
+            )
+            posts = ((resp or {}).get("data") or {}).get("posts") or []
+            for p in posts:
+                tu = (p.get("thread_url") or "").lower()
+                if f"/comments/{thread_id}/" in tu:
+                    post_id = int(p.get("id"))
+                    break
+        except Exception:
+            post_id = None
+        self._post_id_cache[thread_id] = post_id
+        return post_id
 
     def _insert(self, post_id, comment_id, author, content, comment_url, status, skip_reason=None):
         override = self.own_replies_map.get(comment_id)
@@ -263,8 +287,7 @@ class InboxScanner:
                 time.sleep(PAGE_PAUSE_SECS)
 
     def finish(self):
-        self.db.commit()
-        self.db.close()
+        # All writes go through the HTTP API; nothing to commit/close locally.
         print(
             f"Inbox scan complete: seen={self.total_seen} "
             f"new_pending={self.discovered} backfill_skipped={self.skipped_old} "
@@ -320,7 +343,6 @@ def main():
         print(f"SESSION_INVALID: no cookie file at {COOKIES_PATH}. Run bootstrap_reddit_cookies.py.")
         sys.exit(0)
 
-    dbmod.load_env()
     user_agent = f"social-autoposter/1.0 (u/{reddit_account} inbox-scan)"
     excluded_authors = {a for a in config.get("exclusions", {}).get("authors", [])}
     own_replies_map = fetch_own_replies(reddit_account, cookie_header, user_agent)
