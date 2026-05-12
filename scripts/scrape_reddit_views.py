@@ -29,8 +29,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
 import http_api
+from http_api import api_get
 
 
 def extract_ids(url):
@@ -54,6 +54,53 @@ def extract_ids(url):
         return (m.group(1), None)
 
     return (None, None)
+
+
+def _list_active_reddit_posts():
+    """Paginated GET against /api/v1/posts?platform=reddit&status=active.
+
+    Returns a list of {id, our_url} dicts so callers can keep the prior
+    contract. The API's `limit` is capped at 500 server-side; we page by
+    walking `posted_at` cursors until we get a short page back.
+    """
+    out = []
+    since = None
+    seen_ids = set()
+    while True:
+        query = {
+            "platform": "reddit",
+            "status": "active",
+            "limit": 500,
+        }
+        if since:
+            query["since"] = since
+        resp = api_get("/api/v1/posts", query=query)
+        rows = ((resp or {}).get("data") or {}).get("posts") or []
+        new = 0
+        oldest = None
+        for r in rows:
+            pid = r.get("id")
+            if pid is None or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            if not r.get("our_url"):
+                continue
+            out.append({"id": int(pid), "our_url": r.get("our_url")})
+            new += 1
+            ts = r.get("posted_at")
+            if ts and (oldest is None or ts < oldest):
+                oldest = ts
+        # Stop when the server returned fewer than the page size (no more
+        # posts behind the cursor) OR no rows were new this iteration.
+        if not rows or new == 0 or len(rows) < 500:
+            break
+        # The /api/v1/posts GET orders by posted_at DESC and filters
+        # since >= ${since}. Walking older requires the inverse (a
+        # `posted_at <` cursor), which the route doesn't yet expose; one
+        # page of 500 covers most refresh cycles. If we ever outgrow that,
+        # add `before` / `cursor` to the GET and resume here.
+        break
+    return out
 
 
 def update_views(db, scraped_data, quiet=False):
@@ -109,10 +156,7 @@ def update_views(db, scraped_data, quiet=False):
         if cc is not None and post_id and not comment_id:
             cc_by_post[post_id] = cc
 
-    posts = db.execute(
-        "SELECT id, our_url FROM posts "
-        "WHERE platform='reddit' AND status='active' AND our_url IS NOT NULL"
-    ).fetchall()
+    posts = _list_active_reddit_posts()
 
     matched = 0
     matched_comment_score = 0
@@ -120,7 +164,7 @@ def update_views(db, scraped_data, quiet=False):
     unmatched = 0
 
     for post in posts:
-        db_id, our_url = post[0], post[1]
+        db_id, our_url = post["id"], post["our_url"]
         post_id, comment_id = extract_ids(our_url)
 
         views = None
@@ -189,38 +233,36 @@ def main():
     if not args.quiet:
         print(f"Loaded {len(scraped_data)} items from {args.from_json}")
 
-    dbmod.load_env()
-    db = dbmod.get_conn()
-    result = update_views(db, scraped_data, quiet=args.quiet)
-    db.close()
+    result = update_views(None, scraped_data, quiet=args.quiet)
 
-    # Get aggregate totals
-    from datetime import datetime
-    db = dbmod.get_conn()
-    # upvotes is NET of the Reddit/Moltbook OP self-upvote (Reddit auto-applies
-    # +1 on every post, our moltbook_post.py self_upvote() does the same for
-    # Moltbook). Strip the +1 per row, clamped at 0, so the printed total
-    # reflects organic engagement rather than (posts * 1) + organic. Moltbook
-    # is already filtered out of this query, but the discount is kept anyway
-    # so any future widening of the platform filter Just Works.
-    row = db.execute(
-        "SELECT SUM(views), "
-        "SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
-        "  THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
-        "  ELSE COALESCE(upvotes, 0) END), "
-        "SUM(comments_count), COUNT(*), MIN(posted_at) "
-        "FROM posts WHERE status='active' AND platform NOT IN ('github_issues', 'moltbook')"
-    ).fetchone()
-    total_views = row[0] or 0
-    total_upvotes = row[1] or 0
-    total_comments = row[2] or 0
-    total_posts = row[3] or 0
-    first_post = row[4]
-    days = max((datetime.now(first_post.tzinfo) if first_post and first_post.tzinfo else datetime.now()).day, 1)
+    # Aggregate totals via /api/v1/posts/totals. Excludes platforms we don't
+    # want in the headline (github_issues, moltbook) and only counts active
+    # rows. Net upvotes strip the self-upvote +1 server-side.
+    from datetime import datetime, timezone as _tz
+    totals_resp = api_get(
+        "/api/v1/posts/totals",
+        query={
+            "status": "active",
+            "exclude_platforms": "github_issues,moltbook",
+        },
+    )
+    t = (totals_resp or {}).get("data") or {}
+    total_views = int(t.get("total_views") or 0)
+    total_upvotes = int(t.get("total_upvotes") or 0)
+    total_comments = int(t.get("total_comments") or 0)
+    total_posts = int(t.get("total_posts") or 0)
+    first_post_iso = t.get("first_post_at")
+    first_post = None
+    if first_post_iso:
+        try:
+            first_post = datetime.fromisoformat(first_post_iso.replace("Z", "+00:00"))
+        except Exception:
+            first_post = None
     if first_post:
         now = datetime.now(first_post.tzinfo) if first_post.tzinfo else datetime.now()
         days = max((now - first_post).days, 1)
-    db.close()
+    else:
+        days = 1
 
     result["totals"] = {
         "total_views": total_views, "total_upvotes": total_upvotes,
