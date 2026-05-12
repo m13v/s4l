@@ -255,10 +255,19 @@ DELIVERABLES (must all exist when you exit):
 2. ~/social-autoposter/mixer/remotion/out/post-${NNN}.caption.txt
    The Instagram caption story (the "here is a story." body for TLH, the
    niche-specific story for Mixer). UTF-8, plain text, no markdown.
+   **CAPTION HARD LIMIT: ≤ 2150 chars total** (Instagram's cap is 2200; we leave
+   50 chars of safety buffer for emoji / unicode). The 8-beat arc is a STRUCTURE,
+   not a length contract. If your draft overshoots, tighten ruthlessly BEFORE
+   writing the file: cut adjectives, collapse compound sentences, drop the second
+   example when one suffices. Verify with \`wc -c <file>\` before declaring done.
+   The harness enforces this programmatically: if the file is > 2150 on exit, it
+   will spawn a focused tighten-only Claude call (up to 3 attempts); if all 3
+   fail, the row is flipped to status='caption_too_long' and the render fails.
 3. media_posts row with post_number=${NEXT_NUM}, status='draft',
    post_type='${TARGET}', and all SKILL Section 5 columns populated
    (variant_id, video_path, caption_text, source_clips, overlays, audio_source,
    metadata.theme_angle, etc.). project_name='fazm' for organic, 'mk0r' for product.
+   The caption_text column MUST match the caption.txt file exactly.
 
 VISUAL STYLE (current as of May 7 2026, do NOT regress):
 The Overlays.tsx and TimeLapseHookComposition.tsx components were rewritten
@@ -376,5 +385,135 @@ case "$ROW_OK" in
 esac
 
 VARIANT=$(echo "$ROW_OK" | sed 's/^OK variant=//')
+
+# Step 3.5: caption length gate (HARD LIMIT 2150 chars).
+# IG's actual limit is 2200; we keep a 50-char safety buffer for emoji/unicode.
+# If over: spawn focused tighten-only claude calls (max 3 attempts).
+# If still over after 3 attempts: flip row to status='caption_too_long' and
+# exit non-zero. The picker filters by status='draft' so the bad row is
+# automatically skipped; the next render fire creates a fresh draft.
+# Never auto-truncate -- silent author-voice loss is worse than a failed render.
+CAP_LIMIT=2150
+CAP_LEN=$(wc -c < "$OUT_CAP" | tr -d ' ')
+log "step 3.5: caption length check len=${CAP_LEN} limit=${CAP_LIMIT}"
+
+if [ "$CAP_LEN" -gt "$CAP_LIMIT" ]; then
+  log "caption over limit (${CAP_LEN} > ${CAP_LIMIT}); spawning tighten loop (max 3 attempts)"
+  attempt=0
+  while [ "$attempt" -lt 3 ] && [ "$CAP_LEN" -gt "$CAP_LIMIT" ]; do
+    attempt=$((attempt + 1))
+    log "  tighten attempt ${attempt}/3 (current len=${CAP_LEN})"
+
+    TIGHTEN_PROMPT=$(mktemp /tmp/ig_tighten_prompt_XXXXXX.txt)
+    NEW_CAP_OUT=$(mktemp /tmp/ig_tighten_out_XXXXXX.txt)
+
+    cat > "$TIGHTEN_PROMPT" <<TIGHTEN_EOF
+You are the caption-tightening agent for an Instagram reel.
+
+Your single job: rewrite the caption below so total length is <= ${CAP_LIMIT}
+characters, while preserving the voice and ALL 8 beats of the caption arc
+(opener "here is a story.", age+setup, wrong-about-AI moment, breaking event,
+felt sense, workflow change, contrarian lesson in one sharp line, closing
+instruction). For Mixer/product captions, preserve the niche walk-in story
+structure and the 🔗 mk0r.com line if present.
+
+RULES (hard):
+- Total length MUST be <= ${CAP_LIMIT} chars. Count and verify before responding.
+- Keep ALL beats. Do NOT drop a beat to fit.
+- Preserve the voice: lowercase, plain, no markdown. Keep existing emoji.
+- Cut adjectives, collapse compound sentences, drop redundant examples,
+  prefer "i was tired" over "i was tired in a way that didn't show up in a paycheck".
+- Output ONLY the rewritten caption. No prose around it. No 'here is the
+  rewritten caption' preamble. No backticks. No commentary. Just the caption text.
+
+CURRENT CAPTION (length=${CAP_LEN}, must shrink to <= ${CAP_LIMIT}):
+---BEGIN---
+$(cat "$OUT_CAP")
+---END---
+
+Output the tightened caption now. Just the text body. Nothing else.
+TIGHTEN_EOF
+
+    if "$REPO_DIR/scripts/run_claude.sh" "run-instagram-render-tighten" \
+            ${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"} \
+            --permission-mode bypassPermissions \
+            -p "$(cat "$TIGHTEN_PROMPT")" > "$NEW_CAP_OUT" 2>>"$LOG_FILE"; then
+      # run_claude.sh prepends a JSON session-log line; strip any leading
+      # JSON-looking line before treating the rest as the new caption.
+      # The actual caption is everything except trailing JSON metadata.
+      /opt/homebrew/bin/python3.11 - "$NEW_CAP_OUT" "$OUT_CAP" <<'PY'
+import sys, json, re
+raw = open(sys.argv[1]).read()
+# claude -p output: caption text, then possibly a trailing JSON line from
+# log_claude_session.py. Strip any line that parses as a single JSON object
+# containing 'session_id' or 'logged' keys (the session marker).
+lines = raw.splitlines(keepends=True)
+out = []
+for ln in lines:
+    stripped = ln.strip()
+    if stripped.startswith('{') and stripped.endswith('}'):
+        try:
+            j = json.loads(stripped)
+            if isinstance(j, dict) and ('session_id' in j or 'logged' in j):
+                continue  # drop the session marker line
+        except Exception:
+            pass
+    out.append(ln)
+text = ''.join(out).strip() + '\n'
+open(sys.argv[2], 'w').write(text)
+PY
+      CAP_LEN=$(wc -c < "$OUT_CAP" | tr -d ' ')
+      log "  attempt ${attempt} result: new len=${CAP_LEN}"
+    else
+      log "  attempt ${attempt} failed: claude exited non-zero"
+    fi
+    rm -f "$TIGHTEN_PROMPT" "$NEW_CAP_OUT"
+  done
+
+  if [ "$CAP_LEN" -gt "$CAP_LIMIT" ]; then
+    log "ERROR: caption still over limit after 3 tighten attempts (final len=${CAP_LEN})"
+    log "flipping media_posts row to status='caption_too_long' so picker skips it"
+    /opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$CAP_LEN" 2>>"$LOG_FILE" <<'PY'
+import os, sys, psycopg2
+env = {}
+for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
+    if '=' in ln and not ln.strip().startswith('#'):
+        k, v = ln.split('=', 1)
+        env[k.strip()] = v.strip()
+conn = psycopg2.connect(env['DATABASE_URL'])
+c = conn.cursor()
+c.execute(
+    "UPDATE media_posts SET status='caption_too_long', "
+    "metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('caption_too_long_len', %s::int, 'caption_too_long_at', NOW()::text), "
+    "updated_at=NOW() WHERE post_number=%s",
+    (int(sys.argv[2]), int(sys.argv[1])),
+)
+conn.commit()
+conn.close()
+print(f"flipped post-{int(sys.argv[1]):03d} to caption_too_long (len={sys.argv[2]})")
+PY
+    exit 1
+  fi
+
+  # Sync tightened caption into DB row.
+  log "tighten loop succeeded; syncing caption_text column"
+  /opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$OUT_CAP" 2>>"$LOG_FILE" <<'PY'
+import os, sys, psycopg2
+env = {}
+for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
+    if '=' in ln and not ln.strip().startswith('#'):
+        k, v = ln.split('=', 1)
+        env[k.strip()] = v.strip()
+conn = psycopg2.connect(env['DATABASE_URL'])
+c = conn.cursor()
+cap = open(sys.argv[2]).read()
+c.execute("UPDATE media_posts SET caption_text=%s, updated_at=NOW() WHERE post_number=%s", (cap, int(sys.argv[1])))
+conn.commit()
+conn.close()
+print(f"synced post-{int(sys.argv[1]):03d} caption_text (len={len(cap)})")
+PY
+  log "caption tightened OK (final len=${CAP_LEN})"
+fi
+
 log "=== rendered post-${NNN} (${TARGET}, variant=${VARIANT}) successfully ==="
 exit 0
