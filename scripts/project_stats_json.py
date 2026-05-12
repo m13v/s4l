@@ -694,16 +694,35 @@ def _period_total_engagement(conn, name, days):
     comments_total = int(row[1] or 0)
     views_total = int(row[2] or 0)
 
+    # post_clicks bracket = scoped (post_links.clicks SUM for new posts in
+    # window) + COUNT of post_link_clicks events on OLD posts during the
+    # window. The "new posts" leg matches the scoped column exactly so
+    # bracket >= scoped is guaranteed; the "old posts" leg captures
+    # click traffic that hit pre-existing posts during the period.
     cur2 = conn.execute(
-        "SELECT COALESCE(COUNT(*), 0)::bigint "
-        "FROM post_link_clicks plc "
-        "JOIN post_links pl ON pl.code = plc.code "
-        "JOIN posts p ON p.id = pl.post_id "
-        "WHERE plc.ts >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
-          "AND plc.is_bot = FALSE "
-          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
-          "AND p.project_name = %s",
-        (name,),
+        "WITH new_clicks AS ("
+          "SELECT COALESCE(SUM(pl.total_clicks), 0)::bigint AS clicks "
+          "FROM posts p "
+          "LEFT JOIN ("
+            "SELECT post_id, SUM(clicks)::int AS total_clicks "
+            "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+          ") pl ON pl.post_id = p.id "
+          "WHERE p.project_name = %s "
+            "AND p.posted_at >= NOW() - " + days_sql +
+        "), "
+        "old_event_clicks AS ("
+          "SELECT COALESCE(COUNT(*), 0)::bigint AS clicks "
+          "FROM post_link_clicks plc "
+          "JOIN post_links pl ON pl.code = plc.code "
+          "JOIN posts p ON p.id = pl.post_id "
+          "WHERE plc.ts >= NOW() - " + days_sql + " "
+            "AND plc.is_bot = FALSE "
+            "AND p.project_name = %s "
+            "AND p.posted_at < NOW() - " + days_sql +
+        ") "
+        "SELECT n.clicks + o.clicks "
+        "FROM new_clicks n CROSS JOIN old_event_clicks o",
+        (name, name),
     )
     row2 = cur2.fetchone() or (0,)
     post_clicks_total = int(row2[0] or 0)
