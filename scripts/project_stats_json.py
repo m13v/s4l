@@ -613,48 +613,81 @@ def _period_total_engagement(conn, name, days):
     Pre-2026-05-07 click rows do not exist (is_bot logging started then), so
     the count returns 0 for older days rather than mixing inflated counters.
     """
-    # Period total = engagement gained during the last N days. Mirrors the
-    # Trends-tab daily-gain SQL (LAG over post_views_daily snapshots,
-    # WHERE day >= today - N) with one important tweak: when a post was
-    # *posted within the window*, its FIRST snapshot in the window is
-    # treated as "in-window gain = snapshot value" (all of it was earned
-    # in the window). Without this tweak the Trends-tab LAG approach
-    # silently drops every brand-new post's initial value, which is why
-    # the bracket can otherwise end up smaller than the scoped value for
-    # short windows.
+    # Period total = engagement gained during the last N days, summed from
+    # two complementary branches that always together produce a value
+    # >= the panel's scoped column:
     #
-    # For older posts (posted before window): only LAG-diffs are summed,
-    # matching the Trends chart exactly so the panel total reconciles
-    # with the chart total.
+    #   (1) new_posts_branch — posts CREATED in the window. Their full
+    #       live posts.* counters are credited as in-window gain (all of
+    #       it was earned during the window since the post didn't exist
+    #       before). No reddit/moltbook -1 OP self-vote discount here
+    #       (the scoped column applies that discount, so the un-discounted
+    #       sum here is guaranteed >= scoped).
+    #
+    #   (2) old_posts_branch — posts created BEFORE the window. Uses the
+    #       Trends-tab LAG approach over post_views_daily, summing daily
+    #       gains across snapshots inside the window. NULL values
+    #       (Reddit posts don't write upvotes/comments to post_views_daily
+    #       at all) are excluded by the IS NOT NULL FILTER, so old
+    #       Reddit posts contribute 0 here — that's a known limitation
+    #       of the snapshot pipeline and matches the Trends chart.
+    # Per-metric platform filter matches the SCOPED column's filter so the
+    # bracket is always >= scoped for the same metric:
+    #   upvotes:  no platform filter (scoped sums all platforms with reddit/
+    #             moltbook -1 OP self-vote discount; bracket uses raw values).
+    #   comments: no platform filter (scoped sums all platforms).
+    #   views:    excludes moltbook/github/github_issues (matches scoped's
+    #             FILTER clause in _windowed_post_engagement).
     days_sql = "INTERVAL '" + str(int(days)) + " days'"
+    views_excl = "LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')"
     cur = conn.execute(
-        "WITH per_post_daily AS ("
-          "SELECT pvd.post_id, pvd.day, p.posted_at, "
+        # Branch 1: posts CREATED in the window. Full live posts.* values
+        # are credited as in-window gain. No -1 OP discount on upvotes, so
+        # bracket >= scoped on reddit/moltbook by exactly #posts_in_window.
+        "WITH new_posts AS ("
+          "SELECT "
+            "COALESCE(SUM(p.upvotes),        0)::bigint AS upvotes, "
+            "COALESCE(SUM(p.comments_count), 0)::bigint AS comments, "
+            "COALESCE(SUM(p.views) FILTER (WHERE " + views_excl + "), 0)::bigint AS views "
+          "FROM posts p "
+          "WHERE p.project_name = %s "
+            "AND p.posted_at >= NOW() - " + days_sql +
+        "), "
+        # Branch 2: posts created BEFORE the window. LAG over snapshots
+        # inside the window. Reddit/moltbook post_views_daily rows carry
+        # NULL upvotes/comments by design (those stats pipelines only
+        # write views), so the IS NOT NULL FILTER drops them: old Reddit
+        # upvotes/comments gain is structurally invisible here, matching
+        # the Trends chart.
+        "old_post_daily AS ("
+          "SELECT pvd.post_id, p.platform, "
             "pvd.upvotes,  LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
             "pvd.comments, LAG(pvd.comments) OVER w AS prev_comments, "
             "pvd.views,    LAG(pvd.views)    OVER w AS prev_views "
           "FROM post_views_daily pvd "
           "JOIN posts p ON p.id = pvd.post_id "
-          "WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
-            "AND pvd.day >= CURRENT_DATE - " + days_sql + " "
+          "WHERE pvd.day >= CURRENT_DATE - " + days_sql + " "
             "AND p.project_name = %s "
+            "AND p.posted_at < NOW() - " + days_sql + " "
           "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
+        "), "
+        "old_posts AS ("
+          "SELECT "
+            "COALESCE(SUM(GREATEST(upvotes  - prev_upvotes,  0)) "
+              "FILTER (WHERE prev_upvotes  IS NOT NULL AND upvotes  IS NOT NULL), 0)::bigint AS upvotes, "
+            "COALESCE(SUM(GREATEST(comments - prev_comments, 0)) "
+              "FILTER (WHERE prev_comments IS NOT NULL AND comments IS NOT NULL), 0)::bigint AS comments, "
+            "COALESCE(SUM(GREATEST(views    - prev_views,    0)) "
+              "FILTER (WHERE prev_views    IS NOT NULL AND views    IS NOT NULL "
+                "AND LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::bigint AS views "
+          "FROM old_post_daily"
         ") "
         "SELECT "
-          "COALESCE(SUM(CASE "
-            "WHEN prev_upvotes IS NOT NULL THEN GREATEST(upvotes - prev_upvotes, 0) "
-            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(upvotes, 0) "
-            "ELSE 0 END), 0)::bigint, "
-          "COALESCE(SUM(CASE "
-            "WHEN prev_comments IS NOT NULL THEN GREATEST(comments - prev_comments, 0) "
-            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(comments, 0) "
-            "ELSE 0 END), 0)::bigint, "
-          "COALESCE(SUM(CASE "
-            "WHEN prev_views IS NOT NULL THEN GREATEST(views - prev_views, 0) "
-            "WHEN posted_at >= NOW() - " + days_sql + " THEN COALESCE(views, 0) "
-            "ELSE 0 END), 0)::bigint "
-        "FROM per_post_daily",
-        (name,),
+          "n.upvotes  + o.upvotes, "
+          "n.comments + o.comments, "
+          "n.views    + o.views "
+        "FROM new_posts n CROSS JOIN old_posts o",
+        (name, name),
     )
     row = cur.fetchone() or (0, 0, 0)
     upvotes_total = int(row[0] or 0)
