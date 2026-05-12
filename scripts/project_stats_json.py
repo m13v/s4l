@@ -593,6 +593,75 @@ def _dm_booking_count(conn, bookings_conn, name, days):
         return 0
 
 
+def _period_total_engagement(conn, name, days):
+    """Total engagement *gained during the window* across ALL posts, regardless
+    of when each post was created.
+
+    Mirrors the Trends-tab calculation (bin/server.js /api/{views,upvotes,
+    comments,clicks}/per-day) so the bracketed "(total)" rendered next to
+    each scoped value on the project panel uses the same numbers the Trends
+    chart sums up. Excludes moltbook/github/github_issues platforms in line
+    with the Trends tab.
+
+    For upvotes/comments/views: SUM of per-post daily gains via LAG() over
+    post_views_daily. First-snapshot rows (prev IS NULL) are excluded so a
+    post's pre-window cumulative does not get attributed to the window.
+
+    For post_clicks: COUNT of post_link_clicks rows with is_bot=FALSE in the
+    window, joined to post_links -> posts so we can apply the project filter.
+    Pre-2026-05-07 click rows do not exist (is_bot logging started then), so
+    the count returns 0 for older days rather than mixing inflated counters.
+    """
+    cur = conn.execute(
+        "WITH per_post_daily AS ("
+          "SELECT pvd.post_id, pvd.day, pvd.upvotes, pvd.comments, pvd.views, "
+            "LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
+            "LAG(pvd.comments) OVER w AS prev_comments, "
+            "LAG(pvd.views)    OVER w AS prev_views "
+          "FROM post_views_daily pvd "
+          "JOIN posts p ON p.id = pvd.post_id "
+          "WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
+            "AND pvd.day >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
+            "AND p.project_name = %s "
+          "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
+        ") "
+        "SELECT "
+          "COALESCE(SUM(GREATEST(upvotes  - prev_upvotes,  0)) "
+            "FILTER (WHERE prev_upvotes  IS NOT NULL AND upvotes  IS NOT NULL), 0)::bigint, "
+          "COALESCE(SUM(GREATEST(comments - prev_comments, 0)) "
+            "FILTER (WHERE prev_comments IS NOT NULL AND comments IS NOT NULL), 0)::bigint, "
+          "COALESCE(SUM(GREATEST(views    - prev_views,    0)) "
+            "FILTER (WHERE prev_views    IS NOT NULL AND views    IS NOT NULL), 0)::bigint "
+        "FROM per_post_daily",
+        (name,),
+    )
+    row = cur.fetchone() or (0, 0, 0)
+    upvotes_total = int(row[0] or 0)
+    comments_total = int(row[1] or 0)
+    views_total = int(row[2] or 0)
+
+    cur2 = conn.execute(
+        "SELECT COALESCE(COUNT(*), 0)::bigint "
+        "FROM post_link_clicks plc "
+        "JOIN post_links pl ON pl.code = plc.code "
+        "JOIN posts p ON p.id = pl.post_id "
+        "WHERE plc.ts >= CURRENT_DATE - INTERVAL '" + str(int(days)) + " days' "
+          "AND plc.is_bot = FALSE "
+          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
+          "AND p.project_name = %s",
+        (name,),
+    )
+    row2 = cur2.fetchone() or (0,)
+    post_clicks_total = int(row2[0] or 0)
+
+    return {
+        "upvotes": upvotes_total,
+        "comments": comments_total,
+        "views": views_total,
+        "post_clicks": post_clicks_total,
+    }
+
+
 def _windowed_post_engagement(conn, name, days):
     """Sum engagement only for posts *created within the window*.
 
@@ -758,6 +827,7 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
     post_stats = ps.get_post_stats(conn, name, days)
     platforms = ps.get_platform_breakdown(conn, name, days)
     eng_recent = _windowed_post_engagement(conn, name, days)
+    eng_period_total = _period_total_engagement(conn, name, days)
     seo_pages_recent = _seo_pages_count(conn, name, days)
 
     domains = ps.get_project_domains(proj)
@@ -903,6 +973,16 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
             # (Twitter card / LinkedIn unfurl / Slack preview filtered at the
             # resolver via post_link_clicks.is_bot). See server.js /api/top.
             "post_clicks_recent": eng_recent["post_clicks"],
+            # Period totals: engagement GAINED during the window across ALL
+            # posts (regardless of posted_at), mirroring the Trends-tab
+            # /api/{views,upvotes,comments,clicks}/per-day SUM. The dashboard
+            # renders each as "<scoped> (<period_total>)" in gray brackets.
+            # post_clicks_period_total counts post_link_clicks (is_bot=FALSE)
+            # in the window joined to this project's posts.
+            "upvotes_period_total": eng_period_total["upvotes"],
+            "comments_period_total": eng_period_total["comments"],
+            "views_period_total": eng_period_total["views"],
+            "post_clicks_period_total": eng_period_total["post_clicks"],
         },
         "seo": {"pages_recent": seo_pages_recent},
         "platforms": platforms,
