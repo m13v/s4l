@@ -5,6 +5,12 @@ Replaces multi-step Claude browser MCP calls with single Python function calls.
 Each function does all browser work internally and returns structured JSON.
 
 Usage:
+    # Check isolated X/Twitter browser profile login
+    python3 twitter_browser.py whoami
+
+    # Open the isolated browser profile and wait for manual login
+    TWITTER_HEADLESS=0 python3 twitter_browser.py login
+
     # Reply to a tweet
     python3 twitter_browser.py reply "https://x.com/user/status/123" "reply text"
 
@@ -19,8 +25,8 @@ Usage:
 
 Requires: pip install playwright && playwright install chromium
 
-Connects to the running twitter-agent MCP browser via CDP (Chrome DevTools Protocol)
-to reuse the existing logged-in session.
+Connects to the running twitter-agent MCP browser via CDP for automation commands,
+or launches an isolated persistent browser profile for login/whoami.
 """
 
 import atexit
@@ -33,13 +39,55 @@ import sys
 import time
 
 
-PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/twitter")
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+DEFAULT_PROFILE_DIR = "~/.claude/browser-profiles/twitter"
+PROFILE_DIR = os.path.expanduser(os.environ.get("TWITTER_PROFILE_DIR", DEFAULT_PROFILE_DIR))
 LOCK_FILE = os.path.expanduser("~/.claude/twitter-agent-lock.json")
 LOCK_EXPIRY = 300  # Must match twitter-agent-lock.sh
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
 VIEWPORT = {"width": 911, "height": 1016}
-OUR_HANDLE = "m13v_"
+HEADLESS = os.environ.get("TWITTER_HEADLESS", "1").lower() not in ("0", "false", "no")
+DEFAULT_BROWSER_EXECUTABLE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+BROWSER_EXECUTABLE = os.environ.get("TWITTER_BROWSER_EXECUTABLE", DEFAULT_BROWSER_EXECUTABLE)
+
+
+def _normalize_twitter_handle(value):
+    if not value:
+        return ""
+    raw = str(value).strip()
+    url_match = re.search(r"(?:x|twitter)\.com/([^/?#]+)", raw, re.I)
+    if url_match:
+        raw = url_match.group(1)
+    raw = raw.strip().lstrip("@").rstrip("/")
+    raw = raw.split()[0] if raw.split() else raw
+    if raw.lower() in {"your-twitter-handle", "your_handle", "username"}:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_]{1,15}", raw):
+        return raw
+    return ""
+
+
+def _load_config_twitter_handle():
+    if os.environ.get("TWITTER_ALLOW_ANY_HANDLE", "").lower() in ("1", "true", "yes"):
+        return ""
+    env_handle = _normalize_twitter_handle(os.environ.get("TWITTER_HANDLE", ""))
+    if env_handle:
+        return env_handle
+    try:
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+        config_handle = (
+            config.get("accounts", {})
+            .get("twitter", {})
+            .get("handle", "")
+        )
+        return _normalize_twitter_handle(config_handle) or "m13v_"
+    except Exception:
+        return "m13v_"
+
+
+OUR_HANDLE = _load_config_twitter_handle()
 
 # DM encryption passcode from .env
 DM_PASSCODE = os.environ.get("TWITTER_DM_PASSCODE", "")
@@ -266,15 +314,22 @@ def _refresh_browser_lock():
         pass
 
 
-def get_browser_and_page(playwright):
+def _browser_executable_path():
+    path = os.path.expanduser(BROWSER_EXECUTABLE) if BROWSER_EXECUTABLE else ""
+    if path and os.path.exists(path):
+        return path
+    return None
+
+
+def get_browser_and_page(playwright, prefer_cdp=True):
     """Connect to the twitter-agent MCP browser via CDP, or launch a new one.
 
     Returns (browser, page, is_cdp). When is_cdp=True, `page` is a reused
     existing Twitter tab (navigate it, don't close it). When is_cdp=False,
-    it's a new headless page.
+    it's a new page in the isolated persistent profile.
     """
     _acquire_browser_lock()
-    cdp_port = find_twitter_cdp_port()
+    cdp_port = find_twitter_cdp_port() if prefer_cdp else None
 
     if cdp_port:
         try:
@@ -299,12 +354,23 @@ def get_browser_and_page(playwright):
     deadline = time.time() + LOCK_WAIT_MAX
     while True:
         try:
+            launch_kwargs = {
+                "headless": HEADLESS,
+                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            }
+            args = ["--disable-blink-features=AutomationControlled"]
+            if HEADLESS:
+                launch_kwargs["viewport"] = VIEWPORT
+            else:
+                launch_kwargs["no_viewport"] = True
+                args.extend(["--start-maximized", "--window-size=1280,1000"])
+            launch_kwargs["args"] = args
+            executable_path = _browser_executable_path()
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
             context = playwright.chromium.launch_persistent_context(
                 PROFILE_DIR,
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport=VIEWPORT,
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                **launch_kwargs,
             )
             break
         except Exception as e:
@@ -318,6 +384,217 @@ def get_browser_and_page(playwright):
             time.sleep(LOCK_POLL_INTERVAL)
     page = context.new_page()
     return context, page, False
+
+
+def _twitter_login_state(page):
+    """Read X login state from the current page without posting anything."""
+    return page.evaluate("""(expectedHandle) => {
+        const reserved = new Set([
+            'home', 'explore', 'notifications', 'messages', 'i', 'intent',
+            'settings', 'search', 'compose', 'login', 'signup', 'privacy',
+            'tos', 'download', 'jobs', 'help'
+        ]);
+
+        function cleanHandle(raw) {
+            if (!raw) return '';
+            let value = String(raw).trim();
+            const at = value.match(/@([A-Za-z0-9_]{1,15})/);
+            if (at) {
+                value = at[1];
+            } else {
+                value = value.replace(/^@/, '').split(/[\\s/?#]/)[0];
+            }
+            if (!/^[A-Za-z0-9_]{1,15}$/.test(value)) return '';
+            if (reserved.has(value.toLowerCase())) return '';
+            return value;
+        }
+
+        const candidates = [];
+        function addCandidate(raw, source) {
+            const handle = cleanHandle(raw);
+            if (!handle) return;
+            if (candidates.some(c => c.handle.toLowerCase() === handle.toLowerCase())) return;
+            candidates.push({handle, source});
+        }
+
+        const switcher = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+        if (switcher) {
+            addCandidate(switcher.textContent, 'account_switcher_text');
+            addCandidate(switcher.getAttribute('aria-label'), 'account_switcher_aria');
+        }
+
+        for (const el of document.querySelectorAll('[aria-label]')) {
+            const label = el.getAttribute('aria-label') || '';
+            if (label.includes('@')) addCandidate(label, 'aria_label');
+        }
+
+        for (const link of document.querySelectorAll('a[href^="/"]')) {
+            const href = link.getAttribute('href') || '';
+            const parts = href.split('?')[0].split('#')[0].split('/').filter(Boolean);
+            if (parts.length === 1) addCandidate(parts[0], 'profile_link');
+            const text = link.textContent || '';
+            if (text.includes('@')) addCandidate(text, 'link_text');
+        }
+
+        const expected = cleanHandle(expectedHandle);
+        let expectedFound = false;
+        if (expected) {
+            const lowerExpected = expected.toLowerCase();
+            expectedFound = candidates.some(c => c.handle.toLowerCase() === lowerExpected);
+            if (!expectedFound) {
+                expectedFound = Boolean(
+                    document.querySelector(`a[href="/${expected}"], a[href^="/${expected}/"]`)
+                );
+            }
+        }
+
+        const url = window.location.href;
+        const path = window.location.pathname || '';
+        const bodyText = ((document.body && document.body.innerText) || '')
+            .replace(/\\s+/g, ' ')
+            .trim();
+        const appNav = Boolean(
+            document.querySelector('a[href="/home"], a[data-testid="AppTabBar_Home_Link"], a[href="/notifications"], [data-testid="SideNav_AccountSwitcher_Button"], [data-testid="SideNav_NewTweet_Button"]')
+        );
+        const loginUrl = /\\/login|\\/i\\/flow\\/login/i.test(path);
+        const challengeUrl = /\\/account\\/access|\\/challenge/i.test(url);
+        const loginCta = /Sign in|Log in|Create account/i.test(bodyText.slice(0, 800));
+        const loggedIn = appNav && !loginUrl && !challengeUrl;
+
+        let handle = '';
+        if (expectedFound && expected) {
+            handle = expected;
+        } else if (candidates.length) {
+            handle = candidates[0].handle;
+        }
+
+        return {
+            url,
+            logged_in: loggedIn,
+            login_url: loginUrl,
+            challenge_url: challengeUrl,
+            login_cta: loginCta,
+            handle,
+            expected_handle: expected,
+            handle_matches: Boolean(
+                loggedIn && expected && handle &&
+                handle.toLowerCase() === expected.toLowerCase()
+            ),
+            candidates: candidates.slice(0, 8),
+            body_start: bodyText.slice(0, 300)
+        };
+    }""", OUR_HANDLE)
+
+
+def _twitter_handle_matches(state):
+    if not state or not state.get("logged_in"):
+        return False
+    expected = _normalize_twitter_handle(state.get("expected_handle", ""))
+    if not expected:
+        return True
+    return bool(state.get("handle_matches"))
+
+
+def _profile_payload(extra=None):
+    payload = {
+        "profile_dir": PROFILE_DIR,
+        "expected_handle": OUR_HANDLE,
+        "headless": HEADLESS,
+        "browser_executable": _browser_executable_path(),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def whoami():
+    """Check which X account is logged into the isolated browser profile."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p, prefer_cdp=False)
+        try:
+            try:
+                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                pass
+            page.wait_for_timeout(5000)
+            state = _twitter_login_state(page)
+            return _profile_payload({
+                "ok": _twitter_handle_matches(state),
+                "state": state,
+                "using_cdp": is_cdp,
+            })
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+
+def login(wait_seconds=600):
+    """Open a visible isolated browser and wait for manual X login."""
+    if HEADLESS:
+        return _profile_payload({
+            "ok": False,
+            "error": "login_requires_headed_browser",
+            "hint": "Run: TWITTER_HEADLESS=0 python3 scripts/twitter_browser.py login",
+        })
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p, prefer_cdp=False)
+        try:
+            try:
+                page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+            state = _twitter_login_state(page)
+            if _twitter_handle_matches(state):
+                return _profile_payload({"ok": True, "state": state, "using_cdp": is_cdp})
+
+            if not state.get("logged_in"):
+                try:
+                    page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    pass
+
+            deadline = time.time() + max(1, int(wait_seconds))
+            last_state = state
+            while time.time() < deadline:
+                page.wait_for_timeout(3000)
+                _refresh_browser_lock()
+                last_state = _twitter_login_state(page)
+                if _twitter_handle_matches(last_state):
+                    return _profile_payload({
+                        "ok": True,
+                        "state": last_state,
+                        "using_cdp": is_cdp,
+                    })
+                if (
+                    last_state.get("logged_in")
+                    and last_state.get("handle")
+                    and last_state.get("expected_handle")
+                    and not last_state.get("handle_matches")
+                ):
+                    return _profile_payload({
+                        "ok": False,
+                        "error": "wrong_twitter_account",
+                        "state": last_state,
+                        "using_cdp": is_cdp,
+                    })
+
+            return _profile_payload({
+                "ok": False,
+                "error": "login_timeout",
+                "state": last_state,
+                "using_cdp": is_cdp,
+            })
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
 
 
 def _handle_dm_passcode(page):
@@ -1531,7 +1808,22 @@ def main():
 
     cmd = sys.argv[1]
 
-    if cmd == "reply":
+    if cmd == "whoami":
+        result = whoami()
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "login":
+        wait_seconds = 600
+        if len(sys.argv) >= 3:
+            try:
+                wait_seconds = int(sys.argv[2])
+            except ValueError:
+                print(f"login: wait_seconds must be int, got {sys.argv[2]!r}", file=sys.stderr)
+                sys.exit(1)
+        result = login(wait_seconds=wait_seconds)
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "reply":
         if len(sys.argv) < 4:
             print(
                 "Usage: twitter_browser.py reply <tweet_url> <reply_text>",
