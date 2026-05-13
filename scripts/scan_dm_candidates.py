@@ -237,13 +237,25 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
             continue
 
         # Dedupe: don't re-promote a candidate if either
-        #   (a) we sent/queued a DM to them in the last 30 days, OR
+        #   (a) we sent/queued a REAL private DM (chat_url IS NOT NULL) in the
+        #       last 30 days, OR
         #   (b) we permanently can't (or shouldn't) DM them based on a prior
         #       skip/error (chat_disabled, account_suspended, disqualified,
         #       inmail credits exhausted, etc. — see PERMANENT_SKIP_REASON_PATTERNS)
+        #
+        # NOTE 2026-05-13: the recent_active branch REQUIRES chat_url IS NOT NULL.
+        # The dms table is also used as a unified prospect-tracker: dm_conversation.
+        # ensure-dm inserts rows with status='sent' + chat_url=NULL after every
+        # public reply (engage_reddit hook), which previously self-poisoned the
+        # cooldown — every public-comment author looked "already_dmd_recently"
+        # even though no real DM was ever sent. Result: real DM outreach collapsed
+        # from ~100-225/wk pre-Apr 27 to 0 by mid-May 2026. The chat_url IS NOT
+        # NULL filter restores the intended semantics: cool down on actual DM
+        # delivery, not on public engagement bookkeeping.
         recent_dm = conn.execute("""
             SELECT
               SUM(CASE WHEN status IN ('sent','pending')
+                        AND chat_url IS NOT NULL
                         AND discovered_at >= NOW() - INTERVAL '30 days'
                        THEN 1 ELSE 0 END) AS recent_active,
               SUM(CASE WHEN status IN ('skipped','error')
