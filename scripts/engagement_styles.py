@@ -385,31 +385,26 @@ STYLE_CAP_PCT = 50.0
 
 
 def _fetch_style_stats(platform):
-    """Query posts table for avg_upvotes per engagement_style on this platform.
+    """Query the autoposter API for avg_upvotes per engagement_style on this platform.
 
     Returns a dict: {style_name: {"n": int, "avg_up": float}}.
-    Returns {} on any DB error (cold start / DB unavailable / psycopg2 missing).
+    Returns {} on any error (API unreachable, missing env, cold start).
+
+    Routes through the social-autoposter-website API (no direct Neon access)
+    so VMs / sandboxes without a DATABASE_URL still get live weights.
     """
     try:
         import os
         import sys as _sys
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        cur = conn.execute(
-            "SELECT engagement_style, COUNT(*) AS n, "
-            "AVG(COALESCE(upvotes,0))::float AS avg_up "
-            "FROM posts "
-            "WHERE status='active' AND engagement_style IS NOT NULL "
-            "AND our_content IS NOT NULL AND LENGTH(our_content) >= 30 "
-            "AND upvotes IS NOT NULL AND platform = %s "
-            "GROUP BY engagement_style",
-            [platform],
-        )
-        rows = cur.fetchall()
-        conn.close()
-        return {r[0]: {"n": int(r[1]), "avg_up": float(r[2])} for r in rows}
+        from http_api import api_get
+        resp = api_get("/api/v1/engagement-styles/style-stats", {"platform": platform})
+        stats = (resp or {}).get("stats") or {}
+        return {
+            name: {"n": int(v.get("n", 0)), "avg_up": float(v.get("avg_up", 0.0))}
+            for name, v in stats.items()
+            if isinstance(v, dict)
+        }
     except Exception:
         return {}
 
@@ -476,26 +471,22 @@ def _last_picks(platform, limit=10):
     """Return the last `limit` engagement_style picks on `platform`, newest first.
 
     Used by the prompt to show recent pick history so the LLM can cool off a
-    style that's been over-used. Returns [] on any DB error.
+    style that's been over-used. Returns [] on any error.
+
+    Routes through the social-autoposter-website API (no direct Neon access)
+    so VMs / sandboxes without a DATABASE_URL still get the recent-pick list.
     """
     try:
         import os
         import sys as _sys
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        cur = conn.execute(
-            "SELECT engagement_style FROM posts "
-            "WHERE platform = %s AND engagement_style IS NOT NULL AND engagement_style != '' "
-            "AND our_content IS NOT NULL AND LENGTH(our_content) >= 30 "
-            "AND our_content <> '(mention - no original post)' "
-            "ORDER BY posted_at DESC LIMIT %s",
-            [platform, int(limit)],
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/engagement-styles/last-picks",
+            {"platform": platform, "limit": int(limit)},
         )
-        rows = cur.fetchall()
-        conn.close()
-        return [r[0] for r in rows]
+        picks = (resp or {}).get("picks") or []
+        return [str(p) for p in picks if p]
     except Exception:
         return []
 

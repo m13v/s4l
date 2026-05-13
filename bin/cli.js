@@ -311,20 +311,8 @@ function init() {
     console.log('  .env exists — skipping');
   }
 
-  // Check psycopg2-binary (required to connect to Neon DB)
-  const pip3Check = spawnSync('pip3', ['show', 'psycopg2-binary'], { stdio: 'pipe' });
-  if (pip3Check.status !== 0) {
-    console.log('  installing psycopg2-binary (required for Neon DB)...');
-    const pipInstall = spawnSync('pip3', ['install', 'psycopg2-binary', '-q'], { stdio: 'inherit' });
-    if (pipInstall.status !== 0) {
-      console.warn('  WARNING: psycopg2-binary install failed — run manually:');
-      console.warn('    pip3 install psycopg2-binary');
-    } else {
-      console.log('  psycopg2-binary installed');
-    }
-  } else {
-    console.log('  psycopg2-binary already installed');
-  }
+  installPythonDeps();
+  installEngagementStylesSidecar();
 
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
@@ -385,6 +373,11 @@ function update() {
   // Register any newly added MCP servers with Claude (idempotent).
   registerBrowserAgentMcpServers();
 
+  // Refresh Python deps every update so version-bumps land on existing installs
+  // and the candidate-style sidecar gets merged (preserves VM-side candidates).
+  installPythonDeps();
+  installEngagementStylesSidecar();
+
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
   try { fs.rmSync(skillMd, { force: true }); } catch {}
@@ -402,6 +395,63 @@ function update() {
 
   console.log('');
   console.log('Update complete. config.json was preserved.');
+}
+
+// Install Python deps from requirements.txt (preferred) or fall back to the
+// hardcoded list. Idempotent — pip3 install is a no-op when the package is
+// already at the requested version. Playwright also needs the Chromium
+// browser binary; we run `playwright install chromium` after the pip install.
+function installPythonDeps() {
+  const reqPath = path.join(PKG_ROOT, 'requirements.txt');
+  const args = fs.existsSync(reqPath)
+    ? ['install', '-r', reqPath, '-q']
+    : ['install', '-q', 'psycopg2-binary', 'playwright'];
+  console.log('  installing Python deps (psycopg2-binary, playwright, ...)');
+  const r = spawnSync('pip3', args, { stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.warn('  WARNING: pip3 install failed — run manually:');
+    console.warn(`    pip3 ${args.join(' ')}`);
+    return;
+  }
+  // Playwright needs its browser binary downloaded separately. Chromium
+  // is the only engine the repo uses today; skip Firefox/WebKit.
+  console.log('  installing Playwright Chromium binary (one-time, ~150MB)...');
+  const pw = spawnSync('python3', ['-m', 'playwright', 'install', 'chromium'], { stdio: 'inherit' });
+  if (pw.status !== 0) {
+    console.warn('  WARNING: playwright install chromium failed — run manually:');
+    console.warn('    python3 -m playwright install chromium');
+  }
+}
+
+// Copy the candidate-style sidecar JSON into ~/social-autoposter/scripts/
+// if missing; merge if present so VM-side invented candidates survive
+// across updates. Promoted (status=active) entries from the shipped baseline
+// always win.
+function installEngagementStylesSidecar() {
+  const src = path.join(PKG_ROOT, 'scripts', 'engagement_styles_extra.json');
+  const dest = path.join(DEST, 'scripts', 'engagement_styles_extra.json');
+  if (!fs.existsSync(src)) return;
+
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    console.log('  installed scripts/engagement_styles_extra.json');
+    return;
+  }
+
+  let shipped = {};
+  let local = {};
+  try { shipped = JSON.parse(fs.readFileSync(src, 'utf8')) || {}; } catch {}
+  try { local = JSON.parse(fs.readFileSync(dest, 'utf8')) || {}; } catch {}
+
+  // Start from local (preserves VM-only candidates), overlay shipped active
+  // entries so newly promoted styles always land. Shipped wins on conflict.
+  const merged = { ...local };
+  for (const [name, entry] of Object.entries(shipped)) {
+    merged[name] = entry;
+  }
+  fs.writeFileSync(dest, JSON.stringify(merged, null, 2) + '\n');
+  console.log('  merged scripts/engagement_styles_extra.json (shipped wins on conflict)');
 }
 
 const cmd = process.argv[2];
