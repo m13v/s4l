@@ -321,7 +321,7 @@ if [ -n "$TW_SCAN_PROC_LINE" ] || [ -n "$TW_SCAN_SUMMARY_LINE" ]; then
   tw_excluded=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ excluded" | grep -oE "[0-9]+" | head -1)
   tw_own=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ own account" | grep -oE "[0-9]+" | head -1)
   tw_short=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ too short" | grep -oE "[0-9]+" | head -1)
-  tw_noid=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ no_tweet_id" | grep -oE "[0-9]+" | head -1)
+  tw_noid=$(echo "$TW_SCAN_SUMMARY_LINE" | grep -oE "[0-9]+ no tweet_id" | grep -oE "[0-9]+" | head -1)
   # excluded pill = excluded + own_account; unmatched pill = too_short + no_tweet_id
   tw_excl_total=$(( ${tw_excluded:-0} + ${tw_own:-0} ))
   tw_unm_total=$(( ${tw_short:-0} + ${tw_noid:-0} ))
