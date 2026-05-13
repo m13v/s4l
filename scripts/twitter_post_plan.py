@@ -343,6 +343,18 @@ def post_one(c: dict) -> tuple[str, str]:
         log_args += ["--language", language]
     if link_source:
         log_args += ["--link-source", link_source]
+    # Generation trace: run-twitter-cycle.sh writes a snapshot of the
+    # cycle's few-shot context (top_performers, top_queries, supply
+    # signal, dud queries) to a tempfile and exports the path via
+    # SAPS_TWITTER_GEN_TRACE_PATH. Forward to log_post.py so every
+    # post landed this cycle gets posts.generation_trace JSONB pointing
+    # to the same snapshot. Same trace for every post in this run
+    # because they all saw the same Phase 2b-prep context. The env var
+    # is missing/empty when run-twitter-cycle.sh's trace step failed —
+    # in that case we just skip the flag and the row gets NULL trace.
+    trace_path = os.environ.get("SAPS_TWITTER_GEN_TRACE_PATH") or ""
+    if trace_path and os.path.isfile(trace_path):
+        log_args += ["--generation-trace", trace_path]
 
     rc, out, err = run_subprocess(log_args, timeout_sec=60)
     if err:
