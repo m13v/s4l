@@ -501,6 +501,16 @@ const STANDALONE_JOBS = {
   precompute_stats: { job_type: 'report', job_label: 'Precompute Stats' },
 };
 
+// Scripts that still run on schedule (and may log to run_monitor.log) but
+// should never surface in the Job History tab. Keep this list minimal: a row
+// only belongs here if it's purely infrastructure (no posting, no audit, no
+// SEO write) and operators have asked for it to be hidden from the feed.
+// Filtering happens inside parseRunMonitorLog so every Job History consumer
+// sees the same trimmed list; the underlying launchd job is unaffected.
+const JOB_HISTORY_HIDDEN_SCRIPTS = new Set([
+  'deploy_status',
+]);
+
 // Wrapper-script names (as they appear in `ps` for running jobs, or as some
 // scripts historically wrote to run_monitor.log) that don't match the
 // classifier regexes below. Aliasing them here makes the platform/type
@@ -577,6 +587,7 @@ function parseRunMonitorLog(maxLines) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
     const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr] = m;
+    if (JOB_HISTORY_HIDDEN_SCRIPTS.has(script)) continue;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
     // correct since the dashboard server runs on the same host.
