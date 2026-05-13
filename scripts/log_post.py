@@ -233,6 +233,15 @@ def main():
                              "log_post.py merges these with IDs extracted from "
                              "thread_url and our_url before INSERT, so dedup "
                              "via posts.urns catches future cross-URN collisions.")
+    parser.add_argument("--generation-trace", default=None,
+                        help="Path to a JSON file with the few-shot context "
+                             "Claude saw before drafting this post. Stored in "
+                             "posts.generation_trace JSONB so a later audit "
+                             "can reconstruct 'which examples produced this "
+                             "output?'. Pass the file path (NOT inline JSON) "
+                             "to keep argv short and avoid shell-escape pain. "
+                             "Capped at 64 KB by the API. See "
+                             "migrations/2026-05-12_generation_trace.sql.")
     args = parser.parse_args()
 
     if args.mark_self_reply:
@@ -303,6 +312,20 @@ def main():
         body["urns"] = urn_ids
     if args.link_source:
         body["link_source"] = args.link_source
+    # Generation trace: read the JSON file and pass as-is. We do NOT
+    # validate the inner shape here; the API enforces the 64 KB cap and
+    # rejects non-object payloads. If the file is missing or unparseable
+    # we skip the field silently rather than failing the post — losing
+    # the audit row for one post is preferable to losing the post itself.
+    if args.generation_trace:
+        try:
+            with open(args.generation_trace, "r", encoding="utf-8") as tf:
+                body["generation_trace"] = json.load(tf)
+        except (OSError, json.JSONDecodeError) as e:
+            print(json.dumps({
+                "warning": "GENERATION_TRACE_LOAD_FAILED",
+                "message": f"could not load {args.generation_trace}: {e}",
+            }), file=sys.stderr)
 
     resp = http_api.api_post("/api/v1/posts", body, ok_on_conflict=True)
     if resp and resp.get("error") in ("duplicate_thread", "conflict"):
@@ -326,3 +349,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+test
