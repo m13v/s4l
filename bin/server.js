@@ -1512,7 +1512,10 @@ async function enrichPostCommentsRedditRuns(runs) {
     const claudeFailedRe = /\[post_reddit\] Claude FAILED: (.+)/;
     const cdpFailedRe = /\[post_reddit\] CDP FAILED: (\w+)/;
     const cdpReasonMap = {
-      thread_locked: 'reddit_locked',
+      // 2026-05-13: rename reddit_locked -> thread_locked. "reddit_locked"
+      // read like a sub-wide or account-wide block; the underlying CDP error
+      // is a per-thread mod lock, so we surface the literal reason now.
+      thread_locked: 'thread_locked',
       subreddit_restricted: 'sub_restricted',
       account_blocked_in_sub: 'account_blocked',
       thread_not_found: 'reddit_deleted',
