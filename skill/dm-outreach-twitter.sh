@@ -231,10 +231,47 @@ DMs disabled (recipient setting, not a send failure):
   psql "\$DATABASE_URL" -c "UPDATE dms SET status='skipped', skip_reason='chat_disabled', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
 
 CRITICAL: ALL browser calls MUST use mcp__twitter-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a twitter-agent tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
+
+## CRITICAL FAILURE MODE: mcp__twitter-agent__* tools not registered
+If at the START of this run you cannot see ANY mcp__twitter-agent__* tools available, OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged playwright-mcp wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the prospects in the queue.
+
+Do EXACTLY this:
+1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', or anything else.
+2. Print a single line to stdout: \`MCP_UNAVAILABLE: twitter-agent tools not registered; aborting with rows left at status=pending\`
+3. Exit cleanly. The launchd schedule will retry on the next cycle, by which point the wedged profile holder will likely have timed out.
+
+Burning rows with skip_reason='twitter_agent_mcp_unavailable: ...' is a regression that on 2026-05-12 nuked 7 warm leads (efemjoba, gpuops, josesaezmerino, AIDailyGems, alkimiadev, RobertDMellish, kunaljeweller). The d.id IS NULL filter in scan_dm_candidates.py then permanently blocked them from re-discovery. Do not do this.
 PROMPT_EOF
 
 gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-twitter" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Twitter DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
+
+# Belt-and-suspenders: if Claude (despite the prompt instructions added 2026-05-13)
+# marked any row with skip_reason='twitter_agent_mcp_unavailable: ...' or
+# 'mcp_unavailable' or similar transient-MCP signals THIS run, revert it back
+# to status='pending' so the next cycle can retry. Scoped to this run via
+# claude_session_id to avoid clobbering legitimate older rows.
+#
+# The scan_dm_candidates.py discover query uses `LEFT JOIN dms ... WHERE d.id IS NULL`
+# so once a reply has any dms row (even status='error'), it never re-appears as a
+# candidate. That's how the 2026-05-12 incident permanently lost 7 warm leads.
+# This revert closes the gap by ensuring transient-MCP failures don't lock rows
+# into a status=error state that the scanner can't see past.
+RECOVERED=$(psql "$DATABASE_URL" -t -A -c "
+    UPDATE dms
+    SET status='pending', skip_reason=NULL
+    WHERE platform IN ('twitter','x')
+      AND status='error'
+      AND claude_session_id = '$CLAUDE_SESSION_ID'::uuid
+      AND (skip_reason ILIKE 'twitter_agent_mcp_unavailable%'
+           OR skip_reason ILIKE '%mcp server not connected%'
+           OR skip_reason ILIKE '%no mcp tools%'
+           OR skip_reason ILIKE 'mcp_unavailable%')
+    RETURNING id;
+" 2>/dev/null | grep -c '^[0-9]' || echo "0")
+if [ "$RECOVERED" -gt 0 ]; then
+    log "Reverted $RECOVERED row(s) from status='error' (transient MCP failure) back to pending"
+fi
 
 SENT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform IN ('twitter','x') AND status='sent';" 2>/dev/null || echo "0")
 STILL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform IN ('twitter','x') AND status='pending';" 2>/dev/null || echo "0")
