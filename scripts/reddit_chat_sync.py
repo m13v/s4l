@@ -338,21 +338,22 @@ def ingest_unread(hydration_wait_ms=8000, dry_run=False):
 
     Returns a structured summary of what happened.
 
-    dm_conversation.ensure_dm and log_inbound print progress lines to stdout,
-    which would corrupt our JSON output. We redirect them to stderr for the
-    duration of the ingest loop so the final JSON stays clean.
+    Progress chatter from the helpers is squelched because we emit a single
+    JSON doc at the end and don't want it corrupted. The migration to HTTP
+    (2026-05-12) removed direct psycopg2 access from this script entirely;
+    DM lookups + chat_url updates go through /api/v1/dms*, ensure_dm goes
+    through a subprocess to scripts/dm_conversation.py ensure-dm (which is
+    the same precedent engage_reddit.py uses), and per-event inbound
+    messages POST directly to /api/v1/dms/[id]/messages with event_id
+    dedup handled server-side.
     """
-    # Lazy imports so list-unread doesn't require DB connectivity.
+    # Lazy import so list-unread doesn't pay for it.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import db as dbmod  # noqa: E402
-    import dm_conversation as dmc  # noqa: E402
     import contextlib  # noqa: E402
 
     scan = list_unread(hydration_wait_ms=hydration_wait_ms)
     if not scan.get("ok"):
         return scan
-
-    conn = dbmod.get_conn()
 
     stats = {
         "rooms_scanned": len(scan["unread"]),
@@ -368,13 +369,13 @@ def ingest_unread(hydration_wait_ms=8000, dry_run=False):
     }
     per_room = []
 
-    # Route dm_conversation's progress prints to stderr for the whole loop.
-    # We emit one JSON doc at the end on stdout and that's it.
+    # Route any stray helper prints to stderr for the whole loop. We emit
+    # one JSON doc at the end on stdout and that's it.
     _redirect_cm = contextlib.redirect_stdout(sys.stderr)
     _redirect_cm.__enter__()
 
     try:
-        _ingest_rooms(conn, scan, dmc, dry_run, stats, per_room)
+        _ingest_rooms(scan, dry_run, stats, per_room)
     finally:
         _redirect_cm.__exit__(None, None, None)
 
@@ -390,7 +391,93 @@ def ingest_unread(hydration_wait_ms=8000, dry_run=False):
     }
 
 
-def _ingest_rooms(conn, scan, dmc, dry_run, stats, per_room):
+def _http_lookup_reddit_dm(partner):
+    """Return the most-recent reddit dms row for `partner`, or None.
+
+    Replaces the legacy
+        SELECT id, chat_url FROM dms WHERE platform='reddit' AND their_author=%s
+        ORDER BY id DESC LIMIT 1
+    via GET /api/v1/dms?platform=reddit&their_author=partner&limit=1. The
+    route's their_author filter is case-insensitive, matching what the
+    legacy LOWER(...) backfill clause expected.
+    """
+    from http_api import api_get  # local import keeps list-unread cheap
+    resp = api_get(
+        "/api/v1/dms",
+        query={"platform": "reddit", "their_author": partner, "limit": 1},
+    )
+    data = (resp or {}).get("data") or {}
+    rows = data.get("dms") or []
+    return rows[0] if rows else None
+
+
+def _http_ensure_reddit_dm(partner, chat_url):
+    """Shell out to dm_conversation.py ensure-dm (matches engage_reddit.py
+    precedent, which also subprocess-calls the CLI rather than re-implementing
+    the cross-link logic over HTTP). Parses `DM_ID=<n>\\n  created (...)` from
+    stdout. Returns (dm_id:int, created:bool, error:str|None).
+    """
+    import subprocess
+    cmd = [
+        "python3",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "dm_conversation.py"),
+        "ensure-dm",
+        "--platform", "reddit",
+        "--author", partner,
+    ]
+    if chat_url:
+        cmd.extend(["--chat-url", chat_url])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return None, False, f"subprocess failed: {e}"
+    if result.returncode != 0:
+        return None, False, (result.stderr or "ensure-dm rc != 0").strip()
+    out = result.stdout.strip().splitlines()
+    dm_id = None
+    created = False
+    for line in out:
+        if line.startswith("DM_ID="):
+            try:
+                dm_id = int(line.split("=", 1)[1])
+            except Exception:
+                pass
+        elif "created" in line.lower():
+            created = True
+    if dm_id is None:
+        return None, False, f"could not parse DM_ID from stdout: {out!r}"
+    return dm_id, created, None
+
+
+def _http_log_inbound(dm_id, partner, body, message_at_iso, event_id):
+    """POST /api/v1/dms/<id>/messages with event_id dedup handled server-side.
+    Returns ("inserted", None) on insert, ("deduped", dedup_key) on duplicate,
+    ("error", reason) on failure.
+    """
+    from http_api import api_post
+    body_payload = {
+        "direction": "inbound",
+        "author": partner,
+        "content": body,
+    }
+    if message_at_iso:
+        body_payload["message_at"] = message_at_iso
+    if event_id:
+        body_payload["event_id"] = event_id
+    try:
+        resp = api_post(f"/api/v1/dms/{dm_id}/messages", body_payload)
+    except SystemExit as e:
+        # http_api raises SystemExit on terminal HTTP failure
+        return "error", f"http_api SystemExit: {e}"
+    except Exception as e:
+        return "error", str(e)
+    data = (resp or {}).get("data") or {}
+    if data.get("deduped"):
+        return "deduped", data.get("dedup_key") or "unknown"
+    return "inserted", None
+
+
+def _ingest_rooms(scan, dry_run, stats, per_room):
     for room in scan["unread"]:
         partner = room.get("partner_username")
         chat_url = room.get("chat_url")
@@ -398,22 +485,20 @@ def _ingest_rooms(conn, scan, dmc, dry_run, stats, per_room):
             stats["rooms_without_partner"] += 1
             continue
 
-        existing = conn.execute(
-            "SELECT id, chat_url FROM dms WHERE platform='reddit' AND their_author=%s ORDER BY id DESC LIMIT 1",
-            (partner,),
-        ).fetchone()
-        had_chat_url = bool(existing and existing["chat_url"])
+        try:
+            existing = _http_lookup_reddit_dm(partner)
+        except Exception as e:
+            stats["errors"].append({"room_id": room["room_id"], "lookup_error": str(e)})
+            continue
+        had_chat_url = bool(existing and existing.get("chat_url"))
 
         if dry_run:
             dm_id = existing["id"] if existing else None
             created = not existing
         else:
-            try:
-                dm_id, created, _ = dmc.ensure_dm(
-                    conn, "reddit", partner, chat_url=chat_url,
-                )
-            except Exception as e:
-                stats["errors"].append({"room_id": room["room_id"], "ensure_dm_error": str(e)})
+            dm_id, created, err = _http_ensure_reddit_dm(partner, chat_url)
+            if err is not None:
+                stats["errors"].append({"room_id": room["room_id"], "ensure_dm_error": err})
                 continue
 
         if existing and not had_chat_url and chat_url:
@@ -444,31 +529,25 @@ def _ingest_rooms(conn, scan, dmc, dry_run, stats, per_room):
             event_id = ev.get("event_id")
 
             if dry_run:
-                # Simulate the dedup check that log_inbound runs.
-                if event_id:
-                    dup = conn.execute(
-                        "SELECT id FROM dm_messages WHERE event_id = %s LIMIT 1",
-                        (event_id,),
-                    ).fetchone()
-                else:
-                    dup = conn.execute(
-                        "SELECT id FROM dm_messages WHERE dm_id=%s AND direction='inbound' AND author=%s AND content=%s LIMIT 1",
-                        (dm_id, partner, body) if dm_id else (None, partner, body),
-                    ).fetchone()
-                if dup:
-                    deduped_this_room += 1
-                else:
-                    inserted_this_room += 1
+                # We can't predict dedup without a query; approximate by
+                # counting all events as would-insert. The dry-run path is
+                # dev-only and the inflated insert count is acceptable.
+                inserted_this_room += 1
                 continue
 
-            ok = dmc.log_inbound(
-                conn, dm_id, partner, body,
-                message_at=message_at_iso, event_id=event_id,
+            outcome, detail = _http_log_inbound(
+                dm_id, partner, body, message_at_iso, event_id,
             )
-            if ok:
+            if outcome == "inserted":
                 inserted_this_room += 1
-            else:
+            elif outcome == "deduped":
                 deduped_this_room += 1
+            else:
+                stats["errors"].append({
+                    "room_id": room["room_id"],
+                    "log_inbound_error": detail,
+                    "event_id": event_id,
+                })
 
         stats["inbound_inserted"] += inserted_this_room
         stats["inbound_deduped"] += deduped_this_room
@@ -501,15 +580,21 @@ def backfill_chat_urls(hydration_wait_ms=8000, dry_run=False):
 
     Unlike ingest-unread (which only processes rooms with unread notifs),
     this walks ALL joined rooms so we can catch historical DMs that have
-    been quiet for months but are still in the sidebar."""
+    been quiet for months but are still in the sidebar.
+
+    Routes used:
+      GET   /api/v1/dms?platform=reddit&their_author=<partner>&limit=200
+            (their_author filter is case-insensitive, matching the legacy
+             `LOWER(their_author)=LOWER(%s)` clause)
+      PATCH /api/v1/dms/<id>  with { chat_url }
+    """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import db as dbmod  # noqa: E402
+    from http_api import api_get, api_patch  # noqa: E402
 
     scan = list_all_rooms(hydration_wait_ms=hydration_wait_ms)
     if not scan.get("ok"):
         return scan
 
-    conn = dbmod.get_conn()
     stats = {
         "rooms_in_sidebar": len(scan["rooms"]),
         "rooms_without_partner": 0,
@@ -527,12 +612,14 @@ def backfill_chat_urls(hydration_wait_ms=8000, dry_run=False):
             stats["rooms_without_partner"] += 1
             continue
 
-        # Case-insensitive match on author because Reddit usernames are
-        # case-preserving but compare case-insensitively.
-        rows = conn.execute(
-            "SELECT id, chat_url FROM dms WHERE platform='reddit' AND LOWER(their_author)=LOWER(%s) ORDER BY id DESC",
-            (partner,),
-        ).fetchall()
+        resp = api_get(
+            "/api/v1/dms",
+            query={"platform": "reddit", "their_author": partner, "limit": 200},
+        )
+        rows = ((resp or {}).get("data") or {}).get("dms") or []
+        # Legacy SELECT used ORDER BY id DESC; the route orders by
+        # discovered_at DESC which picks the same "most recent" row for
+        # our backfill purpose (rows[0]).
 
         if not rows:
             stats["no_matching_dm"] += 1
@@ -542,16 +629,12 @@ def backfill_chat_urls(hydration_wait_ms=8000, dry_run=False):
             # Fall through and backfill the most recent row only (rows[0]).
 
         target = rows[0]
-        if target["chat_url"]:
+        if target.get("chat_url"):
             stats["matched_dms_already_filled"] += 1
             continue
 
         if not dry_run:
-            conn.execute(
-                "UPDATE dms SET chat_url = %s WHERE id = %s",
-                (chat_url, target["id"]),
-            )
-            conn.commit()
+            api_patch(f"/api/v1/dms/{target['id']}", {"chat_url": chat_url})
         stats["matched_dms_filled_now"] += 1
         filled.append({
             "dm_id": target["id"],
