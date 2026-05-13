@@ -22,7 +22,7 @@ export SA_CYCLE_ID="$BATCH_ID"
 # browser operations (profile fetch + compose DM, ~30-90s per DM). This
 # unblocks peer reddit pipelines (engage-reddit, dm-replies-reddit,
 # link-edit-reddit, post-reddit) during the DB scan, prompt build, and
-# psql update phases of each DM row.
+# HTTP PATCH update phases of each DM row.
 source "$(dirname "$0")/lock.sh"
 acquire_lock "dm-outreach-reddit" 2700
 
@@ -34,10 +34,13 @@ REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# 2026-05-12 migration: bash-level DB access moved off psql / DATABASE_URL
+# onto HTTP routes (/api/v1/dms*, /api/v1/dms/outreach-queue). The shell no
+# longer needs Postgres credentials; everything flows through
+# scripts/dm_outreach_helper.py which calls the website.
+# DATABASE_URL may still be defined in .env for other tooling; we don't
+# require it here. The Python http_api layer expects AUTOPOSTER_API_BASE
+# (defaults to https://s4l.ai) and an installation identity header.
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/dm-outreach-reddit-$(date +%Y-%m-%d_%H%M%S).log"
@@ -51,7 +54,7 @@ log "=== Reddit DM Outreach Run: $(date) ==="
 log "Scanning for DM candidates (all platforms)..."
 (PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_dm_candidates.py" 2>&1 || true) | tee -a "$LOG_FILE"
 
-DM_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE status='pending' AND platform='reddit';" 2>/dev/null || echo "0")
+DM_PENDING=$(python3 "$REPO_DIR/scripts/dm_outreach_helper.py" count --platform reddit --status pending 2>/dev/null || echo "0")
 
 if [ "$DM_PENDING" -eq 0 ]; then
     log "No pending Reddit DMs"
@@ -61,35 +64,9 @@ fi
 
 log "Reddit: $DM_PENDING DMs to send"
 
-DM_DATA=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT d.id, d.platform, d.their_author, d.their_content, d.comment_context,
-               d.target_project, d.prospect_id,
-               r.their_comment_url, r.our_reply_content,
-               p.thread_title, p.our_content as our_post_content,
-               (SELECT json_agg(e) FROM (
-                   SELECT p2.thread_title,
-                          r2.their_content AS their_content,
-                          COALESCE(r2.our_reply_content, '') AS our_reply_content,
-                          r2.status,
-                          r2.depth,
-                          r2.their_comment_url,
-                          r2.replied_at
-                   FROM replies r2
-                   LEFT JOIN posts p2 ON r2.post_id = p2.id
-                   WHERE r2.their_author = d.their_author
-                     AND r2.platform = d.platform
-                     AND r2.id != d.reply_id
-                     AND r2.discovered_at >= NOW() - INTERVAL '60 days'
-                   ORDER BY r2.discovered_at DESC
-                   LIMIT 8
-               ) e) AS other_engagement
-        FROM dms d
-        JOIN replies r ON d.reply_id = r.id
-        JOIN posts p ON d.post_id = p.id
-        WHERE d.status='pending' AND d.platform='reddit'
-        ORDER BY d.discovered_at ASC
-    ) q;")
+DM_DATA=$(python3 "$REPO_DIR/scripts/dm_outreach_helper.py" outreach-queue \
+    --platform reddit --status pending --limit 200 \
+    --other-engagement-days 60 2>/dev/null || echo "[]")
 
 # Per-project qualification context for ICP pre-check
 PROJECTS_QUALIFICATION=$(python3 -c "
@@ -127,7 +104,7 @@ CRITICAL RULES:
 
 EXECUTION MODEL — STRICT SEQUENTIAL, NO BATCHING (read this twice):
 - Process DMs ONE AT A TIME. Run the FULL chain (profile fetch → ICP pre-check → compose → send → log) end-to-end for DM N before reading DM N+1.
-- The reddit-browser lock is NOT held by the parent shell. You acquire/release it explicitly per DM (steps 1.5 and 7.5 below), so peer reddit pipelines can use the browser during your DB queries, ICP scoring, and psql updates.
+- The reddit-browser lock is NOT held by the parent shell. You acquire/release it explicitly per DM (steps 1.5 and 7.5 below), so peer reddit pipelines can use the browser during your DB queries, ICP scoring, and dm_outreach_helper.py PATCH calls.
 - The lock has a 90s lease that auto-renews on every reddit-agent MCP call (PreToolUse / PostToolUse hooks), so you do NOT need to manually heartbeat. Just acquire before the first browser call for the DM, release after the last one.
 
 ## COMMITMENT GUARDRAILS (violating any of these is a critical failure)
@@ -175,7 +152,7 @@ For each DM row, BEFORE you compose or send, do this in order:
    \`\`\`
    - If stdout starts with "OK", proceed to step 2.
    - If "BUSY", a peer reddit pipeline owns the browser and didn't release within 10 min. Mark this DM error/transient and move on to the NEXT DM:
-     \`psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='reddit_browser_busy', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"\`
+     \`python3 $REPO_DIR/scripts/dm_outreach_helper.py patch --id DM_ID --status error --skip-reason reddit_browser_busy --claude-session-id $CLAUDE_SESSION_ID\`
    - If "ERROR", same handling as BUSY: mark error, move on. Do NOT call browser tools without the lock — collisions on the same chrome profile crash both runs.
 
 2. Fetch the prospect's Reddit profile with mcp__reddit-agent__* tools:
@@ -222,20 +199,20 @@ Inspect the tool's return value. There are exactly three outcomes:
   CLAUDE_SESSION_ID=$CLAUDE_SESSION_ID python3 $REPO_DIR/scripts/dm_send_log.py \\
       --dm-id DM_ID --message "DM_TEXT" --verified
 
-  Do NOT issue a raw "UPDATE dms SET status='sent'" psql command. The
-  dm_send_log.py script is the only path that may flip status to 'sent';
-  it requires --verified, and refuses without it. This is intentional:
-  prior phantom-DM bugs (~700 rows in 4/2026) came from prose-driven
-  status flips that ignored the verification result.
+  Do NOT use dm_outreach_helper.py to set status='sent'. The helper
+  refuses, and dm_send_log.py is the only path that may flip status to
+  'sent'; it requires --verified, and refuses without it. This is
+  intentional: prior phantom-DM bugs (~700 rows in 4/2026) came from
+  prose-driven status flips that ignored the verification result.
 
 (B) ok=false OR verified=false  ->  send did not land, mark error:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='send_unverified', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_outreach_helper.py patch --id DM_ID --status error --skip-reason send_unverified --claude-session-id $CLAUDE_SESSION_ID
 
 (C) Rate limit, account blocked, or any other thrown exception:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='REASON', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_outreach_helper.py patch --id DM_ID --status error --skip-reason REASON --claude-session-id $CLAUDE_SESSION_ID
 
 DMs/Chat disabled (recipient setting, not a send failure):
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='skipped', skip_reason='chat_disabled', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_outreach_helper.py patch --id DM_ID --status skipped --skip-reason chat_disabled --claude-session-id $CLAUDE_SESSION_ID
 
 7.5. RELEASE the reddit-browser lock IMMEDIATELY after the DM result is logged (success, error, or skip). This is mandatory — failing to release blocks every other reddit pipeline:
    \`\`\`bash
@@ -252,7 +229,7 @@ PROMPT_EOF
 # the actual ~30-90s reddit-agent browser ops per DM (profile fetch +
 # compose), not the full ~45-min run. Peer pipelines (engage-reddit,
 # dm-replies-reddit, link-edit-reddit, post-reddit) can use the profile
-# during our DB queries, ICP scoring, and psql update phases.
+# during our DB queries, ICP scoring, and HTTP PATCH update phases.
 #
 # Pre-flight: ensure the profile isn't wedged by a prior crashed run.
 # Unified lock (2026-05-10): brief Python acquire+release so the orphan-Chrome
@@ -274,8 +251,8 @@ rm -f "$PROMPT_FILE"
 # the lock_dir and rm-rf's it; safe even if claude already released.
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
-SENT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='reddit' AND status='sent';" 2>/dev/null || echo "0")
-STILL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='reddit' AND status='pending';" 2>/dev/null || echo "0")
+SENT=$(python3 "$REPO_DIR/scripts/dm_outreach_helper.py" count --platform reddit --status sent 2>/dev/null || echo "0")
+STILL_PENDING=$(python3 "$REPO_DIR/scripts/dm_outreach_helper.py" count --platform reddit --status pending 2>/dev/null || echo "0")
 log "Reddit DM outreach summary: sent (all-time)=$SENT, still_pending=$STILL_PENDING"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
