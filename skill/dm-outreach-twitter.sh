@@ -22,6 +22,13 @@ LOG_FILE="$LOG_DIR/dm-outreach-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
+
+# Skip cleanly if an interactive twitter-agent MCP session (Fazm Dev / IDE /
+# another cron) already owns the profile. See engage-twitter.sh for context.
+if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
+    exit 0
+fi
+
 acquire_lock "twitter-browser" 3600
 # Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
 bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
