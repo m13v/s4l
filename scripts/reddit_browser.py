@@ -20,6 +20,15 @@ Usage:
     # Send a DM in a Reddit chat
     python3 reddit_browser.py send-dm "https://www.reddit.com/chat/..." "message text"
 
+    # Check which account the Reddit browser profile sees
+    python3 reddit_browser.py whoami
+
+    # Open the automation browser and wait until Reddit login is completed
+    REDDIT_HEADLESS=0 python3 reddit_browser.py login
+
+    # Check if a comment is publicly visible without the logged-in profile
+    python3 reddit_browser.py check-comment-visible "https://old.reddit.com/r/sub/comments/abc/title/def/"
+
 Requires: pip install playwright && playwright install chromium
 
 Connects to the running reddit-agent MCP browser via CDP (Chrome DevTools Protocol)
@@ -34,9 +43,15 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 
-PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/reddit")
+# Same persistent profile as the reddit-agent MCP.
+# Override with REDDIT_PROFILE_DIR only when intentionally rotating accounts.
+PROFILE_DIR = os.path.expanduser(
+    os.environ.get("REDDIT_PROFILE_DIR", "~/.claude/browser-profiles/reddit")
+)
 LOCK_FILE = os.path.expanduser("~/.claude/reddit-agent-lock.json")
 LOCK_EXPIRY = 300  # Must match reddit-agent-lock.sh
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
@@ -60,6 +75,19 @@ def _diag_log(msg):
     except Exception:
         pass
 VIEWPORT = {"width": 911, "height": 1016}
+HEADLESS = os.environ.get("REDDIT_HEADLESS", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+DEFAULT_BROWSER_EXECUTABLE = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+BROWSER_EXECUTABLE = os.environ.get("REDDIT_BROWSER_EXECUTABLE", DEFAULT_BROWSER_EXECUTABLE)
+PUBLIC_VISIBILITY_DELAY = float(os.environ.get("REDDIT_PUBLIC_VISIBILITY_DELAY", "3"))
+PUBLIC_VISIBILITY_RETRIES = int(os.environ.get("REDDIT_PUBLIC_VISIBILITY_RETRIES", "2"))
+PUBLIC_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 # Load Reddit username from config
 _config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
@@ -320,7 +348,8 @@ def get_browser_and_page(playwright):
         try:
             context = playwright.chromium.launch_persistent_context(
                 PROFILE_DIR,
-                headless=True,
+                headless=HEADLESS,
+                executable_path=BROWSER_EXECUTABLE if os.path.exists(BROWSER_EXECUTABLE) else None,
                 args=["--disable-blink-features=AutomationControlled"],
                 viewport=VIEWPORT,
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -357,6 +386,363 @@ def _ensure_old_reddit(page):
         old_url = _to_old_reddit(current)
         page.goto(old_url, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
+
+
+def _old_reddit_login_state(page):
+    """Return login state from the currently loaded old.reddit.com page."""
+    return page.evaluate("""(ourUsername) => {
+        const userLink = document.querySelector(
+            '#header-bottom-right .user a[href*="/user/"], ' +
+            '#header-bottom-right a[href*="/user/"]'
+        );
+        const username = userLink ? userLink.textContent.trim() : null;
+        const bodyText = document.body ? document.body.innerText : '';
+        const loginPrompt = /want to join\\?|log in|sign up|зарегистр|войти/i
+            .test(bodyText);
+        const loginUrl = /\\/login/i.test(location.href);
+        return {
+            logged_in: Boolean(username),
+            username,
+            expected_username: ourUsername,
+            username_matches: username
+                ? username.toLowerCase() === String(ourUsername).toLowerCase()
+                : false,
+            login_prompt: loginPrompt,
+            login_url: loginUrl,
+            url: location.href,
+        };
+    }""", OUR_USERNAME)
+
+
+def _api_me_state(context):
+    """Read Reddit's /api/me.json through the current browser profile."""
+    api_page = context.new_page()
+    try:
+        api_page.goto("https://www.reddit.com/api/me.json", wait_until="domcontentloaded")
+        api_page.wait_for_timeout(1000)
+        text = api_page.locator("body").inner_text(timeout=5000)
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        data = parsed and (parsed.get("data") or parsed)
+        return {
+            "ok": bool(data and data.get("name")),
+            "status": None,
+            "username": data.get("name") if data else None,
+            "kind": parsed.get("kind") if isinstance(parsed, dict) else None,
+            "raw_start": text[:200],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        api_page.close()
+
+
+def _api_me_fetch_state(page):
+    """Best-effort same-page fetch; kept for future CDP contexts that allow it."""
+    return page.evaluate("""async () => {
+        try {
+            const res = await fetch('https://www.reddit.com/api/me.json', {
+                credentials: 'include',
+            });
+            const text = await res.text();
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch (e) {}
+            const data = parsed && (parsed.data || parsed);
+            return {
+                ok: res.ok,
+                status: res.status,
+                username: data && data.name || null,
+                kind: parsed && parsed.kind || null,
+            };
+        } catch (e) {
+            return {ok: false, error: String(e)};
+        }
+    }""")
+
+
+def _api_username_matches(api_state):
+    username = api_state.get("username") if isinstance(api_state, dict) else None
+    return bool(username and username.lower() == OUR_USERNAME.lower())
+
+
+def _thing_id_from_thread_url(thread_url):
+    match = re.search(r"/comments/([a-z0-9]+)", thread_url, re.I)
+    if not match:
+        return None
+    return f"t3_{match.group(1)}"
+
+
+def _comment_permalink_from_api_result(result):
+    try:
+        things = result["json"]["data"]["things"]
+    except Exception:
+        return None
+    for thing in things:
+        data = thing.get("data") or {}
+        permalink = data.get("permalink")
+        if permalink:
+            if permalink.startswith("http"):
+                return permalink
+            return "https://old.reddit.com" + permalink
+    return None
+
+
+def _comment_id_from_permalink(permalink):
+    if not permalink:
+        return None
+    match = re.search(
+        r"/comments/[a-z0-9]+/[^/?#]+/([a-z0-9]+)",
+        permalink,
+        re.I,
+    )
+    return match.group(1) if match else None
+
+
+def _public_json_request(url):
+    req = urllib.request.Request(url, headers={"User-Agent": PUBLIC_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    return json.loads(text)
+
+
+def _public_comment_data(comment_id):
+    thing_id = f"t1_{comment_id}"
+    url = f"https://old.reddit.com/api/info.json?id={thing_id}&raw_json=1"
+    data = _public_json_request(url)
+    children = ((data.get("data") or {}).get("children") or [])
+    for child in children:
+        child_data = child.get("data") or {}
+        if child_data.get("name") == thing_id or child_data.get("id") == comment_id:
+            return child_data
+    return None
+
+
+def check_public_comment_visibility(comment_permalink, retries=None, delay=None):
+    """Check whether a comment is visible without the logged-in browser profile."""
+    retries = PUBLIC_VISIBILITY_RETRIES if retries is None else retries
+    delay = PUBLIC_VISIBILITY_DELAY if delay is None else delay
+    comment_id = _comment_id_from_permalink(comment_permalink)
+    if not comment_id:
+        return {
+            "ok": False,
+            "visible": None,
+            "status": "bad_permalink",
+            "permalink": comment_permalink,
+        }
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            data = _public_comment_data(comment_id)
+            if data:
+                author = data.get("author")
+                body = data.get("body")
+                removed_by = data.get("removed_by_category")
+                removed = (
+                    body in ("[removed]", "[deleted]")
+                    or bool(removed_by)
+                    or data.get("author") in ("[deleted]", None)
+                )
+                visible = (
+                    not removed
+                    and bool(author)
+                    and author.lower() == OUR_USERNAME.lower()
+                )
+                if visible:
+                    status = "visible"
+                elif removed:
+                    status = "removed_or_deleted"
+                else:
+                    status = "wrong_author_or_unexpected_record"
+                return {
+                    "ok": True,
+                    "visible": visible,
+                    "status": status,
+                    "comment_id": comment_id,
+                    "author": author,
+                    "score": data.get("score"),
+                    "removed_by_category": removed_by,
+                    "attempt": attempt + 1,
+                }
+            last_error = "missing_from_public_api"
+        except urllib.error.HTTPError as e:
+            last_error = f"http_{e.code}"
+        except Exception as e:
+            last_error = f"{type(e).__name__}:{str(e)[:120]}"
+
+        if attempt < retries:
+            time.sleep(delay)
+
+    return {
+        "ok": True,
+        "visible": False,
+        "status": last_error or "missing_from_public_api",
+        "comment_id": comment_id,
+        "attempt": retries + 1,
+    }
+
+
+def _attach_public_visibility(result):
+    permalink = result.get("permalink") if isinstance(result, dict) else None
+    if not permalink or not str(permalink).startswith("http"):
+        return result
+    visibility = check_public_comment_visibility(permalink)
+    result["visibility"] = visibility
+    result["publicly_visible"] = visibility.get("visible")
+    return result
+
+
+def _post_comment_via_api(page, thread_url, text, api_state=None):
+    """Post a top-level comment through old Reddit's authenticated JSON API."""
+    api_state = api_state or _api_me_state(page.context)
+    if not _api_username_matches(api_state):
+        return {
+            "ok": False,
+            "error": "wrong_or_missing_account",
+            "api_me": api_state,
+        }
+
+    thing_id = _thing_id_from_thread_url(thread_url)
+    if not thing_id:
+        return {"ok": False, "error": "thread_id_not_found"}
+
+    modhash = api_state.get("modhash")
+    if not modhash:
+        me_page = page.context.new_page()
+        try:
+            me_page.goto("https://old.reddit.com/api/me.json", wait_until="domcontentloaded")
+            me_text = me_page.locator("body").inner_text(timeout=5000)
+            me_data = json.loads(me_text).get("data") or {}
+            modhash = me_data.get("modhash")
+        finally:
+            me_page.close()
+    if not modhash:
+        return {"ok": False, "error": "missing_modhash", "api_me": api_state}
+
+    result = page.evaluate("""async ({thingId, text, uh}) => {
+        const form = new URLSearchParams();
+        form.set('api_type', 'json');
+        form.set('thing_id', thingId);
+        form.set('text', text);
+        form.set('uh', uh);
+        form.set('renderstyle', 'html');
+        const res = await fetch('https://old.reddit.com/api/comment', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: form.toString(),
+        });
+        const responseText = await res.text();
+        let json = null;
+        try { json = JSON.parse(responseText); } catch (e) {}
+        return {status: res.status, ok: res.ok, responseText, json};
+    }""", {"thingId": thing_id, "text": text, "uh": modhash})
+
+    errors = []
+    try:
+        errors = result["json"]["json"]["errors"]
+    except Exception:
+        pass
+    if errors:
+        return {"ok": False, "error": "api_comment_failed", "errors": errors}
+
+    permalink = _comment_permalink_from_api_result(result)
+    return _attach_public_visibility({
+        "ok": bool(result.get("ok") and permalink),
+        "permalink": permalink,
+        "method": "old_reddit_api",
+        "api_status": result.get("status"),
+    })
+
+
+def whoami():
+    """Check which Reddit account the automation profile is logged in as."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            page.goto("https://old.reddit.com/", wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            _ensure_old_reddit(page)
+            old_state = _old_reddit_login_state(page)
+            api_state = _api_me_state(page.context)
+            return {
+                "ok": _api_username_matches(api_state),
+                "expected_username": OUR_USERNAME,
+                "old_reddit": old_state,
+                "api_me": api_state,
+                "old_ui_logged_in": bool(old_state.get("logged_in")),
+                "profile_dir": PROFILE_DIR,
+                "browser_executable": BROWSER_EXECUTABLE,
+                "headless": HEADLESS,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "profile_dir": PROFILE_DIR}
+        finally:
+            page.context.close()
+            if not is_cdp:
+                browser.close()
+
+
+def login(wait_seconds=600):
+    """Open the automation browser and wait for login as OUR_USERNAME."""
+    from playwright.sync_api import sync_playwright
+
+    if HEADLESS:
+        return {
+            "ok": False,
+            "error": "login_requires_headed_browser",
+            "hint": "Run with REDDIT_HEADLESS=0.",
+        }
+
+    deadline = time.time() + wait_seconds
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            page.goto("https://old.reddit.com/", wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
+
+            last_state = None
+            while time.time() < deadline:
+                try:
+                    last_state = _old_reddit_login_state(page)
+                    api_state = _api_me_state(page.context)
+                except Exception as e:
+                    last_state = {"error": str(e), "url": page.url}
+                    page.wait_for_timeout(3000)
+                    continue
+                if _api_username_matches(api_state):
+                    api_state = _api_me_state(page.context)
+                    return {
+                        "ok": True,
+                        "expected_username": OUR_USERNAME,
+                        "old_reddit": last_state,
+                        "api_me": api_state,
+                        "old_ui_logged_in": bool(last_state.get("logged_in")),
+                        "profile_dir": PROFILE_DIR,
+                    }
+                page.wait_for_timeout(3000)
+
+            return {
+                "ok": False,
+                "error": "login_timeout",
+                "expected_username": OUR_USERNAME,
+                "last_state": last_state,
+                "profile_dir": PROFILE_DIR,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "profile_dir": PROFILE_DIR}
+        finally:
+            page.context.close()
+            if not is_cdp:
+                browser.close()
 
 
 def post_comment(thread_url, text):
@@ -399,9 +785,31 @@ def post_comment(thread_url, text):
             if page.locator(".locked-tagline").count() > 0:
                 return {"ok": False, "error": "thread_locked"}
 
-            # Check if we're actually logged in (login redirect or no user element)
+            # Check if we're actually logged in as the configured account.
+            api_state = _api_me_state(page.context)
             if "login" in page.url.lower():
+                if _api_username_matches(api_state):
+                    return _post_comment_via_api(page, thread_url, text, api_state)
                 return {"ok": False, "error": "not_logged_in"}
+            login_state = _old_reddit_login_state(page)
+            if not login_state.get("logged_in"):
+                if _api_username_matches(api_state):
+                    return _post_comment_via_api(page, thread_url, text, api_state)
+                return {
+                    "ok": False,
+                    "error": "not_logged_in",
+                    "login_state": login_state,
+                    "api_me": api_state,
+                }
+            if not login_state.get("username_matches"):
+                if _api_username_matches(api_state):
+                    return _post_comment_via_api(page, thread_url, text, api_state)
+                return {
+                    "ok": False,
+                    "error": "wrong_account",
+                    "login_state": login_state,
+                    "api_me": api_state,
+                }
 
             # Check if the top-level comment form exists at all.
             # When the sub gates top-level commenting on this account (CrowdControl,
@@ -489,11 +897,11 @@ def post_comment(thread_url, text):
                 return null;
             }""", OUR_USERNAME)
 
-            return {
+            return _attach_public_visibility({
                 "ok": True,
                 "permalink": permalink,
                 "thread_url": thread_url,
-            }
+            })
 
         finally:
             page.context.close()
@@ -2042,6 +2450,25 @@ def main():
             )
             sys.exit(1)
         result = post_comment(sys.argv[2], sys.argv[3])
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "whoami":
+        result = whoami()
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "login":
+        wait_seconds = int(sys.argv[2]) if len(sys.argv) >= 3 else 600
+        result = login(wait_seconds=wait_seconds)
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "check-comment-visible":
+        if len(sys.argv) < 3:
+            print(
+                "Usage: reddit_browser.py check-comment-visible <comment_permalink>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        result = check_public_comment_visibility(sys.argv[2], retries=0, delay=0)
         print(json.dumps(result, indent=2))
 
     elif cmd == "reply":
