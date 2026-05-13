@@ -8,6 +8,12 @@ Usage:
     # Reply to a tweet
     python3 twitter_browser.py reply "https://x.com/user/status/123" "reply text"
 
+    # Reply without campaign suffix injection
+    python3 twitter_browser.py reply-plain "https://x.com/user/status/123" "reply text"
+
+    # Search recent tweets without posting
+    python3 twitter_browser.py search "AI code review since:2026-05-12 -filter:replies"
+
     # Scan DM inbox for unread conversations
     python3 twitter_browser.py unread-dms
 
@@ -629,6 +635,104 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 "final_text": text,
             }
 
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+
+def search_tweets(query, max_results=12, live=True):
+    """Search X and extract visible tweet cards without interacting."""
+    from playwright.sync_api import sync_playwright
+    import urllib.parse
+
+    encoded = urllib.parse.quote(query)
+    tab = "live" if live else "top"
+    url = f"https://x.com/search?q={encoded}&f={tab}"
+
+    extractor = r"""(maxResults) => {
+        const out = [];
+        const seen = new Set();
+        for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
+            try {
+                let handle = '';
+                let displayName = '';
+                for (const link of article.querySelectorAll('a[role="link"]')) {
+                    const href = link.getAttribute('href') || '';
+                    if (
+                        href.startsWith('/') &&
+                        !href.includes('/status/') &&
+                        !href.includes('/search') &&
+                        !href.startsWith('/i/') &&
+                        href.split('/').filter(Boolean).length === 1
+                    ) {
+                        handle = href.replace('/', '').split('?')[0];
+                        const span = link.querySelector('span');
+                        if (span) displayName = span.textContent || '';
+                        break;
+                    }
+                }
+                const textEl = article.querySelector('[data-testid="tweetText"]');
+                const text = textEl ? textEl.textContent : '';
+                const timeEl = article.querySelector('time');
+                const timeParent = timeEl ? timeEl.closest('a') : null;
+                const href = timeParent ? timeParent.getAttribute('href') : '';
+                const tweetUrl = href ? ('https://x.com' + href) : '';
+                const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
+
+                let replies = 0, reposts = 0, likes = 0, views = 0, bookmarks = 0;
+                for (const el of article.querySelectorAll('[role="group"] button, [role="group"] a')) {
+                    const al = el.getAttribute('aria-label') || '';
+                    let m;
+                    if (m = al.match(/([\d,]+)\s*repl/i)) replies = parseInt(m[1].replace(/,/g, ''), 10);
+                    if (m = al.match(/([\d,]+)\s*repost/i)) reposts = parseInt(m[1].replace(/,/g, ''), 10);
+                    if (m = al.match(/([\d,]+)\s*like/i)) likes = parseInt(m[1].replace(/,/g, ''), 10);
+                    if (m = al.match(/([\d,]+)\s*view/i)) views = parseInt(m[1].replace(/,/g, ''), 10);
+                    if (m = al.match(/([\d,]+)\s*bookmark/i)) bookmarks = parseInt(m[1].replace(/,/g, ''), 10);
+                }
+
+                if (!tweetUrl || !handle || seen.has(tweetUrl)) continue;
+                seen.add(tweetUrl);
+                out.push({
+                    handle,
+                    display_name: displayName.trim(),
+                    text,
+                    tweet_url: tweetUrl,
+                    datetime,
+                    replies,
+                    reposts,
+                    likes,
+                    views,
+                    bookmarks,
+                });
+                if (out.length >= maxResults) break;
+            } catch (e) {}
+        }
+        return out;
+    }"""
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(5000)
+            results = []
+            seen = set()
+            for _ in range(3):
+                batch = page.evaluate(extractor, max_results)
+                for item in batch:
+                    tweet_url = item.get("tweet_url")
+                    if tweet_url and tweet_url not in seen:
+                        seen.add(tweet_url)
+                        item["search_query"] = query
+                        results.append(item)
+                        if len(results) >= max_results:
+                            break
+                if len(results) >= max_results:
+                    break
+                page.evaluate("window.scrollBy(0, window.innerHeight * 1.5)")
+                page.wait_for_timeout(1500)
+            return {"ok": True, "query": query, "url": url, "results": results}
         finally:
             if not is_cdp:
                 page.close()
@@ -1539,6 +1643,33 @@ def main():
             )
             sys.exit(1)
         result = reply_to_tweet(sys.argv[2], sys.argv[3])
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "reply-plain":
+        if len(sys.argv) < 4:
+            print(
+                "Usage: twitter_browser.py reply-plain <tweet_url> <reply_text>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        result = reply_to_tweet(sys.argv[2], sys.argv[3], apply_campaigns=False)
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "search":
+        if len(sys.argv) < 3:
+            print(
+                "Usage: twitter_browser.py search <query> [max_results]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        max_results = 12
+        if len(sys.argv) >= 4:
+            try:
+                max_results = int(sys.argv[3])
+            except ValueError:
+                print(f"search: max_results must be int, got {sys.argv[3]!r}", file=sys.stderr)
+                sys.exit(1)
+        result = search_tweets(sys.argv[2], max_results=max_results)
         print(json.dumps(result, indent=2))
 
     elif cmd == "self-reply":
