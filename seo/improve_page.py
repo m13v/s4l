@@ -121,18 +121,40 @@ Then pick ONE substantive change set whose expected impact on the primary metric
 
 You are NOT restricted to any particular component library. The repo likely uses `@seo/components` / `@m13v/seo-components` plus local components under `src/components/`. Reuse them when they genuinely fit the page's job; build inline TSX/JSX when they don't. Reaching for a kit component just because the rest of the site uses it is the wrong reason.
 
-# Step 4: Edit, verify, commit
+# Step 4: Edit + typecheck
 
 1. Edit the files. Keep changes focused and high-signal; if you find yourself changing 10 files you are probably refactoring, stop.
-2. Run the repo's typecheck / build if one exists under `package.json` scripts and it is cheap. If a quick check fails due to your edit, fix it before committing.
-3. Stage and commit ALL your changes with a single commit:
+2. Run the repo's typecheck / build if one exists under `package.json` scripts and it is cheap. If a quick check fails due to your edit, fix it before moving on.
 
-   ```
-   git add -A
-   git commit -m "improve: {commit_subject}" -m "<one short paragraph of rationale>"
-   ```
+# Step 5: Visual QA on localhost (MANDATORY — do NOT skip)
 
-   Do NOT push. Do NOT amend prior commits. Do NOT run `git reset --hard`, `git checkout`, or delete branches. The repo's auto-commit agent handles pushing.
+Before committing, you MUST verify the changes look correct in a real browser via the **`assrt` MCP** against the local dev server. This catches misalignment, broken layouts, off-screen elements, text overflow, missing images, and console errors that typecheck cannot.
+
+1. **Start the dev server** if not already running. Try in order: `pnpm dev`, `npm run dev`, `yarn dev`. Run it in the background (`nohup ... &` or via the Bash tool's `run_in_background: true`). Wait until it logs that it's listening (usually `localhost:3000`, but read the actual port from the dev server output — some repos use 3001, 4000, 5173, etc.).
+2. **Run `assrt_test`** against `http://localhost:<port>{brief_page_path}` for the page you just edited. Use a `#Case` that explicitly checks:
+   - Page renders without console errors
+   - Hero / above-the-fold section is visually intact (no overlapping text, no off-screen CTAs, no broken images)
+   - Primary CTA is visible, clickable, and not crowded
+   - Layout at desktop (1280px+) AND mobile (375px) widths is clean
+   - Any new sections you added flow correctly between existing ones
+   - Text doesn't overflow its container; headings don't wrap weirdly
+3. **If `assrt_test` fails or surfaces visual bugs**: use `assrt_diagnose` to root-cause, then fix the issue in the source files. Re-run `assrt_test`. Repeat up to 3 attempts. If you cannot resolve a visual bug after 3 attempts, set status="failed", DO NOT commit, and explain the failure in `rationale` + `visual_qa_findings`.
+4. **Only commit after `assrt_test` passes clean.**
+
+Record the result in the final JSON (see Output): `visual_qa_status` ("passed" | "failed" | "skipped_no_dev_server"), `visual_qa_findings` (1-2 sentences on what assrt saw — empty string if passed clean), `visual_qa_test_url` (the localhost URL you tested).
+
+Only set `visual_qa_status="skipped_no_dev_server"` if the dev server genuinely could not be started (missing deps, port conflict you can't resolve, no `dev` script in package.json). In that case still commit if the typecheck passed, but flag it loudly in `rationale`.
+
+# Step 6: Commit
+
+Stage and commit ALL your changes with a single commit:
+
+```
+git add -A
+git commit -m "improve: {commit_subject}" -m "<one short paragraph of rationale, including 'visual QA: passed via assrt' or the skip reason>"
+```
+
+Do NOT push. Do NOT amend prior commits. Do NOT run `git reset --hard`, `git checkout`, or delete branches. The repo's auto-commit agent handles pushing.
 
 # Output
 
@@ -151,6 +173,9 @@ After committing, end your final assistant message with EXACTLY one fenced JSON 
   "rationale": "the single most important reason you expect this change to move the primary metric",
   "web_sources_used": ["url1", "url2", ...],
   "commit_sha": "<short sha or empty>",
+  "visual_qa_status": "passed" | "failed" | "skipped_no_dev_server",
+  "visual_qa_findings": "what assrt saw; empty string if passed clean",
+  "visual_qa_test_url": "http://localhost:<port><page_path> or empty if skipped",
   "notes_for_next_run": "anything you want the next run to know (tests ran, hypotheses to validate, etc.)"
 }}
 ```
