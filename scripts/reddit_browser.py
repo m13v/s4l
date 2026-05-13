@@ -1300,27 +1300,40 @@ def read_conversation(chat_url, max_messages=20):
 
 def _load_active_reddit_campaigns_for_dm():
     """Best-effort: returns [(id, suffix, sample_rate), ...] for active reddit
-    campaigns. On any failure (no DB, missing module, etc.) returns []. This
-    keeps reddit_browser.py usable in non-DB contexts."""
+    campaigns. On any failure (no API reachable, transient error, etc.)
+    returns []. This keeps reddit_browser.py usable when the website route
+    is down without blocking the DM send.
+
+    Migrated 2026-05-12 from direct SQL (campaigns table) to the
+    /api/v1/campaigns route. The route's status/platform/has_suffix/
+    with_budget_remaining filter set is an exact match for the legacy
+    SELECT clauses (status='active', platforms ILIKE '%,reddit,%',
+    suffix NOT NULL/empty, posts_made < max_posts_total).
+    """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import db as _db
-        _db.load_env()
-        conn = _db.get_conn()
-        try:
-            cur = conn.execute(
-                """SELECT id, suffix, COALESCE(sample_rate, 1.000)
-                   FROM campaigns
-                   WHERE status='active'
-                     AND (',' || platforms || ',') LIKE '%,reddit,%'
-                     AND max_posts_total IS NOT NULL
-                     AND posts_made < max_posts_total
-                     AND suffix IS NOT NULL AND suffix <> ''
-                   ORDER BY id"""
-            )
-            return [(r[0], r[1], float(r[2])) for r in cur.fetchall()]
-        finally:
-            conn.close()
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/campaigns",
+            query={
+                "status": "active",
+                "platform": "reddit",
+                "has_suffix": "true",
+                "with_budget_remaining": "true",
+                "limit": 500,
+            },
+        )
+        data = (resp or {}).get("data") or {}
+        rows = data.get("campaigns") or []
+        out = []
+        for r in rows:
+            try:
+                sample_rate = float(r.get("sample_rate") if r.get("sample_rate") is not None else 1.0)
+                out.append((int(r["id"]), r["suffix"], sample_rate))
+            except (TypeError, ValueError, KeyError):
+                # Skip malformed rows rather than blowing up the entire load.
+                continue
+        return out
     except Exception:
         return []
 
@@ -1337,23 +1350,32 @@ def _log_dm_outbound(chat_url, content, dm_id=None, minted_codes=None):
     after RETURNING id. Returns True if log-outbound was invoked."""
     try:
         if dm_id is None:
+            # chat_url -> dms.id lookup. Migrated 2026-05-12 from direct
+            # SQL to GET /api/v1/dms?platform=reddit&chat_url=<url>&limit=1.
+            # The route filters by exact chat_url and orders by
+            # discovered_at DESC, which (like the legacy id DESC) picks
+            # the most recent row when duplicates exist.
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import db as _db
-            _db.load_env()
-            conn = _db.get_conn()
             try:
-                row = conn.execute(
-                    "SELECT id FROM dms WHERE platform='reddit' AND chat_url = %s "
-                    "ORDER BY id DESC LIMIT 1",
-                    (chat_url,),
-                ).fetchone()
-            finally:
-                conn.close()
-            if not row:
+                from http_api import api_get
+                resp = api_get(
+                    "/api/v1/dms",
+                    query={"platform": "reddit", "chat_url": chat_url, "limit": 1},
+                )
+                rows = ((resp or {}).get("data") or {}).get("dms") or []
+            except Exception as e:
+                print(f"[reddit_browser] log-outbound chat_url lookup failed: {e}",
+                      file=sys.stderr)
+                return False
+            if not rows:
                 print("[reddit_browser] log-outbound skipped: no dm_id and chat_url lookup miss",
                       file=sys.stderr)
                 return False
-            dm_id = row["id"] if hasattr(row, "__getitem__") else row[0]
+            dm_id = rows[0].get("id")
+            if not dm_id:
+                print("[reddit_browser] log-outbound skipped: API row missing id",
+                      file=sys.stderr)
+                return False
         env = os.environ.copy()
         if minted_codes:
             env["WRAP_MINTED_CODES"] = ",".join(minted_codes)
