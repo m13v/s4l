@@ -1439,6 +1439,17 @@ async function enrichPostCommentsRedditRuns(runs) {
   const ripenSummaryRe = /\[ripen\] summary input=(\d+) survivors=(\d+) drops=(\d+) floor=([\d.]+) w_comments=([\d.]+) window_sec=(\d+) best_composite=([\d.\-]*) best_d_up=([\d\-]*) best_d_co=([\d\-]*)/;
   const ripenSkipRe = /Ripen phase: 0 survivors; skipping post phase/;
   const ripenPassthroughRe = /\[ripen\] (no thread_urls|empty plan|WARN: 0 of \d+ T0 fetches)/;
+  // 2026-05-13: per-lane post rollups. The cycle log surfaces two separate
+  // "<Lane> lane: posted=N failed=N" lines so the dashboard can split the
+  // global posted/failed back into salvage vs discover contributions.
+  // "Salvage lane: nothing to salvage this cycle" also matches with 0/0 so the
+  // pill can distinguish "no attempts" from "0 of N attempted succeeded".
+  const salvageLaneRe = /Salvage lane:\s*(?:posted=(\d+)\s+failed=(\d+)|nothing to salvage)/;
+  const discoverLaneRe = /Discover lane:\s*(?:posted=(\d+)\s+failed=(\d+)|Claude failed)/;
+  // Phase 0 salvage attempt count: "[HH:MM:SS] Phase 0: salvaged N orphaned
+  // pending rows into <batch>". Counts the rows pulled in BEFORE the post
+  // step ran, i.e. how many candidates the salvage lane was given to try.
+  const phase0SalvageRe = /Phase 0: salvaged (\d+) orphaned pending rows/;
 
   for (const run of rdRuns) {
     const startMs = new Date(run.started_at).getTime();
@@ -1492,6 +1503,18 @@ async function enrichPostCommentsRedditRuns(runs) {
     let iterations = 0, searches = 0, fetched = 0, raw = 0, passed = 0, drafted = 0;
     let postedCount = 0, failedCount = 0, planFailed = 0;
     let discoverFound = 0, discoverFailed = 0, draftFailed = 0;
+    // 2026-05-13: per-lane post counters so the salvaged pill can show
+    // attempts vs successes (e.g. "salvaged 3 attempted, 3 posted, 0 failed")
+    // instead of just the salvageable-pool size, which was ambiguous.
+    // salvageAttempted = rows pulled by Phase 0 salvage BEFORE the post step
+    //   (so even "tried but all failed" surfaces as an attempt count > 0).
+    // salvagePosted / salvageFailed come from the "Salvage lane: posted=N
+    //   failed=N" summary line, which trails the lane's post phase.
+    // discoverPosted / discoverFailed mirror the same split for the discover
+    //   lane (lets us debug "global failed=1 but salvage was clean").
+    let salvageAttempted = 0;
+    let salvagePosted = 0, salvageFailed = 0;
+    let discoverPosted = 0, discoverFailedLane = 0;
     // Ripen accumulators. Sum across iterations within a single run so the
     // pill reflects the whole run, not just the last iteration.
     let ripenInput = 0, ripenSurvivors = 0, ripenDrops = 0;
@@ -1595,6 +1618,21 @@ async function enrichPostCommentsRedditRuns(runs) {
       }
       if (ripenSkipRe.test(ln)) ripenSkippedIters++;
       if (ripenPassthroughRe.test(ln)) ripenPassthroughIters++;
+      // Per-lane post rollups. Match before phase0 so the empty "nothing to
+      // salvage" branch doesn't accidentally bump attempted via phase0SalvageRe
+      // (those lines don't appear together in practice anyway).
+      const slm = ln.match(salvageLaneRe);
+      if (slm) {
+        if (slm[1] != null) salvagePosted += parseInt(slm[1], 10);
+        if (slm[2] != null) salvageFailed += parseInt(slm[2], 10);
+      }
+      const dlm = ln.match(discoverLaneRe);
+      if (dlm) {
+        if (dlm[1] != null) discoverPosted += parseInt(dlm[1], 10);
+        if (dlm[2] != null) discoverFailedLane += parseInt(dlm[2], 10);
+      }
+      const p0m = ln.match(phase0SalvageRe);
+      if (p0m) salvageAttempted += parseInt(p0m[1], 10);
     }
     // ---- per-run queue delta (mirrors twitter enricher above) -------------
     // queueAdded   = candidates whose discovered_at fell in this run window
@@ -1738,6 +1776,16 @@ async function enrichPostCommentsRedditRuns(runs) {
       salvageable_now: salvageableNow,
       salvageable_added: salvAdded,
       salvageable_drained: salvDrained,
+      // 2026-05-13: per-lane post breakdown. Lets the salvaged pill show the
+      // ATTEMPTED count (Phase 0 row pulls), POSTED count, and FAILED count
+      // separately from the future-salvageable pool size. Disambiguates
+      // "salvaged 2" (pool size) from "salvaged 3" (rows we actually tried
+      // this cycle).
+      salvage_attempted: salvageAttempted,
+      salvage_posted: salvagePosted,
+      salvage_failed: salvageFailed,
+      discover_posted: discoverPosted,
+      discover_failed: discoverFailedLane,
     };
   }
 }
@@ -7431,6 +7479,12 @@ function renderResult(run) {
     const salvageableLive = r.salvageable_now || 0;
     const salvAdded = r.salvageable_added || 0;
     const salvDrained = r.salvageable_drained || 0;
+    // 2026-05-13: per-lane salvage attempt counters (from cycle log scan).
+    // Lets the pill show "salvaged N (M posted, K failed)" — the actual work
+    // the salvage lane did this cycle — instead of just the future pool size.
+    const salvAttempted = r.salvage_attempted || 0;
+    const salvPosted = r.salvage_posted || 0;
+    const salvFailedNow = r.salvage_failed || 0;
     // Legacy queue fields kept for the tooltip so operator can still see the
     // raw queue depth + drain breakdown if curious.
     const queue = (r.queue_end != null) ? r.queue_end : (r.pending_queue || 0);
@@ -7443,14 +7497,30 @@ function renderResult(run) {
     const qDrainedExpired = r.queue_drained_expired || 0;
     const qDrainedSkipped = r.queue_drained_skipped || 0;
     const renderQueuePill = () => {
-      if (!salvageableLive && !salvAdded && !salvDrained) return '';
-      const salvDeltaSuffix = (salvAdded || salvDrained)
-        ? ' <span style="color:var(--muted);font-weight:400;">(' +
-            '+' + salvAdded + '/-' + salvDrained +
-            ')</span>'
-        : '';
-      const qTip = 'salvageable now (pending with draft, eligible for next-cycle salvage): ' + salvageableLive +
-        ' (+' + salvAdded + ' became salvageable this run / -' + salvDrained + ' drained out this run)' +
+      if (!salvageableLive && !salvAdded && !salvDrained && !salvAttempted) return '';
+      // Primary number: salvage attempts this cycle (rows pulled by Phase 0
+      // and handed to the post step). Falls back to the future pool size
+      // when the cycle did no salvage work, so the pill is never "salvaged 0"
+      // when there's still a non-zero salvageable pool.
+      const primaryN = salvAttempted || salvageableLive;
+      // Breakdown segment: "(3 posted, 0 failed)" when we actually attempted,
+      // "(+A/-D pool)" otherwise.
+      let bracket = '';
+      if (salvAttempted > 0) {
+        const parts = [];
+        parts.push(salvPosted + ' posted');
+        if (salvFailedNow > 0) parts.push(salvFailedNow + ' failed');
+        bracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+                  parts.join(', ') + ')</span>';
+      } else if (salvAdded || salvDrained) {
+        bracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+                  '+' + salvAdded + '/-' + salvDrained + ' pool)</span>';
+      }
+      const qTip = 'salvage attempts this run (Phase 0 row pulls): ' + salvAttempted +
+        ' / salvage lane posted: ' + salvPosted +
+        ' / salvage lane failed: ' + salvFailedNow +
+        ' / salvageable now (pool size for next cycle): ' + salvageableLive +
+        ' (+' + salvAdded + ' became salvageable / -' + salvDrained + ' drained out)' +
         ' / pending pool end-of-run: ' + queue + ' (start: ' + queueStartV +
         ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
         qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
@@ -7458,8 +7528,8 @@ function renderResult(run) {
         ' / pending right now (live): ' + pendingLive;
       return '<span title="' + qTip.replace(/"/g, '&quot;') + '" ' +
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        'salvaged <span style="color:var(--text);font-weight:600;">' + salvageableLive + '</span>' +
-        salvDeltaSuffix + '</span>';
+        'salvaged <span style="color:var(--text);font-weight:600;">' + primaryN + '</span>' +
+        bracket + '</span>';
     };
 
     const tooltip = 'iterations: ' + iterations +
