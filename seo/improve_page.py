@@ -131,7 +131,7 @@ You are NOT restricted to any particular component library. The repo likely uses
 Before committing, you MUST verify the changes look correct in a real browser via the **`assrt` MCP** against the local dev server. This catches misalignment, broken layouts, off-screen elements, text overflow, missing images, and console errors that typecheck cannot.
 
 1. **Start the dev server** if not already running. Try in order: `pnpm dev`, `npm run dev`, `yarn dev`. Run it in the background (`nohup ... &` or via the Bash tool's `run_in_background: true`). Wait until it logs that it's listening (usually `localhost:3000`, but read the actual port from the dev server output — some repos use 3001, 4000, 5173, etc.).
-2. **Run `assrt_test`** against `http://localhost:<port>{brief_page_path}` for the page you just edited. Use a `#Case` that explicitly checks:
+2. **Run `assrt_test`** against `http://localhost:<port><page_path>` (the exact `Page path` from the Context block above) for the page you just edited. Use a `#Case` that explicitly checks:
    - Page renders without console errors
    - Hero / above-the-fold section is visually intact (no overlapping text, no off-screen CTAs, no broken images)
    - Primary CTA is visible, clickable, and not crowded
