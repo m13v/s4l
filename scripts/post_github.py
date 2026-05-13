@@ -216,47 +216,11 @@ def get_recent_comments(limit=5):
     return [(int(r[0]), r[1] or "") for r in rows]
 
 
-def build_generation_trace(*, project_name, platform, model, prompt_chars,
-                            top_report, top_topics_report, recent_comments_pairs,
-                            min_score_floor):
-    """Capture-everything-Claude-saw audit blob, written to posts.generation_trace.
-
-    Stored verbatim so a later question like "which examples produced the
-    Mediar post that drove 40 clicks?" can be answered by SELECT-ing this
-    row's generation_trace. Cap: API rejects payloads > 64 KB; we never
-    truncate here because we want the full content of the examples — the
-    report texts are already pre-summarized by top_performers.py /
-    top_search_topics.py and rarely cross 10 KB combined.
-
-    Shape v1 matches migrations/2026-05-12_generation_trace.sql. Bump
-    `version` and migrate consumers if the contract changes.
-    """
-    return {
-        "version": 1,
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "model": model or "",
-        "platform": platform,
-        "project": project_name,
-        "prompt_chars": int(prompt_chars or 0),
-        "examples": {
-            # Full pre-formatted report Claude saw, including style averages,
-            # per-project summaries, top posts with click counts, and bottom
-            # posts with failure annotations. This is the bytes-for-bytes
-            # copy of what landed in the prompt.
-            "top_performers_text": top_report or "",
-            # Top search topics report (click-ranked by top_search_topics.py).
-            "top_search_topics_text": top_topics_report or "",
-            # Recent-comments cluster: IDs only (text already in posts table,
-            # don't duplicate). post_id lets a reader JOIN back if needed.
-            "recent_comment_ids": [pid for pid, _ in (recent_comments_pairs or [])],
-        },
-        "scoring": {
-            "score_formula": "clicks*10 + comments*3 + upvotes_net",
-            "min_score_floor": int(min_score_floor or 0),
-            # When the click signal was wired into top_performers.py.
-            "click_aware_since": "2026-05-12",
-        },
-    }
+# Generation trace plumbing lives in scripts/generation_trace.py so the
+# github / reddit / twitter pipelines all write the same shape. See that
+# module for the shape contract and migrations/2026-05-12_generation_trace.sql
+# for the JSONB column definition.
+import generation_trace as _gen_trace
 
 
 def recent_github_posts_by_project(days=7):
@@ -945,26 +909,24 @@ def main():
     # survives the with-block close and the child process can read it.
     generation_trace_path = None
     try:
-        import tempfile
-        trace = build_generation_trace(
-            project_name=project_name,
+        trace = _gen_trace.build_trace(
             platform="github",
-            model=None,  # filled in below if Claude reports a model in usage
+            project_name=project_name,
             prompt_chars=len(prompt),
-            top_report=top_report,
-            top_topics_report=top_topics_report,
-            recent_comments_pairs=recent_comments,
-            min_score_floor=5,  # PLATFORM_MIN_SCORE['github'] in top_performers.py
+            top_performers_text=top_report or "",
+            top_search_topics_text=top_topics_report or "",
+            # recent_comments here is the list of (id, content) tuples
+            # from get_recent_comments(); extract just the IDs.
+            recent_comment_ids=[pid for pid, _ in (recent_comments or [])],
+            model=None,
+            min_score_floor=5,  # PLATFORM_MIN_SCORE['github']
         )
-        tf = tempfile.NamedTemporaryFile(
-            prefix="github_gen_trace_", suffix=".json",
-            mode="w", delete=False, encoding="utf-8",
+        generation_trace_path = _gen_trace.write_trace_tempfile(
+            trace, prefix="github_gen_trace_",
         )
-        json.dump(trace, tf, ensure_ascii=False)
-        tf.close()
-        generation_trace_path = tf.name
-        log(f"Generation trace: {generation_trace_path} "
-            f"({os.path.getsize(generation_trace_path)} bytes)")
+        if generation_trace_path:
+            log(f"Generation trace: {generation_trace_path} "
+                f"({os.path.getsize(generation_trace_path)} bytes)")
     except Exception as e:
         # Audit row is nice-to-have, never a blocker. Log and continue.
         log(f"WARNING: generation_trace build failed ({e}); proceeding without trace")
@@ -1135,11 +1097,7 @@ def main():
     # so the on-disk JSON is redundant. macOS would eventually purge
     # /var/folders/, but explicit cleanup keeps temp dirs tidy when this
     # runs every 20 min via launchd.
-    if generation_trace_path:
-        try:
-            os.unlink(generation_trace_path)
-        except OSError:
-            pass
+    _gen_trace.cleanup_trace_tempfile(generation_trace_path)
 
     total_elapsed = time.time() - run_start
     log(f"=== SUMMARY: elapsed={total_elapsed:.0f}s posted={posted} failed={failed} ===")
