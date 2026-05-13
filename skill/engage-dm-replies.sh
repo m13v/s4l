@@ -45,6 +45,16 @@ export SA_CYCLE_ID="$BATCH_ID"
 # scans, and prompt build. Alphabetical order is preserved at acquire time
 # below for multi-platform runs to prevent deadlock.
 source "$(dirname "$0")/lock.sh"
+
+# Skip cleanly if a foreign playwright-mcp wrapper for THIS platform is alive
+# (interactive Fazm Dev / IDE / another cron). Avoids the Chrome SingletonLock
+# crash cascade — see dm-outreach-twitter.sh and engage-twitter.sh.
+# LOG_FILE isn't set yet (line 78), so use ${LOG_FILE:-} to satisfy set -u.
+if [ -n "$PLATFORM" ]; then
+    if defer_if_foreign_browser_mcp_active "$PLATFORM" "${LOG_FILE:-}"; then
+        exit 0
+    fi
+fi
 acquire_lock "$LOCK_NAME" 3600
 
 # Load secrets
@@ -641,6 +651,16 @@ NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp
 If a script or tool call fails, wait 30 seconds and retry (up to 3 times).
 CRITICAL: Reply in the SAME LANGUAGE as the inbound message. Match the language exactly.
 
+## CRITICAL FAILURE MODE: platform-agent MCP tools not registered
+If at the START of this run you cannot see ANY of the platform's mcp__<platform>-agent__* tools available (mcp__twitter-agent__*, mcp__reddit-agent__*, mcp__linkedin-agent__*), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged playwright-mcp wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
+
+Do EXACTLY this:
+1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', 'failed', or anything else. Do NOT call log-outbound, mark-skipped, set-status, mark-inspected, increment-attempts, or any other status-mutating helper. Do NOT write skip_reason on any dms/dm_messages/human_dm_replies row.
+2. Print a single line to stdout: \`MCP_UNAVAILABLE: <platform>-agent tools not registered; aborting with rows untouched\`
+3. Exit cleanly. The launchd schedule will retry on the next cycle, by which point the wedged profile holder will likely have timed out.
+
+Burning rows with skip_reason='twitter_agent_mcp_unavailable: ...' on outbound DM rows is a regression that on 2026-05-12 nuked 7 warm leads (efemjoba, gpuops, josesaezmerino, AIDailyGems, alkimiadev, RobertDMellish, kunaljeweller). The LEFT JOIN d.id IS NULL filter in scan_dm_candidates.py then permanently blocked them from re-discovery (since fixed 2026-05-13 to treat transient skip_reasons as non-blocking, but the right behavior remains: do not write the row in the first place).
+
 $PHASE0_BLOCK
 Our projects (for context when conversations touch relevant topics):
 $PROJECTS
@@ -960,9 +980,24 @@ python3 scripts/dm_conversation.py mark-booking-sent --dm-id DM_ID
 
 Never send the booking link twice. If \`booking_link_sent_at\` is not NULL, Step 2.8 is a no-op; let Step 2.7 handle any tool mention normally. (The wrap pipeline is also idempotent — re-wrapping the same URL for the same DM returns the existing code rather than minting a new one.)
 
+### Step 3.5: ACQUIRE the reddit-browser lease (REDDIT DMs ONLY)
+
+**Reddit only.** Skip this step entirely for LinkedIn and Twitter DMs.
+
+Before driving any reddit-agent browser tool (MCP or Python CDP) for THIS DM, acquire the reddit-browser lease. The lease is held only around THIS DM's Step 4 + Step 5; the next DM acquires its own. Peer reddit pipelines (run-reddit-search post phase, engage-reddit, link-edit-reddit, dm-outreach-reddit) can use the browser between our DMs.
+
+\`\`\`bash
+LOCK_OUT=\$(python3 ~/social-autoposter/scripts/reddit_browser_lock.py acquire --timeout 600 --ttl 90 2>&1)
+\`\`\`
+
+- If \`LOCK_OUT\` starts with "OK", you hold the lease. Proceed to Step 4.
+- If "BUSY", a peer reddit pipeline owns the browser and didn't release within 10 min. Treat as a TRANSIENT skip: log nothing, do NOT call Step 4, move on to the NEXT DM. The conversation stays pending and the next launchd cycle will retry. Do NOT attempt Step 4 without the lease; collisions on the same Chrome profile crash both runs.
+
+The reddit-agent MCP wrapper auto-heartbeats expires_at on every MCP browser call (PreToolUse / PostToolUse hooks), and \`scripts/reddit_browser.py\` heartbeats on every CDP subprocess, so you do NOT need to manually heartbeat. Just acquire before Step 4's first browser call for the DM and release in Step 5.5 below.
+
 ### Step 4: Send the reply
 
-Reddit dms split into two surfaces — pick by whether \`chat_url\` is set on the dms row:
+Reddit dms split into two surfaces (pick by whether \`chat_url\` is set on the dms row):
 
 **Reddit Chat** (chat_url set; true DM — try CDP first, fall back to mcp__reddit-agent__* browser):
 \`\`\`bash
@@ -1028,6 +1063,18 @@ On {ok:false}, treat these errors as TERMINAL for this run: \`rate_limited\`, \`
 cd ~/social-autoposter && python3 scripts/dm_conversation.py log-outbound --dm-id DM_ID --content "MESSAGE_SENT_FROM_TOOL_JSON" --verified
 \`\`\`
 Use \`message_sent\` from the send-dm JSON as the content (NOT YOUR_REPLY_TEXT) so any campaign suffix the tool appended is captured, enabling auto-attribution. For Twitter, the send-dm helper has already self-logged when DM_ID was passed; this call is dedup-protected and acts as a no-op confirmation. Pass --verified ONLY when the browser tool returned verified=true (or you visually confirmed the message in the thread). The flag is a hard gate: log-outbound refuses to insert without it. If verification failed, log nothing and let the next cycle retry; never pass --verified speculatively. The log-outbound command also has a dedup guard. If it says "DEDUP BLOCKED" or "VERIFY BLOCKED", the message was NOT logged. Do not retry.
+
+### Step 5.5: RELEASE the reddit-browser lease (REDDIT DMs ONLY)
+
+**Reddit only.** Skip this step entirely for LinkedIn and Twitter DMs.
+
+RELEASE the reddit-browser lease IMMEDIATELY after the DM result is logged (success, error, or skip). This is mandatory; failing to release blocks every other reddit pipeline for up to 90s of TTL idle decay:
+
+\`\`\`bash
+python3 ~/social-autoposter/scripts/reddit_browser_lock.py release
+\`\`\`
+
+Run this even if Step 4 raised, the send threw, or Step 5 failed. Wrap the per-DM browser block (Step 4 + Step 5) in a way that Step 5.5 ALWAYS executes (mental try/finally). The release is idempotent and safe to call multiple times. Move to the NEXT DM only after the release. Step 5b classify/log work below is DB-only (no browser) and runs unlocked, so peer pipelines can use the browser during it.
 
 ### Step 5b: Classify interest level AND mode (REQUIRED on every reply)
 
@@ -1241,40 +1288,39 @@ fi
 # step. Alphabetical order in the multi-platform branch prevents deadlock
 # with other pipelines that also acquire multiple browser locks.
 #
-# Reddit lock strategy (changed 2026-05-10): instead of holding the bash
-# `reddit-browser` lock for the full 5400s Claude turn (which blocks every
-# other reddit pipeline even while Claude is just thinking), we acquire the
-# Python lease lock with a 90s TTL. The reddit-agent MCP proxy
-# (scripts/mcp_lock_proxy.py) heartbeats the lease on every browser call, so
-# the lock stays held during actual MCP activity but auto-decays within 90s
-# of idleness. Peer pipelines (run-reddit-search post phase, engage-reddit,
-# link-edit-reddit) can steal the lock during long Claude reasoning gaps.
+# Reddit lock strategy (migrated 2026-05-13): the reddit-browser lease is
+# acquired/released PER DM inside the Claude prompt (Step 4-pre / Step 5-post),
+# mirroring the link-edit-reddit.sh and dm-outreach-reddit.sh pattern. Holding
+# the lease around the whole 5400s Claude turn monopolised the browser for
+# the full DM batch (~5-15 min) while peer reddit pipelines sat blocked during
+# Claude's compose + classify phases. The brief pre-flight below runs the
+# one-shot ensure_browser_healthy / Singleton-lock clear under a 30s lease so
+# the cycle starts on a clean profile; the prompt then acquires per-DM.
 #
-# Pre-flight: brief bash-lock acquire+release just to run ensure_browser_healthy
-# under mutex (mirrors link-edit-reddit.sh:174-176). LinkedIn/Twitter still use
-# the long bash lock because they don't have the per-MCP-call heartbeat proxy
-# wired through their MCP configs yet.
+# LinkedIn/Twitter still use the long bash lock because they don't have the
+# per-MCP-call heartbeat proxy wired through their MCP configs yet.
 log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
     linkedin) acquire_lock "linkedin-browser" 3600; ensure_browser_healthy "linkedin" ;;
     reddit)
-        # Unified reddit lock (2026-05-10): only the Python lease. Python
-        # acquire performs the orphan-Chrome sweep internally; ensure_browser_healthy
-        # runs under the exclusive lease that follows.
-        log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
-        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
-            log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
+        # Reddit: brief pre-flight acquire+ensure+release ONLY. Per-DM
+        # acquire/release happens inside the Claude prompt.
+        log "Reddit pre-flight: brief acquire + ensure_browser_healthy + release..."
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
+            log "WARNING: reddit pre-flight acquire BUSY; ensure_browser_healthy will run anyway; per-DM acquires inside the prompt will retry."
         ensure_browser_healthy "reddit"
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_browser_healthy "twitter" ;;
     all)
         acquire_lock "linkedin-browser" 3600
         ensure_browser_healthy "linkedin"
-        # reddit: unified lease (2026-05-10), Python lock only.
-        log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
-        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
-            log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
+        # Reddit: brief pre-flight only (same as the `reddit` branch above).
+        log "Reddit pre-flight: brief acquire + ensure_browser_healthy + release..."
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
+            log "WARNING: reddit pre-flight acquire BUSY; per-DM acquires inside the prompt will retry."
         ensure_browser_healthy "reddit"
+        python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
         ensure_browser_healthy "twitter"
         ;;
