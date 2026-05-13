@@ -8,10 +8,6 @@
 		<string>/Users/matthewdi</string>
 		<key>PATH</key>
 		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-		<key>TWITTER_ENGINE</key>
-		<string>camoufox</string>
-		<key>TWITTER_CAMOUFOX_HEADLESS</key>
-		<string>true</string>
 	</dict>
 	<key>Label</key>
 	<string>com.m13v.social-dm-outreach-twitter</string>
