@@ -9477,7 +9477,7 @@ function renderRatioMetrics() {
     let label = '';
     if (isSingle) {
       const v = yMax * t;
-      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(_fmtPct(v)) + '</text>';
+      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(_fmtForRatio(singleRatio, v)) + '</text>';
     }
     return '<line class="gridline" x1="' + padL + '" x2="' + (width - padR) + '" y1="' + y + '" y2="' + y + '"/>' + label;
   }).join('');
@@ -9498,7 +9498,7 @@ function renderRatioMetrics() {
       const h = Math.max(0, padT + plotH - y);
       const barRect = '<rect class="series-bar" data-day="' + escapeHtml(d) + '" data-ratio="' + escapeHtml(r.id) + '" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barWidth.toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + r.color + '"/>';
       const valueLabel = (v > 0)
-        ? '<text class="series-value" x="' + (x + barWidth / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2) + '" text-anchor="middle" fill="' + r.color + '">' + escapeHtml(_fmtPct(v)) + '</text>'
+        ? '<text class="series-value" x="' + (x + barWidth / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2) + '" text-anchor="middle" fill="' + r.color + '">' + escapeHtml(_fmtForRatio(r, v)) + '</text>'
         : '';
       return barRect + valueLabel;
     }).join('');
@@ -9535,7 +9535,11 @@ function renderRatioMetrics() {
       const day = days[idx];
       const rows = visible.map(r => {
         const v = ratioSeries[r.id][day];
-        const display = (v == null || !isFinite(v)) ? 'no views' : _fmtPct(v);
+        // "no views" / "no visitors" depending on the denominator. Cost
+        // ratios use the right unit so the empty-day message matches the
+        // ratio's meaning ("no views" for cost_per_kviews, etc.).
+        const emptyLabel = (r.denominator === 'pageviews') ? 'no visitors' : 'no views';
+        const display = (v == null || !isFinite(v)) ? emptyLabel : _fmtForRatio(r, v);
         return '<div class="tt-row"><span class="swatch" style="background:' + r.color + ';"></span>' +
                '<span>' + escapeHtml(r.label) + '</span>' +
                '<span class="val">' + escapeHtml(display) + '</span></div>';
