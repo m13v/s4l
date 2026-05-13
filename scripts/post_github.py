@@ -196,16 +196,67 @@ def get_top_search_topics(project_name, platform="github", limit=8, window_days=
 
 
 def get_recent_comments(limit=5):
+    """Last N github comments by id DESC. Tuple form `(id, our_content)` so
+    the generation_trace audit row can store the IDs alongside the text (no
+    duplication: the text is already in the posts table, the IDs let us
+    reverse-link). Backward-compat note: this used to return a plain list
+    of strings; callers that consume `recent_comments` for prompt-building
+    were updated in the same change."""
     dbmod.load_env()
     conn = dbmod.get_conn()
     cur = conn.execute(
-        "SELECT our_content FROM posts "
+        "SELECT id, our_content FROM posts "
         "WHERE platform='github' ORDER BY id DESC LIMIT %s",
         [limit],
     )
-    results = [row[0] for row in cur.fetchall()]
+    rows = cur.fetchall()
     conn.close()
-    return results
+    # Return as list of (id, content) tuples. The caller-side conversion
+    # to a flat string list for prompt-building is one-line below in main().
+    return [(int(r[0]), r[1] or "") for r in rows]
+
+
+def build_generation_trace(*, project_name, platform, model, prompt_chars,
+                            top_report, top_topics_report, recent_comments_pairs,
+                            min_score_floor):
+    """Capture-everything-Claude-saw audit blob, written to posts.generation_trace.
+
+    Stored verbatim so a later question like "which examples produced the
+    Mediar post that drove 40 clicks?" can be answered by SELECT-ing this
+    row's generation_trace. Cap: API rejects payloads > 64 KB; we never
+    truncate here because we want the full content of the examples — the
+    report texts are already pre-summarized by top_performers.py /
+    top_search_topics.py and rarely cross 10 KB combined.
+
+    Shape v1 matches migrations/2026-05-12_generation_trace.sql. Bump
+    `version` and migrate consumers if the contract changes.
+    """
+    return {
+        "version": 1,
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "model": model or "",
+        "platform": platform,
+        "project": project_name,
+        "prompt_chars": int(prompt_chars or 0),
+        "examples": {
+            # Full pre-formatted report Claude saw, including style averages,
+            # per-project summaries, top posts with click counts, and bottom
+            # posts with failure annotations. This is the bytes-for-bytes
+            # copy of what landed in the prompt.
+            "top_performers_text": top_report or "",
+            # Top search topics report (click-ranked by top_search_topics.py).
+            "top_search_topics_text": top_topics_report or "",
+            # Recent-comments cluster: IDs only (text already in posts table,
+            # don't duplicate). post_id lets a reader JOIN back if needed.
+            "recent_comment_ids": [pid for pid, _ in (recent_comments_pairs or [])],
+        },
+        "scoring": {
+            "score_formula": "clicks*10 + comments*3 + upvotes_net",
+            "min_score_floor": int(min_score_floor or 0),
+            # When the click signal was wired into top_performers.py.
+            "click_aware_since": "2026-05-12",
+        },
+    }
 
 
 def recent_github_posts_by_project(days=7):
@@ -410,7 +461,18 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
 
     recent_ctx = ""
     if recent_comments:
-        snippets = "\n".join(f"  - {c}" for c in recent_comments if c)
+        # recent_comments is now a list of (id, content) tuples (2026-05-12
+        # change to support generation_trace audit). Accept both shapes
+        # here so any caller still passing plain strings keeps working.
+        def _extract(item):
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                return item[1]
+            return item
+        snippets = "\n".join(
+            f"  - {_extract(c)}"
+            for c in recent_comments
+            if _extract(c)
+        )
         if snippets:
             recent_ctx = f"""
 Your last {len(recent_comments)} GitHub comments (don't repeat talking points):
@@ -642,12 +704,18 @@ def post_comment(owner, repo, number, body):
 
 def log_post(thread_url, our_url, text, project_name, thread_author, thread_title,
              github_username, engagement_style=None, search_topic=None, language=None,
-             claude_session_id=None):
+             claude_session_id=None, generation_trace_path=None):
     """Defers to github_tools.py log-post, which handles dedup + INSERT.
 
     Returns the new posts.id on success, or None on failure / dedup hit.
     Callers who need attribution wiring (e.g. post_links backfill) check
     the return for truthy before calling backfill_post_id.
+
+    generation_trace_path (added 2026-05-12): optional path to a JSON
+    file with the few-shot context Claude saw. Passed to github_tools.py
+    as --generation-trace and stored in posts.generation_trace JSONB.
+    File-based instead of inline-JSON to keep argv short (the report
+    text can be several KB) and to avoid shell-escape pain.
     """
     try:
         cmd = ["python3", GITHUB_TOOLS, "log-post",
@@ -662,6 +730,8 @@ def log_post(thread_url, our_url, text, project_name, thread_author, thread_titl
             cmd.extend(["--language", language])
         if claude_session_id:
             cmd.extend(["--claude-session-id", claude_session_id])
+        if generation_trace_path:
+            cmd.extend(["--generation-trace", generation_trace_path])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.stdout.strip():
             try:
@@ -860,9 +930,50 @@ def main():
     prompt = build_prompt(project, config, top, cap, top_report,
                           recent_comments, top_topics_report=top_topics_report)
 
+    # Build the generation_trace audit blob: what Claude is about to see.
+    # Captured BEFORE the Claude call so we never end up with a post row
+    # missing its trace (e.g. if Claude errors out, we never call
+    # log_post and the file is GC'd by the OS). Same trace path is used
+    # for every post produced from this Claude invocation, since they
+    # all saw the same few-shot context.
+    #
+    # Why a temp file: argv has a ~256 KB cap on macOS and the top_report
+    # alone can run several KB. The path travels through 3 hops
+    # (post_github → log_post() → github_tools.py log-post) and stays
+    # cheap to pass; the JSON body only deserializes once at the SQL
+    # INSERT step. tempfile.NamedTemporaryFile(delete=False) so the file
+    # survives the with-block close and the child process can read it.
+    generation_trace_path = None
+    try:
+        import tempfile
+        trace = build_generation_trace(
+            project_name=project_name,
+            platform="github",
+            model=None,  # filled in below if Claude reports a model in usage
+            prompt_chars=len(prompt),
+            top_report=top_report,
+            top_topics_report=top_topics_report,
+            recent_comments_pairs=recent_comments,
+            min_score_floor=5,  # PLATFORM_MIN_SCORE['github'] in top_performers.py
+        )
+        tf = tempfile.NamedTemporaryFile(
+            prefix="github_gen_trace_", suffix=".json",
+            mode="w", delete=False, encoding="utf-8",
+        )
+        json.dump(trace, tf, ensure_ascii=False)
+        tf.close()
+        generation_trace_path = tf.name
+        log(f"Generation trace: {generation_trace_path} "
+            f"({os.path.getsize(generation_trace_path)} bytes)")
+    except Exception as e:
+        # Audit row is nice-to-have, never a blocker. Log and continue.
+        log(f"WARNING: generation_trace build failed ({e}); proceeding without trace")
+
     if args.dry_run:
         log("=== DRY RUN ===")
         log(f"Prompt length: {len(prompt)} chars")
+        if generation_trace_path:
+            log(f"Trace would be saved with each post: {generation_trace_path}")
         for c in top[:cap]:
             log(f"  would consider {c['repo']}#{c['number']} "
                 f"delta={c['delta_score']:.1f} title={c['title'][:60]}")
@@ -996,6 +1107,10 @@ def main():
             search_topic=(decision.get("search_topic") or "").strip() or None,
             language=language,
             claude_session_id=claude_session_id,
+            # Same trace blob for every post in this run — they all saw
+            # the same few-shot context. If the trace file couldn't be
+            # built earlier this is None and log_post drops the flag.
+            generation_trace_path=generation_trace_path,
         )
         # Stamp post_links.post_id for the URLs minted before posting.
         # Idempotent; no-op when minted_session is None or the dedup path
@@ -1014,6 +1129,17 @@ def main():
         _RUN_STATE["skipped"] = len(skipped)
         log(f"POSTED: {url_or_err or 'ok'}")
         time.sleep(3)
+
+    # Clean up the generation_trace temp file. By this point every post
+    # that landed has its trace persisted to posts.generation_trace JSONB,
+    # so the on-disk JSON is redundant. macOS would eventually purge
+    # /var/folders/, but explicit cleanup keeps temp dirs tidy when this
+    # runs every 20 min via launchd.
+    if generation_trace_path:
+        try:
+            os.unlink(generation_trace_path)
+        except OSError:
+            pass
 
     total_elapsed = time.time() - run_start
     log(f"=== SUMMARY: elapsed={total_elapsed:.0f}s posted={posted} failed={failed} ===")
