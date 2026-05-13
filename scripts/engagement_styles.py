@@ -399,7 +399,8 @@ def _fetch_style_stats(platform):
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from http_api import api_get
         resp = api_get("/api/v1/engagement-styles/style-stats", {"platform": platform})
-        stats = (resp or {}).get("stats") or {}
+        data = (resp or {}).get("data") or {}
+        stats = data.get("stats") or {}
         return {
             name: {"n": int(v.get("n", 0)), "avg_up": float(v.get("avg_up", 0.0))}
             for name, v in stats.items()
@@ -485,7 +486,8 @@ def _last_picks(platform, limit=10):
             "/api/v1/engagement-styles/last-picks",
             {"platform": platform, "limit": int(limit)},
         )
-        picks = (resp or {}).get("picks") or []
+        data = (resp or {}).get("data") or {}
+        picks = data.get("picks") or []
         return [str(p) for p in picks if p]
     except Exception:
         return []
