@@ -104,8 +104,15 @@ for p in c.get('projects', []):
 PLATFORM_SQL_FILTER="1=1"
 if [ -n "$PLATFORM" ]; then
     P="$PLATFORM"
-    [ "$P" = "x" ] && P="twitter"
-    PLATFORM_SQL_FILTER="d.platform = '$P'"
+    # The dms table stores Twitter rows as platform='x', but historical rows or
+    # the linkedin sidebar may also write 'twitter'. Pre-2026-05-13 this branch
+    # had `[ "$P" = "x" ] && P="twitter"` which silently flipped every query
+    # to platform='twitter' and matched ZERO rows for X. That's bug A in the
+    # 2026-05-01..05-13 inbound-DM cliff. Match both values to be safe.
+    case "$P" in
+        twitter|x) PLATFORM_SQL_FILTER="d.platform IN ('x','twitter')" ;;
+        *) PLATFORM_SQL_FILTER="d.platform = '$P'" ;;
+    esac
 fi
 
 # Get conversations where the last message is inbound (they replied OR a backend
@@ -1299,10 +1306,21 @@ GATE_REASON=""
 # silently skipped every fresh inbound (bug surfaced 2026-04-30 with 4 warm
 # leads stuck unanswered for hours/days).
 needs_reply_count_for() {
+    # Accept either 'twitter' or 'x' as the platform name; the dms table
+    # stores X rows as platform='x' but the rest of this script uses 'twitter'.
+    # Pre-2026-05-13 the gate normalized x→twitter and queried platform='twitter'
+    # which matched zero rows; combined with the absence of a Twitter live
+    # precheck this silently skipped every X inbound DM for 13 days. Match
+    # both column values to be safe.
     local plat="$1"
+    local sql_filter
+    case "$plat" in
+        twitter|x) sql_filter="d.platform IN ('x','twitter')" ;;
+        *) sql_filter="d.platform = '$plat'" ;;
+    esac
     psql "$DATABASE_URL" -tA -c "
         SELECT COUNT(*) FROM dms d
-        WHERE d.platform='$plat'
+        WHERE $sql_filter
           AND d.conversation_status IN ('active', 'needs_reply')
           AND EXISTS (
             SELECT 1 FROM dm_messages m
@@ -1320,7 +1338,7 @@ needs_reply_count_for() {
 # DB-side check across in-scope platforms.
 for plat_check in ${PLATFORM:-reddit linkedin twitter}; do
     case "$plat_check" in
-        x) plat_check="twitter" ;;
+        x) plat_check="twitter" ;;  # canonical display name; query covers both
     esac
     NR=$(needs_reply_count_for "$plat_check")
     if [ "$NR" != "0" ] && [ "$NR" != "?" ] && [ -n "$NR" ]; then
@@ -1409,6 +1427,103 @@ PYEOF
         # Helper failed (session_invalid, profile_locked, crash, etc).
         NEEDS_CLAUDE=true
         GATE_REASON="linkedin pre-check failed (ok=$LI_OK error=$LI_ERROR); falling through to Claude"
+        log "[gate] ${GATE_REASON}"
+    fi
+fi
+
+# Live-side Twitter pre-check (mirror of the LinkedIn one above). Required
+# because Twitter inbound DMs are only ingested into the dms/dm_messages tables
+# when Claude runs Phase B of this script — but the DB-side gate above would
+# never see them and skip Claude entirely. That's bug B in the 2026-05-01..
+# 05-13 inbound-DM cliff: 0 X DMs ingested for 13 days after the gate landed.
+#
+# Read-only sidebar scrape via headed Chromium (~5s, $0). Identical safety
+# envelope to the LinkedIn one: capture stderr for auditability, parse JSON
+# defensively, fall through to Claude on any failure rather than dropping work.
+#
+# Disable with SOCIAL_AUTOPOSTER_DISABLE_TWITTER_PRECHECK=1 if it starts
+# misbehaving; the cycle will then run Claude on every fire (high cost, but
+# never silently drops inbound).
+if ! $NEEDS_CLAUDE \
+   && { [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; } \
+   && [ "${SOCIAL_AUTOPOSTER_DISABLE_TWITTER_PRECHECK:-0}" != "1" ]; then
+    log "[gate] DB says nothing pending; running Twitter live sidebar pre-check..."
+    TW_PRECHECK_STDERR="/tmp/tw_precheck_stderr.$$"
+    TW_PRECHECK_PARSED="/tmp/tw_precheck_parsed.$$"
+    TW_PRECHECK=$(/usr/bin/python3 "$REPO_DIR/scripts/twitter_browser.py" unread-dms 2>"$TW_PRECHECK_STDERR") \
+        && TW_EXIT=0 || TW_EXIT=$?
+    TW_OK="" TW_UNREAD="" TW_TOTAL="" TW_FIRST_PARTNER="" TW_ERROR=""
+    /usr/bin/python3 - "$TW_PRECHECK_PARSED" "$TW_PRECHECK" << 'PYEOF' || true
+import json, shlex, sys
+out_path = sys.argv[1]
+raw = (sys.argv[2] if len(sys.argv) > 2 else "").strip()
+try:
+    d = json.loads(raw) if raw else None
+except Exception:
+    d = None
+
+# twitter_browser.unread_dms returns either:
+#  - a LIST of {has_unread, author, thread_url, ...} on success
+#  - a DICT {"ok": False, "error": "..."} on rate limit / not_on_dm_page
+#  - None / unparseable on script crash
+total = 0
+unread = 0
+first_partner = ""
+ok = False
+err = ""
+if isinstance(d, list):
+    ok = True
+    total = len(d)
+    for c in d:
+        if c.get("has_unread"):
+            unread += 1
+            if not first_partner:
+                first_partner = c.get("author") or c.get("handle") or ""
+elif isinstance(d, dict):
+    ok = bool(d.get("ok"))
+    err = d.get("error", "") or ""
+else:
+    err = "unparseable_json"
+
+fields = {
+    "TW_OK": "True" if ok else "False",
+    "TW_UNREAD": unread,
+    "TW_TOTAL": total,
+    "TW_FIRST_PARTNER": first_partner,
+    "TW_ERROR": err,
+}
+with open(out_path, "w") as f:
+    for k, v in fields.items():
+        f.write(f"{k}={shlex.quote(str(v) if v is not None else '')}\n")
+PYEOF
+    if [ -s "$TW_PRECHECK_PARSED" ]; then
+        # shellcheck disable=SC1090
+        source "$TW_PRECHECK_PARSED"
+    fi
+    rm -f "$TW_PRECHECK_PARSED"
+    log "[gate] twitter precheck: exit=$TW_EXIT ok=$TW_OK total=$TW_TOTAL unread=$TW_UNREAD first_partner='${TW_FIRST_PARTNER}' error='${TW_ERROR}'"
+    if [ -s "$TW_PRECHECK_STDERR" ]; then
+        log "[gate] twitter precheck stderr (first 20 lines):"
+        head -20 "$TW_PRECHECK_STDERR" | sed 's/^/[gate]   /' | tee -a "$LOG_FILE" >/dev/null
+    fi
+    rm -f "$TW_PRECHECK_STDERR"
+    if [ "$TW_OK" = "True" ] && [ "$TW_TOTAL" != "0" ] && [ -n "$TW_TOTAL" ] && [ "$TW_UNREAD" = "0" ]; then
+        log "[gate] Twitter sidebar pre-check: 0 unread of $TW_TOTAL threads"
+    elif [ "$TW_OK" = "True" ] && [ "$TW_TOTAL" != "0" ] && [ -n "$TW_TOTAL" ]; then
+        NEEDS_CLAUDE=true
+        GATE_REASON="twitter live: ${TW_UNREAD} unread of ${TW_TOTAL} threads in sidebar"
+        log "[gate] ${GATE_REASON}"
+    elif [ "$TW_OK" = "True" ]; then
+        # ok=true but total_threads=0 means the helper returned an empty list.
+        # Could be: encryption passcode prompt, session expired, DOM changed,
+        # or a real empty inbox. Don't drop work; fall through to Claude.
+        NEEDS_CLAUDE=true
+        GATE_REASON="twitter pre-check returned 0 total threads (suspect bad session or passcode); falling through to Claude"
+        log "[gate] ${GATE_REASON}"
+    else
+        # Helper failed (rate limit, not_on_dm_page, crash, etc).
+        NEEDS_CLAUDE=true
+        GATE_REASON="twitter pre-check failed (ok=$TW_OK error=$TW_ERROR); falling through to Claude"
         log "[gate] ${GATE_REASON}"
     fi
 fi
