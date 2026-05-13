@@ -4,7 +4,7 @@ top_dud_reddit_queries.py
 
 Returns recent Reddit search queries that produced ZERO post-filter
 candidates so post_reddit.py:build_prompt can tell the LLM scanner
-"do not redraft these phrasings — they were flat in the last N hours".
+"do not redraft these phrasings, they were flat in the last N hours".
 Counterpart to top_search_topics.py (positive signal): this is the
 negative-signal feed.
 
@@ -16,7 +16,9 @@ sorted by most-attempted dud first (so the most-wasteful repeats surface
 at the top of the prompt anti-list).
 
 Source: reddit_search_attempts (one row per (query, subreddits, project)
-per cmd_search call, written by reddit_tools.py:cmd_search).
+per cmd_search call, written by reddit_tools.py:cmd_search). Routed
+through GET /api/v1/reddit-search-attempts/dud-queries on the website
+to keep this script HTTP-only (no psycopg2 / no DATABASE_URL).
 """
 import argparse
 import json
@@ -24,7 +26,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 
 
 def main():
@@ -36,51 +38,24 @@ def main():
                    help="Look back this many hours for dud queries (default 7d).")
     args = p.parse_args()
 
-    conn = dbmod.get_conn()
+    query = {
+        "limit": args.limit,
+        "window_hours": args.window_hours,
+    }
     if args.project:
-        rows = conn.execute(
-            """
-            SELECT query,
-                   COALESCE(subreddits, '')   AS subreddits,
-                   COALESCE(project_name, '') AS project,
-                   COUNT(*) AS attempts,
-                   EXTRACT(EPOCH FROM (NOW() - MAX(ran_at)))/3600.0 AS last_ran_h_ago
-            FROM reddit_search_attempts
-            WHERE candidates_post_filter = 0
-              AND ran_at > NOW() - (%s || ' hours')::interval
-              AND project_name = %s
-            GROUP BY query, COALESCE(subreddits, ''), COALESCE(project_name, '')
-            ORDER BY attempts DESC, MAX(ran_at) DESC
-            LIMIT %s
-            """,
-            [str(args.window_hours), args.project, args.limit],
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT query,
-                   COALESCE(subreddits, '')   AS subreddits,
-                   COALESCE(project_name, '') AS project,
-                   COUNT(*) AS attempts,
-                   EXTRACT(EPOCH FROM (NOW() - MAX(ran_at)))/3600.0 AS last_ran_h_ago
-            FROM reddit_search_attempts
-            WHERE candidates_post_filter = 0
-              AND ran_at > NOW() - (%s || ' hours')::interval
-            GROUP BY query, COALESCE(subreddits, ''), COALESCE(project_name, '')
-            ORDER BY attempts DESC, MAX(ran_at) DESC
-            LIMIT %s
-            """,
-            [str(args.window_hours), args.limit],
-        ).fetchall()
-    conn.close()
+        query["project"] = args.project
+
+    resp = api_get("/api/v1/reddit-search-attempts/dud-queries", query=query)
+    data = (resp or {}).get("data") or {}
+    rows = data.get("rows") or []
 
     out = [
         {
-            "query": r[0],
-            "subreddits": r[1] or None,
-            "project": r[2],
-            "attempts": int(r[3]),
-            "last_ran_h_ago": round(float(r[4] or 0), 1),
+            "query": r.get("query"),
+            "subreddits": r.get("subreddits") or None,
+            "project": r.get("project") or "",
+            "attempts": int(r.get("attempts") or 0),
+            "last_ran_h_ago": round(float(r.get("last_ran_h_ago") or 0), 1),
         }
         for r in rows
     ]
