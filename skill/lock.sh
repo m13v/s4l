@@ -17,6 +17,52 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
   declare -a _SA_LOCK_TICKETS=()
   _sa_release_locks() {
     local d t
+    # Browser-profile cleanup BEFORE releasing locks (added 2026-05-13).
+    # Before this, dm-outreach-twitter would exit, _sa_release_locks would
+    # rm the twitter-browser lock dir, the next pipeline (engage-twitter,
+    # engage-dm-replies-twitter) would acquire the now-free shell lock,
+    # then find the Chrome profile's SingletonLock STILL held by the
+    # previous pipeline's Chrome (which hadn't fully torn down yet) and
+    # crash with "chromium profile locked by another process; waited 45s".
+    # Observed 2026-05-13 14:06 (engage-twitter), 14:13 (engage-dm-replies-twitter,
+    # spawned dozens of Chrome respawns at 3-5s cadence).
+    #
+    # Fix: for any held lock that LOOKS like a browser lock (suffix -browser),
+    # kill any top-level Chrome on the corresponding profile BEFORE releasing
+    # the shell lock, regardless of ppid. We hold the lock so this is safe
+    # by construction (no peer can race us, unlike the post-acquire sweep
+    # in acquire_lock which restricts to ppid==1 to avoid clobbering peers).
+    # The next pipeline then takes a clean profile.
+    for d in ${_SA_LOCK_DIRS[@]+"${_SA_LOCK_DIRS[@]}"}; do
+      local lock_name="${d##*/}"
+      lock_name="${lock_name#social-autoposter-}"
+      lock_name="${lock_name%.lock}"
+      case "$lock_name" in
+        twitter-browser|reddit-browser|linkedin-browser)
+          local plat="${lock_name%-browser}"
+          local profile_dir="$HOME/.claude/browser-profiles/$plat"
+          # Top-level Chromes on this profile (skip --type= subprocesses).
+          local chrome_pids
+          chrome_pids=$(ps -A -o pid=,command= 2>/dev/null             | awk -v p="user-data-dir=$profile_dir" '
+                index($0,p)>0 && index($0,"--type=")==0 {print $1}'             || true)
+          if [ -n "$chrome_pids" ]; then
+            # SIGTERM first for graceful close, brief pause, then SIGKILL stragglers.
+            echo "$chrome_pids" | xargs kill -TERM 2>/dev/null || true
+            sleep 1
+            local still_alive
+            still_alive=$(ps -A -o pid=,command= 2>/dev/null               | awk -v p="user-data-dir=$profile_dir" '
+                  index($0,p)>0 && index($0,"--type=")==0 {print $1}'               || true)
+            if [ -n "$still_alive" ]; then
+              echo "$still_alive" | xargs kill -KILL 2>/dev/null || true
+            fi
+            # Also kill matching MCP wrappers so they can't relaunch Chrome.
+            pkill -KILL -f "${plat}-agent.json" 2>/dev/null || true
+            # Clear singletons so the next launch_persistent_context starts clean.
+            rm -f "$profile_dir/SingletonLock"                   "$profile_dir/SingletonCookie"                   "$profile_dir/SingletonSocket" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    done
     # Safe for bash 3.2: ${arr[@]+"${arr[@]}"} expands to nothing when arr is
     # unset or empty, avoiding the "unbound variable" error with set -u.
     # The earlier if+for guard was insufficient because bash 3.2 treats even
@@ -283,9 +329,21 @@ ensure_browser_healthy() {
       fi
     done
 
-    # Still here after the wait? Treat as a wedged orphan and force-kill.
+    # Still here after the wait? Two cases:
+    #   (a) Foreign MCP wrapper alive on this profile (user's IDE / Fazm Dev /
+    #       Claude Code interactive session that has <platform>-agent.json in
+    #       its MCP config) — DO NOT force-kill. Killing destroys the user's
+    #       Chrome session mid-use. Log + exit cleanly so the next cron cycle
+    #       retries when the user is done. Observed live 2026-05-13 14:15:14:
+    #       run-twitter-cycle force-killed the user's Fazm Dev twitter-agent
+    #       Chrome as "wedged orphan" and trashed an active IDE session.
+    #   (b) No foreign MCP wrapper alive — true wedged orphan. Force-kill.
     if [ "$has_chrome" = "yes" ]; then
-      echo "[ensure_browser_healthy] ${platform}: Chrome still alive after ${browser_wait_sec}s — force-killing as wedged orphan."
+      if defer_if_foreign_browser_mcp_active "$platform"; then
+        echo "[ensure_browser_healthy] ${platform}: Chrome still alive after ${browser_wait_sec}s AND foreign MCP wrapper detected. NOT force-killing — exiting this run cleanly so the user's session is preserved."
+        exit 0
+      fi
+      echo "[ensure_browser_healthy] ${platform}: Chrome still alive after ${browser_wait_sec}s — no foreign MCP wrapper found, treating as wedged orphan and force-killing."
       pkill -TERM -f "${platform}-agent.json"          2>/dev/null || true
       pkill -TERM -f "user-data-dir=${profile_dir}"    2>/dev/null || true
       sleep 1
@@ -299,6 +357,86 @@ ensure_browser_healthy() {
         "$profile_dir/SingletonCookie" \
         "$profile_dir/SingletonSocket" 2>/dev/null || true
 
+  return 0
+}
+
+# Detect if a playwright-mcp wrapper for the given platform agent is running
+# OUTSIDE this script's process tree (e.g. an interactive Fazm Dev / Claude
+# Code IDE session that has <platform>-agent.json in its MCP config, or an
+# already-running peer cron). When found, the calling cron pipeline should
+# exit cleanly without launching Chrome — racing the foreign MCP's profile
+# crashes Chrome with "chromium profile locked by another process; waited
+# 45s" and burns the run.
+#
+# Observed live 2026-05-13 14:29: engage-twitter.sh fired on schedule while
+# the user's Fazm Dev IDE held a twitter-agent MCP wrapper via codex-acp,
+# Phase A Playwright SIGTRAPed after the 45s SingletonLock wait. The user
+# saw repeated Chrome crashes every cron cycle until engage-twitter was
+# unloaded.
+#
+# Usage:
+#   defer_if_foreign_browser_mcp_active twitter || exit 0
+#   defer_if_foreign_browser_mcp_active reddit  "$LOG_FILE"  # optional log path
+#
+# Returns 0 (foreign found, caller should defer) or 1 (clean, caller proceeds).
+defer_if_foreign_browser_mcp_active() {
+  local platform="$1"
+  local log_file="${2:-}"
+  local our_pid=$$
+  local cfg_pattern="${platform}-agent.json"
+
+  # Find every playwright-mcp wrapper or node-playwright-mcp child whose
+  # command line references this platform's agent config file. Captures both
+  # the npm-exec wrapper layer and the underlying node process so we don't
+  # miss either tier of the tree.
+  local wrappers
+  wrappers=$(ps -A -o pid=,command= 2>/dev/null     | awk -v cfg="$cfg_pattern" '
+        index($0,cfg)==0 { next }
+        /npm exec @playwright\/mcp/ || /playwright-mcp/ { print $1 }
+      ' || true)
+
+  [ -z "$wrappers" ] && return 1
+
+  # Walk each wrapper's parent chain. If our_pid appears anywhere, the
+  # wrapper is a descendant of us (we spawned it ourselves later in this
+  # script — fine). Otherwise it's foreign.
+  local wpid cur depth foreign_pid=""
+  for wpid in $wrappers; do
+    cur=$wpid
+    depth=0
+    local is_ours=false
+    # Cap at 20 hops to avoid pathological ancestry walks.
+    while [ -n "$cur" ] && [ "$cur" != "1" ] && [ "$depth" -lt 20 ]; do
+      if [ "$cur" = "$our_pid" ]; then
+        is_ours=true
+        break
+      fi
+      cur=$(ps -p "$cur" -o ppid= 2>/dev/null | tr -d ' ')
+      depth=$((depth+1))
+    done
+    if ! $is_ours; then
+      foreign_pid=$wpid
+      break
+    fi
+  done
+
+  [ -z "$foreign_pid" ] && return 1
+
+  # Identify what the foreign wrapper is attached to so the log is useful.
+  local foreign_root=$foreign_pid
+  cur=$foreign_pid
+  while [ -n "$cur" ] && [ "$cur" != "1" ]; do
+    foreign_root=$cur
+    cur=$(ps -p "$cur" -o ppid= 2>/dev/null | tr -d ' ')
+  done
+  local foreign_root_cmd
+  foreign_root_cmd=$(ps -p "$foreign_root" -o command= 2>/dev/null | head -c 120)
+
+  local msg="[defer_foreign_mcp] ${platform}: foreign ${platform}-agent MCP wrapper PID ${foreign_pid} detected (root PID ${foreign_root}: ${foreign_root_cmd}). Skipping this run to avoid Chrome profile collision."
+  echo "$msg" >&2
+  if [ -n "$log_file" ] && [ -w "$(dirname "$log_file")" ]; then
+    echo "$msg" >> "$log_file"
+  fi
   return 0
 }
 
