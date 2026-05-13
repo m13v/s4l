@@ -11,7 +11,7 @@ Why this matters:
 - top_dud_reddit_queries.py = "no results returned" signal (search dud)
 - THIS = "results returned, ripen survived, draft gate killed them" signal
   i.e. the seed is producing alive-but-unfit threads. Category-level
-  mismatch — the LLM should drop or rephrase that seed.
+  mismatch, the LLM should drop or rephrase that seed.
 
 Output: JSON list (so build_discover_prompt can paste it directly), sorted
 by most-omitted first:
@@ -23,6 +23,11 @@ by most-omitted first:
 
 Usage:
     python3 scripts/top_omitted_reddit_topics.py [--project NAME] [--limit 15] [--window-hours 168]
+
+Routed through GET /api/v1/reddit-candidates/omitted-topics on the
+website. omit_rate and last_omit_h_ago are computed server-side; the
+shape returned by the route already matches the legacy CLI contract,
+so callers (build_discover_prompt et al.) don't need to change.
 """
 import argparse
 import json
@@ -30,54 +35,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-
-
-SQL = """
-WITH base AS (
-  SELECT search_topic,
-         matched_project,
-         subreddit,
-         status,
-         last_failure_reason,
-         draft_text,
-         last_attempt_at
-  FROM reddit_candidates
-  WHERE search_topic IS NOT NULL
-    AND search_topic <> ''
-    AND COALESCE(last_attempt_at, discovered_at) > NOW() - (%s || ' hours')::interval
-    {project_filter}
-)
-SELECT search_topic,
-       matched_project,
-       COUNT(*) FILTER (WHERE last_failure_reason = 'draft_gate_omit') AS draft_omits,
-       (COUNT(*) FILTER (WHERE draft_text IS NOT NULL)
-        + COUNT(*) FILTER (WHERE last_failure_reason = 'draft_gate_omit'))
-         AS ripen_survivors,
-       COUNT(*) FILTER (WHERE status = 'posted') AS posted,
-       MAX(last_attempt_at) FILTER (WHERE last_failure_reason = 'draft_gate_omit')
-         AS last_omit_at,
-       (
-         SELECT json_agg(DISTINCT s)
-         FROM (
-           SELECT subreddit AS s
-           FROM reddit_candidates rc2
-           WHERE rc2.search_topic = base.search_topic
-             AND rc2.matched_project = base.matched_project
-             AND rc2.last_failure_reason = 'draft_gate_omit'
-             AND rc2.subreddit IS NOT NULL
-             AND rc2.subreddit <> ''
-             AND COALESCE(rc2.last_attempt_at, rc2.discovered_at)
-                 > NOW() - (%s || ' hours')::interval
-           LIMIT 8
-         ) sub
-       ) AS sample_subreddits
-FROM base
-GROUP BY search_topic, matched_project
-HAVING COUNT(*) FILTER (WHERE last_failure_reason = 'draft_gate_omit') >= %s
-ORDER BY draft_omits DESC, ripen_survivors DESC
-LIMIT %s
-"""
+from http_api import api_get
 
 
 def main():
@@ -92,46 +50,38 @@ def main():
                         "in the window (default 1).")
     args = p.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
+    query = {
+        "limit": args.limit,
+        "window_hours": args.window_hours,
+        "min_omits": args.min_omits,
+    }
     if args.project:
-        sql = SQL.format(project_filter="AND matched_project = %s")
-        params = [str(args.window_hours), args.project,
-                  str(args.window_hours), args.min_omits, args.limit]
-    else:
-        sql = SQL.format(project_filter="")
-        params = [str(args.window_hours),
-                  str(args.window_hours), args.min_omits, args.limit]
+        query["project"] = args.project
 
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    resp = api_get("/api/v1/reddit-candidates/omitted-topics", query=query)
+    data = (resp or {}).get("data") or {}
+    rows = data.get("rows") or []
 
-    out = []
-    for r in rows:
-        search_topic, matched_project, draft_omits, ripen_survivors, posted, \
-            last_omit_at, sample_subreddits = r
-        denom = max(int(ripen_survivors or 0), 1)
-        omit_rate = round(int(draft_omits or 0) / denom, 2)
-        last_omit_h_ago = None
-        if last_omit_at is not None:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc)
-            try:
-                delta = now - last_omit_at
-                last_omit_h_ago = round(delta.total_seconds() / 3600.0, 1)
-            except Exception:
-                last_omit_h_ago = None
-        out.append({
-            "search_topic": search_topic,
-            "project": matched_project or "",
-            "draft_omits": int(draft_omits or 0),
-            "ripen_survivors": int(ripen_survivors or 0),
-            "posted": int(posted or 0),
-            "omit_rate": omit_rate,
-            "last_omit_h_ago": last_omit_h_ago,
-            "sample_subreddits": sample_subreddits or [],
-        })
+    # Route already returns the legacy shape. Mirror keys explicitly so
+    # downstream callers see a stable contract even if the route adds
+    # extra fields later.
+    out = [
+        {
+            "search_topic": r.get("search_topic"),
+            "project": r.get("project") or "",
+            "draft_omits": int(r.get("draft_omits") or 0),
+            "ripen_survivors": int(r.get("ripen_survivors") or 0),
+            "posted": int(r.get("posted") or 0),
+            "omit_rate": round(float(r.get("omit_rate") or 0), 2),
+            "last_omit_h_ago": (
+                round(float(r["last_omit_h_ago"]), 1)
+                if r.get("last_omit_h_ago") is not None
+                else None
+            ),
+            "sample_subreddits": r.get("sample_subreddits") or [],
+        }
+        for r in rows
+    ]
 
     json.dump(out, sys.stdout)
     print("", file=sys.stdout)
