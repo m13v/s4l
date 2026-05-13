@@ -46,6 +46,20 @@ LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
 QUERIES_FILE="/tmp/twitter_cycle_queries_$(date +%s).json"
 RUN_START=$(date +%s)
+
+# ----------------------------------------------------------------------------
+# Browser: Playwright MCP attached to Chrome twitter-agent profile at
+# ~/.claude/browser-profiles/twitter. (Camoufox/Firefox engine was carved out
+# 2026-05-13; only Chrome is supported now.)
+#
+# Vars are kept (TW_MCP_CONFIG, TW_BROWSER_PROFILE, TW_ENGINE_PREFIX) so the
+# downstream Claude SDK calls and singleton-cleanup hooks need no edits.
+# TW_ENGINE_PREFIX is empty by design; it used to prepend engine-specific
+# instructions to the scan/prep prompts.
+# ----------------------------------------------------------------------------
+TW_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json"
+TW_BROWSER_PROFILE="$HOME/.claude/browser-profiles/twitter"
+TW_ENGINE_PREFIX=""
 # Tweets older than this are no longer worth replying to. Pending rows older
 # than this are hard-expired by Phase 0; younger pending rows are salvaged
 # from prior cycles into this batch.
@@ -450,18 +464,23 @@ log "Per-project supply signal loaded: $SUPPLY_COUNT projects"
 SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"text":{"type":"string"},"tweetUrl":{"type":"string"},"datetime":{"type":"string"},"replies":{"type":"integer"},"retweets":{"type":"integer"},"likes":{"type":"integer"},"views":{"type":"integer"},"bookmarks":{"type":"integer"},"search_topic":{"type":"string"},"matched_project":{"type":"string"}},"required":["handle","text","tweetUrl","datetime","replies","retweets","likes","views","bookmarks","search_topic","matched_project"]}},"queries_used":{"type":"array","items":{"type":"object","properties":{"query":{"type":"string"},"project":{"type":"string"},"tweets_found":{"type":"integer"}},"required":["query","project","tweets_found"]}}},"required":["tweets","queries_used"]}'
 
 log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
+# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
+# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
+if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+    exit 0
+fi
 acquire_lock "twitter-browser" 3600
 # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
 # exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
 # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
 # went wrong when opening your profile" 7x and the pipeline hangs. Helper
 # refuses to clean if the lock PID is alive.
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 1: drafting queries and scraping tweets..."
 
-SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p --output-format json --json-schema "$SCAN_SCHEMA" "You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
+SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA" "${TW_ENGINE_PREFIX}You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
 
 ## Step 1: Draft one search query per project
 
@@ -908,9 +927,14 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 # phase2b_silent run-monitor rows even when posts succeeded.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
+# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
+# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
+if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+    exit 0
+fi
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replies..."
@@ -926,7 +950,7 @@ export CLAUDE_SESSION_ID
 
 PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
-PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p --output-format json --json-schema "$PREP_SCHEMA" "You are the Social Autoposter prep step.
+PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" "${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
   1. Read each thread you decide to reply to (browser, mcp__twitter-agent__* read-only).
@@ -1103,9 +1127,14 @@ fi
 # already be tripping if we left the row at phase2a.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
+# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
+# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
+if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+    exit 0
+fi
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
+bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
 ensure_browser_healthy "twitter"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
