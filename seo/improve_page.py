@@ -130,20 +130,50 @@ You are NOT restricted to any particular component library. The repo likely uses
 
 Before committing, you MUST verify the changes look correct in a real browser via the **`assrt` MCP** against the local dev server. This catches misalignment, broken layouts, off-screen elements, text overflow, missing images, and console errors that typecheck cannot.
 
-1. **Start the dev server** if not already running. Try in order: `pnpm dev`, `npm run dev`, `yarn dev`. Run it in the background (`nohup ... &` or via the Bash tool's `run_in_background: true`). Wait until it logs that it's listening (usually `localhost:3000`, but read the actual port from the dev server output — some repos use 3001, 4000, 5173, etc.).
-2. **Run `assrt_test`** against `http://localhost:<port><page_path>` (the exact `Page path` from the Context block above) for the page you just edited. Use a `#Case` that explicitly checks:
-   - Page renders without console errors
-   - Hero / above-the-fold section is visually intact (no overlapping text, no off-screen CTAs, no broken images)
-   - Primary CTA is visible, clickable, and not crowded
-   - Layout at desktop (1280px+) AND mobile (375px) widths is clean
-   - Any new sections you added flow correctly between existing ones
-   - Text doesn't overflow its container; headings don't wrap weirdly
-3. **If `assrt_test` fails or surfaces visual bugs**: use `assrt_diagnose` to root-cause, then fix the issue in the source files. Re-run `assrt_test`. Repeat up to 3 attempts. If you cannot resolve a visual bug after 3 attempts, set status="failed", DO NOT commit, and explain the failure in `rationale` + `visual_qa_findings`.
-4. **Only commit after `assrt_test` passes clean.**
+## 5a. Start the dev server
 
-Record the result in the final JSON (see Output): `visual_qa_status` ("passed" | "failed" | "skipped_no_dev_server"), `visual_qa_findings` (1-2 sentences on what assrt saw — empty string if passed clean), `visual_qa_test_url` (the localhost URL you tested).
+Try in order: `pnpm dev`, `npm run dev`, `yarn dev`. Run it in the background (`nohup ... &` or via the Bash tool's `run_in_background: true`). Wait until it logs that it's listening (usually `localhost:3000`, but read the actual port from the dev server output — some repos use 3001, 4000, 5173, etc.).
 
-Only set `visual_qa_status="skipped_no_dev_server"` if the dev server genuinely could not be started (missing deps, port conflict you can't resolve, no `dev` script in package.json). In that case still commit if the typecheck passed, but flag it loudly in `rationale`.
+## 5b. Run `assrt_test` (use exactly these arguments)
+
+Call `mcp__assrt__assrt_test` against `http://localhost:<port><page_path>` (the exact `Page path` from the Context block above) with:
+
+- **`stopOnFirstFailure: true`** — abort the remaining scenarios as soon as one fails. Stops the run from burning the timeout on Cases 2-5 when Case 1 already proved the page is broken.
+- **`timeout: 600`** — 10 minutes. The default is too tight for multi-case plans; long pages plus assrt's scroll/screenshot overhead easily exceeds 300s.
+- **`viewport: "desktop"`** — desktop preset (1440x900). Run a second call with `viewport: "mobile"` ONLY if your change touches above-the-fold layout.
+- **`autoOpenPlayer: false`** — pipeline mode, don't open the video player.
+- **`plan`** — keep to **2-3 focused cases max**. Each case is 3-5 steps. More cases means more wall-clock burn for less marginal coverage. Suggested cases:
+  - Case 1: page renders cleanly (no console errors, H1 visible, primary content area populated, no off-screen primary CTA)
+  - Case 2: the specific section you ADDED in this run renders and links correctly
+  - (Optional) Case 3: layout integrity at the bottom (footer, related-posts strip, CTA — no overflow, no broken images)
+- **`passCriteria`** — one paragraph naming what success means for this run, including "no JavaScript console errors" explicitly.
+
+## 5c. Read the result correctly
+
+The MCP response contains: `passed` (bool), `passedCount`, `failedCount`, `aborted` (bool, present only when run was cut short), `abortReason`, `scenarios` (array with per-scenario `passed`/`assertions[]`/`evidence`), and `logFile` (path to the full execution log on disk).
+
+**Read order:**
+
+1. If `passed: true` → visual QA passed. Proceed to commit.
+2. If `passed: false`:
+   - **`Read` the `logFile` path** (always). Grep for `[FAIL]` and `[PASS]` lines. The execution log has the ground truth for every assertion the inner agent ran, with the actual evidence text. The top-level `scenarios` summary can lose detail if `aborted: true`.
+   - Categorize each `[FAIL]`:
+     - **(A) caused by your edits in this run** (e.g. a section you added overflows, an import path you changed breaks rendering, a missing slug in CLAUDE_METER_SLUGS produces a 500) → `assrt_diagnose` if needed, fix the source file, retry `assrt_test`. Up to 3 fix/retry attempts.
+     - **(B) pre-existing on this page before your edits** (e.g. a console error that fires on every blog post because of a shared component, a layout quirk in the footer that ships on every page) → verify by `git stash`-ing your changes, reloading the page, confirming the same failure reproduces, then `git stash pop`. If pre-existing, you MAY proceed to commit but you MUST: (i) set `visual_qa_status="failed_preexisting"`, (ii) write the specific failure into `visual_qa_findings`, (iii) include the verbatim `[FAIL]` line from the execution log. Do NOT silently mark passed.
+   - **`aborted: true`** by itself is NOT a pass or a fail — it just means the run was cut short (by timeout or `stopOnFirstFailure`). The completed scenarios still contain real assertion data; trust the per-scenario `passed` field on those, plus the `logFile` ground truth.
+
+## 5d. Strict integrity rule
+
+`visual_qa_status` is one of `passed | failed | failed_preexisting | skipped_no_dev_server` and MUST match the evidence:
+
+- **`passed`**: only when `assrt_test` returned `passed: true`, OR when (a) `passed: false` was due solely to a wall-clock `Timeout` scenario AND (b) every completed scenario in `scenarios[]` has `passed: true` AND (c) the `logFile` shows no `[FAIL]` lines.
+- **`failed`**: any new visual bug your edits caused that you could not fix in 3 attempts. Set `status="failed"` at the envelope level, DO NOT commit.
+- **`failed_preexisting`**: a real `[FAIL]` exists in the log AND you verified it reproduces on `HEAD~1` (pre-edit). Commit is allowed; envelope `status="committed"` is fine, but `visual_qa_status` flags the issue.
+- **`skipped_no_dev_server`**: only when the dev server genuinely could not be started (missing deps, port conflict you can't resolve, no `dev` script). Commit is allowed if typecheck passed, flag loudly in `rationale`.
+
+**Do not claim `passed` because curl-ing the rendered HTML shows your content rendered.** Curl proves the response body has bytes; it does not prove the browser renders without console errors, paints correctly, or has clean layout. The only source of truth is `mcp__assrt__assrt_test`'s `passed` field cross-checked against the `logFile`.
+
+Record in the final JSON (see Output): `visual_qa_status`, `visual_qa_findings` (2-4 sentences, include the verbatim `[FAIL]` evidence if any), `visual_qa_test_url`.
 
 # Step 6: Commit
 
@@ -173,7 +203,7 @@ After committing, end your final assistant message with EXACTLY one fenced JSON 
   "rationale": "the single most important reason you expect this change to move the primary metric",
   "web_sources_used": ["url1", "url2", ...],
   "commit_sha": "<short sha or empty>",
-  "visual_qa_status": "passed" | "failed" | "skipped_no_dev_server",
+  "visual_qa_status": "passed" | "failed" | "failed_preexisting" | "skipped_no_dev_server",
   "visual_qa_findings": "what assrt saw; empty string if passed clean",
   "visual_qa_test_url": "http://localhost:<port><page_path> or empty if skipped",
   "notes_for_next_run": "anything you want the next run to know (tests ran, hypotheses to validate, etc.)"
