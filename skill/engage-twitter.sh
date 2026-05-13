@@ -21,6 +21,16 @@ export SA_CYCLE_ID="$BATCH_ID"
 
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
+
+# Skip cleanly if an interactive twitter-agent MCP session (Fazm Dev / IDE /
+# another cron) is alive on the same profile. Racing the foreign Chrome
+# triggers the "chromium profile locked by another process; waited 45s"
+# SIGTRAP cascade — observed live 2026-05-13 14:29 with the user's IDE
+# holding the profile via codex-acp.
+if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
+    exit 0
+fi
+
 acquire_lock "twitter-browser" 3600
 # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
 # exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
