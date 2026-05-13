@@ -32,6 +32,7 @@ from http_api import api_get, api_post, api_patch
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
+REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
 RATELIMIT_FILE = "/tmp/reddit_ratelimit.json"
 PREFLIGHT_WAIT_BUDGET_SECONDS = 180
@@ -198,118 +199,66 @@ def _db_load_fresh_draft(thread_url):
 def _db_mark_candidate_posted(thread_url, post_id):
     """Mark a candidate as successfully posted with linkage to posts.id.
 
-    Guard added 2026-05-10: when `post_id is None` we used to write
-    status='posted' with post_id=NULL anyway. That created 38% of posted
-    candidates with broken linkage and made them invisible to the
-    candidate-keyed feedback feed (top_search_topics --platform reddit).
-    Two recovery layers now:
-      1) try to recover post_id from posts.thread_url (covers the case where
-         log_post() actually inserted the row but the caller's parse of the
-         return payload failed — most common log_post=None mode).
-      2) if recovery fails, mark status='failed' with reason
-         'log_post_returned_null' instead of 'posted'. The comment IS live
-         on Reddit (we have a permalink upstream), but we lost the link to
-         posts(id), so a downstream backfill job can target this exact
-         reason. status='failed' prevents Phase 0 salvage from re-posting
-         and creating a duplicate.
+    The server-side action=mark_posted runs the same two recovery layers as
+    the previous Python implementation: if post_id is NULL, it first tries
+    `SELECT id FROM posts WHERE thread_url=...` to recover, then falls back
+    to status='failed' with last_failure_reason='log_post_returned_null'.
+    See scripts/post_reddit.py CLAUDE.md commentary for the rationale.
     """
     if not thread_url:
         return
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        if post_id is None:
-            # Recovery layer 1: maybe log_post inserted into posts but the
-            # caller's return-payload parse dropped the id.
-            row = conn.execute(
-                "SELECT id FROM posts WHERE thread_url = %s "
-                "AND LOWER(platform)='reddit' "
-                "ORDER BY posted_at DESC LIMIT 1",
-                [thread_url],
-            ).fetchone()
-            if row:
-                post_id = int(row[0])
-                print(
-                    f"[post_reddit] WARNING: recovered post_id={post_id} via posts.thread_url "
-                    f"after log_post returned None for {thread_url}",
-                    file=sys.stderr,
-                )
-
-        if post_id is None:
-            # Recovery layer 2: tag failure reason and bail. Comment is live
-            # but linkage is lost; a backfill cron can repair it later.
-            conn.execute(
-                "UPDATE reddit_candidates SET "
-                "  status = 'failed', "
-                "  last_attempt_at = NOW(), "
-                "  last_failure_reason = 'log_post_returned_null' "
-                "WHERE thread_url = %s AND post_id IS NULL",
-                [thread_url],
-            )
-            conn.commit()
-            conn.close()
+        body = {"thread_url": thread_url, "action": "mark_posted"}
+        if post_id is not None:
+            body["post_id"] = int(post_id)
+        resp = api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            body,
+            ok_on_404=True,
+        )
+        data = (resp or {}).get("data") or {}
+        if data.get("recovery") == "marked_failed_no_post_id":
             print(
                 f"[post_reddit] WARNING: log_post returned None and posts.thread_url "
-                f"lookup failed for {thread_url}. Marking status='failed' to prevent "
+                f"lookup failed for {thread_url}. Marked status='failed' to prevent "
                 f"Phase 0 re-post (would dupe). Comment is live on Reddit; backfill "
                 f"required for click attribution.",
                 file=sys.stderr,
             )
-            return
-
-        conn.execute(
-            "UPDATE reddit_candidates SET "
-            "  status = 'posted', "
-            "  post_id = %s, "
-            "  posted_at = NOW(), "
-            "  last_attempt_at = NOW() "
-            "WHERE thread_url = %s",
-            [post_id, thread_url],
-        )
-        conn.commit()
-        conn.close()
+        elif data.get("recovery") == "ok" and post_id is None:
+            # Server-side recovery succeeded — log for parity with the prior
+            # Python WARNING so dashboard ingestion is unchanged.
+            recovered = ((data.get("candidate") or {}).get("post_id"))
+            print(
+                f"[post_reddit] WARNING: recovered post_id={recovered} via posts.thread_url "
+                f"after log_post returned None for {thread_url}",
+                file=sys.stderr,
+            )
     except Exception as e:
         print(f"[post_reddit] WARNING: mark_posted failed for {thread_url}: {e}",
               file=sys.stderr)
 
 
 def _db_mark_candidate_attempt(thread_url, reason, permanent=False):
-    """Record a failed post attempt.
+    """Record a failed post attempt via /api/v1/reddit-candidates/by-thread-url.
 
-    Permanent failures jump straight to status='failed' (Phase 0 salvage skips
-    these). Transient failures keep status='pending' with attempt_count++; if
-    the bump puts attempt_count >= MAX_ATTEMPTS the row is auto-promoted to
-    'failed' so we don't keep salvaging it forever.
+    Server-side action=mark_attempt mirrors the previous Python branching
+    (permanent vs transient with auto-promote at MAX_ATTEMPTS).
     """
     if not thread_url:
         return
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        if permanent:
-            conn.execute(
-                "UPDATE reddit_candidates SET "
-                "  status = 'failed', "
-                "  attempt_count = attempt_count + 1, "
-                "  last_attempt_at = NOW(), "
-                "  last_failure_reason = %s "
-                "WHERE thread_url = %s",
-                [reason, thread_url],
-            )
-        else:
-            conn.execute(
-                "UPDATE reddit_candidates SET "
-                "  attempt_count = attempt_count + 1, "
-                "  last_attempt_at = NOW(), "
-                "  last_failure_reason = %s, "
-                "  status = CASE "
-                "    WHEN attempt_count + 1 >= %s THEN 'failed' "
-                "    ELSE status END "
-                "WHERE thread_url = %s",
-                [reason, MAX_ATTEMPTS, thread_url],
-            )
-        conn.commit()
-        conn.close()
+        api_patch(
+            "/api/v1/reddit-candidates/by-thread-url",
+            {
+                "thread_url": thread_url,
+                "action": "mark_attempt",
+                "reason": reason,
+                "permanent": bool(permanent),
+                "max_attempts": MAX_ATTEMPTS,
+            },
+            ok_on_404=True,
+        )
     except Exception as e:
         print(f"[post_reddit] WARNING: mark_attempt failed for {thread_url}: {e}",
               file=sys.stderr)
@@ -318,196 +267,62 @@ def _db_mark_candidate_attempt(thread_url, reason, permanent=False):
 def _db_phase0_salvage(batch_id, freshness_hours=FRESHNESS_HOURS,
                        max_attempts=MAX_ATTEMPTS,
                        retry_backoff_min=RETRY_BACKOFF_MIN):
-    """Phase 0: hard-expire stale rows + re-assign salvageable ones to this batch.
+    """Phase 0 via /api/v1/reddit-candidates/phase0-salvage.
 
-    Returns (expired_count, salvaged_count). Mirrors run-twitter-cycle.sh's
-    Phase 0 SQL but with Reddit-tuned windows. We use a Python advisory-lock
-    int distinct from Twitter's 7472346 (we pick 7472347) so concurrent
-    Twitter+Reddit cycles don't block each other on the same lock.
+    The route runs the same single-transaction WITH _lock / expired / salvaged
+    CTE that this function used to issue directly. Returns (expired, salvaged).
     """
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        # Single round-trip: combine the lock acquisition, expire, and salvage
-        # into one transaction so a crash mid-Phase-0 doesn't half-update.
-        cur = conn.execute(
-            "WITH _lock AS (SELECT pg_advisory_xact_lock(7472347)), "
-            "expired AS ( "
-            "    UPDATE reddit_candidates "
-            "    SET status='expired' "
-            "    WHERE status='pending' "
-            "      AND discovered_at < NOW() - INTERVAL '%s hours' "
-            "    RETURNING id "
-            "), salvaged AS ( "
-            "    UPDATE reddit_candidates "
-            "    SET batch_id = %s "
-            "    WHERE status='pending' "
-            "      AND attempt_count < %s "
-            "      AND batch_id IS DISTINCT FROM %s "
-            "      AND discovered_at >= NOW() - INTERVAL '%s hours' "
-            # Salvage is a RETRY rail for two distinct row classes:
-            #   (a) previously-attempted rows past the retry backoff
-            #       (transient post failures) — the original 2026-05-08 case.
-            #   (b) drafted-but-never-attempted rows — rows whose discover
-            #       cycle wrote `draft_text` but never reached the post phase
-            #       (e.g. watchdog SIGTERMed the cycle while it waited for
-            #       the reddit-browser lock; observed 2026-05-10 cycle 11:30
-            #       killed at 5400s with 7 drafts queued, posted=0). These
-            #       rows have `attempt_count=0`, `last_attempt_at IS NULL`,
-            #       `draft_text IS NOT NULL` — recoverable but invisible to
-            #       the original gate.
-            # We still EXCLUDE fresh-discovered-but-not-yet-drafted rows
-            # (`draft_text IS NULL AND last_attempt_at IS NULL`), preserving
-            # the 2026-05-08 fix's intent: don't scoop the discoverer's own
-            # in-flight pool and waste $30/cycle re-drafting blind.
-            "      AND ( "
-            "          (last_attempt_at IS NOT NULL AND last_attempt_at < NOW() - INTERVAL '%s minutes') "
-            "          OR (last_attempt_at IS NULL AND draft_text IS NOT NULL) "
-            "      ) "
-            "    RETURNING id "
-            ") "
-            "SELECT (SELECT COUNT(*) FROM expired), (SELECT COUNT(*) FROM salvaged)",
-            [freshness_hours, batch_id, max_attempts, batch_id,
-             freshness_hours, retry_backoff_min],
+        resp = api_post(
+            "/api/v1/reddit-candidates/phase0-salvage",
+            {
+                "batch_id": batch_id,
+                "freshness_hours": int(freshness_hours),
+                "max_attempts": int(max_attempts),
+                "retry_backoff_minutes": int(retry_backoff_min),
+            },
         )
-        row = cur.fetchone()
-        conn.commit()
-        conn.close()
-        if row:
-            return int(row[0] or 0), int(row[1] or 0)
+        data = (resp or {}).get("data") or {}
+        return int(data.get("expired_count") or 0), int(data.get("salvaged_count") or 0)
     except Exception as e:
         print(f"[post_reddit] WARNING: phase0 salvage failed: {e}",
               file=sys.stderr)
-    return 0, 0
+        return 0, 0
 
 
 def _db_pick_salvage_candidates(batch_id, limit=1):
     """Pull up to `limit` salvage-eligible rows from a SINGLE project.
 
-    Phase 0 already re-assigned salvageable rows to `batch_id`. This helper
-    picks the project with the most pending rows in this batch, then returns
-    up to `limit` rows from THAT project (highest delta_score first, falling
-    back to most recently discovered).
+    Routes through /api/v1/reddit-candidates/pick-salvage, which performs
+    the same two-step (project picker + atomic claim) inside a single PG
+    transaction. The route stamps last_attempt_at=NOW() at pick-time using
+    FOR UPDATE SKIP LOCKED so two concurrent post phases can never re-pick
+    the same row. See route source for the full SQL.
 
-    Single-project batching is intentional: draft phase builds the Claude
-    prompt around plan["project_name"], and post phase logs each comment's
-    posts.project from the same field. Mixing projects in one salvage batch
-    would either misattribute posts or require a per-decision project_name
-    refactor across draft/post. The single-project rule keeps the existing
-    contract intact while letting one ripen+draft+post cycle handle N rows
-    instead of 1.
-
-    Returns a {project_name, decisions:[{...}, ...], cost:0, salvaged:True}
-    dict, or None if no eligible row remains.
+    Returns {project_name, decisions:[...], cost:0, salvaged:True, ...} or
+    None if no eligible row remains.
     """
     limit = max(1, int(limit or 1))
     try:
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        # Step 1: pick the project with the most pending rows in this batch.
-        # Tie-break by max delta_score so the project with the strongest
-        # remaining momentum signal wins.
-        cur = conn.execute(
-            "SELECT matched_project, COUNT(*) AS c "
-            "FROM reddit_candidates "
-            "WHERE batch_id = %s "
-            "  AND status = 'pending' "
-            "  AND attempt_count < %s "
-            # Defense-in-depth: salvage retries previously-attempted failures
-            # OR drafted-but-never-attempted rows (orphaned drafts from a
-            # killed cycle — see Phase 0 comment on the (a)/(b) split).
-            # Still excludes fresh-discovered rows with no draft.
-            # (2026-05-08 baseline; (b) added 2026-05-10.)
-            "  AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
-            "GROUP BY matched_project "
-            "ORDER BY c DESC, MAX(COALESCE(delta_score, 0)) DESC "
-            "LIMIT 1",
-            [batch_id, MAX_ATTEMPTS],
+        resp = api_post(
+            "/api/v1/reddit-candidates/pick-salvage",
+            {
+                "batch_id": batch_id,
+                "max_attempts": MAX_ATTEMPTS,
+                "draft_ttl_minutes": DRAFT_TTL_MIN,
+                "limit": limit,
+            },
         )
-        proj_row = cur.fetchone()
-        if not proj_row:
-            conn.close()
+        data = (resp or {}).get("data") or {}
+        if not data.get("decisions"):
             return None
-        project_name = proj_row[0] or "general"
-
-        # Step 2: pull up to `limit` rows from that project, highest-momentum
-        # first. The CASE on draft_text enforces draft_ttl_min freshness at
-        # the SQL level so stale drafts don't ride into post (mirrors the
-        # original single-row implementation).
-        #
-        # 2026-05-12 atomic-claim patch: the SELECT is wrapped in a CTE with
-        # FOR UPDATE SKIP LOCKED, and the outer query UPDATEs the picked rows'
-        # last_attempt_at = NOW() in the SAME transaction. Why: previously,
-        # path-(b) orphaned-draft rows (last_attempt_at IS NULL, draft_text
-        # IS NOT NULL) had no time gate, so a second cycle's Phase 0 salvage
-        # could re-assign the SAME row to its own batch while the first cycle
-        # was still mid-post (e.g. waiting on the reddit-browser lock). Both
-        # cycles then raced the browser for the same row, and the loser hit
-        # cdp_no_response (observed 2026-05-12 13:45 Cyrano salvage). Stamping
-        # last_attempt_at=NOW() at pick-time converts orphaned-draft rows
-        # into "freshly attempted" rows for the next 30 min (RETRY_BACKOFF_MIN),
-        # which Phase 0's existing time gate already respects, so re-salvage
-        # is blocked until the in-flight cycle either posts or expires.
-        # SKIP LOCKED ensures two concurrent post phases never block each
-        # other on the row lock; the loser sees fewer rows and moves on.
-        cur = conn.execute(
-            "WITH picked AS ( "
-            "    SELECT id, thread_url, thread_author, thread_title, subreddit, "
-            "           matched_project, search_topic, drafted_at, draft_text, "
-            "           draft_engagement_style, attempt_count "
-            "    FROM reddit_candidates "
-            "    WHERE batch_id = %s "
-            "      AND status = 'pending' "
-            "      AND attempt_count < %s "
-            "      AND matched_project = %s "
-            # Same defense-in-depth as the project-pick query above:
-            # salvage retries previously-attempted failures OR orphaned
-            # drafts from a killed cycle. (2026-05-10.)
-            "      AND (last_attempt_at IS NOT NULL OR draft_text IS NOT NULL) "
-            "    ORDER BY COALESCE(delta_score, 0) DESC, discovered_at DESC "
-            "    LIMIT %s "
-            "    FOR UPDATE SKIP LOCKED "
-            ") "
-            "UPDATE reddit_candidates c "
-            "SET last_attempt_at = NOW() "
-            "FROM picked "
-            "WHERE c.id = picked.id "
-            "RETURNING c.thread_url, c.thread_author, c.thread_title, c.subreddit, "
-            "          c.matched_project, c.search_topic, "
-            "          CASE WHEN picked.drafted_at > NOW() - INTERVAL '%s minutes' "
-            "               THEN picked.draft_text ELSE NULL END AS fresh_draft, "
-            "          picked.draft_engagement_style, picked.attempt_count",
-            [batch_id, MAX_ATTEMPTS, project_name, limit, DRAFT_TTL_MIN],
-        )
-        rows = cur.fetchall()
-        conn.commit()
-        conn.close()
-        if not rows:
-            return None
-        decisions = []
-        max_attempt = 0
-        for row in rows:
-            decision = {
-                "action": "candidate",
-                "thread_url": row[0],
-                "thread_author": row[1] or "",
-                "thread_title": row[2] or "",
-                "search_topic": row[5] or "",
-                "engagement_style": row[7] or "",
-            }
-            if row[6]:
-                decision["draft_text"] = row[6]
-            decisions.append(decision)
-            attempt = int(row[8] or 0)
-            if attempt > max_attempt:
-                max_attempt = attempt
         return {
-            "project_name": project_name,
-            "decisions": decisions,
-            "cost": 0.0,
-            "salvaged": True,
-            "salvaged_attempt": max_attempt + 1,
-            "salvaged_count": len(decisions),
+            "project_name": data.get("project_name") or "general",
+            "decisions": data.get("decisions") or [],
+            "cost": float(data.get("cost") or 0.0),
+            "salvaged": bool(data.get("salvaged", True)),
+            "salvaged_attempt": int(data.get("salvaged_attempt") or 0),
+            "salvaged_count": int(data.get("salvaged_count") or 0),
         }
     except Exception as e:
         print(f"[post_reddit] WARNING: pick_salvage_candidates failed: {e}",
@@ -859,17 +674,36 @@ def get_dud_reddit_queries(project_name, limit=15, window_hours=168):
     return ""
 
 
+def _recent_comment_text(item):
+    """Accept either str (legacy shape) or (id, content) tuple (2026-05-12
+    shape) and return the content string. Lets all three prompt builders
+    consume recent_comments without caring which shape they got. If
+    you're refactoring the upstream shape again, update this one place."""
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return item[1] or ""
+    return item or ""
+
+
 def get_recent_comments(limit=5):
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    cur = conn.execute(
-        "SELECT our_content FROM posts "
-        "WHERE platform='reddit' ORDER BY id DESC LIMIT %s",
-        [limit],
+    """Recent Reddit posts.our_content via /api/v1/posts.
+
+    Returns list of (id, content) tuples (2026-05-12 change). The IDs
+    feed into the generation_trace audit blob so a later reader can
+    JOIN back to the source posts; the content still feeds the prompt
+    builders verbatim. Prompt-builders below were updated to accept
+    both the old (str) and new (tuple) shapes so any straggler caller
+    keeps working without a coordinated change.
+    """
+    resp = api_get(
+        "/api/v1/posts",
+        query={"platform": "reddit", "limit": int(limit)},
     )
-    results = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return results
+    rows = ((resp or {}).get("data") or {}).get("posts") or []
+    return [
+        (int(r["id"]), r.get("our_content") or "")
+        for r in rows
+        if r.get("our_content") and r.get("id") is not None
+    ]
 
 
 def load_active_reddit_campaigns():
@@ -879,26 +713,28 @@ def load_active_reddit_campaigns():
     the drafted text in Python before posting, so the literal text is
     guaranteed to land on Reddit. sample_rate gates the per-post coin flip
     for concurrent A/B (e.g. 0.5 = ~half of posts get tagged).
+
+    Calls /api/v1/campaigns?status=active&platform=reddit&has_suffix=true&with_budget_remaining=true.
     """
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            """SELECT id, suffix, COALESCE(sample_rate, 1.000)
-               FROM campaigns
-               WHERE status = 'active'
-                 AND (',' || platforms || ',') LIKE '%,reddit,%'
-                 AND max_posts_total IS NOT NULL
-                 AND posts_made < max_posts_total
-                 AND suffix IS NOT NULL AND suffix <> ''
-               ORDER BY id"""
-        )
-        return [
-            {"id": r[0], "suffix": r[1], "sample_rate": float(r[2])}
-            for r in cur.fetchall()
-        ]
-    finally:
-        conn.close()
+    resp = api_get(
+        "/api/v1/campaigns",
+        query={
+            "status": "active",
+            "platform": "reddit",
+            "has_suffix": "true",
+            "with_budget_remaining": "true",
+            "limit": 500,
+        },
+    )
+    rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+    return [
+        {
+            "id": int(r["id"]),
+            "suffix": r.get("suffix"),
+            "sample_rate": float(r.get("sample_rate") if r.get("sample_rate") is not None else 1.0),
+        }
+        for r in rows
+    ]
 
 
 def _angle_str(v):
@@ -962,7 +798,12 @@ def build_discover_prompt(project, config, limit, top_report, recent_comments,
 
     recent_ctx = ""
     if recent_comments:
-        snippets = "\n".join(f"  - {c}" for c in recent_comments)
+        # _recent_comment_text handles both legacy str and current (id, content) shapes.
+        snippets = "\n".join(
+            f"  - {_recent_comment_text(c)}"
+            for c in recent_comments
+            if _recent_comment_text(c)
+        )
         recent_ctx = f"\nYour last {len(recent_comments)} comments (don't repeat these threads):\n{snippets}\n"
 
     top_ctx = ""
@@ -1063,7 +904,12 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments)
 
     recent_ctx = ""
     if recent_comments:
-        snippets = "\n".join(f"  - {c}" for c in recent_comments)
+        # _recent_comment_text handles both legacy str and current (id, content) shapes.
+        snippets = "\n".join(
+            f"  - {_recent_comment_text(c)}"
+            for c in recent_comments
+            if _recent_comment_text(c)
+        )
         recent_ctx = f"\nYour last {len(recent_comments)} comments (don't repeat talking points):\n{snippets}\n"
 
     top_ctx = ""
@@ -1213,7 +1059,12 @@ def build_prompt(project, config, limit, top_report, recent_comments,
 
     recent_ctx = ""
     if recent_comments:
-        snippets = "\n".join(f"  - {c}" for c in recent_comments)
+        # _recent_comment_text handles both legacy str and current (id, content) shapes.
+        snippets = "\n".join(
+            f"  - {_recent_comment_text(c)}"
+            for c in recent_comments
+            if _recent_comment_text(c)
+        )
         recent_ctx = f"""
 Your last {len(recent_comments)} comments (don't repeat talking points):
 {snippets}
@@ -1470,6 +1321,61 @@ def run_claude(prompt, timeout=600):
         return False, str(e), usage
 
 
+def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
+    """Acquire the reddit-browser lease for THIS row's CDP work.
+
+    Per-post acquire (not per-cycle, per-phase) is the load-bearing migration
+    shipped 2026-05-13. Before this change, run-reddit-search.sh held the
+    lease around the entire `--phase post` invocation, so a 10-row salvage
+    batch monopolised the browser for ~30 min (10 × ~45s post + 9 × 180s
+    between-post sleep) while peers (link-edit-reddit, dm-outreach-reddit,
+    engage-reddit, engage-dm-replies-reddit) sat blocked. Pushing acquire/
+    release down to per-row means lease is only held during the actual CDP
+    posting work (~45s incl. retries), and the 3-min between-post sleeps
+    happen unlocked.
+
+    The MCP wrapper's auto-heartbeat (PreToolUse/PostToolUse hooks bumping
+    `expires_at`) keeps the lease alive during real browser activity, so no
+    manual heartbeat is needed here. Default TTL of 90s leaves enough headroom
+    for post_via_cdp's 5-attempt retry loop with internal sleeps.
+
+    Returns (ok: bool, msg: str). msg is the helper's last stdout line on
+    success, or BUSY/ERROR diagnostic on failure.
+    """
+    try:
+        r = subprocess.run(
+            ["python3", REDDIT_BROWSER_LOCK, "acquire",
+             "--timeout", str(timeout), "--ttl", str(ttl)],
+            capture_output=True, text=True, timeout=timeout + 30,
+        )
+        out_lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln]
+        last = out_lines[-1] if out_lines else ""
+        if r.returncode == 0 and last.startswith("OK"):
+            return True, last
+        return False, last or (r.stderr or "").strip()[:200] or f"rc={r.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "subprocess_timeout"
+    except Exception as e:
+        return False, f"exception:{e}"
+
+
+def _release_browser_lease() -> None:
+    """Release the reddit-browser lease. Idempotent (NOT_HELD is fine).
+
+    Always called in a `finally` so peers can acquire during the 3-min
+    between-post sleep even if post_via_cdp raised. The lease auto-decays
+    after 90s of idleness anyway (no MCP heartbeats while we're sleeping),
+    but explicit release frees peers immediately.
+    """
+    try:
+        subprocess.run(
+            ["python3", REDDIT_BROWSER_LOCK, "release"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def post_via_cdp(thread_url, reply_to_url, text):
     """Post a comment or reply via CDP. Returns parsed JSON result."""
     # 5 attempts with lock-aware backoff. Lock contention (engage.sh or other
@@ -1514,8 +1420,17 @@ def post_via_cdp(thread_url, reply_to_url, text):
     return {"ok": False, "error": "all_attempts_failed"}
 
 
-def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None):
-    """Log a successful post to the database. Returns the new post_id, or None."""
+def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None):
+    """Log a successful post to the database. Returns the new post_id, or None.
+
+    generation_trace_path (2026-05-12): optional path to a JSON file with
+    the few-shot context Claude saw before drafting (top_performers
+    report, recent comments, top_search_topics). Forwarded to
+    reddit_tools.py as --generation-trace and stored in
+    posts.generation_trace JSONB. File-based (not inline) to keep argv
+    short. Same trace blob is reused for every post produced from this
+    Claude draft, since they all share the same few-shot context.
+    """
     try:
         cmd = ["python3", REDDIT_TOOLS, "log-post",
              thread_url, permalink or "", text, project_name,
@@ -1525,6 +1440,8 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
             cmd.extend(["--engagement-style", engagement_style])
         if search_topic:
             cmd.extend(["--search-topic", search_topic])
+        if generation_trace_path:
+            cmd.extend(["--generation-trace", generation_trace_path])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         try:
             payload = json.loads((result.stdout or "").strip())
@@ -1841,15 +1758,10 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         seed = (candidates[0].get("search_topic") or "").strip()
         if seed:
             try:
-                dbmod.load_env()
-                conn = dbmod.get_conn()
-                conn.execute(
-                    "UPDATE reddit_search_attempts SET seed = %s "
-                    "WHERE batch_id = %s AND seed IS NULL",
-                    [seed, plan_batch_id],
+                api_patch(
+                    "/api/v1/reddit-search-attempts",
+                    {"batch_id": plan_batch_id, "seed": seed},
                 )
-                conn.commit()
-                conn.close()
             except Exception as e:
                 print(f"[post_reddit] WARNING: seed backfill failed: {e}", file=sys.stderr)
 
@@ -1912,6 +1824,42 @@ def _draft_iteration(plan, config, reddit_username):
         plan["draft_cost"] = 0.0
         plan["phase"] = "draft"
         plan["draft_reused"] = True
+        # Build a "reused draft" marker trace so the audit row isn't empty.
+        # We can't recover the exact context the prior cycle's Claude saw,
+        # but the current top_performers/recent_comments document what the
+        # few-shot prompt WOULD have contained had we redrafted. The
+        # reused_from_prior_cycle flag tells future auditors "this is
+        # current-cycle context, not what produced the draft" — without it
+        # the trace would look like Claude saw this report and chose to
+        # reuse, which it didn't (Claude wasn't invoked at all). Marker
+        # also gives 100% trace coverage on the platform so SQL queries
+        # don't have to special-case NULL rows.
+        try:
+            from generation_trace import build_trace, write_trace_tempfile
+            top_report = get_top_performers(project_name)
+            recent_comments = get_recent_comments()
+            trace = build_trace(
+                platform="reddit",
+                project_name=project_name,
+                prompt_chars=0,  # no Claude call this cycle
+                top_performers_text=top_report or "",
+                top_search_topics_text="",
+                recent_comment_ids=[pid for pid, _ in (recent_comments or [])],
+                model="reused_from_prior_cycle",
+                min_score_floor=10,
+                extras={
+                    "reused_from_prior_cycle": True,
+                    "draft_ttl_min": DRAFT_TTL_MIN,
+                    "reused_candidate_count": len(candidates),
+                },
+            )
+            trace_path = write_trace_tempfile(trace, prefix="reddit_reused_trace_")
+            if trace_path:
+                plan["generation_trace_path"] = trace_path
+                print(f"[post_reddit] Reused-draft trace marker: {trace_path}")
+        except Exception as e:
+            print(f"[post_reddit] WARNING: reused-draft trace build failed "
+                  f"({e}); proceeding without trace")
         return plan
 
     project = None
@@ -1926,7 +1874,39 @@ def _draft_iteration(plan, config, reddit_username):
 
     top_report = get_top_performers(project_name)
     recent_comments = get_recent_comments()
+    # We don't have a Reddit equivalent of top_search_topics_report in
+    # the draft phase (the discover phase loads it for the search step).
+    # Pass empty string; the trace audit still captures top_performers
+    # and recent_comments, which is the bulk of the few-shot context.
     prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments)
+
+    # Build the generation_trace audit blob: what Claude is about to see.
+    # Captured BEFORE the Claude call so we never end up with a post row
+    # missing its trace if Claude errors out. The path is stashed in
+    # `plan` so the post-phase (_post_iteration → log_post) can forward
+    # it to reddit_tools.py for INSERT into posts.generation_trace.
+    # Same trace reused for every post produced from this draft session.
+    try:
+        from generation_trace import build_trace, write_trace_tempfile
+        trace = build_trace(
+            platform="reddit",
+            project_name=project_name,
+            prompt_chars=len(prompt or ""),
+            top_performers_text=top_report or "",
+            top_search_topics_text="",  # Reddit draft phase doesn't surface this
+            recent_comment_ids=[pid for pid, _ in (recent_comments or [])],
+            model=None,
+            min_score_floor=10,  # PLATFORM_MIN_SCORE['reddit']
+        )
+        trace_path = write_trace_tempfile(trace, prefix="reddit_gen_trace_")
+        if trace_path:
+            plan["generation_trace_path"] = trace_path
+            print(f"[post_reddit] Generation trace: {trace_path} "
+                  f"({os.path.getsize(trace_path)} bytes)")
+    except Exception as e:
+        # Audit row is nice-to-have, never a blocker.
+        print(f"[post_reddit] WARNING: generation_trace build failed "
+              f"({e}); proceeding without trace")
 
     print(f"[post_reddit] Starting draft session for {len(candidates)} thread(s)...")
     start = time.time()
@@ -2089,8 +2069,28 @@ def _post_iteration(plan, reddit_username):
         except Exception as e:
             print(f"[post_reddit] WARNING: URL wrap raised ({e}); posting unwrapped")
 
-        print(f"[post_reddit] Posting {i + 1}/{len(decisions)}: {thread_title[:50]}...")
-        result = post_via_cdp(thread_url, reply_to_url, text)
+        # Per-row reddit-browser lease (2026-05-13). Acquire JUST around the
+        # CDP work, release before this row's DB post-processing and the 3-min
+        # between-post sleep. Peers (link-edit, dm-outreach, engage,
+        # engage-dm-replies) can use the browser during our sleeps and DB
+        # writes instead of sitting blocked until the whole batch finishes.
+        lease_ok, lease_msg = _acquire_browser_lease(timeout=600, ttl=90)
+        if not lease_ok:
+            print(f"[post_reddit] {i + 1}/{len(decisions)} LEASE: {lease_msg}; skipping post")
+            failed += 1
+            # Treat lease-acquire failure as TRANSIENT so phase0 salvages
+            # the row next cycle (it's not the candidate's fault that a
+            # peer pipeline held the browser too long).
+            _db_mark_candidate_attempt(thread_url, "lease_acquire_timeout", permanent=False)
+            if i < len(decisions) - 1:
+                time.sleep(180)
+            continue
+
+        try:
+            print(f"[post_reddit] Posting {i + 1}/{len(decisions)}: {thread_title[:50]}...")
+            result = post_via_cdp(thread_url, reply_to_url, text)
+        finally:
+            _release_browser_lease()
 
         if result.get("ok"):
             if result.get("already_replied"):
@@ -2110,7 +2110,13 @@ def _post_iteration(plan, reddit_username):
             new_post_id = log_post(thread_url, permalink, text, project_name,
                      thread_author, thread_title, reddit_username,
                      engagement_style=engagement_style,
-                     search_topic=search_topic)
+                     search_topic=search_topic,
+                     # Forward the trace blob built during draft phase.
+                     # Same trace for every post in this plan because they
+                     # all saw the same few-shot context. None when the
+                     # draft phase used a reused/cached draft (no Claude
+                     # call) — that's fine, audit just records no trace.
+                     generation_trace_path=plan.get("generation_trace_path"))
             bump_campaigns("posts", new_post_id, applied_campaign_ids)
             # Backfill post_links.post_id for the codes minted at wrap time
             # so /api/short-links/<code> resolver knows which post each
@@ -2263,8 +2269,18 @@ def main():
             sys.exit(2)
         with open(args.in_path) as f:
             plan = json.load(f)
-        posted, failed = _post_iteration(plan, reddit_username)
-        print(f"[post_reddit] phase=post project={plan.get('project_name')} posted={posted} failed={failed}")
+        try:
+            posted, failed = _post_iteration(plan, reddit_username)
+            print(f"[post_reddit] phase=post project={plan.get('project_name')} posted={posted} failed={failed}")
+        finally:
+            # Clean up the generation_trace temp file. By this point every
+            # post that landed has the trace JSONB persisted to its row,
+            # so the on-disk file is redundant. Best-effort delete.
+            try:
+                from generation_trace import cleanup_trace_tempfile
+                cleanup_trace_tempfile(plan.get("generation_trace_path"))
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
