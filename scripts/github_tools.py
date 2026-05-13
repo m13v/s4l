@@ -240,19 +240,44 @@ def cmd_log_post(args):
     session_id = (getattr(args, "claude_session_id", None)
                   or os.environ.get("CLAUDE_SESSION_ID")
                   or None)
+    # Generation trace: opaque JSONB blob captured by the generator
+    # before invoking Claude. Stored verbatim so a later audit can ask
+    # "which few-shot examples produced this post?". Loaded from a file
+    # path (--generation-trace) because the JSON can be several KB and
+    # passing it inline via argv blows past macOS ARG_MAX. We do NOT
+    # validate the shape here; the post_github.py builder is the only
+    # writer and owns the shape. Failure to read just nulls the column
+    # — never blocks the INSERT, since losing the audit row for one
+    # post is preferable to losing the post.
+    generation_trace_json = None
+    trace_path = getattr(args, "generation_trace", None)
+    if trace_path:
+        try:
+            with open(trace_path, "r", encoding="utf-8") as tf:
+                # Re-serialize so the DB sees a single JSON literal even
+                # if the input had trailing whitespace / weird formatting.
+                generation_trace_json = json.dumps(json.load(tf))
+        except (OSError, json.JSONDecodeError) as e:
+            # Stderr only — stdout is reserved for the JSON envelope
+            # that post_github.py:log_post() parses. Silent loss > broken
+            # JSON-on-stdout that propagates as "post_id: null".
+            print(f"WARNING: could not load generation_trace {trace_path}: {e}",
+                  file=sys.stderr)
     cur = conn.execute(
         """INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
            thread_title, thread_content, our_url, our_content, our_account,
            source_summary, project_name, status, posted_at, feedback_report_used,
-           engagement_style, search_topic, language, claude_session_id)
+           engagement_style, search_topic, language, claude_session_id,
+           generation_trace)
            VALUES ('github', %s, %s, %s, %s, '', %s, %s, %s, '', %s, 'active', NOW(), TRUE,
-                   %s, %s, %s, %s::uuid) RETURNING id""",
+                   %s, %s, %s, %s::uuid, %s::jsonb) RETURNING id""",
         [args.thread_url, args.thread_author, args.thread_author, args.thread_title,
          args.our_url, args.our_text, args.account, args.project,
          getattr(args, "engagement_style", None),
          getattr(args, "search_topic", None),
          (getattr(args, "language", None) or "en"),
-         session_id],
+         session_id,
+         generation_trace_json],
     )
     row = cur.fetchone()
     new_id = row[0] if row else None
@@ -297,6 +322,13 @@ def main():
                        help="ISO 639-1 language code of the issue (defaults to en if omitted)")
     p_log.add_argument("--claude-session-id", dest="claude_session_id", default=None,
                        help="UUID of the Claude session that drafted this post (falls back to CLAUDE_SESSION_ID env var)")
+    p_log.add_argument("--generation-trace", dest="generation_trace", default=None,
+                       help="Path to a JSON file with the few-shot context Claude "
+                            "saw before drafting (top_performers report, recent "
+                            "comments, top_search_topics, model, prompt size). "
+                            "Stored in posts.generation_trace JSONB for audit. "
+                            "See migrations/2026-05-12_generation_trace.sql for "
+                            "the shape contract.")
 
     args = parser.parse_args()
     if args.command == "search":
