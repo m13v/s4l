@@ -691,6 +691,23 @@ def cmd_log_post(args):
     table; ok_on_conflict=True surfaces that as a structured body.
     """
     session_id = os.environ.get("CLAUDE_SESSION_ID") or None
+    # Generation trace: opaque JSONB blob captured by post_reddit.py
+    # before invoking Claude. Loaded from a file path (--generation-trace)
+    # because the JSON can be several KB; passing inline blows past
+    # macOS ARG_MAX. Failure to read just nulls the field — never
+    # blocks the INSERT, since losing the audit row for one post is
+    # preferable to losing the post.
+    generation_trace_blob = None
+    trace_path = getattr(args, "generation_trace", None)
+    if trace_path:
+        try:
+            with open(trace_path, "r", encoding="utf-8") as tf:
+                generation_trace_blob = json.load(tf)
+        except (OSError, json.JSONDecodeError) as e:
+            # Stderr only — stdout is reserved for the JSON envelope
+            # that post_reddit.py:log_post() parses.
+            print(f"WARNING: could not load generation_trace {trace_path}: {e}",
+                  file=sys.stderr)
     body = {
         "platform": "reddit",
         "thread_url": args.thread_url,
@@ -705,6 +722,8 @@ def cmd_log_post(args):
         "language": None,
         "is_recommendation": False,
     }
+    if generation_trace_blob is not None:
+        body["generation_trace"] = generation_trace_blob
     resp = api_post("/api/v1/posts", body, ok_on_conflict=True)
     err = resp.get("error") if isinstance(resp, dict) else None
     if err:
@@ -763,6 +782,13 @@ def main():
     p_log.add_argument("--engagement-style", default=None)
     p_log.add_argument("--search-topic", dest="search_topic", default=None,
                        help="The seed topic/query used to find this thread (feedback loop input)")
+    p_log.add_argument("--generation-trace", dest="generation_trace", default=None,
+                       help="Path to a JSON file with the few-shot context Claude "
+                            "saw before drafting (top_performers report, recent "
+                            "comments, model, prompt size). Stored in "
+                            "posts.generation_trace JSONB for audit. See "
+                            "migrations/2026-05-12_generation_trace.sql for the "
+                            "shape contract.")
 
     args = parser.parse_args()
     try:
