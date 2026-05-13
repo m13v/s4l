@@ -31,8 +31,56 @@ CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 REPLY_DB = os.path.join(REPO_DIR, "scripts", "reply_db.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 REDDIT_MCP_CONFIG = os.path.expanduser("~/.claude/browser-agent-configs/reddit-agent-mcp.json")
+REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 
 from engagement_styles import REPLY_STYLES as VALID_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns, validate_or_register
+
+
+def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
+    """Acquire the reddit-browser lease for THIS reply's Claude+CDP work.
+
+    Per-reply acquire (not per-cycle) shipped 2026-05-13. Before this change,
+    engage-reddit.sh held the lease around the whole `engage_reddit.py --limit
+    N` run, so a 5-reply batch monopolised the browser for ~10-25 min while
+    peer reddit pipelines (run-reddit-search post phase, link-edit-reddit,
+    dm-outreach-reddit, engage-dm-replies) sat blocked through every Claude
+    session and 2s inter-reply sleep.
+
+    The reddit-agent MCP wrapper (scripts/mcp_lock_proxy.py) auto-heartbeats
+    expires_at on every JSON-RPC `tools/call`, so the lease stays alive
+    through Claude's MCP-driven search/fetch/draft loop without manual pulses.
+    Default 90s TTL gives plenty of headroom for Claude session startup
+    (~20s before the first MCP call) plus subsequent CDP posting.
+
+    Returns (ok: bool, msg: str). msg is the helper's last stdout line on
+    success, or BUSY/ERROR diagnostic on failure.
+    """
+    try:
+        r = subprocess.run(
+            ["python3", REDDIT_BROWSER_LOCK, "acquire",
+             "--timeout", str(timeout), "--ttl", str(ttl)],
+            capture_output=True, text=True, timeout=timeout + 30,
+        )
+        out_lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln]
+        last = out_lines[-1] if out_lines else ""
+        if r.returncode == 0 and last.startswith("OK"):
+            return True, last
+        return False, last or (r.stderr or "").strip()[:200] or f"rc={r.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "subprocess_timeout"
+    except Exception as e:
+        return False, f"exception:{e}"
+
+
+def _release_browser_lease() -> None:
+    """Release the reddit-browser lease. Idempotent (NOT_HELD is fine)."""
+    try:
+        subprocess.run(
+            ["python3", REDDIT_BROWSER_LOCK, "release"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def load_config():
@@ -674,6 +722,33 @@ def main():
             print("=== END DRY RUN ===")
             break
 
+        # Per-reply reddit-browser lease (added 2026-05-13). Acquire JUST
+        # around this reply's Claude session + CDP post, release in the
+        # finally below so peers can use the browser during the inter-reply
+        # 2s sleep AND during the moltbook-only iterations that follow.
+        # Moltbook replies use the moltbook API (no browser), so we skip
+        # acquire for those rows entirely.
+        lease_held = False
+        if reply["platform"] == "reddit":
+            lease_ok, lease_msg = _acquire_browser_lease(timeout=600, ttl=90)
+            if not lease_ok:
+                print(f"[engage_reddit] #{reply['id']} LEASE: {lease_msg}; deferring")
+                failed += 1
+                skip_reasons["lease_acquire_timeout"] += 1
+                # Mark processing so this row isn't refetched in this run;
+                # reset_stuck_processing's 2h cap brings it back to pending.
+                try:
+                    subprocess.run(
+                        ["python3", REPLY_DB, "processing", str(reply["id"])],
+                        capture_output=True, timeout=10,
+                    )
+                except Exception:
+                    pass
+                processed += 1
+                time.sleep(2)
+                continue
+            lease_held = True
+
         # Run Claude session for this one reply (Claude decides + drafts, we post)
         reply_start = time.time()
         session_id = str(uuid.uuid4())
@@ -709,6 +784,8 @@ def main():
             skip_reasons["aup_refusal"] += 1
             for k in total_usage:
                 total_usage[k] += 0  # already accumulated above
+            if lease_held:
+                _release_browser_lease()
             break
 
         # Monthly cap short-circuit. Mirrors the AUP guard above. When the
@@ -720,10 +797,12 @@ def main():
         # dashboard Result column reads "failed: monthly_limit ×1" instead of
         # the previous silent "queue empty $0.00".
         if "monthly usage limit" in output.lower():
-            print(f"[engage_reddit] #{reply['id']} MONTHLY USAGE LIMIT hit — "
+            print(f"[engage_reddit] #{reply['id']} MONTHLY USAGE LIMIT hit, "
                   f"aborting run. Cost on this attempt: ${usage['cost_usd']:.4f}")
             failed += 1
             skip_reasons["monthly_limit"] += 1
+            if lease_held:
+                _release_browser_lease()
             break
 
         if not ok:
@@ -819,6 +898,8 @@ def main():
                         skip_reasons["processing_patch_failed"] = (
                             skip_reasons.get("processing_patch_failed", 0) + 1
                         )
+                        if lease_held:
+                            _release_browser_lease()
                         break
 
                     # Tool-level campaign suffix injection (Reddit only).
@@ -1004,6 +1085,14 @@ def main():
                   f"${usage['cost_usd']:.4f}")
 
         processed += 1
+
+        # Release the reddit-browser lease before the inter-reply sleep so
+        # peers can use the browser during that gap (2s now; widening it
+        # later would only multiply the value). Belt-and-suspenders: if any
+        # branch above hit a `break`, it already released; this fires on the
+        # normal end-of-iteration path. Idempotent (NOT_HELD is fine).
+        if lease_held:
+            _release_browser_lease()
 
         # Brief pause between sessions
         time.sleep(2)
