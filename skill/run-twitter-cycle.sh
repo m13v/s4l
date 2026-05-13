@@ -843,6 +843,43 @@ print(json.dumps({p['name']: p for p in config.get('projects', [])}, indent=2))
 
 TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
 
+# --- Generation trace -------------------------------------------------------
+# Snapshot the few-shot context this cycle will feed to Claude — top_performers
+# report, top_queries from Phase 1, supply signal, dud queries — and write to a
+# tempfile. Path travels via env var to twitter_post_plan.py (Phase 2b-post),
+# which forwards it as --generation-trace to log_post.py so every post landed
+# this cycle gets posts.generation_trace JSONB pointing to the same snapshot.
+# This is what answers "which examples produced post #N" later. See
+# migrations/2026-05-12_generation_trace.sql for the shape contract.
+#
+# Failure is non-fatal: empty string means downstream skips --generation-trace
+# and the row gets NULL trace. We never block the cycle on the audit row.
+TRACE_INPUT=$(python3 -c "
+import json, sys
+payload = {
+    'platform': 'twitter',
+    'project_name': 'all',
+    'prompt_chars': len(sys.argv[1]) + len(sys.argv[2]) + len(sys.argv[3]) + len(sys.argv[4]),
+    'top_performers_text': sys.argv[1],
+    'top_search_topics_text': '',
+    'recent_comment_ids': [],
+    'extras': {
+        'top_queries': json.loads(sys.argv[2] or '[]'),
+        'supply_signal': json.loads(sys.argv[3] or '[]'),
+        'dud_queries': json.loads(sys.argv[4] or '[]'),
+    },
+    'min_score_floor': 5,
+}
+print(json.dumps(payload))
+" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" 2>/dev/null || echo '{}')
+SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
+export SAPS_TWITTER_GEN_TRACE_PATH
+if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
+    log "Generation trace: $SAPS_TWITTER_GEN_TRACE_PATH ($(wc -c < "$SAPS_TWITTER_GEN_TRACE_PATH") bytes)"
+else
+    log "WARN: generation_trace build returned empty path; posts this cycle will have NULL trace"
+fi
+
 source "$REPO_DIR/skill/styles.sh"
 STYLES_BLOCK=$(generate_styles_block twitter posting)
 
@@ -1085,6 +1122,13 @@ EXEC_SKIP_REASONS=$(python3 -c "import json,sys; d=json.loads(sys.argv[1] or '{}
 log "Phase 2b-post summary: posted=$EXEC_POSTED skipped=$EXEC_SKIPPED failed=$EXEC_FAILED reasons=$EXEC_REASONS skip_reasons=$EXEC_SKIP_REASONS"
 
 rm -f "$PLAN_FILE"
+
+# Generation trace tempfile cleanup. By now every post in this cycle that
+# made it to log_post.py has the trace persisted to posts.generation_trace
+# JSONB, so the on-disk JSON is redundant. Best-effort delete.
+if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
+    rm -f "$SAPS_TWITTER_GEN_TRACE_PATH"
+fi
 
 # --- No end-of-cycle expire ------------------------------------------------
 # Pending rows are intentionally left alone. They are either:
