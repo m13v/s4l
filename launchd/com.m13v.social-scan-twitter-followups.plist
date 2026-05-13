@@ -37,9 +37,5 @@
 			<integer>14</integer>
 		</dict>
 	</array>
-		<key>TWITTER_ENGINE</key>
-		<string>camoufox</string>
-		<key>TWITTER_CAMOUFOX_HEADLESS</key>
-		<string>true</string>
-	</dict>
+</dict>
 </plist>
