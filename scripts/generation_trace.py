@@ -30,9 +30,13 @@ TRACE_SHAPE_VERSION = 1
 # API cap (matches src/app/api/v1/posts/route.ts). We do NOT truncate
 # the report bodies — top_performers.py and top_search_topics.py
 # already pre-summarize their output and rarely cross 10 KB combined.
-# If we ever DO cross 64 KB the API returns badRequest and the post
-# still ships (log_post just drops the trace field and warns).
-MAX_TRACE_BYTES = 64 * 1024
+# Cap raised from 64 KB to 1 MB on 2026-05-13: real Twitter cycles were
+# producing ~85 KB traces and the API was rejecting every log_post call
+# with HTTP 400 (posted=0 / failed=log_post_no_id on the dashboard while
+# replies still landed on x.com). The "log_post just drops the trace
+# field and warns" fallback in the older comment was aspirational, not
+# implemented; bumping the cap is the correct lever here.
+MAX_TRACE_BYTES = 1024 * 1024
 
 
 def build_trace(
