@@ -150,7 +150,7 @@ Call `mcp__assrt__assrt_test` against `http://localhost:<port><page_path>` (the 
 
 ## 5c. Read the result correctly
 
-The MCP response contains: `passed` (bool), `passedCount`, `failedCount`, `aborted` (bool, present only when run was cut short), `abortReason`, `scenarios` (array with per-scenario `passed`/`assertions[]`/`evidence`), and `logFile` (path to the full execution log on disk).
+The MCP response contains: `passed` (bool), `passedCount`, `failedCount`, `aborted` (bool, present only when run was cut short), `abortReason`, `scenarios` (array with per-scenario `passed`/`assertions[]`/`evidence`/`droppedAssertions[]`/`expectedAssertions`), and `logFile` (path to the full execution log on disk). The `droppedAssertions[]` field lists any mandatory verify bullets (lines starting with Verify/Check/Assert/Confirm/Ensure) that the inner agent skipped — if it is non-empty for any scenario, that scenario auto-fails for coverage reasons even if every executed assertion individually passed.
 
 **Read order:**
 
@@ -172,6 +172,17 @@ The MCP response contains: `passed` (bool), `passedCount`, `failedCount`, `abort
 - **`skipped_no_dev_server`**: only when the dev server genuinely could not be started (missing deps, port conflict you can't resolve, no `dev` script). Commit is allowed if typecheck passed, flag loudly in `rationale`.
 
 **Do not claim `passed` because curl-ing the rendered HTML shows your content rendered.** Curl proves the response body has bytes; it does not prove the browser renders without console errors, paints correctly, or has clean layout. The only source of truth is `mcp__assrt__assrt_test`'s `passed` field cross-checked against the `logFile`.
+
+## 5e. Evidence discipline (no fabricated context)
+
+Every claim you write in `visual_qa_findings` or `notes_for_next_run` MUST be backed by something concrete: a verbatim `[FAIL]` line from the assrt `logFile`, an entry in the response's `scenarios[i].assertions[]`, a `droppedAssertions[]` entry, or output from a tool call you ran in this session (Bash, Read, Grep, browser).
+
+- Do NOT write phrases like "a pre-existing console error fires on this page" unless you actually opened the page in this session and observed the error, OR the assrt response surfaced it. If you only suspect it exists, omit the claim entirely.
+- Do NOT classify any bug as "pre-existing" without running the verification: `git stash`, reload, confirm same failure, `git stash pop`. If you did not run the verification, the bug is NOT pre-existing for the purposes of this run — treat it as caused by your edits (Category A).
+- If assrt's response includes `droppedAssertions` (mandatory verify bullets the inner agent skipped), that is a coverage failure: do NOT set `visual_qa_status="passed"`. Re-run `assrt_test` with the dropped bullets re-emphasized; if it happens twice, set `visual_qa_status="failed"` and abort the commit.
+- Quote evidence verbatim. If you write a `[FAIL]` line into `visual_qa_findings`, copy it character-for-character from the `logFile`. Do not paraphrase.
+
+`visual_qa_findings` is what the dashboard reads. Anything important about visual QA goes there, NOT in `notes_for_next_run`. `notes_for_next_run` is for forward-looking hints (which models to watch for, what to update if X ships), not for hidden caveats about this run.
 
 Record in the final JSON (see Output): `visual_qa_status`, `visual_qa_findings` (2-4 sentences, include the verbatim `[FAIL]` evidence if any), `visual_qa_test_url`.
 
