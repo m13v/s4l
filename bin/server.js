@@ -2303,6 +2303,11 @@ const bookingsPerDayCache = new Map();
 const clicksPerDayCache = new Map();
 // Funnel-per-day (PostHog-backed metrics): cached by days.
 const funnelPerDayCache = new Map();
+// Cost-per-day: Claude API session cost attributed to days an activity row
+// occurred. Splits each session's total cost evenly across all rows produced
+// (same per-row attribution model as /api/cost/stats), then sums by the
+// activity timestamp's UTC date. Cached by days|platform|project.
+const costPerDayCache = new Map();
 
 // On-disk snapshots written by scripts/precompute_dashboard_stats.py every
 // ~5 min via launchd com.m13v.social-precompute-stats. When a snapshot is
@@ -4158,6 +4163,141 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/cost/per-day?days=N&platform=X&project=Y - Claude API spend per
+  // day. Same per-row attribution model as /api/cost/stats: each session's
+  // cost (COALESCE(orchestrator_cost_usd, total_cost_usd)) is split evenly
+  // across every row the session produced (posts, replies, dm sends,
+  // outbound dm messages, resurrects, seo/gsc page completions). Each row's
+  // slice is then attributed to the UTC date of its activity timestamp
+  // (posted_at, replied_at, sent_at, message_at, resurrected_at,
+  // completed_at) and summed.
+  //
+  // The src CTE divisor counts rows ACROSS ALL TIME (not just the window)
+  // so a long-running session is not over-attributed to the days that
+  // happen to fall inside the window. The in_window UNION then only sums
+  // rows whose activity date falls within `days`.
+  //
+  // Platform filter: same plat normalization (`x` -> `twitter`) as
+  // /api/cost/stats. Platform `seo` includes only page activities; any
+  // other platform includes thread/comment/dm.
+  // Project filter: posts.project_name + replies.project_name +
+  // dms.target_project + seo_keywords/gsc_queries.product, mirroring the
+  // stats endpoint's projectClause logic.
+  if (p === '/api/cost/per-day' && req.method === 'GET') {
+    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+    const rawProject = (url.searchParams.get('project') || '').trim();
+    const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
+    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    if (!projectOk) return json(res, { error: 'invalid project' }, 400);
+    const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email']);
+    let rawPlat = String(url.searchParams.get('platform') || '').toLowerCase().trim();
+    if (rawPlat === 'x') rawPlat = 'twitter';
+    const plat = ALLOWED_COST_PLATFORMS.has(rawPlat) ? rawPlat : '';
+    const cacheKey = days + '|' + plat + '|' + project;
+    const cached = costPerDayCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 300000) {
+      return json(res, { days, rows: cached.value, cachedAt: cached.at });
+    }
+    const postsPc    = auth.projectClause(req.user, 'project_name',   project || null);
+    const repliesPc  = auth.projectClause(req.user, 'project_name',   project || null);
+    const dmsPc      = auth.projectClause(req.user, 'target_project', project || null);
+    const dmsAliasedPc = auth.projectClause(req.user, 'd.target_project', project || null);
+    const seoProdPc  = auth.projectClause(req.user, 'product',        project || null);
+    const platNorm = col => "CASE WHEN LOWER(" + col + ") = 'x' THEN 'twitter' ELSE LOWER(" + col + ") END";
+    const platClause = col => plat ? (" AND " + platNorm(col) + " = '" + plat + "'") : '';
+    const includeThread  = !plat || plat !== 'seo';
+    const includeComment = !plat || plat !== 'seo';
+    const includePage    = !plat || plat === 'seo';
+    const includeDm      = !plat || plat !== 'seo';
+    // Divisor source: every row in every table that can carry a
+    // claude_session_id, regardless of window. Keeps per-row cost
+    // attribution stable across windows.
+    const parts = [
+      "SELECT claude_session_id FROM posts WHERE claude_session_id IS NOT NULL AND posted_at IS NOT NULL",
+      "SELECT claude_session_id FROM replies WHERE claude_session_id IS NOT NULL AND status IN ('replied','skipped')",
+      "SELECT claude_session_id FROM dms WHERE claude_session_id IS NOT NULL AND status='sent' AND sent_at IS NOT NULL",
+      "SELECT m.claude_session_id FROM dm_messages m WHERE m.claude_session_id IS NOT NULL AND m.direction='outbound'",
+      "SELECT claude_session_id FROM posts WHERE claude_session_id IS NOT NULL AND resurrected_at IS NOT NULL",
+      "SELECT claude_session_id FROM seo_keywords WHERE claude_session_id IS NOT NULL AND completed_at IS NOT NULL AND page_url IS NOT NULL",
+      "SELECT claude_session_id FROM gsc_queries WHERE claude_session_id IS NOT NULL AND completed_at IS NOT NULL AND page_url IS NOT NULL",
+    ];
+    const dayWin = "CURRENT_DATE - INTERVAL '" + days + " days'";
+    const inWindow = [];
+    if (includeThread) {
+      inWindow.push(
+        "SELECT posted_at AS occurred_at, claude_session_id FROM posts " +
+        "WHERE posted_at >= " + dayWin + " AND claude_session_id IS NOT NULL" +
+          platClause('posts.platform') + postsPc.clause
+      );
+      inWindow.push(
+        "SELECT resurrected_at AS occurred_at, claude_session_id FROM posts " +
+        "WHERE resurrected_at >= " + dayWin + " AND claude_session_id IS NOT NULL" +
+          platClause('posts.platform') + postsPc.clause
+      );
+    }
+    if (includeComment) {
+      inWindow.push(
+        "SELECT replied_at AS occurred_at, claude_session_id FROM replies " +
+        "WHERE replies.status='replied' AND replied_at >= " + dayWin + " AND claude_session_id IS NOT NULL" +
+          platClause('replies.platform') + repliesPc.clause
+      );
+    }
+    if (includeDm) {
+      inWindow.push(
+        "SELECT sent_at AS occurred_at, claude_session_id FROM dms " +
+        "WHERE dms.status='sent' AND sent_at >= " + dayWin + " AND claude_session_id IS NOT NULL" +
+          platClause('dms.platform') + dmsPc.clause
+      );
+      // Outbound dm_messages share the dms session_id; we attribute their
+      // slice of cost to the message_at day so back-and-forth replies show
+      // up on the day they actually happened, not the day the thread
+      // started.
+      inWindow.push(
+        "SELECT m.message_at AS occurred_at, m.claude_session_id FROM dm_messages m " +
+        "JOIN dms d ON d.id = m.dm_id " +
+        "WHERE m.direction='outbound' AND m.message_at >= " + dayWin + " AND m.claude_session_id IS NOT NULL" +
+          platClause('d.platform') + dmsAliasedPc.clause
+      );
+    }
+    if (includePage) {
+      inWindow.push(
+        "SELECT completed_at AS occurred_at, claude_session_id FROM seo_keywords " +
+        "WHERE completed_at >= " + dayWin + " AND page_url IS NOT NULL AND claude_session_id IS NOT NULL" +
+          seoProdPc.clause
+      );
+      inWindow.push(
+        "SELECT completed_at AS occurred_at, claude_session_id FROM gsc_queries " +
+        "WHERE completed_at >= " + dayWin + " AND page_url IS NOT NULL AND claude_session_id IS NOT NULL" +
+          seoProdPc.clause
+      );
+    }
+    if (!inWindow.length) {
+      return json(res, { days, rows: [] });
+    }
+    const q =
+      "WITH src AS (" + parts.join(' UNION ALL ') + "), " +
+      "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
+      "session_cost AS (SELECT cs.session_id, " +
+          "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost " +
+        "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id), " +
+      "in_window AS (" + inWindow.join(' UNION ALL ') + ") " +
+      "SELECT json_agg(row_to_json(r)) FROM (" +
+        "SELECT to_char((iw.occurred_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
+          "COALESCE(SUM(sc2.per_row_cost), 0)::numeric(12,4) AS cost_usd " +
+        "FROM in_window iw " +
+        "LEFT JOIN session_cost sc2 ON sc2.session_id = iw.claude_session_id " +
+        "GROUP BY day ORDER BY day ASC" +
+      ") r";
+    return (async () => {
+      const dbRows = await pq(q);
+      const value = (dbRows && dbRows.length && dbRows[0].json_agg) ? dbRows[0].json_agg : [];
+      costPerDayCache.set(cacheKey, { at: Date.now(), value });
+      return json(res, { days, rows: value, cachedAt: Date.now() });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/top/dms - DM threads ranked by hotness.
   // Ordering: needs_human first (human escalation), then by interest_level
   // (hot > warm > general > cold). Threads we've effectively stopped engaging
@@ -5065,6 +5205,115 @@ async function handleApi(req, res) {
         website: null,
         unassigned: true,
       }));
+    // Per-project Claude cost in the same window. Mirrors /api/cost/stats
+    // attribution: per_row_cost = COALESCE(orchestrator_cost_usd,
+    // total_cost_usd) / rows_in_session, summed across the activity rows
+    // each project owns in the window. Admin-only because cost is operator-
+    // internal; non-admin callers get empty cost maps and the dashboard
+    // suppresses the column. SDK and estimate lanes are surfaced separately
+    // so the dashboard tooltip can show both, same UX as cost-stats.
+    let costByProject = {};
+    let grandCost = 0, grandCostOrch = 0, grandCostEst = 0;
+    if (req.user && req.user.admin) {
+      const costSrcParts = [
+        "SELECT claude_session_id FROM posts WHERE claude_session_id IS NOT NULL AND posted_at IS NOT NULL",
+        "SELECT claude_session_id FROM replies WHERE claude_session_id IS NOT NULL AND status IN ('replied','skipped')",
+        "SELECT claude_session_id FROM dms WHERE claude_session_id IS NOT NULL AND status='sent' AND sent_at IS NOT NULL",
+        "SELECT m.claude_session_id FROM dm_messages m WHERE m.claude_session_id IS NOT NULL AND m.direction='outbound'",
+        "SELECT claude_session_id FROM posts WHERE claude_session_id IS NOT NULL AND resurrected_at IS NOT NULL",
+        "SELECT claude_session_id FROM seo_keywords WHERE claude_session_id IS NOT NULL AND completed_at IS NOT NULL AND page_url IS NOT NULL",
+        "SELECT claude_session_id FROM gsc_queries WHERE claude_session_id IS NOT NULL AND completed_at IS NOT NULL AND page_url IS NOT NULL",
+      ];
+      const costWin = "INTERVAL '" + hours + " hours'";
+      const costAttributed = [
+        "SELECT COALESCE(posts.project_name, '(none)') AS project, " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id " +
+          "WHERE posts.posted_at >= NOW() - " + costWin + " " +
+          "AND posts.our_content <> '(mention - no original post)'",
+        "SELECT COALESCE(replies.project_name, '(none)') AS project, " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "FROM replies LEFT JOIN session_cost sc ON sc.session_id = replies.claude_session_id " +
+          "WHERE replies.status='replied' AND replies.replied_at >= NOW() - " + costWin,
+        "SELECT COALESCE(dms.target_project, '(none)') AS project, " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id " +
+          "WHERE dms.status='sent' AND dms.sent_at >= NOW() - " + costWin,
+        "SELECT COALESCE(seo_keywords.product, '(none)') AS project, " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "FROM seo_keywords LEFT JOIN session_cost sc ON sc.session_id = seo_keywords.claude_session_id " +
+          "WHERE seo_keywords.completed_at >= NOW() - " + costWin + " AND seo_keywords.page_url IS NOT NULL",
+        "SELECT COALESCE(gsc_queries.product, '(none)') AS project, " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "FROM gsc_queries LEFT JOIN session_cost sc ON sc.session_id = gsc_queries.claude_session_id " +
+          "WHERE gsc_queries.completed_at >= NOW() - " + costWin + " AND gsc_queries.page_url IS NOT NULL",
+      ];
+      const costQ =
+        "WITH src AS (" + costSrcParts.join(' UNION ALL ') + "), " +
+        "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
+        "session_cost AS (SELECT cs.session_id, " +
+            "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
+            "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_orchestrator, " +
+            "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated " +
+          "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id), " +
+        "attributed AS (" + costAttributed.join(' UNION ALL ') + ") " +
+        "SELECT project, " +
+          "COALESCE(SUM(per_row_cost), 0)::numeric(12,4) AS cost_usd, " +
+          "COALESCE(SUM(per_row_cost_orchestrator), 0)::numeric(12,4) AS cost_usd_orchestrator, " +
+          "COALESCE(SUM(per_row_cost_estimated), 0)::numeric(12,4) AS cost_usd_estimated " +
+        "FROM attributed GROUP BY project";
+      try {
+        const costRows = await pq(costQ) || [];
+        costRows.forEach(r => {
+          const proj = r.project || '(none)';
+          const c = Number(r.cost_usd) || 0;
+          const co = Number(r.cost_usd_orchestrator) || 0;
+          const ce = Number(r.cost_usd_estimated) || 0;
+          costByProject[proj] = { cost_usd: c, cost_usd_orchestrator: co, cost_usd_estimated: ce };
+          grandCost += c;
+          grandCostOrch += co;
+          grandCostEst += ce;
+        });
+      } catch (e) {
+        // Soft fail: log and continue without cost data. Don't block the
+        // weight/share table on a cost-query regression.
+        console.error('[project-status] cost query failed:', e && e.message || e);
+      }
+    }
+    // Attach cost to each project + unassigned row.
+    const attachCost = r => {
+      const c = costByProject[r.name];
+      r.cost_usd = c ? c.cost_usd : 0;
+      r.cost_usd_orchestrator = c ? c.cost_usd_orchestrator : 0;
+      r.cost_usd_estimated = c ? c.cost_usd_estimated : 0;
+      return r;
+    };
+    projects.forEach(attachCost);
+    unassigned.forEach(attachCost);
+    // Surface any project that has cost but no posts in the window (e.g.
+    // SEO pages, comments without published posts). These belong in the
+    // unassigned bucket so the cost column adds up.
+    const projectsCoveredByCost = new Set(
+      projects.map(p => p.name).concat(unassigned.map(u => u.name))
+    );
+    Object.entries(costByProject).forEach(([name, c]) => {
+      if (projectsCoveredByCost.has(name)) return;
+      if (!c || !c.cost_usd) return;
+      unassigned.push({
+        name,
+        weight: 0,
+        target_share: 0,
+        total: 0,
+        actual_share: 0,
+        deficit: 0,
+        by_platform: Object.fromEntries(platforms.map(pl => [pl, 0])),
+        website: null,
+        unassigned: true,
+        cost_usd: c.cost_usd,
+        cost_usd_orchestrator: c.cost_usd_orchestrator,
+        cost_usd_estimated: c.cost_usd_estimated,
+      });
+    });
     return json(res, {
       hours,
       generated_at_ms: Date.now(),
@@ -5072,6 +5321,10 @@ async function handleApi(req, res) {
       total_weight_by_platform: totalWeightByPlatform,
       grand_total: grandTotal,
       platform_totals: platformTotals,
+      grand_cost_usd: grandCost,
+      grand_cost_usd_orchestrator: grandCostOrch,
+      grand_cost_usd_estimated: grandCostEst,
+      cost_available: !!(req.user && req.user.admin),
       projects,
       unassigned,
     });
@@ -8726,6 +8979,14 @@ const DAILY_METRICS = [
   { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
   { id: 'clicks',          label: 'Clicks',            color: '#0ea5e9', endpoint: '/api/clicks/per-day',   valueKey: 'clicks_gained',    platformAware: true },
   { id: 'bookings',        label: 'Bookings',          color: '#ef4444', endpoint: '/api/bookings/per-day', valueKey: 'bookings_gained',  platformAware: false },
+  // Cost in USD: Claude API spend attributed per day. Same per-row split
+  // model as the activity log Cost column and /api/cost/stats: each
+  // session's total cost is divided across the rows it produced, then
+  // each row's slice is attributed to the day of its activity timestamp.
+  // platformAware: filters cost to the chosen platform's activity rows.
+  // format: 'usd' so the legend pill, Y-axis ticks, bar labels, and
+  // hover tooltip render as dollars (e.g. $12.34) instead of K/M counts.
+  { id: 'cost',            label: 'Cost (USD)',        color: '#dc2626', endpoint: '/api/cost/per-day',     valueKey: 'cost_usd',         platformAware: true,  format: 'usd' },
   // All funnel metrics count UNIQUE VISITORS (distinct_id), not raw events.
   // A user iterating on the same project (multiple prompts, multiple
   // schedule retries, multiple pageviews) is 1, not N. See
@@ -8785,6 +9046,30 @@ function _fmtShort(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'K';
   return String(n);
 }
+// USD formatter for cost metrics (raw dollar series) and cost-derived ratios
+// (cost / 1k views, cost / 1k visitors). Shows cents for sub-dollar values so
+// "$0.42" stays readable; abbreviates K above $1,000 so the legend pill
+// doesn't blow out at high spend.
+function _fmtUsd(n) {
+  if (n == null) return '—';
+  n = Number(n);
+  if (!isFinite(n)) return '—';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return '$' + (n / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1) + 'M';
+  if (abs >= 10_000)    return '$' + (n / 1_000).toFixed(0) + 'K';
+  if (abs >= 1_000)     return '$' + (n / 1_000).toFixed(1) + 'K';
+  if (abs >= 100)       return '$' + n.toFixed(0);
+  if (abs >= 1)         return '$' + n.toFixed(2);
+  if (abs > 0)          return '$' + n.toFixed(3);
+  return '$0';
+}
+// Pick the right formatter for a DAILY_METRICS entry. Defaults to _fmtShort
+// (K/M counts); 'usd' switches to _fmtUsd. Centralized so the legend pill,
+// Y-axis labels, bar labels, and hover tooltip stay consistent.
+function _fmtForMetric(m, n) {
+  if (m && m.format === 'usd') return _fmtUsd(n);
+  return _fmtShort(n);
+}
 function _fmtDay(dayIso) {
   const d = new Date(dayIso + 'T00:00:00');
   return (d.getMonth() + 1) + '/' + d.getDate();
@@ -8826,7 +9111,7 @@ function renderDailyMetrics() {
       '" data-metric="' + escapeHtml(m.id) + '" aria-pressed="' + (off ? 'false' : 'true') + '">' +
       '<span class="swatch" style="background:' + m.color + ';"></span>' +
       '<span class="label">' + escapeHtml(m.label) + '</span>' +
-      '<span class="count">' + _fmtShort(totals[m.id]) + '</span>' +
+      '<span class="count">' + _fmtForMetric(m, totals[m.id]) + '</span>' +
       '</button>';
   }).join('');
   legendEl.querySelectorAll('.daily-metrics-legend-pill').forEach(btn => {
@@ -8886,12 +9171,17 @@ function renderDailyMetrics() {
   const xCenter = i => padL + groupWidth * i + groupWidth / 2;
   // Y-axis: gridlines always, but tick labels only when we have a single
   // shared scale to label.
+  // In single-series mode, the Y-axis labels use that one metric's formatter
+  // (USD for cost, K/M counts for everything else). In multi-series mode we
+  // don't render axis labels at all because each series uses its own peak,
+  // so no single tick value would be meaningful.
+  const singleMetric = isSingle ? visibleMetrics[0] : null;
   const yGrid = [0, 0.25, 0.5, 0.75, 1].map(t => {
     const y = padT + plotH - t * plotH;
     let label = '';
     if (isSingle) {
       const v = yMax * t;
-      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(_fmtShort(v)) + '</text>';
+      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(_fmtForMetric(singleMetric, v)) + '</text>';
     }
     return '<line class="gridline" x1="' + padL + '" x2="' + (width - padR) + '" y1="' + y + '" y2="' + y + '"/>' + label;
   }).join('');
@@ -8915,7 +9205,7 @@ function renderDailyMetrics() {
       const h = Math.max(0, padT + plotH - y);
       const barRect = '<rect class="series-bar" data-day="' + escapeHtml(d) + '" data-metric="' + escapeHtml(m.id) + '" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barWidth.toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + m.color + '"/>';
       const valueLabel = (v > 0)
-        ? '<text class="series-value" x="' + (x + barWidth / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2) + '" text-anchor="middle" fill="' + m.color + '">' + escapeHtml(_fmtShort(v)) + '</text>'
+        ? '<text class="series-value" x="' + (x + barWidth / 2).toFixed(2) + '" y="' + (y - 3).toFixed(2) + '" text-anchor="middle" fill="' + m.color + '">' + escapeHtml(_fmtForMetric(m, v)) + '</text>'
         : '';
       return barRect + valueLabel;
     }).join('');
@@ -8964,9 +9254,14 @@ function renderDailyMetrics() {
       const day = days[idx];
       const rows = visibleMetrics.map(m => {
         const v = Number((_dailyMetricsSeries[m.id] || {})[day]) || 0;
+        // Cost-format metrics get $X.XX in the tooltip; everything else
+        // keeps the locale-grouped integer rendering (e.g. "12,345").
+        const display = (m.format === 'usd')
+          ? _fmtUsd(v)
+          : v.toLocaleString();
         return '<div class="tt-row"><span class="swatch" style="background:' + m.color + ';"></span>' +
                '<span>' + escapeHtml(m.label) + '</span>' +
-               '<span class="val">' + escapeHtml(v.toLocaleString()) + '</span></div>';
+               '<span class="val">' + escapeHtml(display) + '</span></div>';
       }).join('');
       tip.innerHTML = '<div class="tt-day">' + escapeHtml(_fmtDay(day)) + '</div>' + rows;
       // Position the tooltip in CSS px relative to the chart container so it
@@ -9026,19 +9321,29 @@ function renderDailyMetrics() {
 // no new fetch needed. Values are percentages (0-100), formatted to one
 // decimal place; days with views=0 are dropped (ratios are undefined).
 const RATIO_METRICS = [
-  { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views' },
-  { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views' },
-  { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views' },
+  { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views',     format: 'pct',     scaleFactor: 100 },
+  { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views',     format: 'pct',     scaleFactor: 100 },
+  { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   // Conversion ratios are per VISITOR (one unique distinct_id), not per
   // session. The metric IDs keep the _per_session suffix for back-compat
   // with persisted localStorage keys (RATIO_METRICS_STORAGE_KEY); only the
   // label + denominator key changed.
-  { id: 'email_signups_per_session',     label: 'Email Signups / Visitors',   color: '#10b981', numerator: 'email_signups',   denominator: 'pageviews' },
-  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Visitors', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'pageviews' },
-  { id: 'get_started_per_session',       label: 'Get Started / Visitors',     color: '#06b6d4', numerator: 'get_started',     denominator: 'pageviews' },
+  { id: 'email_signups_per_session',     label: 'Email Signups / Visitors',   color: '#10b981', numerator: 'email_signups',   denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Visitors', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  { id: 'get_started_per_session',       label: 'Get Started / Visitors',     color: '#06b6d4', numerator: 'get_started',     denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  // Cost-efficiency ratios (USD per 1k of denominator). scaleFactor=1000
+  // so each per-day point is cost / denominator * 1000 = $ per 1k events.
+  // format='usd' switches the legend pill, axis labels, bar labels, and
+  // tooltip to dollar rendering. Days with denominator=0 still drop out
+  // (NaN) so the chart shows a gap rather than a misleading $0 bar.
+  { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#dc2626', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000 },
+  { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#7c3aed', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000 },
 ];
-const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session'];
-const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v1';
+const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session', 'cost_per_kviews', 'cost_per_kvisitors'];
+// .v2: ratio set expanded to include cost_per_kviews + cost_per_kvisitors.
+// Bumping the storage key seeds the new defaults exactly once so existing
+// users see the new ratios pre-selected the next time they open Trends.
+const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v2';
 let _ratioMetricsActive = null;
 function _loadRatioMetricsActive() {
   if (_ratioMetricsActive) return _ratioMetricsActive;
@@ -9056,6 +9361,14 @@ function _fmtPct(n) {
   if (n >= 100) return n.toFixed(0) + '%';
   if (n >= 10)  return n.toFixed(1) + '%';
   return n.toFixed(2) + '%';
+}
+// Pick the right formatter for a RATIO_METRICS entry. 'usd' renders as
+// dollars (cost-per-1k ratios), anything else (default 'pct') keeps the
+// percentage rendering.
+function _fmtForRatio(r, n) {
+  if (n == null || !isFinite(n)) return '—';
+  if (r && r.format === 'usd') return _fmtUsd(n);
+  return _fmtPct(n);
 }
 
 function renderRatioMetrics() {
@@ -9078,17 +9391,21 @@ function renderRatioMetrics() {
   }
   const days = _dailyMetricsDays;
   const active = _loadRatioMetricsActive();
-  // Build per-ratio series: percentage = numerator / denominator * 100.
-  // Days where denominator=0 yield NaN, rendered as gaps (no bar, no label).
+  // Build per-ratio series: value = numerator / denominator * scaleFactor.
+  // For pct ratios scaleFactor=100 (percentage), for cost-per-1k ratios
+  // scaleFactor=1000 (dollars per 1k events). Days where denominator=0
+  // yield null, rendered as gaps (no bar, no label) so a flat-zero day
+  // doesn't masquerade as "no cost efficiency".
   const ratioSeries = {};
   RATIO_METRICS.forEach(r => {
     const numByDay = _dailyMetricsSeries[r.numerator]   || {};
     const denByDay = _dailyMetricsSeries[r.denominator] || {};
+    const scale = (typeof r.scaleFactor === 'number') ? r.scaleFactor : 100;
     const map = {};
     days.forEach(d => {
       const num = Number(numByDay[d]) || 0;
       const den = Number(denByDay[d]) || 0;
-      map[d] = (den > 0) ? (num / den * 100) : null;
+      map[d] = (den > 0) ? (num / den * scale) : null;
     });
     ratioSeries[r.id] = map;
   });
@@ -9106,7 +9423,7 @@ function renderRatioMetrics() {
       '" data-ratio="' + escapeHtml(r.id) + '" aria-pressed="' + (off ? 'false' : 'true') + '">' +
       '<span class="swatch" style="background:' + r.color + ';"></span>' +
       '<span class="label">' + escapeHtml(r.label) + '</span>' +
-      '<span class="count">' + escapeHtml(_fmtPct(avgs[r.id])) + '</span>' +
+      '<span class="count">' + escapeHtml(_fmtForRatio(r, avgs[r.id])) + '</span>' +
       '</button>';
   }).join('');
   legendEl.querySelectorAll('.daily-metrics-legend-pill').forEach(btn => {
@@ -9136,6 +9453,7 @@ function renderRatioMetrics() {
     seriesPeak[r.id] = p;
   });
   const isSingle = visible.length === 1;
+  const singleRatio = isSingle ? visible[0] : null;
   const yMax = isSingle ? _niceMax(Math.max(0.01, seriesPeak[visible[0].id] || 0)) : 0;
   const width = 960;
   const height = 260;
@@ -9364,15 +9682,16 @@ async function loadDailyMetrics() {
   const qsAware = platformAwareParams.join('&');
   const qsProj  = projectOnlyParams.join('&');
   try {
-    const [views, upvotes, comments, clicks, bookings, funnel] = await Promise.all([
+    const [views, upvotes, comments, clicks, bookings, funnel, cost] = await Promise.all([
       fetchOne('/api/views/per-day?'    + qsAware),
       fetchOne('/api/upvotes/per-day?'  + qsAware),
       fetchOne('/api/comments/per-day?' + qsAware),
       fetchOne('/api/clicks/per-day?'   + qsAware),
       fetchOne('/api/bookings/per-day?' + qsProj),
       fetchOne('/api/funnel/per-day?'   + qsProj),
+      fetchOne('/api/cost/per-day?'     + qsAware),
     ]);
-    const allFailed = [views, upvotes, comments, clicks, bookings, funnel].every(r => r.failed);
+    const allFailed = [views, upvotes, comments, clicks, bookings, funnel, cost].every(r => r.failed);
     if (allFailed) {
       if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
       return;
@@ -9387,6 +9706,7 @@ async function loadDailyMetrics() {
     intoSeries('comments', comments.rows, 'comments_gained');
     intoSeries('clicks',   clicks.rows,   'clicks_gained');
     intoSeries('bookings', bookings.rows, 'bookings_gained');
+    intoSeries('cost',     cost.rows,     'cost_usd');
     DAILY_METRICS.filter(m => m.funnel).forEach(m => {
       intoSeries(m.id, funnel.rows, m.valueKey);
     });
@@ -9409,7 +9729,7 @@ async function loadDailyMetrics() {
     // Stash a list of failed endpoints so renderDailyMetrics can surface a
     // small "(N timed out)" hint in the status pill rather than silently
     // showing flat zeros for those series.
-    const fetchResults = { views, upvotes, comments, clicks, bookings, funnel };
+    const fetchResults = { views, upvotes, comments, clicks, bookings, funnel, cost };
     _dailyMetricsFailed = Object.keys(fetchResults)
       .filter(k => fetchResults[k].failed)
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
@@ -12734,9 +13054,53 @@ function renderProjectStatus(data) {
   const unassigned = (data && data.unassigned) || [];
   const grandTotal = Number(data && data.grand_total) || 0;
   const totals = (data && data.platform_totals) || {};
+  const costAvailable = !!(data && data.cost_available);
+  const grandCost = Number(data && data.grand_cost_usd) || 0;
+  const grandCostOrch = Number(data && data.grand_cost_usd_orchestrator) || 0;
+  const grandCostEst = Number(data && data.grand_cost_usd_estimated) || 0;
+  // Money formatter mirrors fmtCost: $0, $0.0042, $12.34.
+  const fmtMoney = (v) => {
+    const n = Number(v) || 0;
+    if (n === 0) return '$0';
+    if (n < 0.01) return '$' + n.toFixed(4);
+    return '$' + n.toFixed(2);
+  };
+  // Money cell with tooltip exposing SDK + estimate lanes, same UX as
+  // moneyCell in renderCostStats so operators see consistent numbers.
+  const costCell = (displayed, orch, est, opts) => {
+    const tip = [
+      'Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
+      'Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
+      '',
+      'Displayed value prefers SDK; falls back to transcript estimate. Subagent costs excluded (anthropics/claude-code #43945).',
+    ].join('\\n');
+    const style = 'text-align:right;font-variant-numeric:tabular-nums;' + (opts && opts.extra || '');
+    const inner = '<span data-tooltip="' + escapeHtml(tip) +
+      '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+      fmtMoney(displayed) + '</span>';
+    return '<td style="' + style + '">' + inner + '</td>';
+  };
   if (totalEl) {
-    totalEl.textContent = grandTotal.toLocaleString() + ' post' + (grandTotal === 1 ? '' : 's') +
+    const base = grandTotal.toLocaleString() + ' post' + (grandTotal === 1 ? '' : 's') +
       ' · ' + projects.length + ' project' + (projects.length === 1 ? '' : 's');
+    totalEl.textContent = costAvailable
+      ? base + ' · ' + fmtMoney(grandCost)
+      : base;
+    if (costAvailable) {
+      const tipLines = [
+        'Orchestrator (SDK): ' + fmtMoney(grandCostOrch),
+        'Estimated (transcript): ' + fmtMoney(grandCostEst),
+        '',
+        'Total Claude session cost across all activity rows (posts, comments, DMs, SEO pages) attributed to projects in this window. Same attribution model as Cost per Activity.',
+      ];
+      totalEl.setAttribute('data-tooltip', tipLines.join('\\n'));
+      totalEl.style.cursor = 'help';
+      totalEl.style.borderBottom = '1px dotted var(--text-muted)';
+    } else {
+      totalEl.removeAttribute('data-tooltip');
+      totalEl.style.cursor = '';
+      totalEl.style.borderBottom = '';
+    }
   }
   if (!projects.length && !unassigned.length) {
     body.innerHTML = '<div class="style-stats-empty">No projects configured with weight &gt; 0.</div>';
@@ -12751,6 +13115,7 @@ function renderProjectStatus(data) {
         '<th style="text-align:right;">' + PROJECT_STATUS_PLATFORM_LABELS[p] + '</th>'
       ).join('') +
       '<th style="text-align:right;">Total</th>' +
+      (costAvailable ? '<th style="text-align:right;" title="Claude session cost in this window">Cost</th>' : '') +
     '</tr></thead>';
   const cellWithShare = (n, platformTotal, targetShare, opts) => {
     const num = Number(n) || 0;
@@ -12793,23 +13158,31 @@ function renderProjectStatus(data) {
       ? nameCell + ' <span style="color:var(--text-muted);font-size:11px;font-weight:400;">(not weighted)</span>'
       : nameCell;
     const totalCell = cellWithShare(r.total, grandTotal, targetShare, { extra: 'font-weight:600;', showZeroShare: true });
+    const costCellHtml = costAvailable
+      ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, { extra: 'color:var(--text-secondary);' })
+      : '';
     return '<tr>' +
       '<td style="text-align:left;font-weight:600;">' + nameLabel + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + (r.weight || 0) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + (r.unassigned ? '&mdash;' : formatPct(r.target_share)) + '</td>' +
       platformCells +
       totalCell +
+      costCellHtml +
     '</tr>';
   };
   const bodyRows = projects.map(rowHtml).join('') + unassigned.map(rowHtml).join('');
   const footerCells = PROJECT_STATUS_PLATFORMS.map(p =>
     '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + (Number(totals[p]) || 0) + '</td>'
   ).join('');
+  const footerCostCell = costAvailable
+    ? costCell(grandCost, grandCostOrch, grandCostEst, { extra: 'font-weight:600;' })
+    : '';
   const footerHtml =
     '<tr style="border-top:2px solid var(--border);font-weight:600;background:var(--bg-subtle);">' +
       '<td style="text-align:left;">Total</td>' +
       '<td></td><td></td>' + footerCells +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + grandTotal + '</td>' +
+      footerCostCell +
     '</tr>';
   const legend =
     '<div style="font-size:11px;color:var(--text-muted);padding:8px 2px 2px;">' +
