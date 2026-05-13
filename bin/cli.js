@@ -18,6 +18,7 @@ const COPY_TARGETS = [
   'scripts',
   'schema-postgres.sql',
   'config.example.json',
+  'requirements.txt',
   'SKILL.md',
   'skill',
   'setup',
@@ -403,14 +404,21 @@ function update() {
 // browser binary; we run `playwright install chromium` after the pip install.
 function installPythonDeps() {
   const reqPath = path.join(PKG_ROOT, 'requirements.txt');
-  const args = fs.existsSync(reqPath)
+  const base = fs.existsSync(reqPath)
     ? ['install', '-r', reqPath, '-q']
     : ['install', '-q', 'psycopg2-binary', 'playwright'];
   console.log('  installing Python deps (psycopg2-binary, playwright, ...)');
-  const r = spawnSync('pip3', args, { stdio: 'inherit' });
+  // Debian/Ubuntu 23+ ship a PEP 668 marker that blocks pip3 against the
+  // system Python without --break-system-packages. Try without first
+  // (safer on macOS) and retry with the flag if the marker fires.
+  let r = spawnSync('pip3', base, { stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.log('  retrying with --break-system-packages (PEP 668 environments)');
+    r = spawnSync('pip3', [...base, '--break-system-packages'], { stdio: 'inherit' });
+  }
   if (r.status !== 0) {
     console.warn('  WARNING: pip3 install failed — run manually:');
-    console.warn(`    pip3 ${args.join(' ')}`);
+    console.warn(`    pip3 ${base.join(' ')} --break-system-packages`);
     return;
   }
   // Playwright needs its browser binary downloaded separately. Chromium
