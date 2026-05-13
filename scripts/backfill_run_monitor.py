@@ -59,7 +59,9 @@ PHASE0_SALVAGED_RE = re.compile(r"salvaged=(\d+)")
 RIPEN_INPUT_RE = re.compile(r"\[ripen\] summary input=(\d+) survivors=(\d+)")
 
 CDP_REASON_MAP = {
-    "thread_locked": "reddit_locked",
+    # 2026-05-13: keep the literal "thread_locked" label end-to-end; the prior
+    # "reddit_locked" rename read like a sub-wide or account-wide block.
+    "thread_locked": "thread_locked",
     "thread_archived": "reddit_archived",
     "thread_not_found": "reddit_deleted",
     "account_blocked_in_sub": "account_blocked",
