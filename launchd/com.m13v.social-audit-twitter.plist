@@ -29,9 +29,5 @@
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
-		<key>TWITTER_ENGINE</key>
-		<string>camoufox</string>
-		<key>TWITTER_CAMOUFOX_HEADLESS</key>
-		<string>true</string>
-	</dict>
+</dict>
 </plist>
