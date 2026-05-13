@@ -517,11 +517,26 @@ def _html_postable_check(thread_url):
         reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
         _write_ratelimit(remaining, reset)
         html = resp.read().decode("utf-8", errors="ignore")
+        # Scope the lock check to the post header only. r/Entrepreneur (and
+        # similar subs) sticky an AutoMod comment that is itself locked,
+        # rendering `<span class="locked-tagline">locked comment</span>`
+        # inside the `.commentarea` div. Matching against that produces a
+        # false-positive on every thread in the sub and silently kills all
+        # candidates (see 2026-05-13 PieLine run: 10 ripen-survivors, 10
+        # false html_locked drops). Slice to the prefix before the
+        # comments section.
+        ca_idx = html.find('class="commentarea"')
+        if ca_idx < 0:
+            # Couldn't isolate the header (empty thread, stripped page, etc.).
+            # Trust the JSON `locked`/`archived` flags from cmd_repoll
+            # instead of fail-closing every thread on a layout edge case.
+            return "ok"
+        header_html = html[:ca_idx]
         # Match only the tagline CSS classes, not the archived-popup template
         # that old.reddit.com preloads on every page.
-        if _re.search(r'class="[^"]*\blocked-tagline\b', html):
+        if _re.search(r'class="[^"]*\blocked-tagline\b', header_html):
             return "locked"
-        if _re.search(r'class="[^"]*\barchived-tagline\b', html):
+        if _re.search(r'class="[^"]*\barchived-tagline\b', header_html):
             return "archived"
         return "ok"
     except Exception:
