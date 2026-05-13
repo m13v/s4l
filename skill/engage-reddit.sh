@@ -34,39 +34,40 @@ export SA_CYCLE_ID="$BATCH_ID"
 echo "=== Engage Reddit Run: $(date) (cycle=$BATCH_ID) ===" | tee "$LOG_FILE"
 START_TS=$(date +%s)
 
-# Reddit-browser lease (added 2026-05-10): scan_reddit_replies.py is HTTP-only
-# (no browser) but it auto-fires engage_reddit.py, which runs Claude with the
-# reddit-agent MCP profile and DOES drive the browser. Without the lease,
-# engage_reddit.py's Claude session can collide with peer reddit pipelines
-# (run-reddit-search post phase, run-reddit-threads, link-edit-reddit) all
-# driving the same Chrome profile concurrently.
+# Reddit-browser lease strategy (migrated 2026-05-13): the lease is now
+# acquired/released PER REPLY inside engage_reddit.py's main() while-loop,
+# around each Claude+CDP iteration. Previously we held the lease around the
+# whole engage_reddit.py run, so a 5-reply batch monopolised the browser for
+# ~10-25 min while peer reddit pipelines (run-reddit-search post phase,
+# run-reddit-threads, link-edit-reddit, dm-outreach-reddit, engage-dm-replies)
+# sat blocked even during the per-reply Claude "thinking" gaps. Mirrors the
+# pattern shipped to post_reddit.py + run-reddit-search.sh on 2026-05-13 and
+# to link-edit-reddit.sh + dm-outreach-reddit.sh in May 2026.
 #
-# Lease pattern: acquire before scan, release after. The scan HTTP phase
-# doesn't heartbeat, but it's fast (<30s typical). Once engage_reddit.py
-# starts Claude, the reddit-agent MCP proxy heartbeats expires_at on every
-# tool call. The 90s TTL gives us plenty of headroom for Claude startup
-# (~20s) before the first heartbeat fires.
-echo "[engage-reddit] Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..." | tee -a "$LOG_FILE"
-python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
-    echo "[engage-reddit] WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)." | tee -a "$LOG_FILE"
+# Pre-flight: brief acquire+ensure_browser_healthy+release ONCE per cycle so
+# orphan-Chrome cleanup / Singleton-lock clear runs before the first reply.
+# Best-effort: if acquire is BUSY (peer pipeline mid-post), warn and proceed.
+echo "[engage-reddit] Pre-flight: brief reddit-browser acquire + ensure_browser_healthy + release..." | tee -a "$LOG_FILE"
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
+    echo "[engage-reddit] WARNING: pre-flight acquire BUSY; ensure_browser_healthy will run anyway; per-reply acquires inside engage_reddit.py will retry." | tee -a "$LOG_FILE"
+ensure_browser_healthy "reddit"
+python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 # Belt-and-suspenders trap: free the lease on any exit path. Idempotent.
-# Without this, a SIGTERM mid-engage_reddit.py would leave the lease held
-# for ~90s before peers could steal it.
+# With the per-reply pattern the lease is normally released at the end of
+# each iteration, but a SIGTERM mid-iteration would otherwise leave it
+# held for ~90s before peers could steal it.
 #
 # Trap chaining: lock.sh sourced above installed `_sa_release_locks` on
 # EXIT INT TERM HUP. Bash trap REPLACES, not appends, so we re-set with
 # both handlers. Order: release the lease first (cheap, lets peers in),
-# then release pipeline locks. Mirrors run-reddit-search.sh:158.
+# then release pipeline locks. Mirrors run-reddit-search.sh.
 _release_reddit_lease() {
     timeout 3 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 }
 trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
 
 PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_reddit_replies.py" 2>&1 | tee -a "$LOG_FILE" || true
-
-# Explicit release after engage subprocess returns (the trap is the safety net).
-python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 ELAPSED=$(( $(date +%s) - START_TS ))
 # Pull scan-stage counters out of the "Inbox scan complete:" line so the
