@@ -84,6 +84,35 @@ PERMANENT_SKIP_REASON_PATTERNS = (
     "send_button_disabled%",
 )
 
+# Transient failure patterns: infrastructure errors (browser profile lock
+# contention, MCP wrapper death, Playwright launch failures, verify-failed
+# sends) that should NOT permanently block a candidate. A dms row in
+# status='error' (or 'skipped' tagged with one of these) gets:
+#   (a) treated as non-blocking in the discover LEFT JOIN below, so the
+#       reply re-appears as a candidate, AND
+#   (b) reverted to status='pending' via ON CONFLICT DO UPDATE when
+#       re-inserted (see scan_platform).
+# Self-heals the 2026-05-12 "7 warm leads burned by twitter_agent_mcp_unavailable"
+# regression at the source. Without this, the LEFT JOIN d.id IS NULL filter
+# permanently blocked any reply that ever had a transient-error dms row.
+TRANSIENT_SKIP_REASON_PATTERNS = (
+    "twitter_agent_mcp_unavailable%",
+    "reddit_agent_mcp_unavailable%",
+    "linkedin_agent_mcp_unavailable%",
+    "mcp_unavailable%",
+    "%mcp server not connected%",
+    "%no mcp tools%",
+    "%MCP server not registered%",
+    "send_unverified%",
+    "%browser launch failed%",
+    "%profile locked by another process%",
+    "%chromium profile locked%",
+    "%target page, context or browser has been closed%",
+    "%playwright%timeout%",
+    "%SIGTRAP%",
+    "%transient_browser_failure%",
+)
+
 def load_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
@@ -202,7 +231,16 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
                r.replied_at
         FROM replies r
         JOIN posts p ON r.post_id = p.id
-        LEFT JOIN dms d ON d.reply_id = r.id AND d.platform = %s
+        LEFT JOIN dms d
+               ON d.reply_id = r.id
+              AND d.platform = %s
+              -- Ignore transient-failure rows when deciding "already has a DM entry".
+              -- A reply whose ONLY dms row is e.g. status='error' with
+              -- skip_reason='twitter_agent_mcp_unavailable: ...' passes through
+              -- this join as d.id IS NULL and gets re-discovered. The ON CONFLICT
+              -- DO UPDATE in the INSERT below then flips that row back to pending.
+              AND NOT (d.status IN ('error','skipped')
+                       AND COALESCE(d.skip_reason,'') ILIKE ANY(%s))
         WHERE r.status = 'replied'
           AND r.platform = %s
           AND r.our_reply_content IS NOT NULL
@@ -211,7 +249,7 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
           AND r.replied_at >= NOW() - INTERVAL '%s days'
           AND r.replied_at <= NOW() - (INTERVAL '1 hour' * %s)
         ORDER BY r.replied_at DESC
-    """, (platform, platform, age_days, POST_REPLY_COOLDOWN_HOURS)).fetchall()
+    """, (platform, list(TRANSIENT_SKIP_REASON_PATTERNS), platform, age_days, POST_REPLY_COOLDOWN_HOURS)).fetchall()
 
     inserted = 0
     skipped_reasons = {}
@@ -274,6 +312,22 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
             skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
             continue
 
+        # Reject if there's already a pending DM for this (platform, author).
+        # The existing ON CONFLICT (platform, their_author, reply_id) only blocks
+        # re-inserting the SAME comment. When one author has N matched comments
+        # (e.g. Economy_Leopard112 with 7 replies → Terminator on 2026-05-13),
+        # the scanner used to queue N separate pending DM rows. If the pipeline
+        # ever sent, that person would get N DMs back-to-back. Account-killer.
+        existing_pending = conn.execute("""
+            SELECT 1 FROM dms
+            WHERE platform = %s AND their_author = %s AND status = 'pending'
+            LIMIT 1
+        """, (platform, author)).fetchone()
+        if existing_pending:
+            reason = "duplicate_pending_author"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+
         # Build comment context for the DM
         context = f"Thread: {row['thread_title'] or 'N/A'}\n"
         context += f"Their comment: {content}\n"
@@ -297,13 +351,29 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
 
         prospect_id = upsert_prospect_row(conn, platform, author)
 
+        # ON CONFLICT DO UPDATE (added 2026-05-13): when a row already exists for
+        # this (platform, their_author, reply_id) but its status is a transient
+        # error/skipped (twitter_agent_mcp_unavailable, send_unverified,
+        # chromium profile locked, etc.), revert it back to status='pending' so
+        # the next outreach run picks it up. Non-transient rows (sent, real
+        # pending, permanent chat_disabled, disqualified) are left untouched by
+        # the WHERE clause. Second prong of the self-heal mechanism, paired
+        # with the relaxed LEFT JOIN above.
         conn.execute("""
             INSERT INTO dms (platform, reply_id, post_id, their_author, their_content,
                              comment_context, status, prospect_id, target_project)
             VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
-            ON CONFLICT (platform, their_author, reply_id) DO NOTHING
+            ON CONFLICT (platform, their_author, reply_id) DO UPDATE
+              SET status = 'pending',
+                  skip_reason = NULL,
+                  claude_session_id = NULL,
+                  discovered_at = NOW(),
+                  target_project = EXCLUDED.target_project,
+                  comment_context = EXCLUDED.comment_context
+              WHERE dms.status IN ('error','skipped')
+                AND COALESCE(dms.skip_reason,'') ILIKE ANY(%s)
         """, (platform, row["reply_id"], row["post_id"], author, content, context,
-              prospect_id, target_project))
+              prospect_id, target_project, list(TRANSIENT_SKIP_REASON_PATTERNS)))
         conn.commit()
         inserted += 1
         print(f"  [{platform}] NEW DM candidate: {author} (reply #{row['reply_id']}) "
