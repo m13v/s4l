@@ -23,13 +23,49 @@ import db as dbmod
 
 MIN_CONTENT_LEN = 30  # skip posts with empty/placeholder content
 
-# Composite score: comments are the strongest imitation signal (real discussion),
-# upvotes are second, views deliberately excluded (viral-by-algorithm ≠ a pattern
-# worth imitating). Reddit and Moltbook upvotes get -1 because the OP's self-upvote
-# inflates the score (Reddit via API default, Moltbook via our own moltbook_post.py
-# self_upvote() call after every create). SQL expression is reused across queries.
+# CTE that adds a bot-filtered `clicks` column to every row of `posts`.
+# Sources from `post_link_clicks` (per-hit log, populated by the redirector
+# after 2026-05-07) with `is_bot=false`. This is the same attribution path
+# used by top_search_topics.py and matches what the dashboard reports on
+# the Top Comments tab. The legacy `post_links.real_clicks` column is a
+# stale PostHog backfill and is wildly inaccurate (twitter ~7x undercount,
+# reddit permanently 0), so we do NOT use it here.
+#
+# Why a CTE: the score expression below references `clicks` in WHERE,
+# ORDER BY, and SELECT clauses across multiple functions. A correlated
+# subquery inline-repeated 3x per query would compile, but the CTE form
+# stays readable and Postgres can hoist the per-post aggregation once.
+POSTS_WITH_CLICKS_CTE = """
+WITH posts_w_clicks AS (
+  SELECT p.*,
+    COALESCE((
+      SELECT COUNT(plc.id)
+        FROM post_links pl
+        LEFT JOIN post_link_clicks plc
+               ON plc.code = pl.code AND plc.is_bot = false
+       WHERE pl.post_id = p.id
+    ), 0) AS clicks
+    FROM posts p
+)
+"""
+
+# Composite score (2026-05-12 reweight): real human clicks are the ONLY
+# signal that proves a comment drove someone to actually visit the
+# project's link. Comments are the next-best imitation signal (real
+# discussion). Upvotes are passive approval, kept faint. Views deliberately
+# excluded (viral-by-algorithm ≠ a pattern worth imitating). Reddit and
+# Moltbook upvotes get -1 to strip the OP's auto self-upvote.
+#
+# Click weight ×10 means one real human click outvalues 10 likes worth
+# of vibes when ranking top examples for the generator's few-shot context.
+# This is the same direction top_search_topics.py already takes (×100
+# there because that script ranks SEARCH QUERIES, where a single click
+# across a query's posts is rare). For per-post example ranking ×10
+# keeps zero-click posts with very strong discussion (Reddit threads with
+# 20 comments) still competitive.
 SCORE_SQL = (
-    "(COALESCE(comments_count,0) * 3 + "
+    "(COALESCE(clicks, 0) * 10 + "
+    "COALESCE(comments_count,0) * 3 + "
     "CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
     "THEN GREATEST(0, COALESCE(upvotes,0) - 1) "
     "ELSE COALESCE(upvotes,0) END)"
@@ -156,14 +192,21 @@ def get_style_performance(conn, platform=None):
         where_clauses.append("platform = %s")
         params.append(platform)
     where = " AND ".join(where_clauses)
+    # Style averages now include avg_clicks too; clicks are the ground-truth
+    # behavioral signal and styles that drive zero clicks (no matter how
+    # many comments) should be visible as suspect.
     cur = conn.execute(
+        f"{POSTS_WITH_CLICKS_CTE}"
         f"SELECT engagement_style, COUNT(*) as cnt, "
         f"AVG({UPVOTES_NET_SQL})::numeric(10,2) as avg_up, "
         f"AVG(COALESCE(comments_count,0))::numeric(10,2) as avg_cm, "
+        f"AVG(COALESCE(clicks,0))::numeric(10,2) as avg_clicks, "
         f"MAX({UPVOTES_NET_SQL}) as max_up, "
-        f"MAX(comments_count) as max_cm "
-        f"FROM posts WHERE {where} "
-        f"GROUP BY engagement_style ORDER BY avg_cm DESC, avg_up DESC",
+        f"MAX(comments_count) as max_cm, "
+        f"MAX(clicks) as max_clicks "
+        f"FROM posts_w_clicks WHERE {where} "
+        f"GROUP BY engagement_style "
+        f"ORDER BY avg_clicks DESC, avg_cm DESC, avg_up DESC",
         params,
     )
     return cur.fetchall()
@@ -202,14 +245,19 @@ def get_project_platform_summary(conn, project=None, platform=None):
 
     where = " AND ".join(where_clauses)
     cur = conn.execute(
+        f"{POSTS_WITH_CLICKS_CTE}"
         f"SELECT COALESCE(project_name, '(no project)') as proj, platform, "
         f"COUNT(*) as cnt, "
         f"AVG({UPVOTES_NET_SQL})::numeric(10,1) as avg_up, "
         f"AVG(COALESCE(comments_count,0))::numeric(10,1) as avg_cm, "
+        f"AVG(COALESCE(clicks,0))::numeric(10,2) as avg_clicks, "
         f"MAX({UPVOTES_NET_SQL}) as max_up, "
-        f"MAX(comments_count) as max_cm "
-        f"FROM posts WHERE {where} "
-        f"GROUP BY project_name, platform ORDER BY proj, avg_cm DESC, avg_up DESC",
+        f"MAX(comments_count) as max_cm, "
+        f"MAX(clicks) as max_clicks, "
+        f"SUM(COALESCE(clicks,0)) as total_clicks "
+        f"FROM posts_w_clicks WHERE {where} "
+        f"GROUP BY project_name, platform "
+        f"ORDER BY proj, avg_clicks DESC, avg_cm DESC, avg_up DESC",
         params
     )
     return cur.fetchall()
@@ -247,19 +295,54 @@ def get_top_posts(conn, project=None, platform=None, limit=15, min_score=None):
     # Tiebreaker uses UPVOTES_NET_SQL so two posts with identical scores on
     # Reddit/Moltbook order by net upvotes (not net + self-upvote noise) —
     # matches every other display in this script and on the dashboard.
+    #
+    # Column 11 (`clicks`) is the new bot-filtered click count, surfaced so
+    # callers (and format_post below) can show "[X clicks]" alongside
+    # upvotes/comments. Order tiebreaker also threads clicks DESC so two
+    # posts with the same composite score sort the higher-click one first.
     fetch_limit = limit * 3
     cur = conn.execute(
+        f"{POSTS_WITH_CLICKS_CTE}"
         f"SELECT id, platform, upvotes, comments_count, views, "
         f"our_content, thread_title, thread_content, "
-        f"project_name, posted_at::date, our_account "
-        f"FROM posts WHERE {where} "
-        f"ORDER BY {SCORE_SQL} DESC, {UPVOTES_NET_SQL} DESC LIMIT %s",
+        f"project_name, posted_at::date, our_account, clicks "
+        f"FROM posts_w_clicks WHERE {where} "
+        f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
+        f"         {UPVOTES_NET_SQL} DESC LIMIT %s",
         params + [fetch_limit]
     )
     rows = cur.fetchall()
-    # Filter out top posts that contain product names or links
-    # (these send mixed signals about what works)
-    clean = [r for r in rows if not has_anti_pattern(r[5])]
+    # Click-aware anti-pattern filter (2026-05-12 fix).
+    #
+    # The old rule was: drop any post whose content contains a product
+    # name OR a URL. That made sense pre-2026-05-07 when we ranked by
+    # comments/upvotes — links suppressed organic reach and the model
+    # would learn to drop them. After the click signal came online, the
+    # rule started filtering OUT our highest-converting examples:
+    # Mediar's best post drove 40 clicks but contained a URL (it had to,
+    # to be clickable), and the filter removed it from the few-shot
+    # context, leaving Claude staring at "(no Mediar posts meeting
+    # threshold)" while 40 clicks of proof sat one filter away.
+    #
+    # New rule:
+    #   - Product-name mentions (PRODUCT_NAMES): still filter unconditionally.
+    #     We don't want Claude learning to namedrop the project.
+    #   - URLs / www. references: filter ONLY if the post has zero clicks.
+    #     A URL-bearing post that drove real human clicks IS the gold
+    #     example by definition.
+    clean = []
+    for r in rows:
+        content = r[5] or ""
+        clicks = r[11] if len(r) > 11 and r[11] is not None else 0
+        lower = content.lower()
+        # Product-name gate: hard filter regardless of clicks.
+        if any(name in lower for name in PRODUCT_NAMES):
+            continue
+        # URL gate: only filter when there's no click evidence.
+        has_url = ("http://" in lower or "https://" in lower or "www." in lower)
+        if has_url and clicks == 0:
+            continue
+        clean.append(r)
     return clean[:limit]
 
 
@@ -288,11 +371,16 @@ def get_bottom_posts(conn, project=None, platform=None, limit=10):
         params.append(platform)
 
     where = " AND ".join(where_clauses)
+    # SCORE_SQL=0 already means zero clicks AND zero comments AND zero
+    # upvotes_net, so bottom posts are still "all three dead" — the click
+    # term doesn't change which rows qualify, just makes the failure mode
+    # visible in the display.
     cur = conn.execute(
+        f"{POSTS_WITH_CLICKS_CTE}"
         f"SELECT id, platform, upvotes, comments_count, views, "
         f"our_content, thread_title, thread_content, "
-        f"project_name, posted_at::date, our_account "
-        f"FROM posts WHERE {where} "
+        f"project_name, posted_at::date, our_account, clicks "
+        f"FROM posts_w_clicks WHERE {where} "
         f"ORDER BY posted_at DESC LIMIT %s",
         params + [limit]
     )
@@ -322,8 +410,22 @@ def format_post(row, include_thread_content=True):
     project = row[8] or "(no project)"
     date = row[9]
     account = row[10] or ""
+    # New column 11 = clicks. Pre-2026-05-12 rows fed from older callers
+    # may not include this column, so guard with len() before indexing
+    # to keep this function backward-compatible with the (now-rewritten)
+    # SELECT lists in this file and anywhere else still on the old shape.
+    clicks = row[11] if len(row) > 11 and row[11] is not None else 0
 
-    header = f"[{upvotes} upvotes, {comments} comments, {views} views] {row[1]} | {project} | {date}"
+    # Clicks lead the header because they are the ground-truth conversion
+    # signal: a click means a real human actually went to the project
+    # link. Upvotes/comments/views are leading indicators of attention,
+    # not behavior. If a top-tier example has 0 clicks, Claude should
+    # see that and weight discussion shape (comments) over "this post
+    # drove traffic".
+    header = (
+        f"[{clicks} clicks, {upvotes} upvotes, {comments} comments, "
+        f"{views} views] {row[1]} | {project} | {date}"
+    )
     lines.append(header)
 
     if thread_title:
@@ -354,33 +456,43 @@ def format_report(summary, top, bottom, project=None, platform=None,
         if rules:
             lines.append(rules)
 
-    # "meaningful engagement" is scored as comments*3 + upvotes (Reddit -1),
-    # with a per-platform floor (see PLATFORM_MIN_SCORE). Report it to Claude so
-    # it understands why borderline posts are/aren't included.
+    # "meaningful engagement" is scored as clicks*10 + comments*3 + upvotes
+    # (Reddit upvote -1), with a per-platform floor (see PLATFORM_MIN_SCORE).
+    # Report it to Claude so it understands why borderline posts are/aren't
+    # included. Clicks dominate because a single human click is worth more
+    # than 10 upvotes of vibes when picking examples for the few-shot prompt.
     threshold_label = (
         f">= score {min_score_for(platform)} "
-        f"(comments*3 + upvotes, Reddit upvote -1)"
+        f"(clicks*10 + comments*3 + upvotes, Reddit upvote -1)"
     )
 
-    # Style performance (live from DB). Report both upvotes AND comments so
-    # discussion-driving styles surface, not just upvote-accumulating ones.
+    # Style performance (live from DB). Report clicks AND comments AND
+    # upvotes so click-driving styles surface FIRST, discussion-driving
+    # styles second, and upvote-accumulating ones last. avg_clicks (col 4)
+    # is the new column; legacy callers that grouped only on upvotes/
+    # comments will not see it but every caller in this repo now does.
     if style_perf:
-        lines.append("### Engagement Style Performance (live data, sorted by avg comments)")
+        lines.append("### Engagement Style Performance (live data, sorted by avg clicks → avg comments)")
         for row in style_perf:
             lines.append(
                 f"  {row[0]:<22} {row[1]:>5} posts  "
-                f"avg_cm={row[3]}  avg_up={row[2]}  "
-                f"best_cm={row[5]}  best_up={row[4]}"
+                f"avg_clicks={row[4]}  avg_cm={row[3]}  avg_up={row[2]}  "
+                f"best_clicks={row[7]}  best_cm={row[6]}  best_up={row[5]}"
             )
         lines.append("")
 
-    # Summary table
+    # Summary table. Per-project/platform now shows total_clicks (col 9)
+    # so Claude can see at-a-glance which projects converted at all.
+    # Projects with zero total_clicks across many posts are the canaries
+    # for "this product/voice combination isn't landing" (the 'General'
+    # bucket in the 7d audit on 2026-05-12: 56 posts, 0 clicks).
     lines.append("### Posts per Project per Platform")
     for row in summary:
         lines.append(
             f"  {row[0]:<20} {row[1]:<12} {row[2]:>5} posts  "
-            f"avg_cm={row[4]}  avg_up={row[3]}  "
-            f"best_cm={row[6]}  best_up={row[5]}"
+            f"avg_clicks={row[5]}  avg_cm={row[4]}  avg_up={row[3]}  "
+            f"best_clicks={row[8]}  best_cm={row[7]}  best_up={row[6]}  "
+            f"total_clicks={row[9]}"
         )
     lines.append("")
 
@@ -454,9 +566,11 @@ def main():
         min_score = min_score_for(args.platform)
         platform_filter = "AND platform = %s" if args.platform else ""
         platform_params = [args.platform] if args.platform else []
-        # Get distinct projects (respecting platform filter)
+        # Get distinct projects (respecting platform filter). Uses the
+        # CTE so the SCORE_SQL >= threshold expression resolves `clicks`.
         cur = conn.execute(
-            f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts "
+            f"{POSTS_WITH_CLICKS_CTE}"
+            f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts_w_clicks "
             f"WHERE status = 'active' AND platform NOT IN ('github_issues') "
             f"AND our_content IS NOT NULL AND LENGTH(our_content) >= %s "
             f"AND upvotes IS NOT NULL AND {SCORE_SQL} >= %s "
@@ -469,15 +583,21 @@ def main():
             proj_filter = proj if proj != "(no project)" else None
             where_extra = "AND project_name = %s" if proj_filter else "AND project_name IS NULL"
             params = ([proj_filter] if proj_filter else []) + platform_params
+            # Per-project top-5 examples — these are what Claude actually
+            # sees as the few-shot prompt. Click DESC tiebreaker means two
+            # posts at the same composite score sort the higher-click one
+            # first, putting the better conversion proof in front of Claude.
             cur = conn.execute(
+                f"{POSTS_WITH_CLICKS_CTE}"
                 f"SELECT id, platform, upvotes, comments_count, views, "
                 f"our_content, thread_title, thread_content, "
-                f"project_name, posted_at::date, our_account "
-                f"FROM posts WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
+                f"project_name, posted_at::date, our_account, clicks "
+                f"FROM posts_w_clicks WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
                 f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
                 f"AND platform NOT IN ('github_issues') "
                 f"{where_extra} {platform_filter} "
-                f"ORDER BY {SCORE_SQL} DESC, {UPVOTES_NET_SQL} DESC LIMIT 5",
+                f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
+                f"         {UPVOTES_NET_SQL} DESC LIMIT 5",
                 params
             )
             top_by_group[proj] = cur.fetchall()
