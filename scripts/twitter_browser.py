@@ -34,6 +34,10 @@ import time
 
 
 PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/twitter")
+# Camoufox (Firefox-stealth) parallel profile. Used when TWITTER_ENGINE=camoufox.
+# Seeded from Chrome cookies via scripts/dump_twitter_storage.py on first use.
+CAMOUFOX_PROFILE_DIR = os.path.expanduser("~/.camoufox-mcp/profiles/twitter")
+CAMOUFOX_STORAGE_JSON = os.path.expanduser("~/.camoufox-mcp/storage/twitter.storage.json")
 LOCK_FILE = os.path.expanduser("~/.claude/twitter-agent-lock.json")
 LOCK_EXPIRY = 300  # Must match twitter-agent-lock.sh
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
@@ -266,14 +270,91 @@ def _refresh_browser_lock():
         pass
 
 
+def _ensure_camoufox_seeded():
+    """Make sure ~/.camoufox-mcp/storage/twitter.storage.json exists with valid
+    cookies. If not, dump them from the live Chrome twitter-agent profile via
+    scripts/dump_twitter_storage.py. One-shot; cheap if already seeded.
+    """
+    if os.path.exists(CAMOUFOX_STORAGE_JSON):
+        try:
+            with open(CAMOUFOX_STORAGE_JSON) as f:
+                data = json.load(f)
+            has_auth = any(c.get("name") == "auth_token" for c in data.get("cookies", []))
+            if has_auth:
+                return
+        except Exception:
+            pass
+    dumper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "dump_twitter_storage.py")
+    if os.path.exists(dumper):
+        subprocess.run([sys.executable, dumper], check=False, timeout=60)
+
+
+def _launch_camoufox_browser_and_page(playwright):
+    """Camoufox path: Firefox-engine browser with stealth fingerprint patches.
+
+    Headless-safe (camoufox patches Firefox at the C++ layer so headless looks
+    identical to headed), so it sidesteps Twitter's 2026-04-30 headless-Chrome
+    DM strip-down. Uses its own persistent profile dir to avoid colliding with
+    the Chrome twitter-agent's profile lock.
+
+    Returns (context, page, False) to match the existing non-CDP contract.
+    """
+    from camoufox.sync_api import NewBrowser
+    os.makedirs(CAMOUFOX_PROFILE_DIR, exist_ok=True)
+    _ensure_camoufox_seeded()
+    headless_env = os.environ.get("TWITTER_CAMOUFOX_HEADLESS", "true").lower()
+    headless = headless_env not in ("0", "false", "no")
+    context = NewBrowser(
+        playwright,
+        persistent_context=True,
+        user_data_dir=CAMOUFOX_PROFILE_DIR,
+        headless=headless,
+        humanize=True,
+        block_webrtc=True,
+        geoip=True,
+    )
+    # First-run cookie hydration from the seeded storage JSON (only if the
+    # persistent profile doesn't already carry an auth_token).
+    try:
+        existing = context.cookies()
+        if not any(c.get("name") == "auth_token" for c in existing):
+            if os.path.exists(CAMOUFOX_STORAGE_JSON):
+                with open(CAMOUFOX_STORAGE_JSON) as f:
+                    state = json.load(f)
+                if state.get("cookies"):
+                    context.add_cookies(state["cookies"])
+    except Exception as e:
+        print(f"[twitter_browser] camoufox cookie hydration failed: {e}",
+              file=sys.stderr)
+    page = context.new_page()
+    return context, page, False
+
+
 def get_browser_and_page(playwright):
     """Connect to the twitter-agent MCP browser via CDP, or launch a new one.
 
     Returns (browser, page, is_cdp). When is_cdp=True, `page` is a reused
     existing Twitter tab (navigate it, don't close it). When is_cdp=False,
     it's a new headless page.
+
+    Set TWITTER_ENGINE=camoufox to swap in a Firefox-stealth engine instead of
+    Chrome. Same return shape; all callers untouched. See
+    _launch_camoufox_browser_and_page() above.
     """
     _acquire_browser_lock()
+
+    if os.environ.get("TWITTER_ENGINE", "").lower() == "camoufox":
+        try:
+            return _launch_camoufox_browser_and_page(playwright)
+        except Exception as e:
+            _release_browser_lock()
+            print(json.dumps({
+                "success": False,
+                "error": f"camoufox launch failed: {e}"
+            }))
+            sys.exit(1)
+
     cdp_port = find_twitter_cdp_port()
 
     if cdp_port:
@@ -299,9 +380,21 @@ def get_browser_and_page(playwright):
     deadline = time.time() + LOCK_WAIT_MAX
     while True:
         try:
+            # IMPORTANT (2026-05-13): headless MUST be False. Twitter rolled out
+            # stricter headless-Chrome fingerprint detection around 2026-04-30
+            # that silently serves a stripped DM page: /i/chat never redirects
+            # to /i/chat/pin/recovery, the passcode prompt never appears, and
+            # the sidebar `main li` selector returns 0 results. We confirmed
+            # this empirically by running the same script with headless=True
+            # vs headless=False against the same persistent profile after a
+            # fresh login: True → empty list, False → passcode page appears
+            # and sidebar renders normally. This caused a 13-day inbound DM
+            # cliff (2026-05-01 .. 05-13) where ~50 inbound messages went
+            # uningested. Do NOT revert to headless=True without a working
+            # stealth/fingerprint patch — silent failure mode.
             context = playwright.chromium.launch_persistent_context(
                 PROFILE_DIR,
-                headless=True,
+                headless=False,
                 args=["--disable-blink-features=AutomationControlled"],
                 viewport=VIEWPORT,
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -489,37 +582,73 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
         browser, page, is_cdp = get_browser_and_page(p)
 
         try:
-            # Set up CDP Network interception to capture CreateTweet response
+            # Set up Network interception to capture CreateTweet response.
+            # Two parallel paths so both engines work:
+            #   (a) page.on("response") — engine-agnostic. Works on Chromium
+            #       AND on Firefox/camoufox. This is the only path that fires
+            #       when TWITTER_ENGINE=camoufox (Firefox doesn't support CDP).
+            #   (b) CDP Network.responseReceived — Chromium-only. Slightly
+            #       faster + less body-fetch overhead. Skipped on Firefox
+            #       because new_cdp_session raises "CDP session is only
+            #       available in Chromium" there.
+            # Both write into _created_tweet_ids; dedup-on-append keeps the
+            # list a set of unique rest_ids regardless of which path fired.
             _cdp_session = None
             _created_tweet_ids = []
-            try:
-                _cdp_session = page.context.new_cdp_session(page)
-                _cdp_session.send("Network.enable")
+            _is_firefox = os.environ.get("TWITTER_ENGINE", "").lower() == "camoufox"
 
-                def _on_cdp_response(params):
-                    try:
-                        url = params.get("response", {}).get("url", "")
-                        if "CreateTweet" in url:
-                            body_resp = _cdp_session.send(
-                                "Network.getResponseBody",
-                                {"requestId": params["requestId"]},
-                            )
-                            data = json.loads(body_resp.get("body", "{}"))
-                            rest_id = (
-                                data.get("data", {})
-                                .get("create_tweet", {})
-                                .get("tweet_results", {})
-                                .get("result", {})
-                                .get("rest_id")
-                            )
-                            if rest_id:
-                                _created_tweet_ids.append(rest_id)
-                    except Exception:
-                        pass
+            def _on_response_event(resp):
+                # Engine-agnostic CreateTweet capture. Filter by URL FIRST so
+                # we don't pay a body-fetch round-trip on every graphql call.
+                try:
+                    if "CreateTweet" not in resp.url:
+                        return
+                    if resp.status != 200:
+                        return
+                    data = resp.json()
+                    rest_id = (
+                        data.get("data", {})
+                        .get("create_tweet", {})
+                        .get("tweet_results", {})
+                        .get("result", {})
+                        .get("rest_id")
+                    )
+                    if rest_id and rest_id not in _created_tweet_ids:
+                        _created_tweet_ids.append(rest_id)
+                except Exception:
+                    pass
 
-                _cdp_session.on("Network.responseReceived", _on_cdp_response)
-            except Exception:
-                pass
+            page.on("response", _on_response_event)
+
+            if not _is_firefox:
+                try:
+                    _cdp_session = page.context.new_cdp_session(page)
+                    _cdp_session.send("Network.enable")
+
+                    def _on_cdp_response(params):
+                        try:
+                            url = params.get("response", {}).get("url", "")
+                            if "CreateTweet" in url:
+                                body_resp = _cdp_session.send(
+                                    "Network.getResponseBody",
+                                    {"requestId": params["requestId"]},
+                                )
+                                data = json.loads(body_resp.get("body", "{}"))
+                                rest_id = (
+                                    data.get("data", {})
+                                    .get("create_tweet", {})
+                                    .get("tweet_results", {})
+                                    .get("result", {})
+                                    .get("rest_id")
+                                )
+                                if rest_id and rest_id not in _created_tweet_ids:
+                                    _created_tweet_ids.append(rest_id)
+                        except Exception:
+                            pass
+
+                    _cdp_session.on("Network.responseReceived", _on_cdp_response)
+                except Exception:
+                    pass
 
             page.goto(tweet_url, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
@@ -589,7 +718,8 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             # Method 1: CDP network interception (most reliable)
             if _created_tweet_ids:
                 reply_url = f"https://x.com/{OUR_HANDLE}/status/{_created_tweet_ids[-1]}"
-                print(f"[reply_url] captured via CDP: {reply_url}", file=sys.stderr)
+                src = "response-listener" if _is_firefox else "CDP+response-listener"
+                print(f"[reply_url] captured via {src}: {reply_url}", file=sys.stderr)
 
             # Method 2: DOM diff (check if new reply links appeared)
             if not reply_url:
