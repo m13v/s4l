@@ -3571,6 +3571,185 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/activity/deletion-requests - list activity keys currently flagged
+  // pending deletion. Dashboard pulls this on tab activation so the trash icon
+  // renders in "pending" state for already-flagged rows. We expose only the
+  // minimal fields the UI needs (key + status + requested_at) so this is
+  // cheap to poll alongside /api/activity.
+  if (p === '/api/activity/deletion-requests' && req.method === 'GET') {
+    return (async () => {
+      const rows = await pq(
+        "SELECT activity_key, status, requested_at FROM deletion_requests " +
+        "WHERE status = 'pending' ORDER BY requested_at DESC LIMIT 5000"
+      );
+      return json(res, { requests: rows || [] });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // POST /api/activity/mark-deletion - flag an activity row for manual review
+  // and email i@m13v.com with the details. We do NOT actually delete the
+  // underlying post/reply/mention; the user reviews the email and decides.
+  // Idempotent on activity_key (UNIQUE constraint -> ON CONFLICT DO NOTHING),
+  // so a double-click or a re-fire after a page reload won't send a duplicate
+  // email. The email body is built from the payload the dashboard already
+  // has in hand so the server doesn't need to re-query the source table.
+  if (p === '/api/activity/mark-deletion' && req.method === 'POST') {
+    return readBody(req).then(async body => {
+      let payload;
+      try { payload = JSON.parse(body || '{}'); }
+      catch { return json(res, { error: 'invalid JSON' }, 400); }
+      const key = String(payload.key || '').trim();
+      if (!key || key.length > 64) return json(res, { error: 'missing key' }, 400);
+      // Map prefix -> kind label + numeric record id. Keys come from the
+      // /api/activity SQL UNION and follow the convention prefix||id.
+      // Longer prefixes must be matched before shorter ones (ktp before k).
+      const PREFIXES = [
+        ['ktp', 'seo_top_post'], ['kru', 'seo_roundup'], ['kt', 'seo_top_page'],
+        ['kr', 'seo_reddit_page'], ['k', 'seo_serp_page'],
+        ['rr', 'post_resurrected'], ['pi', 'seo_page_improvement'], ['xp', 'seo_expired_page'],
+        ['dr', 'dm_reply'], ['d', 'dm'], ['s', 'reply_skipped'], ['r', 'reply'],
+        ['m', 'mention'], ['p', 'post'], ['g', 'gsc_query'],
+      ];
+      let kind = 'unknown';
+      let recordId = null;
+      for (const [pref, label] of PREFIXES) {
+        if (key.startsWith(pref) && /^\d+$/.test(key.slice(pref.length))) {
+          kind = label;
+          recordId = parseInt(key.slice(pref.length), 10);
+          break;
+        }
+      }
+      const platform = String(payload.platform || '').slice(0, 64);
+      const project = String(payload.project || '').slice(0, 128);
+      // Non-admin: only allow flagging rows on projects in their claim. Posts
+      // tab is admin-only today, but the Activity tab is shared.
+      if (!req.user.admin) {
+        const allowed = new Set(req.user.projects || []);
+        if (!project || !allowed.has(project)) {
+          return json(res, { error: 'project not allowed' }, 403);
+        }
+      }
+      const link = String(payload.link || '').slice(0, 2000);
+      const summary = String(payload.summary || '').slice(0, 2000);
+      const bodyText = String(payload.body || '').slice(0, 8000);
+      const detail = String(payload.detail || '').slice(0, 500);
+      const eventType = String(payload.type || '').slice(0, 64);
+      const occurredAt = payload.occurred_at ? new Date(payload.occurred_at) : null;
+      const requestedBy = (req.user && (req.user.email || req.user.sub)) || 'dashboard';
+
+      // Insert (or fetch the existing row if already pending). Idempotent.
+      const insRows = await pq(
+        "INSERT INTO deletion_requests " +
+        "(activity_key, kind, record_id, platform, project, link, summary, occurred_at, requested_by, status) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') " +
+        "ON CONFLICT (activity_key) DO NOTHING " +
+        "RETURNING id, email_sent_at",
+        [key, kind, recordId, platform, project, link, summary, occurredAt, requestedBy]
+      );
+      let alreadyExisted = false;
+      let drId, emailSentAt;
+      if (insRows && insRows.length) {
+        drId = insRows[0].id;
+        emailSentAt = insRows[0].email_sent_at;
+      } else {
+        alreadyExisted = true;
+        const ex = await pq(
+          "SELECT id, email_sent_at, requested_at FROM deletion_requests WHERE activity_key = $1",
+          [key]
+        );
+        if (ex && ex.length) {
+          drId = ex[0].id;
+          emailSentAt = ex[0].email_sent_at;
+        }
+      }
+
+      // Only attempt to send the notification email when we don't already
+      // have one on file for this row. This is the second idempotency gate
+      // (race-safe under the UNIQUE constraint above).
+      let emailStatus = alreadyExisted && emailSentAt ? 'already_sent' : 'pending';
+      if (!emailSentAt) {
+        try {
+          const env = loadEnv();
+          const resendKey = (env.RESEND_API_KEY || process.env.RESEND_API_KEY || '').trim();
+          const notifyTo = (env.NOTIFICATION_EMAIL || process.env.NOTIFICATION_EMAIL || 'i@m13v.com').trim();
+          if (!resendKey) {
+            emailStatus = 'no_api_key';
+            await pq(
+              "UPDATE deletion_requests SET email_error = $1 WHERE id = $2",
+              ['RESEND_API_KEY missing in .env', drId]
+            );
+          } else {
+            const fromAddr = 'Social Autoposter <matt@mail.omi.me>';
+            const subj = 'Deletion request: ' + (platform || 'unknown') + ' / ' +
+              (project || 'unknown') + ' / ' + (kind || 'unknown') + ' #' + (recordId || '?');
+            const occurredStr = occurredAt ? occurredAt.toISOString() : '(unknown)';
+            // Plain text; no dashes (per global CLAUDE.md rule). Resend
+            // recommends both html and text but text alone is fine.
+            const textBody =
+              'A row was flagged for deletion from the social autoposter dashboard.\n\n' +
+              'Activity key: ' + key + '\n' +
+              'Kind: ' + kind + '\n' +
+              'Record id: ' + (recordId == null ? '(unknown)' : recordId) + '\n' +
+              'Event type: ' + (eventType || '(unknown)') + '\n' +
+              'Platform: ' + (platform || '(unknown)') + '\n' +
+              'Project: ' + (project || '(unknown)') + '\n' +
+              'Occurred at: ' + occurredStr + '\n' +
+              'Link: ' + (link || '(none)') + '\n' +
+              'Detail: ' + (detail || '(none)') + '\n' +
+              'Requested by: ' + requestedBy + '\n\n' +
+              'Summary:\n' + (summary || '(none)') + '\n\n' +
+              'Body:\n' + (bodyText || '(none)') + '\n';
+            const r = await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: {
+                'Authorization': 'Bearer ' + resendKey,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                from: fromAddr,
+                to: [notifyTo],
+                subject: subj,
+                text: textBody,
+              }),
+            });
+            const rj = await r.json().catch(() => ({}));
+            if (r.ok && rj && rj.id) {
+              await pq(
+                "UPDATE deletion_requests SET email_sent_at = NOW(), email_id = $1 WHERE id = $2",
+                [String(rj.id), drId]
+              );
+              emailStatus = 'sent';
+            } else {
+              const errMsg = (rj && (rj.message || rj.error)) || ('HTTP ' + r.status);
+              await pq(
+                "UPDATE deletion_requests SET email_error = $1 WHERE id = $2",
+                [String(errMsg).slice(0, 500), drId]
+              );
+              emailStatus = 'send_failed';
+              console.error('[mark-deletion] resend failed:', errMsg);
+            }
+          }
+        } catch (e) {
+          emailStatus = 'send_failed';
+          await pq(
+            "UPDATE deletion_requests SET email_error = $1 WHERE id = $2",
+            [String(e.message || e).slice(0, 500), drId]
+          ).catch(() => {});
+          console.error('[mark-deletion] exception:', e.message);
+        }
+      }
+
+      return json(res, {
+        status: 'pending',
+        already_existed: alreadyExisted,
+        email_status: emailStatus,
+        key,
+        kind,
+        record_id: recordId,
+      });
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/style/stats - posts grouped by engagement_style over a trailing window (default 24h)
   if (p === '/api/style/stats' && req.method === 'GET') {
     const url = new URL(req.url, 'http://localhost');
@@ -5674,6 +5853,42 @@ const HTML = `<!DOCTYPE html>
   .reply-text { color: var(--text); margin-top: 2px; }
   .hidden { display: none; }
 
+  /* Mark-for-deletion trash button (Activity + Top tabs).
+     States:
+       .sa-del-btn               default trash icon (greyed out, low opacity)
+       .sa-del-btn:hover         red glow, full opacity
+       .sa-del-btn.is-loading    spinner overlay, button disabled
+       .sa-del-btn.is-pending    amber color, tooltip "pending deletion"
+     The button text/label is intentionally absent; the icon shows on hover
+     via title/data-tooltip. */
+  .sa-del-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0;
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    color: var(--text-muted, #888); cursor: pointer; opacity: 0.5;
+    transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    line-height: 1; font-size: 14px;
+    vertical-align: middle;
+  }
+  .sa-del-btn:hover { opacity: 1; color: #ef4444; border-color: rgba(239, 68, 68, 0.35); }
+  .sa-del-btn:focus-visible { outline: 1px solid #ef4444; outline-offset: 1px; opacity: 1; }
+  .sa-del-btn svg { width: 14px; height: 14px; display: block; }
+  .sa-del-btn.is-loading { pointer-events: none; opacity: 1; color: var(--cyan, #06b6d4); }
+  .sa-del-btn.is-loading svg { opacity: 0; }
+  .sa-del-btn.is-loading::after {
+    content: ''; position: absolute; width: 12px; height: 12px;
+    border: 2px solid rgba(6, 182, 212, 0.25); border-top-color: var(--cyan, #06b6d4);
+    border-radius: 50%; animation: saDelSpin 0.8s linear infinite;
+  }
+  .sa-del-btn { position: relative; }
+  @keyframes saDelSpin { to { transform: rotate(360deg); } }
+  .sa-del-btn.is-pending {
+    opacity: 1; color: #f59e0b; border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .sa-del-btn.is-pending:hover { color: #f59e0b; border-color: rgba(245, 158, 11, 0.55); }
+  .sa-del-btn.is-failed { color: #ef4444; opacity: 1; border-color: rgba(239, 68, 68, 0.55); }
+
   /* Activity tab */
   .activity-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
   .activity-filter-group { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -6573,10 +6788,13 @@ const HTML = `<!DOCTYPE html>
           <th style="width:90px;text-align:right;" class="activity-sortable" data-sort="cost_usd">
             <span class="activity-header-label">Cost <span class="activity-sort-arrow" data-sort-arrow="cost_usd"></span></span>
           </th>
+          <th style="width:40px;text-align:center;">
+            <span class="activity-header-label" title="Mark for deletion">&nbsp;</span>
+          </th>
         </tr>
       </thead>
       <tbody id="activity-body">
-        <tr><td colspan="5" style="text-align:center;color:var(--text);padding:40px;">Loading&hellip;</td></tr>
+        <tr><td colspan="6" style="text-align:center;color:var(--text);padding:40px;">Loading&hellip;</td></tr>
       </tbody>
     </table>
   </div>
@@ -8847,6 +9065,126 @@ function escapeHtml(s) {
   if (s == null) return '';
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
+
+// ===== Mark-for-deletion helpers (Activity tab + Top tab) =====
+// _saDelPending is a client-side Set of activity keys (e.g. 'p123', 'r456')
+// known to already be flagged for deletion. Populated on tab activation by
+// loadDeletionRequests() and updated optimistically when the user clicks the
+// trash icon. We never delete from this set; pending is a one-way state.
+const _saDelPending = new Set();
+const _saDelFailed = new Set();
+
+function renderDeleteBtnHtml(e) {
+  if (!e || !e.key) return '';
+  const isPending = _saDelPending.has(e.key);
+  const isFailed = !isPending && _saDelFailed.has(e.key);
+  // Stash the minimal payload the POST endpoint wants on the button itself
+  // so the click handler can read it without re-querying state. Encoded
+  // as a single base64 blob to keep HTML clean and skip per-field escaping.
+  const payload = {
+    key: e.key,
+    type: e.type || '',
+    platform: e.platform || '',
+    project: e.project || '',
+    link: e.link || '',
+    summary: e.summary || '',
+    body: e.body || '',
+    detail: e.detail || '',
+    occurred_at: e.occurred_at || null,
+  };
+  let b64 = '';
+  try { b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload)))); }
+  catch { b64 = ''; }
+  const title = isPending
+    ? 'pending deletion'
+    : (isFailed ? 'delete request failed, click to retry' : 'mark for deletion');
+  const cls = 'sa-del-btn' + (isPending ? ' is-pending' : '') + (isFailed ? ' is-failed' : '');
+  // Trash can SVG (Heroicons-style, 24x24 viewBox). currentColor for theming.
+  const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M3 6h18"/>' +
+    '<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>' +
+    '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>' +
+    '<path d="M10 11v6"/>' +
+    '<path d="M14 11v6"/>' +
+    '</svg>';
+  return '<button type="button" class="' + cls + '" ' +
+    'data-sa-del="1" ' +
+    'data-sa-del-payload="' + b64 + '" ' +
+    'aria-label="' + escapeHtml(title) + '" ' +
+    'title="' + escapeHtml(title) + '">' + icon + '</button>';
+}
+
+async function handleDeleteBtnClick(btn) {
+  if (!btn || btn.classList.contains('is-loading')) return;
+  // No-op if already pending (just give the hover tooltip).
+  if (btn.classList.contains('is-pending')) return;
+  let payload = null;
+  try {
+    const b64 = btn.getAttribute('data-sa-del-payload') || '';
+    if (b64) payload = JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch (e) { /* ignored - bail below */ }
+  if (!payload || !payload.key) return;
+  btn.classList.remove('is-failed');
+  _saDelFailed.delete(payload.key);
+  btn.classList.add('is-loading');
+  btn.setAttribute('title', 'sending...');
+  try {
+    const r = await fetch('/api/activity/mark-deletion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json().catch(() => ({}));
+    btn.classList.remove('is-loading');
+    if (r.ok && (j.status === 'pending' || j.already_existed)) {
+      _saDelPending.add(payload.key);
+      btn.classList.add('is-pending');
+      btn.setAttribute('title', 'pending deletion');
+      btn.setAttribute('aria-label', 'pending deletion');
+    } else {
+      _saDelFailed.add(payload.key);
+      btn.classList.add('is-failed');
+      const msg = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
+      btn.setAttribute('title', 'failed: ' + msg + ' (click to retry)');
+    }
+  } catch (e) {
+    btn.classList.remove('is-loading');
+    _saDelFailed.add(payload.key);
+    btn.classList.add('is-failed');
+    btn.setAttribute('title', 'failed: ' + (e.message || 'network error') + ' (click to retry)');
+  }
+}
+
+async function loadDeletionRequests() {
+  try {
+    const r = await fetch('/api/activity/deletion-requests');
+    if (!r.ok) return;
+    const j = await r.json();
+    const list = (j && j.requests) || [];
+    list.forEach(row => {
+      if (row && row.activity_key) _saDelPending.add(row.activity_key);
+    });
+  } catch (e) {
+    // Silent - the buttons just stay in the default state until the user
+    // refreshes the tab. No UX regression vs not having the feature.
+  }
+}
+
+// Global delegated click handler so every trash button on every tab works
+// without per-row wiring. Idempotent: re-wiring is a no-op because we set a
+// flag on document.body.
+function _saInstallDeleteListener() {
+  if (document.body && document.body.dataset.saDelInstalled === '1') return;
+  document.addEventListener('click', ev => {
+    const btn = ev.target.closest && ev.target.closest('button[data-sa-del]');
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    handleDeleteBtnClick(btn);
+  });
+  if (document.body) document.body.dataset.saDelInstalled = '1';
+}
+// ===== end mark-for-deletion helpers =====
 
 const PLATFORM_ICONS = {
   reddit:   '<svg viewBox="0 0 24 24" aria-label="reddit"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm6.436 13.158c.023.16.034.323.034.49 0 2.498-2.908 4.522-6.494 4.522-3.587 0-6.494-2.024-6.494-4.523 0-.167.011-.33.033-.489a1.44 1.44 0 01-.822-1.297 1.444 1.444 0 012.448-1.036 7.967 7.967 0 014.337-1.374l.82-3.865a.277.277 0 01.328-.215l2.69.57a1.004 1.004 0 011.813.068 1.005 1.005 0 01-1.813.875l-2.406-.51-.736 3.47a7.98 7.98 0 014.298 1.379 1.44 1.44 0 011.996.432c.35.56.2 1.29-.332 1.652-.02.013-.04.025-.06.037zM9.17 13.14a1.02 1.02 0 100-2.041 1.02 1.02 0 000 2.041zm6.69-1.02a1.02 1.02 0 10-2.04 0 1.02 1.02 0 002.04 0zm-1.01 3.32a.33.33 0 00-.467 0c-.56.56-1.63.605-1.944.605s-1.384-.046-1.944-.606a.33.33 0 00-.467.467c.887.887 2.587.957 2.411.957.176 0 1.524-.07 2.411-.957a.33.33 0 000-.466z"/></svg>',
@@ -11583,8 +11921,28 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: ageThresholdOptions(),
         filterPredicate: filterPredicateAge },
-      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 48,
+      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 46,
         formatter: renderTopContentCell,
+        filterMode: 'none' },
+      { key: 'id',             label: '',         type: 'text',    align: 'center', widthPct: 2,
+        // Per-row "mark for deletion" trash button. The Top tab only shows
+        // posts, so we synthesize an Activity-style event key with the 'p'
+        // prefix and pass through the platform/project/content the email
+        // would want to surface. The button itself + click handler live in
+        // the shared sa-del-btn helpers.
+        formatter: (_v, r) => {
+          const ev = {
+            key: 'p' + r.id,
+            type: r.is_thread ? 'posted_thread' : 'posted_comment',
+            platform: r.platform || '',
+            project: r.project_name || '',
+            link: r.our_url || '',
+            summary: r.our_content || '',
+            body: r.our_content || '',
+            occurred_at: r.posted_at || null,
+          };
+          return renderDeleteBtnHtml(ev);
+        },
         filterMode: 'none' },
     ],
   });
@@ -13449,7 +13807,7 @@ function renderActivity(events) {
     sorted.length + ' of ' + events.length + ' events';
   renderPagination(sorted.length);
   if (!page.length) {
-    body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text);padding:40px;">No matching events</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text);padding:40px;">No matching events</td></tr>';
     return;
   }
   const rows = page.map(e => {
@@ -13527,6 +13885,7 @@ function renderActivity(events) {
       '</td>' +
       '<td class="activity-summary">' + summaryHtml + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated) + '</td>' +
+      '<td style="text-align:center;">' + renderDeleteBtnHtml(e) + '</td>' +
     '</tr>';
   }).join('');
   body.innerHTML = rows;
@@ -13582,6 +13941,9 @@ function activateTab(name) {
   if (name === 'activity') {
     buildActivityFilters();
     if (!_tabLoaded.activity) _tabLoaded.activity = true;
+    // Refresh the pending-deletion Set so the trash icon renders in
+    // "pending" state for already-flagged rows on tab activation.
+    loadDeletionRequests();
     startActivityAutoRefresh();
   } else {
     stopActivityAutoRefresh();
@@ -13597,6 +13959,9 @@ function activateTab(name) {
   }
   if (name === 'top') {
     initTopFilters();
+    // Same pending-deletion refresh as Activity: makes the trash icon
+    // show the right state immediately when the user lands on Top.
+    loadDeletionRequests();
     if (_topSubtab === 'pages') {
       loadTopPages();
     } else if (_topSubtab === 'dms') {
