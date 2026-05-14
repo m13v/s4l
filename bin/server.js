@@ -5572,9 +5572,42 @@ async function handleApi(req, res) {
       grand_cost_usd_orchestrator: grandCostOrch,
       grand_cost_usd_estimated: grandCostEst,
       cost_available: !!(req.user && req.user.admin),
+      can_edit_weight: !auth.CLIENT_MODE && !!(req.user && req.user.admin),
       projects,
       unassigned,
     });
+  }
+
+  // POST /api/project/weight - update one project's weight in config.json.
+  // Admin only and disabled in CLIENT_MODE (no config.json on Cloud Run).
+  // Body: { name: string, weight: number }. Weight must be a non-negative
+  // finite number. The picker reads config.json directly on each pick, so no
+  // restart or cache bust is needed.
+  if (p === '/api/project/weight' && req.method === 'POST') {
+    if (auth.CLIENT_MODE) return json(res, { error: 'config_readonly_in_client_mode' }, 405);
+    if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    return readBody(req).then(body => {
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch { return json(res, { error: 'invalid_json' }, 400); }
+      const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+      const weight = Number(payload.weight);
+      if (!name) return json(res, { error: 'name_required' }, 400);
+      if (!Number.isFinite(weight) || weight < 0 || weight > 1e6) {
+        return json(res, { error: 'invalid_weight' }, 400);
+      }
+      let config;
+      try { config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
+      catch (e) { return json(res, { error: 'config_read_failed', detail: e.message }, 500); }
+      const projects = Array.isArray(config.projects) ? config.projects : [];
+      const target = projects.find(pr => pr && pr.name === name);
+      if (!target) return json(res, { error: 'project_not_found', name }, 404);
+      const previous = Number(target.weight) || 0;
+      target.weight = weight;
+      try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n'); }
+      catch (e) { return json(res, { error: 'config_write_failed', detail: e.message }, 500); }
+      return json(res, { saved: true, name, weight, previous });
+    }).catch(e => json(res, { error: e.message }, 400));
   }
 
   // GET /api/deploy/status - latest Vercel production deploy per project.
@@ -13529,6 +13562,7 @@ function renderProjectStatus(data) {
   const grandTotal = Number(data && data.grand_total) || 0;
   const totals = (data && data.platform_totals) || {};
   const costAvailable = !!(data && data.cost_available);
+  const canEditWeight = !!(data && data.can_edit_weight);
   const grandCost = Number(data && data.grand_cost_usd) || 0;
   const grandCostOrch = Number(data && data.grand_cost_usd_orchestrator) || 0;
   const grandCostEst = Number(data && data.grand_cost_usd_estimated) || 0;
@@ -13635,9 +13669,20 @@ function renderProjectStatus(data) {
     const costCellHtml = costAvailable
       ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, { extra: 'color:var(--text-secondary);' })
       : '';
+    const weightVal = Number(r.weight) || 0;
+    const weightCellHtml = (canEditWeight && !r.unassigned)
+      ? '<td style="text-align:right;font-variant-numeric:tabular-nums;">' +
+          '<input type="number" min="0" step="1" value="' + weightVal + '" ' +
+            'data-project-weight-input="' + escapeHtml(r.name) + '" ' +
+            'data-original-weight="' + weightVal + '" ' +
+            'class="project-weight-input" ' +
+            'style="width:60px;text-align:right;font-variant-numeric:tabular-nums;padding:2px 6px;border:1px solid var(--border);background:var(--bg-subtle,transparent);color:var(--text);border-radius:4px;font-size:13px;font-weight:600;" ' +
+            'title="Edit and press Enter or blur to save" />' +
+        '</td>'
+      : '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + weightVal + '</td>';
     return '<tr>' +
       '<td style="text-align:left;font-weight:600;">' + nameLabel + '</td>' +
-      '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + (r.weight || 0) + '</td>' +
+      weightCellHtml +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + (r.unassigned ? '&mdash;' : formatPct(r.target_share)) + '</td>' +
       platformCells +
       totalCell +
@@ -13668,6 +13713,61 @@ function renderProjectStatus(data) {
         '<tbody>' + bodyRows + footerHtml + '</tbody>' +
       '</table>' +
     '</div>' + legend;
+  if (canEditWeight) {
+    body.querySelectorAll('input.project-weight-input').forEach(inp => {
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+        else if (e.key === 'Escape') {
+          inp.value = inp.dataset.originalWeight || '0';
+          inp.blur();
+        }
+      });
+      inp.addEventListener('blur', () => saveProjectWeight(inp));
+    });
+  }
+}
+async function saveProjectWeight(inp) {
+  const name = inp.dataset.projectWeightInput;
+  const original = Number(inp.dataset.originalWeight) || 0;
+  const raw = inp.value.trim();
+  const next = Number(raw);
+  if (!name) return;
+  if (raw === '' || !Number.isFinite(next) || next < 0) {
+    inp.value = String(original);
+    return;
+  }
+  if (Math.trunc(next) === Math.trunc(original) && next === original) return;
+  inp.disabled = true;
+  const prevBorder = inp.style.borderColor;
+  inp.style.borderColor = 'var(--text-muted)';
+  try {
+    const res = await fetch('/api/project/weight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, weight: next }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      inp.value = String(original);
+      inp.style.borderColor = '#b91c1c';
+      setTimeout(() => { inp.style.borderColor = prevBorder; }, 1500);
+      console.error('[project-weight] save failed', data);
+      return;
+    }
+    inp.dataset.originalWeight = String(next);
+    inp.style.borderColor = '#15803d';
+    setTimeout(() => { inp.style.borderColor = prevBorder; }, 800);
+    try { window.posthog && window.posthog.capture('project_weight_edit', { project: name, weight: next, previous: original }); } catch (er) {}
+    _projectStatusLoading = false;
+    loadProjectStatus(true);
+  } catch (e) {
+    inp.value = String(original);
+    inp.style.borderColor = '#b91c1c';
+    setTimeout(() => { inp.style.borderColor = prevBorder; }, 1500);
+    console.error('[project-weight] save error', e);
+  } finally {
+    inp.disabled = false;
+  }
 }
 async function refreshAllData() {
   const icon = document.getElementById('global-refresh-icon');
