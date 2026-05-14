@@ -124,3 +124,6 @@ skill/logs-archive/
 *.tiff
 *.tif
 *.raw
+
+# Customer onboarding playbook + drafts (private)
+/onboarding/
