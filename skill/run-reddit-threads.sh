@@ -29,6 +29,12 @@ LOG_FILE="$LOG_DIR/run-reddit-threads-$(date +%Y-%m-%d_%H%M%S).log"
 echo "=== Reddit Threads Run: $(date) ===" | tee "$LOG_FILE"
 RUN_START_EPOCH=$(date +%s)
 
+# Match run-reddit-search.sh:38 / engage.sh:46. Without this, the 4 `log "..."`
+# calls added in 5e41d96 (2026-05-10) fall through to macOS /usr/bin/log,
+# which barfs `Unknown subcommand` and ERR-traps the run at exit=64 before
+# the browser lease is ever acquired (silent kill since 2026-05-10).
+log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
+
 # Diagnostic: log the failing line and command before set -e kills the script.
 # Without this, silent deaths (e.g., Claude exits non-zero inside the $() below)
 # leave only the context block in the log with no clue what killed the run.
