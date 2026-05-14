@@ -19,6 +19,78 @@ LOG_FILE="$LOG_DIR/engage-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 BATCH_ID="entw-$(date +%Y%m%d-%H%M%S)-$$"
 export SA_CYCLE_ID="$BATCH_ID"
 
+# 2026-05-13 backend selector — switch between twitter-agent (Playwright MCP,
+# default) and twitter-harness (browser-harness MCP, CDP-driven real Chrome).
+# Both drive the SAME logical Twitter session via shared auth_token cookies,
+# so lock.sh's defer_if_foreign_browser_mcp_active treats them as mutually
+# exclusive. To pilot the harness path: TWITTER_BACKEND=harness bash engage-twitter.sh
+TWITTER_BACKEND="${TWITTER_BACKEND:-agent}"
+case "$TWITTER_BACKEND" in
+    agent)
+        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json"
+        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_AGENT_EOF'
+BROWSER BACKEND: twitter-agent (Playwright MCP, headed Chromium at ~/.claude/browser-profiles/twitter).
+Tools available: mcp__twitter-agent__browser_navigate, browser_snapshot, browser_run_code,
+browser_click, browser_type, browser_take_screenshot, browser_wait_for, browser_press_key,
+browser_resize, browser_console_messages, browser_network_requests. The MCP holds the
+browser open across calls; tool calls are session-stateful.
+BROWSER_AGENT_EOF
+        )
+        ;;
+    harness)
+        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
+        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
+BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
+port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
+logged in as m13v_; cookies persist on disk.
+
+You have ONE tool: mcp__twitter-harness__bh_run(script). It runs arbitrary Python with
+these helpers pre-imported:
+  new_tab(url), goto_url(url), wait_for_load(), page_info(),
+  capture_screenshot(),                     # returns path to PNG; Read it to see the page
+  click_at_xy(x, y),                        # coordinate click (viewport pixels)
+  js(expression),                           # page.evaluate-style; returns the result
+  type_text(text),                          # types into currently-focused element
+  press_key(key),                           # e.g. "Enter", "Tab", "Escape"
+  scroll(direction, amount), cdp(method, **params)
+
+TRANSLATION TABLE — wherever this prompt mentions a Playwright-style tool, do the
+following with bh_run instead:
+
+  browser_navigate(url)           ->  bh_run('new_tab("URL")') or bh_run('goto_url("URL"); wait_for_load()')
+  browser_snapshot                ->  bh_run('print(js("""..."""))') to read DOM as structured data,
+                                       OR bh_run('print(capture_screenshot())') + Read the PNG
+  browser_run_code(js)            ->  bh_run('print(js("""<the JS expression>"""))')
+  browser_click(ref=...)          ->  Find the element via selector, compute center coords from
+                                       getBoundingClientRect, then bh_run('click_at_xy(X, Y)')
+  browser_type(ref=..., text=...) ->  Click the textbox first (click_at_xy), then bh_run('type_text("TEXT")')
+  browser_take_screenshot         ->  bh_run('print(capture_screenshot())') then Read the path
+  browser_press_key("Enter")      ->  bh_run('press_key("Enter")')
+
+EXAMPLE — click the reply submit button:
+  bh_run('''
+  pt = js("""
+    const el = document.querySelector('[data-testid="tweetButtonInline"]');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {x: r.x + r.width/2, y: r.y + r.height/2};
+  """)
+  print(pt)
+  ''')
+  # Then in a follow-up call (substituting the x/y from above):
+  bh_run('click_at_xy(123, 456)')
+
+VERIFY AFTER EVERY MUTATION by capturing a screenshot and reading the PNG — coordinate
+clicks can miss; visual verification is the only reliable confirmation that the action took.
+BROWSER_HARNESS_EOF
+        )
+        ;;
+    *)
+        echo "ERROR: unknown TWITTER_BACKEND='$TWITTER_BACKEND' (expected: agent, harness)" >&2
+        exit 2
+        ;;
+esac
+
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
 
@@ -27,8 +99,17 @@ source "$(dirname "$0")/lock.sh"
 # triggers the "chromium profile locked by another process; waited 45s"
 # SIGTRAP cascade — observed live 2026-05-13 14:29 with the user's IDE
 # holding the profile via codex-acp.
-if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
-    exit 0
+#
+# 2026-05-13: For TWITTER_BACKEND=harness we skip this check — the harness
+# Chrome is on a separate profile (~/.claude/browser-profiles/browser-harness)
+# and CDP supports multiple concurrent clients on the same Chrome, so foreign
+# harness MCP servers do NOT cause SingletonLock contention. We still rely on
+# the bash `twitter-browser` lock below for serializing Twitter operations
+# across pipelines.
+if [ "$TWITTER_BACKEND" = "agent" ]; then
+    if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
+        exit 0
+    fi
 fi
 
 acquire_lock "twitter-browser" 3600
@@ -158,6 +239,8 @@ print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) i
     PHASE_B_PROMPT=$(mktemp)
     cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter Twitter/X engagement bot.
+
+$BROWSER_INSTRUCTIONS
 
 Read $SKILL_FILE for the full workflow, content rules, and platform details.
 
@@ -290,7 +373,7 @@ If the tweet has been deleted or is unavailable, mark as 'skipped' with reason '
 After every 10 replies, run: python3 $REPO_DIR/scripts/reply_db.py status
 PROMPT_EOF
 
-    gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-twitter-phaseB" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
+    gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-twitter-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
     rm -f "$PHASE_B_PROMPT"
 fi
 
