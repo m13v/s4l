@@ -360,35 +360,45 @@ ensure_browser_healthy() {
   return 0
 }
 
-# Detect if a playwright-mcp wrapper for the given platform agent is running
-# OUTSIDE this script's process tree (e.g. an interactive Fazm Dev / Claude
-# Code IDE session that has <platform>-agent.json in its MCP config, or an
-# already-running peer cron). When found, the calling cron pipeline should
-# exit cleanly without launching Chrome — racing the foreign MCP's profile
-# crashes Chrome with "chromium profile locked by another process; waited
-# 45s" and burns the run.
+# Detect if a foreign playwright-mcp wrapper for the given platform agent has
+# a LIVE Chrome under its process tree on the platform's profile directory.
+# When found, the calling cron pipeline should exit cleanly without launching
+# Chrome — racing the foreign MCP's profile crashes Chrome with "chromium
+# profile locked by another process; waited 45s" and burns the run.
 #
-# Observed live 2026-05-13 14:29: engage-twitter.sh fired on schedule while
-# the user's Fazm Dev IDE held a twitter-agent MCP wrapper via codex-acp,
-# Phase A Playwright SIGTRAPed after the 45s SingletonLock wait. The user
-# saw repeated Chrome crashes every cron cycle until engage-twitter was
-# unloaded.
+# Why "wrapper + Chrome" instead of "wrapper alone": playwright-mcp wrappers
+# spawn at Claude Code session startup (regardless of whether mcp__<platform>-
+# agent__* tools have ever been called) and stay alive for the lifetime of
+# the IDE/CLI session — hours to days. Chrome only launches lazily on the
+# first tool call. Treating a naked wrapper as a conflict permanently starves
+# the cron whenever any developer keeps a Claude Code window open with the
+# agent in their MCP config (the steady-state in this workflow). Observed
+# live 2026-05-13 17:00 / 17:15 / 17:30 / 17:43 / 17:45: four consecutive
+# reddit + one twitter cycle bailed with posted=0 cost=$0.00 elapsed=61s
+# even though no Chrome was actually open on either profile.
+#
+# Observed live 2026-05-13 14:29 (still a real conflict): engage-twitter.sh
+# fired on schedule while the user's Fazm Dev IDE held a twitter-agent MCP
+# wrapper via codex-acp AND that wrapper had a live Chrome. Phase A
+# Playwright SIGTRAPed after the 45s SingletonLock wait. THIS case is what
+# the defer mechanism exists to prevent.
 #
 # Usage:
 #   defer_if_foreign_browser_mcp_active twitter || exit 0
 #   defer_if_foreign_browser_mcp_active reddit  "$LOG_FILE"  # optional log path
 #
-# Returns 0 (foreign found, caller should defer) or 1 (clean, caller proceeds).
+# Returns 0 (foreign conflict, caller should defer) or 1 (clean, caller proceeds).
 defer_if_foreign_browser_mcp_active() {
   local platform="$1"
   local log_file="${2:-}"
   local our_pid=$$
   local cfg_pattern="${platform}-agent.json"
+  local profile_dir="$HOME/.claude/browser-profiles/$platform"
 
-  # Find every playwright-mcp wrapper or node-playwright-mcp child whose
-  # command line references this platform's agent config file. Captures both
-  # the npm-exec wrapper layer and the underlying node process so we don't
-  # miss either tier of the tree.
+  # Step 1. Find every playwright-mcp wrapper or node-playwright-mcp child
+  # whose command line references this platform's agent config file. Captures
+  # both the npm-exec wrapper layer and the underlying node process so we
+  # don't miss either tier of the tree.
   local wrappers
   wrappers=$(ps -A -o pid=,command= 2>/dev/null     | awk -v cfg="$cfg_pattern" '
         index($0,cfg)==0 { next }
@@ -397,10 +407,9 @@ defer_if_foreign_browser_mcp_active() {
 
   [ -z "$wrappers" ] && return 1
 
-  # Walk each wrapper's parent chain. If our_pid appears anywhere, the
-  # wrapper is a descendant of us (we spawned it ourselves later in this
-  # script — fine). Otherwise it's foreign.
-  local wpid cur depth foreign_pid=""
+  # Step 2. Partition wrappers into ours (descendants of $$) vs foreign by
+  # walking each wrapper's parent chain.
+  local wpid cur depth foreign_wrappers=""
   for wpid in $wrappers; do
     cur=$wpid
     depth=0
@@ -415,14 +424,59 @@ defer_if_foreign_browser_mcp_active() {
       depth=$((depth+1))
     done
     if ! $is_ours; then
-      foreign_pid=$wpid
-      break
+      foreign_wrappers="$foreign_wrappers $wpid"
     fi
   done
+  foreign_wrappers="${foreign_wrappers# }"
 
-  [ -z "$foreign_pid" ] && return 1
+  [ -z "$foreign_wrappers" ] && return 1
 
-  # Identify what the foreign wrapper is attached to so the log is useful.
+  # Step 3. Require that at least one foreign wrapper has a live Chrome
+  # child on this platform's profile. Walk every Chrome process whose
+  # cmdline references user-data-dir=$profile_dir (this catches both the
+  # top-level Chrome and its --type= renderer/utility subprocesses, all of
+  # which inherit the cmdline) and check whether any of their ancestors is
+  # one of the foreign wrappers. Bottom-up because pgrep -P is not portable
+  # to all macOS variants and we already do ancestor walks above.
+  local chrome_pids cpid
+  chrome_pids=$(ps -A -o pid=,command= 2>/dev/null | awk -v p="user-data-dir=$profile_dir" '
+        index($0,p)>0 { print $1 }' || true)
+
+  local foreign_pid=""
+  if [ -n "$chrome_pids" ]; then
+    for cpid in $chrome_pids; do
+      cur=$cpid
+      depth=0
+      while [ -n "$cur" ] && [ "$cur" != "1" ] && [ "$depth" -lt 20 ]; do
+        for wpid in $foreign_wrappers; do
+          if [ "$cur" = "$wpid" ]; then
+            foreign_pid=$wpid
+            break
+          fi
+        done
+        [ -n "$foreign_pid" ] && break
+        cur=$(ps -p "$cur" -o ppid= 2>/dev/null | tr -d ' ')
+        depth=$((depth+1))
+      done
+      [ -n "$foreign_pid" ] && break
+    done
+  fi
+
+  if [ -z "$foreign_pid" ]; then
+    # Foreign wrapper(s) exist but none have a live Chrome on this profile.
+    # No collision risk — proceed. This is the steady state when the user
+    # has Claude Code open but hasn't invoked an mcp__<platform>-agent__*
+    # tool this session (or invoked one and Chrome already closed).
+    local first_foreign="${foreign_wrappers%% *}"
+    echo "[defer_foreign_mcp] ${platform}: foreign wrapper(s) detected (${foreign_wrappers}) but NO live Chrome on profile ${profile_dir}; proceeding." >&2
+    if [ -n "$log_file" ] && [ -w "$(dirname "$log_file")" ]; then
+      echo "[defer_foreign_mcp] ${platform}: foreign wrapper(s) detected (${foreign_wrappers}) but NO live Chrome on profile ${profile_dir}; proceeding." >> "$log_file"
+    fi
+    return 1
+  fi
+
+  # Step 4. Identify the root process owning the foreign wrapper so the log
+  # is useful (tells the user which IDE / cron session is holding Chrome).
   local foreign_root=$foreign_pid
   cur=$foreign_pid
   while [ -n "$cur" ] && [ "$cur" != "1" ]; do
@@ -432,7 +486,7 @@ defer_if_foreign_browser_mcp_active() {
   local foreign_root_cmd
   foreign_root_cmd=$(ps -p "$foreign_root" -o command= 2>/dev/null | head -c 120)
 
-  local msg="[defer_foreign_mcp] ${platform}: foreign ${platform}-agent MCP wrapper PID ${foreign_pid} detected (root PID ${foreign_root}: ${foreign_root_cmd}). Skipping this run to avoid Chrome profile collision."
+  local msg="[defer_foreign_mcp] ${platform}: foreign ${platform}-agent MCP wrapper PID ${foreign_pid} has a live Chrome on profile ${profile_dir} (root PID ${foreign_root}: ${foreign_root_cmd}). Skipping this run to avoid Chrome profile collision."
   echo "$msg" >&2
   if [ -n "$log_file" ] && [ -w "$(dirname "$log_file")" ]; then
     echo "$msg" >> "$log_file"
