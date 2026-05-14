@@ -3562,10 +3562,16 @@ async function handleApi(req, res) {
       const rows = await pq(q);
       let events = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       // Non-admin: drop events not tagged with an allowed project (including
-      // octolens mentions, which have no project column).
+      // octolens mentions, which have no project column). Strip Claude cost
+      // fields; cost is operator-internal (API spend not charged to clients).
       if (!req.user.admin) {
         const allowed = new Set(req.user.projects);
         events = events.filter(e => e.project && allowed.has(e.project));
+        events.forEach(e => {
+          delete e.cost_usd;
+          delete e.cost_usd_orchestrator;
+          delete e.cost_usd_estimated;
+        });
       }
       return json(res, { events });
     })().catch(e => json(res, { error: e.message }, 500));
@@ -6510,7 +6516,7 @@ const HTML = `<!DOCTYPE html>
       <button type="button" class="style-stats-pill" data-value="30d">Last 30d</button>
     </div>
   </div>
-  <details class="style-stats-section" id="cost-stats" open>
+  <details class="style-stats-section sa-admin-only" id="cost-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">&#9654;</span><span id="cost-stats-heading">Cost per Activity (last 24 hours)</span></span>
       <span class="style-stats-total" id="cost-stats-total"></span>
@@ -6785,7 +6791,7 @@ const HTML = `<!DOCTYPE html>
           <th class="activity-sortable" data-sort="summary">
             <span class="activity-header-label">What <span class="activity-sort-arrow" data-sort-arrow="summary"></span></span>
           </th>
-          <th style="width:90px;text-align:right;" class="activity-sortable" data-sort="cost_usd">
+          <th style="width:90px;text-align:right;" class="activity-sortable sa-admin-only" data-sort="cost_usd">
             <span class="activity-header-label">Cost <span class="activity-sort-arrow" data-sort-arrow="cost_usd"></span></span>
           </th>
           <th style="width:40px;text-align:center;">
@@ -9128,6 +9134,27 @@ async function handleDeleteBtnClick(btn) {
   _saDelFailed.delete(payload.key);
   btn.classList.add('is-loading');
   btn.setAttribute('title', 'sending...');
+  // Optimistic add: the Resend roundtrip is ~15s and the activity table can
+  // re-render mid-flight, detaching this button node from the DOM. The fresh
+  // button reads _saDelPending at render time, so adding the key up-front
+  // guarantees the new button paints pending immediately instead of
+  // reverting to the default trash icon.
+  _saDelPending.add(payload.key);
+  const applyPendingState = () => {
+    document.querySelectorAll('button.sa-del-btn[data-sa-del-payload]').forEach(b => {
+      let k = null;
+      try {
+        const raw = b.getAttribute('data-sa-del-payload') || '';
+        if (raw) k = JSON.parse(decodeURIComponent(escape(atob(raw)))).key;
+      } catch {}
+      if (k === payload.key) {
+        b.classList.remove('is-loading', 'is-failed');
+        b.classList.add('is-pending');
+        b.setAttribute('title', 'pending deletion');
+        b.setAttribute('aria-label', 'pending deletion');
+      }
+    });
+  };
   try {
     const r = await fetch('/api/activity/mark-deletion', {
       method: 'POST',
@@ -9135,19 +9162,18 @@ async function handleDeleteBtnClick(btn) {
       body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));
-    btn.classList.remove('is-loading');
     if (r.ok && (j.status === 'pending' || j.already_existed)) {
-      _saDelPending.add(payload.key);
-      btn.classList.add('is-pending');
-      btn.setAttribute('title', 'pending deletion');
-      btn.setAttribute('aria-label', 'pending deletion');
+      applyPendingState();
     } else {
+      _saDelPending.delete(payload.key);
       _saDelFailed.add(payload.key);
+      btn.classList.remove('is-loading');
       btn.classList.add('is-failed');
       const msg = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
       btn.setAttribute('title', 'failed: ' + msg + ' (click to retry)');
     }
   } catch (e) {
+    _saDelPending.delete(payload.key);
     btn.classList.remove('is-loading');
     _saDelFailed.add(payload.key);
     btn.classList.add('is-failed');
@@ -9395,7 +9421,7 @@ async function loadActivityStats() {
 // post's first-ever snapshot so day 1 never attributes lifetime counts
 // to a capture day; expect those lines to sit at 0 until at least two
 // consecutive days of snapshots have accumulated per post.
-const DAILY_METRICS = [
+let DAILY_METRICS = [
   { id: 'views',           label: 'Views',             color: '#6366f1', endpoint: '/api/views/per-day',    valueKey: 'views_gained',     platformAware: true },
   { id: 'upvotes',         label: 'Upvotes',           color: '#f97316', endpoint: '/api/upvotes/per-day',  valueKey: 'upvotes_gained',   platformAware: true },
   { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
@@ -9408,7 +9434,7 @@ const DAILY_METRICS = [
   // platformAware: filters cost to the chosen platform's activity rows.
   // format: 'usd' so the legend pill, Y-axis ticks, bar labels, and
   // hover tooltip render as dollars (e.g. $12.34) instead of K/M counts.
-  { id: 'cost',            label: 'Cost (USD)',        color: '#dc2626', endpoint: '/api/cost/per-day',     valueKey: 'cost_usd',         platformAware: true,  format: 'usd' },
+  { id: 'cost',            label: 'Cost (USD)',        color: '#dc2626', endpoint: '/api/cost/per-day',     valueKey: 'cost_usd',         platformAware: true,  format: 'usd', adminOnly: true },
   // All funnel metrics count UNIQUE VISITORS (distinct_id), not raw events.
   // A user iterating on the same project (multiple prompts, multiple
   // schedule retries, multiple pageviews) is 1, not N. See
@@ -10108,6 +10134,7 @@ async function loadDailyMetrics() {
   const qsAware = platformAwareParams.join('&');
   const qsProj  = projectOnlyParams.join('&');
   try {
+    const costAvail = window.SA_IS_ADMIN !== false;
     const [views, upvotes, comments, clicks, bookings, funnel, cost] = await Promise.all([
       fetchOne('/api/views/per-day?'    + qsAware),
       fetchOne('/api/upvotes/per-day?'  + qsAware),
@@ -10115,7 +10142,7 @@ async function loadDailyMetrics() {
       fetchOne('/api/clicks/per-day?'   + qsAware),
       fetchOne('/api/bookings/per-day?' + qsProj),
       fetchOne('/api/funnel/per-day?'   + qsProj),
-      fetchOne('/api/cost/per-day?'     + qsAware),
+      costAvail ? fetchOne('/api/cost/per-day?' + qsAware) : Promise.resolve({ rows: [], failed: false }),
     ]);
     const allFailed = [views, upvotes, comments, clicks, bookings, funnel, cost].every(r => r.failed);
     if (allFailed) {
@@ -11414,6 +11441,7 @@ function renderCostStats(payload) {
 let _costStatsLoadedFor = null;
 let _costStatsLoading = false;
 async function loadCostStats(force) {
+  if (window.SA_IS_ADMIN === false) return;
   if (_costStatsLoading) return;
   const hours = currentStatusWindow().hours;
   const row = document.getElementById('cost-stats-platform-pills');
@@ -13884,7 +13912,7 @@ function renderActivity(events) {
         '</div>' +
       '</td>' +
       '<td class="activity-summary">' + summaryHtml + '</td>' +
-      '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated) + '</td>' +
+      '<td class="sa-admin-only" style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated) + '</td>' +
       '<td style="text-align:center;">' + renderDeleteBtnHtml(e) + '</td>' +
     '</tr>';
   }).join('');
@@ -14180,6 +14208,7 @@ function saStartApp() {
   document.body.classList.remove('sa-authed-pending');
   const isCloud = document.body.classList.contains('sa-cloud');
   const isAdmin = window.SA_IS_ADMIN !== false;
+  if (!isAdmin) DAILY_METRICS = DAILY_METRICS.filter(m => !m.adminOnly);
   try { window.posthog && window.posthog.capture('dashboard_opened', { is_admin: isAdmin, is_cloud: isCloud }); } catch (e) {}
   // Status + pending are local-only (UI hidden by body.sa-cloud). Endpoints
   // are admin-only too, so skipping them on cloud also stops 403 spam for
