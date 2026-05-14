@@ -5945,6 +5945,15 @@ const HTML = `<!DOCTYPE html>
   }
   .sa-del-btn { position: relative; }
   @keyframes saDelSpin { to { transform: rotate(360deg); } }
+  /* Inline editable weight cell: input + small spinner shown while saving. */
+  .pw-cell { display: inline-flex; align-items: center; gap: 4px; justify-content: flex-end; }
+  .pw-spinner {
+    display: none; width: 10px; height: 10px; border: 1.5px solid transparent;
+    border-top-color: var(--text-muted); border-right-color: var(--text-muted);
+    border-radius: 50%; animation: saDelSpin 0.7s linear infinite;
+  }
+  .pw-cell.is-saving .pw-spinner { display: inline-block; }
+  .pw-cell.is-saving input { opacity: 0.6; }
   .sa-del-btn.is-pending {
     opacity: 1; color: #f59e0b; border-color: rgba(245, 158, 11, 0.35);
     background: rgba(245, 158, 11, 0.08);
@@ -13568,8 +13577,67 @@ const PROJECT_STATUS_PLATFORM_LABELS = {
   moltbook: 'MoltBook', github: 'GitHub',
 };
 let _projectStatusLoading = false;
+let _projectStatusData = null;
+let _projectStatusOrder = null;
+const PROJECT_STATUS_SORT_STORAGE = 'sa.projectStatus.sort.v1';
+let _projectStatusSort = { field: 'weight', dir: 'desc' };
+try {
+  const saved = JSON.parse(localStorage.getItem(PROJECT_STATUS_SORT_STORAGE) || 'null');
+  if (saved && typeof saved.field === 'string' && (saved.dir === 'asc' || saved.dir === 'desc')) {
+    _projectStatusSort = { field: saved.field, dir: saved.dir };
+  }
+} catch (e) {}
+function _persistProjectStatusSort() {
+  try { localStorage.setItem(PROJECT_STATUS_SORT_STORAGE, JSON.stringify(_projectStatusSort)); } catch (e) {}
+}
+const PROJECT_STATUS_SORT_FIELDS = {
+  name:         { type: 'string',  value: r => r.name || '' },
+  weight:       { type: 'numeric', value: r => Number(r.weight) || 0 },
+  target_share: { type: 'numeric', value: r => Number(r.target_share) || 0 },
+  total:        { type: 'numeric', value: r => Number(r.total) || 0 },
+  cost:         { type: 'numeric', value: r => Number(r.cost_usd) || 0 },
+  reddit:       { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.reddit) || 0 },
+  twitter:      { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.twitter) || 0 },
+  linkedin:     { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.linkedin) || 0 },
+  moltbook:     { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.moltbook) || 0 },
+  github:       { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.github) || 0 },
+};
+function _sortProjectRows(rows) {
+  const { field, dir } = _projectStatusSort;
+  const cfg = PROJECT_STATUS_SORT_FIELDS[field] || PROJECT_STATUS_SORT_FIELDS.weight;
+  const mul = dir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    // Unassigned rows always live at the bottom regardless of sort.
+    if (!!a.unassigned !== !!b.unassigned) return a.unassigned ? 1 : -1;
+    const va = cfg.value(a); const vb = cfg.value(b);
+    if (cfg.type === 'numeric') {
+      const diff = (Number(va) - Number(vb)) * mul;
+      if (diff !== 0) return diff;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    }
+    return String(va).localeCompare(String(vb)) * mul;
+  });
+}
+function _applyProjectStatusOrder(rows) {
+  if (!_projectStatusOrder) return _sortProjectRows(rows);
+  // Render previously-captured order, appending any new rows at the bottom
+  // (still respecting unassigned-at-bottom). This is what keeps a freshly-
+  // edited row from jumping after a save: order is frozen until the user
+  // explicitly resorts (header click) or refreshes (↻).
+  const byName = new Map(rows.map(r => [r.name, r]));
+  const used = new Set();
+  const out = [];
+  for (const name of _projectStatusOrder) {
+    const r = byName.get(name);
+    if (r) { out.push(r); used.add(name); }
+  }
+  const leftovers = rows.filter(r => !used.has(r.name));
+  // Keep unassigned at the bottom even within the leftovers slice.
+  leftovers.sort((a, b) => (a.unassigned ? 1 : 0) - (b.unassigned ? 1 : 0));
+  return out.concat(leftovers);
+}
 function formatPct(v) { return (Number(v || 0) * 100).toFixed(1) + '%'; }
-function renderProjectStatus(data) {
+function renderProjectStatus(data, opts) {
   const body = document.getElementById('project-status-body');
   const totalEl = document.getElementById('project-status-total');
   const heading = document.getElementById('project-status-heading');
@@ -13579,6 +13647,8 @@ function renderProjectStatus(data) {
     body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(data.error) + '</div>';
     return;
   }
+  _projectStatusData = data;
+  const preserveOrder = !!(opts && opts.preserveOrder);
   const hours = Number(data && data.hours) || 24;
   if (heading) heading.textContent = 'Project Status (last ' + hours + 'h)';
   const projects = (data && data.projects) || [];
@@ -13638,16 +13708,27 @@ function renderProjectStatus(data) {
     body.innerHTML = '<div class="style-stats-empty">No projects configured with weight &gt; 0.</div>';
     return;
   }
+  const sortHeader = (key, label, align) => {
+    const alignStyle = align === 'left' ? 'text-align:left;' : 'text-align:right;';
+    const active = _projectStatusSort.field === key;
+    const arrow = active ? (_projectStatusSort.dir === 'asc' ? '▲' : '▼') : '';
+    const arrowCls = 'activity-sort-arrow' + (active ? ' active' : '');
+    return '<th class="activity-sortable" data-project-sort-key="' + key + '" style="' + alignStyle + '">' +
+      '<span class="activity-header-label">' + label +
+        ' <span class="' + arrowCls + '" data-project-sort-arrow="' + key + '">' + arrow + '</span>' +
+      '</span>' +
+    '</th>';
+  };
   const header =
     '<thead><tr>' +
-      '<th style="text-align:left;">Project</th>' +
-      '<th style="text-align:right;">Weight</th>' +
-      '<th style="text-align:right;">Target&nbsp;%</th>' +
+      sortHeader('name', 'Project', 'left') +
+      sortHeader('weight', 'Weight') +
+      sortHeader('target_share', 'Target&nbsp;%') +
       PROJECT_STATUS_PLATFORMS.map(p =>
-        '<th style="text-align:right;">' + PROJECT_STATUS_PLATFORM_LABELS[p] + '</th>'
+        sortHeader(p, PROJECT_STATUS_PLATFORM_LABELS[p])
       ).join('') +
-      '<th style="text-align:right;">Total</th>' +
-      (costAvailable ? '<th style="text-align:right;" title="Claude session cost in this window">Cost</th>' : '') +
+      sortHeader('total', 'Total') +
+      (costAvailable ? sortHeader('cost', 'Cost') : '') +
     '</tr></thead>';
   const cellWithShare = (n, platformTotal, targetShare, opts) => {
     const num = Number(n) || 0;
@@ -13697,12 +13778,15 @@ function renderProjectStatus(data) {
     const editable = canEditWeight && (!r.unassigned || r.configured);
     const weightCellHtml = editable
       ? '<td style="text-align:right;font-variant-numeric:tabular-nums;">' +
-          '<input type="number" min="0" step="1" value="' + weightVal + '" ' +
-            'data-project-weight-input="' + escapeHtml(r.name) + '" ' +
-            'data-original-weight="' + weightVal + '" ' +
-            'class="project-weight-input" ' +
-            'style="width:60px;text-align:right;font-variant-numeric:tabular-nums;padding:2px 6px;border:1px solid var(--border);background:var(--bg-subtle,transparent);color:var(--text);border-radius:4px;font-size:13px;font-weight:600;" ' +
-            'title="Edit and press Enter or blur to save" />' +
+          '<span class="pw-cell" data-project-weight-cell="' + escapeHtml(r.name) + '">' +
+            '<input type="number" min="0" step="1" value="' + weightVal + '" ' +
+              'data-project-weight-input="' + escapeHtml(r.name) + '" ' +
+              'data-original-weight="' + weightVal + '" ' +
+              'class="project-weight-input" ' +
+              'style="width:56px;text-align:right;font-variant-numeric:tabular-nums;padding:2px 6px;border:1px solid var(--border);background:var(--bg-subtle,transparent);color:var(--text);border-radius:4px;font-size:13px;font-weight:600;" ' +
+              'title="Edit and press Enter or blur to save" />' +
+            '<span class="pw-spinner" aria-hidden="true"></span>' +
+          '</span>' +
         '</td>'
       : '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + weightVal + '</td>';
     return '<tr>' +
@@ -13714,7 +13798,12 @@ function renderProjectStatus(data) {
       costCellHtml +
     '</tr>';
   };
-  const bodyRows = projects.map(rowHtml).join('') + unassigned.map(rowHtml).join('');
+  const allRows = projects.concat(unassigned);
+  const ordered = preserveOrder ? _applyProjectStatusOrder(allRows) : _sortProjectRows(allRows);
+  // Capture the order we just rendered so future in-place saves (or
+  // background reloads) don't reshuffle rows under the operator.
+  _projectStatusOrder = ordered.map(r => r.name);
+  const bodyRows = ordered.map(rowHtml).join('');
   const footerCells = PROJECT_STATUS_PLATFORMS.map(p =>
     '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + (Number(totals[p]) || 0) + '</td>'
   ).join('');
@@ -13738,6 +13827,25 @@ function renderProjectStatus(data) {
         '<tbody>' + bodyRows + footerHtml + '</tbody>' +
       '</table>' +
     '</div>' + legend;
+  body.querySelectorAll('[data-project-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.getAttribute('data-project-sort-key');
+      if (!PROJECT_STATUS_SORT_FIELDS[key]) return;
+      const cfg = PROJECT_STATUS_SORT_FIELDS[key];
+      const defaultDir = cfg.type === 'numeric' ? 'desc' : 'asc';
+      if (_projectStatusSort.field === key) {
+        _projectStatusSort.dir = _projectStatusSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        _projectStatusSort.field = key;
+        _projectStatusSort.dir = defaultDir;
+      }
+      _persistProjectStatusSort();
+      // Header click is an explicit user-initiated re-sort, so drop the
+      // sticky order and let _sortProjectRows recompute.
+      _projectStatusOrder = null;
+      if (_projectStatusData) renderProjectStatus(_projectStatusData);
+    });
+  });
   if (canEditWeight) {
     body.querySelectorAll('input.project-weight-input').forEach(inp => {
       inp.addEventListener('keydown', e => {
@@ -13761,7 +13869,9 @@ async function saveProjectWeight(inp) {
     inp.value = String(original);
     return;
   }
-  if (Math.trunc(next) === Math.trunc(original) && next === original) return;
+  if (next === original) return;
+  const cell = inp.closest('.pw-cell');
+  if (cell) cell.classList.add('is-saving');
   inp.disabled = true;
   const prevBorder = inp.style.borderColor;
   inp.style.borderColor = 'var(--text-muted)';
@@ -13783,8 +13893,11 @@ async function saveProjectWeight(inp) {
     inp.style.borderColor = '#15803d';
     setTimeout(() => { inp.style.borderColor = prevBorder; }, 800);
     try { window.posthog && window.posthog.capture('project_weight_edit', { project: name, weight: next, previous: original }); } catch (er) {}
+    // Pull fresh totals + target % from the server, but preserve the row
+    // order so the just-edited row stays where the operator saw it. The
+    // order will be refreshed on header click or the ↻ refresh button.
     _projectStatusLoading = false;
-    loadProjectStatus(true);
+    loadProjectStatus(true, { preserveOrder: true });
   } catch (e) {
     inp.value = String(original);
     inp.style.borderColor = '#b91c1c';
@@ -13792,6 +13905,7 @@ async function saveProjectWeight(inp) {
     console.error('[project-weight] save error', e);
   } finally {
     inp.disabled = false;
+    if (cell) cell.classList.remove('is-saving');
   }
 }
 async function refreshAllData() {
@@ -13819,7 +13933,7 @@ async function refreshAllData() {
   loadTopDms(true);
   loadActivity();
 }
-async function loadProjectStatus(force) {
+async function loadProjectStatus(force, opts) {
   if (_projectStatusLoading) return;
   if (saAuthNotReady()) return;
   _projectStatusLoading = true;
@@ -13827,7 +13941,7 @@ async function loadProjectStatus(force) {
     const hours = currentStatusWindow().hours;
     const res = await fetch('/api/project/status?hours=' + hours);
     const data = await res.json();
-    renderProjectStatus(data);
+    renderProjectStatus(data, opts);
   } catch (e) {
     renderProjectStatus({ error: String(e && e.message || e) });
   } finally {
@@ -14353,7 +14467,10 @@ function saStartApp() {
     loadDeployHealth();
     setInterval(loadDeployHealth, 60000);
     loadProjectStatus();
-    setInterval(loadProjectStatus, 60000);
+    // Silent background polls preserve the current row order so editing one
+    // weight + waiting 60s doesn't shuffle rows under the operator. Explicit
+    // ↻ refresh and column-header clicks re-sort.
+    setInterval(() => loadProjectStatus(false, { preserveOrder: true }), 60000);
   }
   // Funnel + DM stats sections are \`<details open>\` by default; load them
   // here (post-auth) rather than in their wire IIFEs, which fire before
