@@ -16,10 +16,12 @@ LOG_FILE="$LOG_DIR/scan-twitter-followups-$(date +%Y-%m-%d_%H%M%S).log"
 
 # Browser-profile lock shared with all twitter pipelines.
 source "$(dirname "$0")/lock.sh"
+# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+# scan_twitter_thread_followups.py uses twitter_browser.py functions, which
+# honor TWITTER_CDP_URL set by the helper for harness backend.
+source "$(dirname "$0")/lib/twitter-backend.sh"
 acquire_lock "twitter-browser" 0
-# Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 acquire_lock "scan-twitter-followups" 0
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
