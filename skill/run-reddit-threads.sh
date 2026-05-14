@@ -334,7 +334,7 @@ CRITICAL: Use ONLY mcp__reddit-agent__* tools.
 CRITICAL: If mcp__reddit-agent__* tools are NOT available in this session (you cannot find them as deferred or callable), return JSON immediately with permalink=null and abort_reason='mcp_browser_unavailable'. DO NOT spawn Python, shell, headless or headed Playwright as a fallback. DO NOT use any other browser MCP. The pipeline depends on reddit-agent specifically; any other browser path violates project rules and CHECK-aborts a second Chrome on the locked profile (incident 2026-05-04 08:27).
 CRITICAL: Close browser tabs after each navigation (browser_tabs action 'close').
 CRITICAL: If a browser call times out, wait 30s and retry up to 3 times.
-CRITICAL: This is a RETRY of a $4-24 sunk-cost draft. Do NOT redraft, do NOT research." > "$CLAUDE_TMP" 2>&1
+CRITICAL: This is a RETRY of a \$4-24 sunk-cost draft. Do NOT redraft, do NOT research." > "$CLAUDE_TMP" 2>&1
 CLAUDE_RC=$?
 else
 "$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are posting an ORIGINAL thread to ${SUBREDDIT} for the ${PROJECT} project as u/${POST_ACCOUNT}.
