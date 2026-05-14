@@ -22,17 +22,18 @@ LOG_FILE="$LOG_DIR/dm-outreach-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
+# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+source "$(dirname "$0")/lib/twitter-backend.sh"
 
 # Skip cleanly if an interactive twitter-agent MCP session (Fazm Dev / IDE /
 # another cron) already owns the profile. See engage-twitter.sh for context.
-if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
+# Harness backend skips this check (CDP supports multiple concurrent clients).
+if defer_if_foreign_for_backend "$LOG_FILE"; then
     exit 0
 fi
 
 acquire_lock "twitter-browser" 3600
-# Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 acquire_lock "dm-outreach-twitter" 2700
 
 # Load secrets
@@ -250,7 +251,9 @@ Do EXACTLY this:
 Burning rows with skip_reason='twitter_agent_mcp_unavailable: ...' is a regression that on 2026-05-12 nuked 7 warm leads (efemjoba, gpuops, josesaezmerino, AIDailyGems, alkimiadev, RobertDMellish, kunaljeweller). The d.id IS NULL filter in scan_dm_candidates.py then permanently blocked them from re-discovery. Do not do this.
 PROMPT_EOF
 
-gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-twitter" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Twitter DM outreach claude exited with code $?"
+gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-twitter" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p "${BROWSER_INSTRUCTIONS}
+
+$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Twitter DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 # Belt-and-suspenders: if Claude (despite the prompt instructions added 2026-05-13)
