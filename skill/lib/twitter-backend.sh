@@ -108,11 +108,16 @@ ensure_twitter_browser_for_backend() {
         # harness path: probe + launch Chrome on port 9555 if needed.
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555 — launching..." >&2
+            # 2026-05-13: pass --window-position / --window-size on every launch.
+            # Mirrors the MCP server's ensure_chrome flags so the window lands
+            # at the twitter-agent monitor regardless of which path spawned Chrome.
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
                 --remote-debugging-port=9555 \
                 --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
                 --no-first-run --no-default-browser-check \
                 --disable-features=ChromeWhatsNewUI \
+                --window-position="${BH_WINDOW_POS:-3042,-1032}" \
+                --window-size="${BH_WINDOW_SIZE:-1024,1013}" \
                 about:blank >/dev/null 2>&1 &
             disown
             for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
