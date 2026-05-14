@@ -39,6 +39,8 @@ trap 'rc=$?; echo "SCRIPT DIED line=$LINENO cmd=\"$BASH_COMMAND\" exit=$rc" | te
 
 # Pipeline lock at top. Browser lock acquired later, just before the Claude/MCP step.
 source "$REPO_DIR/skill/lock.sh"
+# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+source "$REPO_DIR/skill/lib/twitter-backend.sh"
 acquire_lock "twitter-threads" 600
 
 # Engagement styles
@@ -286,9 +288,7 @@ export LINK_RULE
 
 # Acquire browser lock right before MCP step.
 acquire_lock "twitter-browser" 3600
-# Drop stale Chrome singleton symlinks before launch (see clean_stale_singleton.sh).
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 # Campaign wiring: pre-submit suffix injection (Twitter has no edit API, so we
 # can't mirror reddit-threads' post-submit edit pattern; instead we instruct the
@@ -353,7 +353,9 @@ fi
 # Capture Claude output to a temp file so non-zero exit doesn't swallow stderr.
 CLAUDE_TMP=$(mktemp)
 set +e
-"$REPO_DIR/scripts/run_claude.sh" "run-twitter-threads" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are posting an ORIGINAL Twitter thread for the ${PROJECT} project as @${POST_ACCOUNT}.
+"$REPO_DIR/scripts/run_claude.sh" "run-twitter-threads" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p --output-format json --json-schema "$RESULT_SCHEMA" "${BROWSER_INSTRUCTIONS}
+
+You are posting an ORIGINAL Twitter thread for the ${PROJECT} project as @${POST_ACCOUNT}.
 
 ## Config & Rules
 Read $SKILL_FILE for content rules and anti-AI-detection checklist.
