@@ -39,6 +39,10 @@ BROWSER_AGENT_EOF
         ;;
     harness)
         MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
+        # Route twitter_browser.py (Phase A) at the harness Chrome instead of the
+        # twitter-agent profile. twitter_browser.py:get_browser_and_page reads
+        # TWITTER_CDP_URL as a hard override (skips ps-based discovery).
+        export TWITTER_CDP_URL="http://127.0.0.1:9555"
         BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
 port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
@@ -113,13 +117,38 @@ if [ "$TWITTER_BACKEND" = "agent" ]; then
 fi
 
 acquire_lock "twitter-browser" 3600
-# Drop stale Chrome singleton symlinks before launch. Background ungraceful-
-# exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
-# pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
-# went wrong when opening your profile" 7x and the pipeline hangs. See
-# scripts/clean_stale_singleton.sh — refuses to clean if PID is alive.
-bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+
+if [ "$TWITTER_BACKEND" = "agent" ]; then
+    # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
+    # exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
+    # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
+    # went wrong when opening your profile" 7x and the pipeline hangs. See
+    # scripts/clean_stale_singleton.sh — refuses to clean if PID is alive.
+    bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
+    ensure_browser_healthy "twitter"
+else
+    # Harness path: ensure the harness Chrome is alive on port 9555 before
+    # Phase A's twitter_browser.py call. The browser-harness MCP launches it
+    # lazily on first bh_run, but Phase A doesn't go through MCP — it connects
+    # via CDP directly. Cold start = ~3s. Idempotent: skips if already up.
+    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+        log "Harness Chrome down on port 9555 — launching..."
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"             --remote-debugging-port=9555             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness"             --no-first-run --no-default-browser-check             --disable-features=ChromeWhatsNewUI             about:blank >>"$LOG_FILE" 2>&1 &
+        disown
+        # Wait up to 12s for CDP to be ready.
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
+            sleep 1
+        done
+        if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+            log "ERROR: harness Chrome failed to start within 12s; aborting"
+            exit 1
+        fi
+        log "Harness Chrome up on port 9555"
+    else
+        log "Harness Chrome already alive on port 9555"
+    fi
+fi
 acquire_lock "twitter" 3600
 
 # Load secrets
