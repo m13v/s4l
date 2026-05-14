@@ -5438,20 +5438,44 @@ async function handleApi(req, res) {
       };
     }).sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name));
     // Surface any posts that didn't match a weighted project, so the matrix adds up.
+    // configured = the project name is in config.json (just at weight 0), so the
+    // weight editor stays available. unconfigured rows come from stale project
+    // names found in post rows only and aren't editable here.
     const knownNames = new Set(weighted.map(p => p.name));
+    const configuredNames = new Set(configuredProjects.map(p => p.name));
+    const configuredByName = Object.fromEntries(configuredProjects.map(p => [p.name, p]));
     const unassigned = Object.entries(byProject)
       .filter(([name]) => !knownNames.has(name))
       .map(([name, stats]) => ({
         name,
-        weight: 0,
+        weight: Number((configuredByName[name] || {}).weight) || 0,
         target_share: 0,
         total: stats.total,
         actual_share: grandTotal > 0 ? stats.total / grandTotal : 0,
         deficit: -(grandTotal > 0 ? stats.total / grandTotal : 0),
         by_platform: Object.fromEntries(platforms.map(pl => [pl, stats.by_platform[pl] || 0])),
-        website: null,
+        website: (configuredByName[name] && configuredByName[name].website) || null,
         unassigned: true,
+        configured: configuredNames.has(name),
       }));
+    // Also include configured projects with weight=0 and zero posts in the
+    // window, so an operator can lift them back up from the table.
+    configuredProjects.forEach(cp => {
+      if (knownNames.has(cp.name)) return;
+      if (byProject[cp.name]) return;
+      unassigned.push({
+        name: cp.name,
+        weight: Number(cp.weight) || 0,
+        target_share: 0,
+        total: 0,
+        actual_share: 0,
+        deficit: 0,
+        by_platform: Object.fromEntries(platforms.map(pl => [pl, 0])),
+        website: cp.website || null,
+        unassigned: true,
+        configured: true,
+      });
+    });
     // Per-project Claude cost in the same window. Mirrors /api/cost/stats
     // attribution: per_row_cost = COALESCE(orchestrator_cost_usd,
     // total_cost_usd) / rows_in_session, summed across the activity rows
@@ -13670,7 +13694,8 @@ function renderProjectStatus(data) {
       ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, { extra: 'color:var(--text-secondary);' })
       : '';
     const weightVal = Number(r.weight) || 0;
-    const weightCellHtml = (canEditWeight && !r.unassigned)
+    const editable = canEditWeight && (!r.unassigned || r.configured);
+    const weightCellHtml = editable
       ? '<td style="text-align:right;font-variant-numeric:tabular-nums;">' +
           '<input type="number" min="0" step="1" value="' + weightVal + '" ' +
             'data-project-weight-input="' + escapeHtml(r.name) + '" ' +
