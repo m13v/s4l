@@ -1390,7 +1390,11 @@ def post_via_cdp(thread_url, reply_to_url, text):
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             cdp_out = proc.stdout.strip()
             if not cdp_out:
-                print(f"[post_reddit] CDP attempt {attempt + 1}: no stdout. stderr: {proc.stderr[:200]}")
+                # Full stderr (was [:200] until 2026-05-14; truncation hid the
+                # actual exception class/message, leaving cdp_no_response
+                # failures undiagnosable in postmortems).
+                _stderr_full = proc.stderr or ""
+                print(f"[post_reddit] CDP attempt {attempt + 1}: no stdout. stderr:\n{_stderr_full}")
                 if attempt < MAX_ATTEMPTS - 1:
                     time.sleep(10)
                 continue
