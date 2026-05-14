@@ -2137,5 +2137,59 @@ def main():
         sys.exit(1)
 
 
+def _install_stderr_tee():
+    """Mirror stderr to <repo>/log/reddit_browser.<utc>.<pid>.err.
+
+    Each reddit_browser.py invocation is captured by the parent post_reddit.py
+    with stderr=PIPE; when the child raises before printing JSON to stdout, the
+    parent prints only a truncated slice of the captured stderr (post_reddit
+    historically clipped at 200 chars). Teeing here keeps the full traceback
+    on disk regardless of parent-side handling.
+    """
+    try:
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_dir = os.path.join(repo_dir, "log")
+        os.makedirs(log_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        path = os.path.join(log_dir, f"reddit_browser.{ts}.{os.getpid()}.err")
+        fh = open(path, "a", encoding="utf-8", buffering=1)
+        cmd_repr = " ".join(sys.argv[1:3])[:160] if len(sys.argv) > 1 else "(no cmd)"
+        fh.write(f"--- reddit_browser invocation pid={os.getpid()} cmd={cmd_repr!r} ts={ts} ---\n")
+        fh.flush()
+        real_stderr = sys.stderr
+
+        class _Tee:
+            def write(self, s):
+                try:
+                    fh.write(s)
+                except Exception:
+                    pass
+                return real_stderr.write(s)
+
+            def flush(self):
+                try:
+                    fh.flush()
+                except Exception:
+                    pass
+                return real_stderr.flush()
+
+            def __getattr__(self, name):
+                return getattr(real_stderr, name)
+
+        sys.stderr = _Tee()
+
+        def _close():
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+        atexit.register(_close)
+    except Exception:
+        # Never let logging setup kill the invocation.
+        pass
+
+
 if __name__ == "__main__":
+    _install_stderr_tee()
     main()
