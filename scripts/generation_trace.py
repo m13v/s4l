@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -83,16 +84,51 @@ def build_trace(
     }
 
 
+_GEN_TRACE_DIR_ENV = "SOCIAL_AUTOPOSTER_GEN_TRACE_DIR"
+
+
+def _gen_trace_dir() -> Optional[str]:
+    """Resolve the persistent trace directory.
+
+    Order: env override > <repo>/log/gen_trace/ > None (fall back to tempfile).
+    """
+    override = os.environ.get(_GEN_TRACE_DIR_ENV)
+    if override:
+        try:
+            os.makedirs(override, exist_ok=True)
+            return override
+        except OSError:
+            return None
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = os.path.join(repo_dir, "log", "gen_trace")
+    try:
+        os.makedirs(target, exist_ok=True)
+        return target
+    except OSError:
+        return None
+
+
 def write_trace_tempfile(trace: dict, *, prefix: str = "gen_trace_") -> Optional[str]:
-    """Persist trace dict to a NamedTemporaryFile and return the path.
+    """Persist trace dict to disk and return the path.
+
+    Was a /tmp NamedTemporaryFile until 2026-05-14; /tmp didn't survive
+    e2b sandbox pause/resume, losing per-thread draft decisions on the
+    very runs we needed to postmortem. Now writes to <repo>/log/gen_trace/
+    (or $SOCIAL_AUTOPOSTER_GEN_TRACE_DIR), persistent across the run.
 
     Returns None on any IO failure — the caller must treat the trace as
     nice-to-have, never block the post on a failed trace write.
-    delete=False so the file survives the with-block close; the child
-    process consuming --generation-trace reads it and the parent
-    cleans up via cleanup_trace_tempfile() at end-of-run.
     """
+    trace_dir = _gen_trace_dir()
     try:
+        if trace_dir:
+            ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            fname = f"{prefix}{ts}_{uuid.uuid4().hex[:8]}.json"
+            path = os.path.join(trace_dir, fname)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(trace, fh, ensure_ascii=False)
+            return path
+        # Fallback: tempfile (read-only repo, sandbox edge cases).
         tf = tempfile.NamedTemporaryFile(
             prefix=prefix, suffix=".json",
             mode="w", delete=False, encoding="utf-8",
@@ -107,10 +143,23 @@ def write_trace_tempfile(trace: dict, *, prefix: str = "gen_trace_") -> Optional
 
 
 def cleanup_trace_tempfile(path: Optional[str]) -> None:
-    """Best-effort delete of a trace temp file. Safe to call with None."""
+    """Historically deleted trace files at end-of-run. Now a no-op for files
+    under <repo>/log/ so failure postmortems retain trace JSON; still deletes
+    legacy /tmp paths to avoid filling /tmp on long-running hosts.
+    """
     if not path:
         return
     try:
+        # Persistent log/ files: keep. Anything else (e.g. /tmp fallback): delete.
+        norm = os.path.abspath(path)
+        repo_log = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "log",
+        ))
+        override = os.environ.get(_GEN_TRACE_DIR_ENV)
+        keep_dirs = [repo_log] + ([os.path.abspath(override)] if override else [])
+        if any(norm.startswith(d + os.sep) for d in keep_dirs):
+            return
         os.unlink(path)
     except OSError:
         pass
