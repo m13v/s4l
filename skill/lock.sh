@@ -395,7 +395,26 @@ defer_if_foreign_browser_mcp_active() {
         /npm exec @playwright\/mcp/ || /playwright-mcp/ { print $1 }
       ' || true)
 
-  [ -z "$wrappers" ] && return 1
+  # 2026-05-13: Twitter has a second backend — twitter-harness (browser-harness
+  # MCP server + its own real-Chrome instance on port 9555). Both backends drive
+  # the SAME logical Twitter session (shared auth_token via cookie injection),
+  # so they must be mutually exclusive even though their Chrome profile dirs
+  # differ. Detect the harness MCP server.py and its underlying daemon process
+  # in addition to the playwright-mcp wrappers. Only fires for platform=twitter
+  # (no harness equivalent exists for reddit/linkedin yet).
+  if [ "$platform" = "twitter" ]; then
+    local harness_pids
+    harness_pids=$(ps -A -o pid=,command= 2>/dev/null     | awk '
+          /mcp-servers\/browser-harness\/server\.py/ || /browser_harness\.daemon/ { print $1 }
+        ' || true)
+    if [ -n "$harness_pids" ]; then
+      wrappers="$wrappers"$'\n'"$harness_pids"
+    fi
+  fi
+
+  # Trim blanks and dedupe.
+  wrappers=$(echo "$wrappers" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+  [ -z "$(echo "$wrappers" | tr -d ' ')" ] && return 1
 
   # Walk each wrapper's parent chain. If our_pid appears anywhere, the
   # wrapper is a descendant of us (we spawned it ourselves later in this
