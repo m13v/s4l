@@ -13988,6 +13988,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     try { window.posthog && window.posthog.capture('tab_view', { tab: name }); } catch (e) {}
   });
 });
+// Install the global delegated click handler for "mark for deletion" trash
+// buttons. Idempotent (early-exits if already installed). Runs once the body
+// is parsed so the listener is in place before any tab render fires.
+_saInstallDeleteListener();
 // On first paint, restore the persisted main tab. The HTML defaults to
 // "stats" — only override if the saved value is a known tab and is currently
 // visible to the user (some tabs are admin-only).
