@@ -26,6 +26,8 @@
 		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
+		<key>TWITTER_BACKEND</key>
+		<string>harness</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
