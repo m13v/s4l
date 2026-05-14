@@ -132,7 +132,7 @@ else
     # lazily on first bh_run, but Phase A doesn't go through MCP — it connects
     # via CDP directly. Cold start = ~3s. Idempotent: skips if already up.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-        log "Harness Chrome down on port 9555 — launching..."
+        echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." | tee -a "$LOG_FILE"
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"             --remote-debugging-port=9555             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness"             --no-first-run --no-default-browser-check             --disable-features=ChromeWhatsNewUI             about:blank >>"$LOG_FILE" 2>&1 &
         disown
         # Wait up to 12s for CDP to be ready.
@@ -141,12 +141,12 @@ else
             sleep 1
         done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            log "ERROR: harness Chrome failed to start within 12s; aborting"
+            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s; aborting" | tee -a "$LOG_FILE"
             exit 1
         fi
-        log "Harness Chrome up on port 9555"
+        echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" | tee -a "$LOG_FILE"
     else
-        log "Harness Chrome already alive on port 9555"
+        echo "[$(date +%H:%M:%S)] Harness Chrome already alive on port 9555" | tee -a "$LOG_FILE"
     fi
 fi
 acquire_lock "twitter" 3600
