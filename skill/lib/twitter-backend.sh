@@ -108,39 +108,14 @@ BROWSER_HARNESS_EOF
 esac
 
 cleanup_harness_tabs() {
-    # Close every CDP "page" tab except one, leaving harness Chrome with a clean
-    # slate before a new run starts. Safe to call any time: skips if Chrome is
-    # down. Idempotent. Workers, iframes, browser_ui targets are left alone
-    # (they auto-clean on tab close). Uses /json/close which gracefully closes
-    # via CDP; falls through quietly on errors so a tab-cleanup failure never
-    # blocks the run.
+    # Close every CDP "page" tab except one. Delegated to a standalone Python
+    # script because bash 3.2 (what launchd uses) cannot parse a nested heredoc
+    # inside a function body inside a sourced file. Inline form here broke every
+    # launchd-fired twitter script on 2026-05-14 until this refactor.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
         return 0
     fi
-    python3 - <<'PYEOF' 2>/dev/null || true
-import json, urllib.request, urllib.error
-try:
-    with urllib.request.urlopen("http://127.0.0.1:9555/json", timeout=2) as r:
-        tabs = json.loads(r.read())
-except Exception:
-    raise SystemExit(0)
-pages = [t for t in tabs if t.get("type") == "page"]
-if len(pages) <= 1:
-    print(f"[cleanup_harness_tabs] {len(pages)} page tab(s), no cleanup needed")
-    raise SystemExit(0)
-to_close = pages[1:]
-closed = 0
-for t in to_close:
-    tid = t.get("id")
-    if not tid:
-        continue
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:9555/json/close/{tid}", timeout=2).read()
-        closed += 1
-    except Exception:
-        pass
-print(f"[cleanup_harness_tabs] closed {closed}/{len(to_close)} extra page tabs (kept 1)")
-PYEOF
+    python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
 ensure_twitter_browser_for_backend() {
