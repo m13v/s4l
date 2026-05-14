@@ -522,6 +522,11 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     platform UTMs + code in utm_content), so the LLM's URL in the comment text
     is ignored for routing -- visitors always land on the destination we baked
     in. Pool depth managed by scripts/mint_external_pool.py.
+
+    Routes DB ops through social-autoposter-website /api/v1/post-links/* so
+    VMs / sandboxes without DATABASE_URL still mint successfully. The `conn`
+    arg is accepted for backward compatibility but ignored. Set
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to fall back to the direct-Neon path.
     """
     target_url = _ensure_scheme((target_url or '').strip())
     if not target_url or target_url == 'https://':
@@ -540,45 +545,68 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'detail': f"no website for project={project_name!r} in config.json",
         }
 
+    platform_norm = (platform or '').lower()
+    if platform_norm == 'x':
+        platform_norm = 'twitter'
+
     project_cfg = next((p for p in projects if p.get('name') == project_name), None)
+    use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
+
     if project_cfg and project_cfg.get('external_short_links'):
-        # Pool path. Atomically claim the oldest unclaimed pool row matching
-        # (project_name, platform). FOR UPDATE SKIP LOCKED makes concurrent
-        # cycles take different rows instead of contending on the same one.
-        platform_norm = (platform or '').lower()
-        if platform_norm == 'x':
-            platform_norm = 'twitter'
-        cur = conn.execute(
-            "SELECT code, target_url FROM post_links "
-            "WHERE project_name = %s AND platform = %s "
-            "  AND post_id IS NULL AND reply_id IS NULL "
-            "  AND minted_session LIKE 'pool:%%' "
-            "ORDER BY minted_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-            (project_name, platform_norm),
-        )
-        row = cur.fetchone()
-        if not row:
-            return {
-                'ok': False,
-                'error': 'pool_exhausted',
-                'project': project_name,
-                'platform': platform_norm,
-                'detail': (f"external_short_links pool empty for {project_name}/{platform_norm}; "
-                           f"re-mint via scripts/mint_external_pool.py and send updated CSV to client"),
-            }
-        row = dict(row)
-        pool_code = row['code']
-        pool_target = row['target_url']
-        # Re-stamp minted_session with the caller's session so backfill_post_id /
-        # backfill_reply_id finds this row when log_post returns. Without this,
-        # the pool row's minted_session stays 'pool:<slug>-<platform>' and the
-        # backfill UPDATE matches nothing.
-        conn.execute(
-            "UPDATE post_links SET minted_session = %s "
-            "WHERE code = %s",
-            (minted_session, pool_code),
-        )
-        conn.commit()
+        # Pool path. Atomically claim the oldest unclaimed pool row.
+        if use_legacy:
+            cur = conn.execute(
+                "SELECT code, target_url FROM post_links "
+                "WHERE project_name = %s AND platform = %s "
+                "  AND post_id IS NULL AND reply_id IS NULL "
+                "  AND minted_session LIKE 'pool:%%' "
+                "ORDER BY minted_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (project_name, platform_norm),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {
+                    'ok': False,
+                    'error': 'pool_exhausted',
+                    'project': project_name,
+                    'platform': platform_norm,
+                }
+            row = dict(row)
+            pool_code = row['code']
+            pool_target = row['target_url']
+            conn.execute(
+                "UPDATE post_links SET minted_session = %s WHERE code = %s",
+                (minted_session, pool_code),
+            )
+            conn.commit()
+        else:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from http_api import api_post
+            try:
+                resp = api_post(
+                    "/api/v1/post-links/claim-pool",
+                    {
+                        "project_name": project_name,
+                        "platform": platform_norm,
+                        "minted_session": minted_session,
+                    },
+                    ok_on_conflict=True,
+                )
+            except Exception as e:
+                return {'ok': False, 'error': 'api_unreachable', 'detail': str(e)}
+            if not resp or not resp.get('ok'):
+                err = (resp or {}).get('error') or {}
+                code = err.get('code') if isinstance(err, dict) else None
+                return {
+                    'ok': False,
+                    'error': code or 'pool_exhausted',
+                    'project': project_name,
+                    'platform': platform_norm,
+                    'detail': err.get('message') if isinstance(err, dict) else str(err),
+                }
+            data = resp.get('data') or {}
+            pool_code = data.get('code')
+            pool_target = data.get('target_url')
         return {
             'ok': True,
             'code': pool_code,
@@ -596,22 +624,54 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
         platform=platform,
     )
 
-    # Posts mint fresh codes every call — no idempotency on (post_id, target_url)
-    # because post_id is NULL at mint time. The minted_session UUID groups the
-    # codes so the caller can backfill them all in one UPDATE after log_post
-    # returns. If a wrap is retried (rare), we get duplicate codes pointing at
-    # the same target_url; orphans of failed posts are bounded and harmless.
+    # Fresh mint: try up to 8 random codes before giving up on collision.
+    if use_legacy:
+        for _ in range(8):
+            code = _gen_code()
+            try:
+                conn.execute(
+                    "INSERT INTO post_links (code, platform, project_name, "
+                    "       target_url, kind, project_at_mint, minted_session) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (code, platform, project_name, final_target, kind,
+                     matched_project, minted_session),
+                )
+                conn.commit()
+                return {
+                    'ok': True,
+                    'code': code,
+                    'short_url': f"{website}/r/{code}",
+                    'target_url': final_target,
+                    'kind': kind,
+                }
+            except Exception as e:
+                if 'duplicate key' in str(e).lower() and 'post_links_pkey' in str(e).lower():
+                    conn.execute("ROLLBACK")
+                    continue
+                raise
+        return {'ok': False, 'error': 'code_collision_after_8_tries'}
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from http_api import api_post
     for _ in range(8):
         code = _gen_code()
         try:
-            conn.execute(
-                "INSERT INTO post_links (code, platform, project_name, "
-                "       target_url, kind, project_at_mint, minted_session) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (code, platform, project_name, final_target, kind,
-                 matched_project, minted_session),
+            resp = api_post(
+                "/api/v1/post-links/mint",
+                {
+                    "code": code,
+                    "platform": platform,
+                    "project_name": project_name,
+                    "target_url": final_target,
+                    "kind": kind,
+                    "project_at_mint": matched_project,
+                    "minted_session": minted_session,
+                },
+                ok_on_conflict=True,
             )
-            conn.commit()
+        except Exception as e:
+            return {'ok': False, 'error': 'api_unreachable', 'detail': str(e)}
+        if resp and resp.get('ok'):
             return {
                 'ok': True,
                 'code': code,
@@ -619,11 +679,15 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                 'target_url': final_target,
                 'kind': kind,
             }
-        except Exception as e:
-            if 'duplicate key' in str(e).lower() and 'post_links_pkey' in str(e).lower():
-                conn.execute("ROLLBACK")
-                continue
-            raise
+        err = (resp or {}).get('error') or {}
+        err_code = err.get('code') if isinstance(err, dict) else None
+        if err_code == 'code_collision':
+            continue  # try another random code
+        return {
+            'ok': False,
+            'error': err_code or 'mint_api_error',
+            'detail': err.get('message') if isinstance(err, dict) else str(err),
+        }
     return {'ok': False, 'error': 'code_collision_after_8_tries'}
 
 
@@ -653,7 +717,11 @@ def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
 
     minted_session = str(uuid.uuid4())
     projects = _load_projects()
-    conn = dbmod.get_conn()
+    # Conn is only opened for the legacy direct-Neon path (env-gated). The
+    # default API path doesn't need it; lazy-open avoids a wasted Neon
+    # connection on VMs that don't have DATABASE_URL.
+    use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
+    conn = dbmod.get_conn() if use_legacy else None
     try:
         seen = {}
         codes = []
@@ -704,7 +772,26 @@ def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
             'skipped': skipped,
         }
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+
+
+def _backfill_via_api(*, minted_session: str, post_id: int | None = None,
+                      reply_id: int | None = None) -> int:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from http_api import api_post
+    body: dict = {"minted_session": minted_session}
+    if post_id is not None:
+        body["post_id"] = int(post_id)
+    if reply_id is not None:
+        body["reply_id"] = int(reply_id)
+    try:
+        resp = api_post("/api/v1/post-links/backfill", body)
+    except Exception:
+        return 0
+    if not resp or not resp.get('ok'):
+        return 0
+    return int((resp.get('data') or {}).get('updated') or 0)
 
 
 def backfill_post_id(*, minted_session: str, post_id: int) -> int:
@@ -714,9 +801,14 @@ def backfill_post_id(*, minted_session: str, post_id: int) -> int:
     Caller should NOT raise on rowcount==0 because some posts have no URLs
     and minted_session was None — the caller should skip the backfill in
     that case.
+
+    Routes through /api/v1/post-links/backfill by default. Set
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-Neon path.
     """
     if not minted_session or post_id is None:
         return 0
+    if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') != '1':
+        return _backfill_via_api(minted_session=minted_session, post_id=post_id)
     conn = dbmod.get_conn()
     try:
         cur = conn.execute(
@@ -735,6 +827,8 @@ def backfill_reply_id(*, minted_session: str, reply_id: int) -> int:
     writes to the `replies` table, not `posts`)."""
     if not minted_session or reply_id is None:
         return 0
+    if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') != '1':
+        return _backfill_via_api(minted_session=minted_session, reply_id=reply_id)
     conn = dbmod.get_conn()
     try:
         cur = conn.execute(
