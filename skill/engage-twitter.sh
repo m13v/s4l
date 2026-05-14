@@ -148,6 +148,34 @@ else
     else
         echo "[$(date +%H:%M:%S)] Harness Chrome already alive on port 9555" | tee -a "$LOG_FILE"
     fi
+    # Close leftover tabs from prior twitter runs. Safe under twitter-browser
+    # lock serialization (engage-twitter holds it before this point would be
+    # called, but the call is up here pre-lock as part of pre-flight; tabs are
+    # owned by prior-completed runs in this branch so closing them here is
+    # idempotent and race-free in practice).
+    python3 - <<'CLEANUP_PYEOF' 2>/dev/null | tee -a "$LOG_FILE" || true
+import json, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:9555/json", timeout=2) as r:
+        tabs = json.loads(r.read())
+except Exception:
+    raise SystemExit(0)
+pages = [t for t in tabs if t.get("type") == "page"]
+if len(pages) <= 1:
+    print(f"[cleanup_harness_tabs] {len(pages)} page tab(s), no cleanup needed")
+    raise SystemExit(0)
+closed = 0
+for t in pages[1:]:
+    tid = t.get("id")
+    if not tid:
+        continue
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:9555/json/close/{tid}", timeout=2).read()
+        closed += 1
+    except Exception:
+        pass
+print(f"[cleanup_harness_tabs] closed {closed}/{len(pages)-1} extra page tabs (kept 1)")
+CLEANUP_PYEOF
 fi
 acquire_lock "twitter" 3600
 
