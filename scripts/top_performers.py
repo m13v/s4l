@@ -536,6 +536,117 @@ def format_report(summary, top, bottom, project=None, platform=None,
     return "\n".join(lines)
 
 
+def _apply_top_filter(rows, limit):
+    """Anti-pattern filter applied to top-N candidates.
+
+    PRODUCT_NAMES: hard-drop self-promotional examples regardless of
+    clicks (don't teach Claude to namedrop). URL/www. mention: only
+    drop when clicks==0 (a URL-bearing post with real human clicks IS
+    the gold example by definition; see 2026-05-12 click-aware fix).
+    Caller passes overfetched rows; we trim to `limit` after filter.
+    """
+    clean = []
+    for r in rows:
+        content = (r[5] or "")
+        clicks = r[11] if len(r) > 11 and r[11] is not None else 0
+        lower = content.lower()
+        if any(name in lower for name in PRODUCT_NAMES):
+            continue
+        has_url = ("http://" in lower or "https://" in lower or "www." in lower)
+        if has_url and clicks == 0:
+            continue
+        clean.append(r)
+    return clean[:limit]
+
+
+def _fetch_report_via_api(*, platform, project, top, bottom):
+    """Pull all 6 SQL aggregations in one call via the v1 route.
+
+    Returns (summary, style_perf, top_posts, bottom_posts,
+              fallback_top|None, top_by_group|None). Row shapes match
+    the column order format_post / format_report expect.
+    """
+    from http_api import api_get
+    resp = api_get(
+        "/api/v1/posts/top-performers-report",
+        query={
+            "platform": platform or "",
+            "project": project or "",
+            "top": str(top),
+            "bottom": str(bottom),
+        },
+    )
+    data = (resp or {}).get("data") or {}
+    summary = data.get("summary") or []
+    style_perf = data.get("style_perf") or []
+    raw_top = data.get("top_posts") or []
+    raw_bottom = data.get("bottom_posts") or []
+    raw_fallback = data.get("fallback_top") or []
+    raw_group = data.get("top_by_group") or {}
+
+    top_filtered = _apply_top_filter(raw_top, top) if raw_top else []
+    fallback_filtered = None
+    if project and not top_filtered and raw_fallback:
+        fallback_filtered = _apply_top_filter(raw_fallback, top)
+    top_by_group = None
+    if not project:
+        top_by_group = {
+            proj: _apply_top_filter(rows, 5)
+            for proj, rows in raw_group.items()
+        }
+    return summary, style_perf, top_filtered, raw_bottom, fallback_filtered, top_by_group
+
+
+def _fetch_report_via_neon(*, platform, project, top, bottom):
+    conn = dbmod.get_conn()
+    try:
+        summary = get_project_platform_summary(conn, project=project, platform=platform)
+        style_perf = get_style_performance(conn, platform=platform)
+        top_posts = get_top_posts(conn, project=project, platform=platform, limit=top)
+        bottom_posts = get_bottom_posts(conn, project=project, platform=platform, limit=bottom)
+        fallback_top = None
+        if project and not top_posts:
+            fallback_top = get_top_posts(conn, project=None, platform=platform, limit=top)
+        top_by_group = None
+        if not project:
+            top_by_group = {}
+            min_score = min_score_for(platform)
+            platform_filter = "AND platform = %s" if platform else ""
+            platform_params = [platform] if platform else []
+            cur = conn.execute(
+                f"{POSTS_WITH_CLICKS_CTE}"
+                f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts_w_clicks "
+                f"WHERE status = 'active' AND platform NOT IN ('github_issues') "
+                f"AND our_content IS NOT NULL AND LENGTH(our_content) >= %s "
+                f"AND upvotes IS NOT NULL AND {SCORE_SQL} >= %s "
+                f"{platform_filter} "
+                f"ORDER BY 1",
+                [MIN_CONTENT_LEN, min_score] + platform_params,
+            )
+            projects = [row[0] for row in cur.fetchall()]
+            for proj in projects:
+                proj_filter = proj if proj != "(no project)" else None
+                where_extra = "AND project_name = %s" if proj_filter else "AND project_name IS NULL"
+                params = ([proj_filter] if proj_filter else []) + platform_params
+                cur = conn.execute(
+                    f"{POSTS_WITH_CLICKS_CTE}"
+                    f"SELECT id, platform, upvotes, comments_count, views, "
+                    f"our_content, thread_title, thread_content, "
+                    f"project_name, posted_at::date, our_account, clicks "
+                    f"FROM posts_w_clicks WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
+                    f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
+                    f"AND platform NOT IN ('github_issues') "
+                    f"{where_extra} {platform_filter} "
+                    f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
+                    f"         {UPVOTES_NET_SQL} DESC LIMIT 5",
+                    params,
+                )
+                top_by_group[proj] = cur.fetchall()
+        return summary, style_perf, top_posts, bottom_posts, fallback_top, top_by_group
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate top performers feedback report")
     parser.add_argument("--platform", default=None, help="Filter to specific platform")
@@ -545,71 +656,20 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
-    conn = dbmod.get_conn()
-
-    summary = get_project_platform_summary(conn, project=args.project, platform=args.platform)
-    style_perf = get_style_performance(conn, platform=args.platform)
-    top = get_top_posts(conn, project=args.project, platform=args.platform, limit=args.top)
-    bottom = get_bottom_posts(conn, project=args.project, platform=args.platform, limit=args.bottom)
-
-    # If project was specified but no posts met the threshold, fall back to
-    # general high-performing posts on the same platform
-    fallback_top = None
-    if args.project and not top:
-        fallback_top = get_top_posts(conn, project=None, platform=args.platform, limit=args.top)
-
-    # When no project filter, also get top 5 per project for focused examples.
-    # Uses the same SCORE_SQL composite as get_top_posts so ranking is consistent.
-    top_by_group = None
-    if not args.project:
-        top_by_group = {}
-        min_score = min_score_for(args.platform)
-        platform_filter = "AND platform = %s" if args.platform else ""
-        platform_params = [args.platform] if args.platform else []
-        # Get distinct projects (respecting platform filter). Uses the
-        # CTE so the SCORE_SQL >= threshold expression resolves `clicks`.
-        cur = conn.execute(
-            f"{POSTS_WITH_CLICKS_CTE}"
-            f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts_w_clicks "
-            f"WHERE status = 'active' AND platform NOT IN ('github_issues') "
-            f"AND our_content IS NOT NULL AND LENGTH(our_content) >= %s "
-            f"AND upvotes IS NOT NULL AND {SCORE_SQL} >= %s "
-            f"{platform_filter} "
-            f"ORDER BY 1",
-            [MIN_CONTENT_LEN, min_score] + platform_params
-        )
-        projects = [row[0] for row in cur.fetchall()]
-        for proj in projects:
-            proj_filter = proj if proj != "(no project)" else None
-            where_extra = "AND project_name = %s" if proj_filter else "AND project_name IS NULL"
-            params = ([proj_filter] if proj_filter else []) + platform_params
-            # Per-project top-5 examples — these are what Claude actually
-            # sees as the few-shot prompt. Click DESC tiebreaker means two
-            # posts at the same composite score sort the higher-click one
-            # first, putting the better conversion proof in front of Claude.
-            cur = conn.execute(
-                f"{POSTS_WITH_CLICKS_CTE}"
-                f"SELECT id, platform, upvotes, comments_count, views, "
-                f"our_content, thread_title, thread_content, "
-                f"project_name, posted_at::date, our_account, clicks "
-                f"FROM posts_w_clicks WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
-                f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
-                f"AND platform NOT IN ('github_issues') "
-                f"{where_extra} {platform_filter} "
-                f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
-                f"         {UPVOTES_NET_SQL} DESC LIMIT 5",
-                params
-            )
-            top_by_group[proj] = cur.fetchall()
-
-    conn.close()
+    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
+        fetch = _fetch_report_via_neon
+    else:
+        fetch = _fetch_report_via_api
+    summary, style_perf, top, bottom, fallback_top, top_by_group = fetch(
+        platform=args.platform, project=args.project, top=args.top, bottom=args.bottom,
+    )
 
     if args.json:
         output = {
-            "summary": [dict(row) for row in summary],
-            "top_posts": [dict(row) for row in top],
-            "bottom_posts": [dict(row) for row in bottom],
-            "fallback_top": [dict(row) for row in fallback_top] if fallback_top else [],
+            "summary": [list(row) for row in summary],
+            "top_posts": [list(row) for row in top],
+            "bottom_posts": [list(row) for row in bottom],
+            "fallback_top": [list(row) for row in fallback_top] if fallback_top else [],
         }
         print(json.dumps(output, indent=2, default=str))
     else:
