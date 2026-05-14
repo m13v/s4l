@@ -123,6 +123,14 @@ preflight_acquire_slot_or_skip "twitter-cycle" 4
 # peer cycles' Phase 2b-post under parallel-cycle contention.
 source "$REPO_DIR/skill/lock.sh"
 
+# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. Default agent
+# = unchanged cron behavior. harness routes to browser-harness Chrome (port 9555)
+# for both Phase 1 scan and Phase 2b-prep/post. Phase 2b-post's twitter_post_plan.py
+# shells out to twitter_browser.py, which honors TWITTER_CDP_URL exported below.
+source "$REPO_DIR/skill/lib/twitter-backend.sh"
+TW_MCP_CONFIG="$MCP_CONFIG_FILE"                 # backend-aware: agent vs harness MCP
+TW_ENGINE_PREFIX="${BROWSER_INSTRUCTIONS}"$'\n\n' # inject backend + translation table at top of every prompt
+
 # --- Phase tracking: start the twitter_batches row + chain into lock.sh trap -
 # Per-cycle phase row (twitter_batches.current_phase + phase_started_at) is
 # read by peer cycles' Phase 0 to decide salvage timing per-phase instead of
@@ -466,7 +474,7 @@ SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"t
 log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
 # Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
 # the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
     exit 0
 fi
 acquire_lock "twitter-browser" 3600
@@ -475,8 +483,7 @@ acquire_lock "twitter-browser" 3600
 # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
 # went wrong when opening your profile" 7x and the pipeline hangs. Helper
 # refuses to clean if the lock PID is alive.
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 log "Phase 1: drafting queries and scraping tweets..."
 
@@ -929,13 +936,12 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
 # Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
 # the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
     exit 0
 fi
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replies..."
 
@@ -1129,13 +1135,12 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
 # Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
 # the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_browser_mcp_active "twitter" "${LOG_FILE:-}"; then
+if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
     exit 0
 fi
 acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
-bash "$REPO_DIR/scripts/clean_stale_singleton.sh" "$TW_BROWSER_PROFILE" 2>&1 | tee -a "$LOG_FILE" || true
-ensure_browser_healthy "twitter"
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
 POST_OUTPUT=$(python3 "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
