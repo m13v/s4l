@@ -67,7 +67,7 @@ TAB HYGIENE (IMPORTANT): Reuse the SAME tab for sequential same-domain navigatio
 Use new_tab() ONLY for the very first navigation OR when you need to keep an old tab
 open in parallel. For each subsequent query / page / scan, use goto_url() so the
 existing tab is reused. Opening a fresh tab for every query leaks tabs over time and
-exhausts Chrome's per-process resources.
+exhausts per-process Chrome resources.
 
 TRANSLATION TABLE - wherever this prompt mentions a Playwright-style tool, do the
 following with bh_run instead:
