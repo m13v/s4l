@@ -511,6 +511,17 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     Returns:
       {ok: True, code, short_url, target_url, kind}
       {ok: False, error: 'no_primary_website' | 'empty_url' | 'code_collision_after_8_tries'}
+
+    External-short-links path: if the project's config.json entry has
+    external_short_links=true, we don't mint a fresh code, we CLAIM one from
+    the pre-minted pool (post_links rows where minted_session starts with
+    'pool:' and post_id IS NULL and reply_id IS NULL). The pool exists so we
+    can hand the client a STATIC CSV they host on their own domain redirector;
+    if we minted fresh codes for these projects the CSV would go stale every
+    cycle. The pool's target_url is fixed at pool-mint time (homepage with
+    platform UTMs + code in utm_content), so the LLM's URL in the comment text
+    is ignored for routing -- visitors always land on the destination we baked
+    in. Pool depth managed by scripts/mint_external_pool.py.
     """
     target_url = _ensure_scheme((target_url or '').strip())
     if not target_url or target_url == 'https://':
@@ -527,6 +538,54 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'error': 'no_primary_website',
             'project': project_name,
             'detail': f"no website for project={project_name!r} in config.json",
+        }
+
+    project_cfg = next((p for p in projects if p.get('name') == project_name), None)
+    if project_cfg and project_cfg.get('external_short_links'):
+        # Pool path. Atomically claim the oldest unclaimed pool row matching
+        # (project_name, platform). FOR UPDATE SKIP LOCKED makes concurrent
+        # cycles take different rows instead of contending on the same one.
+        platform_norm = (platform or '').lower()
+        if platform_norm == 'x':
+            platform_norm = 'twitter'
+        cur = conn.execute(
+            "SELECT code, target_url FROM post_links "
+            "WHERE project_name = %s AND platform = %s "
+            "  AND post_id IS NULL AND reply_id IS NULL "
+            "  AND minted_session LIKE 'pool:%%' "
+            "ORDER BY minted_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+            (project_name, platform_norm),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {
+                'ok': False,
+                'error': 'pool_exhausted',
+                'project': project_name,
+                'platform': platform_norm,
+                'detail': (f"external_short_links pool empty for {project_name}/{platform_norm}; "
+                           f"re-mint via scripts/mint_external_pool.py and send updated CSV to client"),
+            }
+        row = dict(row)
+        pool_code = row['code']
+        pool_target = row['target_url']
+        # Re-stamp minted_session with the caller's session so backfill_post_id /
+        # backfill_reply_id finds this row when log_post returns. Without this,
+        # the pool row's minted_session stays 'pool:<slug>-<platform>' and the
+        # backfill UPDATE matches nothing.
+        conn.execute(
+            "UPDATE post_links SET minted_session = %s "
+            "WHERE code = %s",
+            (minted_session, pool_code),
+        )
+        conn.commit()
+        return {
+            'ok': True,
+            'code': pool_code,
+            'short_url': f"{website}/r/{pool_code}",
+            'target_url': pool_target,
+            'kind': 'website',
+            'from_pool': True,
         }
 
     final_target = _build_target_url_for_post(
