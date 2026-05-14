@@ -70,43 +70,72 @@ def main():
         return
 
     try:
-        import psycopg2  # noqa: F401  (psycopg2 only needed via dbmod transitively)
         sys.path.insert(0, os.path.join(ROOT_DIR, 'scripts'))
-        import db as dbmod
-        conn = dbmod.get_conn()
-        if cycle_id:
-            cur = conn.execute(
-                """SELECT COALESCE(SUM(total_cost_usd), 0),
-                          COALESCE(SUM(subagent_cost_usd), 0),
-                          COALESCE(SUM(task_call_count), 0),
-                          COALESCE(SUM(subagent_count), 0)
-                   FROM claude_sessions
-                   WHERE cycle_id = %s""",
-                [cycle_id],
+        if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1':
+            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_neon(
+                cycle_id=cycle_id, since=args.since, scripts=args.scripts,
             )
         else:
-            since_ts = datetime.fromtimestamp(args.since, tz=timezone.utc).isoformat()
-            placeholders = ','.join(['%s'] * len(args.scripts))
-            cur = conn.execute(
-                f"""SELECT COALESCE(SUM(total_cost_usd), 0),
-                           COALESCE(SUM(subagent_cost_usd), 0),
-                           COALESCE(SUM(task_call_count), 0),
-                           COALESCE(SUM(subagent_count), 0)
-                    FROM claude_sessions
-                    WHERE script IN ({placeholders}) AND started_at >= %s""",
-                args.scripts + [since_ts],
+            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_api(
+                cycle_id=cycle_id, since=args.since, scripts=args.scripts,
             )
-        row = cur.fetchone()
-        parent_cost = float(row[0] or 0)
-        subagent_cost = float(row[1] or 0)
-        task_count = int(row[2] or 0)
-        subagent_count = int(row[3] or 0)
         if args.breakdown:
             print(f"{parent_cost:.4f} {subagent_cost:.4f} {task_count} {subagent_count}")
         else:
             print(f"{parent_cost:.4f}")
     except Exception:
         print("0.0000")
+
+
+def _fetch_via_api(*, cycle_id, since, scripts):
+    from http_api import api_get
+    if cycle_id:
+        query = {"cycle_id": cycle_id}
+    else:
+        query = {"since_ts": str(int(since)), "scripts": ",".join(scripts)}
+    resp = api_get("/api/v1/claude-sessions/cost", query=query)
+    data = (resp or {}).get("data") or {}
+    return (
+        float(data.get("parent_cost") or 0),
+        float(data.get("subagent_cost") or 0),
+        int(data.get("task_count") or 0),
+        int(data.get("subagent_count") or 0),
+    )
+
+
+def _fetch_via_neon(*, cycle_id, since, scripts):
+    import psycopg2  # noqa: F401
+    import db as dbmod
+    conn = dbmod.get_conn()
+    if cycle_id:
+        cur = conn.execute(
+            """SELECT COALESCE(SUM(total_cost_usd), 0),
+                      COALESCE(SUM(subagent_cost_usd), 0),
+                      COALESCE(SUM(task_call_count), 0),
+                      COALESCE(SUM(subagent_count), 0)
+               FROM claude_sessions
+               WHERE cycle_id = %s""",
+            [cycle_id],
+        )
+    else:
+        since_ts = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
+        placeholders = ','.join(['%s'] * len(scripts))
+        cur = conn.execute(
+            f"""SELECT COALESCE(SUM(total_cost_usd), 0),
+                       COALESCE(SUM(subagent_cost_usd), 0),
+                       COALESCE(SUM(task_call_count), 0),
+                       COALESCE(SUM(subagent_count), 0)
+                FROM claude_sessions
+                WHERE script IN ({placeholders}) AND started_at >= %s""",
+            list(scripts) + [since_ts],
+        )
+    row = cur.fetchone()
+    return (
+        float(row[0] or 0),
+        float(row[1] or 0),
+        int(row[2] or 0),
+        int(row[3] or 0),
+    )
 
 
 if __name__ == '__main__':
