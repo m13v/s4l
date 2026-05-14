@@ -63,10 +63,17 @@ these helpers pre-imported:
   press_key(key),                           # e.g. "Enter", "Tab", "Escape"
   scroll(direction, amount), cdp(method, **params)
 
-TRANSLATION TABLE — wherever this prompt mentions a Playwright-style tool, do the
+TAB HYGIENE (IMPORTANT): Reuse the SAME tab for sequential same-domain navigation.
+Use new_tab() ONLY for the very first navigation OR when you need to keep an old tab
+open in parallel. For each subsequent query / page / scan, use goto_url() so the
+existing tab is reused. Opening a fresh tab for every query leaks tabs over time and
+exhausts Chrome's per-process resources.
+
+TRANSLATION TABLE - wherever this prompt mentions a Playwright-style tool, do the
 following with bh_run instead:
 
-  browser_navigate(url)           ->  bh_run('new_tab("URL")') or bh_run('goto_url("URL"); wait_for_load()')
+  browser_navigate(url)           ->  First navigation: bh_run('new_tab("URL"); wait_for_load()')
+                                       Subsequent navigations (same session): bh_run('goto_url("URL"); wait_for_load()')
   browser_snapshot                ->  bh_run('print(js("""..."""))') to read DOM as structured data,
                                        OR bh_run('print(capture_screenshot())') + Read the PNG
   browser_run_code(js)            ->  bh_run('print(js("""<the JS expression>"""))')
@@ -100,6 +107,42 @@ BROWSER_HARNESS_EOF
         ;;
 esac
 
+cleanup_harness_tabs() {
+    # Close every CDP "page" tab except one, leaving harness Chrome with a clean
+    # slate before a new run starts. Safe to call any time: skips if Chrome is
+    # down. Idempotent. Workers, iframes, browser_ui targets are left alone
+    # (they auto-clean on tab close). Uses /json/close which gracefully closes
+    # via CDP; falls through quietly on errors so a tab-cleanup failure never
+    # blocks the run.
+    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+        return 0
+    fi
+    python3 - <<'PYEOF' 2>/dev/null || true
+import json, urllib.request, urllib.error
+try:
+    with urllib.request.urlopen("http://127.0.0.1:9555/json", timeout=2) as r:
+        tabs = json.loads(r.read())
+except Exception:
+    raise SystemExit(0)
+pages = [t for t in tabs if t.get("type") == "page"]
+if len(pages) <= 1:
+    print(f"[cleanup_harness_tabs] {len(pages)} page tab(s), no cleanup needed")
+    raise SystemExit(0)
+to_close = pages[1:]
+closed = 0
+for t in to_close:
+    tid = t.get("id")
+    if not tid:
+        continue
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:9555/json/close/{tid}", timeout=2).read()
+        closed += 1
+    except Exception:
+        pass
+print(f"[cleanup_harness_tabs] closed {closed}/{len(to_close)} extra page tabs (kept 1)")
+PYEOF
+}
+
 ensure_twitter_browser_for_backend() {
     if [ "$TWITTER_BACKEND" = "agent" ]; then
         bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 || true
@@ -107,7 +150,7 @@ ensure_twitter_browser_for_backend() {
     else
         # harness path: probe + launch Chrome on port 9555 if needed.
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555 — launching..." >&2
+            echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
             # 2026-05-13: pass --window-position / --window-size on every launch.
             # Mirrors the MCP server's ensure_chrome flags so the window lands
             # at the twitter-agent monitor regardless of which path spawned Chrome.
@@ -130,6 +173,10 @@ ensure_twitter_browser_for_backend() {
             fi
             echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
         fi
+        # Always close leftover tabs from prior runs. Safe under acquire_lock
+        # "twitter-browser" serialization (every caller of this function holds
+        # that lock), so we will not race with another active twitter run.
+        cleanup_harness_tabs
     fi
 }
 
