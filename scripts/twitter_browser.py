@@ -272,8 +272,41 @@ def get_browser_and_page(playwright):
     Returns (browser, page, is_cdp). When is_cdp=True, `page` is a reused
     existing Twitter tab (navigate it, don't close it). When is_cdp=False,
     it's a new headless page.
+
+    2026-05-13: TWITTER_CDP_URL env var (set by engage-twitter.sh when
+    TWITTER_BACKEND=harness) routes directly to the browser-harness Chrome
+    (http://127.0.0.1:9555), skipping the ps-based discovery. The caller
+    explicitly asked for this endpoint, so failure here is fatal — silently
+    falling back to launch_persistent_context(twitter profile) would defeat
+    the whole point of the backend switch.
     """
     _acquire_browser_lock()
+
+    cdp_url_override = os.environ.get("TWITTER_CDP_URL", "").strip()
+    if cdp_url_override:
+        try:
+            browser = playwright.chromium.connect_over_cdp(cdp_url_override)
+            contexts = browser.contexts
+            if contexts:
+                context = contexts[0]
+                # Prefer a reusable Twitter tab if one exists.
+                for pg in context.pages:
+                    if ("x.com" in pg.url or "twitter.com" in pg.url) and "login" not in pg.url:
+                        return browser, pg, True
+                # Otherwise reuse the first page (caller will navigate it).
+                if context.pages:
+                    return browser, context.pages[0], True
+                return browser, context.new_page(), True
+            # No contexts present (unusual on a fresh harness Chrome) — create one.
+            context = browser.new_context()
+            return browser, context.new_page(), True
+        except Exception as e:
+            _release_browser_lock()
+            print(json.dumps({
+                "success": False,
+                "error": f"TWITTER_CDP_URL connect failed ({cdp_url_override}): {e}"
+            }))
+            sys.exit(1)
 
     cdp_port = find_twitter_cdp_port()
 
