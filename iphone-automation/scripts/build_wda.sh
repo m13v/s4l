@@ -3,7 +3,7 @@
 # Run once after first plugging in the phone, and any time WDA needs a refresh.
 set -euo pipefail
 
-TEAM_ID="${IOS_TEAM_ID:-RW6X8XPJ83}"
+TEAM_ID="${IOS_TEAM_ID:-S6DP5HF77G}"
 WDA_DIR="$(cd "$(dirname "$0")/.." && pwd)/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent"
 
 if ! command -v /opt/homebrew/bin/idevice_id >/dev/null; then
