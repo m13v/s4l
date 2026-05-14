@@ -20,10 +20,39 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db
 
 
-def get_active_campaigns(platform):
+def _get_active_via_api(platform):
+    from http_api import api_get
+    resp = api_get(
+        "/api/v1/campaigns",
+        query={
+            "status": "active",
+            "platform": platform,
+            "with_budget_remaining": "true",
+            "limit": 500,
+        },
+    )
+    rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+    out = []
+    for r in rows:
+        max_total = r.get("max_posts_total")
+        posts_made = r.get("posts_made") or 0
+        if max_total is None or posts_made >= max_total:
+            continue
+        out.append({
+            "id": int(r["id"]),
+            "name": r.get("name"),
+            "prompt": r.get("prompt"),
+            "max_posts_total": int(max_total),
+            "posts_made": int(posts_made),
+            "remaining": int(max_total) - int(posts_made),
+        })
+    return out
+
+
+def _get_active_via_neon(platform):
+    import db
     conn = db.get_conn()
     try:
         cur = conn.execute(
@@ -41,7 +70,6 @@ def get_active_campaigns(platform):
         rows = cur.fetchall()
     finally:
         conn.close()
-
     return [
         {
             "id": r[0],
@@ -53,6 +81,18 @@ def get_active_campaigns(platform):
         }
         for r in rows
     ]
+
+
+def get_active_campaigns(platform):
+    """Active campaigns for `platform` with budget remaining.
+
+    Routes through /api/v1/campaigns by default so VMs without
+    DATABASE_URL still get the active list. Set
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-Neon path.
+    """
+    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
+        return _get_active_via_neon(platform)
+    return _get_active_via_api(platform)
 
 
 def format_prompt_block(campaigns, repo_dir):
