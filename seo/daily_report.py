@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Daily SEO pipeline report. Queries Postgres for the last 24h of activity and
+Weekly SEO pipeline report. Queries Postgres for the last 7d of activity and
 sends a per-recipient summary email via Gmail API.
+
+(The file name is legacy: this used to be a 24h daily email; it is now a 7d
+weekly email. The launchd plist label is com.m13v.seo-weekly-report.)
 
 Recipients come from `dashboard_users` (report_enabled=true). Admins get the
 unscoped master view. Non-admins get their projects' slice; if none of their
@@ -37,7 +40,7 @@ def _emit_run_log() -> None:
     subprocess.run(
         [
             "python3", str(SCRIPT_DIR.parent / "scripts" / "log_run.py"),
-            "--script", "seo_daily_report",
+            "--script", "seo_weekly_report",
             "--posted", "0", "--skipped", "0", "--failed", "0",
             "--cost", "0", "--elapsed", str(elapsed),
         ],
@@ -82,7 +85,7 @@ def query_report(conn, projects) -> dict:
     """If projects is None/empty, return unscoped master view."""
     cur = conn.cursor()
     now_utc = datetime.now(timezone.utc)
-    since = now_utc - timedelta(hours=24)
+    since = now_utc - timedelta(days=7)
     scope = projects or None
 
     pages_filter = ""
@@ -151,14 +154,15 @@ def format_report(data: dict, recipient: dict) -> tuple[str, str]:
     scope_label = ", ".join(scope) if scope else "all products"
 
     date_str = now.strftime("%Y-%m-%d")
-    subject = f"SEO Pipeline ({scope_label}): {len(pages)} pages created ({date_str})"
+    subject = f"SEO Pipeline Weekly ({scope_label}): {len(pages)} pages created ({date_str})"
 
     lines = []
-    lines.append("<h2>SEO Pipeline Daily Report</h2>")
+    lines.append("<h2>SEO Pipeline Weekly Report</h2>")
     lines.append(f"<p>Hi {greeting_name},</p>")
     lines.append(
-        f"<p>Period: {since.strftime('%Y-%m-%d %H:%M')} to "
-        f"{now.strftime('%Y-%m-%d %H:%M')} UTC. Scope: {scope_label}.</p>"
+        f"<p>Last 7 days, scope: {scope_label}. "
+        f"Period: {since.strftime('%Y-%m-%d %H:%M')} to "
+        f"{now.strftime('%Y-%m-%d %H:%M')} UTC.</p>"
     )
 
     lines.append(f"<h3>{len(pages)} Pages Created</h3>")
@@ -261,15 +265,15 @@ def main():
         print(f"Processing {len(recipients)} recipient(s){mode}")
         for r in recipients:
             projects = r["projects"] or []
-            # Quiet day rule (per user instruction 2026-05-14): skip recipients
-            # whose scope had zero pages created in the last 24h. Applies in
+            # Quiet-week rule (per user instruction 2026-05-14): skip recipients
+            # whose scope had zero pages created in the last 7 days. Applies in
             # both live and sample modes so the preview matches reality.
             # Recipients whose projects don't intersect SEO_PRODUCTS at all
             # naturally have pages_created=[], so they fall through the same
             # gate without needing a separate check.
             data = query_report(conn, projects)
             if not data["pages_created"]:
-                print(f"  SKIP -> {r['email']:30s}  (no pages created in scope last 24h)")
+                print(f"  SKIP -> {r['email']:30s}  (no pages created in scope last 7 days)")
                 continue
 
             subject, html_body = format_report(data, r)
