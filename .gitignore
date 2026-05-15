@@ -93,6 +93,9 @@ scripts/instagram_creators.md
 # Rotated log archive (8.6k+ files, was triggering too_many_files dashboard warnings)
 skill/logs-archive/
 
+# Runtime log dir: generation traces + style-target snapshot history
+/log/
+
 # Generated LinkedIn comments snapshot (root-level scratch)
 /linkedin-comments-snapshot.json
 
