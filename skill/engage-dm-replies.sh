@@ -1597,7 +1597,7 @@ fi
 # END EARLY-EXIT GATE
 # ============================================================================
 
-gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-dm-replies" --strict-mcp-config --mcp-config "$DM_MCP_CONFIG" -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: DM reply claude exited with code $?"
+gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-dm-replies" --strict-mcp-config --mcp-config "$DM_MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: DM reply claude exited with code $?"
 rm -f "$PHASE_A_PROMPT"
 
 # Belt-and-suspenders: free the reddit-browser lease if it's still held.
