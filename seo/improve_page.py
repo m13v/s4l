@@ -368,6 +368,7 @@ def _run_claude(prompt: str, cwd: str, log_path: Path, session_id: str) -> dict:
     ]
     tool_counts: dict[str, int] = {}
     final_text = ""
+    orch_cost = None
     start = time.time()
 
     # Bridge the Claude Code auto-update unlink window before spawning.
@@ -410,16 +411,24 @@ def _run_claude(prompt: str, cwd: str, log_path: Path, session_id: str) -> dict:
                         tool_counts[name] = tool_counts.get(name, 0) + 1
             elif ev.get("type") == "result":
                 final_text = ev.get("result") or ""
+                c = ev.get("total_cost_usd")
+                if isinstance(c, (int, float)) and c > 0:
+                    orch_cost = float(c)
         proc.wait()
 
-    # fire-and-forget cost logging so runs show up in claude_sessions
+    # fire-and-forget cost logging so runs show up in claude_sessions.
+    # Forward the SDK-reported total_cost_usd from the result event as
+    # --orchestrator-cost-usd so the SDK lane gets populated (SDK-only cost
+    # mode, 2026-05-15); without it the row would have a NULL orchestrator
+    # cost and the dashboard would show "missing SDK".
     logger = ROOT_DIR / "scripts" / "log_claude_session.py"
     if logger.exists():
+        log_args = ["python3", str(logger), "--session-id", session_id,
+                    "--script", "seo_improve_page"]
+        if orch_cost is not None and orch_cost > 0:
+            log_args.extend(["--orchestrator-cost-usd", str(orch_cost)])
         try:
-            subprocess.run(
-                ["python3", str(logger), "--session-id", session_id, "--script", "seo_improve_page"],
-                capture_output=True, text=True, timeout=30,
-            )
+            subprocess.run(log_args, capture_output=True, text=True, timeout=30)
         except Exception:
             pass
 
