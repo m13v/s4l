@@ -17,7 +17,6 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 
@@ -27,24 +26,46 @@ def load_config():
         return json.load(f)
 
 
-def get_posts_today_by_project(platform=None):
-    """Return dict of project_name -> post count for today."""
+def _counts_via_api(platform=None):
+    from http_api import api_get
+    query = {"platform": platform} if platform else None
+    resp = api_get("/api/v1/posts/counts-today-by-project", query=query)
+    data = (resp or {}).get("data") or {}
+    counts = data.get("counts") or {}
+    return {k: int(v) for k, v in counts.items()}
+
+
+def _counts_via_neon(platform=None):
+    import db as dbmod
     conn = dbmod.get_conn()
-    if platform:
-        rows = conn.execute(
-            "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
-            "FROM posts WHERE DATE(posted_at) = CURRENT_DATE AND platform = %s "
-            "GROUP BY project_name",
-            [platform],
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
-            "FROM posts WHERE DATE(posted_at) = CURRENT_DATE "
-            "GROUP BY project_name"
-        ).fetchall()
-    conn.close()
+    try:
+        if platform:
+            rows = conn.execute(
+                "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
+                "FROM posts WHERE DATE(posted_at) = CURRENT_DATE AND platform = %s "
+                "GROUP BY project_name",
+                [platform],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
+                "FROM posts WHERE DATE(posted_at) = CURRENT_DATE "
+                "GROUP BY project_name"
+            ).fetchall()
+    finally:
+        conn.close()
     return {row[0]: row[1] for row in rows}
+
+
+def get_posts_today_by_project(platform=None):
+    """Return dict of project_name -> post count for today.
+
+    Routes through /api/v1/posts/counts-today-by-project by default.
+    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct Neon.
+    """
+    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
+        return _counts_via_neon(platform)
+    return _counts_via_api(platform)
 
 
 def pick_project(config, platform=None, exclude=None):
