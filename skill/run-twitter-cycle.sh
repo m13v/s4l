@@ -595,7 +595,8 @@ CRITICAL RULES:
 - Use ONLY mcp__twitter-agent__* tools for scraping
 - Do NOT post, reply, like, or interact with any tweet
 - Do NOT generate any reply content
-- If a search fails or times out, skip it and continue to the next (still emit a queries_used entry with tweets_found:0 for that project)" 2>&1)
+- If a search fails or times out, skip it and continue to the next (still emit a queries_used entry with tweets_found:0 for that project)
+- If a query returns 0 tweets, re-run it once with min_faves dropped one tier lower (or removed entirely) before recording tweets_found:0." 2>&1)
 
 # Dump the captured envelope to the cycle log for offline inspection.
 echo "$SCAN_OUTPUT" >> "$LOG_FILE"
