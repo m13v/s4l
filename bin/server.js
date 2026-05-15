@@ -6682,6 +6682,24 @@ const HTML = `<!DOCTYPE html>
   .style-stats-pill:hover { border-color: var(--border-strong); background: var(--bg-hover); }
   .style-stats-pill.active { background: var(--accent-panel-bg); border-color: #3b82f6; color: var(--text); }
 
+  /* In-place loading state for stats containers. Dims the previously-rendered
+     grid/table so it stays visible (no layout jump) but reads clearly as stale.
+     Used by loadActivityStats / loadCohortStats / loadStyleStats while their
+     fetches are in flight. */
+  .is-loading { opacity: 0.5; transition: opacity 0.12s linear; pointer-events: none; }
+
+  /* Disable Stats-tab filter pills while any stats fetch is in flight
+     (body.sa-stats-busy) so users can't queue overlapping requests across
+     rapid pill changes. Covers the three pill rows that drive
+     reloadStatsTabSections: stats window + style-stats platform/project. */
+  body.sa-stats-busy #stats-window-pills .style-stats-pill,
+  body.sa-stats-busy #style-stats-platform-pills .style-stats-pill,
+  body.sa-stats-busy #style-stats-project-pills .style-stats-pill {
+    pointer-events: none;
+    opacity: 0.55;
+    cursor: wait;
+  }
+
   @media (max-width: 600px) { .cards { grid-template-columns: 1fr; } .content { padding: 16px; } }
 
   /* Client-mode auth overlay. Non-admin users see the app with admin-only
@@ -9601,22 +9619,31 @@ function currentStatsProject() {
   const row = document.getElementById('style-stats-project-pills');
   return (row && row.dataset.selected) || 'all';
 }
-function reloadStatsTabSections() {
-  loadActivityStats();
-  loadCohortStats();
-  loadStyleStats();
+// Sets body.sa-stats-busy while the batch of stats fetches kicked off by a
+// single filter change is in flight. CSS uses the class to disable the four
+// pill rows (status window, stats window, style-stats platform/project) so
+// users can't queue overlapping reloads across rapid pill clicks.
+async function reloadStatsTabSections() {
+  document.body.classList.add('sa-stats-busy');
+  const pending = [
+    loadActivityStats(),
+    loadCohortStats(),
+    loadStyleStats(),
+  ];
   // daily-metrics chart now lives on its own Trends tab with its own filter
   // bar; intentionally NOT reloaded on stats-tab window/platform/project
   // of the filter bar.
   const funnelEl = document.getElementById('funnel-stats');
   if (funnelEl && funnelEl.open) {
     if (_lastFunnelPayload) renderFunnelStats(_lastFunnelPayload);
-    else loadFunnelStats(true);
+    else pending.push(loadFunnelStats(true));
   }
   const dmEl = document.getElementById('dm-stats');
-  if (dmEl && dmEl.open) loadDmStats(true);
+  if (dmEl && dmEl.open) pending.push(loadDmStats(true));
   const sqEl = document.getElementById('search-queries-stats');
-  if (sqEl && sqEl.open) loadSearchQueriesStats(true);
+  if (sqEl && sqEl.open) pending.push(loadSearchQueriesStats(true));
+  try { await Promise.allSettled(pending); }
+  finally { document.body.classList.remove('sa-stats-busy'); }
 }
 function syncStatsHeadings() {
   const win = currentStatsWindow();
@@ -9688,6 +9715,13 @@ function renderActivityStats(payload) {
 }
 
 async function loadActivityStats() {
+  // Immediate visual feedback on filter change. Without this the previously
+  // rendered grid sits frozen until the 9-way UNION returns; on a cold cache
+  // miss that's a couple seconds with zero indication anything is happening.
+  const grid = document.getElementById('stats-grid');
+  const totalEl = document.getElementById('stats-total');
+  if (grid) grid.classList.add('is-loading');
+  if (totalEl) totalEl.textContent = 'loading…';
   try {
     const hours = currentStatsWindow().hours;
     const plat = currentStatsPlatform();
@@ -9698,7 +9732,9 @@ async function loadActivityStats() {
     const res = await fetch('/api/activity/stats?' + params.join('&'));
     const data = await res.json();
     renderActivityStats(data);
-  } catch {}
+  } catch {} finally {
+    if (grid) grid.classList.remove('is-loading');
+  }
 }
 
 // Combined daily-metrics line chart (Trends tab). Fetches 4 endpoints (2
@@ -11001,6 +11037,10 @@ function getStyleMeta() {
 }
 
 async function loadStyleStats() {
+  const body = document.getElementById('style-stats-body');
+  const totalEl = document.getElementById('style-stats-total');
+  if (body) body.classList.add('is-loading');
+  if (totalEl) totalEl.textContent = 'loading…';
   try {
     const platformRow = document.getElementById('style-stats-platform-pills');
     const projectRow  = document.getElementById('style-stats-project-pills');
@@ -11015,7 +11055,9 @@ async function loadStyleStats() {
       getStyleMeta(),
     ]);
     renderStyleStats(statsRes, meta);
-  } catch {}
+  } catch {} finally {
+    if (body) body.classList.remove('is-loading');
+  }
 }
 
 // Score-cohort distribution. Buckets posts in the trailing window into
@@ -11118,6 +11160,10 @@ function renderCohortStats(payload) {
 }
 
 async function loadCohortStats() {
+  const body = document.getElementById('cohort-stats-body');
+  const totalEl = document.getElementById('cohort-stats-total');
+  if (body) body.classList.add('is-loading');
+  if (totalEl) totalEl.textContent = 'loading…';
   try {
     const platformRow = document.getElementById('style-stats-platform-pills');
     const projectRow  = document.getElementById('style-stats-project-pills');
@@ -11131,8 +11177,9 @@ async function loadCohortStats() {
     const data = await res.json();
     renderCohortStats(data);
   } catch (e) {
-    const body = document.getElementById('cohort-stats-body');
     if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load cohort stats.</div>';
+  } finally {
+    if (body) body.classList.remove('is-loading');
   }
 }
 
