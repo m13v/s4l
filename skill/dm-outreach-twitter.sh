@@ -251,7 +251,7 @@ Do EXACTLY this:
 Burning rows with skip_reason='twitter_agent_mcp_unavailable: ...' is a regression that on 2026-05-12 nuked 7 warm leads (efemjoba, gpuops, josesaezmerino, AIDailyGems, alkimiadev, RobertDMellish, kunaljeweller). The d.id IS NULL filter in scan_dm_candidates.py then permanently blocked them from re-discovery. Do not do this.
 PROMPT_EOF
 
-gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-twitter" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p "${BROWSER_INSTRUCTIONS}
+gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-twitter" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "${BROWSER_INSTRUCTIONS}
 
 $(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Twitter DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
