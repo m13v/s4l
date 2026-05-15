@@ -260,6 +260,59 @@ def _project_website(projects: list, name: str) -> str | None:
     return None
 
 
+def _project_short_links_live(projects: list, name: str) -> bool:
+    """True iff the project's /r/<code> redirector is actually serving.
+
+    Default true (preserves behavior for fazm, mediar, assrt, cyrano-systems
+    and every other existing project). Set false in config.json for projects
+    where the customer owns the domain and hasn't shipped the resolver (or the
+    static CSV) yet, so we emit UTM-tagged URLs instead of broken /r/<code>.
+    """
+    for p in projects:
+        if p.get('name') == name:
+            v = p.get('short_links_live')
+            return True if v is None else bool(v)
+    return True
+
+
+def utm_only_text(*, text: str, platform: str, project_name: str) -> str:
+    """Walk every URL in text, replace with its UTM-tagged version (no minting,
+    no DB). Safety-net helper for caller exception branches so a bare URL
+    never escapes when wrap_text_for_post itself raises.
+    """
+    if not text:
+        return text
+    platform = (platform or '').lower()
+    if platform == 'x':
+        platform = 'twitter'
+    minted_session = str(uuid.uuid4())
+    projects = _load_projects()
+    seen: dict[str, str] = {}
+    for m in list(_URL_RE.finditer(text)):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        if stripped in seen:
+            continue
+        if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', stripped, re.IGNORECASE):
+            seen[stripped] = stripped
+            continue
+        target = _ensure_scheme(stripped)
+        kind, matched_project = _classify_url(target, projects)
+        utm_url = _build_target_url_for_post(
+            target, kind, minted_session=minted_session,
+            project=matched_project or project_name, platform=platform,
+        )
+        seen[stripped] = utm_url
+
+    def _sub(m):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        trailing = raw[len(stripped):]
+        return seen.get(stripped, stripped) + trailing
+
+    return _URL_RE.sub(_sub, text)
+
+
 def _dm_row(conn, dm_id: int):
     cur = conn.execute(
         "SELECT id, platform, target_project, target_projects, project_name, "
@@ -552,6 +605,34 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     project_cfg = next((p for p in projects if p.get('name') == project_name), None)
     use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
 
+    # UTM URL is the universal fallback — used when short_links_live=false on
+    # the project, OR when pool/mint can't produce a /r/<code> for any reason.
+    # No DB row is created in fallback mode; PostHog still attributes via
+    # utm_source/utm_campaign/utm_content=post_<minted_session>. The trade-off
+    # is losing the post_links → posts join until the operator flips
+    # short_links_live=true and the customer's redirector is live.
+    fallback_target = _build_target_url_for_post(
+        target_url,
+        kind,
+        minted_session=minted_session,
+        project=matched_project or project_name,
+        platform=platform,
+    )
+
+    def _utm_fallback(reason: str) -> dict:
+        return {
+            'ok': True,
+            'code': None,
+            'short_url': fallback_target,
+            'target_url': fallback_target,
+            'kind': kind,
+            'utm_only': True,
+            'fallback_reason': reason,
+        }
+
+    if not _project_short_links_live(projects, project_name):
+        return _utm_fallback('short_links_not_live')
+
     if project_cfg and project_cfg.get('external_short_links'):
         # Pool path. Atomically claim the oldest unclaimed pool row.
         if use_legacy:
@@ -565,12 +646,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             )
             row = cur.fetchone()
             if not row:
-                return {
-                    'ok': False,
-                    'error': 'pool_exhausted',
-                    'project': project_name,
-                    'platform': platform_norm,
-                }
+                return _utm_fallback('pool_exhausted')
             row = dict(row)
             pool_code = row['code']
             pool_target = row['target_url']
@@ -592,18 +668,12 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                     },
                     ok_on_conflict=True,
                 )
-            except Exception as e:
-                return {'ok': False, 'error': 'api_unreachable', 'detail': str(e)}
+            except Exception:
+                return _utm_fallback('api_unreachable')
             if not resp or not resp.get('ok'):
                 err = (resp or {}).get('error') or {}
-                code = err.get('code') if isinstance(err, dict) else None
-                return {
-                    'ok': False,
-                    'error': code or 'pool_exhausted',
-                    'project': project_name,
-                    'platform': platform_norm,
-                    'detail': err.get('message') if isinstance(err, dict) else str(err),
-                }
+                err_code = err.get('code') if isinstance(err, dict) else None
+                return _utm_fallback(err_code or 'pool_exhausted')
             data = resp.get('data') or {}
             pool_code = data.get('code')
             pool_target = data.get('target_url')
@@ -616,14 +686,6 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'from_pool': True,
         }
 
-    final_target = _build_target_url_for_post(
-        target_url,
-        kind,
-        minted_session=minted_session,
-        project=matched_project or project_name,
-        platform=platform,
-    )
-
     # Fresh mint: try up to 8 random codes before giving up on collision.
     if use_legacy:
         for _ in range(8):
@@ -633,7 +695,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                     "INSERT INTO post_links (code, platform, project_name, "
                     "       target_url, kind, project_at_mint, minted_session) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (code, platform, project_name, final_target, kind,
+                    (code, platform, project_name, fallback_target, kind,
                      matched_project, minted_session),
                 )
                 conn.commit()
@@ -641,7 +703,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                     'ok': True,
                     'code': code,
                     'short_url': f"{website}/r/{code}",
-                    'target_url': final_target,
+                    'target_url': fallback_target,
                     'kind': kind,
                 }
             except Exception as e:
@@ -649,7 +711,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                     conn.execute("ROLLBACK")
                     continue
                 raise
-        return {'ok': False, 'error': 'code_collision_after_8_tries'}
+        return _utm_fallback('code_collision_after_8_tries')
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from http_api import api_post
@@ -662,33 +724,29 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                     "code": code,
                     "platform": platform,
                     "project_name": project_name,
-                    "target_url": final_target,
+                    "target_url": fallback_target,
                     "kind": kind,
                     "project_at_mint": matched_project,
                     "minted_session": minted_session,
                 },
                 ok_on_conflict=True,
             )
-        except Exception as e:
-            return {'ok': False, 'error': 'api_unreachable', 'detail': str(e)}
+        except Exception:
+            return _utm_fallback('api_unreachable')
         if resp and resp.get('ok'):
             return {
                 'ok': True,
                 'code': code,
                 'short_url': f"{website}/r/{code}",
-                'target_url': final_target,
+                'target_url': fallback_target,
                 'kind': kind,
             }
         err = (resp or {}).get('error') or {}
         err_code = err.get('code') if isinstance(err, dict) else None
         if err_code == 'code_collision':
             continue  # try another random code
-        return {
-            'ok': False,
-            'error': err_code or 'mint_api_error',
-            'detail': err.get('message') if isinstance(err, dict) else str(err),
-        }
-    return {'ok': False, 'error': 'code_collision_after_8_tries'}
+        return _utm_fallback(err_code or 'mint_api_error')
+    return _utm_fallback('code_collision_after_8_tries')
 
 
 def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
@@ -750,7 +808,14 @@ def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
             if not res.get('ok'):
                 return {**res, 'ok': False}
             seen[stripped] = res['short_url']
-            codes.append(res['code'])
+            if res.get('code') is not None:
+                codes.append(res['code'])
+            else:
+                # UTM-only fallback (no /r/<code>): track in skipped[] so the
+                # caller's logging doesn't see [None] in codes[] but still has
+                # visibility into how the URL was handled.
+                skipped.append({'url': stripped, 'reason': 'utm_fallback',
+                                'detail': res.get('fallback_reason')})
 
         if not seen:
             return {'ok': True, 'text': text, 'minted_session': None,
