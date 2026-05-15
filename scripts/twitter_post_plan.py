@@ -267,7 +267,7 @@ def post_one(c: dict) -> tuple[str, str]:
     # returns.
     minted_session = None
     try:
-        from dm_short_links import wrap_text_for_post
+        from dm_short_links import wrap_text_for_post, utm_only_text
         wrap_res = wrap_text_for_post(text=full_text, platform="twitter",
                                         project_name=project)
         if wrap_res.get("ok"):
@@ -278,10 +278,17 @@ def post_one(c: dict) -> tuple[str, str]:
                       f"{wrap_res['codes']}", flush=True)
         else:
             print(f"[post] candidate {cid} WARNING: URL wrap failed "
-                  f"({wrap_res.get('error')}); posting unwrapped", flush=True)
+                  f"({wrap_res.get('error')}); falling back to UTM-only", flush=True)
+            full_text = utm_only_text(text=full_text, platform="twitter", project_name=project)
     except Exception as e:
         print(f"[post] candidate {cid} WARNING: URL wrap raised ({e}); "
-              f"posting unwrapped", flush=True)
+              f"falling back to UTM-only", flush=True)
+        try:
+            from dm_short_links import utm_only_text
+            full_text = utm_only_text(text=full_text, platform="twitter", project_name=project)
+        except Exception as ee:
+            print(f"[post] candidate {cid} WARNING: UTM-only fallback also failed ({ee}); "
+                  f"posting unwrapped", flush=True)
 
     print(f"[post] candidate {cid} -> posting (link={link_url!r})", flush=True)
     rc, out, err = run_subprocess(
