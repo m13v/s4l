@@ -1996,6 +1996,7 @@ def run_claude_stream(prompt: str, cwd: str, log_dir: Path, slug: str) -> dict:
 
     tool_calls: list[dict] = []
     final_text = ""
+    orch_cost = None
     start = time.time()
 
     # Bridge the Claude Code auto-update unlink window before spawning.
@@ -2033,7 +2034,7 @@ def run_claude_stream(prompt: str, cwd: str, log_dir: Path, slug: str) -> dict:
 
             if time.time() - start > CLAUDE_TIMEOUT_SECONDS:
                 proc.kill()
-                _log_claude_session(session_id, "seo_generate_page")
+                _log_claude_session(session_id, "seo_generate_page", orch_cost)
                 return {"exit_code": 124, "final_result_text": final_text,
                         "tool_summary": _summarize_tools(tool_calls),
                         "stream_log_path": str(stream_log),
@@ -2055,10 +2056,13 @@ def run_claude_stream(prompt: str, cwd: str, log_dir: Path, slug: str) -> dict:
                         })
             elif event.get("type") == "result":
                 final_text = event.get("result", "") or ""
+                c = event.get("total_cost_usd")
+                if isinstance(c, (int, float)) and c > 0:
+                    orch_cost = float(c)
 
         proc.wait()
 
-    _log_claude_session(session_id, "seo_generate_page")
+    _log_claude_session(session_id, "seo_generate_page", orch_cost)
     return {
         "exit_code": proc.returncode,
         "final_result_text": final_text,
@@ -2091,6 +2095,7 @@ def run_claude_stream_resume(session_id: str, prompt: str, cwd: str,
 
     tool_calls: list[dict] = []
     final_text = ""
+    orch_cost = None
     start = time.time()
 
     if not wait_for_claude():
@@ -2127,7 +2132,7 @@ def run_claude_stream_resume(session_id: str, prompt: str, cwd: str,
 
             if time.time() - start > timeout:
                 proc.kill()
-                _log_claude_session(session_id, "seo_generate_page_retry")
+                _log_claude_session(session_id, "seo_generate_page_retry", orch_cost)
                 return {"exit_code": 124, "final_result_text": final_text,
                         "tool_summary": _summarize_tools(tool_calls),
                         "stream_log_path": str(stream_log),
@@ -2149,10 +2154,13 @@ def run_claude_stream_resume(session_id: str, prompt: str, cwd: str,
                         })
             elif event.get("type") == "result":
                 final_text = event.get("result", "") or ""
+                c = event.get("total_cost_usd")
+                if isinstance(c, (int, float)) and c > 0:
+                    orch_cost = float(c)
 
         proc.wait()
 
-    _log_claude_session(session_id, "seo_generate_page_retry")
+    _log_claude_session(session_id, "seo_generate_page_retry", orch_cost)
     return {
         "exit_code": proc.returncode,
         "final_result_text": final_text,
@@ -2162,16 +2170,20 @@ def run_claude_stream_resume(session_id: str, prompt: str, cwd: str,
     }
 
 
-def _log_claude_session(session_id: str, script_tag: str) -> None:
-    """Best-effort: invoke log_claude_session.py to record cost into claude_sessions."""
+def _log_claude_session(session_id: str, script_tag: str, orch_cost: float | None = None) -> None:
+    """Best-effort: invoke log_claude_session.py to record cost into claude_sessions.
+    When orch_cost is provided (captured from the stream-json result event's
+    total_cost_usd field), it's forwarded as --orchestrator-cost-usd so the
+    SDK lane gets populated. Sessions without orch_cost fall back to the
+    transcript-walk estimate the logger computes itself."""
     logger = ROOT_DIR / "scripts" / "log_claude_session.py"
     if not logger.exists():
         return
+    args = ["python3", str(logger), "--session-id", session_id, "--script", script_tag]
+    if orch_cost is not None and orch_cost > 0:
+        args.extend(["--orchestrator-cost-usd", str(orch_cost)])
     try:
-        subprocess.run(
-            ["python3", str(logger), "--session-id", session_id, "--script", script_tag],
-            capture_output=True, text=True, timeout=30,
-        )
+        subprocess.run(args, capture_output=True, text=True, timeout=30)
     except Exception:
         pass
 
