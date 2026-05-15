@@ -197,7 +197,7 @@ PROMPT_EOF
 acquire_lock "linkedin-browser" 3600
 ensure_browser_healthy "linkedin"
 
-gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG" -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase A claude exited with code $?"
+gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase A claude exited with code $?"
 
 release_lock "linkedin-browser"
 # Defense-in-depth: explicitly clear the hook-layer lockfile so the next
@@ -411,7 +411,7 @@ PROMPT_EOF
     acquire_lock "linkedin-browser" 3600
     ensure_browser_healthy "linkedin"
 
-    gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG" -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
+    gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
 
     release_lock "linkedin-browser"
     # Defense-in-depth: explicit hook-lockfile cleanup; see Phase A note.
