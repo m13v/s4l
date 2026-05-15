@@ -2313,14 +2313,17 @@ const _PHASE_FAMILY = {
   thread_twitter:       ['run-twitter-threads'],
   dm_outreach_twitter:  ['dm-outreach-twitter'],
   dm_replies_twitter:   ['engage-dm-replies'],
-  // LinkedIn
-  post_linkedin:        ['run-linkedin-phaseA', 'run-linkedin-phaseB'],
+  link_edit_twitter:    ['link-edit-twitter'],
+  // LinkedIn (run-linkedin bare = pre-phase-split legacy tag, kept for old rows)
+  post_linkedin:        ['run-linkedin-phaseA', 'run-linkedin-phaseB', 'run-linkedin'],
   engage_linkedin:      ['engage-linkedin-phaseA', 'engage-linkedin-phaseB'],
   dm_replies_linkedin:  ['engage-dm-replies'],
   dm_outreach_linkedin: ['dm-outreach-linkedin'],
+  link_edit_linkedin:   ['link-edit-linkedin'],
   // GitHub
   post_github:          ['post_github'],
-  engage_github:        ['github-engage'],
+  engage_github:        ['engage_github', 'github-engage', 'run-github-cycle'],
+  link_edit_github:     ['link-edit-github'],
   // Moltbook
   post_moltbook:        ['run-moltbook-cycle'],
   // SEO
