@@ -410,7 +410,8 @@ def log_inbound(conn, dm_id, author, content, message_at=None, event_id=None):
                        conversation_status = CASE
                            WHEN conversation_status IN ('needs_human','converted','closed','public_only') THEN conversation_status
                            ELSE 'needs_reply'
-                       END
+                       END,
+                       snoozed_until = NULL
         WHERE id = %s
     """, (dm_id,))
     conn.commit()
