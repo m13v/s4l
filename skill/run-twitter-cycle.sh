@@ -20,8 +20,8 @@
 #     remains the dominant signal, but a slow-burn "anyone know a tool for..."
 #     tweet now ranks alongside fast-growing news/drama
 #   - Claude reads top 25 (raised from 15 so the long tail reaches the model),
-#     drops unsuitable, posts top N where N is adaptive: 4 if ≥3 candidates
-#     cleared Δ≥10 (strong momentum), else 1
+#     drops unsuitable, posts every candidate it judges genuinely on-brand
+#     (no per-cycle post cap, no per-project quota)
 #   - keep remaining pending rows: salvaged into the next cycle, hard-expired
 #     by Phase 0 once tweet age crosses FRESHNESS_HOURS
 #
@@ -781,7 +781,7 @@ sleep 1200
 log "Phase 2a: re-polling fxtwitter for T1 engagement..."
 python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE"
 
-# --- Phase 2b: top 25 by hybrid score (delta + product-discussion intent boost), adaptive post cap 1 or 4 --------
+# --- Phase 2b: top 25 by hybrid score (delta + product-discussion intent boost), no post cap ---------------------
 # Hybrid sort: keep raw growth (delta_score) as the dominant signal, but add a +5 boost
 # when the tweet text shows a "product-discussion intent" pattern (someone asking for a tool,
 # venting a pain point, comparing alternatives, asking for recs). This lets slow-growing but
@@ -830,15 +830,12 @@ fi
 CANDIDATE_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
 log "Top $CANDIDATE_COUNT candidates by delta selected for post review."
 
-# Adaptive post cap: if ≥3 candidates cleared Δ≥10 (strong momentum), allow up to 4
-# posts; otherwise cap at 1 so we don't burn reply budget on marginal cycles.
+# No post cap: Phase 2b-prep posts every candidate it judges genuinely
+# on-brand. HIGH_DELTA_COUNT is still computed, but ONLY as a dashboard
+# diagnostic (the "Δ≥10 N" stat, fed to log_run.py --above-floor). It no
+# longer gates how many replies the cycle is allowed to post.
 HIGH_DELTA_COUNT=$(printf '%s\n' "$CANDIDATES" | awk -F'|' '$1 ~ /^[0-9]+$/ && $6+0 >= 10 {n++} END {print n+0}')
-if [ "$HIGH_DELTA_COUNT" -ge 3 ]; then
-    POST_LIMIT=4
-else
-    POST_LIMIT=1
-fi
-log "Adaptive post cap: $HIGH_DELTA_COUNT candidates with Δ≥10 → POST_LIMIT=$POST_LIMIT"
+log "Candidates with Δ≥10 (momentum diagnostic only, not a cap): $HIGH_DELTA_COUNT"
 
 CANDIDATE_BLOCK=""
 while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clikes crts creplies cviews cfollowers cage cdraft cdraftstyle cdraftage; do
@@ -943,7 +940,7 @@ acquire_lock "twitter-browser" 3600
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
-log "Phase 2b-prep: Claude reading threads and drafting up to $POST_LIMIT replies..."
+log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
 
 # Pre-assign the prep session UUID in the parent shell so it survives the
 # command-substitution subshell run_claude.sh runs in. We write it into the
@@ -982,7 +979,7 @@ $TOP_REPORT
 $STYLES_BLOCK
 
 ## WORKFLOW
-Pick AT MOST $POST_LIMIT candidate(s) this cycle. Skip any candidate whose thread is off-topic, toxic, or low-quality. If fewer than $POST_LIMIT candidates are truly on-brand, return fewer; never force entries.
+There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
 
 For each chosen candidate:
 1. Navigate to CANDIDATE_URL via mcp__twitter-agent__browser_navigate (READ-ONLY).
@@ -1007,9 +1004,9 @@ For each chosen candidate:
    - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
 
 5. ACCOUNT FOR EVERY PRE-SCORED CANDIDATE: every Candidate ID listed in the PRE-SCORED CANDIDATES section above MUST appear in EXACTLY ONE of the two output arrays this cycle:
-   - 'candidates' (chosen, capped at $POST_LIMIT) per step 4 above, OR
+   - 'candidates' (every on-brand pick, no cap) per step 4 above, OR
    - 'rejected' with a SHORT one-line reason explaining why this thread is not worth replying to (off-topic for the matched project, toxic / hateful, low-quality / spam, audience mismatch, near-duplicate of something we already replied to, etc.). Reason must be <=200 chars, plain text, no quotes.
-   It is fine for 'candidates' to be empty if no thread is on-brand; in that case every candidate id goes into 'rejected'. The reverse (every id in 'candidates') is also allowed up to POST_LIMIT, with the rest in 'rejected'.
+   It is fine for 'candidates' to be empty if no thread is on-brand; in that case every candidate id goes into 'rejected'. The reverse (every id in 'candidates', none in 'rejected') is also allowed when every thread is genuinely on-brand.
    Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you forgot.
 
 5a. SELF-IMPROVING PROJECT-WIDE EXCLUSION LIST (optional, on rejected entries only):
@@ -1167,7 +1164,7 @@ fi
 # --- No end-of-cycle expire ------------------------------------------------
 # Pending rows are intentionally left alone. They are either:
 #   - candidates Phase 2b never reached (e.g., org quota, browser crash, or
-#     simply ran out of POST_LIMIT before reviewing the long tail), and the
+#     a phase budget elapsing before the long tail was reviewed), and the
 #     next cycle's Phase 0 will salvage them while still fresh
 #   - hard-expired by the next cycle's Phase 0 once they cross FRESHNESS_HOURS
 # This avoids losing work to transient infra failures.
