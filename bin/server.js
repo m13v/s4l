@@ -4354,10 +4354,18 @@ async function handleApi(req, res) {
     const projectFilter = project
       ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
       : '';
+    // Split posts_made into threads_made (we authored the thread itself) vs
+    // comments_made (we engaged on someone else's thread). Matches the
+    // /api/activity classifier: thread iff thread_url = our_url AND
+    // (thread_author IS NULL OR thread_author = our_account).
+    const threadClause =
+      "p.thread_url = p.our_url AND (p.thread_author IS NULL OR p.thread_author = p.our_account)";
     const q =
       "SELECT json_agg(row_to_json(r)) FROM (" +
         "SELECT to_char((p.posted_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
-          "COUNT(*)::bigint AS posts_made " +
+          "COUNT(*)::bigint AS posts_made, " +
+          "SUM(CASE WHEN " + threadClause + " THEN 1 ELSE 0 END)::bigint AS threads_made, " +
+          "SUM(CASE WHEN " + threadClause + " THEN 0 ELSE 1 END)::bigint AS comments_made " +
         "FROM posts p " +
         "WHERE p.posted_at IS NOT NULL " +
           "AND p.posted_at >= CURRENT_DATE - INTERVAL '" + days + " days' " +
@@ -5486,11 +5494,23 @@ async function handleApi(req, res) {
           "AND query IS NOT NULL AND length(trim(query)) > 0 " +
       "), " +
       "cand AS ( " +
-        "SELECT 'twitter'  AS platform, c.search_topic AS query, " +
+        // Twitter: c.search_topic is the SEED concept (e.g. "vibe coding") while
+        // twitter_search_attempts.query is the literal X advanced-search string
+        // (e.g. '("vibe coded" OR ...) min_faves:30 since:... -filter:replies').
+        // The two never line up textually, so we associate each candidate to
+        // its parent attempt via (batch_id, project_name) and project the
+        // attempt's `query` as the join key. When one project ran multiple
+        // queries in the same batch (~1.5% of cases), this attributes each
+        // candidate to all of them — known minor over-attribution, acceptable
+        // until we add a per-attempt seed column.
+        "SELECT 'twitter' AS platform, a.query, " +
                "COALESCE(c.matched_project, '(none)') AS project_name, c.post_id " +
         "FROM twitter_candidates c " +
+        "JOIN twitter_search_attempts a " +
+          "ON a.batch_id = c.batch_id " +
+         "AND COALESCE(a.project_name, '(none)') = COALESCE(c.matched_project, '(none)') " +
         "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
-          "AND c.search_topic IS NOT NULL " +
+          "AND c.batch_id IS NOT NULL " +
         "UNION ALL " +
         "SELECT 'linkedin', c.search_query, COALESCE(c.matched_project, '(none)'), c.post_id " +
         "FROM linkedin_candidates c " +
@@ -9698,6 +9718,14 @@ async function loadActivityStats() {
 // to a capture day; expect those lines to sit at 0 until at least two
 // consecutive days of snapshots have accumulated per post.
 let DAILY_METRICS = [
+  // Output volume: posts we made per day, split by type. 'threads' counts
+  // posts where we authored the thread itself; 'comments_made' counts posts
+  // where we engaged on someone else's thread. Both come from the same
+  // /api/posts/per-day endpoint (server returns threads_made + comments_made
+  // alongside posts_made). 'comments_made' is intentionally distinct from
+  // the 'comments' pill below, which counts comments EARNED on our posts.
+  { id: 'threads',         label: 'Threads',           color: '#a855f7', endpoint: '/api/posts/per-day',    valueKey: 'threads_made',     platformAware: true },
+  { id: 'comments_made',   label: 'Comments Made',     color: '#d946ef', endpoint: '/api/posts/per-day',    valueKey: 'comments_made',    platformAware: true },
   { id: 'views',           label: 'Views',             color: '#6366f1', endpoint: '/api/views/per-day',    valueKey: 'views_gained',     platformAware: true },
   { id: 'upvotes',         label: 'Upvotes',           color: '#f97316', endpoint: '/api/upvotes/per-day',  valueKey: 'upvotes_gained',   platformAware: true },
   { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
@@ -10452,6 +10480,8 @@ async function loadDailyMetrics() {
     intoSeries('bookings', bookings.rows, 'bookings_gained');
     intoSeries('cost',     cost.rows,     'cost_usd');
     intoSeries('posts',    posts.rows,    'posts_made');
+    intoSeries('threads',       posts.rows, 'threads_made');
+    intoSeries('comments_made', posts.rows, 'comments_made');
     DAILY_METRICS.filter(m => m.funnel).forEach(m => {
       intoSeries(m.id, funnel.rows, m.valueKey);
     });
