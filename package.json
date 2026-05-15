@@ -18,7 +18,8 @@
     "config.example.json",
     "requirements.txt",
     "SKILL.md",
-    "skill/",
+    "skill/*.sh",
+    "skill/lib/*.sh",
     "setup/SKILL.md",
     "browser-agent-configs/"
   ],
