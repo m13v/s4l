@@ -2,7 +2,8 @@
 # run-twitter-cycle.sh — Combined Twitter scan + post cycle.
 #
 # Phase 1 (t=0):
-#   - weighted-sample 5 projects from config.json
+#   - select 8 projects via the shared inverse-recent-share picker
+#     (scripts/pick_project.py, same logic as github/reddit)
 #   - LLM drafts one search query per project (style from past top queries)
 #   - scrape tweets via twitter-agent, enrich via fxtwitter -> T0 snapshot
 #   - store all candidates with batch_id and search_topic
@@ -386,44 +387,51 @@ SALVAGED=$(echo "$PHASE0_RESULT" | cut -d'|' -f2)
 # they cover begins.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase1 2>&1 | tee -a "$LOG_FILE" || true
 
-# --- Weighted project sample -------------------------------------------------
-# Each chosen project is enriched with an `excludes_for_search` array sourced
-# from project_search_excludes (only terms past the 2-distinct-batch activation
-# gate). The Phase 1 scanner is required to mechanically append these as
-# `-term` operators to whatever query it drafts for the project. See
-# scripts/project_excludes.py for proposal/activation/decay rules.
+# --- Shared project selection (inverse-recent-share) -------------------------
+# Project selection is shared across twitter/github/reddit via
+# scripts/pick_project.py (pick_projects): inverse-recent-share weighting,
+# weight / (1 + posts in the last 7d), sampled without replacement. This
+# replaced the old inline weighted sample on 2026-05-15 so all platforms
+# pick projects the same way.
+# Each chosen project is then enriched here with an `excludes_for_search`
+# array sourced from project_search_excludes (only terms past the
+# 2-distinct-batch activation gate). The Phase 1 scanner is required to
+# mechanically append these as `-term` operators to whatever query it drafts
+# for the project. See scripts/project_excludes.py for proposal/activation/
+# decay rules.
 PROJECTS_JSON=$(python3 - <<'PY'
-import json, os, random, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+import json, os, subprocess, sys
+REPO = os.path.expanduser('~/social-autoposter')
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
-c = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
-projects = [p for p in c.get('projects', []) if p.get('weight', 0) > 0]
-weights = [(p, p.get('weight', 0)) for p in projects]
-k = 8
+
+res = subprocess.run(
+    ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
+     '--platform', 'twitter', '--count', '8', '--json'],
+    capture_output=True, text=True, timeout=30,
+)
+picked = []
+if res.returncode == 0 and res.stdout.strip():
+    try:
+        picked = json.loads(res.stdout)
+    except Exception:
+        picked = []
+
 chosen = []
-remaining = list(weights)
-for _ in range(min(k, len(remaining))):
-    total = sum(w for _, w in remaining)
-    r = random.uniform(0, total)
-    acc = 0
-    for i, (p, w) in enumerate(remaining):
-        acc += w
-        if acc >= r:
-            try:
-                excludes = pe.active_excludes('twitter', p.get('name'))
-            except Exception:
-                excludes = []
-            chosen.append({
-                'name': p.get('name'),
-                'description': p.get('description', ''),
-                # Unified search_topics (post 2026-04-30 legacy field cleanup).
-                'search_topics': p.get('search_topics') or [],
-                # Self-improving exclusion list (2026-05-09): MUST be appended
-                # as `-term` to every query drafted for this project.
-                'excludes_for_search': excludes,
-            })
-            remaining.pop(i)
-            break
+for p in picked:
+    try:
+        excludes = pe.active_excludes('twitter', p.get('name'))
+    except Exception:
+        excludes = []
+    chosen.append({
+        'name': p.get('name'),
+        'description': p.get('description', ''),
+        # Unified search_topics (post 2026-04-30 legacy field cleanup).
+        'search_topics': p.get('search_topics') or [],
+        # Self-improving exclusion list (2026-05-09): MUST be appended
+        # as `-term` to every query drafted for this project.
+        'excludes_for_search': excludes,
+    })
 print(json.dumps(chosen, indent=2))
 PY
 )
