@@ -8132,30 +8132,45 @@ function renderResult(run) {
       'salvaged <span style="color:var(--text);font-weight:600;">' + salvPrimary + '</span>' +
       salvBracket +
       '</span>';
-    const tooltip = 'searches: ' + searches +
-      ' / raw tweets: ' + raw +
-      ' / passed score-time cuts: ' + passed +
-      ' / dropped pre-score (already-posted or age>18h): ' + dropped +
-      ' / expired (delta<1 floor): ' + expired +
-      ' / above review cap (delta>=10, gates POST_LIMIT=3): ' + aboveFloor +
-      ' / posted: ' + posted +
-      ' / Phase 0 salvaged into this cycle: ' + salvAttempted +
-      ' (of which posted: ' + salvPosted + ')' +
-      ' / salvageable now (pool size for next cycle): ' + salvageableLive +
-      ' (+' + salvAdded + ' became salvageable / -' + salvDrained + ' drained this run)' +
-      ' / pending end-of-run: ' + queue +
-      ' (start: ' + queueStart + ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
-        qDrainedPosted + ' posted + ' + qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
-      ' / pending right now (live): ' + pendingLive;
+    // Tooltip is grouped by cycle phase so the funnel reads chronologically.
+    // String.fromCharCode(10) sidesteps the outer HTML backtick template
+    // that strips literal \n escapes (see feedback_server_js_template_regex).
+    // CSS .sa-tooltip white-space:pre-line turns these into line breaks.
+    const NL = String.fromCharCode(10);
+    const tooltip =
+      'Phase 0 (cleanup):' + NL +
+      '• salvaged ' + salvAttempted + ': orphan rows adopted from prior dead cycles (' + salvPosted + ' posted this cycle)' + NL +
+      '• pool for next cycle: ' + salvageableLive + ' salvageable (+' + salvAdded + ' / -' + salvDrained + ' this run)' + NL +
+      NL +
+      'Phase 1 (scrape):' + NL +
+      '• searches ' + searches + ': queries run' + NL +
+      '• raw ' + raw + ': tweets returned' + NL +
+      '• passed ' + passed + ': after dedup + age>18h cuts (' + dropped + ' dropped)' + NL +
+      NL +
+      'Phase 2a (Δ re-score):' + NL +
+      '• expired ' + expired + ': below Δ<1 likes floor' + NL +
+      NL +
+      'Phase 2b (draft + post):' + NL +
+      '• Δ≥10 ' + aboveFloor + ': crossed POST_LIMIT=3 review cap' + NL +
+      '• posted ' + posted + ': shipped' + NL +
+      '• failed ' + failed + ': post errors' + NL +
+      NL +
+      'Pending end-of-run: ' + queue +
+      ' (start ' + queueStart + ', +' + qAdded + ' / -' + qDrained + ' = ' +
+        qDrainedPosted + ' posted, ' + qDrainedExpired + ' expired, ' + qDrainedSkipped + ' skipped)' + NL +
+      'Pending live: ' + pendingLive;
+    // Pill order mirrors the tooltip story: salvaged (Phase 0 input) leads,
+    // then Phase 1 funnel (searches, raw, passed), Phase 2a drop (expired),
+    // Phase 2b decision and outcome (Δ≥10, posted, failed).
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+        queuePill +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('passed', passed, passed > 0 ? '#22c55e' : 'var(--muted)') +
         pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#a78bfa' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
-        queuePill +
         renderFailedPill() +
       '</span>'
     );
@@ -8655,10 +8670,12 @@ function buildSeoDetailRows(run) {
   );
 }
 
-// Cost cell for a Job History row. Renders the headline total and exposes a
-// hover tooltip with the 4-lane decomposition (Total/Orchestrator/Subagent/
-// Estimated) plus a per-phase breakdown when enrichRunsCostBreakdown attached
-// one. Falls back to the shell-log value when no phase data is available.
+// Cost cell for a Job History row. SDK-only mode (2026-05-15): the headline
+// total is the sum of orchestrator_cost_usd across the phases of this run.
+// Sessions whose wrapper didn't capture SDK cost contribute 0; the per-phase
+// breakdown surfaces a "missing SDK" count so the operator can spot pipelines
+// where real spend went unrecorded (the cost cell shows the smaller real
+// number, not an inflated estimate).
 function _jobHistoryCostCell(result) {
   const fmtLane = (v) => {
     if (v == null) return 'n/a';
@@ -8668,40 +8685,68 @@ function _jobHistoryCostCell(result) {
     if (n < 0.01) return '$' + n.toFixed(4);
     return '$' + n.toFixed(4);
   };
-  const total = Number(result.cost_usd) || 0;
+  const bd    = result.cost_breakdown;
   const orch  = result.cost_usd_orchestrator != null ? Number(result.cost_usd_orchestrator) : null;
   const sub   = result.cost_usd_subagent != null ? Number(result.cost_usd_subagent) : null;
   const est   = result.cost_usd_estimated != null ? Number(result.cost_usd_estimated) : null;
-  const bd    = result.cost_breakdown;
+  const sessionsAll = bd ? Number(bd.sessions) || 0 : 0;
+  const sessionsWithSdk = bd ? Number(bd.sessions_with_sdk) || 0 : 0;
+  const sessionsMissing = Math.max(0, sessionsAll - sessionsWithSdk);
+  const totalForDisplay = orch != null ? orch : 0;
+  // Header value: "n/a" when no SDK data captured for any of the run's
+  // sessions, otherwise the orchestrator sum (with a "(N missing SDK)"
+  // hint inline when partial).
+  let headerHtml;
+  if (sessionsAll === 0) {
+    headerHtml = '<span style="color:var(--text-very-faint);">n/a</span>';
+  } else if (sessionsWithSdk === 0) {
+    headerHtml = '<span style="color:var(--text-very-faint);">n/a</span>';
+  } else if (sessionsMissing > 0) {
+    headerHtml = fmtCost(totalForDisplay) +
+      ' <span style="color:#eab308;font-size:11px;">(' + sessionsMissing + ' missing)</span>';
+  } else {
+    headerHtml = fmtCost(totalForDisplay);
+  }
   const lines = [
-    'Total (displayed): ' + fmtLane(total),
-    '  Orchestrator (SDK): ' + fmtLane(orch),
-    '  Subagent (Task): ' + fmtLane(sub),
-    '  Estimated (transcript): ' + fmtLane(est),
+    'Cost (SDK orchestrator): ' + (sessionsWithSdk > 0 ? fmtLane(orch) : 'n/a'),
   ];
+  if (sessionsAll > 0) {
+    lines.push('  Sessions: ' + sessionsAll +
+      '  ·  with SDK data: ' + sessionsWithSdk +
+      '  ·  missing SDK: ' + sessionsMissing);
+  }
   if (bd && Array.isArray(bd.phases) && bd.phases.length) {
     lines.push('');
-    lines.push('Phases (' + bd.phases.length + '):');
-    // Show up to 10 phases inline to keep the tooltip readable.
+    lines.push('Per-phase (claude_sessions.script grouping):');
     const shown = bd.phases.slice(0, 10);
     for (const p of shown) {
-      const subStr = (p.sub && p.sub > 0) ? ('  sub ' + fmtLane(p.sub)) : '';
-      lines.push('  ' + (p.phase || '(unknown)') + '  x' + p.sessions + '  ' + fmtLane(p.total) + subStr);
+      const missing = (p.sessions_missing_sdk && p.sessions_missing_sdk > 0)
+        ? ('  [' + p.sessions_missing_sdk + ' missing SDK]')
+        : '';
+      const orchVal = (p.sessions_with_sdk && p.sessions_with_sdk > 0)
+        ? fmtLane(p.orch)
+        : 'n/a';
+      lines.push('  ' + (p.phase || '(unknown)') + '  x' + p.sessions +
+        '  ' + orchVal + missing);
     }
     if (bd.phases.length > shown.length) {
       lines.push('  …(' + (bd.phases.length - shown.length) + ' more)');
     }
   }
-  if (typeof result.cost_usd_from_log === 'number' && result.cost_usd_from_log !== total) {
+  if (typeof result.cost_usd_from_log === 'number') {
     lines.push('');
-    lines.push('Shell-log value: ' + fmtLane(result.cost_usd_from_log) + ' (recomputed from claude_sessions window-match)');
+    lines.push('Wrapper shell-log value: ' + fmtLane(result.cost_usd_from_log));
   }
   lines.push('');
-  lines.push('Total = COALESCE(orch, estimate) + subagent. Per-phase rows = matching claude_sessions in the run window grouped by script.');
+  lines.push('Diagnostic-only (local pricing estimate, not actual billing):');
+  lines.push('  Transcript estimate: ' + fmtLane(est));
+  lines.push('  Subagent (est): ' + fmtLane(sub));
+  lines.push('');
+  lines.push('SDK-only mode: shows orchestrator_cost_usd captured by the SDK result event. "missing SDK" = wrapper script didn\\'t pass --output-format json to claude, so no result event = no cost data recorded. Patch the wrapper to fix.');
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) +
     '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
-    fmtCost(total) + '</span>';
+    headerHtml + '</span>';
 }
 
 // Stable identity for a job-history row across polls. (script, started_at)
@@ -8732,8 +8777,16 @@ function _jobHistoryRowSig(r) {
   ].join('|');
 }
 function _buildJobHistoryRowGroup(r, idx) {
-  const cost = r.result && r.result.cost_usd;
-  const costCell = cost ? _jobHistoryCostCell(r.result) : '<span style="color:var(--muted);">—</span>';
+  // SDK-only mode: render the cost cell whenever the run produced any
+  // claude_sessions rows (cost_breakdown is attached), even if the SDK lane
+  // is NULL across all of them — the tooltip surfaces "missing SDK" so the
+  // operator sees pipelines whose wrappers haven't been patched yet.
+  const hasBreakdown = r.result && r.result.cost_breakdown
+    && Number(r.result.cost_breakdown.sessions) > 0;
+  const hasLogCost = r.result && typeof r.result.cost_usd === 'number';
+  const costCell = (hasBreakdown || hasLogCost)
+    ? _jobHistoryCostCell(r.result)
+    : '<span style="color:var(--muted);">—</span>';
   const hasDetails = Array.isArray(r.details) && r.details.length;
   const caret = hasDetails
     ? '<span class="sa-job-caret" style="display:inline-block;width:12px;color:var(--muted);cursor:pointer;user-select:none;transition:transform 0.15s ease;">&#9656;</span> '
@@ -12016,10 +12069,14 @@ function renderCostStats(payload) {
   const merged = COST_TYPE_ORDER.map(t => {
     const r = byType[t] || { count: 0, total_cost_usd: 0, total_cost_usd_orchestrator: 0, total_cost_usd_estimated: 0, total_cost_usd_subagent: 0 };
     const count = Number(r.count) || 0;
-    const total = Number(r.total_cost_usd) || 0;
+    // SDK-only: total = orchestrator. Estimate/subagent kept for diagnostic
+    // tooltips. /api/cost/stats SQL emits total_cost_usd = SUM(per_row_cost)
+    // which itself is SUM(orchestrator/rows), so it equals total_cost_usd_
+    // orchestrator by construction in SDK-only mode.
     const totalOrch = r.total_cost_usd_orchestrator != null ? Number(r.total_cost_usd_orchestrator) : null;
     const totalEst  = r.total_cost_usd_estimated != null ? Number(r.total_cost_usd_estimated) : null;
     const totalSub  = r.total_cost_usd_subagent != null ? Number(r.total_cost_usd_subagent) : null;
+    const total = totalOrch != null ? totalOrch : 0;
     return {
       type: t, label: COST_TYPE_LABELS[t], count: count,
       total: total, totalOrch: totalOrch, totalEst: totalEst, totalSub: totalSub,
@@ -12037,12 +12094,13 @@ function renderCostStats(payload) {
   if (totalEl) {
     totalEl.textContent = '$' + totalCost.toFixed(2) + ' · ' + totalCount.toLocaleString() + ' activit' + (totalCount === 1 ? 'y' : 'ies');
     const tipLines = [
-      'Total (displayed): $' + totalCost.toFixed(4),
-      '  Orchestrator (SDK): $' + totalOrch.toFixed(4),
-      '  Subagent (Task): $' + totalSub.toFixed(4),
-      '  Estimated (transcript): $' + totalEst.toFixed(4),
+      'Cost (SDK orchestrator): $' + totalOrch.toFixed(4),
       '',
-      'Total = COALESCE(orch, estimate) + subagent. Subagent (Task) cost previously hidden by SDK; now folded in as a separate addend (see anthropics/claude-code #43945).',
+      'Diagnostic-only (local pricing estimate, not actual billing):',
+      '  Transcript estimate: $' + totalEst.toFixed(4),
+      '  Subagent (est): $' + totalSub.toFixed(4),
+      '',
+      'Anthropic SDK-reported orchestrator_cost_usd. Pipelines whose wrappers don\\'t capture --orchestrator-cost-usd contribute $0 — see the per-phase table for which scripts are missing coverage.',
     ];
     totalEl.setAttribute('data-tooltip', tipLines.join('\\n'));
     totalEl.style.cursor = 'help';
@@ -12057,12 +12115,11 @@ function renderCostStats(payload) {
   function fmtCount(v) { return (Number(v) || 0).toLocaleString(); }
   function moneyCell(displayed, orch, est, sub) {
     const tip = [
-      'Total (displayed): ' + fmtMoney(displayed),
-      '  Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
-      '  Subagent (Task): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
-      '  Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
+      'Cost (SDK orchestrator): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
       '',
-      'Total = COALESCE(orch, estimate) + subagent.',
+      'Diagnostic-only (local pricing estimate):',
+      '  Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
+      '  Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
     ].join('\\n');
     return '<span data-tooltip="' + escapeHtml(tip) +
       '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
@@ -12106,19 +12163,30 @@ function renderCostStats(payload) {
   let phaseTableHtml = '';
   if (phases.length) {
     const phaseRowsHtml = phases.map(function (p) {
-      const total = Number(p.total_cost_usd) || 0;
-      const orch  = p.total_cost_usd_orchestrator != null ? Number(p.total_cost_usd_orchestrator) : null;
+      const orch  = p.total_cost_usd_orchestrator != null ? Number(p.total_cost_usd_orchestrator) : 0;
       const est   = p.total_cost_usd_estimated != null ? Number(p.total_cost_usd_estimated) : null;
       const sub   = p.total_cost_usd_subagent != null ? Number(p.total_cost_usd_subagent) : null;
       const sessions = Number(p.sessions) || 0;
-      const totalCell = moneyCell(total, orch, est, sub);
-      const subCell = sub != null && sub > 0 ? fmtMoney(sub) : '<span style="color:var(--text-very-faint);">$0</span>';
-      const perSession = sessions > 0 ? moneyCell(total / sessions, orch != null ? orch / sessions : null, est != null ? est / sessions : null, sub != null ? sub / sessions : null) : '&mdash;';
+      const withSdk = Number(p.sessions_with_sdk) || 0;
+      const missing = Math.max(0, sessions - withSdk);
+      // SDK-only: per-phase total = orchestrator sum. Phases with 0% SDK
+      // coverage show $0 with a "(N/N missing)" hint so it's obvious the
+      // wrapper needs patching.
+      const totalCellInner = withSdk > 0
+        ? moneyCell(orch, orch, est, sub)
+        : '<span style="color:var(--text-very-faint);">n/a</span>';
+      const coverageCell = missing === 0
+        ? ('<span style="color:#15803d;">' + sessions + '/' + sessions + '</span>')
+        : ('<span style="color:#b91c1c;" title="' + missing + ' sessions missing SDK cost (wrapper script needs --output-format json on claude call)">' +
+            withSdk + '/' + sessions + '</span>');
+      const perSession = withSdk > 0
+        ? moneyCell(orch / withSdk, orch / withSdk, est != null ? est / sessions : null, sub != null ? sub / sessions : null)
+        : '&mdash;';
       return '<tr>' +
         '<td style="font-family:ui-monospace,monospace;font-size:12px;">' + escapeHtml(p.phase || '(unknown)') + '</td>' +
         '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(sessions) + '</td>' +
-        '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCell + '</td>' +
-        '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + subCell + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;font-size:11px;">' + coverageCell + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCellInner + '</td>' +
         '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + perSession + '</td>' +
       '</tr>';
     }).join('');
@@ -12128,8 +12196,8 @@ function renderCostStats(payload) {
         '<thead><tr>' +
           '<th style="text-align:left;">Phase</th>' +
           '<th style="text-align:right;">Sessions</th>' +
-          '<th style="text-align:right;">Total Cost</th>' +
-          '<th style="text-align:right;">Subagent</th>' +
+          '<th style="text-align:right;" title="Sessions with SDK cost captured / total sessions. Red = wrapper needs patching.">SDK coverage</th>' +
+          '<th style="text-align:right;">Cost (SDK)</th>' +
           '<th style="text-align:right;">Cost per Session</th>' +
         '</tr></thead>' +
         '<tbody>' + phaseRowsHtml + '</tbody>' +
@@ -12148,7 +12216,7 @@ function renderCostStats(payload) {
     '</table>' +
     phaseTableHtml +
     '<div style="font-size:11px;color:var(--text-muted);padding:8px 2px 2px;">' +
-      'Cost = COALESCE(SDK orchestrator, transcript estimate) + Task subagent. The per-type table splits Claude session spend across the activity rows each session produced; the per-phase table groups raw claude_sessions rows by script and is independent of activity attribution. Excludes skipped replies, resurrected posts, DM replies, and mentions from the per-type counts.' +
+      'SDK-only mode (2026-05-15): cost = Anthropic\\'s orchestrator_cost_usd from the SDK result event. Pipelines whose wrappers don\\'t pass --output-format json to claude show $0 with a red SDK-coverage cell — that\\'s a missing-data signal, not a real $0. Transcript estimate and Task-subagent figures (tooltip-only) come from a local pricing table and don\\'t reflect subscription billing.' +
     '</div>';
 }
 
@@ -14393,13 +14461,16 @@ function renderProjectStatus(data, opts) {
   // Money cell with tooltip exposing SDK + estimate lanes, same UX as
   // moneyCell in renderCostStats so operators see consistent numbers.
   const costCell = (displayed, orch, est, sub, opts) => {
+    // SDK-only mode: displayed value comes from orchestrator_cost_usd; the
+    // estimate and subagent are diagnostic-only (local pricing table).
     const tip = [
-      'Total (displayed): ' + fmtMoney(displayed),
-      '  Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
-      '  Subagent (Task): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
-      '  Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
+      'Cost (SDK orchestrator): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
       '',
-      'Total = COALESCE(orchestrator, transcript estimate) + subagent. The orchestrator SDK lane previously hid Task subagent spend (anthropics/claude-code #43945); subagent is now folded in as a separate addend.',
+      'Diagnostic-only (local pricing estimate, not actual billing):',
+      '  Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
+      '  Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
+      '',
+      'Anthropic SDK-reported cost only. "n/a" or $0 means the wrapper didn\\'t capture --orchestrator-cost-usd (no --output-format json on the claude call) for one or more sessions in this window. Subagent and transcript estimates are computed from a local pricing table and are not billing-accurate on subscription plans.',
     ].join('\\n');
     const style = 'text-align:right;font-variant-numeric:tabular-nums;' + (opts && opts.extra || '');
     const inner = '<span data-tooltip="' + escapeHtml(tip) +
@@ -14415,12 +14486,13 @@ function renderProjectStatus(data, opts) {
       : base;
     if (costAvailable) {
       const tipLines = [
-        'Total (displayed): ' + fmtMoney(grandCost),
-        '  Orchestrator (SDK): ' + fmtMoney(grandCostOrch),
-        '  Subagent (Task): ' + fmtMoney(grandCostSub),
-        '  Estimated (transcript): ' + fmtMoney(grandCostEst),
+        'Cost (SDK orchestrator): ' + fmtMoney(grandCostOrch),
         '',
-        'Total Claude session cost across all activity rows (posts, comments, DMs, SEO pages) attributed to projects in this window. Same attribution model as Cost per Activity. Total = COALESCE(orch, transcript) + subagent.',
+        'Diagnostic-only (local pricing estimate, not actual billing):',
+        '  Transcript estimate: ' + fmtMoney(grandCostEst),
+        '  Subagent (est): ' + fmtMoney(grandCostSub),
+        '',
+        'Anthropic SDK-reported orchestrator_cost_usd across all activity rows in this window. Per-session attribution is the session\\'s cost split evenly across its activity rows. Pipelines whose wrappers don\\'t pass --output-format json to claude contribute $0.',
       ];
       totalEl.setAttribute('data-tooltip', tipLines.join('\\n'));
       totalEl.style.cursor = 'help';
