@@ -157,10 +157,12 @@ def upsert_candidates(tweets, config, batch_id=None):
             posted_at = None
             age_hours = 24
 
-        # Skip very old tweets (> 18h). Softened from 12h; we now have a
-        # 6h half-life decay, so 18h still scores ~12% — enough that a
-        # slow-burn banger can beat a fresh dud.
-        if age_hours > 18:
+        # Skip tweets older than the cycle's Phase 0 freshness wall (6h, set by
+        # FRESHNESS_HOURS in skill/run-twitter-cycle.sh). Anything older than that
+        # gets hard-expired by the next cycle's Phase 0 before it can be posted,
+        # so admitting it just wastes a draft and a candidate row. Keep this
+        # value in sync with FRESHNESS_HOURS in run-twitter-cycle.sh.
+        if age_hours > 6:
             skipped += 1
             continue
 
