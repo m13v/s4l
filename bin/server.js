@@ -2224,7 +2224,7 @@ async function enrichSeoRuns(runs) {
     }
     if (sessionIds.length) {
       const rows = await pq(
-        'SELECT session_id, total_cost_usd, orchestrator_cost_usd FROM claude_sessions WHERE session_id = ANY($1::uuid[])',
+        'SELECT session_id, total_cost_usd, orchestrator_cost_usd, subagent_cost_usd FROM claude_sessions WHERE session_id = ANY($1::uuid[])',
         [sessionIds]
       );
       if (rows && rows.length) {
@@ -2233,6 +2233,9 @@ async function enrichSeoRuns(runs) {
             estimated: Number(r.total_cost_usd),
             orchestrator: r.orchestrator_cost_usd != null
               ? Number(r.orchestrator_cost_usd)
+              : null,
+            subagent: r.subagent_cost_usd != null
+              ? Number(r.subagent_cost_usd)
               : null,
           }])
         );
@@ -2246,16 +2249,19 @@ async function enrichSeoRuns(runs) {
             // sessions, locked callers that don't pass --orchestrator-cost-usd),
             // keep whatever streamRes value _collectSeoDetails parsed from the
             // .log file.
+            const sub = Number.isFinite(row.subagent) ? row.subagent : 0;
             if (Number.isFinite(row.orchestrator)) {
-              d.cost_usd = row.orchestrator;
+              d.cost_usd = row.orchestrator + sub;
               d.cost_usd_orchestrator = row.orchestrator;
             } else if (Number.isFinite(d.cost_usd)) {
               d.cost_usd_orchestrator = d.cost_usd;
+              d.cost_usd = d.cost_usd + sub;
             }
             // Manual estimate alongside (always populated by log_claude_session.py).
             if (Number.isFinite(row.estimated)) {
               d.cost_usd_estimated = row.estimated;
             }
+            d.cost_usd_subagent = sub;
           }
         }
       }
@@ -3633,27 +3639,28 @@ async function handleApi(req, res) {
         "SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id" +
       "), session_cost AS (" +
         "SELECT cs.session_id, " +
-          "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost, " +
+          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost, " +
           "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_orchestrator, " +
-          "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_estimated " +
+          "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_estimated, " +
+          "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_subagent " +
         "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id" +
       ") " +
       "SELECT json_agg(row_to_json(r)) FROM (" +
-      "SELECT * FROM (SELECT posted_at AS occurred_at, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, engagement_style AS detail, our_url AS link, ('p' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, c.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c ON c.id = posts.campaign_id WHERE posted_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY posted_at DESC LIMIT 150) x1 " +
-      "UNION ALL SELECT * FROM (SELECT r2.replied_at, 'replied', r2.platform, r2.their_author, COALESCE(LEFT(r2.our_reply_content, 280), LEFT(r2.their_content, 280)), CASE WHEN r2.is_recommendation THEN 'rec · ' || COALESCE(r2.engagement_style, '') ELSE r2.engagement_style END, r2.our_reply_url, ('r' || r2.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, c2.name, p.thread_title, p.thread_url, NULL::text FROM replies r2 LEFT JOIN posts p ON p.id = r2.post_id LEFT JOIN session_cost sc ON sc.session_id = r2.claude_session_id LEFT JOIN campaigns c2 ON c2.id = r2.campaign_id WHERE r2.status='replied' AND r2.replied_at IS NOT NULL ORDER BY r2.replied_at DESC LIMIT 150) x2 " +
-      "UNION ALL SELECT * FROM (SELECT COALESCE(r3.processing_at, r3.discovered_at), 'skipped', r3.platform, r3.their_author, LEFT(r3.their_content, 140), r3.skip_reason, r3.their_comment_url, ('s' || r3.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, c3.name, p.thread_title, p.thread_url, NULL::text FROM replies r3 LEFT JOIN posts p ON p.id = r3.post_id LEFT JOIN session_cost sc ON sc.session_id = r3.claude_session_id LEFT JOIN campaigns c3 ON c3.id = r3.campaign_id WHERE r3.status='skipped' ORDER BY COALESCE(r3.processing_at, r3.discovered_at) DESC LIMIT 150) x3 " +
-      "UNION ALL SELECT * FROM (SELECT COALESCE(source_timestamp, received_at), 'mention', platform, author, COALESCE(title, LEFT(body, 140)), sentiment, url, ('m' || id), NULL::text, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM octolens_mentions ORDER BY COALESCE(source_timestamp, received_at) DESC LIMIT 150) x4 " +
-      "UNION ALL SELECT * FROM (SELECT sent_at, 'dm_sent', platform, their_author, LEFT(our_dm_content, 140), NULL::text, chat_url, ('d' || dms.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id WHERE status='sent' AND sent_at IS NOT NULL ORDER BY sent_at DESC LIMIT 150) x5 " +
-      "UNION ALL SELECT * FROM (SELECT m.message_at, 'dm_reply_sent', d.platform, d.their_author, LEFT(m.content, 140), NULL::text, d.chat_url, ('dr' || m.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, c5.name, NULL::text, NULL::text, NULL::text FROM dm_messages m JOIN dms d ON d.id = m.dm_id LEFT JOIN session_cost sc ON sc.session_id = m.claude_session_id LEFT JOIN campaigns c5 ON c5.id = m.campaign_id WHERE m.direction = 'outbound' AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction = 'inbound' AND m2.message_at < m.message_at) ORDER BY m.message_at DESC LIMIT 150) x5b " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_serp', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup') ORDER BY completed_at DESC LIMIT 150) x6 " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_gsc', 'seo', product, query, page_slug, page_url, ('g' || gq.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM gsc_queries gq LEFT JOIN session_cost sc ON sc.session_id = gq.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL ORDER BY completed_at DESC LIMIT 150) x7 " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_reddit', 'seo', product, keyword, slug, page_url, ('kr' || sk2.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk2 LEFT JOIN session_cost sc ON sc.session_id = sk2.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'reddit' ORDER BY completed_at DESC LIMIT 150) x8 " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top', 'seo', product, keyword, slug, page_url, ('kt' || sk3.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk3 LEFT JOIN session_cost sc ON sc.session_id = sk3.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_page' ORDER BY completed_at DESC LIMIT 150) x8b " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top_post', 'seo', product, keyword, slug, page_url, ('ktp' || sk5.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk5 LEFT JOIN session_cost sc ON sc.session_id = sk5.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_post' ORDER BY completed_at DESC LIMIT 150) x8tp " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_roundup', 'seo', product, keyword, slug, page_url, ('kru' || sk4.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk4 LEFT JOIN session_cost sc ON sc.session_id = sk4.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'roundup' ORDER BY completed_at DESC LIMIT 150) x8r " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_improved', 'seo', product, LEFT(COALESCE(rationale, diff_summary, page_path), 140), page_path, page_url, ('pi' || spi.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_page_improvements spi LEFT JOIN session_cost sc ON sc.session_id = spi.claude_session_id WHERE completed_at IS NOT NULL AND status = 'committed' ORDER BY completed_at DESC LIMIT 150) x8c " +
-      "UNION ALL SELECT * FROM (SELECT expired_at, 'page_expired', 'seo', product, regexp_replace(source_path, '^.*/', ''), 'imp=' || impressions_30d || ' clicks=0 age=' || COALESCE(file_age_days::int, 0) || 'd ' || COALESCE(reason,''), page_url, ('xp' || sep.id), product, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_expired_pages sep ORDER BY expired_at DESC LIMIT 150) x8d " +
-      "UNION ALL SELECT * FROM (SELECT resurrected_at AS occurred_at, 'resurrected' AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, NULL::text AS detail, our_url AS link, ('rr' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, c9.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c9 ON c9.id = posts.campaign_id WHERE resurrected_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY resurrected_at DESC LIMIT 150) x9 " +
+      "SELECT * FROM (SELECT posted_at AS occurred_at, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, engagement_style AS detail, our_url AS link, ('p' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c ON c.id = posts.campaign_id WHERE posted_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY posted_at DESC LIMIT 150) x1 " +
+      "UNION ALL SELECT * FROM (SELECT r2.replied_at, 'replied', r2.platform, r2.their_author, COALESCE(LEFT(r2.our_reply_content, 280), LEFT(r2.their_content, 280)), CASE WHEN r2.is_recommendation THEN 'rec · ' || COALESCE(r2.engagement_style, '') ELSE r2.engagement_style END, r2.our_reply_url, ('r' || r2.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c2.name, p.thread_title, p.thread_url, NULL::text FROM replies r2 LEFT JOIN posts p ON p.id = r2.post_id LEFT JOIN session_cost sc ON sc.session_id = r2.claude_session_id LEFT JOIN campaigns c2 ON c2.id = r2.campaign_id WHERE r2.status='replied' AND r2.replied_at IS NOT NULL ORDER BY r2.replied_at DESC LIMIT 150) x2 " +
+      "UNION ALL SELECT * FROM (SELECT COALESCE(r3.processing_at, r3.discovered_at), 'skipped', r3.platform, r3.their_author, LEFT(r3.their_content, 140), r3.skip_reason, r3.their_comment_url, ('s' || r3.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c3.name, p.thread_title, p.thread_url, NULL::text FROM replies r3 LEFT JOIN posts p ON p.id = r3.post_id LEFT JOIN session_cost sc ON sc.session_id = r3.claude_session_id LEFT JOIN campaigns c3 ON c3.id = r3.campaign_id WHERE r3.status='skipped' ORDER BY COALESCE(r3.processing_at, r3.discovered_at) DESC LIMIT 150) x3 " +
+      "UNION ALL SELECT * FROM (SELECT COALESCE(source_timestamp, received_at), 'mention', platform, author, COALESCE(title, LEFT(body, 140)), sentiment, url, ('m' || id), NULL::text, NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM octolens_mentions ORDER BY COALESCE(source_timestamp, received_at) DESC LIMIT 150) x4 " +
+      "UNION ALL SELECT * FROM (SELECT sent_at, 'dm_sent', platform, their_author, LEFT(our_dm_content, 140), NULL::text, chat_url, ('d' || dms.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id WHERE status='sent' AND sent_at IS NOT NULL ORDER BY sent_at DESC LIMIT 150) x5 " +
+      "UNION ALL SELECT * FROM (SELECT m.message_at, 'dm_reply_sent', d.platform, d.their_author, LEFT(m.content, 140), NULL::text, d.chat_url, ('dr' || m.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c5.name, NULL::text, NULL::text, NULL::text FROM dm_messages m JOIN dms d ON d.id = m.dm_id LEFT JOIN session_cost sc ON sc.session_id = m.claude_session_id LEFT JOIN campaigns c5 ON c5.id = m.campaign_id WHERE m.direction = 'outbound' AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction = 'inbound' AND m2.message_at < m.message_at) ORDER BY m.message_at DESC LIMIT 150) x5b " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_serp', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup') ORDER BY completed_at DESC LIMIT 150) x6 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_gsc', 'seo', product, query, page_slug, page_url, ('g' || gq.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM gsc_queries gq LEFT JOIN session_cost sc ON sc.session_id = gq.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL ORDER BY completed_at DESC LIMIT 150) x7 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_reddit', 'seo', product, keyword, slug, page_url, ('kr' || sk2.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk2 LEFT JOIN session_cost sc ON sc.session_id = sk2.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'reddit' ORDER BY completed_at DESC LIMIT 150) x8 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top', 'seo', product, keyword, slug, page_url, ('kt' || sk3.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk3 LEFT JOIN session_cost sc ON sc.session_id = sk3.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_page' ORDER BY completed_at DESC LIMIT 150) x8b " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top_post', 'seo', product, keyword, slug, page_url, ('ktp' || sk5.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk5 LEFT JOIN session_cost sc ON sc.session_id = sk5.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_post' ORDER BY completed_at DESC LIMIT 150) x8tp " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_roundup', 'seo', product, keyword, slug, page_url, ('kru' || sk4.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk4 LEFT JOIN session_cost sc ON sc.session_id = sk4.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'roundup' ORDER BY completed_at DESC LIMIT 150) x8r " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_improved', 'seo', product, LEFT(COALESCE(rationale, diff_summary, page_path), 140), page_path, page_url, ('pi' || spi.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_page_improvements spi LEFT JOIN session_cost sc ON sc.session_id = spi.claude_session_id WHERE completed_at IS NOT NULL AND status = 'committed' ORDER BY completed_at DESC LIMIT 150) x8c " +
+      "UNION ALL SELECT * FROM (SELECT expired_at, 'page_expired', 'seo', product, regexp_replace(source_path, '^.*/', ''), 'imp=' || impressions_30d || ' clicks=0 age=' || COALESCE(file_age_days::int, 0) || 'd ' || COALESCE(reason,''), page_url, ('xp' || sep.id), product, NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_expired_pages sep ORDER BY expired_at DESC LIMIT 150) x8d " +
+      "UNION ALL SELECT * FROM (SELECT resurrected_at AS occurred_at, 'resurrected' AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, NULL::text AS detail, our_url AS link, ('rr' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c9.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c9 ON c9.id = posts.campaign_id WHERE resurrected_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY resurrected_at DESC LIMIT 150) x9 " +
       "ORDER BY 1 DESC LIMIT 500) r";
     return (async () => {
       const rows = await pq(q);
@@ -3668,6 +3675,7 @@ async function handleApi(req, res) {
           delete e.cost_usd;
           delete e.cost_usd_orchestrator;
           delete e.cost_usd_estimated;
+          delete e.cost_usd_subagent;
         });
       }
       return json(res, { events });
@@ -4514,7 +4522,8 @@ async function handleApi(req, res) {
     const sumCols =
       "COALESCE(SUM(sc.per_row_cost), 0)::numeric(12,4) AS total_cost_usd, " +
       "COALESCE(SUM(sc.per_row_cost_orchestrator), 0)::numeric(12,4) AS total_cost_usd_orchestrator, " +
-      "COALESCE(SUM(sc.per_row_cost_estimated), 0)::numeric(12,4) AS total_cost_usd_estimated";
+      "COALESCE(SUM(sc.per_row_cost_estimated), 0)::numeric(12,4) AS total_cost_usd_estimated, " +
+      "COALESCE(SUM(sc.per_row_cost_subagent), 0)::numeric(12,4) AS total_cost_usd_subagent";
     if (includeThread) {
       rowQueries.push(
         "SELECT 'thread' AS type, COUNT(*)::int AS count, " + sumCols + " " +
@@ -4553,15 +4562,38 @@ async function handleApi(req, res) {
       "WITH src AS (" + parts.join(' UNION ALL ') + "), " +
       "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
       "session_cost AS (SELECT cs.session_id, " +
-          "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
+          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
           "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_orchestrator, " +
-          "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated " +
+          "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated, " +
+          "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_subagent " +
         "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id) " +
       "SELECT json_agg(row_to_json(r)) FROM (" + rowQueries.join(' UNION ALL ') + ") r";
+    // Per-phase (script) cost rollup over the same window. Groups every
+    // claude_sessions row in the window by its `script` column (e.g.
+    // run-twitter-cycle-scan, post_reddit, seo_generate_page) and surfaces
+    // total + orchestrator + subagent + estimate lanes. Independent of the
+    // activity-type rollup above: a single post_reddit session might produce
+    // 0 or 1 thread row, but its cost still shows up in the per-phase view.
+    const phaseQ =
+      "SELECT script AS phase, " +
+        "COUNT(*)::int AS sessions, " +
+        "COALESCE(SUM(COALESCE(orchestrator_cost_usd, total_cost_usd, 0) + COALESCE(subagent_cost_usd, 0)), 0)::numeric(12,4) AS total_cost_usd, " +
+        "COALESCE(SUM(orchestrator_cost_usd), 0)::numeric(12,4) AS total_cost_usd_orchestrator, " +
+        "COALESCE(SUM(total_cost_usd), 0)::numeric(12,4) AS total_cost_usd_estimated, " +
+        "COALESCE(SUM(subagent_cost_usd), 0)::numeric(12,4) AS total_cost_usd_subagent " +
+      "FROM claude_sessions " +
+      "WHERE started_at >= NOW() - " + win + " " +
+      "GROUP BY script " +
+      "HAVING COALESCE(SUM(COALESCE(orchestrator_cost_usd, total_cost_usd, 0) + COALESCE(subagent_cost_usd, 0)), 0) > 0 " +
+      "ORDER BY total_cost_usd DESC " +
+      "LIMIT 50";
     return (async () => {
       const dbRows = await pq(q);
       const value = (dbRows && dbRows.length && dbRows[0].json_agg) ? dbRows[0].json_agg : [];
-      return json(res, { windowHours, platform: plat || 'all', rows: value });
+      let phases = [];
+      try { phases = await pq(phaseQ) || []; }
+      catch (e) { console.error('[cost/stats] phase query failed:', e && e.message || e); }
+      return json(res, { windowHours, platform: plat || 'all', rows: value, phases });
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
@@ -4682,7 +4714,7 @@ async function handleApi(req, res) {
       "WITH src AS (" + parts.join(' UNION ALL ') + "), " +
       "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
       "session_cost AS (SELECT cs.session_id, " +
-          "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost " +
+          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost " +
         "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id), " +
       "in_window AS (" + inWindow.join(' UNION ALL ') + ") " +
       "SELECT json_agg(row_to_json(r)) FROM (" +
@@ -5700,7 +5732,7 @@ async function handleApi(req, res) {
     // suppresses the column. SDK and estimate lanes are surfaced separately
     // so the dashboard tooltip can show both, same UX as cost-stats.
     let costByProject = {};
-    let grandCost = 0, grandCostOrch = 0, grandCostEst = 0;
+    let grandCost = 0, grandCostOrch = 0, grandCostEst = 0, grandCostSub = 0;
     if (req.user && req.user.admin) {
       const costSrcParts = [
         "SELECT claude_session_id FROM posts WHERE claude_session_id IS NOT NULL AND posted_at IS NOT NULL",
@@ -5714,24 +5746,24 @@ async function handleApi(req, res) {
       const costWin = "INTERVAL '" + hours + " hours'";
       const costAttributed = [
         "SELECT COALESCE(posts.project_name, '(none)') AS project, " +
-          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id " +
           "WHERE posts.posted_at >= NOW() - " + costWin + " " +
           "AND posts.our_content <> '(mention - no original post)'",
         "SELECT COALESCE(replies.project_name, '(none)') AS project, " +
-          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM replies LEFT JOIN session_cost sc ON sc.session_id = replies.claude_session_id " +
           "WHERE replies.status='replied' AND replies.replied_at >= NOW() - " + costWin,
         "SELECT COALESCE(dms.target_project, '(none)') AS project, " +
-          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id " +
           "WHERE dms.status='sent' AND dms.sent_at >= NOW() - " + costWin,
         "SELECT COALESCE(seo_keywords.product, '(none)') AS project, " +
-          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM seo_keywords LEFT JOIN session_cost sc ON sc.session_id = seo_keywords.claude_session_id " +
           "WHERE seo_keywords.completed_at >= NOW() - " + costWin + " AND seo_keywords.page_url IS NOT NULL",
         "SELECT COALESCE(gsc_queries.product, '(none)') AS project, " +
-          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated " +
+          "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM gsc_queries LEFT JOIN session_cost sc ON sc.session_id = gsc_queries.claude_session_id " +
           "WHERE gsc_queries.completed_at >= NOW() - " + costWin + " AND gsc_queries.page_url IS NOT NULL",
       ];
@@ -5739,15 +5771,17 @@ async function handleApi(req, res) {
         "WITH src AS (" + costSrcParts.join(' UNION ALL ') + "), " +
         "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
         "session_cost AS (SELECT cs.session_id, " +
-            "(COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
+            "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
             "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_orchestrator, " +
-            "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated " +
+            "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated, " +
+            "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_subagent " +
           "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id), " +
         "attributed AS (" + costAttributed.join(' UNION ALL ') + ") " +
         "SELECT project, " +
           "COALESCE(SUM(per_row_cost), 0)::numeric(12,4) AS cost_usd, " +
           "COALESCE(SUM(per_row_cost_orchestrator), 0)::numeric(12,4) AS cost_usd_orchestrator, " +
-          "COALESCE(SUM(per_row_cost_estimated), 0)::numeric(12,4) AS cost_usd_estimated " +
+          "COALESCE(SUM(per_row_cost_estimated), 0)::numeric(12,4) AS cost_usd_estimated, " +
+          "COALESCE(SUM(per_row_cost_subagent), 0)::numeric(12,4) AS cost_usd_subagent " +
         "FROM attributed GROUP BY project";
       try {
         const costRows = await pq(costQ) || [];
@@ -5756,10 +5790,12 @@ async function handleApi(req, res) {
           const c = Number(r.cost_usd) || 0;
           const co = Number(r.cost_usd_orchestrator) || 0;
           const ce = Number(r.cost_usd_estimated) || 0;
-          costByProject[proj] = { cost_usd: c, cost_usd_orchestrator: co, cost_usd_estimated: ce };
+          const cs = Number(r.cost_usd_subagent) || 0;
+          costByProject[proj] = { cost_usd: c, cost_usd_orchestrator: co, cost_usd_estimated: ce, cost_usd_subagent: cs };
           grandCost += c;
           grandCostOrch += co;
           grandCostEst += ce;
+          grandCostSub += cs;
         });
       } catch (e) {
         // Soft fail: log and continue without cost data. Don't block the
@@ -5773,6 +5809,7 @@ async function handleApi(req, res) {
       r.cost_usd = c ? c.cost_usd : 0;
       r.cost_usd_orchestrator = c ? c.cost_usd_orchestrator : 0;
       r.cost_usd_estimated = c ? c.cost_usd_estimated : 0;
+      r.cost_usd_subagent = c ? c.cost_usd_subagent : 0;
       return r;
     };
     projects.forEach(attachCost);
@@ -5811,6 +5848,7 @@ async function handleApi(req, res) {
       grand_cost_usd: grandCost,
       grand_cost_usd_orchestrator: grandCostOrch,
       grand_cost_usd_estimated: grandCostEst,
+      grand_cost_usd_subagent: grandCostSub,
       cost_available: !!(req.user && req.user.admin),
       can_edit_weight: !auth.CLIENT_MODE && !!(req.user && req.user.admin),
       projects,
@@ -8370,7 +8408,7 @@ function buildSeoDetailRows(run) {
   if (!details.length) return '';
   const subRows = details.map(d => {
     const cost = (typeof d.cost_usd === 'number' && d.cost_usd > 0)
-      ? fmtCostCell(d.cost_usd, d.cost_usd_orchestrator, d.cost_usd_estimated)
+      ? fmtCostCell(d.cost_usd, d.cost_usd_orchestrator, d.cost_usd_estimated, d.cost_usd_subagent)
       : '<span style="color:var(--muted);">—</span>';
     const turns = (typeof d.num_turns === 'number' && d.num_turns > 0)
       ? d.num_turns
@@ -9295,17 +9333,21 @@ function fmtCost(c) {
 //
 // Args (no backticks anywhere; this whole helper sits inside the dashboard
 // HTML template literal, see feedback_server_js_template_regex memory):
-//   displayed     value rendered in the cell. Already prefers SDK, falls
-//                 back to estimate. Source of truth for the text.
+//   displayed     value rendered in the cell. Total = COALESCE(orch,
+//                 estimate) + subagent. Source of truth for the text.
 //   orchestrator  native SDK orchestrator cost (claude_sessions.
 //                 orchestrator_cost_usd, captured from streamRes.
 //                 total_cost_usd). Authoritative for orchestrator billing
 //                 but EXCLUDES Task subagent costs (anthropics/claude-code
-//                 issue #43945).
-//   estimated     manual transcript-derived estimate using local pricing
-//                 tables (claude_sessions.total_cost_usd, written by
+//                 issue #43945). Subagent is now folded in via the 4th arg.
+//   estimated     manual transcript-derived estimate of orchestrator turns
+//                 only (claude_sessions.total_cost_usd, written by
 //                 log_claude_session.py).
-function fmtCostCell(displayed, orchestrator, estimated) {
+//   subagent      Task/Agent subagent cost from sidechain transcripts +
+//                 sibling subagents/*.jsonl files (claude_sessions.
+//                 subagent_cost_usd). Added on top of the orch/estimate
+//                 lane to form the displayed total.
+function fmtCostCell(displayed, orchestrator, estimated, subagent) {
   const text = fmtCost(displayed);
   if (text === '') return '';
   const fmtLane = (v) => {
@@ -9317,12 +9359,12 @@ function fmtCostCell(displayed, orchestrator, estimated) {
     return '$' + n.toFixed(4);
   };
   const lines = [
-    'Orchestrator (SDK): ' + fmtLane(orchestrator),
-    'Estimated (transcript): ' + fmtLane(estimated),
+    'Total (displayed): ' + fmtLane(displayed),
+    '  Orchestrator (SDK): ' + fmtLane(orchestrator),
+    '  Subagent (Task): ' + fmtLane(subagent),
+    '  Estimated (transcript): ' + fmtLane(estimated),
     '',
-    'Displayed value prefers the SDK orchestrator cost (native streamRes.total_cost_usd, matches Anthropic billing for the orchestrator session) and falls back to the manual transcript-derived estimate when the SDK value is unavailable.',
-    '',
-    'Note: orchestrator cost EXCLUDES Task subagent spend (anthropics/claude-code #43945). The estimate uses our local pricing table over the parent transcript only and has the same exclusion.',
+    'Total = COALESCE(orch, estimate) + subagent. Orchestrator is the native SDK lane (matches Anthropic billing for parent turns) but historically hid Task subagent cost (anthropics/claude-code #43945); we now fold subagent in as a separate addend.',
   ];
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) +
@@ -11714,34 +11756,35 @@ function renderCostStats(payload) {
   const byType = {};
   rows.forEach(r => { byType[r.type] = r; });
   const merged = COST_TYPE_ORDER.map(t => {
-    const r = byType[t] || { count: 0, total_cost_usd: 0, total_cost_usd_orchestrator: 0, total_cost_usd_estimated: 0 };
+    const r = byType[t] || { count: 0, total_cost_usd: 0, total_cost_usd_orchestrator: 0, total_cost_usd_estimated: 0, total_cost_usd_subagent: 0 };
     const count = Number(r.count) || 0;
     const total = Number(r.total_cost_usd) || 0;
     const totalOrch = r.total_cost_usd_orchestrator != null ? Number(r.total_cost_usd_orchestrator) : null;
     const totalEst  = r.total_cost_usd_estimated != null ? Number(r.total_cost_usd_estimated) : null;
+    const totalSub  = r.total_cost_usd_subagent != null ? Number(r.total_cost_usd_subagent) : null;
     return {
       type: t, label: COST_TYPE_LABELS[t], count: count,
-      total: total, totalOrch: totalOrch, totalEst: totalEst,
+      total: total, totalOrch: totalOrch, totalEst: totalEst, totalSub: totalSub,
       avg: count > 0 ? total / count : 0,
       avgOrch: count > 0 && totalOrch != null ? totalOrch / count : null,
       avgEst:  count > 0 && totalEst  != null ? totalEst  / count : null,
+      avgSub:  count > 0 && totalSub  != null ? totalSub  / count : null,
     };
   });
   const totalCount = merged.reduce(function (a, r) { return a + r.count; }, 0);
   const totalCost  = merged.reduce(function (a, r) { return a + r.total; }, 0);
   const totalOrch  = merged.reduce(function (a, r) { return a + (r.totalOrch || 0); }, 0);
   const totalEst   = merged.reduce(function (a, r) { return a + (r.totalEst  || 0); }, 0);
+  const totalSub   = merged.reduce(function (a, r) { return a + (r.totalSub  || 0); }, 0);
   if (totalEl) {
     totalEl.textContent = '$' + totalCost.toFixed(2) + ' · ' + totalCount.toLocaleString() + ' activit' + (totalCount === 1 ? 'y' : 'ies');
-    // Tooltip on the header pill so users can see both lanes for the
-    // headline figure without expanding the table.
     const tipLines = [
-      'Orchestrator (SDK): $' + totalOrch.toFixed(4),
-      'Estimated (transcript): $' + totalEst.toFixed(4),
+      'Total (displayed): $' + totalCost.toFixed(4),
+      '  Orchestrator (SDK): $' + totalOrch.toFixed(4),
+      '  Subagent (Task): $' + totalSub.toFixed(4),
+      '  Estimated (transcript): $' + totalEst.toFixed(4),
       '',
-      'Displayed total prefers the SDK orchestrator cost (native streamRes.total_cost_usd) and falls back to the manual transcript estimate where the SDK value is missing.',
-      '',
-      'Note: orchestrator cost EXCLUDES Task subagent spend (anthropics/claude-code #43945).',
+      'Total = COALESCE(orch, estimate) + subagent. Subagent (Task) cost previously hidden by SDK; now folded in as a separate addend (see anthropics/claude-code #43945).',
     ];
     totalEl.setAttribute('data-tooltip', tipLines.join('\\n'));
     totalEl.style.cursor = 'help';
@@ -11754,56 +11797,100 @@ function renderCostStats(payload) {
     return '$' + n.toFixed(2);
   }
   function fmtCount(v) { return (Number(v) || 0).toLocaleString(); }
-  // Wraps a money cell in a span that exposes both cost lanes via tooltip.
-  function moneyCell(displayed, orch, est) {
+  function moneyCell(displayed, orch, est, sub) {
     const tip = [
-      'Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
-      'Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
+      'Total (displayed): ' + fmtMoney(displayed),
+      '  Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
+      '  Subagent (Task): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
+      '  Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
       '',
-      'Displayed value prefers SDK; falls back to transcript estimate. Subagent costs excluded (anthropics/claude-code #43945).',
+      'Total = COALESCE(orch, estimate) + subagent.',
     ].join('\\n');
     return '<span data-tooltip="' + escapeHtml(tip) +
       '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
       fmtMoney(displayed) + '</span>';
   }
   const rowsHtml = merged.map(function (r) {
-    const totalCellHtml = moneyCell(r.total, r.totalOrch, r.totalEst);
+    const totalCellHtml = moneyCell(r.total, r.totalOrch, r.totalEst, r.totalSub);
+    const subCellHtml   = r.totalSub != null && r.totalSub > 0 ? fmtMoney(r.totalSub) : '<span style="color:var(--text-very-faint);">$0</span>';
     const avgCellHtml = r.count > 0
-      ? moneyCell(r.avg, r.avgOrch, r.avgEst)
+      ? moneyCell(r.avg, r.avgOrch, r.avgEst, r.avgSub)
       : '&mdash;';
     return '<tr>' +
       '<td>' + escapeHtml(r.label) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(r.count) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCellHtml + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + subCellHtml + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + avgCellHtml + '</td>' +
     '</tr>';
   }).join('');
-  const footerTotalHtml = moneyCell(totalCost, totalOrch, totalEst);
+  const footerTotalHtml = moneyCell(totalCost, totalOrch, totalEst, totalSub);
+  const footerSubHtml   = totalSub > 0 ? fmtMoney(totalSub) : '<span style="color:var(--text-very-faint);">$0</span>';
   const footerAvgHtml = totalCount > 0
     ? moneyCell(totalCost / totalCount,
                 totalOrch / totalCount,
-                totalEst  / totalCount)
+                totalEst  / totalCount,
+                totalSub  / totalCount)
     : '&mdash;';
   const footerHtml =
     '<tr style="border-top:2px solid var(--border);font-weight:600;background:var(--bg-subtle);">' +
       '<td>Total</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(totalCount) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + footerTotalHtml + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + footerSubHtml + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + footerAvgHtml + '</td>' +
     '</tr>';
+  // Per-phase (script) breakdown. Same window, separate query — gives the
+  // operator an answer to "which phase of which pipeline is burning cash?"
+  // independent of the activity-type rollup above. A row like
+  // run-twitter-cycle-scan dominating the spend is the signal to investigate.
+  const phases = (payload && payload.phases) || [];
+  let phaseTableHtml = '';
+  if (phases.length) {
+    const phaseRowsHtml = phases.map(function (p) {
+      const total = Number(p.total_cost_usd) || 0;
+      const orch  = p.total_cost_usd_orchestrator != null ? Number(p.total_cost_usd_orchestrator) : null;
+      const est   = p.total_cost_usd_estimated != null ? Number(p.total_cost_usd_estimated) : null;
+      const sub   = p.total_cost_usd_subagent != null ? Number(p.total_cost_usd_subagent) : null;
+      const sessions = Number(p.sessions) || 0;
+      const totalCell = moneyCell(total, orch, est, sub);
+      const subCell = sub != null && sub > 0 ? fmtMoney(sub) : '<span style="color:var(--text-very-faint);">$0</span>';
+      const perSession = sessions > 0 ? moneyCell(total / sessions, orch != null ? orch / sessions : null, est != null ? est / sessions : null, sub != null ? sub / sessions : null) : '&mdash;';
+      return '<tr>' +
+        '<td style="font-family:ui-monospace,monospace;font-size:12px;">' + escapeHtml(p.phase || '(unknown)') + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(sessions) + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCell + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + subCell + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + perSession + '</td>' +
+      '</tr>';
+    }).join('');
+    phaseTableHtml =
+      '<div style="font-size:12px;font-weight:600;padding:12px 2px 4px;color:var(--text-secondary);">Cost per Phase (Claude session script)</div>' +
+      '<table class="style-stats-table">' +
+        '<thead><tr>' +
+          '<th style="text-align:left;">Phase</th>' +
+          '<th style="text-align:right;">Sessions</th>' +
+          '<th style="text-align:right;">Total Cost</th>' +
+          '<th style="text-align:right;">Subagent</th>' +
+          '<th style="text-align:right;">Cost per Session</th>' +
+        '</tr></thead>' +
+        '<tbody>' + phaseRowsHtml + '</tbody>' +
+      '</table>';
+  }
   body.innerHTML =
     '<table class="style-stats-table">' +
       '<thead><tr>' +
         '<th style="text-align:left;">Type</th>' +
         '<th style="text-align:right;">Activities</th>' +
         '<th style="text-align:right;">Total Cost</th>' +
+        '<th style="text-align:right;">Subagent</th>' +
         '<th style="text-align:right;">Cost per Activity</th>' +
       '</tr></thead>' +
       '<tbody>' + rowsHtml + footerHtml + '</tbody>' +
     '</table>' +
+    phaseTableHtml +
     '<div style="font-size:11px;color:var(--text-muted);padding:8px 2px 2px;">' +
-      'Cost is Claude session spend split evenly across the activity rows each session produced. ' +
-      'Totals here exclude skipped replies, resurrected posts, DM replies, and mentions.' +
+      'Cost = COALESCE(SDK orchestrator, transcript estimate) + Task subagent. The per-type table splits Claude session spend across the activity rows each session produced; the per-phase table groups raw claude_sessions rows by script and is independent of activity attribution. Excludes skipped replies, resurrected posts, DM replies, and mentions from the per-type counts.' +
     '</div>';
 }
 
@@ -14037,6 +14124,7 @@ function renderProjectStatus(data, opts) {
   const grandCost = Number(data && data.grand_cost_usd) || 0;
   const grandCostOrch = Number(data && data.grand_cost_usd_orchestrator) || 0;
   const grandCostEst = Number(data && data.grand_cost_usd_estimated) || 0;
+  const grandCostSub = Number(data && data.grand_cost_usd_subagent) || 0;
   // Money formatter mirrors fmtCost: $0, $0.0042, $12.34.
   const fmtMoney = (v) => {
     const n = Number(v) || 0;
@@ -14046,12 +14134,14 @@ function renderProjectStatus(data, opts) {
   };
   // Money cell with tooltip exposing SDK + estimate lanes, same UX as
   // moneyCell in renderCostStats so operators see consistent numbers.
-  const costCell = (displayed, orch, est, opts) => {
+  const costCell = (displayed, orch, est, sub, opts) => {
     const tip = [
-      'Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
-      'Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
+      'Total (displayed): ' + fmtMoney(displayed),
+      '  Orchestrator (SDK): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
+      '  Subagent (Task): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
+      '  Estimated (transcript): ' + (est != null ? fmtMoney(est) : 'n/a'),
       '',
-      'Displayed value prefers SDK; falls back to transcript estimate. Subagent costs excluded (anthropics/claude-code #43945).',
+      'Total = COALESCE(orchestrator, transcript estimate) + subagent. The orchestrator SDK lane previously hid Task subagent spend (anthropics/claude-code #43945); subagent is now folded in as a separate addend.',
     ].join('\\n');
     const style = 'text-align:right;font-variant-numeric:tabular-nums;' + (opts && opts.extra || '');
     const inner = '<span data-tooltip="' + escapeHtml(tip) +
@@ -14067,10 +14157,12 @@ function renderProjectStatus(data, opts) {
       : base;
     if (costAvailable) {
       const tipLines = [
-        'Orchestrator (SDK): ' + fmtMoney(grandCostOrch),
-        'Estimated (transcript): ' + fmtMoney(grandCostEst),
+        'Total (displayed): ' + fmtMoney(grandCost),
+        '  Orchestrator (SDK): ' + fmtMoney(grandCostOrch),
+        '  Subagent (Task): ' + fmtMoney(grandCostSub),
+        '  Estimated (transcript): ' + fmtMoney(grandCostEst),
         '',
-        'Total Claude session cost across all activity rows (posts, comments, DMs, SEO pages) attributed to projects in this window. Same attribution model as Cost per Activity.',
+        'Total Claude session cost across all activity rows (posts, comments, DMs, SEO pages) attributed to projects in this window. Same attribution model as Cost per Activity. Total = COALESCE(orch, transcript) + subagent.',
       ];
       totalEl.setAttribute('data-tooltip', tipLines.join('\\n'));
       totalEl.style.cursor = 'help';
@@ -14149,7 +14241,7 @@ function renderProjectStatus(data, opts) {
       : nameCell;
     const totalCell = cellWithShare(r.total, grandTotal, targetShare, { extra: 'font-weight:600;', showZeroShare: true });
     const costCellHtml = costAvailable
-      ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, { extra: 'color:var(--text-secondary);' })
+      ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, Number(r.cost_usd_subagent) || 0, { extra: 'color:var(--text-secondary);' })
       : '';
     const weightVal = Number(r.weight) || 0;
     const editable = canEditWeight && (!r.unassigned || r.configured);
@@ -14185,7 +14277,7 @@ function renderProjectStatus(data, opts) {
     '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + (Number(totals[p]) || 0) + '</td>'
   ).join('');
   const footerCostCell = costAvailable
-    ? costCell(grandCost, grandCostOrch, grandCostEst, { extra: 'font-weight:600;' })
+    ? costCell(grandCost, grandCostOrch, grandCostEst, grandCostSub, { extra: 'font-weight:600;' })
     : '';
   const footerHtml =
     '<tr style="border-top:2px solid var(--border);font-weight:600;background:var(--bg-subtle);">' +
@@ -14528,7 +14620,7 @@ function renderActivity(events) {
         '</div>' +
       '</td>' +
       '<td class="activity-summary">' + summaryHtml + '</td>' +
-      '<td class="sa-admin-only" style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated) + '</td>' +
+      '<td class="sa-admin-only" style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated, e.cost_usd_subagent) + '</td>' +
       '<td style="text-align:center;">' + renderDeleteBtnHtml(e) + '</td>' +
     '</tr>';
   }).join('');
