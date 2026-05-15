@@ -462,12 +462,13 @@ def main():
         ok, output, usage = run_claude(prompt, timeout=args.per_reply_timeout, session_id=session_id)
         reply_elapsed = time.time() - reply_start
         session_ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+        log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
              "--session-id", session_id, "--script", "engage_github",
-             "--started-at", session_started_at, "--ended-at", session_ended_at],
-            capture_output=True,
-        )
+             "--started-at", session_started_at, "--ended-at", session_ended_at]
+        orch_cost = usage.get("cost_usd")
+        if isinstance(orch_cost, (int, float)) and orch_cost > 0:
+            log_args.extend(["--orchestrator-cost-usd", str(orch_cost)])
+        subprocess.run(log_args, capture_output=True)
 
         for k in total_usage:
             total_usage[k] += usage[k]
