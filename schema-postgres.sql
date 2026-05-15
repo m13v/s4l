@@ -180,6 +180,14 @@ ALTER TABLE dms ADD COLUMN IF NOT EXISTS short_link_first_click_at TIMESTAMP;
 ALTER TABLE dms ADD COLUMN IF NOT EXISTS short_link_last_click_at TIMESTAMP;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dms_short_link_code ON dms(short_link_code) WHERE short_link_code IS NOT NULL;
 
+-- Dashboard "skip until next inbound" affordance for needs_human (and any other)
+-- escalations: while snoozed_until > NOW(), engage-dm-replies.sh hides the row
+-- and the escalation card collapses to a "snoozed" badge. Auto-cleared by
+-- dm_conversation.log_inbound() when a new inbound message arrives, which
+-- re-surfaces the DM under its existing conversation_status on the next cycle.
+ALTER TABLE dms ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMP;
+CREATE INDEX IF NOT EXISTS idx_dms_snoozed_until ON dms(snoozed_until) WHERE snoozed_until IS NOT NULL;
+
 -- prospects: persistent per-(platform, author) record. One person can have multiple DMs over time.
 CREATE TABLE IF NOT EXISTS prospects (
     id SERIAL PRIMARY KEY,
