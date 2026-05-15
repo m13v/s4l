@@ -254,7 +254,7 @@ python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30
 ensure_browser_healthy "reddit"
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
-gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit DM outreach claude exited with code $?"
+gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 # Belt-and-suspenders: if claude exited without releasing the lock (e.g.
