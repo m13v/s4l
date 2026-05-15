@@ -98,11 +98,15 @@ def _build_project_bare_host_pattern():
     if not hosts:
         return None
     parts = sorted({re.escape(h) for h in hosts}, key=len, reverse=True)
-    # \b on left, lookahead on right rejects '.tld/' (branch 2 would catch
-    # that) and any continuation char (digit/letter/dot/slash) so we don't
-    # misfire mid-token. The trailing punctuation stripper at call time
-    # handles the period-after-prose case ('check fazm.ai.').
-    return r'\b(?:' + '|'.join(parts) + r')\b(?![\w./])'
+    # \b on left, narrow lookahead on right. Reject:
+    #   - word chars/slashes (mid-token or path → branch 2 territory)
+    #   - dot+letter (sub-domain extension: 'runner.now.example.com' must NOT
+    #     match 'runner.now')
+    # ALLOW dot+non-letter (sentence-ending: 'try fazm.ai.' must match) and
+    # plain punctuation/whitespace. Pre-2026-05-14 this was `(?![\w./])` which
+    # over-rejected sentence-ending periods, so 'try fazm.ai.' yielded ZERO
+    # matches and the URL went out bare.
+    return r'\b(?:' + '|'.join(parts) + r')\b(?![\w/]|\.[a-z])'
 
 _PROJECT_BARE_HOST_PAT = _build_project_bare_host_pattern()
 _URL_RE = re.compile(
@@ -196,6 +200,15 @@ def _classify_url(url: str, projects: list) -> tuple[str, str | None]:
 def _build_target_url(target_url: str, kind: str, *, dm_id: int, project: str | None, platform: str) -> str:
     """Add UTM params for kinds where we control the analytics consumer.
 
+    Canonical UTM scheme (matches _build_target_url_for_post + the pool
+    minters): utm_source='s4l' identifies the agency for every customer's
+    analytics ('this traffic came from S4L'). utm_term carries the platform
+    (reddit | twitter | linkedin | github_issues) since utm_source is no
+    longer platform-specific. utm_medium stays 'dm' to keep the DM rail
+    distinct from posts. utm_content keeps the strict 'dm_<id>' shape
+    consumed by bin/server.js (regex /^dm_(\\d+)$/) and project_stats_json
+    (LIKE 'dm_%').
+
     Booking: Cal.com metadata[utm_*] survives to the booking webhook (the flat
     utm_* gets stripped by Cal's UI), Calendly accepts both — keep both.
     Website: our own domains run PostHog; flat utm_* is enough.
@@ -208,9 +221,10 @@ def _build_target_url(target_url: str, kind: str, *, dm_id: int, project: str | 
     existing = dict(parse_qsl(parts.query, keep_blank_values=True))
 
     utm = {
-        'utm_source': platform,           # reddit | twitter | linkedin
+        'utm_source': 's4l',
         'utm_medium': 'dm',
         'utm_campaign': (project or 'unknown').lower(),
+        'utm_term': (platform or 'unknown').lower(),
         'utm_content': f'dm_{dm_id}',
     }
     for k, v in utm.items():
@@ -226,10 +240,9 @@ def _build_target_url_for_post(target_url: str, kind: str, *, minted_session: st
                                 project: str | None, platform: str) -> str:
     """UTM stamping for PUBLIC post wrappers (utm_medium='post').
 
-    Same kinds as the DM path (booking + website get stamped, github + other
-    pass through). utm_content uses the minted_session UUID at mint time;
-    after log_post returns post_id we have it stored alongside in
-    post_links, so analytics can join post_links → posts on session.
+    See _build_target_url for the canonical UTM scheme rationale. utm_content
+    keeps the 'post_<session>' shape so backfill_real_clicks.py can
+    PostHog-join on it.
     """
     if kind not in ('booking', 'website'):
         return target_url
@@ -238,9 +251,10 @@ def _build_target_url_for_post(target_url: str, kind: str, *, minted_session: st
     existing = dict(parse_qsl(parts.query, keep_blank_values=True))
 
     utm = {
-        'utm_source': platform,           # reddit | twitter | linkedin | github_issues
+        'utm_source': 's4l',
         'utm_medium': 'post',
         'utm_campaign': (project or 'unknown').lower(),
+        'utm_term': (platform or 'unknown').lower(),
         'utm_content': f'post_{minted_session}',
     }
     for k, v in utm.items():
