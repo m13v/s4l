@@ -325,6 +325,7 @@ log "step 2: spawning claude -p (will run for several minutes)"
 if ! "$REPO_DIR/scripts/run_claude.sh" "run-instagram-render" \
         ${CLAUDE_MODEL:+--model "$CLAUDE_MODEL"} \
         --permission-mode bypassPermissions \
+        --output-format stream-json --verbose \
         -p "$(cat "$PROMPT_FILE")" >>"$LOG_FILE" 2>&1; then
   rc=$?
   log "claude exited rc=$rc"
