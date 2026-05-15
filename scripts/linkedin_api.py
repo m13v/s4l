@@ -94,7 +94,7 @@ def _wrap_if_project(text, project):
         return text, None
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from dm_short_links import wrap_text_for_post
+        from dm_short_links import wrap_text_for_post, utm_only_text
         res = wrap_text_for_post(text=text, platform="linkedin", project_name=project)
         if res.get("ok"):
             if res.get("codes"):
@@ -102,10 +102,17 @@ def _wrap_if_project(text, project):
                       f"{res['codes']}", file=sys.stderr)
             return res.get("text", text), res.get("minted_session")
         print(f"[linkedin_api] WARNING: URL wrap failed "
-              f"({res.get('error')}); posting unwrapped", file=sys.stderr)
+              f"({res.get('error')}); falling back to UTM-only", file=sys.stderr)
+        return utm_only_text(text=text, platform="linkedin", project_name=project), None
     except Exception as e:
-        print(f"[linkedin_api] WARNING: URL wrap raised ({e}); posting unwrapped",
+        print(f"[linkedin_api] WARNING: URL wrap raised ({e}); falling back to UTM-only",
               file=sys.stderr)
+        try:
+            from dm_short_links import utm_only_text
+            return utm_only_text(text=text, platform="linkedin", project_name=project), None
+        except Exception as ee:
+            print(f"[linkedin_api] WARNING: UTM-only fallback also failed ({ee}); "
+                  f"posting unwrapped", file=sys.stderr)
     return text, None
 
 
