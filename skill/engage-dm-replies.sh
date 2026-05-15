@@ -172,6 +172,7 @@ PENDING_CONVOS=$(psql "$DATABASE_URL" -t -A -c "
         ) last_out ON true
         WHERE d.conversation_status IN ('active', 'needs_reply')
           AND d.conversation_status != 'needs_human'
+          AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW())
           AND d.status = 'sent'
           AND $PLATFORM_SQL_FILTER
           AND (d.chat_url IS NOT NULL
@@ -1368,6 +1369,7 @@ needs_reply_count_for() {
         SELECT COUNT(*) FROM dms d
         WHERE $sql_filter
           AND d.conversation_status IN ('active', 'needs_reply')
+          AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW())
           AND EXISTS (
             SELECT 1 FROM dm_messages m
             WHERE m.dm_id = d.id
@@ -1629,13 +1631,23 @@ log "DM pipeline summary: $DM_SUMMARY"
 # skipped = conversations currently marked stale (per-platform, cumulative snapshot)
 dm_counts_for() {
     local plat="$1"
+    # 2026-05-14: normalize x↔twitter the same way the gate query does
+    # (see line ~1357). The dms table stores X rows as platform='x', so
+    # passing plat='twitter' here used to match zero rows and the dashboard
+    # showed `posted 0 skipped 0` on every cycle even when 11+ DMs flew. The
+    # gate side was fixed on 2026-05-13; this site was missed.
+    local sql_filter
+    case "$plat" in
+        twitter|x) sql_filter="d.platform IN ('x','twitter')" ;;
+        *)         sql_filter="d.platform = '$plat'" ;;
+    esac
     psql "$DATABASE_URL" -t -A -c "
         SELECT
             (SELECT COUNT(*) FROM dm_messages m JOIN dms d ON d.id=m.dm_id
-             WHERE m.direction='outbound' AND d.platform='$plat'
+             WHERE m.direction='outbound' AND $sql_filter
                AND m.message_at >= to_timestamp($RUN_START)),
-            (SELECT COUNT(*) FROM dms
-             WHERE platform='$plat' AND conversation_status='stale');
+            (SELECT COUNT(*) FROM dms d WHERE $sql_filter
+               AND d.conversation_status='stale');
     " 2>/dev/null | tr '|' ' '
 }
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
