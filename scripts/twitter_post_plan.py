@@ -117,7 +117,7 @@ def update_candidate(cid: int, status: str) -> None:
         return
     cmd = [
         "psql", DATABASE_URL, "-c",
-        f"UPDATE twitter_candidates SET status='{sql_status}' WHERE id={cid}",
+        f"UPDATE twitter_candidates SET status='{sql_status}' WHERE id={cid} AND status != 'posted'",
     ]
     rc, out, err = run_subprocess(cmd, timeout_sec=30)
     if rc != 0:
