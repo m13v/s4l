@@ -1077,6 +1077,20 @@ async function enrichPostCommentsLinkedInRuns(runs) {
 //   posted    = COUNT(*) twitter_candidates status='posted' in window
 //   pending   = global COUNT(*) status='pending' (small for Twitter; each cycle
 //                self-expires its own batch)
+// Parse a twitter cycle batch_id (`twcycle-YYYYMMDD-HHMMSS`) into epoch ms.
+// Used to map each candidate/search row back to the cycle that owns it, so a
+// long-running cycle's posts aren't also attributed to the next cycle's run
+// window (the prior overlap-based attribution triple-counted posts when three
+// cycles were live simultaneously, e.g. 2026-05-14 16:13/16:15/16:30 all
+// reported posted=8/8/4 for the same 8 unique posts).
+function parseTwitterBatchIdMs(batchId) {
+  if (!batchId) return NaN;
+  const m = batchId.match(/^twcycle-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return NaN;
+  const [, y, mo, d, hh, mm, ss] = m;
+  return new Date(`${y}-${mo}-${d}T${hh}:${mm}:${ss}`).getTime();
+}
+
 async function enrichPostCommentsTwitterRuns(runs) {
   const txRuns = runs.filter(r =>
     r.job_type === 'post-comments' && r.platform_key === 'twitter'
@@ -1088,6 +1102,19 @@ async function enrichPostCommentsTwitterRuns(runs) {
     if (ms < oldestMs) oldestMs = ms;
   }
   const since = new Date(oldestMs - 2 * 60 * 1000).toISOString();
+  // Cycle log files (`twitter-cycle-YYYY-MM-DD_HHMMSS.log`) carry the Phase 0
+  // salvage marker we need for the salvaged pill. Read once per enricher call.
+  let logFiles = [];
+  try {
+    logFiles = fs.readdirSync(LOG_DIR).filter(f => f.startsWith('twitter-cycle-') && f.endsWith('.log'));
+  } catch { /* empty */ }
+  const cycleFileTs = (name) => {
+    const m = name.match(/^twitter-cycle-(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.log$/);
+    if (!m) return NaN;
+    const [, day, hh, mm, ss] = m;
+    return new Date(`${day}T${hh}:${mm}:${ss}`).getTime();
+  };
+  const phase0SalvageRe = /Phase 0: salvaged (\d+) orphaned pending rows/;
   const searchRows = await pq(
     "SELECT ran_at, tweets_found, batch_id FROM twitter_search_attempts " +
     "WHERE ran_at >= $1::timestamp",
@@ -1173,22 +1200,78 @@ async function enrichPostCommentsTwitterRuns(runs) {
   for (const run of txRuns) {
     const startMs = new Date(run.started_at).getTime();
     const endMs = new Date(run.finished_at).getTime() + 60 * 1000;
+    // Attribute funnel counters to the ONE batch this run owns — derived by
+    // matching `twcycle-YYYYMMDD-HHMMSS` to run.started_at within ±10s. The
+    // prior code attributed every batch whose search_attempt fell in this
+    // window, which triple-counted posts under overlapping cycles.
+    let ownBatchId = null;
+    let ownBatchDelta = Infinity;
+    for (const s of searchNorm) {
+      if (!s.batch_id) continue;
+      const bms = parseTwitterBatchIdMs(s.batch_id);
+      if (!Number.isFinite(bms)) continue;
+      const delta = Math.abs(bms - startMs);
+      if (delta > 10 * 1000) continue;
+      if (delta < ownBatchDelta) { ownBatchDelta = delta; ownBatchId = s.batch_id; }
+    }
+    // Fall back to scanning candidate rows if no search_attempt matched (e.g.
+    // Phase 1 logged nothing because the cycle aborted before scraping).
+    if (!ownBatchId) {
+      for (const c of candNorm) {
+        if (!c.batch_id) continue;
+        const bms = parseTwitterBatchIdMs(c.batch_id);
+        if (!Number.isFinite(bms)) continue;
+        const delta = Math.abs(bms - startMs);
+        if (delta > 10 * 1000) continue;
+        if (delta < ownBatchDelta) { ownBatchDelta = delta; ownBatchId = c.batch_id; }
+      }
+    }
     let searches = 0, candidatesRaw = 0, posted = 0, expired = 0;
-    const batchIds = new Set();
     for (const s of searchNorm) {
       if (s.ms == null || s.ms < startMs || s.ms > endMs) continue;
+      if (!ownBatchId || s.batch_id !== ownBatchId) continue;
       searches++;
       candidatesRaw += s.found;
-      if (s.batch_id) batchIds.add(s.batch_id);
     }
     let candidatesPassed = 0;
+    let salvagePosted = 0;
     for (const c of candNorm) {
-      if (!c.batch_id || !batchIds.has(c.batch_id)) continue;
+      if (!ownBatchId || c.batch_id !== ownBatchId) continue;
       candidatesPassed++;
-      if (c.status === 'posted') posted++;
-      else if (c.status === 'expired') expired++;
+      if (c.status === 'posted') {
+        posted++;
+        // Salvage signature: candidate's discovered_at predates this cycle's
+        // start by enough that it must have been pulled in by Phase 0 (which
+        // rewrites batch_id to the current BATCH_ID). Tolerance covers Phase 1
+        // re-discovery via SERP repeat (very fast — <run_duration window).
+        if (c.discoveredMs != null && c.discoveredMs < startMs - 30 * 60 * 1000) {
+          salvagePosted++;
+        }
+      } else if (c.status === 'expired') expired++;
     }
     const candidatesDropped = Math.max(0, candidatesRaw - candidatesPassed);
+    // Phase 0 salvage attempt count from the cycle log — what was actually
+    // pulled in (vs `salvageable_now`, which is the future pool). Surfaces in
+    // the salvaged pill so it shows what THIS cycle salvaged, not what NEXT
+    // cycle could salvage.
+    let salvageAttempted = 0;
+    let chosenLog = null;
+    let chosenLogDelta = Infinity;
+    for (const f of logFiles) {
+      const ts = cycleFileTs(f);
+      if (!Number.isFinite(ts)) continue;
+      if (ts > startMs + 90 * 1000) continue;
+      if (ts < startMs - 90 * 1000) continue;
+      const delta = Math.abs(ts - startMs);
+      if (delta < chosenLogDelta) { chosenLogDelta = delta; chosenLog = f; }
+    }
+    if (chosenLog) {
+      try {
+        const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
+        const m = body.match(phase0SalvageRe);
+        if (m) salvageAttempted = parseInt(m[1], 10);
+      } catch { /* empty */ }
+    }
     // Per-run queue delta. ADD = candidates whose discovered_at fell in this
     // run's window (Phase 1 SERP discovery wrote them into twitter_candidates
     // as 'pending'). DRAIN = candidates that left 'pending' inside the same
@@ -1282,6 +1365,14 @@ async function enrichPostCommentsTwitterRuns(runs) {
       salvageable_now: salvageableNow,
       salvageable_added: salvAdded,
       salvageable_drained: salvDrained,
+      // Actual salvage performed by THIS cycle's Phase 0. Read from the
+      // matching cycle log (`twitter-cycle-*.log`); falls back to 0 when the
+      // log was rotated. salvage_posted counts posted candidates whose
+      // discovered_at predates the cycle by >30min (those rows can only be
+      // here via Phase 0 salvage rewriting their batch_id).
+      salvage_attempted: salvageAttempted,
+      salvage_posted: salvagePosted,
+      own_batch_id: ownBatchId,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -7604,6 +7695,12 @@ function renderResult(run) {
     const salvageableLive = r.salvageable_now || 0;
     const salvAdded = r.salvageable_added || 0;
     const salvDrained = r.salvageable_drained || 0;
+    // Actual Phase 0 salvage this cycle did (read from cycle log) and the
+    // count of those salvaged rows that ended up posted. Distinct from
+    // salvageable_now, which is the pool size for the NEXT cycle. Mirrors
+    // Reddit's salvage_attempted / salvage_posted split.
+    const salvAttempted = r.salvage_attempted || 0;
+    const salvPosted = r.salvage_posted || 0;
     // Legacy queue fields kept for the tooltip (operator can still see queue
     // depth + drain breakdown if they hover the pill).
     const queue = (r.queue_end != null) ? r.queue_end : (r.pending_queue || 0);
@@ -7630,22 +7727,24 @@ function renderResult(run) {
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
-    // Salvaged pill with per-run delta. Format: salvaged N (+A/-D)
-    // N = live count of pending rows with a persisted draft (Phase 0 salvage
-    //     pool — orphaned drafts that the next cycle's salvage lane will retry).
-    // +A = drafts created during this run's window (became salvageable).
-    // -D = drafts that exited pending during this run's window.
-    // Delta omitted when both sides are zero so old (pre-patch) rows stay
-    // clean instead of showing noisy (+0/-0).
-    const salvDeltaSuffix = (salvAdded || salvDrained)
-      ? ' <span style="color:var(--muted);font-weight:400;">(' +
-          '+' + salvAdded + '/-' + salvDrained +
-          ')</span>'
-      : '';
+    // Salvaged pill. Primary number is what THIS cycle's Phase 0 actually
+    // salvaged (from the cycle log). Falls back to the future-pool size when
+    // no cycle log was found, so old rows still surface something. Bracket
+    // shows posted-from-salvage when an attempt happened, otherwise +A/-D
+    // pool delta.
+    const salvPrimary = salvAttempted || salvageableLive;
+    let salvBracket = '';
+    if (salvAttempted > 0) {
+      salvBracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+                    salvPosted + ' posted)</span>';
+    } else if (salvAdded || salvDrained) {
+      salvBracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+                    '+' + salvAdded + '/-' + salvDrained + ' pool)</span>';
+    }
     const queuePill =
       '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      'salvaged <span style="color:var(--text);font-weight:600;">' + salvageableLive + '</span>' +
-      salvDeltaSuffix +
+      'salvaged <span style="color:var(--text);font-weight:600;">' + salvPrimary + '</span>' +
+      salvBracket +
       '</span>';
     const tooltip = 'searches: ' + searches +
       ' / raw tweets: ' + raw +
@@ -7654,7 +7753,9 @@ function renderResult(run) {
       ' / expired (delta<1 floor): ' + expired +
       ' / above review cap (delta>=10, gates POST_LIMIT=3): ' + aboveFloor +
       ' / posted: ' + posted +
-      ' / salvageable now (pending+drafted): ' + salvageableLive +
+      ' / Phase 0 salvaged into this cycle: ' + salvAttempted +
+      ' (of which posted: ' + salvPosted + ')' +
+      ' / salvageable now (pool size for next cycle): ' + salvageableLive +
       ' (+' + salvAdded + ' became salvageable / -' + salvDrained + ' drained this run)' +
       ' / pending end-of-run: ' + queue +
       ' (start: ' + queueStart + ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
