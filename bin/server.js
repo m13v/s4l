@@ -2359,10 +2359,17 @@ function _phaseFamilyFor(runScript) {
 //   run.result.cost_usd_*        = orch/subagent/estimated lanes for the
 //                                  4-lane tooltip the Cost column renders.
 // Runs whose `script` isn't in _PHASE_FAMILY get NO breakdown (we don't know
-// which sessions to attribute) and keep their shell-log cost. Best-effort:
-// time-window matching can still get confused by concurrent runs of the
-// SAME family (e.g. two post_reddit fires overlapping), but cross-family
-// contamination — the big leak — is gone.
+// which sessions to attribute) and keep their shell-log cost.
+//
+// cycle_id disambiguation (2026-05-15): time-window + family matching alone
+// mis-attributes overlapping cycles. Twitter cycles fire every 15 min, so a
+// 30-min run's window catches the previous cycle's late-running prep and the
+// next cycle's scan. Each wrapper invocation exports a unique SA_CYCLE_ID
+// that every child claude_sessions row inherits, so after window+family
+// matching we pick the ONE cycle_id whose earliest session is closest to the
+// run's started_at (that's the run's own scan/first phase) and drop every
+// session belonging to a different cycle_id. Sessions with NULL cycle_id are
+// only used when the run matched no cycle_id at all (pure fallback).
 async function enrichRunsCostBreakdown(runs) {
   const candidates = (runs || []).filter(r =>
     !r.running && r.started_at && r.finished_at && _phaseFamilyFor(r.script)
@@ -2386,7 +2393,7 @@ async function enrichRunsCostBreakdown(runs) {
       // Subagent and transcript-estimate are kept for diagnostic tooltips but
       // never added into the total. has_sdk lets the UI distinguish "session
       // happened but SDK didn't capture cost" from "session cost was $0".
-      "SELECT script, started_at, " +
+      "SELECT script, started_at, cycle_id, " +
         "orchestrator_cost_usd IS NOT NULL AS has_sdk, " +
         "COALESCE(orchestrator_cost_usd, 0)::float8 AS orch, " +
         "COALESCE(total_cost_usd, 0)::float8 AS est, " +
@@ -2402,6 +2409,7 @@ async function enrichRunsCostBreakdown(runs) {
   const sessionList = rows.map(r => ({
     ts: r.started_at instanceof Date ? r.started_at.getTime() : Date.parse(r.started_at),
     script: r.script || '(unknown)',
+    cycleId: r.cycle_id || null,
     hasSdk: !!r.has_sdk,
     orch: Number(r.orch) || 0,
     est:  Number(r.est)  || 0,
@@ -2411,15 +2419,43 @@ async function enrichRunsCostBreakdown(runs) {
     total: Number(r.orch) || 0,
   }));
   for (const r of candidates) {
-    const startMs = Date.parse(r.started_at) - slackMs;
+    const runStartMs = Date.parse(r.started_at);
+    const startMs = runStartMs - slackMs;
     const endMs   = Date.parse(r.finished_at) + slackMs;
     const family = _phaseFamilyFor(r.script);
+    // Step 1: window + family match (over-broad — catches overlapping cycles).
+    const windowMatched = sessionList.filter(s =>
+      s.ts >= startMs && s.ts <= endMs && (!family || family.has(s.script))
+    );
+    // Step 2: cycle_id disambiguation. Group matched sessions by cycle_id and
+    // pick the group whose earliest session starts closest to this run's
+    // started_at — that's the run's own cycle. Drop sessions from other
+    // cycle_ids. If no session carries a cycle_id, fall back to the full
+    // window-matched set (older sessions / pipelines that don't set
+    // SA_CYCLE_ID).
+    let attributed;
+    const byCycle = new Map();
+    for (const s of windowMatched) {
+      if (!s.cycleId) continue;
+      let g = byCycle.get(s.cycleId);
+      if (!g) { g = { earliest: s.ts, sessions: [] }; byCycle.set(s.cycleId, g); }
+      if (s.ts < g.earliest) g.earliest = s.ts;
+      g.sessions.push(s);
+    }
+    if (byCycle.size > 0) {
+      let bestCycle = null, bestDelta = Infinity;
+      for (const [cid, g] of byCycle) {
+        const delta = Math.abs(g.earliest - runStartMs);
+        if (delta < bestDelta) { bestDelta = delta; bestCycle = cid; }
+      }
+      attributed = byCycle.get(bestCycle).sessions;
+    } else {
+      attributed = windowMatched;
+    }
     const byPhase = {};
     let totalOrch = 0, totalEst = 0, totalSub = 0;
     let sessionsAll = 0, sessionsWithSdk = 0;
-    for (const s of sessionList) {
-      if (s.ts < startMs || s.ts > endMs) continue;
-      if (family && !family.has(s.script)) continue;
+    for (const s of attributed) {
       const key = s.script;
       const cur = byPhase[key] || { phase: key, sessions: 0, sessions_with_sdk: 0, orch: 0, est: 0, sub: 0 };
       cur.sessions += 1;
