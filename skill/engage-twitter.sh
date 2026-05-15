@@ -372,11 +372,29 @@ MANDATORY reply flow for every item:
           Do this BEFORE Step 4, since the typed text in Step 4c must include
           the suffix. The literal text rule is the entire point: never paraphrase
           or reformat the suffix.
+  Step 3b: UTM-WRAP ANY URL IN YOUR_REPLY_TEXT. Mandatory for Tier 2/3 replies
+           that drop a brand URL (runner.now, agora.xyz, podlog.io, fazm.ai,
+           usenightowl.com, etc.). The MCP browser_type path has NO Python
+           wrap layer, so a bare URL would be posted as-is and we lose all
+           per-post attribution. Run, in bash:
+             python3 \$REPO_DIR/scripts/dm_short_links.py utm-text \\
+               --platform twitter \\
+               --project RESOLVED_PROJECT_NAME \\
+               --text "YOUR_REPLY_TEXT"
+           This rewrites every URL in the text to its UTM-tagged form
+           (utm_source=s4l, utm_term=twitter, utm_campaign=<slug>) and
+           prints the result on stdout. Use that printed string as
+           YOUR_REPLY_TEXT going forward. No DB write happens — the URL
+           itself carries attribution. If YOUR_REPLY_TEXT contains zero URLs
+           (Tier 1, default case), the helper is a no-op and the text comes
+           back unchanged, so it is safe to run unconditionally.
+
   Step 4: Post the reply via the SAME mcp__twitter-agent__ browser from Step 2.
           a) mcp__twitter-agent__browser_snapshot to refresh element refs.
           b) Find the reply textbox: role="textbox" with name like "Post your reply"
              or "Post text". Then mcp__twitter-agent__browser_click on its ref.
-          c) mcp__twitter-agent__browser_type the YOUR_REPLY_TEXT into that textbox.
+          c) mcp__twitter-agent__browser_type the YOUR_REPLY_TEXT (post-Step-3b
+             UTM-wrapped form, post-Step-3a suffix) into that textbox.
              Pass submit=false (we click the Reply button explicitly in step e).
           d) mcp__twitter-agent__browser_snapshot again (refs can shift after typing).
           e) Find the submit button: role="button" with name="Reply", or selector
