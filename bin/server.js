@@ -9935,7 +9935,7 @@ function renderDailyMetrics() {
 // the same Trends-tab filters because it reuses _dailyMetricsSeries directly,
 // no new fetch needed. Values are percentages (0-100), formatted to one
 // decimal place; days with views=0 are dropped (ratios are undefined).
-const RATIO_METRICS = [
+let RATIO_METRICS = [
   { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views',     format: 'pct',     scaleFactor: 100 },
@@ -9951,8 +9951,8 @@ const RATIO_METRICS = [
   // format='usd' switches the legend pill, axis labels, bar labels, and
   // tooltip to dollar rendering. Days with denominator=0 still drop out
   // (NaN) so the chart shows a gap rather than a misleading $0 bar.
-  { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#dc2626', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000 },
-  { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#7c3aed', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000 },
+  { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#dc2626', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000, adminOnly: true },
+  { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#7c3aed', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000, adminOnly: true },
 ];
 const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session', 'cost_per_kviews', 'cost_per_kvisitors'];
 // .v2: ratio set expanded to include cost_per_kviews + cost_per_kvisitors.
@@ -14548,7 +14548,10 @@ function saStartApp() {
   document.body.classList.remove('sa-authed-pending');
   const isCloud = document.body.classList.contains('sa-cloud');
   const isAdmin = window.SA_IS_ADMIN !== false;
-  if (!isAdmin) DAILY_METRICS = DAILY_METRICS.filter(m => !m.adminOnly);
+  if (!isAdmin) {
+    DAILY_METRICS = DAILY_METRICS.filter(m => !m.adminOnly);
+    RATIO_METRICS = RATIO_METRICS.filter(m => !m.adminOnly);
+  }
   try { window.posthog && window.posthog.capture('dashboard_opened', { is_admin: isAdmin, is_cloud: isCloud }); } catch (e) {}
   // Status + pending are local-only (UI hidden by body.sa-cloud). Endpoints
   // are admin-only too, so skipping them on cloud also stops 403 spam for
