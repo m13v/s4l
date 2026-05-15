@@ -927,7 +927,7 @@ def main():
                     wrap_platform = "reddit" if reply["platform"] == "reddit" else reply["platform"]
                     if wrap_project:
                         try:
-                            from dm_short_links import wrap_text_for_post
+                            from dm_short_links import wrap_text_for_post, utm_only_text
                             wrap_res = wrap_text_for_post(
                                 text=reply_text,
                                 platform=wrap_platform,
@@ -941,10 +941,21 @@ def main():
                                           f"{len(wrap_res['codes'])} URL(s)")
                             else:
                                 print(f"[engage_reddit] #{reply['id']} WARNING: URL wrap "
-                                      f"failed ({wrap_res.get('error')}); posting unwrapped")
+                                      f"failed ({wrap_res.get('error')}); falling back to UTM-only")
+                                reply_text = utm_only_text(
+                                    text=reply_text, platform=wrap_platform,
+                                    project_name=wrap_project)
                         except Exception as e:
                             print(f"[engage_reddit] #{reply['id']} WARNING: URL wrap "
-                                  f"raised ({e}); posting unwrapped")
+                                  f"raised ({e}); falling back to UTM-only")
+                            try:
+                                from dm_short_links import utm_only_text
+                                reply_text = utm_only_text(
+                                    text=reply_text, platform=wrap_platform,
+                                    project_name=wrap_project)
+                            except Exception as ee:
+                                print(f"[engage_reddit] #{reply['id']} WARNING: UTM-only "
+                                      f"fallback also failed ({ee}); posting unwrapped")
 
                     # Post via CDP (reddit) or Moltbook API (moltbook)
                     post_result = None
