@@ -1072,6 +1072,18 @@ def cmd_wrap_post_text(args):
     print(json.dumps(res))
 
 
+def cmd_utm_text(args):
+    """UTM-only wrap (no DB, no minting). Prints the wrapped text on stdout.
+    Used by the Twitter engagement prompt where Claude types the reply through
+    mcp__twitter-agent__browser_type and there is no Python posting layer to
+    invoke wrap_text_for_post. The typed URL itself carries all attribution
+    via utm_source=s4l + utm_term=<platform>; PostHog captures it on landing.
+    """
+    out = utm_only_text(text=args.text, platform=args.platform,
+                        project_name=args.project)
+    sys.stdout.write(out)
+
+
 def cmd_backfill_post(args):
     n = backfill_post_id(minted_session=args.minted_session, post_id=args.post_id)
     print(json.dumps({'backfilled': n, 'post_id': args.post_id,
@@ -1119,6 +1131,17 @@ def main():
     p_wrap_post.add_argument('--project', required=True,
                              help='project_name from config.json (drives wrapper hostname)')
 
+    p_utm = sub.add_parser('utm-text',
+                            help='UTM-only wrap (no DB write). Replaces every URL '
+                                 'in --text with its UTM-tagged version and prints '
+                                 'the result on stdout. Use when no Python posting '
+                                 'layer is available (Claude-driven MCP typing).')
+    p_utm.add_argument('--text', required=True)
+    p_utm.add_argument('--platform', required=True,
+                       choices=['reddit', 'twitter', 'x', 'linkedin', 'github_issues', 'github', 'moltbook'])
+    p_utm.add_argument('--project', required=True,
+                       help='project_name from config.json (drives utm_campaign + wrapper hostname classification)')
+
     p_bp = sub.add_parser('backfill-post',
                            help='Stamp post_links.post_id for every code minted '
                                 'under --minted-session. Idempotent.')
@@ -1140,6 +1163,8 @@ def main():
         cmd_wrap_text(args)
     elif args.cmd == 'wrap-post-text':
         cmd_wrap_post_text(args)
+    elif args.cmd == 'utm-text':
+        cmd_utm_text(args)
     elif args.cmd == 'backfill-post':
         cmd_backfill_post(args)
     elif args.cmd == 'backfill-reply':
