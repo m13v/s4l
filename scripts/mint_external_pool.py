@@ -57,10 +57,15 @@ def _gen_code() -> str:
 
 
 def _build_target(homepage: str, *, platform: str, slug: str, code: str) -> str:
+    # Canonical UTM scheme: utm_source='s4l' identifies the agency, utm_term
+    # carries the platform. Keep aligned with dm_short_links._build_target_url
+    # / _build_target_url_for_post. utm_content stays as <code> so the customer's
+    # static-CSV redirector can PostHog-join clicks back to post_links.code.
     params = {
-        'utm_source': platform,
+        'utm_source': 's4l',
         'utm_medium': 'post',
         'utm_campaign': slug,
+        'utm_term': platform,
         'utm_content': code,
     }
     sep = '&' if '?' in homepage else '?'
