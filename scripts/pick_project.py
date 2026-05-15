@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Pick the next project to post about based on weight distribution.
+"""Pick which project(s) to post about. Shared across every platform.
 
-Compares each project's target weight against actual posts today,
-and picks the most underrepresented project.
+Inverse-recent-share weighting: a project's selection weight is its config
+`weight` divided by (1 + its posts in the last RECENT_WINDOW_DAYS), so a
+project that has been posting heavily is dampened toward under-posted ones
+(but never selected above its raw weight). Single-pick (pick_project) and
+multi-pick (pick_projects / --count N) share one code path, so Twitter,
+GitHub and Reddit all select projects the same way.
 
 Usage:
-    python3 scripts/pick_project.py                    # pick for any platform
-    python3 scripts/pick_project.py --platform reddit  # pick for specific platform
-    python3 scripts/pick_project.py --json             # output full project config as JSON
+    python3 scripts/pick_project.py                       # one project, any platform
+    python3 scripts/pick_project.py --platform reddit     # one project for a platform
+    python3 scripts/pick_project.py --json                # one project, full JSON
+    python3 scripts/pick_project.py --platform twitter --count 8 --json  # N projects, JSON array
 """
 
 import argparse
@@ -19,6 +24,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+
+# Rolling window (days) for inverse-recent-share weighting in pick_projects().
+RECENT_WINDOW_DAYS = 7
 
 
 def load_config():
@@ -68,54 +76,86 @@ def get_posts_today_by_project(platform=None):
     return _counts_via_api(platform)
 
 
-def pick_project(config, platform=None, exclude=None):
-    """Pick the most underrepresented project based on weights.
+def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
+    """Return {project_name: post count} over the last `days` days.
 
-    Returns the project dict from config.json.
+    Direct Neon read (the cron-proven pattern; this is what the old
+    post_github.recent_github_posts_by_project did). Feeds the
+    inverse-recent-share weighting in pick_projects().
     """
-    projects = config.get("projects", [])
-    weighted = [p for p in projects if p.get("weight", 0) > 0]
+    import db as dbmod
+
+    days = int(days)
+    conn = dbmod.get_conn()
+    try:
+        base = (
+            "SELECT project_name, COUNT(*) FROM posts "
+            f"WHERE posted_at > NOW() - INTERVAL '{days} days' "
+            "  AND project_name IS NOT NULL"
+        )
+        if platform:
+            rows = conn.execute(
+                base + " AND platform = %s GROUP BY project_name", [platform]
+            ).fetchall()
+        else:
+            rows = conn.execute(base + " GROUP BY project_name").fetchall()
+    finally:
+        conn.close()
+    return {row[0]: int(row[1]) for row in rows}
+
+
+def _eligible_pool(config, platform=None, exclude=None):
+    """Projects eligible for selection: enabled, weight>0, platform-compatible."""
+    pool = [
+        p for p in config.get("projects", [])
+        if p.get("enabled", True) and p.get("weight", 0) > 0
+    ]
     if exclude:
         excluded = {n.lower() for n in exclude}
-        weighted = [p for p in weighted if p.get("name", "").lower() not in excluded]
-
-    # Filter by explicit platforms_disabled deny list (config.json per-project field)
+        pool = [p for p in pool if p.get("name", "").lower() not in excluded]
+    # Explicit per-project platforms_disabled deny list.
     if platform:
-        weighted = [p for p in weighted if platform not in (p.get("platforms_disabled") or [])]
-
-    # Filter by platform compatibility: skip projects with no search_topics
-    # (the unified seed list, post 2026-04-30 legacy-field removal).
+        pool = [p for p in pool if platform not in (p.get("platforms_disabled") or [])]
+    # twitter/linkedin/github draft a search query, so they need seed topics
+    # (the unified search_topics list, post 2026-04-30 legacy-field removal).
     if platform in ("twitter", "linkedin", "github"):
-        weighted = [p for p in weighted if p.get("search_topics")]
+        pool = [p for p in pool if p.get("search_topics")]
+    return pool
 
-    if not weighted:
-        if exclude:
-            return None
-        return random.choice(projects)
 
-    total_weight = sum(p["weight"] for p in weighted)
-    counts = get_posts_today_by_project(platform)
-    total_posts = sum(counts.values()) or 1  # avoid division by zero
+def pick_projects(config, platform=None, n=1, exclude=None):
+    """Pick up to `n` distinct projects. Shared by every platform's pipeline.
 
-    # Calculate deficit: target_share - actual_share
-    # Higher deficit = more underrepresented = higher priority
-    scored = []
-    for p in weighted:
-        target_share = p["weight"] / total_weight
-        actual_count = counts.get(p["name"], 0)
-        actual_share = actual_count / total_posts if total_posts > 0 else 0
-        deficit = target_share - actual_share
-        scored.append((deficit, p))
+    Inverse-recent-share weighting: effective_weight = weight / (1 + posts in
+    the last RECENT_WINDOW_DAYS). Sampled without replacement, so a project
+    that has been posting heavily is dampened in favor of under-posted ones,
+    but a project is never selected above its raw `weight`. Returns a list of
+    project dicts (shorter than `n` only when the eligible pool is smaller).
+    """
+    pool = _eligible_pool(config, platform, exclude)
+    if not pool:
+        return []
+    counts = recent_posts_by_project(platform)
+    chosen = []
+    remaining = list(pool)
+    for _ in range(min(n, len(remaining))):
+        weights = [p["weight"] / (1 + counts.get(p["name"], 0)) for p in remaining]
+        idx = random.choices(range(len(remaining)), weights=weights, k=1)[0]
+        chosen.append(remaining.pop(idx))
+    return chosen
 
-    # Sort by deficit descending (most underrepresented first)
-    scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Pick from top candidates with some randomness to avoid always picking the same one
-    # Take all projects with deficit >= top deficit - 0.05 (within 5% of most underrepresented)
-    top_deficit = scored[0][0]
-    candidates = [p for deficit, p in scored if deficit >= top_deficit - 0.05]
-
-    return random.choice(candidates)
+def pick_project(config, platform=None, exclude=None):
+    """Pick a single project. Thin wrapper around pick_projects() kept for the
+    existing callers (post_reddit.py, the bare CLI, --json, etc.)."""
+    picks = pick_projects(config, platform, n=1, exclude=exclude)
+    if picks:
+        return picks[0]
+    if exclude:
+        return None
+    # No eligible project at all: legacy fallback to any project in config.
+    projects = config.get("projects", [])
+    return random.choice(projects) if projects else None
 
 
 def main():
@@ -126,6 +166,7 @@ def main():
     parser.add_argument("--show-weights", action="store_true", help="Show all projects and their current distribution")
     parser.add_argument("--distribution", action="store_true", help="Show compact distribution for LLM prompts")
     parser.add_argument("--exclude", default=None, help="Comma-separated project names to exclude from picking")
+    parser.add_argument("--count", type=int, default=1, help="Number of projects to pick; >1 emits a JSON array")
     args = parser.parse_args()
 
     exclude = None
@@ -166,6 +207,11 @@ def main():
             actual_pct = (actual / total_posts * 100) if total_posts > 0 else 0
             deficit = target_pct - actual_pct
             print(f"{p['name']:25} {p['weight']:>8} {target_pct:>7.1f}% {actual:>6} {actual_pct:>7.1f}% {deficit:>+7.1f}%")
+        return
+
+    if args.count and args.count > 1:
+        picks = pick_projects(config, args.platform, n=args.count, exclude=exclude)
+        print(json.dumps(picks, indent=2))
         return
 
     if args.project:
