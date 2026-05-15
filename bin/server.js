@@ -4728,7 +4728,7 @@ async function handleApi(req, res) {
           "COALESCE(tlm.last_at, d.last_message_at) AS last_message_at, " +
           "d.discovered_at, " +
           "d.conversation_status, d.interest_level, d.mode, " +
-          "d.human_reason, d.flagged_at, " +
+          "d.human_reason, d.flagged_at, d.snoozed_until, " +
           "d.target_project, d.icp_precheck, d.icp_matches, d.qualification_status, " +
           "d.qualification_notes, d.booking_link_sent_at, " +
           // dm_links aggregates replace the legacy single-link columns. Latest
@@ -4845,7 +4845,8 @@ async function handleApi(req, res) {
               "WHERE mm.dm_id = d.id), " +
             "'[]'::json" +
           ") AS campaign_names, " +
-          "CASE WHEN d.conversation_status = 'needs_human' THEN 0 " +
+          "CASE WHEN d.conversation_status = 'needs_human' AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW()) THEN 0 " +
+               "WHEN d.conversation_status = 'needs_human' THEN 75 " +
                "WHEN d.conversation_status IN ('converted','closed') THEN 90 " +
                "WHEN d.interest_level = 'hot' THEN 10 " +
                "WHEN d.interest_level = 'warm' THEN 20 " +
@@ -5025,6 +5026,54 @@ async function handleApi(req, res) {
           reply_channel: row.reply_channel,
         },
       }, 201);
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // POST /api/dm/:id/snooze - skip a flagged DM until the prospect sends a new
+  // inbound. Sets dms.snoozed_until to NOW()+30d (cap) so the engage loop and
+  // dashboard escalation card both hide it. Auto-cleared in
+  // scripts/dm_conversation.py log_inbound() the next time a real inbound
+  // message lands, which re-arms the thread under its existing conversation_status.
+  // Body: { hours?: number, unsnooze?: boolean }. hours capped to 720 (30d).
+  const snoozeMatch = p.match(/^\/api\/dm\/(\d+)\/snooze$/);
+  if (snoozeMatch && req.method === 'POST') {
+    const dmId = parseInt(snoozeMatch[1], 10);
+    return readBody(req).then(async (body) => {
+      let payload = {};
+      if (body) { try { payload = JSON.parse(body); } catch { return json(res, { error: 'invalid_json' }, 400); } }
+      const unsnooze = !!(payload && payload.unsnooze);
+      const dmRows = await pq(
+        "SELECT d.id, d.platform, d.their_author, " +
+          "COALESCE(p_direct.project_name, p_via_reply.project_name, d.target_project) AS project_name " +
+        "FROM dms d " +
+        "LEFT JOIN posts   p_direct    ON p_direct.id    = d.post_id " +
+        "LEFT JOIN replies r_link      ON r_link.id      = d.reply_id " +
+        "LEFT JOIN posts   p_via_reply ON p_via_reply.id = r_link.post_id " +
+        "WHERE d.id = $1",
+        [dmId]
+      );
+      if (!dmRows || !dmRows.length) return json(res, { error: 'dm_not_found' }, 404);
+      const dm = dmRows[0];
+      if (!req.user || !req.user.admin) {
+        const projName = dm.project_name || '';
+        const claims = (req.user && Array.isArray(req.user.projects)) ? req.user.projects : [];
+        if (!projName || !claims.includes(projName)) {
+          return json(res, { error: 'forbidden' }, 403);
+        }
+      }
+      let upd;
+      if (unsnooze) {
+        upd = await pq("UPDATE dms SET snoozed_until = NULL WHERE id = $1 RETURNING id, snoozed_until", [dmId]);
+      } else {
+        const rawHours = Number(payload && payload.hours);
+        const hours = Number.isFinite(rawHours) && rawHours > 0 ? Math.min(720, Math.floor(rawHours)) : 720;
+        upd = await pq(
+          "UPDATE dms SET snoozed_until = NOW() + ($2 || ' hours')::interval WHERE id = $1 RETURNING id, snoozed_until",
+          [dmId, String(hours)]
+        );
+      }
+      if (!upd || !upd.length) return json(res, { error: 'update_failed' }, 500);
+      return json(res, { ok: true, dm_id: dmId, snoozed_until: upd[0].snoozed_until }, 200);
     }).catch(e => json(res, { error: e.message }, 500));
   }
 
@@ -5312,7 +5361,7 @@ async function handleApi(req, res) {
           "COUNT(*) FILTER (WHERE d.qualification_status = 'disqualified')::int AS q_disqualified, " +
           "COUNT(*) FILTER (WHERE d.booking_link_sent_at IS NOT NULL)::int AS booking_sent, " +
           "COUNT(*) FILTER (WHERE d.conversation_status = 'converted')::int AS converted, " +
-          "COUNT(*) FILTER (WHERE d.conversation_status = 'needs_human')::int AS needs_human " +
+          "COUNT(*) FILTER (WHERE d.conversation_status = 'needs_human' AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW()))::int AS needs_human " +
         "FROM dms d " +
         "LEFT JOIN posts   p_direct    ON p_direct.id    = d.post_id " +
         "LEFT JOIN replies r_link      ON r_link.id      = d.reply_id " +
@@ -6429,6 +6478,10 @@ const HTML = `<!DOCTYPE html>
   .dm-esc-link { margin-left: auto; padding: 2px 8px; font-size: 11px; font-weight: 600; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 4px; text-decoration: none; }
   .dm-esc-link:hover { background: #fde68a; }
   .dm-esc-link-missing { font-size: 10px; color: var(--text-muted); font-style: italic; }
+  .dm-esc-skip { padding: 2px 8px; font-size: 11px; font-weight: 600; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-family: inherit; }
+  .dm-esc-skip:hover { color: var(--text-strong); border-color: var(--border-hover); }
+  .dm-esc-skip:disabled { opacity: 0.6; cursor: not-allowed; }
+  .dm-esc-snoozed { padding: 2px 8px; font-size: 10px; font-weight: 600; color: #1d4ed8; background: #dbeafe; border: 1px solid #bfdbfe; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
 
   .prospect-modal-overlay { position: fixed; inset: 0; background: var(--shadow-modal); display: flex; align-items: flex-start; justify-content: center; z-index: 9999; padding: 60px 20px 20px; overflow-y: auto; }
   .prospect-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; max-width: 640px; width: 100%; padding: 24px 28px; color: var(--text); font-size: 13px; line-height: 1.5; }
@@ -12920,6 +12973,7 @@ function renderTopDms(payload) {
     interest_level: d.interest_level || '',
     mode: d.mode || 'rapport',
     human_reason: d.human_reason || '',
+    snoozed_until: d.snoozed_until || null,
     project_name: d.project_name || '',
     target_project: d.target_project || '',
     project_display: d.target_project || d.project_name || '',
@@ -13328,10 +13382,23 @@ function renderDmEscalationCard(dm) {
         '<a class="dm-esc-link" href="' + escapeHtml(profileUrl) + '" target="_blank" rel="noopener">open profile</a>';
     }
   }
+  const snoozedTs = dm.snoozed_until ? parseServerUtcTs(dm.snoozed_until) : null;
+  const isSnoozed = !!(snoozedTs && snoozedTs.getTime() > Date.now());
+  const snoozeBtnId = 'dm-esc-skip-' + Number(dm.id);
+  const snoozeLabel = isSnoozed ? 'Unskip' : 'Skip until they reply';
+  const snoozeTitle = isSnoozed
+    ? 'Stop ignoring this thread; re-show in human queue.'
+    : 'Hide this thread from the engage loop and the dashboard escalation surface. If they send a new inbound message, it auto-re-arms.';
+  const snoozedBadge = isSnoozed
+    ? '<span class="dm-esc-snoozed" title="Auto-cleared when they send a new inbound.">skipped</span>'
+    : '';
+  const skipBtn = '<button type="button" class="dm-esc-skip" id="' + snoozeBtnId + '" title="' + escapeHtml(snoozeTitle) + '" onclick="toggleDmSnooze(this, ' + Number(dm.id) + ', ' + (isSnoozed ? 'true' : 'false') + ')">' + escapeHtml(snoozeLabel) + '</button>';
   const head =
     '<div class="dm-esc-head">' +
       '<span class="dm-esc-tag">escalation</span>' +
       (dm.flagged_at ? '<span class="dm-exp-ctx-author">flagged ' + escapeHtml(relTime(dm.flagged_at)) + '</span>' : '') +
+      snoozedBadge +
+      skipBtn +
       linkHtml +
     '</div>';
 
@@ -13523,6 +13590,66 @@ async function submitDmInstructions(btn, dmId) {
     fb.className = 'dm-esc-feedback dm-esc-feedback-err';
     fb.textContent = 'Network error: ' + ((e && e.message) || 'unknown');
     btn.disabled = false;
+  }
+}
+
+// Toggle the snoozed_until flag on a flagged DM. POSTs to /api/dm/:id/snooze
+// with {unsnooze:true} (to clear) or {} (to set NOW()+30d). After the response
+// lands we update the in-memory dm.snoozed_until and re-render the card so the
+// badge and button label flip without a full reload. The next time the
+// prospect sends an inbound, dm_conversation.log_inbound clears snoozed_until
+// automatically and the thread re-surfaces in the engage queue.
+async function toggleDmSnooze(btn, dmId, currentlySnoozed) {
+  if (!btn) return;
+  btn.disabled = true;
+  const prevText = btn.textContent;
+  btn.textContent = currentlySnoozed ? 'Unskipping…' : 'Skipping…';
+  try {
+    const resp = await fetch('/api/dm/' + dmId + '/snooze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(currentlySnoozed ? { unsnooze: true } : {}),
+    });
+    let data = {};
+    try { data = await resp.json(); } catch (_) {}
+    if (!resp.ok) {
+      btn.textContent = prevText;
+      btn.disabled = false;
+      const fb = document.getElementById('dm-esc-fb-' + dmId);
+      if (fb) {
+        fb.className = 'dm-esc-feedback dm-esc-feedback-err';
+        fb.textContent = (data && data.error) ? ('Failed: ' + data.error) : ('Failed (HTTP ' + resp.status + ')');
+      }
+      return;
+    }
+    const dm = (window.__dmsById || {})[dmId];
+    if (dm) dm.snoozed_until = data && data.snoozed_until || null;
+    const nowSnoozed = !currentlySnoozed;
+    btn.textContent = nowSnoozed ? 'Unskip' : 'Skip until they reply';
+    btn.setAttribute('onclick', 'toggleDmSnooze(this, ' + dmId + ', ' + nowSnoozed + ')');
+    btn.disabled = false;
+    const card = btn.closest('.dm-esc-card');
+    if (card) {
+      const head = card.querySelector('.dm-esc-head');
+      const existingBadge = head ? head.querySelector('.dm-esc-snoozed') : null;
+      if (nowSnoozed && head && !existingBadge) {
+        const badge = document.createElement('span');
+        badge.className = 'dm-esc-snoozed';
+        badge.title = 'Auto-cleared when they send a new inbound.';
+        badge.textContent = 'skipped';
+        head.insertBefore(badge, btn);
+      } else if (!nowSnoozed && existingBadge) {
+        existingBadge.remove();
+      }
+    }
+  } catch (e) {
+    btn.textContent = prevText;
+    btn.disabled = false;
+    const fb = document.getElementById('dm-esc-fb-' + dmId);
+    if (fb) {
+      fb.className = 'dm-esc-feedback dm-esc-feedback-err';
+      fb.textContent = 'Network error: ' + ((e && e.message) || 'unknown');
+    }
   }
 }
 
