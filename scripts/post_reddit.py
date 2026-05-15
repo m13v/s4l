@@ -1323,11 +1323,12 @@ def run_claude(prompt, timeout=600):
         text_output = "\n".join(all_text_parts) if all_text_parts else "".join(collected)
         stderr_out = proc.stderr.read() if proc.stderr else ""
         try:
-            subprocess.run(
-                ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
-                 "--session-id", session_id, "--script", "post_reddit"],
-                capture_output=True, text=True, timeout=30,
-            )
+            log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+                 "--session-id", session_id, "--script", "post_reddit"]
+            orch_cost = usage.get("cost_usd")
+            if isinstance(orch_cost, (int, float)) and orch_cost > 0:
+                log_args.extend(["--orchestrator-cost-usd", str(orch_cost)])
+            subprocess.run(log_args, capture_output=True, text=True, timeout=30)
         except Exception as e:
             print(f"[post_reddit] WARNING: log_claude_session failed: {e}", file=sys.stderr)
         return proc.returncode == 0, text_output + stderr_out, usage
