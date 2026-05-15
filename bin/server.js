@@ -2454,6 +2454,12 @@ const bookingsPerDayCache = new Map();
 // post_link_clicks (per-hit log) filtered to is_bot=false so we count humans
 // only; joins to post_links + posts so platform/project filters apply.
 const clicksPerDayCache = new Map();
+// Posts-per-day: cached by days|platform|project. Backs the Trends-tab
+// "Views / Post" ratio denominator. Counts posts.posted_at grouped by UTC date,
+// excluding moltbook/github/github_issues to match the views/upvotes/comments
+// scope (those platforms don't surface views, so including them would
+// understate views-per-post for the comparable platforms).
+const postsPerDayCache = new Map();
 // Funnel-per-day (PostHog-backed metrics): cached by days.
 const funnelPerDayCache = new Map();
 // Cost-per-day: Claude API session cost attributed to days an activity row
@@ -4313,6 +4319,56 @@ async function handleApi(req, res) {
       const rows = await pq(q);
       const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
       clicksPerDayCache.set(cacheKey, { at: Date.now(), value });
+      return json(res, { days, rows: value });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // GET /api/posts/per-day?days=N&platform=X&project=Y - count of posts we
+  // made per day, sourced from posts.posted_at. Same platform/project filter
+  // shape as views/upvotes/comments so Trends-tab filters behave identically.
+  // Excludes moltbook/github/github_issues to match the views denominator
+  // scope (those platforms don't surface views, so including their posts
+  // would understate the views-per-post ratio). Backs the Trends-tab
+  // "Views / Post" pill.
+  if (p === '/api/posts/per-day' && req.method === 'GET') {
+    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+    const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
+    const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
+                     (rawPlatform === 'x' ? 'twitter' : rawPlatform);
+    const platformOk = platform === '' || /^[a-z0-9_]{1,32}$/.test(platform);
+    if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
+    const rawProject = (url.searchParams.get('project') || '').trim();
+    const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
+    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    if (!projectOk) return json(res, { error: 'invalid project' }, 400);
+    const cacheKey = days + '|' + platform + '|' + project;
+    const cached = postsPerDayCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 300000) {
+      return json(res, { days, rows: cached.value, cachedAt: cached.at });
+    }
+    const platformFilter = platform
+      ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
+      : '';
+    const projectFilter = project
+      ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
+      : '';
+    const q =
+      "SELECT json_agg(row_to_json(r)) FROM (" +
+        "SELECT to_char((p.posted_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
+          "COUNT(*)::bigint AS posts_made " +
+        "FROM posts p " +
+        "WHERE p.posted_at IS NOT NULL " +
+          "AND p.posted_at >= CURRENT_DATE - INTERVAL '" + days + " days' " +
+          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')" +
+          platformFilter + projectFilter + " " +
+        "GROUP BY day ORDER BY day ASC" +
+      ") r";
+    return (async () => {
+      const rows = await pq(q);
+      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      postsPerDayCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { days, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
   }
@@ -9989,6 +10045,11 @@ function renderDailyMetrics() {
 // no new fetch needed. Values are percentages (0-100), formatted to one
 // decimal place; days with views=0 are dropped (ratios are undefined).
 let RATIO_METRICS = [
+  // Views per post: how many views a post earns on average per day in the
+  // window. Numerator is views_gained that day; denominator is posts_made
+  // that day. format='count' renders as plain K/M numbers (e.g. "1.2K")
+  // since the value is a count, not a percentage or dollar figure.
+  { id: 'views_per_post',           label: 'Views / Post',             color: '#a855f7', numerator: 'views',           denominator: 'posts',     format: 'count',   scaleFactor: 1 },
   { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views',     format: 'pct',     scaleFactor: 100 },
@@ -10007,11 +10068,11 @@ let RATIO_METRICS = [
   { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#dc2626', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000, adminOnly: true },
   { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#7c3aed', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000, adminOnly: true },
 ];
-const RATIO_METRICS_DEFAULTS = ['upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session', 'cost_per_kviews', 'cost_per_kvisitors'];
-// .v2: ratio set expanded to include cost_per_kviews + cost_per_kvisitors.
-// Bumping the storage key seeds the new defaults exactly once so existing
-// users see the new ratios pre-selected the next time they open Trends.
-const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v2';
+const RATIO_METRICS_DEFAULTS = ['views_per_post', 'upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session', 'cost_per_kviews', 'cost_per_kvisitors'];
+// .v3: ratio set expanded to include views_per_post at the head. Bumping
+// the storage key seeds the new defaults exactly once so existing users
+// see the new ratio pre-selected the next time they open Trends.
+const RATIO_METRICS_STORAGE_KEY = 'ratioMetricsActive.v3';
 let _ratioMetricsActive = null;
 function _loadRatioMetricsActive() {
   if (_ratioMetricsActive) return _ratioMetricsActive;
@@ -10036,6 +10097,12 @@ function _fmtPct(n) {
 function _fmtForRatio(r, n) {
   if (n == null || !isFinite(n)) return '—';
   if (r && r.format === 'usd') return _fmtUsd(n);
+  if (r && r.format === 'count') {
+    // Whole-number K/M counts (no decimals) for ratios like Views / Post.
+    if (n >= 1_000_000) return Math.round(n / 1_000_000) + 'M';
+    if (n >= 1_000)     return Math.round(n / 1_000) + 'K';
+    return String(Math.round(n));
+  }
   return _fmtPct(n);
 }
 
@@ -10203,10 +10270,13 @@ function renderRatioMetrics() {
       const day = days[idx];
       const rows = visible.map(r => {
         const v = ratioSeries[r.id][day];
-        // "no views" / "no visitors" depending on the denominator. Cost
-        // ratios use the right unit so the empty-day message matches the
-        // ratio's meaning ("no views" for cost_per_kviews, etc.).
-        const emptyLabel = (r.denominator === 'pageviews') ? 'no visitors' : 'no views';
+        // "no views" / "no visitors" / "no posts" depending on the
+        // denominator. Cost ratios use the right unit so the empty-day
+        // message matches the ratio's meaning ("no views" for
+        // cost_per_kviews, etc.).
+        const emptyLabel = (r.denominator === 'pageviews') ? 'no visitors'
+                         : (r.denominator === 'posts')     ? 'no posts'
+                         : 'no views';
         const display = (v == null || !isFinite(v)) ? emptyLabel : _fmtForRatio(r, v);
         return '<div class="tt-row"><span class="swatch" style="background:' + r.color + ';"></span>' +
                '<span>' + escapeHtml(r.label) + '</span>' +
@@ -10355,7 +10425,7 @@ async function loadDailyMetrics() {
   const qsProj  = projectOnlyParams.join('&');
   try {
     const costAvail = window.SA_IS_ADMIN !== false;
-    const [views, upvotes, comments, clicks, bookings, funnel, cost] = await Promise.all([
+    const [views, upvotes, comments, clicks, bookings, funnel, cost, posts] = await Promise.all([
       fetchOne('/api/views/per-day?'    + qsAware),
       fetchOne('/api/upvotes/per-day?'  + qsAware),
       fetchOne('/api/comments/per-day?' + qsAware),
@@ -10363,8 +10433,9 @@ async function loadDailyMetrics() {
       fetchOne('/api/bookings/per-day?' + qsProj),
       fetchOne('/api/funnel/per-day?'   + qsProj),
       costAvail ? fetchOne('/api/cost/per-day?' + qsAware) : Promise.resolve({ rows: [], failed: false }),
+      fetchOne('/api/posts/per-day?'    + qsAware),
     ]);
-    const allFailed = [views, upvotes, comments, clicks, bookings, funnel, cost].every(r => r.failed);
+    const allFailed = [views, upvotes, comments, clicks, bookings, funnel, cost, posts].every(r => r.failed);
     if (allFailed) {
       if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
       return;
@@ -10380,6 +10451,7 @@ async function loadDailyMetrics() {
     intoSeries('clicks',   clicks.rows,   'clicks_gained');
     intoSeries('bookings', bookings.rows, 'bookings_gained');
     intoSeries('cost',     cost.rows,     'cost_usd');
+    intoSeries('posts',    posts.rows,    'posts_made');
     DAILY_METRICS.filter(m => m.funnel).forEach(m => {
       intoSeries(m.id, funnel.rows, m.valueKey);
     });
@@ -10402,7 +10474,7 @@ async function loadDailyMetrics() {
     // Stash a list of failed endpoints so renderDailyMetrics can surface a
     // small "(N timed out)" hint in the status pill rather than silently
     // showing flat zeros for those series.
-    const fetchResults = { views, upvotes, comments, clicks, bookings, funnel, cost };
+    const fetchResults = { views, upvotes, comments, clicks, bookings, funnel, cost, posts };
     _dailyMetricsFailed = Object.keys(fetchResults)
       .filter(k => fetchResults[k].failed)
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
