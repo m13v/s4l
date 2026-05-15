@@ -52,6 +52,27 @@ If a future agent (including the auto-commit agent) reintroduces a `DELETE ... F
 - Exits 1 on any BROKEN project; safe for pre-commit or CI.
 - Preferred fix: mount `<FullSiteAnalytics>` from `@m13v/seo-components` (handles init + `window.posthog` + `<SeoAnalyticsProvider>`).
 
+## URL wrapping: short_links_live + canonical UTM scheme (2026-05-14)
+
+**Never post bare URLs.** Every URL in any post text goes through `dm_short_links.wrap_text_for_post`, which yields one of two trackable forms:
+
+1. `https://<host>/r/<code>` (short link) when the customer's redirector is live, OR
+2. `https://<host>?utm_source=s4l&utm_medium=post&utm_campaign=<slug>&utm_term=<platform>&utm_content=post_<session>` (UTM URL) as the universal fallback.
+
+The form 1 vs form 2 decision is gated by `projects[].short_links_live` in `config.json` (default true). Set it `false` for any newly onboarded project until the customer either (a) ships our `@m13v/seo-components` `/r/[code]` dynamic resolver, or (b) deploys the static CSV from `mint_external_pool.py --export-csv`. As of 2026-05-14: Runner, Agora, Podlog, NightOwl all have `short_links_live: false`. Flip true once the customer confirms `/r/<some-pool-code>` returns a 302 to the baked-in target.
+
+The UTM scheme is **canonical and global**, not per-project. All four URL builders (`dm_short_links._build_target_url`, `_build_target_url_for_post`, `mint_external_pool._build_target`, `mint_kent_pool._build_target`) emit:
+
+- `utm_source = "s4l"` (the agency). Customer-side analytics see "this traffic came from S4L" consistently.
+- `utm_medium = "post"` (post rail) or `"dm"` (DM rail). Don't change; `bin/server.js` and `project_stats_json.py` parse `utm_content LIKE 'dm_%'` for booking attribution.
+- `utm_campaign = <project_slug>` (runner, agora, podlog, nightowl, fazm, etc.).
+- `utm_term = <platform>` (reddit, twitter, linkedin, github_issues). Platform was historically `utm_source`; moved here when `utm_source` became `s4l`.
+- `utm_content = post_<minted_session>` (post rail), `dm_<dm_id>` (DM rail), or `<code>` (pool rail). Shape consumed downstream by `backfill_real_clicks.py`, `bin/server.js` regex `/^dm_(\d+)$/`, `project_stats_json.py`. Do not change.
+
+Don't add per-project UTM templates to config.json. The scheme is fixed.
+
+Caller exception branches must call `utm_only_text(text=..., platform=..., project_name=...)` from `dm_short_links` rather than posting unwrapped, so even if `wrap_text_for_post` itself raises, no bare URL escapes. Pattern lives in `post_reddit.py`, `engage_reddit.py`, `post_github.py`, `twitter_post_plan.py` (all four hardened 2026-05-14).
+
 ## SKILL.md - Single File, No Copies
 
 `SKILL.md` lives at the repo root. There is no `skill/SKILL.md`.
