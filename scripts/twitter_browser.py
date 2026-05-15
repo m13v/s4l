@@ -517,10 +517,19 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         if detected_project:
                             wrap_res = wrap_text_for_post(text=suffix, platform='twitter',
                                                           project_name=detected_project)
-                            if wrap_res.get('ok') and wrap_res.get('codes'):
+                            # Use the wrapped text whenever the wrap call succeeded.
+                            # codes=[] is now valid (UTM-only fallback path for
+                            # projects with short_links_live=false), and the
+                            # rewritten text still carries full s4l attribution.
+                            # Old guard `and wrap_res.get('codes')` silently
+                            # skipped utm_only fallbacks and let bare URLs
+                            # through in the suffix.
+                            if wrap_res.get('ok'):
                                 wrapped_suffix = wrap_res['text']
+                                tag = 'codes' if wrap_res.get('codes') else 'utm_only'
                                 print(f"[reply_to_tweet] suffix wrap project={detected_project} "
-                                      f"codes={wrap_res['codes']}", file=sys.stderr)
+                                      f"{tag}={wrap_res.get('codes') or [s.get('reason') for s in wrap_res.get('skipped',[])]}",
+                                      file=sys.stderr)
                     except Exception as _e:
                         print(f"[reply_to_tweet] suffix wrap failed ({_e}); raw",
                               file=sys.stderr)
