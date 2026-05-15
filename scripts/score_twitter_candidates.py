@@ -214,7 +214,16 @@ def upsert_candidates(tweets, config, batch_id=None):
                     bookmarks_t1 = NULL,
                     t1_checked_at = NULL,
                     delta_score = NULL,
-                    batch_id = COALESCE(EXCLUDED.batch_id, twitter_candidates.batch_id)
+                    batch_id = COALESCE(twitter_candidates.batch_id, EXCLUDED.batch_id)
+                WHERE NOT (
+                    twitter_candidates.status = 'pending'
+                    AND twitter_candidates.batch_id IS DISTINCT FROM EXCLUDED.batch_id
+                    AND EXISTS (
+                        SELECT 1 FROM twitter_batches tb
+                        WHERE tb.batch_id = twitter_candidates.batch_id
+                          AND tb.phase_started_at > NOW() - INTERVAL '20 minutes'
+                    )
+                )
                 """,
                 [
                     url,
