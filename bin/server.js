@@ -2290,9 +2290,60 @@ async function enrichSeoRuns(runs) {
   }
 }
 
-// Per-phase Claude cost breakdown for Job History rows. Window-matches every
-// `claude_sessions` row that started inside [run.started_at - slack,
-// run.finished_at + slack], groups by `script` (the phase name), and attaches:
+// Maps a Job History row's `script` (log_run.py canonical name) to the
+// `claude_sessions.script` values its wrapper actually spawns. Without this
+// constraint a 40-min post_reddit run's window catches every concurrent
+// pipeline's sessions (engage-dm-replies, seo_generate_page, etc.) and the
+// "cost" cell sums everything that ran in parallel — meaningless. Lookup is
+// keyed on the underscore form (post_reddit, dm_replies_reddit) that survives
+// classifyScript's normalization. Add new entries here when a new wrapper
+// pipeline ships.
+const _PHASE_FAMILY = {
+  // Reddit
+  post_reddit:          ['post_reddit'],
+  engage_reddit:        ['engage_reddit'],
+  thread_reddit:        ['run-reddit-threads'],
+  dm_outreach_reddit:   ['dm-outreach-reddit'],
+  dm_replies_reddit:    ['engage-dm-replies'],
+  link_edit_reddit:     ['link-edit-reddit'],
+  // Twitter
+  post_twitter:         ['run-twitter-cycle-scan', 'run-twitter-cycle-prep'],
+  engage_twitter:       ['engage-twitter-phaseB'],
+  thread_twitter:       ['run-twitter-threads'],
+  dm_outreach_twitter:  ['dm-outreach-twitter'],
+  dm_replies_twitter:   ['engage-dm-replies'],
+  // LinkedIn
+  post_linkedin:        ['run-linkedin-phaseA', 'run-linkedin-phaseB'],
+  engage_linkedin:      ['engage-linkedin-phaseA', 'engage-linkedin-phaseB'],
+  dm_replies_linkedin:  ['engage-dm-replies'],
+  dm_outreach_linkedin: ['dm-outreach-linkedin'],
+  // GitHub
+  post_github:          ['post_github'],
+  engage_github:        ['github-engage'],
+  // Moltbook
+  post_moltbook:        ['run-moltbook-cycle'],
+  // SEO
+  gsc_seo:              ['seo_generate_page', 'seo_generate_page_retry'],
+  serp_seo:             ['seo_generate_page', 'seo_generate_page_retry'],
+  seo_improve:          ['seo_improve_page'],
+  seo_weekly_roundup:   ['seo_generate_page'],
+  seo_top_pages:        ['seo_generate_page'],
+  seo_top_posts:        ['seo_generate_page'],
+};
+
+function _phaseFamilyFor(runScript) {
+  if (!runScript) return null;
+  const norm = String(runScript).replace(/-/g, '_').toLowerCase();
+  const aliased = SCRIPT_ALIASES[norm] || norm;
+  const family = _PHASE_FAMILY[aliased];
+  return family && family.length ? new Set(family) : null;
+}
+
+// Per-phase Claude cost breakdown for Job History rows. For each completed
+// run, queries `claude_sessions` rows whose `script` belongs to the run's
+// known phase family (see _PHASE_FAMILY) AND whose `started_at` falls inside
+// [run.started_at - slack, run.finished_at + slack]. Groups results by
+// session script (the phase) and attaches:
 //   run.result.cost_breakdown = {
 //     total, orchestrator, subagent, estimated,
 //     phases: [{phase, sessions, total, orch, sub, est}, ...] // desc by total
@@ -2306,14 +2357,14 @@ async function enrichSeoRuns(runs) {
 //                                  audit/provenance).
 //   run.result.cost_usd_*        = orch/subagent/estimated lanes for the
 //                                  4-lane tooltip the Cost column renders.
-// Time-window matching has no notion of which wrapper triggered which
-// session; concurrent runs of the same family can attribute sessions to
-// whichever overlapping window catches them first. This is best-effort —
-// cycle_id-aware matching would be cleaner but log_run.py doesn't emit
-// cycle_id today, and the wrapper scripts are locked.
+// Runs whose `script` isn't in _PHASE_FAMILY get NO breakdown (we don't know
+// which sessions to attribute) and keep their shell-log cost. Best-effort:
+// time-window matching can still get confused by concurrent runs of the
+// SAME family (e.g. two post_reddit fires overlapping), but cross-family
+// contamination — the big leak — is gone.
 async function enrichRunsCostBreakdown(runs) {
   const candidates = (runs || []).filter(r =>
-    !r.running && r.started_at && r.finished_at
+    !r.running && r.started_at && r.finished_at && _phaseFamilyFor(r.script)
   );
   if (!candidates.length) return;
   let minStart = Infinity, maxEnd = 0;
@@ -2354,10 +2405,12 @@ async function enrichRunsCostBreakdown(runs) {
   for (const r of candidates) {
     const startMs = Date.parse(r.started_at) - slackMs;
     const endMs   = Date.parse(r.finished_at) + slackMs;
+    const family = _phaseFamilyFor(r.script);
     const byPhase = {};
     let totalOrch = 0, totalEst = 0, totalSub = 0, totalDisplayed = 0;
     for (const s of sessionList) {
       if (s.ts < startMs || s.ts > endMs) continue;
+      if (family && !family.has(s.script)) continue;
       const key = s.script;
       const cur = byPhase[key] || { phase: key, sessions: 0, orch: 0, est: 0, sub: 0, total: 0 };
       cur.sessions += 1;
