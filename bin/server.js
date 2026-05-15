@@ -1130,7 +1130,8 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // otherwise undercount the per-run queue snapshot at older runs.
   const candidateRows = await pq(
     "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
-    "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id " +
+    "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id, " +
+    "       matched_project " +
     "FROM twitter_candidates " +
     "WHERE discovered_at >= $1::timestamp OR posted_at >= $1::timestamp OR t1_checked_at >= $1::timestamp OR status='pending'",
     [since]
@@ -1194,6 +1195,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
       exitMs,
       status: r.status,
       batch_id: r.batch_id || '',
+      matched_project: r.matched_project || '',
     };
   });
 
@@ -1235,9 +1237,25 @@ async function enrichPostCommentsTwitterRuns(runs) {
     }
     let candidatesPassed = 0;
     let salvagePosted = 0;
+    // Project labels this cycle actually worked on, surfaced at the end of the
+    // pill row (mirrors enrichPostCommentsRedditRuns). Source is the
+    // twitter_candidates.matched_project values for rows tied to this run's
+    // own batch_id — i.e. tweets Phase 1 scraped + scored on behalf of these
+    // projects. Insertion-order Set preserves first-seen order while deduping.
+    const projectsSeen = new Set();
+    const projectsList = [];
+    const recordProject = (raw) => {
+      if (!raw) return;
+      const proj = raw.trim();
+      if (proj && !projectsSeen.has(proj)) {
+        projectsSeen.add(proj);
+        projectsList.push(proj);
+      }
+    };
     for (const c of candNorm) {
       if (!ownBatchId || c.batch_id !== ownBatchId) continue;
       candidatesPassed++;
+      recordProject(c.matched_project);
       if (c.status === 'posted') {
         posted++;
         // Salvage signature: candidate's discovered_at predates this cycle's
@@ -1270,6 +1288,19 @@ async function enrichPostCommentsTwitterRuns(runs) {
         const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
         const m = body.match(phase0SalvageRe);
         if (m) salvageAttempted = parseInt(m[1], 10);
+        // Fallback for scan-only cycles where 0 candidates upserted (so
+        // matched_project never landed in twitter_candidates for this batch):
+        // pull project names from the cycle log's "Selected projects:" header.
+        // This surfaces the projects the cycle SCANNED for, mirroring Reddit's
+        // behaviour of capturing project labels even when nothing posted.
+        if (!projectsList.length) {
+          const selM = body.match(/Selected projects:\s*([^\n]+)/);
+          if (selM) {
+            for (const tok of selM[1].split(',')) {
+              recordProject(tok);
+            }
+          }
+        }
       } catch { /* empty */ }
     }
     // Per-run queue delta. ADD = candidates whose discovered_at fell in this
@@ -1373,6 +1404,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
       salvage_attempted: salvageAttempted,
       salvage_posted: salvagePosted,
       own_batch_id: ownBatchId,
+      // Project(s) this cycle actually worked on (Phase 1 scraped + scored
+      // candidates for), parsed from twitter_candidates.matched_project for
+      // rows tied to this run's batch_id. Surfaces at the end of the dashboard
+      // pill row so the operator can see at a glance which projects consumed
+      // the cycle, even when posted=0. Mirrors enrichPostCommentsRedditRuns.
+      projects_worked: projectsList,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -8211,6 +8248,13 @@ function renderResult(run) {
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#a78bfa' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
         renderFailedPill() +
+        (Array.isArray(r.projects_worked) && r.projects_worked.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+            + 'projects '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.projects_worked.join(', ')
+            + '</span></span>'
+          : '') +
       '</span>'
     );
   }
