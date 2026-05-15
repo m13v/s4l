@@ -365,8 +365,16 @@ For LinkedIn replies - use the OAuth API first:
    itself authoritative. Mark replied with the permalink. Do NOT navigate the
    browser to verify; that would burn the linkedin-browser lock for no gain.
 3. If the API call fails (e.g., token expired, comment deleted), fall back to the linkedin-agent browser:
+   - UTM-WRAP YOUR_REPLY_TEXT FIRST. The browser-typing path has no Python wrap
+     layer, so a bare URL would be posted as-is and we'd lose attribution. Run:
+       python3 \$REPO_DIR/scripts/dm_short_links.py utm-text \\
+         --platform linkedin \\
+         --project RESOLVED_PROJECT_NAME \\
+         --text "YOUR_REPLY_TEXT"
+     Use the printed string going forward. No DB write happens. Safe to run
+     unconditionally (no-op when YOUR_REPLY_TEXT contains zero URLs).
    - Navigate to their_comment_url via mcp__linkedin-agent__browser_navigate
-   - browser_snapshot to find the comment, click Reply, type, submit
+   - browser_snapshot to find the comment, click Reply, type the (UTM-wrapped) text, submit
    - Do NOT aggressively scroll-and-expand comments; if the comment isn't visible after a normal scroll, mark as 'skipped' with reason 'comment_not_found'
 4. If both API and browser fail, mark as 'skipped' with reason 'comment_not_found'.
 
