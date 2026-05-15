@@ -2249,19 +2249,20 @@ async function enrichSeoRuns(runs) {
             // sessions, locked callers that don't pass --orchestrator-cost-usd),
             // keep whatever streamRes value _collectSeoDetails parsed from the
             // .log file.
-            const sub = Number.isFinite(row.subagent) ? row.subagent : 0;
+            // SDK-only: d.cost_usd is orchestrator_cost_usd alone. Estimate
+            // and subagent are kept on the row for diagnostic tooltips but
+            // not folded into the displayed total.
             if (Number.isFinite(row.orchestrator)) {
-              d.cost_usd = row.orchestrator + sub;
+              d.cost_usd = row.orchestrator;
               d.cost_usd_orchestrator = row.orchestrator;
-            } else if (Number.isFinite(d.cost_usd)) {
-              d.cost_usd_orchestrator = d.cost_usd;
-              d.cost_usd = d.cost_usd + sub;
+            } else {
+              d.cost_usd = null;
+              d.cost_usd_orchestrator = null;
             }
-            // Manual estimate alongside (always populated by log_claude_session.py).
             if (Number.isFinite(row.estimated)) {
               d.cost_usd_estimated = row.estimated;
             }
-            d.cost_usd_subagent = sub;
+            d.cost_usd_subagent = Number.isFinite(row.subagent) ? row.subagent : 0;
           }
         }
       }
@@ -2381,11 +2382,15 @@ async function enrichRunsCostBreakdown(runs) {
   let rows;
   try {
     rows = await pq(
+      // SDK-only mode: orchestrator_cost_usd is the only number we display.
+      // Subagent and transcript-estimate are kept for diagnostic tooltips but
+      // never added into the total. has_sdk lets the UI distinguish "session
+      // happened but SDK didn't capture cost" from "session cost was $0".
       "SELECT script, started_at, " +
+        "orchestrator_cost_usd IS NOT NULL AS has_sdk, " +
         "COALESCE(orchestrator_cost_usd, 0)::float8 AS orch, " +
         "COALESCE(total_cost_usd, 0)::float8 AS est, " +
-        "COALESCE(subagent_cost_usd, 0)::float8 AS sub, " +
-        "COALESCE(orchestrator_cost_usd, total_cost_usd, 0)::float8 AS displayed " +
+        "COALESCE(subagent_cost_usd, 0)::float8 AS sub " +
       "FROM claude_sessions WHERE started_at BETWEEN $1::timestamp AND $2::timestamp",
       [since, until]
     );
@@ -2397,60 +2402,76 @@ async function enrichRunsCostBreakdown(runs) {
   const sessionList = rows.map(r => ({
     ts: r.started_at instanceof Date ? r.started_at.getTime() : Date.parse(r.started_at),
     script: r.script || '(unknown)',
+    hasSdk: !!r.has_sdk,
     orch: Number(r.orch) || 0,
     est:  Number(r.est)  || 0,
     sub:  Number(r.sub)  || 0,
-    total: (Number(r.displayed) || 0) + (Number(r.sub) || 0),
+    // SDK-only: total = orch. Sessions without SDK contribute 0 to total
+    // (they're flagged via hasSdk so the tooltip can show coverage).
+    total: Number(r.orch) || 0,
   }));
   for (const r of candidates) {
     const startMs = Date.parse(r.started_at) - slackMs;
     const endMs   = Date.parse(r.finished_at) + slackMs;
     const family = _phaseFamilyFor(r.script);
     const byPhase = {};
-    let totalOrch = 0, totalEst = 0, totalSub = 0, totalDisplayed = 0;
+    let totalOrch = 0, totalEst = 0, totalSub = 0;
+    let sessionsAll = 0, sessionsWithSdk = 0;
     for (const s of sessionList) {
       if (s.ts < startMs || s.ts > endMs) continue;
       if (family && !family.has(s.script)) continue;
       const key = s.script;
-      const cur = byPhase[key] || { phase: key, sessions: 0, orch: 0, est: 0, sub: 0, total: 0 };
+      const cur = byPhase[key] || { phase: key, sessions: 0, sessions_with_sdk: 0, orch: 0, est: 0, sub: 0 };
       cur.sessions += 1;
-      cur.orch  += s.orch;
-      cur.est   += s.est;
-      cur.sub   += s.sub;
-      cur.total += s.total;
+      if (s.hasSdk) cur.sessions_with_sdk += 1;
+      cur.orch += s.orch;
+      cur.est  += s.est;
+      cur.sub  += s.sub;
       byPhase[key] = cur;
+      sessionsAll += 1;
+      if (s.hasSdk) sessionsWithSdk += 1;
       totalOrch += s.orch;
       totalEst  += s.est;
       totalSub  += s.sub;
-      totalDisplayed += s.total;
     }
+    if (!sessionsAll) continue;
     const phases = Object.values(byPhase)
-      .sort((a, b) => b.total - a.total)
+      .sort((a, b) => b.orch - a.orch || b.sessions - a.sessions)
       .map(p => ({
         phase: p.phase,
         sessions: p.sessions,
-        total: Number(p.total.toFixed(6)),
+        sessions_with_sdk: p.sessions_with_sdk,
+        sessions_missing_sdk: p.sessions - p.sessions_with_sdk,
+        total: Number(p.orch.toFixed(6)),
         orch:  Number(p.orch.toFixed(6)),
         sub:   Number(p.sub.toFixed(6)),
         est:   Number(p.est.toFixed(6)),
       }));
-    if (!phases.length) continue;
     if (!r.result) r.result = {};
-    // Preserve provenance.
+    // Preserve provenance: the original shell-log cost (parseFloat'd from the
+    // run_monitor line) is kept under cost_usd_from_log so an operator can
+    // see what the wrapper reported vs what we recomputed.
     if (typeof r.result.cost_usd === 'number') {
       r.result.cost_usd_from_log = r.result.cost_usd;
     }
+    // SDK-only displayed total. Sessions missing SDK contribute 0 — the
+    // sessions_missing_sdk counter on each phase row is the only signal that
+    // real spend went unrecorded.
     r.result.cost_breakdown = {
-      total: Number(totalDisplayed.toFixed(6)),
+      total: Number(totalOrch.toFixed(6)),
       orchestrator: Number(totalOrch.toFixed(6)),
       subagent: Number(totalSub.toFixed(6)),
       estimated: Number(totalEst.toFixed(6)),
+      sessions: sessionsAll,
+      sessions_with_sdk: sessionsWithSdk,
+      sessions_missing_sdk: sessionsAll - sessionsWithSdk,
       phases,
     };
     r.result.cost_usd = r.result.cost_breakdown.total;
     r.result.cost_usd_orchestrator = r.result.cost_breakdown.orchestrator;
     r.result.cost_usd_estimated    = r.result.cost_breakdown.estimated;
     r.result.cost_usd_subagent     = r.result.cost_breakdown.subagent;
+    r.result.cost_sessions_missing_sdk = r.result.cost_breakdown.sessions_missing_sdk;
   }
 }
 
@@ -3803,8 +3824,15 @@ async function handleApi(req, res) {
       "), session_counts AS (" +
         "SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id" +
       "), session_cost AS (" +
+        // SDK-only mode (2026-05-15): per_row_cost = orchestrator_cost_usd
+        // alone, split evenly across activity rows. NULL when the wrapper
+        // didn't pass --orchestrator-cost-usd (e.g. shell wrappers that omit
+        // --output-format json so Claude never emits total_cost_usd). The
+        // transcript estimate and subagent dollars are computed from a local
+        // pricing table — kept in the JSON payload for diagnostics only,
+        // never folded into the displayed total.
         "SELECT cs.session_id, " +
-          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost, " +
+          "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost, " +
           "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_orchestrator, " +
           "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_estimated, " +
           "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(10,6) AS per_row_cost_subagent " +
@@ -4727,7 +4755,7 @@ async function handleApi(req, res) {
       "WITH src AS (" + parts.join(' UNION ALL ') + "), " +
       "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
       "session_cost AS (SELECT cs.session_id, " +
-          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
+          "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
           "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_orchestrator, " +
           "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated, " +
           "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_subagent " +
@@ -4739,18 +4767,26 @@ async function handleApi(req, res) {
     // total + orchestrator + subagent + estimate lanes. Independent of the
     // activity-type rollup above: a single post_reddit session might produce
     // 0 or 1 thread row, but its cost still shows up in the per-phase view.
+    // SDK-only per-phase rollup. total_cost_usd = SUM(orchestrator_cost_usd)
+    // — no transcript estimate, no subagent fold-in. Phases with 0% SDK
+    // coverage (wrapper doesn't capture --orchestrator-cost-usd) show
+    // total $0 but a non-zero sessions_missing_sdk count, which is the
+    // signal to investigate. Also surfaces the estimate and subagent
+    // columns as diagnostic-only fields.
     const phaseQ =
       "SELECT script AS phase, " +
         "COUNT(*)::int AS sessions, " +
-        "COALESCE(SUM(COALESCE(orchestrator_cost_usd, total_cost_usd, 0) + COALESCE(subagent_cost_usd, 0)), 0)::numeric(12,4) AS total_cost_usd, " +
+        "COUNT(orchestrator_cost_usd)::int AS sessions_with_sdk, " +
+        "(COUNT(*) - COUNT(orchestrator_cost_usd))::int AS sessions_missing_sdk, " +
+        "COALESCE(SUM(orchestrator_cost_usd), 0)::numeric(12,4) AS total_cost_usd, " +
         "COALESCE(SUM(orchestrator_cost_usd), 0)::numeric(12,4) AS total_cost_usd_orchestrator, " +
         "COALESCE(SUM(total_cost_usd), 0)::numeric(12,4) AS total_cost_usd_estimated, " +
         "COALESCE(SUM(subagent_cost_usd), 0)::numeric(12,4) AS total_cost_usd_subagent " +
       "FROM claude_sessions " +
       "WHERE started_at >= NOW() - " + win + " " +
       "GROUP BY script " +
-      "HAVING COALESCE(SUM(COALESCE(orchestrator_cost_usd, total_cost_usd, 0) + COALESCE(subagent_cost_usd, 0)), 0) > 0 " +
-      "ORDER BY total_cost_usd DESC " +
+      "HAVING COUNT(*) > 0 " +
+      "ORDER BY total_cost_usd DESC, sessions DESC " +
       "LIMIT 50";
     return (async () => {
       const dbRows = await pq(q);
@@ -4879,7 +4915,7 @@ async function handleApi(req, res) {
       "WITH src AS (" + parts.join(' UNION ALL ') + "), " +
       "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
       "session_cost AS (SELECT cs.session_id, " +
-          "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost " +
+          "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost " +
         "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id), " +
       "in_window AS (" + inWindow.join(' UNION ALL ') + ") " +
       "SELECT json_agg(row_to_json(r)) FROM (" +
@@ -5936,7 +5972,7 @@ async function handleApi(req, res) {
         "WITH src AS (" + costSrcParts.join(' UNION ALL ') + "), " +
         "session_counts AS (SELECT claude_session_id, COUNT(*)::int AS rows_in_session FROM src GROUP BY claude_session_id), " +
         "session_cost AS (SELECT cs.session_id, " +
-            "((COALESCE(cs.orchestrator_cost_usd, cs.total_cost_usd) + COALESCE(cs.subagent_cost_usd, 0)) / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
+            "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost, " +
             "(cs.orchestrator_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_orchestrator, " +
             "(cs.total_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_estimated, " +
             "(cs.subagent_cost_usd / NULLIF(sc.rows_in_session, 0))::numeric(12,6) AS per_row_cost_subagent " +
@@ -9562,8 +9598,6 @@ function fmtCost(c) {
 //                 subagent_cost_usd). Added on top of the orch/estimate
 //                 lane to form the displayed total.
 function fmtCostCell(displayed, orchestrator, estimated, subagent) {
-  const text = fmtCost(displayed);
-  if (text === '') return '';
   const fmtLane = (v) => {
     if (v == null) return 'n/a';
     const n = Number(v);
@@ -9572,13 +9606,23 @@ function fmtCostCell(displayed, orchestrator, estimated, subagent) {
     if (n < 0.01) return '$' + n.toFixed(4);
     return '$' + n.toFixed(4);
   };
+  // SDK-only mode (2026-05-15): the displayed value is orchestrator_cost_usd
+  // alone. When that's NULL we render "n/a" — not $0, since the session DID
+  // spend money but the wrapper didn't capture --orchestrator-cost-usd.
+  // Estimate and subagent are diagnostic-only (computed from local pricing
+  // table; not actual billing data).
+  const hasOrch = orchestrator != null && Number.isFinite(Number(orchestrator));
+  const text = hasOrch
+    ? fmtCost(Number(orchestrator))
+    : '<span style="color:var(--text-very-faint);">n/a</span>';
   const lines = [
-    'Total (displayed): ' + fmtLane(displayed),
-    '  Orchestrator (SDK): ' + fmtLane(orchestrator),
-    '  Subagent (Task): ' + fmtLane(subagent),
-    '  Estimated (transcript): ' + fmtLane(estimated),
+    'Cost (SDK orchestrator): ' + fmtLane(orchestrator),
     '',
-    'Total = COALESCE(orch, estimate) + subagent. Orchestrator is the native SDK lane (matches Anthropic billing for parent turns) but historically hid Task subagent cost (anthropics/claude-code #43945); we now fold subagent in as a separate addend.',
+    'Diagnostic-only (not actual billing):',
+    '  Transcript estimate: ' + fmtLane(estimated),
+    '  Subagent (est): ' + fmtLane(subagent),
+    '',
+    'Displays Anthropic-reported orchestrator_cost_usd only. "n/a" means the wrapper didn\\'t capture the SDK cost (no --output-format json on the claude call). Transcript estimate and subagent figures are computed locally from a hardcoded pricing table — informational, not billing-accurate on subscription plans.',
   ];
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) +
