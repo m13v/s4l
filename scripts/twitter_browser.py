@@ -1244,11 +1244,19 @@ def send_dm(thread_url, message, dm_id=None):
 
         try:
             rl_counter = _install_rate_limit_listener(page)
-            # Navigate to DM inbox first, then click into conversation.
-            # Direct URL navigation to DM conversations often hangs
-            # because X's SPA doesn't fire domcontentloaded for DM routes.
-            page.evaluate("window.location.href = 'https://x.com/i/chat/'")
-            page.wait_for_timeout(5000)
+            # 2026-05-14: navigate directly to the thread URL via JS, mirroring
+            # read_conversation. The previous implementation went to /i/chat/
+            # first and clicked `a[href*="<conv_id>"]` from the sidebar, but X
+            # virtualizes the sidebar so only ~14-18 rows render at once. Any
+            # thread below the initial slice (3+ days old, ~20+ position) hit
+            # `conversation_not_found_in_sidebar` as a terminal error,
+            # producing 0 successful sends on the 19:14 cycle's 11 retries.
+            # Direct nav was historically called out as flaky for DM routes;
+            # in practice it works fine when given a 6s settle window, which
+            # is what read_conversation does.
+            conv_id = thread_url.rstrip("/").split("/")[-1]
+            page.evaluate(f"window.location.href = '{thread_url}'")
+            page.wait_for_timeout(6000)
 
             unreachable, reason = _is_x_unreachable(page)
             if unreachable:
@@ -1258,14 +1266,16 @@ def send_dm(thread_url, message, dm_id=None):
             _handle_dm_passcode(page)
             page.wait_for_timeout(2000)
 
-            # Extract conversation ID from URL and click into it
-            conv_id = thread_url.rstrip("/").split("/")[-1]
-            try:
-                conv_link = page.locator(f'a[href*="{conv_id}"]').first
-                conv_link.click()
-                page.wait_for_timeout(3000)
-            except Exception:
-                return {"ok": False, "error": "conversation_not_found_in_sidebar"}
+            # Verify the SPA landed on the right conversation. If the URL
+            # doesn't contain the conv_id, something redirected us (login
+            # bounce, suspended account, deleted thread, etc.).
+            if conv_id not in page.url:
+                return {
+                    "ok": False,
+                    "error": "thread_url_redirected",
+                    "expected_conv_id": conv_id,
+                    "landed_url": page.url,
+                }
 
             # Find the message input box
             msg_box = None
