@@ -747,6 +747,7 @@ def cmd_log_post(args):
         "our_account": args.account,
         "project": args.project,
         "engagement_style": getattr(args, "engagement_style", None),
+        "search_topic": getattr(args, "search_topic", None),
         "claude_session_id": session_id,
         "language": None,
         "is_recommendation": False,
