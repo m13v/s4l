@@ -385,10 +385,15 @@ STYLE_CAP_PCT = 50.0
 
 
 def _fetch_style_stats(platform):
-    """Query the autoposter API for avg_upvotes per engagement_style on this platform.
+    """Query the autoposter API for per-engagement_style performance.
 
-    Returns a dict: {style_name: {"n": int, "avg_up": float}}.
-    Returns {} on any error (API unreachable, missing env, cold start).
+    Returns a dict:
+        {style_name: {"n": int, "avg_up": float, "avg_cm": float,
+                      "avg_clicks": float}}
+    avg_up is NET (Reddit/Moltbook self-upvote stripped); avg_clicks is the
+    bot-filtered click count. The three combine into the same composite the
+    top_performers report ranks on. Returns {} on any error (API unreachable,
+    missing env, cold start).
 
     Routes through the social-autoposter-website API (no direct Neon access)
     so VMs / sandboxes without a DATABASE_URL still get live weights.
@@ -402,12 +407,38 @@ def _fetch_style_stats(platform):
         data = (resp or {}).get("data") or {}
         stats = data.get("stats") or {}
         return {
-            name: {"n": int(v.get("n", 0)), "avg_up": float(v.get("avg_up", 0.0))}
+            name: {
+                "n": int(v.get("n", 0)),
+                "avg_up": float(v.get("avg_up", 0.0)),
+                "avg_cm": float(v.get("avg_cm", 0.0)),
+                "avg_clicks": float(v.get("avg_clicks", 0.0)),
+            }
             for name, v in stats.items()
             if isinstance(v, dict)
         }
     except Exception:
         return {}
+
+
+# Composite style score, mirroring scripts/top_performers.py SCORE_SQL:
+# a real human click outweighs 10 upvotes of vibes, comments sit in the
+# middle. The picker weights styles by this score (sharpened by
+# WEIGHT_EXPONENT) so the style that actually drives clicks wins the
+# distribution, not the one that merely accumulates passive likes.
+CLICK_WEIGHT = 10.0
+COMMENT_WEIGHT = 3.0
+
+
+def _style_score(stat):
+    """Composite per-style score from a _fetch_style_stats() row.
+
+    stat is {"avg_up", "avg_cm", "avg_clicks", ...}. avg_up is already net.
+    """
+    return (
+        float(stat.get("avg_clicks", 0.0)) * CLICK_WEIGHT
+        + float(stat.get("avg_cm", 0.0)) * COMMENT_WEIGHT
+        + float(stat.get("avg_up", 0.0))
+    )
 
 
 def get_dynamic_tiers(platform, context="posting"):
@@ -494,16 +525,23 @@ def _last_picks(platform, limit=10):
 
 
 def compute_target_distribution(platform, context="posting"):
-    """Compute per-style target pick% using sharpened avg_upvotes with floor+cap.
+    """Compute per-style target pick% using a sharpened click-weighted score.
 
     Returns a list of dicts sorted by target pct DESC:
-        [{"style": name, "pct": float, "n": int, "avg_up": float, "trusted": bool}]
+        [{"style", "pct", "n", "avg_up", "avg_cm", "avg_clicks", "score",
+          "trusted", "is_candidate", "weight"}]
 
     Policy:
       - Styles in PLATFORM_POLICY[platform].never are excluded.
-      - Styles with N >= MIN_SAMPLE_SIZE get weight = avg_up ** WEIGHT_EXPONENT.
+      - The per-style score is clicks*10 + comments*3 + upvotes_net, the
+        same composite scripts/top_performers.py ranks posts on. A real
+        human click is the ground-truth conversion signal; upvotes are
+        passive vibes. (Pre-2026-05-15 this used avg_upvotes alone, which
+        disagreed with every click-aware surface in the repo.)
+      - Styles with N >= MIN_SAMPLE_SIZE get weight = score ** WEIGHT_EXPONENT.
       - Styles with N < MIN_SAMPLE_SIZE (incl. zero) get STYLE_FLOOR_PCT only
-        so noisy small-n styles (e.g. n=1 with avg_up=14) don't dominate.
+        so noisy small-n styles (e.g. n=1 with a lucky viral post) don't
+        dominate.
       - STYLE_FLOOR_PCT is applied to every remaining style so nothing hits 0%.
       - STYLE_CAP_PCT caps the top style; overflow redistributes pro-rata.
       - Cold start (no trusted data): equal share across non-never styles.
@@ -518,16 +556,21 @@ def compute_target_distribution(platform, context="posting"):
     for style in candidates:
         s = stats.get(style)
         n = int(s["n"]) if s else 0
-        avg = float(s["avg_up"]) if s else 0.0
+        avg_up = float(s["avg_up"]) if s else 0.0
+        avg_cm = float(s.get("avg_cm", 0.0)) if s else 0.0
+        avg_clicks = float(s.get("avg_clicks", 0.0)) if s else 0.0
+        score = _style_score(s) if s else 0.0
         # Sidecar candidates never count as trusted; they get floor weight only
         # until promoted, regardless of their sample count.
         is_candidate_status = universe[style].get("status") == "candidate"
         trusted = (s is not None and n >= MIN_SAMPLE_SIZE
                    and not is_candidate_status)
-        weight = (avg ** WEIGHT_EXPONENT) if trusted else 0.0
+        weight = (score ** WEIGHT_EXPONENT) if trusted else 0.0
         if trusted:
             trusted_total += weight
-        rows.append({"style": style, "n": n, "avg_up": avg, "trusted": trusted,
+        rows.append({"style": style, "n": n, "avg_up": avg_up,
+                     "avg_cm": avg_cm, "avg_clicks": avg_clicks,
+                     "score": score, "trusted": trusted,
                      "weight": weight, "pct": 0.0,
                      "is_candidate": is_candidate_status})
 
@@ -577,9 +620,10 @@ def compute_target_distribution(platform, context="posting"):
 def get_styles_prompt(platform, context="posting"):
     """Generate the engagement styles prompt block for a given platform.
 
-    Shows an explicit per-style target pick% (computed from live avg_upvotes
-    via compute_target_distribution) plus the last 10 picks on this platform,
-    so the LLM can preferentially pick styles that are under-used vs target.
+    Shows an explicit per-style target pick% (computed from a live
+    click-weighted score via compute_target_distribution) plus the last 10
+    picks on this platform, so the LLM can preferentially pick styles that
+    are under-used vs target.
 
     Replaces the old PRIMARY/SECONDARY/RARE buckets, which tended to make
     the LLM fixate on one "safe" style regardless of actual performance data.
@@ -615,14 +659,21 @@ def get_styles_prompt(platform, context="posting"):
     lines.append(f"Match your style to the conversation. {policy['note']}")
     lines.append("")
     lines.append(
-        f"Target pick distribution on {platform} (derived from live avg_upvotes, "
-        f"sharpened by exponent {WEIGHT_EXPONENT:g} so the winner gets most traffic; "
-        f"{STYLE_FLOOR_PCT:g}% floor per style so every style keeps getting tested):"
+        f"Target pick distribution on {platform} (derived from a live "
+        f"click-weighted score = clicks*{CLICK_WEIGHT:g} + comments*{COMMENT_WEIGHT:g} "
+        f"+ upvotes, sharpened by exponent {WEIGHT_EXPONENT:g} so the winner gets "
+        f"most traffic; {STYLE_FLOOR_PCT:g}% floor per style so every style keeps "
+        f"getting tested). A real human click is worth far more than a passive "
+        f"upvote, so click-driving styles rank highest:"
     )
     lines.append("")
     for t in targets:
         if t["trusted"]:
-            sample = f"avg_up {t['avg_up']:.2f} · n={t['n']}"
+            sample = (
+                f"score {t['score']:.2f} "
+                f"(clicks {t['avg_clicks']:.2f} · cm {t['avg_cm']:.2f} · "
+                f"up {t['avg_up']:.2f}) · n={t['n']}"
+            )
         elif t.get("is_candidate"):
             sample = f"n={t['n']} (candidate, model-invented; floor only)"
         else:
@@ -884,3 +935,53 @@ def validate_style(style, context="posting"):
     if style in valid:
         return style
     return None
+
+
+def target_distribution_snapshot(platform, context="posting"):
+    """Compact, JSON-serializable snapshot of the current target distribution.
+
+    This is what the picker would tell the model to aim for RIGHT NOW.
+    Persisted into generation_trace.extras / the daily snapshot log so the
+    "did the clicks-weighted reweight actually shift picks" audit can replay
+    point-in-time targets — clicks accrue retroactively, so the live numbers
+    cannot be reconstructed cleanly from posts after the fact.
+    """
+    rows = compute_target_distribution(platform, context=context)
+    return [
+        {
+            "style": r["style"],
+            "pct": round(r["pct"], 1),
+            "score": round(r.get("score", 0.0), 3),
+            "avg_clicks": round(r.get("avg_clicks", 0.0), 3),
+            "avg_cm": round(r.get("avg_cm", 0.0), 3),
+            "avg_up": round(r.get("avg_up", 0.0), 3),
+            "n": r["n"],
+            "trusted": bool(r["trusted"]),
+        }
+        for r in rows
+    ]
+
+
+if __name__ == "__main__":
+    import argparse
+    import json as _json
+
+    _parser = argparse.ArgumentParser(
+        description="Engagement styles CLI (target distribution inspection)"
+    )
+    _sub = _parser.add_subparsers(dest="cmd")
+    _td = _sub.add_parser(
+        "target-distribution",
+        help="Print the current per-style target pick distribution as JSON",
+    )
+    _td.add_argument("--platform", required=True)
+    _td.add_argument("--context", default="posting", choices=["posting", "replying"])
+    _args = _parser.parse_args()
+
+    if _args.cmd == "target-distribution":
+        print(_json.dumps(
+            target_distribution_snapshot(_args.platform, context=_args.context),
+            ensure_ascii=False,
+        ))
+    else:
+        _parser.print_help()
