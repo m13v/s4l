@@ -1039,7 +1039,7 @@ def main():
         minted_session = None
         if wrap_project:
             try:
-                from dm_short_links import wrap_text_for_post
+                from dm_short_links import wrap_text_for_post, utm_only_text
                 wrap_res = wrap_text_for_post(text=text, platform="github_issues",
                                                 project_name=wrap_project)
                 if wrap_res.get("ok"):
@@ -1048,9 +1048,15 @@ def main():
                     if wrap_res.get("codes"):
                         log(f"wrapped {len(wrap_res['codes'])} URL(s): {wrap_res['codes']}")
                 else:
-                    log(f"WARNING: URL wrap failed ({wrap_res.get('error')}); posting unwrapped")
+                    log(f"WARNING: URL wrap failed ({wrap_res.get('error')}); falling back to UTM-only")
+                    text = utm_only_text(text=text, platform="github_issues", project_name=wrap_project)
             except Exception as e:
-                log(f"WARNING: URL wrap raised ({e}); posting unwrapped")
+                log(f"WARNING: URL wrap raised ({e}); falling back to UTM-only")
+                try:
+                    from dm_short_links import utm_only_text
+                    text = utm_only_text(text=text, platform="github_issues", project_name=wrap_project)
+                except Exception as ee:
+                    log(f"WARNING: UTM-only fallback also failed ({ee}); posting unwrapped")
 
         log(f"Posting {i + 1}/{len(posts)} -> {owner}/{repo}#{number}: {thread_title[:60]}")
         ok_post, url_or_err = post_comment(owner, repo, number, text)
