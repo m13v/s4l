@@ -52,6 +52,30 @@ If a future agent (including the auto-commit agent) reintroduces a `DELETE ... F
 - Exits 1 on any BROKEN project; safe for pre-commit or CI.
 - Preferred fix: mount `<FullSiteAnalytics>` from `@m13v/seo-components` (handles init + `window.posthog` + `<SeoAnalyticsProvider>`).
 
+## Dashboard users + weekly reports: dashboard_users table (2026-05-14)
+
+The `dashboard_users` Postgres table is the single source of truth for BOTH dashboard
+access (Firebase custom claims) and weekly-report routing. Columns: `email`,
+`firebase_uid`, `admin`, `projects[]` (config.json-cased names), `report_enabled`,
+`name`. Do NOT put report recipients in config.json.
+
+Onboard a new client (one email, N projects):
+1. Add a row to `dashboard_users` (see `scripts/seed_dashboard_users.py` for the shape).
+2. `node scripts/dashboard_provision.js create <email>` — creates the Firebase user,
+   pushes the row's `admin`/`projects` into custom claims, writes `firebase_uid` back.
+3. `python3 scripts/send_dashboard_invite.py <email>` — sends the app.s4l.ai magic-link
+   invite (reads name/projects from the table).
+
+Other `dashboard_provision.js` subcommands: `list` (DB<->Firebase diff), `sync` (reconcile
+claims + UIDs for all rows), `magic <email>` (print a one-shot sign-in URL, does not send).
+
+Weekly reports fan out from this table: `scripts/daily_stats_email.py` (social, legacy
+filename) and `seo/daily_report.py` (SEO). Each recipient gets a project-scoped email;
+admins (`projects` empty) get the unscoped master view. Quiet-week rule: a recipient with
+zero posts (social) / zero pages (SEO) in the 7d window is skipped. Both support
+`--sample`, `--dry-run`, `--only <email>`. Schedule: launchd `com.m13v.social-weekly-report`
++ `com.m13v.seo-weekly-report`, Monday 09:00.
+
 ## URL wrapping: short_links_live + canonical UTM scheme (2026-05-14)
 
 **Never post bare URLs.** Every URL in any post text goes through `dm_short_links.wrap_text_for_post`, which yields one of two trackable forms:
