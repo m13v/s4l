@@ -295,22 +295,52 @@ def _refresh_browser_lock():
 
 
 def get_browser_and_page(playwright):
-    """Connect to the reddit-agent MCP browser via CDP with a fresh logged-in context.
+    """Get a logged-in Reddit page, preferring CDP-attach over launch_persistent_context.
 
-    Creates a NEW browser context with storageState cookies (the logged-in session)
-    rather than reusing contexts[0] (the default context, which is NOT logged in).
-    The MCP's isolated context is invisible to CDP connections, so we must create
-    our own context with the same storageState.
+    Two paths:
+      1. CDP-attach (preferred on appmaker/e2b VM and any host running a visible
+         logged-in Chromium): connect to the existing browser, find a context with
+         a live reddit_session cookie, open a NEW PAGE on that context.
+      2. launch_persistent_context fallback: when CDP isn't available OR contexts
+         have no reddit_session (laptop where reddit-agent MCP isolates its session
+         in an invisible context).
 
-    Returns (browser, page, is_cdp). When is_cdp=True, `page` is in a new context
-    on the CDP browser. When is_cdp=False, it's a new headless page.
+    Why CDP-attach matters: appmaker's visible Chromium permanently holds
+    /root/.chromium-profile. launch_persistent_context collides on profile leveldb
+    locks, loads a partial session, and EVERY post returns account_blocked_in_sub
+    because the comment form never renders. Attaching to the live context dodges
+    the collision entirely.
+
+    Returns (browser, page, is_cdp). When is_cdp=True, callers must close ONLY
+    the page (not page.context) and NOT the browser; closing context[0] or the
+    CDP browser would kill the user's visible session.
     """
     _acquire_browser_lock()
     cdp_port = find_reddit_cdp_port()
 
-    # Always use the persistent profile directly. CDP connections to the MCP
-    # browser expose a default context that is NOT logged in (the MCP's logged-in
-    # context is isolated/invisible to CDP), causing auth failures.
+    if cdp_port:
+        try:
+            cdp_browser = playwright.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
+            for ctx in cdp_browser.contexts:
+                try:
+                    cookies = ctx.cookies("https://www.reddit.com/")
+                except Exception:
+                    cookies = []
+                has_session = any(
+                    c.get("name") == "reddit_session" and c.get("value")
+                    for c in cookies
+                )
+                if has_session:
+                    page = ctx.new_page()
+                    return cdp_browser, page, True
+            try:
+                cdp_browser.close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Fallback: launch our own persistent context against PROFILE_DIR.
     # Retry on Chromium SingletonLock collisions (MCP holds the OS-level profile
     # lock for its entire server lifetime; the JSON lock can expire while the
     # OS lock is still held).
@@ -496,9 +526,18 @@ def post_comment(thread_url, text):
             }
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def reply_to_comment(comment_permalink, text, dm_id=None):
@@ -736,9 +775,18 @@ def reply_to_comment(comment_permalink, text, dm_id=None):
             }
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def edit_comment(comment_permalink, new_text):
@@ -859,9 +907,18 @@ def edit_comment(comment_permalink, new_text):
             }
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def edit_thread(thread_permalink, new_body):
@@ -956,9 +1013,18 @@ def edit_thread(thread_permalink, new_body):
             }
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def unread_dms():
@@ -1135,9 +1201,18 @@ def unread_dms():
             return unique
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def read_conversation(chat_url, max_messages=20):
@@ -1293,9 +1368,18 @@ def read_conversation(chat_url, max_messages=20):
                 return result
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def _load_active_reddit_campaigns_for_dm():
@@ -1564,9 +1648,18 @@ def send_dm(chat_url, message, dm_id=None):
                 }
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def compose_dm(recipient, subject, body):
@@ -1859,9 +1952,18 @@ def compose_dm(recipient, subject, body):
                 return {"ok": True, "thread_url": page.url}
 
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def scrape_views(username, max_scrolls=300):
@@ -2022,9 +2124,18 @@ def scrape_views(username, max_scrolls=300):
         except Exception as e:
             return {"ok": False, "error": str(e)}
         finally:
-            page.context.close()
+            try:
+                if is_cdp:
+                    page.close()
+                else:
+                    page.context.close()
+            except Exception:
+                pass
             if not is_cdp:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def main():
