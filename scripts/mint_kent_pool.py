@@ -88,10 +88,12 @@ def _slug_path(path: str) -> str:
 
 def _build_target(origin: str, path: str, *, platform: str, campaign_slug: str, code: str) -> str:
     base = origin.rstrip('/') + path
+    # Canonical UTM scheme: see dm_short_links._build_target_url for rationale.
     params = {
-        'utm_source': platform,
+        'utm_source': 's4l',
         'utm_medium': 'post',
         'utm_campaign': campaign_slug,
+        'utm_term': platform,
         'utm_content': code,
     }
     sep = '&' if '?' in base else '?'
