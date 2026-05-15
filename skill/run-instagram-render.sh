@@ -10,8 +10,8 @@
 #   1. acquire_lock instagram-render (data.ts edits race otherwise)
 #   2. compute target post_type via 4:1 of last 5 posted IG rows
 #   3. count existing drafts of that type. If >=3, SKIP (buffer healthy).
-#   4. pull exclusion lists from Neon: used_audio (30d), used_angles (14d),
-#      used_variant_ids (all-time).
+#   4. pull from Neon: local_audio_lru (LRU-ordered local mixer/audio pool),
+#      used_angles (14d), used_variant_ids (all-time).
 #   5. spawn run_claude.sh with mixer/SKILL.md as the procedure, plus a
 #      compact request envelope (type, post_number, exclusions).
 #   6. on exit, verify post-NNN.mp4, post-NNN.caption.txt, media_posts row
@@ -59,7 +59,7 @@ acquire_lock instagram-render 60
 # Step 1: compute target type + exclusion lists
 log "step 1: querying Neon for target_type, draft_count, exclusions"
 /opt/homebrew/bin/python3.11 - > "$PICK_FILE" 2>>"$LOG_FILE" <<'PY'
-import json, os, psycopg2
+import glob, json, os, psycopg2
 env = {}
 for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
     if '=' in ln and not ln.strip().startswith('#'):
@@ -86,11 +86,44 @@ draft_count = c.fetchone()[0]
 c.execute("SELECT COALESCE(MAX(post_number), 0) + 1 FROM media_posts")
 next_num = c.fetchone()[0]
 
+# Audio policy: local-only, least-recently-used rotation. The render must
+# reuse the existing mixer/audio/ pool and NEVER source fresh audio from the
+# network. We list the on-disk tracks and order them by last use in
+# media_posts (never-used first, then oldest-used first). audio_source values
+# vary in shape (local:/abs/path, local:~/path, ig://reel/<code>), so a track
+# counts as "used" by a row if the row's audio_source contains the track's
+# basename OR its trailing token (reel code / label after the last '_').
+audio_dir = os.path.expanduser('~/social-autoposter/mixer/audio')
+local_files = sorted(glob.glob(os.path.join(audio_dir, '*.m4a')))
+
 c.execute(
-    "SELECT DISTINCT audio_source FROM media_posts "
-    "WHERE created_at > NOW() - INTERVAL '30 days' AND audio_source IS NOT NULL"
+    "SELECT audio_source, COALESCE(posted_at, created_at) "
+    "FROM media_posts WHERE audio_source IS NOT NULL"
 )
-used_audio = sorted({r[0] for r in c.fetchall()})
+audio_usage = [(r[0] or '', r[1]) for r in c.fetchall()]
+
+
+def _audio_token(path):
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return stem.rsplit('_', 1)[-1] if '_' in stem else stem
+
+
+audio_lru = []
+for f in local_files:
+    base = os.path.basename(f)
+    tok = _audio_token(f)
+    last_used = None
+    for src, used_at in audio_usage:
+        if used_at is None:
+            continue
+        if base in src or (tok and tok in src):
+            if last_used is None or used_at > last_used:
+                last_used = used_at
+    audio_lru.append((f, last_used))
+
+# never-used tracks first, then oldest-used first
+audio_lru.sort(key=lambda x: (1, x[1].isoformat()) if x[1] else (0, ''))
+local_audio_lru = [f for f, _ in audio_lru]
 
 c.execute(
     "SELECT DISTINCT metadata->>'theme_angle' FROM media_posts "
@@ -110,7 +143,7 @@ print(json.dumps({
     'organic_count_last5': organic_count,
     'draft_count_target': draft_count,
     'next_post_number': next_num,
-    'used_audio_30d': used_audio,
+    'local_audio_lru': local_audio_lru,
     'used_theme_angles_14d': used_angles,
     'used_variant_ids': used_variants,
 }, indent=2))
@@ -281,7 +314,12 @@ the run and ask the user, do not "fix" the components. The components are the
 deliverable contract for ALL future renders.
 
 EXCLUSIONS (read from request envelope above; honor strictly):
-- used_audio_30d: do NOT reuse any of these audio file paths.
+- local_audio_lru: the LOCAL audio pool (mixer/audio/*.m4a), ordered
+  least-recently-used first. Pick the FIRST entry, the most stale local
+  track. Reusing a track is fine; audio repeating across reels is normal on
+  Instagram. NEVER download new audio, NEVER run yt-dlp, NEVER open a browser
+  to Instagram for audio. The pool only grows when the user manually drops a
+  track in. If the list is empty, FAIL the run; do not source from the network.
 - used_theme_angles_14d: pick a different angle. SKILL Section 3 lists 5
   acceptable AI angles; pick one not in the exclusion list.
 - used_variant_ids: if creating a NEW TLH variant, pick a variant_id not in
@@ -299,8 +337,9 @@ ORGANIC-PATH (post_type='organic'):
 Compose a new TLH variant. You may remix existing pre-encoded
 remotion/public/mixer/tlh-*.mp4 slots (cheaper, faster) OR encode fresh raw
 clips from ~/social-autoposter/mixer/'5. time lapse hooks/' if available
-(only if remixing produces a stale recombination). The audio_source MUST be
-fresh (not in used_audio_30d). The caption MUST follow SKILL Section 3
+(only if remixing produces a stale recombination). The audio_source MUST be a
+LOCAL file from local_audio_lru -- pick the least-recently-used (first) entry.
+NEVER source audio from the network. The caption MUST follow SKILL Section 3
 caption arc (8 beats: opener, age+setup, wrong-about-AI moment, breaking
 event, felt-sense, workflow change, contrarian one-liner, closing
 instruction). Theme angle must be in SKILL Section 3 list and NOT in
