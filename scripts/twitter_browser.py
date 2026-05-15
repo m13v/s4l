@@ -753,26 +753,34 @@ def unread_dms():
                 return {"ok": False, "error": "not_on_dm_page", "url": page.url}
 
             # Extract conversation list by walking the real DOM structure.
-            # As of 2026-04: aria-label on conversation links is empty, so we
-            # can't rely on it. Instead, every conversation row has:
-            #   - a leaf div with font-weight 700 = author name
-            #   - a leaf div with font-weight 400 = relative time (e.g. "4h")
-            #   - optional span with font-weight 500 and text "You:" = we sent last
-            #   - a leaf span with the preview text. font-weight 400 = read,
-            #     font-weight >= 600 = unread (bold).
-            conversations = page.evaluate("""() => {
+            #
+            # 2026-05-14: X redesigned the sidebar; all unread visual signals
+            # moved and the list is now virtualized (~14-18 rows render at
+            # once). This was the root cause of the 2026-05-01..05-14 inbound
+            # DM ingestion cliff:
+            #   - bolded preview text: was fw>=600, now fw=500
+            #   - unread dot: was a small <div> with background-color, now
+            #     <svg data-icon="icon-circle-fill"> 8x8 with transparent bg
+            #     and color: rgb(30, 156, 241) (Twitter blue) via fill
+            #   - aria-label "unread": gone entirely
+            # Every row also exposes data-testid `dm-conversation-item-<ids>`.
+            # We now (a) detect unread via the SVG dot AND any non-400 weight
+            # on the preview span, and (b) scroll the chat panel until no new
+            # rows surface for several iterations so older unreads (Prince
+            # Canuma at 1w, Foad Green at 2w) are not buried beneath the fold.
+            scrape_js = """() => {
                 const results = [];
-                const items = document.querySelectorAll('main li, main [role="listitem"]');
+                const items = document.querySelectorAll(
+                    '[data-testid^="dm-conversation-item-"], main li, main [role="listitem"]'
+                );
 
                 for (const item of items) {
-                    // Find the conversation link
                     const link = item.querySelector('a[href*="/i/chat/"]');
                     if (!link) continue;
 
                     const threadUrl = link.href;
                     if (!threadUrl.match(/\\/i\\/chat\\/[\\d-g]/)) continue;
 
-                    // Get the handle from the avatar link
                     let handle = '';
                     const avatarLink = item.querySelector('a[href^="https://x.com/"]');
                     if (avatarLink) {
@@ -781,9 +789,6 @@ def unread_dms():
                         if (m) handle = m[1];
                     }
 
-                    // Walk leaf text nodes inside the link, capturing tag,
-                    // computed font-weight, and trimmed text. Order matches
-                    // visual order: [name, time, optional "You:", preview].
                     const leaves = [];
                     const all = link.querySelectorAll('*');
                     for (const el of all) {
@@ -801,46 +806,38 @@ def unread_dms():
                     let previewFw = 400;
 
                     for (const node of leaves) {
-                        // Author: first bold (fw>=700) leaf, short text, not a timestamp
                         if (!author && node.fw >= 700 && node.t.length < 80 &&
                             !/^(\\d+[hmd]|\\d+w|Just now)$/.test(node.t)) {
                             author = node.t;
                             continue;
                         }
-                        // Time: short text matching relative-time pattern
                         if (!time && /^(\\d+[hmd]|\\d+w|Just now)$/.test(node.t)) {
                             time = node.t;
                             continue;
                         }
-                        // "You:" prefix: standalone span with text "You:"
                         if (!isFromUs && node.tag === 'span' && /^You:?$/.test(node.t)) {
                             isFromUs = true;
                             continue;
                         }
-                        // Preview: any remaining text. The bolded preview span
-                        // (fw >= 600) signals an unread message; fw 400 is read.
                         if (!preview && node.t.length > 0) {
                             preview = node.t;
                             previewFw = node.fw;
                         }
                     }
 
-                    // Unread detection. Primary signal: preview span is bolded
-                    // (fw >= 600) when there is an unread inbound. Backup:
-                    // aria-label anywhere in the row containing "unread", or a
-                    // small visible dot/badge. If we sent last ("You:" prefix),
-                    // override to read regardless.
-                    let hasUnread = previewFw >= 600;
+                    // Primary: <svg data-icon="icon-circle-fill"> = blue unread dot.
+                    let hasUnread = !!item.querySelector('svg[data-icon="icon-circle-fill"]');
 
-                    if (!hasUnread) {
-                        const ariaUnread = item.querySelector(
-                            '[aria-label*="unread" i]'
-                        );
-                        if (ariaUnread) hasUnread = true;
+                    // Secondary: any non-400 weight on the preview leaf (X
+                    // currently uses 500 for unread; we accept >400 in case
+                    // they tweak it again).
+                    if (!hasUnread && previewFw > 400) hasUnread = true;
+
+                    // Tertiary legacy signals (kept for safety).
+                    if (!hasUnread && item.querySelector('[aria-label*="unread" i]')) {
+                        hasUnread = true;
                     }
-
                     if (!hasUnread) {
-                        // Tiny coloured pill/dot heuristic
                         const candidates = item.querySelectorAll('span, div');
                         for (const el of candidates) {
                             if (el.children.length !== 0) continue;
@@ -855,6 +852,8 @@ def unread_dms():
                         }
                     }
 
+                    // If we sent the last visible message ("You:" prefix), it
+                    // can't be unread on our end regardless of bolding.
                     if (isFromUs) hasUnread = false;
 
                     if (author || handle) {
@@ -871,15 +870,51 @@ def unread_dms():
                 }
 
                 return results;
-            }""")
+            }"""
 
-            # Deduplicate by thread_url
-            seen = set()
-            unique = []
-            for c in conversations:
-                if c["thread_url"] not in seen:
-                    seen.add(c["thread_url"])
-                    unique.append(c)
+            scroll_js = """() => {
+                const items = document.querySelectorAll(
+                    '[data-testid^="dm-conversation-item-"], main li, main [role="listitem"]'
+                );
+                let last = null;
+                for (const item of items) {
+                    if (item.querySelector('a[href*="/i/chat/"]')) last = item;
+                }
+                if (!last) return -1;
+                last.scrollIntoView({behavior: 'instant', block: 'end'});
+                let el = last;
+                while (el) {
+                    const s = window.getComputedStyle(el);
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+                        el.scrollHeight > el.clientHeight) {
+                        return el.scrollTop;
+                    }
+                    el = el.parentElement;
+                }
+                return 0;
+            }"""
+
+            seen = {}
+            stuck_iters = 0
+            max_iters = int(os.environ.get("TWITTER_UNREAD_SCROLL_MAX_ITERS", "60"))
+            max_no_growth = int(os.environ.get("TWITTER_UNREAD_SCROLL_NO_GROWTH", "5"))
+            for _ in range(max_iters):
+                batch = page.evaluate(scrape_js)
+                grew = False
+                for c in batch:
+                    if c["thread_url"] not in seen:
+                        seen[c["thread_url"]] = c
+                        grew = True
+                if not grew:
+                    stuck_iters += 1
+                else:
+                    stuck_iters = 0
+                if stuck_iters >= max_no_growth:
+                    break
+                page.evaluate(scroll_js)
+                page.wait_for_timeout(600)
+
+            unique = list(seen.values())
 
             # If the inbox API was throttled hard AND we got nothing back,
             # treat this as rate-limited so the caller can back off instead
