@@ -449,13 +449,27 @@ def _ban_entries_to_subs(entries) -> set[str]:
 
 
 def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
-    """Build a new ban-list entry with the current UTC timestamp."""
+    """Build a new ban-list entry with the current UTC timestamp.
+
+    Stamps the current Reddit account (top-level config.json reddit_account
+    .username) so per-account scoping in reddit_tools._load_comment_blocked_subs
+    can ignore this entry on other machines posting as a different account.
+    Returns account=None if the config has no reddit_account, in which case
+    the reader treats the entry as global (back-compat with pre-2026-05-15).
+    """
     from datetime import datetime, timezone
+    account = None
+    try:
+        with open(CONFIG_PATH) as _f:
+            account = (json.load(_f).get("reddit_account") or {}).get("username") or None
+    except Exception:
+        pass
     return {
         "sub": sub.strip().lower(),
         "added_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": reason or None,
         "project": project or None,
+        "account": account,
     }
 
 
