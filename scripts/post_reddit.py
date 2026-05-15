@@ -2058,7 +2058,7 @@ def _post_iteration(plan, reddit_username):
         # better than failing a post that already passed planning.
         minted_session = None
         try:
-            from dm_short_links import wrap_text_for_post
+            from dm_short_links import wrap_text_for_post, utm_only_text
             wrap_res = wrap_text_for_post(text=text, platform="reddit",
                                             project_name=project_name)
             if wrap_res.get("ok"):
@@ -2069,9 +2069,15 @@ def _post_iteration(plan, reddit_username):
                           f"{wrap_res['codes']}")
             else:
                 print(f"[post_reddit] WARNING: URL wrap failed "
-                      f"({wrap_res.get('error')}); posting unwrapped")
+                      f"({wrap_res.get('error')}); falling back to UTM-only")
+                text = utm_only_text(text=text, platform="reddit", project_name=project_name)
         except Exception as e:
-            print(f"[post_reddit] WARNING: URL wrap raised ({e}); posting unwrapped")
+            print(f"[post_reddit] WARNING: URL wrap raised ({e}); falling back to UTM-only")
+            try:
+                from dm_short_links import utm_only_text
+                text = utm_only_text(text=text, platform="reddit", project_name=project_name)
+            except Exception as ee:
+                print(f"[post_reddit] WARNING: UTM-only fallback also failed ({ee}); posting unwrapped")
 
         # Per-row reddit-browser lease (2026-05-13). Acquire JUST around the
         # CDP work, release before this row's DB post-processing and the 3-min
