@@ -61,14 +61,23 @@ def _diag_log(msg):
         pass
 VIEWPORT = {"width": 911, "height": 1016}
 
-# Load Reddit username from config
+# Load Reddit username from config.
+# Prefers the new top-level `reddit_account.username` (2026-05-15) over the
+# legacy `accounts.reddit.username` path. Drift between the two silently
+# broke the post-permalink lookup on the VM (wrong username → JS finds 0
+# matching comments → permalink=None → pipeline records `failed` despite
+# the comment landing on Reddit).
 _config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 OUR_USERNAME = "Deep_Ad1959"
 if os.path.exists(_config_path):
     try:
         with open(_config_path) as f:
             _cfg = json.load(f)
-        OUR_USERNAME = _cfg.get("accounts", {}).get("reddit", {}).get("username", OUR_USERNAME)
+        OUR_USERNAME = (
+            (_cfg.get("reddit_account") or {}).get("username")
+            or _cfg.get("accounts", {}).get("reddit", {}).get("username")
+            or OUR_USERNAME
+        )
     except Exception:
         pass
 
