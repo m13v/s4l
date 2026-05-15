@@ -42,6 +42,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+import pick_project
 
 # ---------------------------------------------------------------------------
 # Run-summary safety net (atexit + SIGTERM/SIGHUP handlers).
@@ -221,40 +222,6 @@ def get_recent_comments(limit=5):
 # module for the shape contract and migrations/2026-05-12_generation_trace.sql
 # for the JSONB column definition.
 import generation_trace as _gen_trace
-
-
-def recent_github_posts_by_project(days=7):
-    """project_name -> count of github posts in last N days, for deficit weighting."""
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        "SELECT project_name, COUNT(*) FROM posts "
-        "WHERE platform='github' "
-        "  AND posted_at > NOW() - INTERVAL '%s days' "
-        "  AND project_name IS NOT NULL "
-        "GROUP BY project_name" % int(days)
-    ).fetchall()
-    conn.close()
-    return {name: int(cnt) for name, cnt in rows}
-
-
-def pick_github_project(config, recent_counts):
-    """Inverse-recent-share weighting. Eligibility: enabled, weight>0, has
-    a non-empty unified search_topics list."""
-    pool = [
-        p for p in config.get("projects", [])
-        if p.get("enabled", True)
-        and p.get("weight", 0) > 0
-        and "github" not in (p.get("platforms_disabled") or [])
-        and p.get("search_topics")
-    ]
-    if not pool:
-        return None
-    weights = [
-        p["weight"] / (1 + recent_counts.get(p["name"], 0))
-        for p in pool
-    ]
-    return random.choices(pool, weights=weights, k=1)[0]
 
 
 def _angle_str(v):
@@ -752,14 +719,16 @@ def main():
         project_name = project.get("name")
         log(f"Project (forced): {project_name}")
     else:
-        recent_counts = recent_github_posts_by_project(days=7)
-        project = pick_github_project(config, recent_counts)
+        # Shared inverse-recent-share picker (scripts/pick_project.py), the
+        # same selection logic twitter and reddit use.
+        picks = pick_project.pick_projects(config, platform="github", n=1)
+        project = picks[0] if picks else None
         if project is None:
             log("ERROR: no eligible project (none have search_topics)")
             sys.exit(1)
         project_name = project.get("name")
-        log(f"Project (deficit-weighted): {project_name} "
-            f"(weight={project.get('weight', 0)}, posts_7d={recent_counts.get(project_name, 0)})")
+        log(f"Project (inverse-recent-share): {project_name} "
+            f"(weight={project.get('weight', 0)})")
 
     # ---- Phase 1: search topics, T0 snapshot -------------------------------
     topics_pool = list(project.get("search_topics") or [])
