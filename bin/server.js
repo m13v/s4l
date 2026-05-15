@@ -2290,6 +2290,117 @@ async function enrichSeoRuns(runs) {
   }
 }
 
+// Per-phase Claude cost breakdown for Job History rows. Window-matches every
+// `claude_sessions` row that started inside [run.started_at - slack,
+// run.finished_at + slack], groups by `script` (the phase name), and attaches:
+//   run.result.cost_breakdown = {
+//     total, orchestrator, subagent, estimated,
+//     phases: [{phase, sessions, total, orch, sub, est}, ...] // desc by total
+//   }
+//   run.result.cost_usd          = total (overrides the shell-log value when
+//                                  we found ≥1 matching session — the wrapper
+//                                  log line often misses sub-phase cost,
+//                                  e.g. engage_twitter logs $0 but phaseB
+//                                  spent real money).
+//   run.result.cost_usd_from_log = original shell-log value (preserved for
+//                                  audit/provenance).
+//   run.result.cost_usd_*        = orch/subagent/estimated lanes for the
+//                                  4-lane tooltip the Cost column renders.
+// Time-window matching has no notion of which wrapper triggered which
+// session; concurrent runs of the same family can attribute sessions to
+// whichever overlapping window catches them first. This is best-effort —
+// cycle_id-aware matching would be cleaner but log_run.py doesn't emit
+// cycle_id today, and the wrapper scripts are locked.
+async function enrichRunsCostBreakdown(runs) {
+  const candidates = (runs || []).filter(r =>
+    !r.running && r.started_at && r.finished_at
+  );
+  if (!candidates.length) return;
+  let minStart = Infinity, maxEnd = 0;
+  for (const r of candidates) {
+    const s = Date.parse(r.started_at);
+    const e = Date.parse(r.finished_at);
+    if (Number.isFinite(s) && s < minStart) minStart = s;
+    if (Number.isFinite(e) && e > maxEnd) maxEnd = e;
+  }
+  if (minStart === Infinity) return;
+  const slackMs = _RUN_WINDOW_SLACK_MS;
+  const since = new Date(minStart - slackMs).toISOString();
+  const until = new Date(maxEnd + slackMs).toISOString();
+  let rows;
+  try {
+    rows = await pq(
+      "SELECT script, started_at, " +
+        "COALESCE(orchestrator_cost_usd, 0)::float8 AS orch, " +
+        "COALESCE(total_cost_usd, 0)::float8 AS est, " +
+        "COALESCE(subagent_cost_usd, 0)::float8 AS sub, " +
+        "COALESCE(orchestrator_cost_usd, total_cost_usd, 0)::float8 AS displayed " +
+      "FROM claude_sessions WHERE started_at BETWEEN $1::timestamp AND $2::timestamp",
+      [since, until]
+    );
+  } catch (e) {
+    console.error('[enrichRunsCostBreakdown] query failed:', e && e.message || e);
+    return;
+  }
+  if (!rows || !rows.length) return;
+  const sessionList = rows.map(r => ({
+    ts: r.started_at instanceof Date ? r.started_at.getTime() : Date.parse(r.started_at),
+    script: r.script || '(unknown)',
+    orch: Number(r.orch) || 0,
+    est:  Number(r.est)  || 0,
+    sub:  Number(r.sub)  || 0,
+    total: (Number(r.displayed) || 0) + (Number(r.sub) || 0),
+  }));
+  for (const r of candidates) {
+    const startMs = Date.parse(r.started_at) - slackMs;
+    const endMs   = Date.parse(r.finished_at) + slackMs;
+    const byPhase = {};
+    let totalOrch = 0, totalEst = 0, totalSub = 0, totalDisplayed = 0;
+    for (const s of sessionList) {
+      if (s.ts < startMs || s.ts > endMs) continue;
+      const key = s.script;
+      const cur = byPhase[key] || { phase: key, sessions: 0, orch: 0, est: 0, sub: 0, total: 0 };
+      cur.sessions += 1;
+      cur.orch  += s.orch;
+      cur.est   += s.est;
+      cur.sub   += s.sub;
+      cur.total += s.total;
+      byPhase[key] = cur;
+      totalOrch += s.orch;
+      totalEst  += s.est;
+      totalSub  += s.sub;
+      totalDisplayed += s.total;
+    }
+    const phases = Object.values(byPhase)
+      .sort((a, b) => b.total - a.total)
+      .map(p => ({
+        phase: p.phase,
+        sessions: p.sessions,
+        total: Number(p.total.toFixed(6)),
+        orch:  Number(p.orch.toFixed(6)),
+        sub:   Number(p.sub.toFixed(6)),
+        est:   Number(p.est.toFixed(6)),
+      }));
+    if (!phases.length) continue;
+    if (!r.result) r.result = {};
+    // Preserve provenance.
+    if (typeof r.result.cost_usd === 'number') {
+      r.result.cost_usd_from_log = r.result.cost_usd;
+    }
+    r.result.cost_breakdown = {
+      total: Number(totalDisplayed.toFixed(6)),
+      orchestrator: Number(totalOrch.toFixed(6)),
+      subagent: Number(totalSub.toFixed(6)),
+      estimated: Number(totalEst.toFixed(6)),
+      phases,
+    };
+    r.result.cost_usd = r.result.cost_breakdown.total;
+    r.result.cost_usd_orchestrator = r.result.cost_breakdown.orchestrator;
+    r.result.cost_usd_estimated    = r.result.cost_breakdown.estimated;
+    r.result.cost_usd_subagent     = r.result.cost_breakdown.subagent;
+  }
+}
+
 // DB-backed enrichment uses run.started_at and run.finished_at to define a
 // window, plus a small slack on each side for clock skew between the shell
 // trap that wrote the run_monitor line and the page row's completed_at.
@@ -3532,6 +3643,7 @@ async function handleApi(req, res) {
       await enrichPostCommentsTwitterRuns(runs);
       await enrichPostCommentsRedditRuns(runs);
       await enrichSeoRuns(runs);
+      await enrichRunsCostBreakdown(runs);
       // Prepend in-progress pipelines so they appear at the top of the table.
       // Always included regardless of the hours window — a long-running job
       // started before the window is still relevant right now.
@@ -8454,6 +8566,55 @@ function buildSeoDetailRows(run) {
   );
 }
 
+// Cost cell for a Job History row. Renders the headline total and exposes a
+// hover tooltip with the 4-lane decomposition (Total/Orchestrator/Subagent/
+// Estimated) plus a per-phase breakdown when enrichRunsCostBreakdown attached
+// one. Falls back to the shell-log value when no phase data is available.
+function _jobHistoryCostCell(result) {
+  const fmtLane = (v) => {
+    if (v == null) return 'n/a';
+    const n = Number(v);
+    if (!isFinite(n)) return 'n/a';
+    if (n === 0) return '$0';
+    if (n < 0.01) return '$' + n.toFixed(4);
+    return '$' + n.toFixed(4);
+  };
+  const total = Number(result.cost_usd) || 0;
+  const orch  = result.cost_usd_orchestrator != null ? Number(result.cost_usd_orchestrator) : null;
+  const sub   = result.cost_usd_subagent != null ? Number(result.cost_usd_subagent) : null;
+  const est   = result.cost_usd_estimated != null ? Number(result.cost_usd_estimated) : null;
+  const bd    = result.cost_breakdown;
+  const lines = [
+    'Total (displayed): ' + fmtLane(total),
+    '  Orchestrator (SDK): ' + fmtLane(orch),
+    '  Subagent (Task): ' + fmtLane(sub),
+    '  Estimated (transcript): ' + fmtLane(est),
+  ];
+  if (bd && Array.isArray(bd.phases) && bd.phases.length) {
+    lines.push('');
+    lines.push('Phases (' + bd.phases.length + '):');
+    // Show up to 10 phases inline to keep the tooltip readable.
+    const shown = bd.phases.slice(0, 10);
+    for (const p of shown) {
+      const subStr = (p.sub && p.sub > 0) ? ('  sub ' + fmtLane(p.sub)) : '';
+      lines.push('  ' + (p.phase || '(unknown)') + '  x' + p.sessions + '  ' + fmtLane(p.total) + subStr);
+    }
+    if (bd.phases.length > shown.length) {
+      lines.push('  …(' + (bd.phases.length - shown.length) + ' more)');
+    }
+  }
+  if (typeof result.cost_usd_from_log === 'number' && result.cost_usd_from_log !== total) {
+    lines.push('');
+    lines.push('Shell-log value: ' + fmtLane(result.cost_usd_from_log) + ' (recomputed from claude_sessions window-match)');
+  }
+  lines.push('');
+  lines.push('Total = COALESCE(orch, estimate) + subagent. Per-phase rows = matching claude_sessions in the run window grouped by script.');
+  const tip = lines.join('\\n');
+  return '<span data-tooltip="' + escapeHtml(tip) +
+    '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+    fmtCost(total) + '</span>';
+}
+
 // Stable identity for a job-history row across polls. (script, started_at)
 // is unique in practice; pid is appended as a tiebreaker for the rare case
 // where two parallel fires of the same script land in the same second.
@@ -8483,7 +8644,7 @@ function _jobHistoryRowSig(r) {
 }
 function _buildJobHistoryRowGroup(r, idx) {
   const cost = r.result && r.result.cost_usd;
-  const costCell = cost ? fmtCost(cost) : '<span style="color:var(--muted);">—</span>';
+  const costCell = cost ? _jobHistoryCostCell(r.result) : '<span style="color:var(--muted);">—</span>';
   const hasDetails = Array.isArray(r.details) && r.details.length;
   const caret = hasDetails
     ? '<span class="sa-job-caret" style="display:inline-block;width:12px;color:var(--muted);cursor:pointer;user-select:none;transition:transform 0.15s ease;">&#9656;</span> '
