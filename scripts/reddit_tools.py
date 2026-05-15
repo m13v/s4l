@@ -190,6 +190,13 @@ def _load_comment_blocked_subs(project_name=None):
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
         with open(config_path) as f:
             config = json.load(f)
+        # Per-account scoping (2026-05-15): a ban applies only to the account
+        # that triggered it. Different machines may post the same project as
+        # different accounts (laptop=Deep_Ad1959, sandbox VM=StreetRefuse7512);
+        # without this filter, account A's real ban would suppress a sub for
+        # account B that has no such ban. Entries with account=null are
+        # treated as global (apply regardless), preserving pre-2026-05-15 data.
+        current_account = (config.get("reddit_account") or {}).get("username") or None
         blocked = set()
         bans = config.get("subreddit_bans") or {}
         if isinstance(bans, dict):
@@ -198,8 +205,15 @@ def _load_comment_blocked_subs(project_name=None):
                 if not slug:
                     continue
                 entry_project = None
+                entry_account = None
                 if isinstance(entry, dict):
                     entry_project = entry.get("project") or None
+                    entry_account = entry.get("account") or None
+                # Account filter first: if entry is tagged with a specific
+                # account and it's not the current one, this ban doesn't apply.
+                if (entry_account is not None and current_account is not None
+                        and entry_account.lower() != current_account.lower()):
+                    continue
                 if entry_project is None:
                     blocked.add(slug)
                 elif project_name and entry_project.lower() == project_name.lower():
