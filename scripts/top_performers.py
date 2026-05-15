@@ -346,6 +346,58 @@ def get_top_posts(conn, project=None, platform=None, limit=15, min_score=None):
     return clean[:limit]
 
 
+def get_top_post_per_style(conn, platform=None):
+    """Top posts per engagement_style, so the prompt can show a concrete
+    real-world exemplar next to each style the model might pick.
+
+    Returns a flat list of rows with the standard 12-column post shape PLUS
+    a 13th column (engagement_style). Up to 3 rows per style are returned
+    (ranked by SCORE_SQL) so the caller can run the same anti-pattern filter
+    (_apply_top_filter) and still land a clean exemplar if the #1 post is a
+    product-name / zero-click-URL post. The caller keeps only the best
+    surviving row per style.
+
+    No min_score gate here on purpose: even a style whose best post is weak
+    is informative — the per-style header stats make the weakness visible,
+    and a weak "best" tells the model the style has not landed yet.
+    """
+    where_clauses = [
+        "status = 'active'",
+        "engagement_style IS NOT NULL",
+        "upvotes IS NOT NULL",
+        "our_content IS NOT NULL",
+        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
+        "platform NOT IN ('github_issues')",
+    ]
+    params = []
+    if platform:
+        where_clauses.append("platform = %s")
+        params.append(platform)
+    where = " AND ".join(where_clauses)
+    cur = conn.execute(
+        f"{POSTS_WITH_CLICKS_CTE}"
+        f", ranked AS ("
+        f"  SELECT id, platform, upvotes, comments_count, views, "
+        f"         our_content, thread_title, thread_content, "
+        f"         project_name, posted_at::date AS posted_at_date, "
+        f"         our_account, clicks, engagement_style, "
+        f"         ROW_NUMBER() OVER ("
+        f"           PARTITION BY engagement_style "
+        f"           ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
+        f"                    {UPVOTES_NET_SQL} DESC"
+        f"         ) AS rn "
+        f"    FROM posts_w_clicks WHERE {where}"
+        f") "
+        f"SELECT id, platform, upvotes, comments_count, views, "
+        f"       our_content, thread_title, thread_content, "
+        f"       project_name, posted_at_date, our_account, clicks, engagement_style "
+        f"FROM ranked WHERE rn <= 3 "
+        f"ORDER BY engagement_style, rn",
+        params,
+    )
+    return cur.fetchall()
+
+
 def get_bottom_posts(conn, project=None, platform=None, limit=10):
     """Worst performing posts (zero-engagement by composite score).
 
@@ -438,7 +490,8 @@ def format_post(row, include_thread_content=True):
 
 
 def format_report(summary, top, bottom, project=None, platform=None,
-                   top_by_group=None, fallback_top=None, style_perf=None):
+                   top_by_group=None, fallback_top=None, style_perf=None,
+                   top_by_style=None):
     """Format the full report."""
     lines = []
     filters = []
@@ -480,6 +533,37 @@ def format_report(summary, top, bottom, project=None, platform=None,
                 f"best_clicks={row[7]}  best_cm={row[6]}  best_up={row[5]}"
             )
         lines.append("")
+
+    # Per-style top exemplar. The style table above is just numbers; this
+    # section shows the single highest-scoring real post we have for each
+    # style, so when the model picks a style it can see what a great post
+    # in that style actually reads like. Ordered to match the style table
+    # (avg clicks DESC) so the click-winning styles and their exemplars
+    # appear first. Styles with no clean example are listed so the absence
+    # is itself a signal ("this style has never landed a usable post").
+    if top_by_style and style_perf:
+        exemplars = _best_exemplar_per_style(top_by_style)
+        lines.append(
+            "### Best Example Per Style (imitate this when you pick the style)"
+        )
+        lines.append(
+            "One real post per style — the highest-scoring one we have. "
+            "Pick the style, then write something with the same shape as its example."
+        )
+        lines.append("")
+        for row in style_perf:
+            style = row[0]
+            header = (
+                f"#### {style}  "
+                f"(n={row[1]}, avg_clicks={row[4]}, avg_cm={row[3]}, avg_up={row[2]})"
+            )
+            lines.append(header)
+            ex = exemplars.get(style)
+            if ex:
+                lines.append(format_post(ex))
+            else:
+                lines.append("  (no clean example yet — style unproven or all examples filtered)")
+            lines.append("")
 
     # Summary table. Per-project/platform now shows total_clicks (col 9)
     # so Claude can see at-a-glance which projects converted at all.
@@ -559,12 +643,34 @@ def _apply_top_filter(rows, limit):
     return clean[:limit]
 
 
+def _best_exemplar_per_style(rows):
+    """Collapse the flat get_top_post_per_style() result to {style: row}.
+
+    Each style ships up to 3 candidate rows (ranked by SCORE_SQL). Run the
+    shared anti-pattern filter per style and keep the best survivor. Styles
+    whose every candidate is filtered out (e.g. all product-name posts) are
+    simply absent from the dict — the caller renders them with no example.
+    The engagement_style key is column 12 of each row.
+    """
+    by_style = {}
+    for r in rows:
+        if len(r) <= 12 or not r[12]:
+            continue
+        by_style.setdefault(r[12], []).append(r)
+    out = {}
+    for style, group in by_style.items():
+        clean = _apply_top_filter(group, 1)
+        if clean:
+            out[style] = clean[0]
+    return out
+
+
 def _fetch_report_via_api(*, platform, project, top, bottom):
-    """Pull all 6 SQL aggregations in one call via the v1 route.
+    """Pull all SQL aggregations in one call via the v1 route.
 
     Returns (summary, style_perf, top_posts, bottom_posts,
-              fallback_top|None, top_by_group|None). Row shapes match
-    the column order format_post / format_report expect.
+              fallback_top|None, top_by_group|None, top_by_style). Row
+    shapes match the column order format_post / format_report expect.
     """
     from http_api import api_get
     resp = api_get(
@@ -583,6 +689,7 @@ def _fetch_report_via_api(*, platform, project, top, bottom):
     raw_bottom = data.get("bottom_posts") or []
     raw_fallback = data.get("fallback_top") or []
     raw_group = data.get("top_by_group") or {}
+    top_by_style = data.get("top_by_style") or []
 
     top_filtered = _apply_top_filter(raw_top, top) if raw_top else []
     fallback_filtered = None
@@ -594,7 +701,8 @@ def _fetch_report_via_api(*, platform, project, top, bottom):
             proj: _apply_top_filter(rows, 5)
             for proj, rows in raw_group.items()
         }
-    return summary, style_perf, top_filtered, raw_bottom, fallback_filtered, top_by_group
+    return (summary, style_perf, top_filtered, raw_bottom,
+            fallback_filtered, top_by_group, top_by_style)
 
 
 def _fetch_report_via_neon(*, platform, project, top, bottom):
@@ -604,6 +712,7 @@ def _fetch_report_via_neon(*, platform, project, top, bottom):
         style_perf = get_style_performance(conn, platform=platform)
         top_posts = get_top_posts(conn, project=project, platform=platform, limit=top)
         bottom_posts = get_bottom_posts(conn, project=project, platform=platform, limit=bottom)
+        top_by_style = get_top_post_per_style(conn, platform=platform)
         fallback_top = None
         if project and not top_posts:
             fallback_top = get_top_posts(conn, project=None, platform=platform, limit=top)
@@ -642,7 +751,8 @@ def _fetch_report_via_neon(*, platform, project, top, bottom):
                     params,
                 )
                 top_by_group[proj] = cur.fetchall()
-        return summary, style_perf, top_posts, bottom_posts, fallback_top, top_by_group
+        return (summary, style_perf, top_posts, bottom_posts,
+                fallback_top, top_by_group, top_by_style)
     finally:
         conn.close()
 
@@ -660,7 +770,8 @@ def main():
         fetch = _fetch_report_via_neon
     else:
         fetch = _fetch_report_via_api
-    summary, style_perf, top, bottom, fallback_top, top_by_group = fetch(
+    (summary, style_perf, top, bottom, fallback_top,
+     top_by_group, top_by_style) = fetch(
         platform=args.platform, project=args.project, top=args.top, bottom=args.bottom,
     )
 
@@ -670,13 +781,14 @@ def main():
             "top_posts": [list(row) for row in top],
             "bottom_posts": [list(row) for row in bottom],
             "fallback_top": [list(row) for row in fallback_top] if fallback_top else [],
+            "top_by_style": [list(row) for row in top_by_style],
         }
         print(json.dumps(output, indent=2, default=str))
     else:
         print(format_report(summary, top, bottom,
                             project=args.project, platform=args.platform,
                             top_by_group=top_by_group, fallback_top=fallback_top,
-                            style_perf=style_perf))
+                            style_perf=style_perf, top_by_style=top_by_style))
 
 
 if __name__ == "__main__":
