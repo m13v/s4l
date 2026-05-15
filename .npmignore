@@ -4,4 +4,7 @@ config.json
 logs/
 scripts/__pycache__/
 skill/logs/
+skill/logs-archive/
+skill/cache/
+skill/SKILL.md
 *.log
