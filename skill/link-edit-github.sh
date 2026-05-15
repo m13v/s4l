@@ -111,7 +111,7 @@ Process ALL of them. For each post:
     psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
 PROMPT_EOF
 
-gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "link-edit-github" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/no-agents-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: GitHub link-edit claude exited with code $?"
+gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "link-edit-github" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/no-agents-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: GitHub link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='github' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
