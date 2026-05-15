@@ -8134,7 +8134,7 @@ function renderResult(run) {
       '</span>';
     // Tooltip is grouped by cycle phase so the funnel reads chronologically.
     // String.fromCharCode(10) sidesteps the outer HTML backtick template
-    // that strips literal \n escapes (see feedback_server_js_template_regex).
+    // that strips literal backslash-n escapes (see feedback_server_js_template_regex).
     // CSS .sa-tooltip white-space:pre-line turns these into line breaks.
     const NL = String.fromCharCode(10);
     const tooltip =
