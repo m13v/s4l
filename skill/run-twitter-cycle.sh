@@ -235,8 +235,14 @@ _sa_emit_run_summary_oneshot() {
         # Inline reason-add: bash doesn't support `local` on function decls,
         # and a free-standing nested function would leak into the outer
         # scope, so we just expand the assignments at each call site.
-        if echo "$phase2b_log" | grep -qiE '"api_error_status":429|hit your limit|monthly usage limit'; then
-            failure_reasons="${failure_reasons:+$failure_reasons,}monthly_limit:1"
+        # Run the shared API-error classifier first — catches monthly_limit,
+        # stream_idle_timeout, api_overloaded, context_overflow, credit_balance,
+        # etc. uniformly so the dashboard pill reads with the actual error
+        # class instead of falling through to the generic phase2b_silent.
+        local classifier_reason
+        classifier_reason=$(echo "$phase2b_log" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
+        if [ -n "$classifier_reason" ]; then
+            failure_reasons="${failure_reasons:+$failure_reasons,}${classifier_reason}:1"
             failed_ct=$(( failed_ct + 1 ))
         fi
         if echo "$phase2b_log" | grep -qiE 'auth redirect|re-authenticat|browser profile.*auth|profile.*needs.*re-auth'; then
@@ -716,16 +722,17 @@ PY
 if [ "$EXTRACT_EXIT" -ne 0 ] || [ ! -f "$RAW_FILE" ]; then
     log "No tweets extracted in Phase 1. Aborting cycle."
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-    # Detect Anthropic usage-limit hits in the scan envelope so the dashboard
-    # surfaces "failed: monthly_limit" instead of a silent failed=1 row. The
-    # 429 marker comes from the JSON envelope ("api_error_status":429), the
-    # plain-text fallback covers Anthropic's ratelimit prose ("You've hit your
-    # limit"). Reason key is consistent with engage_reddit.py for unified
-    # rendering.
-    PHASE1_REASON="phase1_no_tweets"
-    if echo "$SCAN_OUTPUT" | grep -qiE '"api_error_status":429|"hit your limit"|usage limit'; then
-        PHASE1_REASON="monthly_limit"
-    fi
+    # Classify the Anthropic-side cause of the empty-tweet outcome so the
+    # dashboard surfaces the *actual* error (stream_idle_timeout,
+    # monthly_limit, api_overloaded, context_overflow, etc.) instead of
+    # collapsing every Claude failure to a generic phase1_no_tweets pill.
+    # Bit us on 2026-05-15 16:45 cycle: $10.77 burned to a "Stream idle
+    # timeout - partial response received" that read as a silent
+    # phase1_no_tweets in run_monitor.log. Falls back to phase1_no_tweets
+    # when Claude returned successfully but with zero usable tweets (the
+    # historical "Claude tried, found nothing relevant" case).
+    PHASE1_REASON=$(echo "$SCAN_OUTPUT" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
+    [ -z "$PHASE1_REASON" ] && PHASE1_REASON="phase1_no_tweets"
     python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 1 \
         --salvaged "${SALVAGED:-0}" \
         --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
@@ -1089,12 +1096,12 @@ if [ -f "$SKIP_FILE" ]; then
     rm -f "$SKIP_FILE"
 fi
 
-# Detect Anthropic monthly cap so the dashboard surfaces a reason rather than
-# a silent failure when prep returns no plan.
-PREP_REASON="prep_failed"
-if echo "$PREP_OUTPUT" | grep -qiE '"api_error_status":429|"hit your limit"|monthly usage limit'; then
-    PREP_REASON="monthly_limit"
-fi
+# Classify Anthropic-side error in the prep envelope so the dashboard
+# surfaces a specific reason (monthly_limit, stream_idle_timeout, api_overloaded,
+# context_overflow, etc.) rather than a silent failure when prep returns no
+# plan. Empty plan with NO classified API error falls through to the historical
+# "empty plan, no failure logged" branch below (salvage retries next cycle).
+PREP_REASON=$(echo "$PREP_OUTPUT" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
 
 PLAN_COUNT=0
 if [ "$PREP_PARSE_EXIT" -eq 0 ] && [ -f "$PLAN_FILE" ]; then
@@ -1113,11 +1120,16 @@ if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
     rm -f "$PLAN_FILE"
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-prep" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-    if [ "$PREP_REASON" = "monthly_limit" ]; then
+    # If the classifier identified a real Anthropic error (any non-empty reason
+    # key), log as failed=1 with that reason so the dashboard pill reads
+    # "failed: stream_idle_timeout" / "failed: monthly_limit" / etc. Otherwise
+    # keep the historical failed=0 behaviour for "empty plan, no API error"
+    # (salvage retries the candidates next cycle, nothing to surface).
+    if [ -n "$PREP_REASON" ]; then
         python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped "${CANDIDATE_COUNT:-0}" --failed 1 --salvaged "${SALVAGED:-0}" \
             --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
             --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
-            --failure-reasons "monthly_limit:1" --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
+            --failure-reasons "${PREP_REASON}:1" --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
     else
         python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped "${CANDIDATE_COUNT:-0}" --failed 0 --salvaged "${SALVAGED:-0}" \
             --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
