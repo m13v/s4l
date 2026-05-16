@@ -493,6 +493,18 @@ ENGAGED_TWEET_IDS=$(psql "$DATABASE_URL" -t -A -c "SELECT COALESCE(json_agg(DIST
 ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
 
+# --- Hook-notice block: only meaningful on the harness backend --------------
+# The PreToolUse hook ~/.claude/hooks/twitter-search-since-rewrite.py only
+# matches `mcp__twitter-harness__bh_run`, so on the agent backend nothing
+# gets rewritten and the notice would be misleading. Surface it only when
+# the rewrite actually applies. Single-quoted assignment because the body
+# contains literal backticks the model needs to see verbatim.
+HOOK_NOTICE=''
+if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
+    HOOK_NOTICE='HOOK NOTICE — date operators in your search queries are auto-rewritten by a PreToolUse hook on every `mcp__twitter-harness__bh_run` call to enforce a strict 6-hour freshness window. The hook does three things BEFORE your script executes: (a) every `since:YYYY-MM-DD` you write is rewritten to `since_time:<6h-ago-epoch>`, (b) every stale `since_time:<old-epoch>` is re-stamped to <6h-ago-epoch>, and (c) any search-query string containing `-filter:replies` but NO date operator gets `since_time:<6h-ago-epoch>` injected. This is INTENTIONAL — downstream scoring drops every tweet older than 6h, so older results are wasted budget. The rewrite is OUR pipeline, NOT X misbehavior. Do NOT try to work around it (closer dates, dropping the operator, URL-encoding to bypass, retrying with a different draft, or interpreting the smaller result set as a bug) — your queries WILL be filtered to the last 6 hours regardless. Accept the smaller fresh result set; if a query honestly returns 0, drop the min_faves floor per the zero-result rule below and re-run that one query.'
+    log "Hook notice block appended to scan prompt (harness backend; rewrite is active)"
+fi
+
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
 # where the scanner summarized instead of dumping the JSON array.
@@ -551,6 +563,8 @@ $SUPPLY_SIGNAL_JSON
 
 ALREADY-ENGAGED TWEET IDS — we have already posted a reply to each of these tweets within the last 48h, so they are dead candidates. Do NOT return any tweet whose status ID (the digits in \`/status/<ID>\`) appears in this list; skip it while scraping so it never reaches your \`tweets\` array. Returning one only wastes tokens — it is dropped downstream regardless.
 $ENGAGED_TWEET_IDS
+
+$HOOK_NOTICE
 
 Query guidelines:
 - MANDATORY: every query MUST end with the operator \`since_time:$(date -u -v-${FRESHNESS_HOURS}H +%s)\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate, reformat, or round it, just paste it verbatim into every single query. It restricts X to tweets posted in the last ${FRESHNESS_HOURS} hours, which is the cycle's freshness wall: tweets older than that are dropped at scoring and the whole search is wasted. Do NOT use the day-granular \`since:YYYY-MM-DD\` operator: it admits tweets up to ~45h old that the scorer then discards. Even if some past top-performing queries shown below still use \`since:\`, you MUST use \`since_time:\` instead; those examples predate this rule.
