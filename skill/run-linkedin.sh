@@ -103,9 +103,20 @@ _sa_emit_run_summary_oneshot() {
                 --since "${RUN_START_EPOCH:-0}" \
                 --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" \
                 2>/dev/null || echo "0.0000")
+    # Surface Anthropic-side cause (stream_idle_timeout, monthly_limit,
+    # api_overloaded, context_overflow, credit_balance) when failed>0 so
+    # the dashboard pill carries the actual error class instead of just
+    # showing a silent failed=1 row. Uses ${var:+...} conditional expansion
+    # rather than an empty bash array to avoid the `set -u` empty-array
+    # pitfall documented in CLAUDE.md (bash 3.2 trips on `"${empty[@]}"`).
+    local lk_reason=""
+    if [ "$failed" -gt 0 ] && [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ]; then
+        lk_reason=$(python3 "$REPO_DIR/scripts/classify_run_error.py" "$LOG_FILE" 2>/dev/null)
+    fi
     python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin \
         --posted "$posted" --skipped "$skipped" --failed "$failed" \
-        --cost "$cost" --elapsed "$elapsed" 2>/dev/null || true
+        --cost "$cost" --elapsed "$elapsed" \
+        ${lk_reason:+--failure-reasons "${lk_reason}:1"} 2>/dev/null || true
 }
 
 # Trap chain: lock.sh has already installed _sa_release_locks on
