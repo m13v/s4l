@@ -176,9 +176,25 @@ def update_candidate_posted(cid: int, post_id: int) -> None:
     if not DATABASE_URL:
         print("[post] DATABASE_URL not set; cannot mark candidate posted", flush=True)
         return
+    # Re-stamp batch_id to the executing cycle's BATCH_ID alongside the
+    # status='posted' flip. Belt-and-suspenders against peer-cycle Phase 0
+    # salvage races: salvage can rewrite our candidate's batch_id while we are
+    # mid-Phase-2b (observed 2026-05-15 with twcycle-20260515-171505's 6 posts
+    # mis-attributed to twcycle-20260515-180005 after the latter salvaged them
+    # while 171505 was queued behind 173005's 42-min Phase 1 lock-hold).
+    # When BATCH_ID env is unset (manual replays, ad-hoc runs), fall back to
+    # leaving batch_id alone so we never NULL-out a live attribution.
+    batch_id = (os.environ.get("BATCH_ID") or "").strip()
+    if batch_id:
+        set_clause = (
+            f"SET status='posted', posted_at=NOW(), post_id={int(post_id)}, "
+            f"batch_id='{batch_id}'"
+        )
+    else:
+        set_clause = f"SET status='posted', posted_at=NOW(), post_id={int(post_id)}"
     cmd = [
         "psql", DATABASE_URL, "-c",
-        f"UPDATE twitter_candidates SET status='posted', posted_at=NOW(), post_id={int(post_id)} WHERE id={int(cid)}",
+        f"UPDATE twitter_candidates {set_clause} WHERE id={int(cid)}",
     ]
     rc, out, err = run_subprocess(cmd, timeout_sec=30)
     if rc != 0:
