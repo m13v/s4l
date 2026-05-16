@@ -36,6 +36,13 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 
 BATCH_ID="twcycle-$(date +%Y%m%d-%H%M%S)"
+# Exported so twitter_post_plan.py (Phase 2b-post child process) can re-stamp
+# the executing cycle's batch_id onto candidates at post time. Without this
+# export, peer cycles' Phase 0 salvage can rewrite our candidates' batch_id
+# mid-flight (documented edge case 2026-05-15); the re-stamp at post time is
+# the structural fix so attribution always lands on the cycle that fired the
+# browser, regardless of salvage timing.
+export BATCH_ID
 # Export the same id as SA_CYCLE_ID so every Claude session spawned by this
 # cycle (via run_claude.sh -> log_claude_session.py) stamps its claude_sessions
 # row with cycle_id=$BATCH_ID. Enables exact per-cycle cost accounting via
