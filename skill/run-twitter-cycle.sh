@@ -480,6 +480,19 @@ SUPPLY_SIGNAL_JSON=$(python3 "$REPO_DIR/scripts/twitter_supply_signal.py" --wind
 SUPPLY_COUNT=$(echo "$SUPPLY_SIGNAL_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Per-project supply signal loaded: $SUPPLY_COUNT projects"
 
+# --- Recently-engaged tweet IDs: scanner skips tweets we already replied to -
+# The scanner re-searches stable hot topics every cycle, so the same fresh
+# tweets resurface. Once we've replied to one it's a dead candidate
+# (score_twitter_candidates.py dedups it downstream). Injecting the last 48h
+# of engaged status IDs into the scan prompt lets the model skip them while
+# scraping instead of spending tokens evaluating tweets it can't post to.
+# 48h is ample: the 6h freshness wall means any dup is necessarily a recent
+# reply. Scoring remains the backstop; this is purely a token cleanup.
+ENGAGED_TWEET_IDS=$(psql "$DATABASE_URL" -t -A -c "SELECT COALESCE(json_agg(DISTINCT sid), '[]'::json) FROM (SELECT (regexp_match(thread_url, '/status/([0-9]+)'))[1] AS sid FROM posts WHERE platform='twitter' AND thread_url IS NOT NULL AND posted_at > NOW() - INTERVAL '48 hours') t WHERE sid IS NOT NULL" 2>/dev/null || echo "[]")
+[ -z "$ENGAGED_TWEET_IDS" ] && ENGAGED_TWEET_IDS="[]"
+ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
+
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
 # where the scanner summarized instead of dumping the JSON array.
@@ -535,6 +548,9 @@ $DUD_QUERIES_JSON
 
 PER-PROJECT SUPPLY SIGNAL — for each project, the historical median tweets_found at each \`min_faves:N\` tier you've drafted for them in the last 14d. This REPLACES the old flat "broad=50 / narrow=20" rule. Pick the LOWEST min_faves tier where \`median_tweets_found\` >= 3 for the project you're drafting for; if every tier is below 3, drop one tier lower than the lowest you've tried. Niche audiences (med students, meditators) cluster at min_faves:5–15; tech audiences (devs, AI) cluster at min_faves:20–50. Trust this table over your priors:
 $SUPPLY_SIGNAL_JSON
+
+ALREADY-ENGAGED TWEET IDS — we have already posted a reply to each of these tweets within the last 48h, so they are dead candidates. Do NOT return any tweet whose status ID (the digits in \`/status/<ID>\`) appears in this list; skip it while scraping so it never reaches your \`tweets\` array. Returning one only wastes tokens — it is dropped downstream regardless.
+$ENGAGED_TWEET_IDS
 
 Query guidelines:
 - MANDATORY: every query MUST end with the operator \`since_time:$(date -u -v-${FRESHNESS_HOURS}H +%s)\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate, reformat, or round it, just paste it verbatim into every single query. It restricts X to tweets posted in the last ${FRESHNESS_HOURS} hours, which is the cycle's freshness wall: tweets older than that are dropped at scoring and the whole search is wasted. Do NOT use the day-granular \`since:YYYY-MM-DD\` operator: it admits tweets up to ~45h old that the scorer then discards. Even if some past top-performing queries shown below still use \`since:\`, you MUST use \`since_time:\` instead; those examples predate this rule.
