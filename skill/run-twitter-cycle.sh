@@ -514,6 +514,147 @@ if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
     log "Hook notice block appended to scan prompt (harness backend; rewrite is active)"
 fi
 
+# --- Anti-debug rule (always on, both backends) -----------------------------
+# Phase 1 is a STRAIGHT-LINE scrape, not an exploration. The 17:15 cycle on
+# 2026-05-15 ran 42 minutes with num_turns=37 because Claude saw a 0-result
+# query, assumed X was misbehaving, and spent 30 minutes reverse-engineering
+# our own since: hook + X's scroll virtualization. That's all wasted budget:
+# the hook is documented (see HOOK_NOTICE), scroll behavior doesn't matter
+# (the scrape only reads the initial viewport's 8 tweets), and a 0-result
+# query honestly means there is no fresh supply. Encode "stop debugging,
+# finish the job" as an explicit rule the model can quote back to itself.
+ANTI_DEBUG_RULE='ANTI-DEBUG RULE — Phase 1 is a STRAIGHT-LINE scrape with a HARD 15-minute total budget. You have AT MOST 2 bh_run calls per project (1 for the search, 1 only if the first crashed with a Python error — NOT for retries on empty results). You MUST NOT: investigate X search-operator behavior even if results look surprising; investigate why your `since:` operators got rewritten (see HOOK NOTICE above); try alternate URL forms (top vs latest, with/without -filter:replies, &src= variants, etc.); scroll the page, click anything, or take screenshots to "verify" state; "improve" or rewrite the bh_run script body; re-try a query that returned 0 tweets. If your bh_run returns an empty list, that means no fresh supply exists in the 6h window — that is the CORRECT, EXPECTED outcome for thin queries. Log `tweets_found:0` in queries_used and move on to the next project. Finishing all projects in 8 minutes with several 0-result entries is the SUCCESS state. Spending 30 minutes "debugging" one project is a FAILURE — empty results are the diagnostic, not a bug to fix.'
+
+# --- Backend-aware Step 2 block ---------------------------------------------
+# Give Claude the LITERAL script to run for its backend, not a Playwright
+# template + a translation table. The mental-translation step costs turns and
+# invites detours: every cycle the model has to re-derive the bh_run idiom
+# (new_tab vs goto_url, js() triple-quote, tab hygiene) from the translation
+# table. Hardcoding the script per-backend collapses that to zero turns of
+# decision-making.
+if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
+    # `read -r -d ''` rather than `$(cat <<EOF)` because macOS bash 3.2 has a
+    # parsing bug: inside `$(...)` it tries to balance parens/quotes in the
+    # heredoc body, even with a single-quoted delimiter. The JS arrow-function
+    # syntax `(() => {...})()` and apostrophes in prose body would trigger
+    # spurious "unexpected EOF" errors. `read -d ''` reads the heredoc directly
+    # into the variable with no command substitution, sidestepping the bug.
+    # `|| true` because read returns 1 when it hits EOF without the delimiter.
+    IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
+## Step 2: Search and extract — RUN THIS EXACT SCRIPT, NO IMPROVEMENTS
+
+For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the value of the `query` variable; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
+
+```python
+import json, urllib.parse, time
+query = "YOUR DRAFTED QUERY HERE WITH OPERATORS"
+url = "https://x.com/search?q=" + urllib.parse.quote(query) + "&f=live"
+goto_url(url)  # FIRST call of the cycle only: replace with new_tab(url)
+wait_for_load()
+time.sleep(4)
+tweets = js("""
+(() => {
+  const results = [];
+  for (const article of [...document.querySelectorAll('article[data-testid="tweet"]')].slice(0, 8)) {
+    try {
+      let handle = '';
+      for (const link of article.querySelectorAll('a[role="link"]')) {
+        const href = link.getAttribute('href');
+        if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/search') && href.length > 1 && href.split('/').length === 2) {
+          handle = href.replace('/', ''); break;
+        }
+      }
+      const tweetText = article.querySelector('[data-testid="tweetText"]');
+      const text = tweetText ? tweetText.textContent : '';
+      const timeEl = article.querySelector('time');
+      const timeParent = timeEl ? timeEl.closest('a') : null;
+      const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
+      const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
+      let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
+      for (const btn of article.querySelectorAll('[role="group"] button')) {
+        const al = btn.getAttribute('aria-label') || '';
+        let m;
+        if (m=al.match(/([\d,]+)\s*repl/i)) replies=parseInt(m[1].replace(/,/g,''));
+        if (m=al.match(/([\d,]+)\s*repost/i)) retweets=parseInt(m[1].replace(/,/g,''));
+        if (m=al.match(/([\d,]+)\s*like/i)) likes=parseInt(m[1].replace(/,/g,''));
+        if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
+        if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
+      }
+      results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
+    } catch(e) {}
+  }
+  return results;
+})()
+""")
+print(json.dumps(tweets))
+```
+
+Output rules:
+1. The print() emits a JSON array of tweet objects. Tag each tweet with `search_topic` (the exact query string you searched, without URL encoding) and `matched_project` (the project name whose query found it) when you assemble the structured `tweets` field.
+2. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`). Emit zero-result entries — they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings.
+3. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
+HARNESS_STEP2_EOF
+else
+    IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'AGENT_STEP2_EOF' || true
+## Step 2: Search and extract
+
+For EACH project's query you drafted:
+1. Navigate to: https://x.com/search?q={your_query} -filter:replies&f=live
+   Use mcp__twitter-agent__browser_navigate
+2. Wait 4 seconds, then run this JavaScript via mcp__twitter-agent__browser_run_code to extract tweets:
+
+async (page) => {
+  await page.waitForTimeout(3000);
+  const tweets = await page.evaluate(() => {
+    const results = [];
+    for (const article of [...document.querySelectorAll('article[data-testid="tweet"]')].slice(0, 8)) {
+      try {
+        let handle = '';
+        for (const link of article.querySelectorAll('a[role="link"]')) {
+          const href = link.getAttribute('href');
+          if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/search') && href.length > 1 && href.split('/').length === 2) {
+            handle = href.replace('/', ''); break;
+          }
+        }
+        const tweetText = article.querySelector('[data-testid="tweetText"]');
+        const text = tweetText ? tweetText.textContent : '';
+        const timeEl = article.querySelector('time');
+        const timeParent = timeEl ? timeEl.closest('a') : null;
+        const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
+        const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
+        let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
+        for (const btn of article.querySelectorAll('[role="group"] button')) {
+          const al = btn.getAttribute('aria-label') || '';
+          let m;
+          if (m=al.match(/([\d,]+)\s*repl/i)) replies=parseInt(m[1].replace(/,/g,''));
+          if (m=al.match(/([\d,]+)\s*repost/i)) retweets=parseInt(m[1].replace(/,/g,''));
+          if (m=al.match(/([\d,]+)\s*like/i)) likes=parseInt(m[1].replace(/,/g,''));
+          if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
+          if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
+        }
+        results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
+      } catch(e) {}
+    }
+    return results;
+  });
+  return JSON.stringify(tweets);
+}
+
+3. After scanning all projects, return EVERY extracted tweet via the structured 'tweets' field. Each tweet object MUST include 'search_topic' (the query that found it) and 'matched_project' (the project name whose query found it).
+
+4. ALSO return the structured 'queries_used' array with ONE entry per project (length must equal the number of projects), each with:
+   - 'query': the exact final query string you searched on x.com (without the leading 'q=' or url-encoding)
+   - 'project': the project name
+   - 'tweets_found': integer count of tweets you extracted for that query (0 if X showed 'No results' or the page was empty)
+   This list is logged to twitter_search_attempts so future cycles can avoid redrafting dead phrasings. Emit it even when tweets_found is 0 — the zero rows are the whole point of this list.
+
+CRITICAL RULES:
+- Use ONLY mcp__twitter-agent__* tools for scraping
+- Do NOT post, reply, like, or interact with any tweet
+- Do NOT generate any reply content
+AGENT_STEP2_EOF
+fi
+
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
 # where the scanner summarized instead of dumping the JSON array.
@@ -575,6 +716,8 @@ $ENGAGED_TWEET_IDS
 
 $HOOK_NOTICE
 
+$ANTI_DEBUG_RULE
+
 Query guidelines:
 - MANDATORY: every query MUST end with the operator \`since_time:$(date -u -v-${FRESHNESS_HOURS}H +%s)\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate, reformat, or round it, just paste it verbatim into every single query. It restricts X to tweets posted in the last ${FRESHNESS_HOURS} hours, which is the cycle's freshness wall: tweets older than that are dropped at scoring and the whole search is wasted. Do NOT use the day-granular \`since:YYYY-MM-DD\` operator: it admits tweets up to ~45h old that the scorer then discards. Even if some past top-performing queries shown below still use \`since:\`, you MUST use \`since_time:\` instead; those examples predate this rule.
 - MANDATORY EVEN IF YOUR QUERY KEYWORDS DO NOT NAME THE EXCLUDED TOPIC. If a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EVERY listed term to that project's query, verbatim, with NO EXCEPTIONS. The exclusion is project-wide and persistent — it is a safety rail against ALL future false positives for that project, not a query-keyword-conditional rule. Do NOT reason "my search keywords are about meditation/local AI/vibe coding so the cricket/crypto/Bolt excludes are unnecessary" — that reasoning defeats the rail. The terms passed the >=2-batch activation gate; they have ALREADY survived a one-off filter. Your job here is purely mechanical concatenation, not editorial judgment. Concrete examples of what MUST happen: if Vipassana has \`excludes_for_search: ["cricket","ipl","kohli","lsg","pant","csk","inglis","suvendu","tmc","bjp"]\`, your Vipassana query MUST end with \` -cricket -ipl -kohli -lsg -pant -csk -inglis -suvendu -tmc -bjp\` even when the query searches for "meditation" or "vipassana" with no mention of Goenka. If fazm has \`excludes_for_search: ["memecoin","okx","onchain"]\`, every fazm query gets \` -memecoin -okx -onchain\` appended whether searching "local AI", "RPA", or anything else. If mk0r has \`excludes_for_search: ["usain"]\`, every mk0r query gets \` -usain\`. Skipping these in any query is a bug.
@@ -584,64 +727,7 @@ Query guidelines:
 - Mix it up each run, don't always use the same query for the same project
 - Use the projects' search_topics/description as grounding (search_topics is a shared concept seed list across platforms — some phrases are tuned for Reddit or GitHub, so rephrase into natural Twitter search terms with hashtag-adjacent vernacular)
 
-## Step 2: Search and extract
-
-For EACH project's query you drafted:
-1. Navigate to: https://x.com/search?q={your_query} -filter:replies&f=live
-   Use mcp__twitter-agent__browser_navigate
-2. Wait 4 seconds, then run this JavaScript via mcp__twitter-agent__browser_run_code to extract tweets:
-
-async (page) => {
-  await page.waitForTimeout(3000);
-  const tweets = await page.evaluate(() => {
-    const results = [];
-    for (const article of [...document.querySelectorAll('article[data-testid=\"tweet\"]')].slice(0, 8)) {
-      try {
-        let handle = '';
-        for (const link of article.querySelectorAll('a[role=\"link\"]')) {
-          const href = link.getAttribute('href');
-          if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/search') && href.length > 1 && href.split('/').length === 2) {
-            handle = href.replace('/', ''); break;
-          }
-        }
-        const tweetText = article.querySelector('[data-testid=\"tweetText\"]');
-        const text = tweetText ? tweetText.textContent : '';
-        const timeEl = article.querySelector('time');
-        const timeParent = timeEl ? timeEl.closest('a') : null;
-        const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
-        const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
-        let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
-        for (const btn of article.querySelectorAll('[role=\"group\"] button')) {
-          const al = btn.getAttribute('aria-label') || '';
-          let m;
-          if (m=al.match(/([\d,]+)\s*repl/i)) replies=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*repost/i)) retweets=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*like/i)) likes=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
-        }
-        results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
-      } catch(e) {}
-    }
-    return results;
-  });
-  return JSON.stringify(tweets);
-}
-
-3. After scanning all projects, return EVERY extracted tweet via the structured 'tweets' field. Each tweet object MUST include 'search_topic' (the query that found it) and 'matched_project' (the project name whose query found it).
-
-4. ALSO return the structured 'queries_used' array with ONE entry per project (length must equal the number of projects), each with:
-   - 'query': the exact final query string you searched on x.com (without the leading 'q=' or url-encoding)
-   - 'project': the project name
-   - 'tweets_found': integer count of tweets you extracted for that query (0 if X showed 'No results' or the page was empty)
-   This list is logged to twitter_search_attempts so future cycles can avoid redrafting dead phrasings. Emit it even when tweets_found is 0 — the zero rows are the whole point of this list.
-
-CRITICAL RULES:
-- Use ONLY mcp__twitter-agent__* tools for scraping
-- Do NOT post, reply, like, or interact with any tweet
-- Do NOT generate any reply content
-- If a search fails or times out, skip it and continue to the next (still emit a queries_used entry with tweets_found:0 for that project)
-- If a query returns 0 tweets, re-run it once with min_faves dropped one tier lower (or removed entirely) before recording tweets_found:0." 2>&1)
+$STEP2_INSTRUCTIONS" 2>&1)
 
 # Dump the captured envelope to the cycle log for offline inspection.
 echo "$SCAN_OUTPUT" >> "$LOG_FILE"
