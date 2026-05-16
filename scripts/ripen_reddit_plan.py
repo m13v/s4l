@@ -363,30 +363,21 @@ def main():
             "floor": args.floor,
             "w_comments": args.w_comments,
         }
-        if composite >= args.floor:
-            survivors.append(d)
-            # Persist T0/T1/delta for the survivor; do NOT bump attempt_count
-            # — passing the floor isn't an "attempt" against the post budget.
-            _db_update_ripen_metrics(url, t0r["score"], t0r["comments"],
-                                     t1r["score"], t1r["comments"],
-                                     composite, bump_attempt=False)
-            print(f"[ripen] PASS composite={composite:.1f} (Δup={d_up}, Δcomm={d_co}) "
-                  f"{url}", file=sys.stderr)
-        else:
-            drops.append({
-                "url": url,
-                "reason": f"composite={composite:.1f} < floor={args.floor}",
-                "delta_up": d_up,
-                "delta_comments": d_co,
-            })
-            # Floor miss counts against the candidate's attempt budget so a
-            # chronically-flat thread eventually drops out of the salvage
-            # rotation. Phase 0's MAX_ATTEMPTS=3 ceiling auto-promotes it.
-            _db_update_ripen_metrics(url, t0r["score"], t0r["comments"],
-                                     t1r["score"], t1r["comments"],
-                                     composite, bump_attempt=True)
-            print(f"[ripen] DROP composite={composite:.1f} (Δup={d_up}, Δcomm={d_co}) "
-                  f"{url}", file=sys.stderr)
+        # 2026-05-15: floor filter removed by user instruction. ALL decisions
+        # with successful T0+T1 measurements flow through to the LLM. The model
+        # already sees per-candidate Δup / Δcomm / composite via
+        # post_reddit.py:build_draft_prompt and can weigh engagement velocity
+        # against topical fit itself. No bump_attempt on low composite — letting
+        # the model judge avoids killing slow-but-on-theme threads that need a
+        # comment to gain traction. Survivors are sorted by composite DESC below
+        # so the highest-momentum threads land at the top of the prompt.
+        survivors.append(d)
+        _db_update_ripen_metrics(url, t0r["score"], t0r["comments"],
+                                 t1r["score"], t1r["comments"],
+                                 composite, bump_attempt=False)
+        verdict = "PASS" if composite >= args.floor else "PASS_LOW"
+        print(f"[ripen] {verdict} composite={composite:.1f} (Δup={d_up}, Δcomm={d_co}) "
+              f"{url}", file=sys.stderr)
 
     # 2026-05-10: top-k cap removed. The cap was disabled (--top-k 0) since
     # 2026-05-08 because trimming survivors before the LLM relevance gate threw
@@ -429,6 +420,14 @@ def main():
             clean_survivors.append(d)
         survivors = clean_survivors
 
+    # 2026-05-15: sort by composite DESC so the LLM sees highest-momentum
+    # threads first in the prompt. The prompt itself surfaces composite per
+    # candidate (post_reddit.py:build_draft_prompt), but ordering also matters
+    # when the model works top-down or hits a token budget.
+    survivors.sort(
+        key=lambda d: (d.get("ripen") or {}).get("composite", 0.0),
+        reverse=True,
+    )
     plan["decisions"] = survivors
     plan["ripen_summary"] = {
         "input_count": len(decisions),
