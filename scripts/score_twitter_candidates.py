@@ -20,11 +20,46 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+
+
+# Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
+# low bits (sequence counter + worker/datacenter ID = bottom 22 bits ≈ bottom
+# 7 decimal digits). An ID ending in 6+ zeros is statistically impossible
+# unless the sequence counter, worker ID, and datacenter ID were all exactly 0
+# at submission AND the timestamp aligned with a power-of-two ms boundary —
+# combined probability ≈ 0. Observed 2026-05-16 (batch twcycle-20260516-080005):
+# the harness scan model fabricates IDs by templating a high-digit prefix and
+# zero-padding, e.g. 2055588000000000000, 2055590000000000000 (sequential by 1).
+# fxtwitter rejects these at T1 ("truncated/invalid status ID and loads no
+# tweet"). Drop them at score time so we don't burn draft tokens or candidate
+# rows on phantom URLs.
+_SNOWFLAKE_OK = re.compile(r"/status/(\d{15,19})(?:[/?#]|$)")
+_TRAILING_ZEROS_FAKE = re.compile(r"0{6,}$")
+
+
+def looks_like_fabricated_tweet_url(url: str) -> bool:
+    """True if the URL's snowflake suffix is the model's fabrication signature.
+
+    Returns True for:
+      - URLs without a parseable /status/<digits> segment
+      - URLs whose snowflake ID is outside the plausible 15-19 digit range
+      - URLs whose snowflake ID ends in 6 or more zeros (template signature)
+    """
+    if not url:
+        return True
+    m = _SNOWFLAKE_OK.search(url)
+    if not m:
+        return True
+    sid = m.group(1)
+    if _TRAILING_ZEROS_FAKE.search(sid):
+        return True
+    return False
 
 
 def calculate_virality_score(tweet):
@@ -133,10 +168,20 @@ def upsert_candidates(tweets, config, batch_id=None):
         posted.add(row[0])
 
     inserted = updated = skipped = 0
+    skipped_fake_id = 0
 
     for tweet in tweets:
         url = (tweet.get("tweet_url") or tweet.get("tweetUrl") or "").strip()
         if not url:
+            continue
+
+        # Reject hallucinated snowflake IDs (see looks_like_fabricated_tweet_url
+        # docstring). Counted separately so the failure mode is visible in the
+        # pipeline log; rolled into `skipped` total for backwards-compat metrics.
+        if looks_like_fabricated_tweet_url(url):
+            skipped += 1
+            skipped_fake_id += 1
+            print(f"  Drop fabricated snowflake: {url}", file=sys.stderr)
             continue
 
         # Skip if we already posted on this thread
@@ -273,7 +318,7 @@ def upsert_candidates(tweets, config, batch_id=None):
     # add DELETE-by-age back here, regardless of retention window.
     conn.close()
 
-    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or too old)")
+    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted, too old, or fabricated ID: {skipped_fake_id})")
     return inserted
 
 
