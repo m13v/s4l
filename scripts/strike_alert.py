@@ -34,6 +34,7 @@ stats refresh.
 import argparse
 import base64
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -68,6 +69,45 @@ def _gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+_REPO_STATE_CACHE = {}
+
+
+def _github_repo_state(thread_url):
+    """Return 'repo_gone' when the parent repo 404s, 'live' when it 200s,
+    'unknown' on any other condition (network error, non-github URL, etc.).
+
+    Distinguishes a moderation strike (our comment was hidden/deleted on a
+    live repo) from a non-strike (the whole repo was nuked by the owner,
+    which is not adversarial behavior). Result is cached per-process so
+    sweep runs don't repeat the same gh api call per post."""
+    if not thread_url:
+        return "unknown"
+    parts = urlparse(thread_url).path.strip("/").split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return "unknown"
+    owner, repo = parts[0], parts[1]
+    key = f"{owner}/{repo}".lower()
+    if key in _REPO_STATE_CACHE:
+        return _REPO_STATE_CACHE[key]
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        _REPO_STATE_CACHE[key] = "unknown"
+        return "unknown"
+    if proc.returncode == 0:
+        _REPO_STATE_CACHE[key] = "live"
+    else:
+        err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+        if "not found" in err or "http 404" in err:
+            _REPO_STATE_CACHE[key] = "repo_gone"
+        else:
+            _REPO_STATE_CACHE[key] = "unknown"
+    return _REPO_STATE_CACHE[key]
+
+
 def _owner_strike_count(db, owner, days=90):
     """How many of our posts under this owner have been moderated in the
     last `days` days. Mirrors github_tools._dynamic_owner_blocklist so the
@@ -87,17 +127,21 @@ def _owner_strike_count(db, owner, days=90):
     return int(row[0] or 0) if row else 0
 
 
-def _format_subject(post):
+def _format_subject(post, repo_state=None):
     platform = post["platform"] or "?"
     status = post["status"] or "?"
+    if platform == "github" and repo_state == "repo_gone":
+        # Owner nuked the whole repo. Not a moderation strike against us.
+        status = "repo-deleted"
     project = post["project_name"] or "(no project)"
     title = (post["thread_title"] or "")[:60]
+    tag = "STRIKE-REPOGONE" if status == "repo-deleted" else "STRIKE"
     return _scrub_dashes(
-        f"[STRIKE #{post['id']}] {platform} {status}: {project} / {title}"
+        f"[{tag} #{post['id']}] {platform} {status}: {project} / {title}"
     )
 
 
-def _format_body(db, post):
+def _format_body(db, post, repo_state=None):
     platform = post["platform"] or "?"
     status = post["status"] or "?"
     project = post["project_name"] or "(no project)"
@@ -115,7 +159,16 @@ def _format_body(db, post):
     detect_count = post["deletion_detect_count"] or 0
 
     owner_block = ""
+    repo_block = ""
     if platform == "github" and thread_url:
+        if repo_state == "repo_gone":
+            repo_block = (
+                "Repo state: GONE (parent repo returns 404). "
+                "Owner nuked the whole repo, this is not a moderation strike "
+                "against our comment specifically.\n"
+            )
+        elif repo_state == "live":
+            repo_block = "Repo state: live (only our comment is gone, true strike).\n"
         parts = urlparse(thread_url).path.strip("/").split("/")
         owner = parts[0] if parts else None
         if owner:
@@ -136,6 +189,7 @@ def _format_body(db, post):
         f"Style:    {style}\n"
         f"Posted:   {posted_at}\n"
         f"Detected: {checked_at}\n"
+        f"{repo_block}"
         f"{owner_block}"
         f"\n"
         f"Thread:  {thread_url}\n"
@@ -229,8 +283,16 @@ def main():
         if args.post_id is None and r["strike_email_sent_at"] is not None:
             skipped += 1
             continue
-        subject = _format_subject(r)
-        body = _format_body(db, r)
+        repo_state = None
+        if r["platform"] == "github":
+            repo_state = _github_repo_state(r["thread_url"])
+            print(
+                f"[strike_alert] id={r['id']} platform=github "
+                f"repo_state={repo_state} thread={r['thread_url']}",
+                flush=True,
+            )
+        subject = _format_subject(r, repo_state=repo_state)
+        body = _format_body(db, r, repo_state=repo_state)
         if args.dry_run:
             print(f"[strike_alert] DRY RUN id={r['id']}")
             print(f"  subject: {subject}")
