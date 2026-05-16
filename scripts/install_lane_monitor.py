@@ -29,7 +29,7 @@ FAIL = "\033[31m✗\033[0m"
 status = 0
 
 print("=" * 64)
-HTTP_LANE_PLATFORMS = {"github", "reddit"}
+HTTP_LANE_PLATFORMS = {"github", "reddit", "x", "linkedin", "moltbook"}
 print(f"INSTALL LANE CANARY (HTTP: {', '.join(sorted(HTTP_LANE_PLATFORMS))} / others SQL)")
 print("=" * 64)
 
