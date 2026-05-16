@@ -114,6 +114,21 @@ if [ -n "$SUMMARY_LINE" ]; then
   : "${ENG_POSTED:=0}" "${ENG_SKIPPED:=0}" "${ENG_FAILED:=0}" "${ENG_COST:=0.0000}"
 fi
 
+# Rescue Anthropic-side failures the python-side classifier didn't catch.
+# When engage_reddit.py died mid-run (stream idle timeout, monthly cap hit,
+# context overflow), SUMMARY_LINE may be missing OR present-with-empty-reasons.
+# Either way, scan the log for a real cause before falling back to a silent
+# row on the dashboard.
+if [ -z "$ENG_FAILURE_REASONS" ] && [ -f "$LOG_FILE" ]; then
+  API_REASON=$(python3 "$REPO_DIR/scripts/classify_run_error.py" "$LOG_FILE" 2>/dev/null)
+  if [ -n "$API_REASON" ]; then
+    ENG_FAILURE_REASONS="${API_REASON}:1"
+    # Bump failed count by 1 if the classifier found something but the python
+    # side reported zero failures (i.e. the process died before it could log).
+    [ "$ENG_FAILED" = "0" ] && ENG_FAILED=1
+  fi
+fi
+
 LOG_RUN_ARGS=(--script "engage_reddit" --posted "$ENG_POSTED" --skipped "$ENG_SKIPPED" --failed "$ENG_FAILED" --cost "$ENG_COST" --elapsed "$ENG_ELAPSED")
 [ -n "$SCAN_ARG" ] && LOG_RUN_ARGS+=(--scan "$SCAN_ARG")
 [ -n "$ENG_FAILURE_REASONS" ] && LOG_RUN_ARGS+=(--failure-reasons "$ENG_FAILURE_REASONS")
