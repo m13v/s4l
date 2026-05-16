@@ -25,7 +25,11 @@ db = get_conn()
 # install_lane_monitor.py::HTTP_LANE_PLATFORMS. Adding a platform here
 # silences the "unexpected install_id rows on SQL-lane platform" WARN
 # and instead enforces an attribution-coverage check.
-HTTP_LANE_PLATFORMS = {"github", "reddit"}
+#
+# As of 2026-05-12 reply_db.py routes every status flip through PATCH
+# /api/v1/replies/{id} carrying X-Installation, so every engage pipeline
+# (github, reddit, x, linkedin, moltbook) is HTTP-lane. SQL-lane is empty.
+HTTP_LANE_PLATFORMS = {"github", "reddit", "x", "linkedin", "moltbook"}
 
 severity = "OK"
 
