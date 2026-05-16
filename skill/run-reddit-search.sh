@@ -148,6 +148,19 @@ _sa_emit_run_summary_oneshot() {
                         --scripts "post_reddit" 2>/dev/null || echo "0.0000")
         fi
     fi
+    # Rescue Anthropic-side failures the per-phase add_reason cascade didn't
+    # catch (stream_idle_timeout, monthly_limit, api_overloaded,
+    # context_overflow, credit_balance, generic api_error). Scans the cycle
+    # log only when TOTAL_FAILED>0 AND FAILURE_REASONS is still empty — so
+    # the historical per-phase keys (reddit_locked, account_blocked, etc.)
+    # stay authoritative when they fired, and the classifier fills in the
+    # gap when Claude died before any phase emitted a reason.
+    if [ "${TOTAL_FAILED:-0}" -gt 0 ] && [ -z "${FAILURE_REASONS:-}" ] \
+        && [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ]; then
+        local api_reason
+        api_reason=$(python3 "$REPO_DIR/scripts/classify_run_error.py" "$LOG_FILE" 2>/dev/null)
+        [ -n "$api_reason" ] && FAILURE_REASONS="${api_reason}:1"
+    fi
     local args
     args=(--script "post_reddit" \
           --posted "${TOTAL_POSTED:-0}" \
