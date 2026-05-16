@@ -356,12 +356,35 @@ def main():
 
     sent = 0
     skipped = 0
+    filtered = 0
     failed = 0
     for r in rows:
         # When --post-id is used, allow re-fire even if already sent.
         if args.post_id is None and r["strike_email_sent_at"] is not None:
             skipped += 1
             continue
+
+        # Defense-in-depth mention-stub guard. _select_pending already
+        # has a WHERE clause that filters these out; this is a second
+        # layer in case anyone (Gemini, a future agent, a manual SQL
+        # tweak) drops the WHERE clause without touching this loop.
+        # Twitter mention scanner inserts placeholder rows with this
+        # exact string when someone tags us in a tweet; if fxtwitter
+        # later 404s that tweet (spammer banned), update_stats flips
+        # the stub to status='deleted'. Not a moderation strike against
+        # us. See post #25869 (okoroei3 spam, 2026-05-15) for the
+        # canonical false-positive.
+        if args.post_id is None and (r["our_content"] or "").strip() == "(mention - no original post)":
+            if not args.dry_run:
+                _mark_sent(db, r["id"])
+            filtered += 1
+            print(
+                f"[strike_alert] filtered id={r['id']} reason=mention-stub "
+                f"(marked sent, no email)",
+                flush=True,
+            )
+            continue
+
         repo_state = None
         if r["platform"] == "github":
             repo_state = _github_repo_state(r["thread_url"])
@@ -370,6 +393,28 @@ def main():
                 f"repo_state={repo_state} thread={r['thread_url']}",
                 flush=True,
             )
+
+        # GitHub collateral damage: when the parent repo 404s, or when
+        # the issues/discussions feature is disabled on a live repo, the
+        # comment vanished as part of a structural change, not a
+        # moderation action against us. Don't email; mark sent so the
+        # row drops out of the pending queue and stops being evaluated
+        # every hour by the cron. The row is retained in the table for
+        # archaeology and the dashboard still shows status='deleted'.
+        # See the May 15 audit (15 of 27 strikes were REPOGONE) for the
+        # canonical false-positive batch.
+        if args.post_id is None and repo_state in ("repo_gone", "feature_disabled"):
+            if not args.dry_run:
+                _mark_sent(db, r["id"])
+            filtered += 1
+            reason = "repo-gone" if repo_state == "repo_gone" else "feature-disabled"
+            print(
+                f"[strike_alert] filtered id={r['id']} reason={reason} "
+                f"(marked sent, no email)",
+                flush=True,
+            )
+            continue
+
         subject = _format_subject(r, repo_state=repo_state)
         body = _format_body(db, r, repo_state=repo_state)
         if args.dry_run:
@@ -389,7 +434,10 @@ def main():
             failed += 1
             print(f"[strike_alert] FAILED id={r['id']}: {e}", file=sys.stderr)
 
-    print(f"[strike_alert] sent={sent} skipped={skipped} failed={failed}")
+    print(
+        f"[strike_alert] sent={sent} skipped={skipped} "
+        f"filtered={filtered} failed={failed}"
+    )
     if failed:
         sys.exit(1)
 
