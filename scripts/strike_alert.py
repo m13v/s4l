@@ -247,12 +247,22 @@ def _select_pending(db, post_id=None, limit=None):
             [post_id],
         )
         return cur.fetchall()
+    # Skip mention-stub rows. These are placeholder rows the Twitter mention
+    # scanner (scan_twitter_mentions_browser.py) inserts when someone tags us
+    # in a tweet. our_content == '(mention - no original post)' and our_url
+    # equals the OTHER user's tweet URL, so when fxtwitter 404s that URL
+    # (spammer's tweet/account got taken down), update_stats flips the stub
+    # to status='deleted'. That is not a moderation strike against US, just
+    # Twitter cleaning up someone else's spam. Filtering them out here so the
+    # alert email stays high-signal. See post #25869 (okoroei3 spam mention,
+    # 2026-05-15) for the canonical false-positive case.
     sql = (
         "SELECT id, platform, status, project_name, our_account, posted_at, "
         "  status_checked_at, thread_url, our_url, thread_title, our_content, "
         "  engagement_style, deletion_detect_count, strike_email_sent_at "
         "FROM posts "
         "WHERE status IN ('deleted','removed') AND strike_email_sent_at IS NULL "
+        "  AND COALESCE(our_content, '') <> '(mention - no original post)' "
         "ORDER BY COALESCE(status_checked_at, posted_at) DESC"
     )
     if limit:
