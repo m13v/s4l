@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
@@ -43,11 +44,69 @@ DYNAMIC_BLOCK_THRESHOLD = 2
 DYNAMIC_BLOCK_WINDOW_DAYS = 90
 
 
+_REPO_GONE_CACHE_PATH = os.path.expanduser(
+    "~/social-autoposter/skill/cache/github_repo_state.json"
+)
+_REPO_GONE_TTL_SEC = 24 * 3600  # 24h is plenty: a deleted repo stays deleted
+
+
+def _load_repo_gone_cache():
+    try:
+        with open(_REPO_GONE_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_repo_gone_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(_REPO_GONE_CACHE_PATH), exist_ok=True)
+        with open(_REPO_GONE_CACHE_PATH, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
+def _repo_is_gone(owner, repo, _mem={}, _disk={"loaded": False, "data": {}}):
+    """Returns True iff the parent repo 404s. Two-tier cache:
+    in-process dict + 24h on-disk JSON. Disk cache keeps blocklist latency
+    flat across the many short-lived gh-search invocations in a sweep."""
+    key = f"{owner}/{repo}".lower()
+    if key in _mem:
+        return _mem[key]
+    if not _disk["loaded"]:
+        _disk["data"] = _load_repo_gone_cache()
+        _disk["loaded"] = True
+    entry = _disk["data"].get(key)
+    now = int(time.time())
+    if entry and (now - int(entry.get("checked_at", 0))) < _REPO_GONE_TTL_SEC:
+        _mem[key] = bool(entry.get("gone"))
+        return _mem[key]
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        _mem[key] = False
+        return False
+    if proc.returncode == 0:
+        gone = False
+    else:
+        err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+        gone = ("not found" in err or "http 404" in err)
+    _mem[key] = gone
+    _disk["data"][key] = {"gone": gone, "checked_at": now}
+    _save_repo_gone_cache(_disk["data"])
+    return gone
+
+
 def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
                               days=DYNAMIC_BLOCK_WINDOW_DAYS):
     """Return lowercased owner names with >=threshold moderated posts in the
-    last `days` days. Caller unions with static config exclusions before
-    filtering candidates."""
+    last `days` days. Posts whose entire parent repo is now 404 are excluded
+    from the count (owner restructured their project, not a hostility signal).
+    Caller unions with static config exclusions before filtering candidates."""
     try:
         cur = conn.execute(
             "SELECT thread_url FROM posts "
@@ -59,17 +118,39 @@ def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
         rows = cur.fetchall()
     except Exception:
         return set()
-    from collections import Counter
+    from collections import Counter, defaultdict
     from urllib.parse import urlparse
-    counts = Counter()
+    by_owner = defaultdict(set)  # owner -> set of (owner, repo) tuples
     for r in rows:
         url = r[0] if not hasattr(r, "get") else r["thread_url"]
         if not url:
             continue
         parts = urlparse(url).path.strip("/").split("/")
-        if parts and parts[0]:
-            counts[parts[0].lower()] += 1
-    return {owner for owner, n in counts.items() if n >= threshold}
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            by_owner[parts[0].lower()].add((parts[0], parts[1]))
+    counts = Counter()
+    for owner, repos in by_owner.items():
+        for o, r in repos:
+            if not _repo_is_gone(o, r):
+                # Re-count posts under THIS live repo only.
+                # Cheaper than a second query: replay the rows.
+                for row in rows:
+                    url = row[0] if not hasattr(row, "get") else row["thread_url"]
+                    if not url:
+                        continue
+                    parts = urlparse(url).path.strip("/").split("/")
+                    if (len(parts) >= 2
+                            and parts[0].lower() == o.lower()
+                            and parts[1].lower() == r.lower()):
+                        counts[owner] += 1
+    blocked = {owner for owner, n in counts.items() if n >= threshold}
+    if blocked:
+        print(
+            f"[github_blocklist] threshold={threshold} window_days={days} "
+            f"blocked={sorted(blocked)}",
+            file=sys.stderr,
+        )
+    return blocked
 
 
 def _is_excluded_repo(repo_full, excluded_repos):
