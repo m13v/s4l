@@ -112,8 +112,20 @@ cleanup_harness_tabs() {
     # script because bash 3.2 (what launchd uses) cannot parse a nested heredoc
     # inside a function body inside a sourced file. Inline form here broke every
     # launchd-fired twitter script on 2026-05-14 until this refactor.
-    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-        return 0
+    #
+    # Health-check gate: 2026-05-16 the original `--max-time 2` was too strict.
+    # When harness Chrome is busy (long scans, lock backups, CPU-pinned),
+    # the /json/version probe times out, cleanup is silently skipped, and the
+    # next scan's new_tab() leaks an orphan tab. Symptom: occasional
+    # "closed 14/14 extra page tabs" cycles after several skips piled up.
+    # Now: 10s timeout + ONE retry; log skips so they are not silent.
+    local _probe="curl -sf --max-time 10 -o /dev/null http://127.0.0.1:9555/json/version"
+    if ! $_probe 2>/dev/null; then
+        sleep 1
+        if ! $_probe 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] cleanup_harness_tabs: SKIPPED (harness CDP /json/version unreachable after 10s+retry)" >&2
+            return 0
+        fi
     fi
     python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
