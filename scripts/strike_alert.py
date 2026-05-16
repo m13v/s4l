@@ -35,11 +35,39 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from urllib.parse import urlparse
+
+
+def _resolve_gh():
+    """Locate the `gh` binary. Returns the absolute path or None.
+
+    The launchd plist sets PATH=/opt/homebrew/bin:..., but anyone running
+    this script from a shell where /opt/homebrew/bin is not on PATH (or
+    from a future cron that drops the path) will silently fall back to
+    `state=unknown`, defeating the repo-gone filter. Resolve once at
+    import and log loudly on miss."""
+    p = shutil.which("gh")
+    if p:
+        return p
+    for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh"):
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+_GH_BIN = _resolve_gh()
+if _GH_BIN is None:
+    print(
+        "[strike_alert] WARNING: `gh` binary not found on PATH or in "
+        "/opt/homebrew/bin /usr/local/bin. Repo-gone filter will be "
+        "disabled and every github strike will email.",
+        file=sys.stderr,
+    )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -108,12 +136,31 @@ def _github_repo_state(thread_url):
     if key in _REPO_STATE_CACHE:
         cached = _REPO_STATE_CACHE[key]
     else:
+        if _GH_BIN is None:
+            # gh not found at import-time; logged once at module load.
+            # Returning 'unknown' here means the in-loop filter will not
+            # skip this row, so the email DOES fire. That is intentional
+            # graceful degradation: better to send a noisy email than to
+            # silently drop a real moderation strike.
+            _REPO_STATE_CACHE[key] = {"state": "unknown"}
+            return "unknown"
         try:
             proc = subprocess.run(
-                ["gh", "api", f"repos/{owner}/{repo}"],
+                [_GH_BIN, "api", f"repos/{owner}/{repo}"],
                 capture_output=True, text=True, timeout=20,
             )
-        except Exception:
+        except FileNotFoundError as e:
+            print(
+                f"[strike_alert] gh subprocess FileNotFoundError "
+                f"({_GH_BIN}): {e}", file=sys.stderr,
+            )
+            _REPO_STATE_CACHE[key] = {"state": "unknown"}
+            return "unknown"
+        except Exception as e:
+            print(
+                f"[strike_alert] gh subprocess error for {owner}/{repo}: "
+                f"{e}", file=sys.stderr,
+            )
             _REPO_STATE_CACHE[key] = {"state": "unknown"}
             return "unknown"
         if proc.returncode == 0:
