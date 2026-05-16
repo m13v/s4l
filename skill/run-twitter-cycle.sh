@@ -795,8 +795,13 @@ python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | te
 # when the tweet text shows a "product-discussion intent" pattern (someone asking for a tool,
 # venting a pain point, comparing alternatives, asking for recs). This lets slow-growing but
 # on-theme tweets compete with fast-growing news/drama instead of being truncated.
-# Floor lowered from delta_score >= 1 to >= 0 so zero-growth product-asks still qualify;
-# limit raised from 15 to 25 so the long tail reaches the model.
+# 2026-05-15: ripening floor removed entirely (was `delta_score >= 0`). The model
+# already sees per-candidate Delta in CANDIDATE_BLOCK below and can weigh
+# engagement velocity against topical fit itself. Letting negative-delta tweets
+# through means a thoughtful comment can still ride an on-theme but cooling
+# thread to the right audience. Sort is still hybrid (delta + intent) DESC so
+# the hottest tweets land at the top of the prompt; LIMIT 25 stays as a
+# draft-budget cap, not a ripening gate.
 CANDIDATES=$(psql "$DATABASE_URL" -t -A -F '|' -c "
     SELECT id, tweet_url, author_handle,
            REPLACE(REPLACE(COALESCE(tweet_text, ''), E'\n', ' '), E'\r', ' '),
@@ -810,7 +815,7 @@ CANDIDATES=$(psql "$DATABASE_URL" -t -A -F '|' -c "
                 ELSE EXTRACT(EPOCH FROM (NOW() - drafted_at))/60
            END
     FROM twitter_candidates
-    WHERE batch_id='$BATCH_ID' AND status='pending' AND COALESCE(delta_score, 0) >= 0
+    WHERE batch_id='$BATCH_ID' AND status='pending'
     ORDER BY (
         COALESCE(delta_score, 0)
         + CASE WHEN tweet_text ~* '\m(wish|need a|need an|looking for|recommend|alternative to|frustrated|hate (that|when)|should exist|would pay|missing.*(feature|tool|app)|why (is there no|doesn''t)|anyone know|anyone use|how do you|what do you use|best (tool|app))\M' THEN 5 ELSE 0 END
@@ -823,8 +828,10 @@ if [ -z "$CANDIDATES" ]; then
     psql "$DATABASE_URL" -c "UPDATE twitter_candidates SET status='expired' WHERE batch_id='$BATCH_ID' AND status='pending'" 2>&1 | tee -a "$LOG_FILE"
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
     EXPIRED_BATCH=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='expired'" 2>/dev/null || echo 0)
-    # Not a hard error — batch had candidates but none cleared the Δ≥0 floor
-    # (would only happen if every row had a NULL or negative delta_score).
+    # Not a hard error — batch had candidates but none remained 'pending' after
+    # Phase 2a (typically: every row already flipped to posted/skipped/expired
+    # by an earlier salvage pass). With the ripening floor removed (2026-05-15),
+    # this no longer fires on low-delta rows; only on empty/exhausted batches.
     # Report as skipped (not failed) so the row reads "skipped: N" rather than
     # the silent "—" we used to render. failure_reasons stays empty.
     python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped "${EXPIRED_BATCH:-0}" --failed 0 \
