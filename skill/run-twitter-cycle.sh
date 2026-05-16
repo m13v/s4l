@@ -543,17 +543,21 @@ if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
     IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
 ## Step 2: Search and extract — RUN THIS EXACT SCRIPT, NO IMPROVEMENTS
 
-For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the value of the `query` variable; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
+For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the values of `query`, `search_topic`, and `matched_project`; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
 
 ```python
 import json, urllib.parse, time
 query = "YOUR DRAFTED QUERY HERE WITH OPERATORS"
+search_topic = "EXACT QUERY STRING, UNENCODED"      # same value as query
+matched_project = "PROJECT_NAME"                     # e.g. studyly, Podlog, S4L
 url = "https://x.com/search?q=" + urllib.parse.quote(query) + "&f=live"
 goto_url(url)  # FIRST call of the cycle only: replace with new_tab(url)
 wait_for_load()
 time.sleep(4)
 tweets = js("""
 (() => {
+  const SNOWFLAKE = /\/status\/(\d{15,19})(?:[\/?#]|$)/;
+  const FAKE_TAIL = /0{6,}$/;
   const results = [];
   for (const article of [...document.querySelectorAll('article[data-testid="tweet"]')].slice(0, 8)) {
     try {
@@ -570,6 +574,15 @@ tweets = js("""
       const timeParent = timeEl ? timeEl.closest('a') : null;
       const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
       const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
+      // Defense-in-depth: drop any card whose snowflake suffix looks fabricated
+      // (no status ID, length wrong, or 6+ trailing zeros — the model's
+      // template signature observed 2026-05-16). The scorer also rejects these,
+      // but stripping them at scrape time keeps the structured_output clean.
+      const sm = tweetUrl.match(SNOWFLAKE);
+      if (!sm || FAKE_TAIL.test(sm[1])) continue;
+      // Drop cards with no readable timestamp (real <time> elements always
+      // carry an ISO datetime attribute).
+      if (!datetime || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(datetime)) continue;
       let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
       for (const btn of article.querySelectorAll('[role="group"] button')) {
         const al = btn.getAttribute('aria-label') || '';
@@ -586,13 +599,30 @@ tweets = js("""
   return results;
 })()
 """)
+# Bake project/topic into each tweet object IN PYTHON, before printing — so the
+# model has zero degrees of freedom on these fields. The model only concatenates
+# the per-project arrays; it does not regenerate any value.
+for t in tweets:
+    t['search_topic'] = search_topic
+    t['matched_project'] = matched_project
+print('###TWEETS_BEGIN###')
 print(json.dumps(tweets))
+print('###TWEETS_END###')
 ```
 
-Output rules:
-1. The print() emits a JSON array of tweet objects. Tag each tweet with `search_topic` (the exact query string you searched, without URL encoding) and `matched_project` (the project name whose query found it) when you assemble the structured `tweets` field.
-2. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`). Emit zero-result entries — they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings.
-3. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
+Output rules — READ CAREFULLY, this part has historically been buggy.
+
+1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH — every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`) is already correct.
+
+2. When you assemble the final structured `tweets` array, you MUST copy each tweet object byte-for-byte from the JSON output. You MUST NOT:
+   - Regenerate, beautify, summarize, infer, round, or otherwise modify any field.
+   - "Fix" what looks like a truncated tweet URL (e.g. an ID ending in many zeros). If a card has a malformed snowflake the JS already dropped it; nothing reaches you that needs fixing.
+   - "Fill in" a datetime that looks weird (round-hour stamps, missing seconds). Real Twitter datetimes look like `2026-05-16T15:42:17.000Z`. If you find yourself emitting `2026-05-16T10:00:00.000Z`, `09:00:00.000Z`, `08:00:00.000Z` etc. in 1-hour decrements, STOP — you are hallucinating, not copying. Re-read the bh_run stdout and copy the actual datetime strings.
+   - Invent any tweet that did not appear in the JSON output. The tweet count you report in `queries_used.tweets_found` must equal the array length printed between the sentinels for that bh_run call.
+
+3. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`). Emit zero-result entries — they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings.
+
+4. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
 HARNESS_STEP2_EOF
 else
     IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'AGENT_STEP2_EOF' || true
