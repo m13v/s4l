@@ -67,10 +67,10 @@ def _save_repo_gone_cache(cache):
         pass
 
 
-def _repo_is_gone(owner, repo, _mem={}, _disk={"loaded": False, "data": {}}):
-    """Returns True iff the parent repo 404s. Two-tier cache:
-    in-process dict + 24h on-disk JSON. Disk cache keeps blocklist latency
-    flat across the many short-lived gh-search invocations in a sweep."""
+def _fetch_repo_state(owner, repo, _mem={}, _disk={"loaded": False, "data": {}}):
+    """Fetch and cache (gone, has_issues, has_discussions) for owner/repo.
+    Two-tier cache (in-process + 24h on-disk JSON). Returns a dict
+    {gone: bool, has_issues: bool, has_discussions: bool}."""
     key = f"{owner}/{repo}".lower()
     if key in _mem:
         return _mem[key]
@@ -79,33 +79,86 @@ def _repo_is_gone(owner, repo, _mem={}, _disk={"loaded": False, "data": {}}):
         _disk["loaded"] = True
     entry = _disk["data"].get(key)
     now = int(time.time())
-    if entry and (now - int(entry.get("checked_at", 0))) < _REPO_GONE_TTL_SEC:
-        _mem[key] = bool(entry.get("gone"))
-        return _mem[key]
+    if (entry and (now - int(entry.get("checked_at", 0))) < _REPO_GONE_TTL_SEC
+            and "has_issues" in entry):
+        state = {
+            "gone": bool(entry.get("gone")),
+            "has_issues": bool(entry.get("has_issues", True)),
+            "has_discussions": bool(entry.get("has_discussions", True)),
+        }
+        _mem[key] = state
+        return state
     try:
         proc = subprocess.run(
             ["gh", "api", f"repos/{owner}/{repo}"],
             capture_output=True, text=True, timeout=20,
         )
     except Exception:
-        _mem[key] = False
-        return False
+        state = {"gone": False, "has_issues": True, "has_discussions": True}
+        _mem[key] = state
+        return state
     if proc.returncode == 0:
-        gone = False
+        try:
+            data = json.loads(proc.stdout or "{}")
+        except Exception:
+            data = {}
+        state = {
+            "gone": False,
+            "has_issues": bool(data.get("has_issues", True)),
+            "has_discussions": bool(data.get("has_discussions", True)),
+        }
     else:
         err = ((proc.stderr or "") + (proc.stdout or "")).lower()
         gone = ("not found" in err or "http 404" in err)
-    _mem[key] = gone
-    _disk["data"][key] = {"gone": gone, "checked_at": now}
+        state = {"gone": gone, "has_issues": True, "has_discussions": True}
+    _mem[key] = state
+    _disk["data"][key] = {
+        "gone": state["gone"],
+        "has_issues": state["has_issues"],
+        "has_discussions": state["has_discussions"],
+        "checked_at": now,
+    }
     _save_repo_gone_cache(_disk["data"])
-    return gone
+    return state
+
+
+def _repo_is_gone(owner, repo):
+    """Back-compat alias. Returns True iff the parent repo 404s. Callers
+    that want the broader 'this URL is unreachable for non-moderation
+    reasons' should use _post_is_collateral(thread_url) instead."""
+    return _fetch_repo_state(owner, repo)["gone"]
+
+
+def _post_is_collateral(thread_url):
+    """Returns True iff this thread_url died for a non-moderation reason:
+    the whole repo 404'd, OR the repo is alive but the feature this URL
+    lived on (issues, discussions) has been disabled by the owner. Both
+    cases mean every comment under that URL vanished at once and ours is
+    not a targeted strike."""
+    if not thread_url:
+        return False
+    from urllib.parse import urlparse as _urlparse
+    parts = _urlparse(thread_url).path.strip("/").split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return False
+    owner, repo = parts[0], parts[1]
+    state = _fetch_repo_state(owner, repo)
+    if state["gone"]:
+        return True
+    if len(parts) >= 3:
+        if parts[2] == "issues" and not state["has_issues"]:
+            return True
+        if parts[2] == "discussions" and not state["has_discussions"]:
+            return True
+    return False
 
 
 def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
                               days=DYNAMIC_BLOCK_WINDOW_DAYS):
     """Return lowercased owner names with >=threshold moderated posts in the
-    last `days` days. Posts whose entire parent repo is now 404 are excluded
-    from the count (owner restructured their project, not a hostility signal).
+    last `days` days. Posts whose entire parent repo is 404 OR whose host
+    feature (Issues/Discussions) has been turned off on the repo are excluded
+    from the count: owner restructured the project, not a hostility signal.
     Caller unions with static config exclusions before filtering candidates."""
     try:
         cur = conn.execute(
@@ -118,31 +171,20 @@ def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
         rows = cur.fetchall()
     except Exception:
         return set()
-    from collections import Counter, defaultdict
+    from collections import Counter
     from urllib.parse import urlparse
-    by_owner = defaultdict(set)  # owner -> set of (owner, repo) tuples
-    for r in rows:
-        url = r[0] if not hasattr(r, "get") else r["thread_url"]
+    counts = Counter()
+    for row in rows:
+        url = row[0] if not hasattr(row, "get") else row["thread_url"]
         if not url:
             continue
         parts = urlparse(url).path.strip("/").split("/")
-        if len(parts) >= 2 and parts[0] and parts[1]:
-            by_owner[parts[0].lower()].add((parts[0], parts[1]))
-    counts = Counter()
-    for owner, repos in by_owner.items():
-        for o, r in repos:
-            if not _repo_is_gone(o, r):
-                # Re-count posts under THIS live repo only.
-                # Cheaper than a second query: replay the rows.
-                for row in rows:
-                    url = row[0] if not hasattr(row, "get") else row["thread_url"]
-                    if not url:
-                        continue
-                    parts = urlparse(url).path.strip("/").split("/")
-                    if (len(parts) >= 2
-                            and parts[0].lower() == o.lower()
-                            and parts[1].lower() == r.lower()):
-                        counts[owner] += 1
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        if _post_is_collateral(url):
+            # Repo gone or feature disabled: drop from strike count.
+            continue
+        counts[parts[0].lower()] += 1
     blocked = {owner for owner, n in counts.items() if n >= threshold}
     if blocked:
         print(
