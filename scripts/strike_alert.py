@@ -33,6 +33,7 @@ stats refresh.
 
 import argparse
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -73,39 +74,75 @@ _REPO_STATE_CACHE = {}
 
 
 def _github_repo_state(thread_url):
-    """Return 'repo_gone' when the parent repo 404s, 'live' when it 200s,
-    'unknown' on any other condition (network error, non-github URL, etc.).
+    """Return one of:
 
-    Distinguishes a moderation strike (our comment was hidden/deleted on a
-    live repo) from a non-strike (the whole repo was nuked by the owner,
-    which is not adversarial behavior). Result is cached per-process so
-    sweep runs don't repeat the same gh api call per post."""
+      - 'repo_gone'        : parent repo 404s (owner deleted the whole repo)
+      - 'feature_disabled' : repo is live but the feature this comment lived
+                             on is turned off (e.g. /issues/123 on a repo
+                             with has_issues=false, or /discussions/N on a
+                             repo with has_discussions=false). ALL issues
+                             or ALL discussions vanish at once; this is not
+                             a moderation strike against our comment.
+      - 'live'             : repo is alive AND the relevant feature is on.
+                             Our comment is gone in isolation, true strike.
+      - 'unknown'          : network error, non-github URL, etc.
+
+    Distinguishes moderation strikes (our content was hidden/deleted on a
+    live, fully-featured repo) from collateral damage (owner restructured
+    the project). Cached per-process; the gh-api fetch is one round-trip
+    per repo per sweep."""
     if not thread_url:
         return "unknown"
     parts = urlparse(thread_url).path.strip("/").split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return "unknown"
     owner, repo = parts[0], parts[1]
+    # which sub-feature did this URL live on? issues / discussions / other.
+    feature = None
+    if len(parts) >= 3:
+        if parts[2] == "issues":
+            feature = "issues"
+        elif parts[2] == "discussions":
+            feature = "discussions"
     key = f"{owner}/{repo}".lower()
     if key in _REPO_STATE_CACHE:
-        return _REPO_STATE_CACHE[key]
-    try:
-        proc = subprocess.run(
-            ["gh", "api", f"repos/{owner}/{repo}"],
-            capture_output=True, text=True, timeout=20,
-        )
-    except Exception:
-        _REPO_STATE_CACHE[key] = "unknown"
-        return "unknown"
-    if proc.returncode == 0:
-        _REPO_STATE_CACHE[key] = "live"
+        cached = _REPO_STATE_CACHE[key]
     else:
-        err = ((proc.stderr or "") + (proc.stdout or "")).lower()
-        if "not found" in err or "http 404" in err:
-            _REPO_STATE_CACHE[key] = "repo_gone"
+        try:
+            proc = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            _REPO_STATE_CACHE[key] = {"state": "unknown"}
+            return "unknown"
+        if proc.returncode == 0:
+            try:
+                data = json.loads(proc.stdout or "{}")
+            except Exception:
+                data = {}
+            cached = {
+                "state": "live",
+                "has_issues": bool(data.get("has_issues", True)),
+                "has_discussions": bool(data.get("has_discussions", True)),
+            }
         else:
-            _REPO_STATE_CACHE[key] = "unknown"
-    return _REPO_STATE_CACHE[key]
+            err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+            if "not found" in err or "http 404" in err:
+                cached = {"state": "repo_gone"}
+            else:
+                cached = {"state": "unknown"}
+        _REPO_STATE_CACHE[key] = cached
+
+    base = cached.get("state", "unknown")
+    if base != "live":
+        return base
+    # Repo is alive; check whether the specific feature the URL points at is on.
+    if feature == "issues" and not cached.get("has_issues", True):
+        return "feature_disabled"
+    if feature == "discussions" and not cached.get("has_discussions", True):
+        return "feature_disabled"
+    return "live"
 
 
 def _owner_strike_count(db, owner, days=90):
@@ -129,7 +166,10 @@ def _owner_strike_count(db, owner, days=90):
     for r in cur.fetchall():
         url = r[0] if not hasattr(r, "get") else r["thread_url"]
         raw_count += 1
-        if _github_repo_state(url) != "repo_gone":
+        state = _github_repo_state(url)
+        # repo_gone + feature_disabled are both "owner restructured" cases,
+        # not moderation. Don't count them against the owner.
+        if state not in ("repo_gone", "feature_disabled"):
             live_count += 1
     return (live_count, raw_count)
 
@@ -137,12 +177,18 @@ def _owner_strike_count(db, owner, days=90):
 def _format_subject(post, repo_state=None):
     platform = post["platform"] or "?"
     status = post["status"] or "?"
+    tag = "STRIKE"
     if platform == "github" and repo_state == "repo_gone":
         # Owner nuked the whole repo. Not a moderation strike against us.
         status = "repo-deleted"
+        tag = "STRIKE-REPOGONE"
+    elif platform == "github" and repo_state == "feature_disabled":
+        # Repo is alive but Issues/Discussions feature was disabled. Our
+        # comment vanished as collateral, not a moderation action.
+        status = "feature-disabled"
+        tag = "STRIKE-FEATURE-OFF"
     project = post["project_name"] or "(no project)"
     title = (post["thread_title"] or "")[:60]
-    tag = "STRIKE-REPOGONE" if status == "repo-deleted" else "STRIKE"
     return _scrub_dashes(
         f"[{tag} #{post['id']}] {platform} {status}: {project} / {title}"
     )
@@ -173,6 +219,14 @@ def _format_body(db, post, repo_state=None):
                 "Repo state: GONE (parent repo returns 404). "
                 "Owner nuked the whole repo, this is not a moderation strike "
                 "against our comment specifically.\n"
+            )
+        elif repo_state == "feature_disabled":
+            repo_block = (
+                "Repo state: live but FEATURE DISABLED (has_issues=false or "
+                "has_discussions=false on the repo). The entire issues/"
+                "discussions surface was turned off by the owner; every "
+                "comment under it 404s, not just ours. This is collateral "
+                "damage, not a moderation strike.\n"
             )
         elif repo_state == "live":
             repo_block = "Repo state: live (only our comment is gone, true strike).\n"
