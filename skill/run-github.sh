@@ -73,11 +73,23 @@ _sa_emit_run_summary_oneshot() {
                 --since "${RUN_START:-0}" \
                 --scripts "post_github" \
                 2>/dev/null || echo "0.0000")
+    # Classify the most likely cause from the cycle log before falling back to
+    # the generic "sigterm:1" placeholder. Picks up Anthropic-side failures
+    # (stream_idle_timeout, monthly_limit, api_overloaded, context_overflow,
+    # credit_balance) that would otherwise read as a silent sigterm row on the
+    # dashboard. Falls back to sigterm:1 when no API marker is present (true
+    # external SIGTERM, e.g. cycle budget exceeded by watchdog_hung_runs).
+    local trap_reason
+    trap_reason=""
+    if [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ]; then
+        trap_reason=$(python3 "$REPO_DIR/scripts/classify_run_error.py" "$LOG_FILE" 2>/dev/null)
+    fi
+    [ -z "$trap_reason" ] && trap_reason="sigterm"
     python3 "$REPO_DIR/scripts/log_run.py" \
         --script post_github \
         --posted 0 --skipped 0 --failed 1 \
         --cost "$cost" --elapsed "$elapsed" \
-        --failure-reasons "sigterm:1" 2>/dev/null || true
+        --failure-reasons "${trap_reason}:1" 2>/dev/null || true
 }
 trap _sa_emit_run_summary_oneshot EXIT INT TERM HUP
 
