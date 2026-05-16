@@ -308,7 +308,9 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 #        phase0        ->  5 min  (just the salvage SQL)
 #        phase1        -> 20 min  (Claude scan + scrape)
 #        phase2a       -> 20 min  (5 min sleep + HTTP T1 poll)
-#        phase2b-prep  -> 15 min  (Claude reads threads + drafts)
+#        phase2b-prep  -> 30 min  (Claude reads threads + drafts; bumped 2026-05-15
+#                                  from 15 min after 17:15 cycle was wrongly salvaged
+#                                  while queued behind 17:30's 42-min lock-hold)
 #        phase2b-gen   -> 60 min  (SEO landing-page build, the slow phase)
 #        phase2b-post  -> 15 min  (browser reply + log)
 #      Pre-2026-05-01 the rule was a flat 20-min wall-clock cutoff against
@@ -365,7 +367,7 @@ WITH expired AS (
                     WHEN 'phase0'        THEN INTERVAL '5 minutes'
                     WHEN 'phase1'        THEN INTERVAL '20 minutes'
                     WHEN 'phase2a'       THEN INTERVAL '20 minutes'
-                    WHEN 'phase2b-prep'  THEN INTERVAL '15 minutes'
+                    WHEN 'phase2b-prep'  THEN INTERVAL '30 minutes'
                     WHEN 'phase2b-gen'   THEN INTERVAL '60 minutes'
                     WHEN 'phase2b-post'  THEN INTERVAL '15 minutes'
                     ELSE INTERVAL '20 minutes'
