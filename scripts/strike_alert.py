@@ -110,21 +110,28 @@ def _github_repo_state(thread_url):
 
 def _owner_strike_count(db, owner, days=90):
     """How many of our posts under this owner have been moderated in the
-    last `days` days. Mirrors github_tools._dynamic_owner_blocklist so the
-    email body can call out 'this is strike N for {owner}, blocklist
-    threshold met'."""
+    last `days` days, excluding posts whose entire parent repo is now 404
+    (repo-gone is not a moderation strike). Mirrors the same filtering used
+    by github_tools._dynamic_owner_blocklist so the email body and the
+    search-time blocklist stay in sync."""
     if not owner:
-        return 0
+        return (0, 0)
     cur = db.execute(
-        "SELECT COUNT(*) FROM posts "
+        "SELECT thread_url FROM posts "
         "WHERE platform='github' "
         "  AND posted_at > NOW() - INTERVAL %s "
         "  AND lower(thread_url) LIKE %s "
         "  AND (status='deleted' OR COALESCE(deletion_detect_count, 0) > 0)",
         [f"{int(days)} days", f"https://github.com/{owner.lower()}/%"],
     )
-    row = cur.fetchone()
-    return int(row[0] or 0) if row else 0
+    raw_count = 0
+    live_count = 0
+    for r in cur.fetchall():
+        url = r[0] if not hasattr(r, "get") else r["thread_url"]
+        raw_count += 1
+        if _github_repo_state(url) != "repo_gone":
+            live_count += 1
+    return (live_count, raw_count)
 
 
 def _format_subject(post, repo_state=None):
@@ -172,11 +179,19 @@ def _format_body(db, post, repo_state=None):
         parts = urlparse(thread_url).path.strip("/").split("/")
         owner = parts[0] if parts else None
         if owner:
-            n = _owner_strike_count(db, owner)
+            live_n, raw_n = _owner_strike_count(db, owner)
             from github_tools import DYNAMIC_BLOCK_THRESHOLD as THR
-            verdict = "AUTO-BLOCKLISTED" if n >= THR else f"under threshold ({n}/{THR})"
+            verdict = (
+                "AUTO-BLOCKLISTED" if live_n >= THR
+                else f"under threshold ({live_n}/{THR})"
+            )
+            extra = (
+                f" ({raw_n - live_n} excluded as repo-gone)"
+                if raw_n > live_n else ""
+            )
             owner_block = (
-                f"Owner: {owner} ({n} strikes in last 90 days, {verdict})\n"
+                f"Owner: {owner} ({live_n} real strikes in last 90 days{extra}, "
+                f"{verdict})\n"
             )
 
     body = (
