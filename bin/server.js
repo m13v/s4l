@@ -5608,13 +5608,19 @@ async function handleApi(req, res) {
     }
     if (pc.clause) whereParts.push(pc.clause.replace(/^\s*AND\s+/, ''));
     const whereSql = whereParts.length ? ('WHERE ' + whereParts.join(' AND ')) : '';
-    // Grouping key is target_url verbatim (the resolver redirect is a 302 to
-    // this exact string, so a difference in case or trailing slash maps to a
-    // different real destination). Project + platform stay in GROUP BY so a
-    // multi-project repo (mediar website hosting fazm pages, say) shows them
-    // on separate rows.
+    // Grouping key is the URL with all query params + trailing slash stripped.
+    // UTM params (utm_source / utm_medium / utm_campaign / utm_term /
+    // utm_content) are baked into every target_url at mint time so each
+    // post gets its own uniquely-tracked URL even when posting at the same
+    // destination; without stripping, the same homepage would split into
+    // 50 rows. Path is preserved (so /ghostwriting stays distinct from /).
+    // Project + platform stay in GROUP BY so a multi-project repo (one
+    // website hosting pages for several projects) keeps them on separate
+    // rows.
     const q = "SELECT json_agg(row_to_json(r)) FROM (" +
-      "SELECT pl.target_url, pl.project_name, pl.platform, " +
+      "SELECT " +
+        "REGEXP_REPLACE(REGEXP_REPLACE(pl.target_url, '\\?.*$', ''), '/$', '') AS target_url, " +
+        "pl.project_name, pl.platform, " +
         "COUNT(DISTINCT pl.post_id)::int AS posts, " +
         "COUNT(*)::int AS codes, " +
         "COALESCE(SUM(pl.clicks), 0)::int AS legacy_clicks, " +
@@ -5631,7 +5637,7 @@ async function handleApi(req, res) {
         "FROM post_link_clicks GROUP BY code" +
       ") plc ON plc.code = pl.code " +
       whereSql + " " +
-      "GROUP BY pl.target_url, pl.project_name, pl.platform " +
+      "GROUP BY 1, pl.project_name, pl.platform " +
       "ORDER BY real_clicks DESC NULLS LAST, legacy_clicks DESC NULLS LAST, codes DESC " +
       "LIMIT " + limit +
       ") r";
