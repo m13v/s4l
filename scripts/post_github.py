@@ -125,6 +125,14 @@ from engagement_styles import (
     VALID_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns,
     validate_or_register,
 )
+# Audience-page routing: tells Claude which curated landing pages exist for the
+# project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
+# draft when the issue topic matches. See scripts/audience_pages.py + the
+# landing_pages.audience_pages block in config.json.
+from audience_pages import (
+    prompt_block as _audience_prompt_block,
+    classify_url_as_audience_page as _audience_classify_url,
+)
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
@@ -236,30 +244,42 @@ def _angle_str(v):
 
 def build_content_angle(project, config):
     """Rich angle: prefer content_angle override, otherwise compose from
-    description / differentiator / icp / setup / messaging / voice."""
+    description / differentiator / icp / setup / messaging / voice.
+
+    Always appends the project's audience-pages block (when configured) so the
+    draft prompt knows which curated landing pages it should link to for
+    topic-matched issues.
+    """
     if project.get("content_angle"):
-        return project["content_angle"]
-    parts = []
-    for key in ("description", "differentiator", "icp", "setup"):
-        s = _angle_str(project.get(key))
-        if s:
-            parts.append(s)
-    messaging = project.get("messaging", {}) or {}
-    for key in ("lead_with_pain", "solution", "proof"):
-        s = _angle_str(messaging.get(key))
-        if s:
-            parts.append(s)
-    voice = project.get("voice", {}) or {}
-    if voice.get("tone"):
-        parts.append(f"Voice: {voice['tone']}")
-    if voice.get("never"):
-        parts.append("Never: " + "; ".join(voice["never"]))
-    examples = voice.get("examples") or voice.get("examples_good") or []
-    if examples:
-        parts.append("Voice examples: " + " | ".join(examples[:3]))
-    if parts:
-        return " ".join(parts)
-    return config.get("content_angle", "")
+        base = project["content_angle"]
+    else:
+        parts = []
+        for key in ("description", "differentiator", "icp", "setup"):
+            s = _angle_str(project.get(key))
+            if s:
+                parts.append(s)
+        messaging = project.get("messaging", {}) or {}
+        for key in ("lead_with_pain", "solution", "proof"):
+            s = _angle_str(messaging.get(key))
+            if s:
+                parts.append(s)
+        voice = project.get("voice", {}) or {}
+        if voice.get("tone"):
+            parts.append(f"Voice: {voice['tone']}")
+        if voice.get("never"):
+            parts.append("Never: " + "; ".join(voice["never"]))
+        examples = voice.get("examples") or voice.get("examples_good") or []
+        if examples:
+            parts.append("Voice examples: " + " | ".join(examples[:3]))
+        base = " ".join(parts) if parts else config.get("content_angle", "")
+
+    try:
+        ap_block = _audience_prompt_block(project.get("name") or "")
+    except Exception:
+        ap_block = ""
+    if ap_block:
+        return (base + "\n\n" + ap_block).strip() if base else ap_block.strip()
+    return base
 
 
 # ---------- Phase 1 / 2 momentum helpers ------------------------------------
@@ -635,7 +655,7 @@ def post_comment(owner, repo, number, body):
 
 def log_post(thread_url, our_url, text, project_name, thread_author, thread_title,
              github_username, engagement_style=None, search_topic=None, language=None,
-             claude_session_id=None, generation_trace_path=None):
+             claude_session_id=None, generation_trace_path=None, link_source=None):
     """Defers to github_tools.py log-post, which handles dedup + INSERT.
 
     Returns the new posts.id on success, or None on failure / dedup hit.
@@ -647,6 +667,10 @@ def log_post(thread_url, our_url, text, project_name, thread_author, thread_titl
     as --generation-trace and stored in posts.generation_trace JSONB.
     File-based instead of inline-JSON to keep argv short (the report
     text can be several KB) and to avoid shell-escape pain.
+
+    link_source (added 2026-05-17): tags audience-page traffic (e.g.
+    'audience_page:founder-ghostwriting') so the dashboard can break out
+    curated landing-page hits from generic homepage links.
     """
     try:
         cmd = ["python3", GITHUB_TOOLS, "log-post",
@@ -663,6 +687,8 @@ def log_post(thread_url, our_url, text, project_name, thread_author, thread_titl
             cmd.extend(["--claude-session-id", claude_session_id])
         if generation_trace_path:
             cmd.extend(["--generation-trace", generation_trace_path])
+        if link_source:
+            cmd.extend(["--link-source", link_source])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.stdout.strip():
             try:
@@ -1006,6 +1032,24 @@ def main():
         # uses the same fallback chain so attribution lines up.
         wrap_project = (decision.get("matched_project") or project_name or "").strip()
         minted_session = None
+        # Audience-page detection (2026-05-17). Inspect the unwrapped text for
+        # any URL that exactly matches a curated audience-page (e.g.
+        # https://s4l.ai/ghostwriting). When found, posts.link_source is
+        # stamped 'audience_page:<angle>' for the row. Detection runs BEFORE
+        # wrap_text_for_post because wrapping rewrites the URLs to /r/<code>
+        # short links; classify_url_as_audience_page() needs the original
+        # target URL.
+        audience_page_link_source = None
+        if wrap_project:
+            try:
+                for _url_m in re.finditer(r'https?://[^\s)\]>"\']+', text):
+                    _raw = _url_m.group(0).rstrip('.,);!?]')
+                    _angle = _audience_classify_url(_raw, wrap_project)
+                    if _angle:
+                        audience_page_link_source = f"audience_page:{_angle}"
+                        break
+            except Exception as _e:
+                log(f"WARNING: audience-page classify raised ({_e})")
         if wrap_project:
             try:
                 from dm_short_links import wrap_text_for_post, utm_only_text
@@ -1048,6 +1092,7 @@ def main():
             # the same few-shot context. If the trace file couldn't be
             # built earlier this is None and log_post drops the flag.
             generation_trace_path=generation_trace_path,
+            link_source=audience_page_link_source,
         )
         # Stamp post_links.post_id for the URLs minted before posting.
         # Idempotent; no-op when minted_session is None or the dedup path
