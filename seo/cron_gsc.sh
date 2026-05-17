@@ -43,6 +43,22 @@ echo "[$(ts)] cron_gsc tick $TICK_ID starting (parallel per-product)" >> "$TICK_
 # --- Reap stuck rows once per tick (shared state) ---
 python3 "$SCRIPT_DIR/reap_stuck.py" >> "$TICK_LOG" 2>&1 || true
 
+# --- Ingest human replies to escalation emails into seo_escalations ---
+# Polls i@m13v.com inbox for `Re: [SEO #N]`, flips matching rows to
+# status='replied' with the human reply attached. Moved here from the
+# retired cron_seo.sh on 2026-05-16 because cron_gsc.sh is the most
+# frequent active SEO cron (every 10 minutes). The model_initiated
+# trigger has been removed from generate_page.py; the remaining
+# triggers (setup_gate, reaper_stuck) still need ingest + resume.
+# See scripts/ingest_human_seo_replies.py.
+python3 "$REPO_DIR/scripts/ingest_human_seo_replies.py" >> "$TICK_LOG" 2>&1 || true
+
+# --- Resume any escalations whose human replies just landed ---
+# Re-invokes generate_page.py --resume-escalation <id> for each row in
+# 'replied' state. Failures leave the row in 'replied' so the next tick
+# retries; cancel via `python3 seo/escalate.py cancel --id N` to stop.
+python3 "$SCRIPT_DIR/resume_escalations.py" >> "$TICK_LOG" 2>&1 || true
+
 # --- Enumerate eligible products (repo + gsc_property) ---
 PRODUCTS=()
 while IFS= read -r line; do
