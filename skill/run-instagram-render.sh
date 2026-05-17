@@ -59,7 +59,7 @@ acquire_lock instagram-render 60
 # Step 1: compute target type + exclusion lists
 log "step 1: querying Neon for target_type, draft_count, exclusions"
 /opt/homebrew/bin/python3.11 - > "$PICK_FILE" 2>>"$LOG_FILE" <<'PY'
-import glob, json, os, psycopg2
+import glob, json, os, random, psycopg2
 env = {}
 for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
     if '=' in ln and not ln.strip().startswith('#'):
@@ -68,19 +68,104 @@ for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines
 conn = psycopg2.connect(env['DATABASE_URL'])
 c = conn.cursor()
 
+# Inverse-recent-share weighting at TWO levels, mirroring the Twitter pipeline
+# (scripts/pick_project.py). Effective weight = config_weight / (1 + posts in
+# the last RECENT_WINDOW_DAYS). Over-posting damps without ever exceeding the
+# raw config weight; under-posting catches up automatically.
+
+cfg = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
+ig_cfg = cfg.get('instagram', {}) or {}
+recent_window_days = int(ig_cfg.get('recent_window_days', 7))
+post_type_weights_cfg = (
+    ig_cfg.get('post_type_weights')
+    or ig_cfg.get('post_type_ratio')
+    or {'organic': 4, 'product': 1}
+)
+
+# Last-N posted descriptor (kept for telemetry / log readability).
 c.execute(
     "SELECT post_type FROM media_posts "
     "WHERE status='posted' AND posted_urls ? 'instagram' "
-    "ORDER BY posted_at DESC LIMIT 5"
+    "ORDER BY posted_at DESC LIMIT 10"
 )
-last5 = [r[0] for r in c.fetchall()]
-organic_count = sum(1 for t in last5 if t == 'organic')
-target = 'organic' if organic_count < 4 else 'product'
+last10 = [r[0] for r in c.fetchall()]
 
+# ---- LEVEL 1: organic vs product, inverse-recent-share ----
 c.execute(
-    "SELECT COUNT(*) FROM media_posts WHERE status='draft' AND post_type=%s",
-    (target,),
+    "SELECT post_type, COUNT(*) FROM media_posts "
+    "WHERE status='posted' AND posted_urls ? 'instagram' "
+    "  AND posted_at > NOW() - INTERVAL %s "
+    "GROUP BY post_type",
+    (f'{recent_window_days} days',),
 )
+recent_type_counts = {r[0]: r[1] for r in c.fetchall() if r[0]}
+for t in ('organic', 'product'):
+    recent_type_counts.setdefault(t, 0)
+type_weights = {
+    t: float(post_type_weights_cfg.get(t, 0)) / (1 + recent_type_counts[t])
+    for t in ('organic', 'product')
+    if float(post_type_weights_cfg.get(t, 0)) > 0
+}
+if not type_weights:
+    target = 'organic'  # defensive default if config is empty
+else:
+    names = list(type_weights.keys())
+    ws = [type_weights[n] for n in names]
+    target = random.choices(names, weights=ws, k=1)[0]
+
+# ---- LEVEL 2: which project, inverse-recent-share (product only) ----
+# Organic content is intentionally product-free -> project_name=NULL.
+selected_project = None
+mixer_enabled_projects = []
+project_post_counts = {}
+project_weights = {}
+if target == 'product':
+    enabled = [
+        p for p in cfg.get('projects', [])
+        if isinstance(p.get('mixer'), dict)
+        and p['mixer'].get('enabled') is True
+        and p.get('weight', 0) > 0
+    ]
+    mixer_enabled_projects = sorted([p['name'] for p in enabled])
+    if not enabled:
+        # defensive fallback to mk0r if no project is flagged
+        enabled = [{'name': 'mk0r', 'weight': 1}]
+        mixer_enabled_projects = ['mk0r']
+
+    c.execute(
+        "SELECT project_name, COUNT(*) FROM media_posts "
+        "WHERE post_type='product' AND status='posted' "
+        "  AND posted_urls ? 'instagram' "
+        "  AND posted_at > NOW() - INTERVAL %s "
+        "  AND project_name IS NOT NULL "
+        "GROUP BY project_name",
+        (f'{recent_window_days} days',),
+    )
+    recent_proj_counts = {r[0]: r[1] for r in c.fetchall()}
+    for p in enabled:
+        project_post_counts[p['name']] = recent_proj_counts.get(p['name'], 0)
+    project_weights = {
+        p['name']: float(p['weight']) / (1 + project_post_counts[p['name']])
+        for p in enabled
+    }
+    names = list(project_weights.keys())
+    ws = [project_weights[n] for n in names]
+    selected_project = random.choices(names, weights=ws, k=1)[0]
+
+# Per-(type, project) draft buffer. With multi-project, a global product
+# buffer would let one project starve another.
+if target == 'product':
+    c.execute(
+        "SELECT COUNT(*) FROM media_posts "
+        "WHERE status='draft' AND post_type=%s AND project_name=%s",
+        (target, selected_project),
+    )
+else:
+    c.execute(
+        "SELECT COUNT(*) FROM media_posts "
+        "WHERE status='draft' AND post_type=%s",
+        (target,),
+    )
 draft_count = c.fetchone()[0]
 
 c.execute("SELECT COALESCE(MAX(post_number), 0) + 1 FROM media_posts")
@@ -139,13 +224,21 @@ used_variants = sorted({r[0] for r in c.fetchall()})
 
 print(json.dumps({
     'target_type': target,
-    'last5_posted': last5,
-    'organic_count_last5': organic_count,
+    'last10_posted': last10,
+    'recent_window_days': recent_window_days,
+    'recent_type_counts': recent_type_counts,
+    'type_weights_effective': type_weights,
+    'post_type_weights_config': post_type_weights_cfg,
     'draft_count_target': draft_count,
     'next_post_number': next_num,
     'local_audio_lru': local_audio_lru,
     'used_theme_angles_14d': used_angles,
     'used_variant_ids': used_variants,
+    # Level-2 product routing (NULL when target=='organic').
+    'selected_project': selected_project,
+    'mixer_enabled_projects': mixer_enabled_projects,
+    'recent_product_posts_by_project': project_post_counts,
+    'project_weights_effective': project_weights,
 }, indent=2))
 conn.close()
 PY
@@ -158,9 +251,10 @@ fi
 TARGET=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE'))['target_type'])")
 DRAFT_COUNT=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE'))['draft_count_target'])")
 NEXT_NUM=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE'))['next_post_number'])")
+SELECTED_PROJECT=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE')).get('selected_project') or '')")
 NNN=$(printf "%03d" "$NEXT_NUM")
 
-log "target=$TARGET draft_count_target=$DRAFT_COUNT next_post_number=$NEXT_NUM"
+log "target=$TARGET selected_project=${SELECTED_PROJECT:-<null/organic>} draft_count_target=$DRAFT_COUNT next_post_number=$NEXT_NUM"
 
 # Buffer guard: if 3+ drafts of target type already exist, skip.
 # Override with FORCE_RENDER=1 for manual / first-fire runs.
@@ -278,28 +372,32 @@ If "use": false, ignore this block; render normally from the existing pool.
 
 TYPE MAPPING (do NOT swap these):
 - post_type='organic' -> TLH format. AI-themed lesson, NO product mention by
-  name (no Fazm, no Mediar, no AppMaker, no mk0r). 7-8s total.
-- post_type='product' -> Mixer format. niche template (spa/autoshop/hotel/
-  mk0r-retail) with mk0r baked into intro + finale. 26-28s total.
+  name (no Fazm, no Mediar, no AppMaker, no mk0r, no studyly). 7-8s total.
+  project_name MUST be NULL in the media_posts row (organic content is
+  intentionally product-free; null is the correct attribution).
+- post_type='product' -> Mixer format. The picker has already chosen which
+  PROJECT this product reel promotes; see selected_project in the request
+  envelope above (currently '${SELECTED_PROJECT}'). The variant you render
+  MUST belong to that project (variant.project field in data.ts). Pick from
+  the project's pool, oldest-rendered first. project_name MUST equal that
+  project string in the media_posts row.
 
 DELIVERABLES (must all exist when you exit):
 1. ~/social-autoposter/mixer/remotion/out/post-${NNN}.mp4
    1080x1920, audio dubbed, ready to post. Filename uses post_number=${NEXT_NUM}.
 2. ~/social-autoposter/mixer/remotion/out/post-${NNN}.caption.txt
-   The Instagram caption story (the "here is a story." body for TLH, the
-   niche-specific story for Mixer). UTF-8, plain text, no markdown.
+   The Instagram caption story. UTF-8, plain text, no markdown.
    **CAPTION HARD LIMIT: ≤ 2150 chars total** (Instagram's cap is 2200; we leave
-   50 chars of safety buffer for emoji / unicode). The 8-beat arc is a STRUCTURE,
-   not a length contract. If your draft overshoots, tighten ruthlessly BEFORE
-   writing the file: cut adjectives, collapse compound sentences, drop the second
-   example when one suffices. Verify with \`wc -c <file>\` before declaring done.
+   50 chars of safety buffer for emoji / unicode). If your draft overshoots,
+   tighten ruthlessly BEFORE writing the file. Verify with \`wc -c <file>\`.
    The harness enforces this programmatically: if the file is > 2150 on exit, it
    will spawn a focused tighten-only Claude call (up to 3 attempts); if all 3
    fail, the row is flipped to status='caption_too_long' and the render fails.
 3. media_posts row with post_number=${NEXT_NUM}, status='draft',
    post_type='${TARGET}', and all SKILL Section 5 columns populated
    (variant_id, video_path, caption_text, source_clips, overlays, audio_source,
-   metadata.theme_angle, etc.). project_name='fazm' for organic, 'mk0r' for product.
+   metadata.theme_angle, etc.).
+   project_name='${SELECTED_PROJECT}' for product, NULL for organic.
    The caption_text column MUST match the caption.txt file exactly.
 
 VISUAL STYLE (current as of May 7 2026, do NOT regress):
@@ -322,16 +420,29 @@ EXCLUSIONS (read from request envelope above; honor strictly):
   track in. If the list is empty, FAIL the run; do not source from the network.
 - used_theme_angles_14d: pick a different angle. SKILL Section 3 lists 5
   acceptable AI angles; pick one not in the exclusion list.
-- used_variant_ids: if creating a NEW TLH variant, pick a variant_id not in
-  this list. For Mixer, you re-render an existing niche; that's allowed.
+- used_variant_ids: for product runs, exclude these globally — even within
+  the selected project, prefer a variant not in this list. For TLH (organic),
+  pick a variant_id not in this list.
 
-PRODUCT-PATH SHORTCUT (post_type='product'):
-The 4 existing Mixer variants (spa, autoshop, hotel, mk0r-retail) already
-have all clips encoded. For product runs you should re-render one of them
-with current Overlays.tsx and write a fresh niche-targeted caption. Pick the
-niche least-recently-rendered (check media_posts created_at by variant_id).
-A NEW niche requires raw clips that may not exist; only attempt that if
-SKILL Section 2 prerequisites are met.
+PRODUCT-PATH (post_type='product', project='${SELECTED_PROJECT}'):
+The Mixer registry lives in mixer/remotion/src/mixer/data.ts. Every variant
+declares a 'project' field. For this run you MUST pick a variant whose
+variant.project === '${SELECTED_PROJECT}'. Variants are pre-registered in
+Remotion via Root.tsx; you re-render an existing variant, write a fresh
+caption targeted at the selected project, and log the row.
+
+For mk0r: 4 niche variants (spa/autoshop/hotel/mk0r-retail) with the niche
+walk-in story arc ("find a business with no website -> go to mk0r.com ->
+prompt -> publish") and the 🔗 mk0r.com line in the caption.
+
+For studyly: 8 generated variants (studyly-i{1,2}-r{1,2,3,4}) with NO step
+overlays and NO title card. The caption arc is a study-outcome story
+(struggling student moment -> opens studyly.io -> result/grade improvement
+-> the lesson). The caption should reference studyly.io as the product.
+Studyly variants are intentionally simpler/shorter (15-25s vs mk0r's 26-28s).
+
+Pick the variant within the selected project that is least-recently-rendered
+(check media_posts created_at WHERE project_name=selected_project AND variant_id IS NOT NULL).
 
 ORGANIC-PATH (post_type='organic'):
 Compose a new TLH variant. You may remix existing pre-encoded
