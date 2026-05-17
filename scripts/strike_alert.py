@@ -35,9 +35,13 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from urllib.parse import urlparse
@@ -105,6 +109,11 @@ def _github_repo_state(thread_url):
     """Return one of:
 
       - 'repo_gone'        : parent repo 404s (owner deleted the whole repo)
+      - 'issue_deleted'    : repo is live but the specific issue/PR thread is
+                             gone (HTTP 410 'This issue was deleted', or 404
+                             on `repos/{o}/{r}/issues/{n}`). Every comment
+                             under that thread vanishes at once; not a
+                             moderation strike against our comment.
       - 'feature_disabled' : repo is live but the feature this comment lived
                              on is turned off (e.g. /issues/123 on a repo
                              with has_issues=false, or /discussions/N on a
@@ -117,8 +126,8 @@ def _github_repo_state(thread_url):
 
     Distinguishes moderation strikes (our content was hidden/deleted on a
     live, fully-featured repo) from collateral damage (owner restructured
-    the project). Cached per-process; the gh-api fetch is one round-trip
-    per repo per sweep."""
+    the project). Cached per-process; the gh-api fetch is at most two
+    round-trips per (repo, issue#) pair per sweep."""
     if not thread_url:
         return "unknown"
     parts = urlparse(thread_url).path.strip("/").split("/")
@@ -127,11 +136,19 @@ def _github_repo_state(thread_url):
     owner, repo = parts[0], parts[1]
     # which sub-feature did this URL live on? issues / discussions / other.
     feature = None
+    issue_number = None
     if len(parts) >= 3:
         if parts[2] == "issues":
             feature = "issues"
         elif parts[2] == "discussions":
             feature = "discussions"
+        elif parts[2] == "pull":
+            feature = "pull"
+    if feature in ("issues", "pull") and len(parts) >= 4:
+        try:
+            issue_number = int(parts[3])
+        except (ValueError, IndexError):
+            issue_number = None
     key = f"{owner}/{repo}".lower()
     if key in _REPO_STATE_CACHE:
         cached = _REPO_STATE_CACHE[key]
@@ -189,7 +206,147 @@ def _github_repo_state(thread_url):
         return "feature_disabled"
     if feature == "discussions" and not cached.get("has_discussions", True):
         return "feature_disabled"
+    # Repo + feature both live; check the individual issue/PR thread. Cached
+    # separately so multiple comments on the same thread share one call.
+    if feature in ("issues", "pull") and issue_number is not None:
+        issue_key = f"{owner}/{repo}#{issue_number}".lower()
+        if issue_key in _REPO_STATE_CACHE:
+            issue_state = _REPO_STATE_CACHE[issue_key]
+        else:
+            try:
+                proc = subprocess.run(
+                    [_GH_BIN, "api", f"repos/{owner}/{repo}/issues/{issue_number}"],
+                    capture_output=True, text=True, timeout=20,
+                )
+            except Exception as e:
+                print(
+                    f"[strike_alert] gh subprocess error for "
+                    f"{owner}/{repo}/issues/{issue_number}: {e}",
+                    file=sys.stderr,
+                )
+                _REPO_STATE_CACHE[issue_key] = {"state": "unknown"}
+                return "live"  # graceful: assume live so email fires
+            if proc.returncode == 0:
+                issue_state = {"state": "live"}
+            else:
+                err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+                if ("not found" in err or "http 404" in err
+                        or "http 410" in err
+                        or "this issue was deleted" in err):
+                    issue_state = {"state": "issue_deleted"}
+                else:
+                    issue_state = {"state": "unknown"}
+            _REPO_STATE_CACHE[issue_key] = issue_state
+        if issue_state["state"] == "issue_deleted":
+            return "issue_deleted"
     return "live"
+
+
+def _reddit_live_recheck(our_url, our_account, user_agent):
+    """Pre-send Reddit live re-check (added 2026-05-16).
+
+    Before firing a strike email, fetch the comment URL one more time. If
+    the comment body is real content (not [deleted]/[removed]), update_stats
+    false-flagged it (transient parse error, rate-limit miss, etc.) and the
+    strike is bogus. Return one of:
+
+      'alive'   - comment is visible with real content. Caller should flip
+                  status back to 'active', reset deletion_detect_count, and
+                  skip the email.
+      'dead'    - comment is confirmed [deleted]/[removed] or 404. Real
+                  strike, send the email.
+      'unknown' - couldn't determine (rate limit, network error, malformed
+                  response). Fail-open: send the email anyway. Mirrors the
+                  github _github_repo_state='unknown' graceful-degradation
+                  pattern: better to send a noisy email than silently drop
+                  a real moderation strike.
+
+    Self-healing rationale: even with the weekly resurrect job, the alert
+    fires at T+0 detection while resurrect runs later. Without this guard
+    a brittle 2-detection threshold + a couple of bad scrapes was enough
+    to send a false-positive email (see post #23005 / #23223 on 2026-05-07,
+    both alive at the time the strike emails went out).
+    """
+    if not our_url or not our_url.startswith("http"):
+        return "unknown"
+
+    json_url = re.sub(r"www\.reddit\.com", "old.reddit.com", our_url).rstrip("/") + ".json"
+    req = urllib.request.Request(json_url, headers={"User-Agent": user_agent})
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read()
+                if not body:
+                    return "unknown"
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    return "unknown"
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return "dead"
+            if e.code == 429 and attempt == 0:
+                time.sleep(10)
+                continue
+            return "unknown"
+        except Exception:
+            if attempt == 0:
+                time.sleep(5)
+                continue
+            return "unknown"
+    else:
+        return "unknown"
+
+    if not isinstance(data, list) or len(data) < 2:
+        return "unknown"
+
+    has_comment_id = bool(
+        re.search(r"/comment/[a-z0-9]+", our_url) or
+        re.search(r"/comments/[a-z0-9]+/[^/]+/[a-z0-9]+", our_url)
+    )
+
+    if has_comment_id:
+        children = data[1].get("data", {}).get("children", [])
+        if not children:
+            return "dead"
+        cd = children[0].get("data", {})
+        cbody = cd.get("body", "")
+        cauthor = cd.get("author", "")
+        if cbody in ("[deleted]", "[removed]") or cauthor == "[deleted]":
+            return "dead"
+        if cbody.strip():
+            return "alive"
+        return "unknown"
+    else:
+        thread = data[0].get("data", {}).get("children", [{}])[0].get("data", {})
+        thread_author = thread.get("author", "")
+        if our_account and thread_author.lower() == our_account.lower():
+            if thread.get("removed_by_category") or thread.get("selftext") in ("[removed]", "[deleted]"):
+                return "dead"
+            return "alive"
+        children = data[1].get("data", {}).get("children", [])
+        for child in children:
+            cd = child.get("data", {})
+            if our_account and cd.get("author", "").lower() == our_account.lower():
+                cbody = cd.get("body", "")
+                if cbody in ("[deleted]", "[removed]"):
+                    return "dead"
+                if cbody.strip():
+                    return "alive"
+                break
+        return "unknown"
+
+
+def _resurrect_post(db, post_id):
+    """Flip a Reddit strike row back to 'active' after a live re-check confirms
+    the comment is still visible. Mirrors update_reddit_resurrect's UPDATE."""
+    db.execute(
+        "UPDATE posts SET status='active', deletion_detect_count=0, "
+        "resurrected_at=NOW(), status_checked_at=NOW() WHERE id=%s",
+        [post_id],
+    )
+    db.commit()
 
 
 def _owner_strike_count(db, owner, days=90):
@@ -214,9 +371,10 @@ def _owner_strike_count(db, owner, days=90):
         url = r[0] if not hasattr(r, "get") else r["thread_url"]
         raw_count += 1
         state = _github_repo_state(url)
-        # repo_gone + feature_disabled are both "owner restructured" cases,
-        # not moderation. Don't count them against the owner.
-        if state not in ("repo_gone", "feature_disabled"):
+        # repo_gone, issue_deleted, and feature_disabled are all "owner
+        # restructured" cases, not moderation. Don't count them against
+        # the owner.
+        if state not in ("repo_gone", "issue_deleted", "feature_disabled"):
             live_count += 1
     return (live_count, raw_count)
 
@@ -229,6 +387,11 @@ def _format_subject(post, repo_state=None):
         # Owner nuked the whole repo. Not a moderation strike against us.
         status = "repo-deleted"
         tag = "STRIKE-REPOGONE"
+    elif platform == "github" and repo_state == "issue_deleted":
+        # Owner deleted the specific issue/PR thread (HTTP 410). Every
+        # comment under it vanishes, not just ours.
+        status = "issue-deleted"
+        tag = "STRIKE-ISSUEGONE"
     elif platform == "github" and repo_state == "feature_disabled":
         # Repo is alive but Issues/Discussions feature was disabled. Our
         # comment vanished as collateral, not a moderation action.
@@ -266,6 +429,13 @@ def _format_body(db, post, repo_state=None):
                 "Repo state: GONE (parent repo returns 404). "
                 "Owner nuked the whole repo, this is not a moderation strike "
                 "against our comment specifically.\n"
+            )
+        elif repo_state == "issue_deleted":
+            repo_block = (
+                "Repo state: live but ISSUE/PR THREAD DELETED (HTTP 410 or "
+                "404 on the specific issue/PR endpoint). Owner deleted the "
+                "entire thread; every comment under it vanishes, not just "
+                "ours. Collateral damage, not a moderation strike.\n"
             )
         elif repo_state == "feature_disabled":
             repo_block = (
@@ -396,6 +566,24 @@ def main():
     dbmod.load_env()
     db = dbmod.get_conn()
 
+    # Reddit user-agent for the live re-check. Mirrors update_stats.py:1924
+    # so the pre-send re-check uses the same UA Reddit already saw on the
+    # ingest side.
+    try:
+        from project_config import load_config as _load_cfg  # type: ignore
+        _cfg = _load_cfg()
+    except Exception:
+        try:
+            with open(os.path.join(os.path.dirname(SCRIPT_DIR), "config.json")) as _f:
+                _cfg = json.load(_f)
+        except Exception:
+            _cfg = {}
+    _reddit_username = (_cfg.get("accounts", {}) or {}).get("reddit", {}).get("username", "")
+    _reddit_ua = (
+        f"social-autoposter/1.0 (u/{_reddit_username})"
+        if _reddit_username else "social-autoposter/1.0"
+    )
+
     rows = _select_pending(db, post_id=args.post_id, limit=args.limit)
     if not rows:
         print("[strike_alert] no pending strikes")
@@ -432,6 +620,36 @@ def main():
             )
             continue
 
+        # Reddit live re-check (added 2026-05-16). update_stats.py uses a
+        # 2-detection threshold which is brittle to transient scrape failures
+        # and rate-limit misses. Confirmed false positives on 2026-05-07
+        # (post 23005 /r/PAstudent/Active recall with Anki, post 23223 /r/
+        # UniversityOfHouston/UH Finals Study App): both comments alive at
+        # the time the strike email was sent. This guard fetches the
+        # comment URL one more time right before the email goes out; if it's
+        # still visible we flip status back to 'active' and skip the alert,
+        # eliminating that class of false positive without weakening the
+        # detection signal for real strikes.
+        if args.post_id is None and r["platform"] == "reddit":
+            live_state = _reddit_live_recheck(
+                r["our_url"], r["our_account"], _reddit_ua
+            )
+            print(
+                f"[strike_alert] id={r['id']} platform=reddit "
+                f"live_recheck={live_state} url={r['our_url']}",
+                flush=True,
+            )
+            if live_state == "alive":
+                if not args.dry_run:
+                    _resurrect_post(db, r["id"])
+                filtered += 1
+                print(
+                    f"[strike_alert] filtered id={r['id']} reason=reddit-alive "
+                    f"(false positive, status flipped back to active, no email)",
+                    flush=True,
+                )
+                continue
+
         repo_state = None
         if r["platform"] == "github":
             repo_state = _github_repo_state(r["thread_url"])
@@ -450,11 +668,18 @@ def main():
         # archaeology and the dashboard still shows status='deleted'.
         # See the May 15 audit (15 of 27 strikes were REPOGONE) for the
         # canonical false-positive batch.
-        if args.post_id is None and repo_state in ("repo_gone", "feature_disabled"):
+        if args.post_id is None and repo_state in (
+            "repo_gone", "issue_deleted", "feature_disabled"
+        ):
             if not args.dry_run:
                 _mark_sent(db, r["id"])
             filtered += 1
-            reason = "repo-gone" if repo_state == "repo_gone" else "feature-disabled"
+            reason_map = {
+                "repo_gone": "repo-gone",
+                "issue_deleted": "issue-deleted",
+                "feature_disabled": "feature-disabled",
+            }
+            reason = reason_map[repo_state]
             print(
                 f"[strike_alert] filtered id={r['id']} reason={reason} "
                 f"(marked sent, no email)",
