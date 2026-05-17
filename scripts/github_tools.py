@@ -391,16 +391,17 @@ def cmd_log_post(args):
            thread_title, thread_content, our_url, our_content, our_account,
            source_summary, project_name, status, posted_at, feedback_report_used,
            engagement_style, search_topic, language, claude_session_id,
-           generation_trace)
+           generation_trace, link_source)
            VALUES ('github', %s, %s, %s, %s, '', %s, %s, %s, '', %s, 'active', NOW(), TRUE,
-                   %s, %s, %s, %s::uuid, %s::jsonb) RETURNING id""",
+                   %s, %s, %s, %s::uuid, %s::jsonb, %s) RETURNING id""",
         [args.thread_url, args.thread_author, args.thread_author, args.thread_title,
          args.our_url, args.our_text, args.account, args.project,
          getattr(args, "engagement_style", None),
          getattr(args, "search_topic", None),
          (getattr(args, "language", None) or "en"),
          session_id,
-         generation_trace_json],
+         generation_trace_json,
+         getattr(args, "link_source", None)],
     )
     row = cur.fetchone()
     new_id = row[0] if row else None
@@ -452,6 +453,11 @@ def main():
                             "Stored in posts.generation_trace JSONB for audit. "
                             "See migrations/2026-05-12_generation_trace.sql for "
                             "the shape contract.")
+    p_log.add_argument("--link-source", dest="link_source", default=None,
+                       help="Optional tag for posts.link_source so the dashboard "
+                            "can break out audience-page traffic (e.g. "
+                            "'audience_page:founder-ghostwriting') from generic "
+                            "homepage links.")
 
     args = parser.parse_args()
     if args.command == "search":
