@@ -1072,6 +1072,138 @@ def _detect_minimized_github_comments(db, posts, quiet=False):
     return minimized
 
 
+_REPO_STATE_CACHE_US = {}
+
+
+def _classify_github_404(owner, repo, number, comment_id, quiet=False):
+    """Disambiguate a REST 404 on a GitHub issue/PR comment.
+
+    Returns one of:
+      - 'repo_gone'        : `repos/{o}/{r}` itself 404s
+      - 'issue_deleted'    : repo is live but `repos/{o}/{r}/issues/{n}` is
+                             404/410 (issue was deleted by author/admin)
+      - 'feature_disabled' : repo is live, issue is reachable, but
+                             has_issues=false (every comment under the
+                             feature 404s, not specific to us)
+      - 'transient'        : repo + issue both alive, and GraphQL says our
+                             specific comment IS present and not minimized.
+                             REST returned 404 by mistake (rate-limit blip,
+                             secondary throttle, network); do NOT count this
+                             as a strike.
+      - 'comment_deleted'  : repo + issue both alive, GraphQL says our
+                             comment is NOT in the thread (genuine deletion,
+                             or hidden in a way we don't see).
+      - 'unknown'          : a follow-up call failed; caller should fall
+                             back to count-based detection.
+
+    Cached per-process on repo metadata to keep the audit cheap. Adds at
+    most 2 extra gh-api calls per 404, gated by single-repo caching.
+    """
+    import subprocess
+
+    key = f"{owner.lower()}/{repo.lower()}"
+    cached_repo = _REPO_STATE_CACHE_US.get(key)
+    if cached_repo is None:
+        try:
+            proc = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception as e:
+            if not quiet:
+                print(f"  github-classify: repo check failed {owner}/{repo}: {e}",
+                      flush=True)
+            return "unknown"
+        if proc.returncode != 0:
+            err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+            if "not found" in err or "http 404" in err:
+                cached_repo = {"state": "repo_gone"}
+            else:
+                cached_repo = {"state": "unknown"}
+        else:
+            try:
+                data = json.loads(proc.stdout or "{}")
+            except Exception:
+                data = {}
+            cached_repo = {
+                "state": "live",
+                "has_issues": bool(data.get("has_issues", True)),
+            }
+        _REPO_STATE_CACHE_US[key] = cached_repo
+
+    if cached_repo["state"] == "repo_gone":
+        return "repo_gone"
+    if cached_repo["state"] == "unknown":
+        return "unknown"
+    if not cached_repo.get("has_issues", True):
+        return "feature_disabled"
+
+    # Repo is live. Check the specific issue/PR thread via REST first
+    # (cheaper than GraphQL for this gate). 410 + 404 are both "thread gone".
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/issues/{number}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return "unknown"
+    if proc.returncode != 0:
+        err = ((proc.stderr or "") + (proc.stdout or "")).lower()
+        if ("not found" in err or "http 404" in err
+                or "http 410" in err or "this issue was deleted" in err):
+            return "issue_deleted"
+        # Could be 403/permissions; fall through to GraphQL to be sure.
+
+    # Repo + issue are reachable; verify the specific comment via GraphQL.
+    # If our comment_id shows up in `comments.nodes[].databaseId` and is not
+    # minimized, REST 404 was transient. If it's absent, it's truly gone.
+    try:
+        # Pull a wide range of comments; 250 is well within GraphQL's 100/page
+        # limit when combined with `after` paginations, but for simplicity we
+        # just fetch up to 100 here. If the comment is beyond the first 100
+        # we'll return 'unknown' to be safe (caller falls back to count-based).
+        query = (
+            f'{{ repository(owner: "{owner}", name: "{repo}") {{ '
+            f'issueOrPullRequest(number: {number}) {{ '
+            f'... on Issue {{ comments(first: 100) {{ '
+            f'nodes {{ databaseId isMinimized }} '
+            f'pageInfo {{ hasNextPage }} }} }} '
+            f'... on PullRequest {{ comments(first: 100) {{ '
+            f'nodes {{ databaseId isMinimized }} '
+            f'pageInfo {{ hasNextPage }} }} }} '
+            f'}} }} }}'
+        )
+        proc = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={query}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return "unknown"
+        data = json.loads(proc.stdout).get("data", {}) or {}
+    except Exception:
+        return "unknown"
+
+    iop = ((data.get("repository") or {}).get("issueOrPullRequest")) or {}
+    if not iop:
+        # Either repo missing in GraphQL (shouldn't happen if REST said live)
+        # or issue/PR not visible. Treat as issue_deleted equivalent.
+        return "issue_deleted"
+    comments = (iop.get("comments") or {}).get("nodes") or []
+    cid_int = int(comment_id)
+    for n in comments:
+        if int(n.get("databaseId") or 0) == cid_int:
+            if n.get("isMinimized"):
+                # Pre-pass should already have flipped this; defer to its path.
+                return "comment_deleted"
+            return "transient"
+    # Comment not in the first 100 nodes. If the thread is paginated, we
+    # can't be sure; report unknown so count-based detection takes over.
+    has_more = (iop.get("comments") or {}).get("pageInfo", {}).get("hasNextPage")
+    if has_more:
+        return "unknown"
+    return "comment_deleted"
+
+
 def update_github(db, quiet=False, limit=None):
     """Fetch engagement on our GitHub issue/PR comments via `gh api`.
 
@@ -1099,10 +1231,11 @@ def update_github(db, quiet=False, limit=None):
     # Re-select after the pre-pass so flipped rows drop out of the REST loop.
     posts = db.execute(sql).fetchall()
 
-    total = updated = deleted = errors = 0
+    total = updated = deleted = errors = repo_gone = transient_skipped = 0
     results = []
+    # Capture issue/PR number so we can re-verify comment state on 404.
     comment_url_re = re.compile(
-        r"https?://github\.com/([^/]+)/([^/]+)/(?:issues|pull)/\d+#issuecomment-(\d+)"
+        r"https?://github\.com/([^/]+)/([^/]+)/(?:issues|pull)/(\d+)#issuecomment-(\d+)"
     )
 
     for post in posts:
@@ -1113,7 +1246,7 @@ def update_github(db, quiet=False, limit=None):
         if not m:
             errors += 1
             continue
-        owner, repo, comment_id = m.group(1), m.group(2), m.group(3)
+        owner, repo, number, comment_id = m.group(1), m.group(2), m.group(3), m.group(4)
 
         try:
             proc = subprocess.run(
@@ -1126,19 +1259,61 @@ def update_github(db, quiet=False, limit=None):
 
         if proc.returncode != 0:
             err_text = (proc.stderr or "") + (proc.stdout or "")
-            if "rate limit" in err_text.lower():
+            if "rate limit" in err_text.lower() or "secondary rate limit" in err_text.lower() or "abuse detection" in err_text.lower():
                 if not quiet:
                     print(f"  github: rate-limited at {total}/{len(posts)}, sleeping 60s", flush=True)
                 time.sleep(60)
                 errors += 1
                 continue
-            if "Not Found" in err_text or "HTTP 404" in err_text:
+            if "Not Found" in err_text or "HTTP 404" in err_text or "HTTP 410" in err_text:
+                # Disambiguate the 404. A bare comment 404 means one of:
+                #   1. parent repo was deleted (every comment 404s)
+                #   2. issue/PR thread was deleted (every comment under it 404s)
+                #   3. repo has has_issues=false (collateral, not moderation)
+                #   4. our specific comment was deleted or hidden
+                #   5. transient GitHub error returning 404 for a live comment
+                #      (HOLYKEYZ case, 2026-05-09: REST gave 404 twice but
+                #      the comment was alive in both REST and GraphQL once we
+                #      re-checked. Two transient 404s within the cron's polling
+                #      window will otherwise flip the post to status='deleted'.)
+                # Categories 1-3 are not moderation strikes; tag them as
+                # 'repo_gone' so strike_alert.py's filter drops them. Category
+                # 5 must reset detect_count to 0 so the next scan starts fresh.
+                cls = _classify_github_404(owner, repo, number, comment_id, quiet=quiet)
+                if cls in ("repo_gone", "issue_deleted", "feature_disabled"):
+                    db.execute(
+                        "UPDATE posts SET status='repo_gone', status_checked_at=NOW() "
+                        "WHERE id=%s",
+                        [post_id],
+                    )
+                    repo_gone += 1
+                    if not quiet:
+                        print(f"REPO_GONE (github {cls}) [{post_id}] {owner}/{repo}#{number}", flush=True)
+                    continue
+                if cls == "transient":
+                    # REST said 404 but GraphQL confirms our comment is alive
+                    # and not minimized. False positive; reset the strike
+                    # counter so we don't accumulate it.
+                    db.execute(
+                        "UPDATE posts SET deletion_detect_count=0, "
+                        "status_checked_at=NOW() WHERE id=%s",
+                        [post_id],
+                    )
+                    transient_skipped += 1
+                    if not quiet:
+                        print(f"TRANSIENT-404 (github) [{post_id}] {owner}/{repo}#{number} "
+                              f"comment {comment_id} alive in GraphQL, resetting count",
+                              flush=True)
+                    continue
+                # cls == 'comment_deleted' (GraphQL confirms it's gone) or
+                # 'unknown' (GraphQL itself failed; fall through to count-based
+                # detection so a real deletion still gets caught eventually).
                 row = db.execute(
                     "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s",
                     [post_id],
                 ).fetchone()
                 detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
+                if detect_count >= 2 and cls == "comment_deleted":
                     db.execute(
                         "UPDATE posts SET status='deleted', deletion_detect_count=%s, "
                         "status_checked_at=NOW() WHERE id=%s",
@@ -1146,7 +1321,7 @@ def update_github(db, quiet=False, limit=None):
                     )
                     deleted += 1
                     if not quiet:
-                        print(f"DELETED (github 404) [{post_id}]", flush=True)
+                        print(f"DELETED (github 404 + graphql confirmed) [{post_id}]", flush=True)
                 else:
                     db.execute(
                         "UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() "
@@ -1195,13 +1370,20 @@ def update_github(db, quiet=False, limit=None):
                           updated=updated, deleted=deleted, errors=errors)
             if not quiet:
                 print(f"  github: {total}/{len(posts)} processed "
-                      f"(updated={updated}, deleted={deleted}, errors={errors})",
+                      f"(updated={updated}, deleted={deleted}, "
+                      f"repo_gone={repo_gone}, transient={transient_skipped}, "
+                      f"errors={errors})",
                       flush=True)
 
     db.commit()
     progress.done("github", len(posts),
                   updated=updated, deleted=deleted, errors=errors)
+    if not quiet:
+        print(f"  github: done (updated={updated}, deleted={deleted}, "
+              f"repo_gone={repo_gone}, transient={transient_skipped}, "
+              f"errors={errors})", flush=True)
     return {"total": total, "updated": updated, "deleted": deleted,
+            "repo_gone": repo_gone, "transient_skipped": transient_skipped,
             "errors": errors, "results": results}
 
 
