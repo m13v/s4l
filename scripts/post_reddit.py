@@ -91,6 +91,14 @@ _TRANSIENT_CDP_ERRORS = {
 }
 
 from engagement_styles import VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register
+# Audience-page routing: tells Claude which curated landing pages exist for the
+# project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
+# draft when the thread topic matches. See scripts/audience_pages.py + the
+# landing_pages.audience_pages block in config.json.
+from audience_pages import (
+    prompt_block as _audience_prompt_block,
+    classify_url_as_audience_page as _audience_classify_url,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -762,35 +770,46 @@ def _angle_str(v):
 
 
 def build_content_angle(project, config):
-    """Prefer project-specific positioning over the global config angle."""
+    """Prefer project-specific positioning over the global config angle.
+
+    Always appends the project's audience-pages block (when configured) so the
+    draft prompt knows which curated landing pages it should link to for
+    topic-matched threads. Single source of truth flows through every caller
+    that consumes content_angle.
+    """
     if project.get("content_angle"):
-        return project["content_angle"]
+        base = project["content_angle"]
+    else:
+        parts = []
+        for key in ("description", "differentiator", "icp", "setup"):
+            s = _angle_str(project.get(key))
+            if s:
+                parts.append(s)
 
-    parts = []
-    for key in ("description", "differentiator", "icp", "setup"):
-        s = _angle_str(project.get(key))
-        if s:
-            parts.append(s)
+        messaging = project.get("messaging", {}) or {}
+        for key in ("lead_with_pain", "solution", "proof"):
+            s = _angle_str(messaging.get(key))
+            if s:
+                parts.append(s)
 
-    messaging = project.get("messaging", {}) or {}
-    for key in ("lead_with_pain", "solution", "proof"):
-        s = _angle_str(messaging.get(key))
-        if s:
-            parts.append(s)
+        voice = project.get("voice", {}) or {}
+        if voice.get("tone"):
+            parts.append(f"Voice: {voice['tone']}")
+        if voice.get("never"):
+            parts.append("Never: " + "; ".join(voice["never"]))
+        examples = voice.get("examples") or voice.get("examples_good") or []
+        if examples:
+            parts.append("Voice examples: " + " | ".join(examples[:3]))
 
-    voice = project.get("voice", {}) or {}
-    if voice.get("tone"):
-        parts.append(f"Voice: {voice['tone']}")
-    if voice.get("never"):
-        parts.append("Never: " + "; ".join(voice["never"]))
-    examples = voice.get("examples") or voice.get("examples_good") or []
-    if examples:
-        parts.append("Voice examples: " + " | ".join(examples[:3]))
+        base = " ".join(parts) if parts else config.get("content_angle", "")
 
-    if parts:
-        return " ".join(parts)
-
-    return config.get("content_angle", "")
+    try:
+        ap_block = _audience_prompt_block(project.get("name") or "")
+    except Exception:
+        ap_block = ""
+    if ap_block:
+        return (base + "\n\n" + ap_block).strip() if base else ap_block.strip()
+    return base
 
 
 def build_discover_prompt(project, config, limit, top_report, recent_comments,
@@ -1439,7 +1458,7 @@ def post_via_cdp(thread_url, reply_to_url, text):
     return {"ok": False, "error": "all_attempts_failed"}
 
 
-def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None):
+def log_post(thread_url, permalink, text, project_name, thread_author, thread_title, reddit_username, engagement_style=None, search_topic=None, generation_trace_path=None, link_source=None):
     """Log a successful post to the database. Returns the new post_id, or None.
 
     generation_trace_path (2026-05-12): optional path to a JSON file with
@@ -1449,6 +1468,12 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
     posts.generation_trace JSONB. File-based (not inline) to keep argv
     short. Same trace blob is reused for every post produced from this
     Claude draft, since they all share the same few-shot context.
+
+    link_source (2026-05-17): optional string written to posts.link_source so
+    the dashboard can break out audience-page traffic (e.g.
+    'audience_page:founder-ghostwriting') from generic homepage links. Set by
+    the post loop after URL wrapping based on which curated landing page
+    (if any) Claude baked into the reply text.
     """
     try:
         cmd = ["python3", REDDIT_TOOLS, "log-post",
@@ -1461,6 +1486,8 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
             cmd.extend(["--search-topic", search_topic])
         if generation_trace_path:
             cmd.extend(["--generation-trace", generation_trace_path])
+        if link_source:
+            cmd.extend(["--link-source", link_source])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         try:
             payload = json.loads((result.stdout or "").strip())
@@ -2067,6 +2094,25 @@ def _post_iteration(plan, reddit_username):
         if applied_campaign_ids:
             print(f"[post_reddit] applied campaigns {applied_campaign_ids} (suffix appended)")
 
+        # Audience-page detection (2026-05-17). Inspect the unwrapped text for
+        # any URL that exactly matches a curated audience-page (e.g.
+        # https://s4l.ai/ghostwriting). When found, posts.link_source is
+        # stamped 'audience_page:<angle>' for the row so the dashboard can
+        # break out curated traffic from generic homepage links. Detection
+        # runs BEFORE wrap_text_for_post because wrapping rewrites the URLs
+        # to /r/<code> short links; classify_url_as_audience_page() needs
+        # the original target URL.
+        audience_page_link_source = None
+        try:
+            for _url_m in re.finditer(r'https?://[^\s)\]>"\']+', text):
+                _raw = _url_m.group(0).rstrip('.,);!?]')
+                _angle = _audience_classify_url(_raw, project_name)
+                if _angle:
+                    audience_page_link_source = f"audience_page:{_angle}"
+                    break
+        except Exception as _e:
+            print(f"[post_reddit] WARNING: audience-page classify raised ({_e})")
+
         # URL-wrap the final text (URLs in suffix included). Mints into
         # post_links with NULL post_id; we backfill after log_post returns
         # below. On wrap failure, post unwrapped — losing attribution is
@@ -2141,7 +2187,8 @@ def _post_iteration(plan, reddit_username):
                      # all saw the same few-shot context. None when the
                      # draft phase used a reused/cached draft (no Claude
                      # call) — that's fine, audit just records no trace.
-                     generation_trace_path=plan.get("generation_trace_path"))
+                     generation_trace_path=plan.get("generation_trace_path"),
+                     link_source=audience_page_link_source)
             bump_campaigns("posts", new_post_id, applied_campaign_ids)
             # Backfill post_links.post_id for the codes minted at wrap time
             # so /api/short-links/<code> resolver knows which post each
