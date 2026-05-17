@@ -3921,7 +3921,8 @@ async function handleApi(req, res) {
       "UNION ALL SELECT * FROM (SELECT COALESCE(source_timestamp, received_at), 'mention', platform, author, COALESCE(title, LEFT(body, 140)), sentiment, url, ('m' || id), NULL::text, NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM octolens_mentions ORDER BY COALESCE(source_timestamp, received_at) DESC LIMIT 150) x4 " +
       "UNION ALL SELECT * FROM (SELECT sent_at, 'dm_sent', platform, their_author, LEFT(our_dm_content, 140), NULL::text, chat_url, ('d' || dms.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM dms LEFT JOIN session_cost sc ON sc.session_id = dms.claude_session_id WHERE status='sent' AND sent_at IS NOT NULL ORDER BY sent_at DESC LIMIT 150) x5 " +
       "UNION ALL SELECT * FROM (SELECT m.message_at, 'dm_reply_sent', d.platform, d.their_author, LEFT(m.content, 140), NULL::text, d.chat_url, ('dr' || m.id), NULL::text, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c5.name, NULL::text, NULL::text, NULL::text FROM dm_messages m JOIN dms d ON d.id = m.dm_id LEFT JOIN session_cost sc ON sc.session_id = m.claude_session_id LEFT JOIN campaigns c5 ON c5.id = m.campaign_id WHERE m.direction = 'outbound' AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction = 'inbound' AND m2.message_at < m.message_at) ORDER BY m.message_at DESC LIMIT 150) x5b " +
-      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_serp', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup') ORDER BY completed_at DESC LIMIT 150) x6 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_twitter', 'seo', product, keyword, slug, page_url, ('k' || sk.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk LEFT JOIN session_cost sc ON sc.session_id = sk.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'twitter' ORDER BY completed_at DESC LIMIT 150) x6 " +
+      "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_misc', 'seo', product, keyword, slug, page_url, ('km' || sk6.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk6 LEFT JOIN session_cost sc ON sc.session_id = sk6.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup', 'twitter') ORDER BY completed_at DESC LIMIT 150) x6m " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_gsc', 'seo', product, query, page_slug, page_url, ('g' || gq.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM gsc_queries gq LEFT JOIN session_cost sc ON sc.session_id = gq.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL ORDER BY completed_at DESC LIMIT 150) x7 " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_reddit', 'seo', product, keyword, slug, page_url, ('kr' || sk2.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk2 LEFT JOIN session_cost sc ON sc.session_id = sk2.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'reddit' ORDER BY completed_at DESC LIMIT 150) x8 " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_top', 'seo', product, keyword, slug, page_url, ('kt' || sk3.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk3 LEFT JOIN session_cost sc ON sc.session_id = sk3.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'top_page' ORDER BY completed_at DESC LIMIT 150) x8b " +
@@ -4435,7 +4436,16 @@ async function handleApi(req, res) {
     // started with a prospect."
     parts.push("SELECT 'dm_sent' AS type, d.platform AS pl FROM dms d WHERE EXISTS (SELECT 1 FROM dm_messages m WHERE m.dm_id = d.id AND m.direction='outbound' AND m.message_at >= NOW() - " + win + " AND NOT EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = d.id AND m2.direction='outbound' AND m2.message_at < m.message_at))" + dmsAliasedPc.clause);
     parts.push("SELECT 'dm_reply_sent' AS type, d.platform AS pl FROM dm_messages m JOIN dms d ON d.id = m.dm_id WHERE m.direction='outbound' AND m.message_at >= NOW() - " + win + " AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction='inbound' AND m2.message_at < m.message_at)" + dmsAliasedPc.clause);
-    parts.push("SELECT 'page_published_serp' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup')" + seoProdPc.clause);
+    // Pre-2026-05-16: a single 'page_published_serp' bucket caught every
+    // seo_keywords row whose source was not (reddit, top_page, top_post,
+    // roundup). The real SERP pipeline was unloaded 2026-04-17; the cards
+    // labelled "SERP SEO" since then have actually been Twitter-cycle
+    // page-gen output (twitter_gen_links.py -> generate_page.py --trigger
+    // twitter, source='twitter'). Split into an honest twitter bucket and a
+    // misc catch-all for legacy/edge sources (existing_page, gsc,
+    // suggestion:*, competitor:*, topic_template, etc).
+    parts.push("SELECT 'page_published_twitter' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source = 'twitter'" + seoProdPc.clause);
+    parts.push("SELECT 'page_published_misc' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup', 'twitter')" + seoProdPc.clause);
     parts.push("SELECT 'page_published_gsc' AS type, 'seo' AS pl FROM gsc_queries WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL" + seoProdPc.clause);
     parts.push("SELECT 'page_published_reddit' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='reddit'" + seoProdPc.clause);
     parts.push("SELECT 'page_published_top' AS type, 'seo' AS pl FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_page'" + seoProdPc.clause);
@@ -9434,8 +9444,12 @@ async function saveSettings() {
 }
 
 // Activity tab
-const EVENT_TYPES = ['posted_thread', 'posted_comment', 'replied', 'skipped', 'mention', 'dm_sent', 'dm_reply_sent', 'page_published_serp', 'page_published_gsc', 'page_published_reddit', 'page_published_top', 'page_published_top_post', 'page_published_roundup', 'page_improved', 'page_expired', 'resurrected'];
-const EVENT_LABELS = { posted_thread: 'thread posted', posted_comment: 'comment posted', replied: 'engage replied', skipped: 'engage skipped', mention: 'mention', dm_sent: 'dm sent', dm_reply_sent: 'dm reply', page_published_serp: 'page (serp)', page_published_gsc: 'page (gsc)', page_published_reddit: 'page (reddit)', page_published_top: 'page (top)', page_published_top_post: 'page (top post)', page_published_roundup: 'page (roundup)', page_improved: 'page (improved)', page_expired: 'page expired', resurrected: 'resurrected' };
+// Page-generation event types. Folded into a single 'pages_generated' card
+// in renderActivityStats (with per-pipeline breakdown in the body + tooltip).
+// SQL still emits each subtype so the breakdown is faithful.
+const PAGE_GEN_EVENT_TYPES = ['page_published_twitter', 'page_published_gsc', 'page_published_reddit', 'page_published_top', 'page_published_top_post', 'page_published_roundup', 'page_published_misc', 'page_improved'];
+const EVENT_TYPES = ['posted_thread', 'posted_comment', 'replied', 'skipped', 'mention', 'dm_sent', 'dm_reply_sent', ...PAGE_GEN_EVENT_TYPES, 'page_expired', 'resurrected'];
+const EVENT_LABELS = { posted_thread: 'thread posted', posted_comment: 'comment posted', replied: 'engage replied', skipped: 'engage skipped', mention: 'mention', dm_sent: 'dm sent', dm_reply_sent: 'dm reply', page_published_twitter: 'page (twitter)', page_published_gsc: 'page (gsc)', page_published_reddit: 'page (reddit)', page_published_top: 'page (top)', page_published_top_post: 'page (top post)', page_published_roundup: 'page (roundup)', page_published_misc: 'page (misc)', page_improved: 'page (improved)', page_expired: 'page expired', resurrected: 'resurrected', pages_generated: 'pages generated' };
 const EVENT_DESCRIPTIONS = {
   posted_thread: 'Original thread the bot published (Post Threads job): a new top-level Reddit submission, tweet/X post, LinkedIn post, etc. Identified by thread_url = our_url AND thread_author is empty or matches our_account.',
   posted_comment: 'Comment the bot left on someone else’s thread (Post Comments job): a Reddit/Twitter/LinkedIn/Moltbook/GitHub reply where thread_url ≠ our_url, or where thread_url = our_url but thread_author is someone else (LinkedIn comment job stores the parent URL in both columns).',
@@ -9444,13 +9458,15 @@ const EVENT_DESCRIPTIONS = {
   mention: 'Someone mentioned one of our products on a tracked platform. Detection only, no engagement action.',
   dm_sent: 'New direct-message conversation the bot started with a prospect.',
   dm_reply_sent: 'Follow-up message sent inside an existing DM conversation.',
-  page_published_serp: 'SEO landing page generated from the SERP pipeline (based on ranked search results for target keywords).',
+  pages_generated: 'Total SEO/landing pages produced across every pipeline in this window. Hover the breakdown chips for the per-pipeline counts. The standalone SERP pipeline was unloaded 2026-04-17; any page tagged "twitter" came from the Twitter cycle page-gen A/B lane (twitter_gen_links.py), not a dedicated SERP run.',
+  page_published_twitter: 'SEO landing page generated by the Twitter cycle page-gen A/B lane (twitter_gen_links.py -> generate_page.py --trigger twitter). Source rows have seo_keywords.source=twitter. This is what the legacy "SERP SEO" pill was actually counting after the standalone SERP pipeline was unloaded on 2026-04-17.',
   page_published_gsc: 'SEO page generated from a Google Search Console query the site already gets impressions for.',
   page_published_reddit: 'SEO page generated from a high-intent Reddit thread.',
-  page_published_top: 'SEO page generated for a top-of-funnel ranking opportunity.',
+  page_published_top: 'SEO page generated for a top-of-funnel ranking opportunity (top_pages pipeline).',
   page_published_top_post: 'SEO page generated retroactively for a viral social-autoposter post (>=10k views, last 7d) whose link still points at the homepage. Pipeline also mounts a NewsStrip on the homepage routing existing organic clickthroughs to the new /t/ page.',
   page_published_roundup: 'Roundup or list-style SEO page (comparisons, best-of, alternatives).',
-  page_improved: 'Existing SEO page that was updated or rewritten to improve rankings.',
+  page_published_misc: 'SEO page from a legacy or edge source (existing_page, suggestion:*, competitor:*, topic_template, feature_template, client_blog, etc). Mostly historical; near-zero new volume in 2026-05.',
+  page_improved: 'Existing SEO page that was updated or rewritten to improve rankings (seo_page_improvements table).',
   page_expired: 'SEO page deleted by the daily expire pipeline because it had zero clicks in the last 30 days. The on-disk source file was removed; Next.js now returns 404 for the URL. Logged for audit/revert in seo_expired_pages.',
   resurrected: 'Previously archived or unavailable item brought back into rotation (e.g., a removed post restored after reappearing).',
 };
@@ -9462,7 +9478,10 @@ const ACTIVITY_CAMPAIGN_ORGANIC = '(organic)';
 let _activitySeen = new Set();
 let _activityFirstLoad = true;
 // Activity-tab filters/sort/search are persisted across reloads.
-let _activityTypeFilter = saLoadSet('sa.activity.typeFilter.v2', EVENT_TYPES);
+// Bumped v2 -> v3 on 2026-05-16 when page_published_serp was split into
+// page_published_twitter + page_published_misc; old saved Sets did not
+// include the new types, so they'd silently disappear from the feed.
+let _activityTypeFilter = saLoadSet('sa.activity.typeFilter.v3', EVENT_TYPES);
 let _activityPlatformFilter = saLoadSet('sa.activity.platformFilter.v1', ACTIVITY_PLATFORMS);
 let _activityProjectFilter = saLoadSet('sa.activity.projectFilter.v1', []);
 let _activityKnownProjects = saLoad('sa.activity.knownProjects.v1', []);
@@ -9560,7 +9579,7 @@ function buildActivityFilters() {
     var added;
     if (_activityTypeFilter.has(t)) { _activityTypeFilter.delete(t); el.classList.remove('active'); added = false; }
     else { _activityTypeFilter.add(t); el.classList.add('active'); added = true; }
-    saSaveSet('sa.activity.typeFilter.v2', _activityTypeFilter);
+    saSaveSet('sa.activity.typeFilter.v3', _activityTypeFilter);
     try { window.posthog && window.posthog.capture('filter_toggle', { table: 'activity', dimension: 'type', value: t, action: added ? 'add' : 'remove' }); } catch (er) {}
     _activityPage = 0;
     renderActivity(_lastActivityEvents || []);
@@ -9613,11 +9632,11 @@ function buildActivityFilters() {
       if (a === 'type-all') {
         _activityTypeFilter = new Set(EVENT_TYPES);
         tEl.querySelectorAll('[data-type]').forEach(c => c.classList.add('active'));
-        saSaveSet('sa.activity.typeFilter.v2', _activityTypeFilter);
+        saSaveSet('sa.activity.typeFilter.v3', _activityTypeFilter);
       } else if (a === 'type-none') {
         _activityTypeFilter = new Set();
         tEl.querySelectorAll('[data-type]').forEach(c => c.classList.remove('active'));
-        saSaveSet('sa.activity.typeFilter.v2', _activityTypeFilter);
+        saSaveSet('sa.activity.typeFilter.v3', _activityTypeFilter);
       } else if (a === 'platform-all') {
         _activityPlatformFilter = new Set(ACTIVITY_PLATFORMS);
         pEl.querySelectorAll('[data-platform]').forEach(c => c.classList.add('active'));
@@ -10124,7 +10143,63 @@ function renderActivityStats(payload) {
     grandTotal += n;
   });
   if (totalEl) totalEl.textContent = grandTotal + ' events in ' + currentStatsWindow().labelLong;
-  grid.innerHTML = EVENT_TYPES.map(t => {
+  // Fold all page-generation subtypes into a single synthetic 'pages_generated'
+  // card so the grid stops looking like six near-empty SEO cells. The breakdown
+  // row inside the card lists each pipeline + count chip; the hover tooltip on
+  // each chip shows the long description for that pipeline. Card-level "i"
+  // icon shows the umbrella tooltip.
+  const pagesBucket = { total: 0, subtypes: {} };
+  PAGE_GEN_EVENT_TYPES.forEach(t => {
+    const b = byType[t];
+    if (!b) return;
+    pagesBucket.total += b.total;
+    if (b.total > 0) pagesBucket.subtypes[t] = b.total;
+  });
+  const PAGE_GEN_CHIP_LABELS = {
+    page_published_twitter: 'twitter',
+    page_published_gsc: 'gsc',
+    page_published_reddit: 'reddit',
+    page_published_top: 'top',
+    page_published_top_post: 'top post',
+    page_published_roundup: 'roundup',
+    page_published_misc: 'misc',
+    page_improved: 'improved',
+  };
+  // Render order: keep PAGE_GEN_EVENT_TYPES order, then drop the non-page tail
+  // cards (page_expired, resurrected) at the end. Suppress individual page_*
+  // cards since we render the umbrella card instead.
+  const renderOrder = [];
+  EVENT_TYPES.forEach(t => {
+    if (PAGE_GEN_EVENT_TYPES.includes(t)) return; // folded into umbrella
+    renderOrder.push(t);
+  });
+  // Insert the umbrella where the first page card used to live (after dm_reply_sent).
+  const dmIdx = renderOrder.indexOf('dm_reply_sent');
+  if (dmIdx >= 0) renderOrder.splice(dmIdx + 1, 0, '__pages_generated__');
+  else renderOrder.push('__pages_generated__');
+
+  grid.innerHTML = renderOrder.map(t => {
+    if (t === '__pages_generated__') {
+      const total = pagesBucket.total;
+      const subtypes = Object.keys(pagesBucket.subtypes).sort((a, b) => pagesBucket.subtypes[b] - pagesBucket.subtypes[a]);
+      const chips = subtypes.length
+        ? subtypes.map(st => {
+            const lab = PAGE_GEN_CHIP_LABELS[st] || st.replace(/^page_published_/, '');
+            const desc = EVENT_DESCRIPTIONS[st] || '';
+            const titleAttr = desc ? ' data-tooltip="' + escapeHtml(desc) + '"' : '';
+            return '<span class="stat-plat"' + titleAttr + '><span class="stat-plat-text">' + escapeHtml(lab) + '</span><span class="stat-plat-count">' + pagesBucket.subtypes[st] + '</span></span>';
+          }).join('')
+        : '<span style="color:var(--text-very-faint);">\u2014</span>';
+      const umbrellaDesc = EVENT_DESCRIPTIONS.pages_generated || '';
+      const infoIcon = '<span class="stat-card-info" data-tooltip="' + escapeHtml(umbrellaDesc) + '" aria-label="' + escapeHtml(umbrellaDesc) + '">i</span>';
+      return '<div class="stat-card ev-pages-generated' + (total === 0 ? ' zero' : '') + '">' +
+        '<div class="stat-card-head">' +
+          '<span class="stat-card-label">pages generated' + infoIcon + '</span>' +
+          '<span class="stat-card-count">' + total + '</span>' +
+        '</div>' +
+        '<div class="stat-card-breakdown">' + chips + '</div>' +
+      '</div>';
+    }
     const bucket = byType[t];
     const total = bucket.total;
     const plats = Object.keys(bucket.platforms).sort((a, b) => bucket.platforms[b] - bucket.platforms[a]);
