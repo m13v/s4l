@@ -52,6 +52,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import audience_pages as audience_pages_mod  # noqa: E402
+
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 GENERATE_PAGE = os.path.join(REPO_DIR, "seo", "generate_page.py")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -144,14 +147,23 @@ def run_generate(product: str, keyword: str, slug: str) -> tuple[str, str]:
 def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple[str, str]:
     """Decide the link URL for a single candidate.
 
-    Order of preference: SEO page (when applicable AND dice lands in gen lane)
-    -> plain project URL -> "".
+    Order of preference:
+      1. CURATED AUDIENCE PAGE (landing_pages.audience_pages) — wins outright
+         when the candidate's link_keyword / search_topic / reply_text matches
+         any entry's match_keywords. Skips the A/B gate entirely; curated pages
+         are higher-quality than auto-generated /t/<slug> pages.
+      2. SEO page (when has_landing_pages AND dice lands in gen lane)
+      3. plain project URL
+      4. ""
 
     The per-candidate dice roll (random.random() < page_gen_rate) only fires
     for projects that actually support landing pages and where the LLM
     supplied a keyword + slug. Eligible-but-lost candidates surface as
     link_source='plain_url_ab_skip' so post-hoc engagement analysis can
     compare the two lanes apples-to-apples.
+
+    Audience-page hits surface as link_source='audience_page:<angle>' so the
+    dashboard and stats can break out curated-page traffic separately.
     """
     proj_name = candidate.get("matched_project") or ""
     proj = projects.get(proj_name) or {}
@@ -159,6 +171,27 @@ def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple
     has_lp = bool(candidate.get("has_landing_pages"))
     keyword = (candidate.get("link_keyword") or "").strip()
     slug = (candidate.get("link_slug") or "").strip()
+
+    # (1) Curated audience-page short-circuit. Runs BEFORE the A/B gate so a
+    # well-targeted curated page always beats a freshly-spun SEO /t/<slug>.
+    # Signals checked: link_keyword (LLM nomination), search_topic (the topic
+    # bucket the candidate was discovered under), reply_text (the actual draft),
+    # and thread_title (raw thread title from Twitter). First match wins per
+    # the audience_pages list order in config.json.
+    audience_hit = audience_pages_mod.match_by_keyword(
+        proj_name,
+        keyword=keyword,
+        topic=candidate.get("search_topic"),
+        reply_text=candidate.get("reply_text"),
+        thread_title=candidate.get("thread_title") or candidate.get("thread_text"),
+    )
+    if audience_hit:
+        angle = audience_hit.get("angle") or "unknown"
+        url = audience_hit.get("url") or ""
+        if url:
+            print(f"[gen] audience_page hit: angle={angle} url={url} "
+                  f"(skipping A/B page-gen)", flush=True)
+            return (url, f"audience_page:{angle}")
 
     if has_lp and keyword and slug and proj.get("landing_pages"):
         roll = random.random()
