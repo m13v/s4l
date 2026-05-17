@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Process LinkedIn notifications JSON, dedup against DB, insert new replies."""
+from __future__ import annotations  # PEP 604 unions (str | None) for Python 3.9 launchd
+
 import json
 import os
 import re

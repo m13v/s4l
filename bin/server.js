@@ -15994,6 +15994,25 @@ function renderHtml() {
     .replace('__SA_POSTHOG_CONFIG_PLACEHOLDER__', JSON.stringify(posthogWebConfig()));
 }
 
+function renderTikTokOauthCallback(rawUrl) {
+  const u = new URL(rawUrl, 'http://localhost');
+  const code = u.searchParams.get('code') || '';
+  const state = u.searchParams.get('state') || '';
+  const scopes = u.searchParams.get('scopes') || '';
+  const err = u.searchParams.get('error') || '';
+  const errDesc = u.searchParams.get('error_description') || '';
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const ok = !!code && !err;
+  const banner = ok
+    ? '<div style="background:#ecfdf5;color:#065f46;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization successful. Copy the code below and paste it into the local oauth_helper.py script.</div>'
+    : `<div style="background:#fef2f2;color:#991b1b;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization error: ${esc(err || 'no code in callback')}${errDesc ? ` &mdash; ${esc(errDesc)}` : ''}</div>`;
+  const codeBox = ok ? `<div><label style="display:block;font-size:13px;color:#52525b;margin-bottom:6px">Authorization code</label><textarea readonly style="width:100%;font-family:ui-monospace,SFMono-Regular,monospace;font-size:14px;padding:10px;border:1px solid #d4d4d8;border-radius:8px;background:#fafafa" rows="3" onclick="this.select()">${esc(code)}</textarea><button onclick="navigator.clipboard.writeText(${JSON.stringify(code)}).then(()=>this.textContent='Copied')" style="margin-top:8px;padding:8px 14px;background:#18181b;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:13px">Copy</button></div>` : '';
+  const next = ok ? `<details style="margin-top:24px"><summary style="cursor:pointer;color:#27272a;font-weight:500">Next steps</summary><pre style="background:#0a0a0a;color:#fafafa;padding:16px;border-radius:8px;overflow:auto;font-size:13px;line-height:1.6;margin-top:12px">cd ~/social-autoposter
+python3 scripts/tiktok/oauth_helper.py exchange '${esc(code)}'</pre><p style="color:#52525b;font-size:13px;margin-top:12px">This exchanges the code for an access token + refresh token via the TikTok API using the client secret stored in your local macOS keychain, then writes the tokens to <code>~/tiktok-content-api/.env</code>.</p></details>` : '';
+  const meta = ok ? `<dl style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin-top:24px;font-size:13px;color:#52525b"><dt>state</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(state) || '<i>(none)</i>'}</dd><dt>scopes</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(scopes) || '<i>(none)</i>'}</dd></dl>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>TikTok OAuth callback &middot; Meditation Fellow Studio</title><meta name="robots" content="noindex"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 24px;color:#18181b;background:#fff;line-height:1.5}h1{font-size:24px;font-weight:600;margin:0 0 24px;letter-spacing:-0.01em}code{font-family:ui-monospace,SFMono-Regular,monospace;background:#f4f4f5;padding:1px 6px;border-radius:4px;font-size:0.9em}</style></head><body><h1>TikTok OAuth callback</h1>${banner}${codeBox}${meta}${next}</body></html>`;
+}
+
 // --- Server ---
 
 const server = http.createServer((req, res) => {
@@ -16019,6 +16038,14 @@ const server = http.createServer((req, res) => {
     Promise.resolve(handleApi(req, res)).catch(e => {
       try { json(res, { error: e.message || String(e) }, 500); } catch {}
     });
+  } else if (pathname === '/oauth/tiktok/callback') {
+    // Minimal TikTok OAuth landing page. We do not exchange the code here
+    // because the dashboard Cloud Run service does not carry the TikTok
+    // client_secret. The operator pastes the displayed code into the local
+    // scripts/tiktok/oauth_helper.py script which does the exchange via
+    // keychain-stored credentials and writes ~/tiktok-content-api/.env.
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(renderTikTokOauthCallback(req.url));
   } else {
     res.writeHead(404);
     res.end('Not found');
