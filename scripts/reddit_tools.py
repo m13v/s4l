@@ -754,6 +754,12 @@ def cmd_log_post(args):
     }
     if generation_trace_blob is not None:
         body["generation_trace"] = generation_trace_blob
+    # link_source (2026-05-17): tags audience-page traffic (e.g.
+    # 'audience_page:founder-ghostwriting') so the dashboard can break out
+    # curated landing-page hits from generic homepage links. Set by
+    # post_reddit.py based on which URL Claude baked into the reply text.
+    if getattr(args, "link_source", None):
+        body["link_source"] = args.link_source
     resp = api_post("/api/v1/posts", body, ok_on_conflict=True)
     err = resp.get("error") if isinstance(resp, dict) else None
     if err:
@@ -819,6 +825,11 @@ def main():
                             "posts.generation_trace JSONB for audit. See "
                             "migrations/2026-05-12_generation_trace.sql for the "
                             "shape contract.")
+    p_log.add_argument("--link-source", dest="link_source", default=None,
+                       help="Optional tag for posts.link_source so the dashboard "
+                            "can break out audience-page traffic (e.g. "
+                            "'audience_page:founder-ghostwriting') from generic "
+                            "homepage links.")
 
     args = parser.parse_args()
     try:
