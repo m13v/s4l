@@ -5581,6 +5581,67 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/top/destinations - post links rolled up by target URL.
+  // One row per unique destination URL (e.g. https://s4l.ai vs
+  // https://s4l.ai/ghostwriting vs https://s4l.ai/t/<slug>), with click totals
+  // aggregated across every short code that pointed at that URL. Used by the
+  // "Links" subtab in the Top tab to answer "where are my posts sending
+  // traffic and how many clicks does each destination get?"
+  if (p === '/api/top/destinations' && req.method === 'GET') {
+    const url = new URL(req.url, 'http://localhost');
+    const WINDOW_HOURS = { '24h': 24, '7d': 24*7, '14d': 24*14, '30d': 24*30, '90d': 24*90, 'all': null };
+    const rawWindow = String(url.searchParams.get('window') || '7d').toLowerCase();
+    const windowKey = Object.prototype.hasOwnProperty.call(WINDOW_HOURS, rawWindow) ? rawWindow : '7d';
+    const windowHours = WINDOW_HOURS[windowKey];
+    const rawPlatform = String(url.searchParams.get('platform') || '').toLowerCase().trim();
+    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'github']);
+    const platformFilter = ALLOWED_PLATFORMS.has(rawPlatform) ? rawPlatform : '';
+    const pc = auth.projectClause(req.user, 'pl.project_name', url.searchParams.get('project'));
+    if (!pc.ok) return json(res, { destinations: [], window: windowKey, platform: 'all' });
+    const limit = Math.max(50, Math.min(500, parseInt(url.searchParams.get('limit') || '200', 10) || 200));
+    const whereParts = [];
+    if (windowHours != null) {
+      whereParts.push("pl.minted_at >= NOW() - INTERVAL '" + windowHours + " hours'");
+    }
+    if (platformFilter) {
+      whereParts.push("LOWER(pl.platform) = '" + platformFilter + "'");
+    }
+    if (pc.clause) whereParts.push(pc.clause.replace(/^\s*AND\s+/, ''));
+    const whereSql = whereParts.length ? ('WHERE ' + whereParts.join(' AND ')) : '';
+    // Grouping key is target_url verbatim (the resolver redirect is a 302 to
+    // this exact string, so a difference in case or trailing slash maps to a
+    // different real destination). Project + platform stay in GROUP BY so a
+    // multi-project repo (mediar website hosting fazm pages, say) shows them
+    // on separate rows.
+    const q = "SELECT json_agg(row_to_json(r)) FROM (" +
+      "SELECT pl.target_url, pl.project_name, pl.platform, pl.kind, " +
+        "COUNT(DISTINCT pl.post_id)::int AS posts, " +
+        "COUNT(*)::int AS codes, " +
+        "COALESCE(SUM(pl.clicks), 0)::int AS legacy_clicks, " +
+        "COALESCE(SUM(plc.real_clicks), 0)::int AS real_clicks, " +
+        "COALESCE(SUM(plc.bot_clicks), 0)::int AS bot_clicks, " +
+        "COALESCE(SUM(pl.real_clicks), 0)::int AS backfill_real, " +
+        "MIN(pl.minted_at) AS first_minted_at, " +
+        "MAX(pl.last_click_at) AS last_click_at " +
+      "FROM post_links pl " +
+      "LEFT JOIN (" +
+        "SELECT code, " +
+        "  COUNT(*) FILTER (WHERE is_bot = false)::int AS real_clicks, " +
+        "  COUNT(*) FILTER (WHERE is_bot = true)::int AS bot_clicks " +
+        "FROM post_link_clicks GROUP BY code" +
+      ") plc ON plc.code = pl.code " +
+      whereSql + " " +
+      "GROUP BY pl.target_url, pl.project_name, pl.platform, pl.kind " +
+      "ORDER BY real_clicks DESC NULLS LAST, legacy_clicks DESC NULLS LAST, codes DESC " +
+      "LIMIT " + limit +
+      ") r";
+    return (async () => {
+      const rows = await pq(q);
+      const destinations = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      return json(res, { destinations, window: windowKey, platform: platformFilter || 'all' });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/top/links - post short links ranked by click count.
   // Queries post_links joined with posts so the content snippet is available.
   // Returns links with >= 1 click, ordered by clicks desc. Used by the "Links"
@@ -6734,6 +6795,19 @@ const HTML = `<!DOCTYPE html>
   #top-pages-container .style-stats-table th,
   #top-pages-container .style-stats-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 10px 10px; }
   #top-pages-container .style-stats-table td[data-col-key="path"] { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-all; }
+
+  #top-links-container .style-stats-table { table-layout: fixed; }
+  #top-links-container .style-stats-table th,
+  #top-links-container .style-stats-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 10px 10px; vertical-align: top; }
+  #top-links-container .style-stats-table td[data-col-key="target_url"] { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-all; }
+  #top-links-container .dest-kind-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
+  #top-links-container .dest-kind-home     { background: rgba(16,185,129,0.18); color: #10b981; }
+  #top-links-container .dest-kind-subpage  { background: rgba(59,130,246,0.18); color: #3b82f6; }
+  #top-links-container .dest-kind-seo      { background: rgba(168,85,247,0.18); color: #a855f7; }
+  #top-links-container .dest-kind-booking  { background: rgba(245,158,11,0.18); color: #f59e0b; }
+  #top-links-container .dest-kind-github   { background: rgba(148,163,184,0.18); color: #94a3b8; }
+  #top-links-container .dest-kind-external { background: rgba(239,68,68,0.18); color: #ef4444; }
+  #top-links-container .dest-kind-other    { background: rgba(148,163,184,0.18); color: #94a3b8; }
   /* DMs sub-tab */
   #top-dms-container .style-stats-table { table-layout: fixed; }
   #top-dms-container .style-stats-table th,
@@ -7459,6 +7533,11 @@ const HTML = `<!DOCTYPE html>
         <span class="top-subtab-label">DMs</span>
         <span class="top-subtab-sub">prospect chats</span>
       </span>
+      <span class="top-subtab" data-subtab="links" role="tab" aria-selected="false" title="Destination URLs across all posts, ranked by clicks. Homepage vs audience pages vs SEO pages.">
+        <span class="top-subtab-icon" aria-hidden="true">\ud83d\udd17</span>
+        <span class="top-subtab-label">Links</span>
+        <span class="top-subtab-sub">destinations</span>
+      </span>
     </div>
     <div class="top-controls">
       <input id="top-search" class="top-search" type="search" placeholder="Search posts\u2026" />
@@ -7558,6 +7637,9 @@ const HTML = `<!DOCTYPE html>
   </div>
   <div id="top-pages-unknown-container" class="hidden"></div>
   <div id="top-dms-container" class="hidden">
+    <div class="style-stats-empty">Loading\u2026</div>
+  </div>
+  <div id="top-links-container" class="hidden">
     <div class="style-stats-empty">Loading\u2026</div>
   </div>
 </div>
@@ -12427,6 +12509,10 @@ let _topDmsTableState = { sortField: 'rank', sortDir: 'asc', filters: {} };
 let _topDmsLoaded = false;
 let _topDmsLoading = false;
 let _topDmsPayload = null;
+let _topLinksTableState = { sortField: 'real_clicks', sortDir: 'desc', filters: {} };
+let _topLinksLoaded = false;
+let _topLinksLoading = false;
+let _topLinksPayload = null;
 let _topDmDir = saLoad('sa.top.dmDir.v1', 'all');
 let _topDmInterest = saLoad('sa.top.dmInterest.v1', 'all');
 let _topDmMode = saLoad('sa.top.dmMode.v1', 'all');
@@ -12959,6 +13045,7 @@ const TOP_SUBTAB_HELP = {
   comments: 'Top comments your accounts have left under other people’s threads, ranked by reach and reactions.',
   pages: 'Top landing/SEO pages on your sites this period, ranked by pageviews.',
   dms: 'Direct message conversations with prospects, ranked by recent activity.',
+  links: 'Destination URLs across all posts, ranked by clicks. One row per unique target URL (homepage vs audience pages vs SEO pages vs booking).',
 };
 function syncTopSubtabHelp() {
   const el = document.getElementById('top-subtab-help');
@@ -13011,12 +13098,14 @@ function initTopFilters() {
     saveDashboardWindow(_topWindow);
     if (_topSubtab === 'pages') loadTopPages(true);
     else if (_topSubtab === 'dms') { _topDmOffset = 0; loadTopDms(true); }
+    else if (_topSubtab === 'links') loadTopLinks(true);
     else loadTopPosts(true);
   });
   wireTopPillRow('top-platform-pills', (v) => {
     _topPlatform = v || 'all';
     saSave('sa.top.platform.v1', _topPlatform);
     if (_topSubtab === 'dms') { _topDmOffset = 0; loadTopDms(true); }
+    else if (_topSubtab === 'links') loadTopLinks(true);
     else loadTopPosts(true);
   });
   wireTopPillRow('top-project-pills', (v) => {
@@ -13024,6 +13113,7 @@ function initTopFilters() {
     saSave('sa.top.project.v1', _topProject);
     if (_topSubtab === 'pages') renderTopPagesFromCache();
     else if (_topSubtab === 'dms') { if (_topDmsPayload) renderTopDms(_topDmsPayload); }
+    else if (_topSubtab === 'links') loadTopLinks(true);
     else loadTopPosts(true); // refetch so the SQL LIMIT applies AFTER project filter
   });
   wireTopPillRow('top-campaign-pills', (v) => {
@@ -13142,6 +13232,7 @@ function applyTopSubtabState(sub, loadData) {
   const pagesC = document.getElementById('top-pages-container');
   const pagesUnknownC = document.getElementById('top-pages-unknown-container');
   const dmsC   = document.getElementById('top-dms-container');
+  const linksC = document.getElementById('top-links-container');
   const platRowEl = document.getElementById('top-platform-pills');
   const projRowEl = document.getElementById('top-project-pills');
   const campRowEl = document.getElementById('top-campaign-pills');
@@ -13168,6 +13259,7 @@ function applyTopSubtabState(sub, loadData) {
   if (sub === 'pages') {
     if (postsC) postsC.classList.add('hidden');
     if (dmsC) dmsC.classList.add('hidden');
+    if (linksC) linksC.classList.add('hidden');
     if (pagesC) pagesC.classList.remove('hidden');
     if (pagesUnknownC) pagesUnknownC.classList.remove('hidden');
     if (platRowEl) platRowEl.classList.add('hidden');
@@ -13181,6 +13273,7 @@ function applyTopSubtabState(sub, loadData) {
     if (postsC) postsC.classList.add('hidden');
     if (pagesC) pagesC.classList.add('hidden');
     if (pagesUnknownC) pagesUnknownC.classList.add('hidden');
+    if (linksC) linksC.classList.add('hidden');
     if (dmsC) dmsC.classList.remove('hidden');
     if (platRowEl) platRowEl.classList.remove('hidden');
     if (srcRowEl) srcRowEl.classList.add('hidden');
@@ -13194,10 +13287,29 @@ function applyTopSubtabState(sub, loadData) {
       searchElDm.value = _topDmSearch || '';
     }
     if (loadData) loadTopDms(true);
+  } else if (sub === 'links') {
+    if (postsC) postsC.classList.add('hidden');
+    if (pagesC) pagesC.classList.add('hidden');
+    if (pagesUnknownC) pagesUnknownC.classList.add('hidden');
+    if (dmsC) dmsC.classList.add('hidden');
+    if (linksC) linksC.classList.remove('hidden');
+    if (platRowEl) platRowEl.classList.remove('hidden');
+    if (srcRowEl) srcRowEl.classList.add('hidden');
+    if (campRowEl) campRowEl.classList.add('hidden');
+    setDmRowsHidden(true);
+    setLinkPillHidden(true);
+    if (totalEl) totalEl.textContent = '';
+    const searchElLinks = document.getElementById('top-search');
+    if (searchElLinks) {
+      searchElLinks.placeholder = 'Filter destinations by URL\u2026';
+      searchElLinks.value = (_topLinksTableState && _topLinksTableState.globalQuery) || '';
+    }
+    if (loadData) loadTopLinks(true);
   } else {
     if (pagesC) pagesC.classList.add('hidden');
     if (pagesUnknownC) pagesUnknownC.classList.add('hidden');
     if (dmsC) dmsC.classList.add('hidden');
+    if (linksC) linksC.classList.add('hidden');
     if (postsC) postsC.classList.remove('hidden');
     if (platRowEl) platRowEl.classList.remove('hidden');
     if (srcRowEl) srcRowEl.classList.add('hidden');
