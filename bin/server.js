@@ -5614,7 +5614,7 @@ async function handleApi(req, res) {
     // multi-project repo (mediar website hosting fazm pages, say) shows them
     // on separate rows.
     const q = "SELECT json_agg(row_to_json(r)) FROM (" +
-      "SELECT pl.target_url, pl.project_name, pl.platform, pl.kind, " +
+      "SELECT pl.target_url, pl.project_name, pl.platform, " +
         "COUNT(DISTINCT pl.post_id)::int AS posts, " +
         "COUNT(*)::int AS codes, " +
         "COALESCE(SUM(pl.clicks), 0)::int AS legacy_clicks, " +
@@ -5631,13 +5631,74 @@ async function handleApi(req, res) {
         "FROM post_link_clicks GROUP BY code" +
       ") plc ON plc.code = pl.code " +
       whereSql + " " +
-      "GROUP BY pl.target_url, pl.project_name, pl.platform, pl.kind " +
+      "GROUP BY pl.target_url, pl.project_name, pl.platform " +
       "ORDER BY real_clicks DESC NULLS LAST, legacy_clicks DESC NULLS LAST, codes DESC " +
       "LIMIT " + limit +
       ") r";
     return (async () => {
       const rows = await pq(q);
       const destinations = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // Server-side classification of each destination URL into a kind bucket
+      // and (when applicable) the audience-page angle. Reads config.json
+      // once per request to look up each project's website host + audience
+      // pages list; classification is plain hostname / path matching. Done
+      // here so every consumer (UI, future CSV exports) sees the same
+      // canonical label without having to re-implement classify logic.
+      let cfg = null;
+      try {
+        cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      } catch (_e) { cfg = { projects: [] }; }
+      const projIdx = {};
+      for (const p of (cfg && cfg.projects) || []) {
+        if (!p || !p.name) continue;
+        const host = String(p.website || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '').toLowerCase();
+        const audience = ((p.landing_pages || {}).audience_pages) || [];
+        const apIdx = [];
+        for (const a of audience) {
+          try {
+            const u = new URL(a.url);
+            apIdx.push({
+              angle: a.angle,
+              host: (u.hostname || '').toLowerCase().replace(/^www\./, ''),
+              path: (u.pathname || '/').replace(/\/+$/, '') || '/',
+            });
+          } catch (_e) {}
+        }
+        projIdx[p.name] = { website_host: host, audience_pages: apIdx };
+      }
+      const classify = (targetUrl, projectName) => {
+        if (!targetUrl) return { kind: 'other', audience_page_angle: null };
+        let host = '', pathName = '/';
+        try {
+          const u = new URL(targetUrl);
+          host = (u.hostname || '').toLowerCase().replace(/^www\./, '');
+          pathName = (u.pathname || '/').replace(/\/+$/, '') || '/';
+        } catch (_e) { return { kind: 'other', audience_page_angle: null }; }
+        if (/(^|\.)cal\.com$/.test(host) || /(^|\.)calendly\.com$/.test(host)) return { kind: 'booking', audience_page_angle: null };
+        if (host === 'github.com') return { kind: 'github', audience_page_angle: null };
+        const entry = projectName ? projIdx[projectName] : null;
+        // Audience-page exact host+path match wins over generic SUBPAGE.
+        if (entry) {
+          for (const ap of entry.audience_pages || []) {
+            if (ap.host === host && ap.path === pathName) {
+              return { kind: 'audience_page', audience_page_angle: ap.angle || null };
+            }
+          }
+          if (entry.website_host && host === entry.website_host) {
+            if (pathName === '/' || pathName === '') return { kind: 'home', audience_page_angle: null };
+            if (/^\/t\//.test(pathName)) return { kind: 'seo', audience_page_angle: null };
+            return { kind: 'subpage', audience_page_angle: null };
+          }
+        }
+        if (pathName === '/' || pathName === '') return { kind: 'other', audience_page_angle: null };
+        if (/^\/t\//.test(pathName)) return { kind: 'seo', audience_page_angle: null };
+        return { kind: 'external', audience_page_angle: null };
+      };
+      for (const d of destinations) {
+        const c = classify(d.target_url, d.project_name);
+        d.kind = c.kind;
+        d.audience_page_angle = c.audience_page_angle;
+      }
       return json(res, { destinations, window: windowKey, platform: platformFilter || 'all' });
     })().catch(e => json(res, { error: e.message }, 500));
   }
@@ -13487,6 +13548,150 @@ async function loadTopPages(force) {
   } finally {
     _topPagesLoading = false;
   }
+}
+
+// Render the colored kind badge for a destination row. The server's
+// /api/top/destinations endpoint classifies each row into one of seven kind
+// buckets (home / subpage / audience_page / seo / booking / github /
+// external / other) by reading config.json, so the client just looks up
+// the label and color here.
+function destinationKindBadge(kind, audienceAngle) {
+  const map = {
+    home: { cls: 'dest-kind-home', label: 'HOME' },
+    subpage: { cls: 'dest-kind-subpage', label: 'SUBPAGE' },
+    audience_page: { cls: 'dest-kind-subpage', label: 'AUDIENCE' },
+    seo: { cls: 'dest-kind-seo', label: 'SEO' },
+    booking: { cls: 'dest-kind-booking', label: 'BOOKING' },
+    github: { cls: 'dest-kind-github', label: 'GITHUB' },
+    external: { cls: 'dest-kind-external', label: 'EXT' },
+    other: { cls: 'dest-kind-other', label: 'OTHER' },
+  };
+  const m = map[kind] || map.other;
+  let label = m.label;
+  if (kind === 'audience_page' && audienceAngle) {
+    label = 'AUDIENCE: ' + audienceAngle;
+  }
+  return '<span class="dest-kind-badge ' + m.cls + '" title="' + escapeHtml(kind) + '">' + escapeHtml(label) + '</span>';
+}
+
+async function loadTopLinks(force) {
+  if (_topLinksLoading) return;
+  const container = document.getElementById('top-links-container');
+  if (!_topLinksPayload && container) {
+    container.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  }
+  _topLinksLoading = true;
+  try {
+    const params = new URLSearchParams();
+    if (_topWindow) params.set('window', _topWindow);
+    if (_topPlatform && _topPlatform !== 'all') params.set('platform', _topPlatform);
+    if (_topProject && _topProject !== 'all') params.set('project', _topProject);
+    const res = await fetch('/api/top/destinations?' + params.toString());
+    const data = await res.json();
+    _topLinksPayload = data;
+    renderTopLinks(data);
+    _topLinksLoaded = true;
+  } catch (e) {
+    if (container) container.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+  } finally {
+    _topLinksLoading = false;
+  }
+}
+
+function renderTopLinks(payload) {
+  const container = document.getElementById('top-links-container');
+  if (!container) return;
+  const totalEl = document.getElementById('top-total');
+  const dests = Array.isArray(payload && payload.destinations) ? payload.destinations : [];
+  if (!dests.length) {
+    container.innerHTML = '<div class="style-stats-empty">No destinations in this window yet. Posts with linked URLs will show up here once they accrue clicks.</div>';
+    if (totalEl) totalEl.textContent = '';
+    return;
+  }
+  // Roll up real_clicks vs the legacy/backfill columns: prefer plc.real_clicks
+  // (post-2026-05-07 per-hit log), fall back to pl.real_clicks (PostHog
+  // backfill for older rows), final fallback pl.clicks (legacy counter).
+  const rows = dests.map(d => {
+    const kind = d.kind || 'other';
+    const realClicks = Number(d.real_clicks || 0);
+    const backfillReal = Number(d.backfill_real || 0);
+    const legacyClicks = Number(d.legacy_clicks || 0);
+    const botClicks = Number(d.bot_clicks || 0);
+    const effectiveClicks = realClicks > 0 ? realClicks : (backfillReal > 0 ? backfillReal : legacyClicks);
+    return {
+      target_url: d.target_url || '',
+      project_name: d.project_name || '',
+      platform: d.platform || '',
+      kind,
+      audience_page_angle: d.audience_page_angle || null,
+      kind_label: kind,
+      posts: Number(d.posts || 0),
+      codes: Number(d.codes || 0),
+      real_clicks: realClicks,
+      backfill_real: backfillReal,
+      legacy_clicks: legacyClicks,
+      bot_clicks: botClicks,
+      effective_clicks: effectiveClicks,
+      first_minted_at: d.first_minted_at || null,
+      last_click_at: d.last_click_at || null,
+    };
+  });
+  if (totalEl) {
+    const totalClicks = rows.reduce((a, r) => a + r.effective_clicks, 0);
+    totalEl.textContent = rows.length + ' destination' + (rows.length === 1 ? '' : 's') + ' \u00b7 ' + fmt(totalClicks) + ' clicks';
+  }
+  const fmtUrl = (_v, r) => {
+    const safe = escapeHtml(r.target_url);
+    return '<a href="' + safe + '" target="_blank" rel="noopener" class="top-post-link">'
+      + destinationKindBadge(r.kind, r.audience_page_angle)
+      + ' <span style="word-break:break-all">' + safe + '</span>'
+      + '</a>';
+  };
+  const fmtAgo = (v) => {
+    if (!v) return '\u2014';
+    try {
+      const d = new Date(v);
+      const diff = Date.now() - d.getTime();
+      const days = Math.floor(diff / 86400000);
+      if (days < 1) {
+        const hours = Math.floor(diff / 3600000);
+        if (hours < 1) {
+          const mins = Math.max(0, Math.floor(diff / 60000));
+          return mins + 'm ago';
+        }
+        return hours + 'h ago';
+      }
+      return days + 'd ago';
+    } catch (_e) { return '\u2014'; }
+  };
+  const fmtClicks = (v, r) => {
+    const main = fmt(r.effective_clicks);
+    const bits = [];
+    if (r.real_clicks > 0) bits.push(r.real_clicks + ' real');
+    else if (r.backfill_real > 0) bits.push(r.backfill_real + ' backfill');
+    else if (r.legacy_clicks > 0) bits.push(r.legacy_clicks + ' legacy');
+    if (r.bot_clicks > 0) bits.push(r.bot_clicks + ' bot');
+    const sub = bits.length ? '<div style="font-size:11px;color:var(--text-secondary)">' + escapeHtml(bits.join(' \u00b7 ')) + '</div>' : '';
+    return '<div style="font-weight:600">' + main + '</div>' + sub;
+  };
+  const columns = [
+    { key: 'target_url',    label: 'Destination', type: 'text',    align: 'left',  widthPct: 48, formatter: fmtUrl },
+    { key: 'project_name',  label: 'Project',     type: 'text',    align: 'left',  widthPct: 10, formatter: v => escapeHtml(v) },
+    { key: 'platform',      label: 'Platform',    type: 'text',    align: 'left',  widthPct: 8,  formatter: v => escapeHtml(v) },
+    { key: 'posts',         label: 'Posts',       type: 'numeric', align: 'right', widthPct: 7,  formatter: fmt },
+    { key: 'codes',         label: 'Codes',       type: 'numeric', align: 'right', widthPct: 7,  formatter: fmt },
+    { key: 'effective_clicks', label: 'Clicks',   type: 'numeric', align: 'right', widthPct: 12, formatter: fmtClicks },
+    { key: 'last_click_at', label: 'Last click',  type: 'date',    align: 'right', widthPct: 8,  formatter: fmtAgo },
+  ];
+  container.innerHTML = '';
+  mountSortableTable({
+    containerId: 'top-links-container',
+    rows,
+    state: _topLinksTableState,
+    storageKey: 'sa.topLinksTable.v1',
+    columns,
+    emptyMessage: 'No destinations in this window yet.',
+  });
 }
 
 function dmClassBadge(dm) {
