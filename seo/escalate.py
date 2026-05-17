@@ -193,6 +193,56 @@ def _recent_open_or_replied(cur, product, keyword, hours=24):
 
 
 def cmd_open(args):
+    # 2026-05-16: model_initiated trigger is disabled. The pipeline policy
+    # is now "if the model is unsure, mark the keyword skip and move on"
+    # rather than email the human. We still accept the call from the model
+    # (so old prompts don't crash) but instead of emailing, we flip the
+    # seo_keywords / gsc_queries row to status='skip' with the reason as
+    # notes, then exit successfully. setup_gate and reaper_stuck still
+    # escalate normally because those are operational, not model-judgment,
+    # blockers.
+    if args.trigger_kind == "model_initiated":
+        conn = db_helpers.get_conn()
+        cur = conn.cursor()
+        skip_note = f"auto-skip (model_initiated, no escalation): {args.reason}"[:1000]
+        # seo_keywords path
+        cur.execute(
+            "UPDATE seo_keywords SET status='skip', "
+            "notes = COALESCE(notes,'') || E'\\n' || %s, "
+            "updated_at = NOW() "
+            "WHERE product = %s AND keyword = %s AND status != 'done' "
+            "RETURNING id",
+            (skip_note, args.product, args.keyword),
+        )
+        sk_rows = cur.fetchall()
+        # gsc_queries path (same product+keyword may live here too)
+        cur.execute(
+            "UPDATE gsc_queries SET status='skip', "
+            "notes = COALESCE(notes,'') || E'\\n' || %s, "
+            "updated_at = NOW() "
+            "WHERE product = %s AND query = %s AND status != 'done' "
+            "RETURNING id",
+            (skip_note, args.product, args.keyword),
+        )
+        gq_rows = cur.fetchall()
+        conn.commit()
+        _append_log(
+            f"auto_skip model_initiated product={args.product} "
+            f"keyword=\"{args.keyword}\" seo_keywords_rows={len(sk_rows)} "
+            f"gsc_queries_rows={len(gq_rows)}"
+        )
+        print(json.dumps({
+            "ok": True,
+            "action": "auto_skip",
+            "reason": "model_initiated trigger is disabled; keyword marked skip instead of emailing",
+            "product": args.product,
+            "keyword": args.keyword,
+            "seo_keywords_updated": len(sk_rows),
+            "gsc_queries_updated": len(gq_rows),
+        }))
+        cur.close(); conn.close()
+        return 0
+
     conn = db_helpers.get_conn()
     cur = conn.cursor()
 
