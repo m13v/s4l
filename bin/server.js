@@ -13608,6 +13608,7 @@ function renderTopLinks(payload) {
   const container = document.getElementById('top-links-container');
   if (!container) return;
   const totalEl = document.getElementById('top-total');
+  const fmt = n => (Number(n) || 0).toLocaleString();
   const dests = Array.isArray(payload && payload.destinations) ? payload.destinations : [];
   if (!dests.length) {
     container.innerHTML = '<div class="style-stats-empty">No destinations in this window yet. Posts with linked URLs will show up here once they accrue clicks.</div>';
