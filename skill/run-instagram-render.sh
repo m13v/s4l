@@ -72,6 +72,10 @@ c = conn.cursor()
 # (scripts/pick_project.py). Effective weight = config_weight / (1 + posts in
 # the last RECENT_WINDOW_DAYS). Over-posting damps without ever exceeding the
 # raw config weight; under-posting catches up automatically.
+#
+# Two env-var overrides bypass the stochastic rolls (one-shot / debugging):
+#   FORCE_TYPE=organic|product       skip Level-1 roll
+#   FORCE_PROJECT=<name>             skip Level-2 roll (implies product)
 
 cfg = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 ig_cfg = cfg.get('instagram', {}) or {}
@@ -81,6 +85,10 @@ post_type_weights_cfg = (
     or ig_cfg.get('post_type_ratio')
     or {'organic': 4, 'product': 1}
 )
+force_type = os.environ.get('FORCE_TYPE') or ''
+force_project = os.environ.get('FORCE_PROJECT') or ''
+if force_project and not force_type:
+    force_type = 'product'  # FORCE_PROJECT implies product
 
 # Last-N posted descriptor (kept for telemetry / log readability).
 c.execute(
@@ -90,7 +98,7 @@ c.execute(
 )
 last10 = [r[0] for r in c.fetchall()]
 
-# ---- LEVEL 1: organic vs product, inverse-recent-share ----
+# ---- LEVEL 1: organic vs product, inverse-recent-share (or FORCE_TYPE) ----
 c.execute(
     "SELECT post_type, COUNT(*) FROM media_posts "
     "WHERE status='posted' AND posted_urls ? 'instagram' "
@@ -106,7 +114,9 @@ type_weights = {
     for t in ('organic', 'product')
     if float(post_type_weights_cfg.get(t, 0)) > 0
 }
-if not type_weights:
+if force_type in ('organic', 'product'):
+    target = force_type
+elif not type_weights:
     target = 'organic'  # defensive default if config is empty
 else:
     names = list(type_weights.keys())
@@ -148,9 +158,17 @@ if target == 'product':
         p['name']: float(p['weight']) / (1 + project_post_counts[p['name']])
         for p in enabled
     }
-    names = list(project_weights.keys())
-    ws = [project_weights[n] for n in names]
-    selected_project = random.choices(names, weights=ws, k=1)[0]
+    if force_project:
+        if force_project not in [p['name'] for p in enabled]:
+            raise SystemExit(
+                f"FORCE_PROJECT={force_project!r} not in mixer.enabled projects: "
+                f"{[p['name'] for p in enabled]}"
+            )
+        selected_project = force_project
+    else:
+        names = list(project_weights.keys())
+        ws = [project_weights[n] for n in names]
+        selected_project = random.choices(names, weights=ws, k=1)[0]
 
 # Per-(type, project) draft buffer. With multi-project, a global product
 # buffer would let one project starve another.
