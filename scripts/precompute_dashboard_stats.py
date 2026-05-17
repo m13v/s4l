@@ -138,10 +138,22 @@ def precompute_activity(hours=24):
         "AND m.message_at >= NOW() - " + win + " "
         "AND NOT EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = d.id AND m2.direction='outbound' AND m2.message_at < m.message_at)) "
         "UNION ALL SELECT 'dm_reply_sent', d.platform FROM dm_messages m JOIN dms d ON d.id = m.dm_id WHERE m.direction='outbound' AND m.message_at >= NOW() - " + win + " AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id AND m2.direction='inbound' AND m2.message_at < m.message_at) "
-        "UNION ALL SELECT 'page_published_serp', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page') "
+        # Page-generation buckets. Mirrors bin/server.js /api/activity/stats
+        # exactly. Pre-2026-05-16 a single 'page_published_serp' caught any
+        # seo_keywords row whose source was not (reddit, top_page); but the
+        # real SERP pipeline was unloaded 2026-04-17 and the dominant active
+        # producer became the Twitter cycle page-gen A/B lane
+        # (twitter_gen_links.py -> generate_page.py --trigger twitter, source=
+        # 'twitter'). Split into honest twitter / misc / roundup / top_post
+        # buckets so the dashboard tooltip can show real per-pipeline counts.
+        "UNION ALL SELECT 'page_published_twitter', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source = 'twitter' "
+        "UNION ALL SELECT 'page_published_misc', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup', 'twitter') "
         "UNION ALL SELECT 'page_published_gsc', 'seo' FROM gsc_queries WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL "
         "UNION ALL SELECT 'page_published_reddit', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='reddit' "
         "UNION ALL SELECT 'page_published_top', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_page' "
+        "UNION ALL SELECT 'page_published_top_post', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_post' "
+        "UNION ALL SELECT 'page_published_roundup', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='roundup' "
+        "UNION ALL SELECT 'page_improved', 'seo' FROM seo_page_improvements WHERE completed_at >= NOW() - " + win + " AND status='committed' "
         "UNION ALL SELECT 'resurrected', platform FROM posts WHERE resurrected_at >= NOW() - " + win + " AND our_content <> '(mention - no original post)' " +
         ") u GROUP BY type, platform ORDER BY type, platform) r"
     )
