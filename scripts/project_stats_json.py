@@ -25,6 +25,27 @@ from project_slugs import bookings_require_utm as _bookings_require_utm
 _PAGE_FILENAMES = ("page.tsx", "page.ts", "page.jsx", "page.js", "page.mdx", "page.md")
 
 
+def _bridge_per_project_posthog_keys_from_keychain(config, env):
+    import subprocess
+    seen = set()
+    for proj in config.get("projects", []) or []:
+        name_env = ((proj.get("posthog") or {}).get("api_key_env") or "").strip()
+        if not name_env or name_env in seen or name_env == "POSTHOG_PERSONAL_API_KEY":
+            continue
+        seen.add(name_env)
+        if env.get(name_env):
+            continue
+        try:
+            v = subprocess.check_output(
+                ["security", "find-generic-password", "-s", name_env, "-w"],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except subprocess.CalledProcessError:
+            continue
+        if v:
+            env[name_env] = v
+
+
 def _scan_repo_pages(repo_path):
     """Walk a Next.js app-router repo and return URL paths we ship as static files.
 
@@ -1108,6 +1129,8 @@ def main():
     api_key = env.get("POSTHOG_PERSONAL_API_KEY")
     project_id = env.get("POSTHOG_PROJECT_ID", "330744")
     bookings_db_url = env.get("BOOKINGS_DATABASE_URL")
+
+    _bridge_per_project_posthog_keys_from_keychain(config, env)
 
     if not api_key:
         print(json.dumps({"error": "POSTHOG_PERSONAL_API_KEY not set"}), file=sys.stdout)
