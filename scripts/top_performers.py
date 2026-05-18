@@ -176,32 +176,52 @@ def annotate_failure(row):
 _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = None
 
 
-def _load_active_campaign_suffixes(conn):
+def _load_active_campaign_suffixes(conn=None):
     """Best-effort: return a list of currently-active campaign suffix literals.
 
     Cached per-process. Used to strip the suffix from `our_content` before
     feeding it into the few-shot prompt context, so the LLM never learns to
     echo the suffix in its drafts (which then double-fires with the
     tool-layer injection, observed 2026-05-18 on Reddit IDs 70412 + 70413).
-    On any DB failure returns []: missing strip is preferable to crashing
+    On any failure returns []: missing strip is preferable to crashing
     the report pipeline.
+
+    Dual-path: when `conn` is given (legacy Neon path) reads directly;
+    otherwise routes through the HTTP API (/api/v1/campaigns) like the
+    rest of the codebase. main() typically calls with conn=None.
     """
     global _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
     if _ACTIVE_CAMPAIGN_SUFFIXES_CACHE is not None:
         return _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
     suffixes = []
-    try:
-        rows = conn.execute(
-            "SELECT suffix FROM campaigns "
-            "WHERE status = 'active' AND suffix IS NOT NULL AND TRIM(suffix) != ''"
-        ).fetchall()
-        for r in rows:
-            s = (r[0] or "").strip()
-            if s and s not in suffixes:
-                suffixes.append(s)
-    except Exception as e:
-        print(f"[top_performers] _load_active_campaign_suffixes failed: {e}",
-              file=sys.stderr)
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                "SELECT suffix FROM campaigns "
+                "WHERE status = 'active' AND suffix IS NOT NULL AND TRIM(suffix) != ''"
+            ).fetchall()
+            for r in rows:
+                s = (r[0] or "").strip()
+                if s and s not in suffixes:
+                    suffixes.append(s)
+        except Exception as e:
+            print(f"[top_performers] _load_active_campaign_suffixes (db) failed: {e}",
+                  file=sys.stderr)
+    else:
+        try:
+            from http_api import api_get
+            resp = api_get(
+                "/api/v1/campaigns",
+                query={"status": "active", "has_suffix": "true", "limit": 500},
+            )
+            rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+            for r in rows:
+                s = (r.get("suffix") or "").strip()
+                if s and s not in suffixes:
+                    suffixes.append(s)
+        except Exception as e:
+            print(f"[top_performers] _load_active_campaign_suffixes (api) failed: {e}",
+                  file=sys.stderr)
     _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = suffixes
     return suffixes
 
@@ -852,10 +872,20 @@ def main():
         }
         print(json.dumps(output, indent=2, default=str))
     else:
+        # Load active-campaign suffix literals so format_report can strip them
+        # from every embedded `our_content` snippet. Without this, the LLM
+        # downstream (post_reddit, engage_reddit, twitter Phase 2b drafting,
+        # post_github) sees historical campaign-tagged comments in the
+        # few-shot context, copies the suffix into its draft, and the
+        # tool-layer injection appends a SECOND suffix, producing
+        # "written with s4lai written with s4lai" (Reddit 2026-05-18 incident).
+        # API path is preferred; legacy Neon path passes a conn instead.
+        suffix_list = _load_active_campaign_suffixes()
         print(format_report(summary, top, bottom,
                             project=args.project, platform=args.platform,
                             top_by_group=top_by_group, fallback_top=fallback_top,
-                            style_perf=style_perf, top_by_style=top_by_style))
+                            style_perf=style_perf, top_by_style=top_by_style,
+                            suffix_strip_list=suffix_list))
 
 
 if __name__ == "__main__":
