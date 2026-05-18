@@ -706,6 +706,37 @@ def _recent_comment_text(item):
     return item or ""
 
 
+def _strip_active_suffixes(text, active_campaigns):
+    """Remove any active-campaign suffix from `text` (idempotent, trailing-only).
+
+    Mirrors engage_reddit.strip_active_suffixes (commit 8cdde18) so we have
+    the same protection for the post_reddit drafting path. Without this,
+    `get_recent_comments()` feeds the LLM prior `posts.our_content` rows
+    that already end in the campaign suffix (e.g. " written with s4lai"),
+    the LLM copies the literal suffix into its draft because it looks like
+    part of our voice, and the tool-level append at line ~2092 stacks a
+    SECOND suffix on top. Observed in production 2026-05-18 on Deep_Ad1959
+    (reply rows 70412 + 70413) via engage_reddit; same risk exists here.
+
+    Strips trailing suffix repeatedly so a historically-doubled row also
+    collapses to clean text. Active campaign list is passed in by the
+    caller so we only strip patterns we're actively using (avoids
+    unbounded false-positive matches on incidental phrasing).
+    """
+    if not text or not active_campaigns:
+        return text
+    cleaned = text.rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for camp in active_campaigns:
+            suffix = (camp.get("suffix") or "").strip()
+            if suffix and cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)].rstrip()
+                changed = True
+    return cleaned
+
+
 def get_recent_comments(limit=5):
     """Recent Reddit posts.our_content via /api/v1/posts.
 
@@ -715,17 +746,39 @@ def get_recent_comments(limit=5):
     builders verbatim. Prompt-builders below were updated to accept
     both the old (str) and new (tuple) shapes so any straggler caller
     keeps working without a coordinated change.
+
+    2026-05-18: active-campaign suffixes are stripped from `our_content`
+    BEFORE returning, so the LLM never sees suffixed exemplars and
+    cannot copy the campaign tag into its draft (which would then get
+    a SECOND tool-level append, producing "written with s4lai written
+    with s4lai"). See `_strip_active_suffixes` docstring.
     """
     resp = api_get(
         "/api/v1/posts",
         query={"platform": "reddit", "limit": int(limit)},
     )
     rows = ((resp or {}).get("data") or {}).get("posts") or []
-    return [
+    raw = [
         (int(r["id"]), r.get("our_content") or "")
         for r in rows
         if r.get("our_content") and r.get("id") is not None
     ]
+    # Sanitize exemplars against the currently-active campaign suffixes.
+    # If the campaign-load call fails we fall back to raw content (better
+    # than crashing the discover/draft pipeline over a degraded API call).
+    try:
+        active_camps = load_active_reddit_campaigns()
+    except Exception as e:
+        print(f"[post_reddit] WARNING: load_active_reddit_campaigns failed "
+              f"during recent_comments sanitize ({e}); returning raw content",
+              file=sys.stderr)
+        return raw
+    cleaned = []
+    for pid, content in raw:
+        stripped = _strip_active_suffixes(content, active_camps)
+        if stripped:
+            cleaned.append((pid, stripped))
+    return cleaned
 
 
 def load_active_reddit_campaigns():
