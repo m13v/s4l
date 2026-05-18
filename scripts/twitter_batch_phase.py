@@ -25,6 +25,9 @@ end      deletes the row on clean cycle exit. SIGKILL/OOM intentionally
 
 The owning shell wraps lock.sh's EXIT trap to call `end` on clean exit;
 see run-twitter-cycle.sh _sa_combined_exit.
+
+Migrated 2026-05-18: DB writes now go through the s4l.ai HTTP API
+(scripts/http_api.py -> /api/v1/twitter-batches) instead of psycopg2.
 """
 
 from __future__ import annotations
@@ -34,10 +37,8 @@ import os
 import socket
 import sys
 
-# Reuse the project's connection helper so we get DNS retry, statement_timeout,
-# and the keepalive settings without re-implementing them here.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from db import get_conn  # noqa: E402
+from http_api import api_post  # noqa: E402
 
 VALID_PHASES = {
     "phase0",
@@ -60,58 +61,39 @@ def _validate_phase(phase: str) -> None:
 
 def cmd_start(batch_id: str, phase: str) -> None:
     _validate_phase(phase)
-    db = get_conn()
-    db.execute(
-        """
-        INSERT INTO twitter_batches
-            (batch_id, owner_pid, owner_host, current_phase, phase_started_at, started_at, updated_at)
-        VALUES (%s, %s, %s, %s, NOW(), NOW(), NOW())
-        ON CONFLICT (batch_id) DO UPDATE SET
-            owner_pid        = EXCLUDED.owner_pid,
-            owner_host       = EXCLUDED.owner_host,
-            current_phase    = EXCLUDED.current_phase,
-            phase_started_at = NOW(),
-            updated_at       = NOW()
-        """,
-        [batch_id, os.getppid(), socket.gethostname(), phase],
+    api_post(
+        "/api/v1/twitter-batches",
+        {
+            "action": "start",
+            "batch_id": batch_id,
+            "phase": phase,
+            "owner_pid": os.getppid(),
+            "owner_host": socket.gethostname(),
+        },
     )
-    db.commit()
-    db.close()
     print(f"twitter_batches: started {batch_id} phase={phase}")
 
 
 def cmd_advance(batch_id: str, phase: str) -> None:
     _validate_phase(phase)
-    db = get_conn()
-    cur = db.execute(
-        """
-        UPDATE twitter_batches
-        SET current_phase = %s, phase_started_at = NOW(), updated_at = NOW()
-        WHERE batch_id = %s
-        """,
-        [phase, batch_id],
+    api_post(
+        "/api/v1/twitter-batches",
+        {
+            "action": "advance",
+            "batch_id": batch_id,
+            "phase": phase,
+            "owner_pid": os.getppid(),
+            "owner_host": socket.gethostname(),
+        },
     )
-    if cur.rowcount == 0:
-        # Defense in depth: start was skipped; create the row so peer
-        # cycles can still see our phase.
-        db.execute(
-            """
-            INSERT INTO twitter_batches
-                (batch_id, owner_pid, owner_host, current_phase, phase_started_at, started_at, updated_at)
-            VALUES (%s, %s, %s, %s, NOW(), NOW(), NOW())
-            """,
-            [batch_id, os.getppid(), socket.gethostname(), phase],
-        )
-    db.commit()
-    db.close()
     print(f"twitter_batches: advanced {batch_id} phase={phase}")
 
 
 def cmd_end(batch_id: str) -> None:
-    db = get_conn()
-    db.execute("DELETE FROM twitter_batches WHERE batch_id = %s", [batch_id])
-    db.commit()
-    db.close()
+    api_post(
+        "/api/v1/twitter-batches",
+        {"action": "end", "batch_id": batch_id},
+    )
     print(f"twitter_batches: ended {batch_id}")
 
 
