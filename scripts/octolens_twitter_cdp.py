@@ -7,17 +7,16 @@ Each entry in TWEETS MUST include `engagement_style` (e.g. "critic",
 See scripts/engagement_styles.py for the valid set and pick targets per
 platform.
 """
-import sys, os, time, json, psycopg2
+import sys, os, time
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engagement_styles import VALID_STYLES
+from http_api import api_post  # noqa: E402
 
+# DB_URL retained for backward compat; no longer used. Writes route through
+# /api/v1/posts via scripts/http_api.py since 2026-05-18.
 DB_URL = None
-with open(os.path.expanduser('~/social-autoposter/.env')) as f:
-    for line in f:
-        if line.startswith('DATABASE_URL='):
-            DB_URL = line.strip().split('=', 1)[1].strip('"').strip("'")
 
 CDP_PORT = sys.argv[1] if len(sys.argv) > 1 else '55363'
 
@@ -109,7 +108,6 @@ def post_reply(page, tweet):
 
 def main():
     print(f"Connecting to Chrome CDP on port {CDP_PORT}")
-    conn = psycopg2.connect(DB_URL)
 
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(f'http://127.0.0.1:{CDP_PORT}')
@@ -124,33 +122,36 @@ def main():
             try:
                 result = post_reply(page, tweet)
                 if result:
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
-                            thread_title, thread_content, our_url, our_content, our_account,
-                            source_summary, project_name, engagement_style, status, posted_at)
-                        VALUES ('twitter', %s, %s, %s, %s, %s, %s, %s, '@m13v_', %s, %s, %s, 'active', NOW())
-                        RETURNING id
-                    """, (
-                        tweet['url'],
-                        tweet['author'],
-                        tweet['author'],
-                        result['thread_title'],
-                        result['thread_content'],
-                        tweet['url'],
-                        tweet['reply'],
-                        f"octolens: {tweet['keyword']}",
-                        tweet['project_name'],
-                        style,
-                    ))
-                    post_id = cur.fetchone()[0]
-                    conn.commit()
+                    resp = api_post(
+                        "/api/v1/posts",
+                        {
+                            "platform": "twitter",
+                            "thread_url": tweet["url"],
+                            "thread_author": tweet["author"],
+                            "thread_author_handle": tweet["author"],
+                            "thread_title": result["thread_title"],
+                            "thread_content": result["thread_content"],
+                            "our_url": tweet["url"],
+                            "our_content": tweet["reply"],
+                            "our_account": "@m13v_",
+                            "source_summary": f"octolens: {tweet['keyword']}",
+                            "project": tweet["project_name"],
+                            "engagement_style": style,
+                            "status": "active",
+                        },
+                        ok_on_conflict=True,
+                    )
+                    data = resp.get("data") or {}
+                    post = data.get("post") or {}
+                    if not post and resp.get("error"):
+                        details = (resp.get("error") or {}).get("details") or {}
+                        post = details.get("post") or {}
+                    post_id = post.get("id")
                     print(f"Logged to DB: id={post_id}")
                 else:
                     print(f"SKIPPED: {tweet['url']}")
             except Exception as e:
                 print(f"Error: {e}")
-                conn.rollback()
             finally:
                 page.close()
             time.sleep(2)
@@ -158,7 +159,6 @@ def main():
         # Don't close the browser - it belongs to the other agent
         browser.close()  # disconnects CDP, doesn't close browser
 
-    conn.close()
     print("\nDone.")
 
 if __name__ == '__main__':
