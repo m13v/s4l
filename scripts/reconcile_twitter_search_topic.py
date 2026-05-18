@@ -21,7 +21,7 @@ FIX
 Every candidate row carries `batch_id` + `matched_project`, and
 twitter_search_attempts logs the canonical `query` per (batch_id,
 project_name). There is exactly one drafted query per project per cycle, so
-(batch_id, project) -> query is a deterministic lookup. This script rewrites
+(batch_id, project) -> query is a deterministic lookup. The route rewrites
 twitter_candidates.search_topic to that canonical query wherever they differ.
 
 It is idempotent and safe to run repeatedly: rows already correct are skipped
@@ -33,6 +33,13 @@ Usage:
     python3 scripts/reconcile_twitter_search_topic.py --apply          # write
     python3 scripts/reconcile_twitter_search_topic.py --apply --window-days 90
     python3 scripts/reconcile_twitter_search_topic.py --quiet --apply   # cron
+
+Migrated 2026-05-18: the entire CTE (canon SELECT + UPDATE) runs server-side
+behind /api/v1/twitter-candidates/reconcile-search-topic. This script just
+shapes the response into the legacy CLI output and writes the rollback
+snapshot file from the route's `sample` payload (the snapshot now holds the
+first 5 examples instead of every fixable row — the route exposes total
+counts but no longer streams every id back to the client).
 """
 import argparse
 import json
@@ -41,7 +48,7 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_post  # noqa: E402
 
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp")
 
@@ -56,98 +63,61 @@ def main():
                    help="Suppress per-project breakdown (for cron).")
     args = p.parse_args()
 
-    conn = dbmod.get_conn()
+    body = {
+        "window_days": args.window_days,
+        "apply": bool(args.apply),
+    }
+    resp = api_post(
+        "/api/v1/twitter-candidates/reconcile-search-topic",
+        body,
+    )
+    data = resp.get("data") or {}
 
-    # Canonical (batch_id, project) -> query. nq>1 means the pair was logged
-    # with more than one distinct query (rare batch_id collision); skip those.
-    fixable = conn.execute(
-        """
-        WITH canon AS (
-            SELECT batch_id, project_name,
-                   MIN(query)            AS query,
-                   COUNT(DISTINCT query) AS nq
-            FROM twitter_search_attempts
-            WHERE batch_id IS NOT NULL AND project_name IS NOT NULL
-            GROUP BY batch_id, project_name
-        )
-        SELECT c.id, c.search_topic AS old_topic, canon.query AS new_topic,
-               c.matched_project
-        FROM twitter_candidates c
-        JOIN canon ON canon.batch_id = c.batch_id
-                  AND canon.project_name = c.matched_project
-        WHERE canon.nq = 1
-          AND c.search_topic IS DISTINCT FROM canon.query
-          AND c.discovered_at > NOW() - (%s || ' days')::interval
-        """,
-        [str(args.window_days)],
-    ).fetchall()
+    fixable_count = int(data.get("fixable_count") or 0)
+    ambiguous_count = int(data.get("ambiguous_count") or 0)
+    by_project = data.get("by_project") or {}
+    sample = data.get("sample") or []
 
-    ambiguous = conn.execute(
-        """
-        WITH canon AS (
-            SELECT batch_id, project_name, COUNT(DISTINCT query) AS nq
-            FROM twitter_search_attempts
-            WHERE batch_id IS NOT NULL AND project_name IS NOT NULL
-            GROUP BY batch_id, project_name
-        )
-        SELECT COUNT(*)
-        FROM twitter_candidates c
-        JOIN canon ON canon.batch_id = c.batch_id
-                  AND canon.project_name = c.matched_project
-        WHERE canon.nq > 1
-          AND c.discovered_at > NOW() - (%s || ' days')::interval
-        """,
-        [str(args.window_days)],
-    ).fetchone()[0]
-
-    n = len(fixable)
     if not args.quiet:
         print(f"reconcile_twitter_search_topic: window={args.window_days}d")
-        print(f"  candidates to reconcile : {n}")
-        print(f"  ambiguous (skipped)     : {ambiguous}")
-        by_proj = {}
-        for _id, _old, _new, proj in fixable:
-            by_proj[proj] = by_proj.get(proj, 0) + 1
-        for proj, cnt in sorted(by_proj.items(), key=lambda kv: -kv[1]):
+        print(f"  candidates to reconcile : {fixable_count}")
+        print(f"  ambiguous (skipped)     : {ambiguous_count}")
+        for proj, cnt in sorted(by_project.items(), key=lambda kv: -int(kv[1])):
             print(f"    {proj:<26} {cnt}")
 
-    if n == 0:
+    if fixable_count == 0:
         print("reconcile_twitter_search_topic: nothing to do.")
-        conn.close()
         return 0
 
     if not args.apply:
         print("reconcile_twitter_search_topic: DRY RUN, no rows written. "
               "Re-run with --apply to commit.")
-        # Show a few example before/after pairs.
-        for _id, old, new, proj in fixable[:5]:
-            print(f"  [{proj}] id={_id}")
-            print(f"      old: {old!r}")
-            print(f"      new: {new!r}")
-        conn.close()
+        for s in sample[:5]:
+            print(f"  [{s.get('project')}] id={s.get('id')}")
+            print(f"      old: {s.get('old')!r}")
+            print(f"      new: {s.get('new')!r}")
         return 0
 
-    # Snapshot old values so the change is reversible.
+    # Snapshot the sample so the change is at least partially reversible.
+    # The full pre-image is no longer streamed back from the route (post-2026-
+    # 05-18 redesign); if a full rollback is ever needed, query
+    # twitter_candidates history server-side instead.
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snap_path = os.path.join(SNAPSHOT_DIR, f"search_topic_snapshot_{stamp}.json")
     with open(snap_path, "w") as f:
-        json.dump(
-            [{"id": r[0], "old_search_topic": r[1]} for r in fixable],
-            f, indent=2,
-        )
+        json.dump({
+            "window_days": args.window_days,
+            "fixable_count": fixable_count,
+            "ambiguous_count": ambiguous_count,
+            "by_project": by_project,
+            "sample_only": True,
+            "sample": sample,
+        }, f, indent=2)
 
-    updated = 0
-    for _id, _old, new, _proj in fixable:
-        conn.execute(
-            "UPDATE twitter_candidates SET search_topic = %s WHERE id = %s",
-            [new, _id],
-        )
-        updated += 1
-    conn.commit()
-    conn.close()
+    updated = int(data.get("updated_count") or fixable_count)
     print(f"reconcile_twitter_search_topic: updated {updated} rows. "
-          f"Snapshot of old values: {snap_path}")
+          f"Sample snapshot: {snap_path}")
     return 0
 
 
