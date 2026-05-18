@@ -17,6 +17,9 @@ twitter_candidates table only has rows for tweets that were actually scraped,
 so duds were previously invisible. Pair with top_dud_twitter_queries.py.
 
     python3 scripts/log_twitter_search_attempts.py --batch-id <id> < queries.json
+
+Migrated 2026-05-18: writes now POST to /api/v1/twitter-search-attempts via
+scripts/http_api.py instead of opening a psycopg2 connection.
 """
 import argparse
 import json
@@ -24,7 +27,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_post  # noqa: E402
 
 
 def main():
@@ -47,7 +50,6 @@ def main():
         print("log_twitter_search_attempts: not a list or empty list, nothing to log", file=sys.stderr)
         return 0
 
-    conn = dbmod.get_conn()
     inserted = 0
     for r in rows:
         if not isinstance(r, dict):
@@ -61,16 +63,23 @@ def main():
             tweets_found = 0
         if not query:
             continue
-        conn.execute(
-            """
-            INSERT INTO twitter_search_attempts (query, project_name, tweets_found, batch_id)
-            VALUES (%s, %s, %s, %s)
-            """,
-            [query, project, tweets_found, args.batch_id],
-        )
-        inserted += 1
-    conn.commit()
-    conn.close()
+        try:
+            api_post(
+                "/api/v1/twitter-search-attempts",
+                {
+                    "query": query,
+                    "project_name": project,
+                    "tweets_found": tweets_found,
+                    "batch_id": args.batch_id,
+                },
+            )
+            inserted += 1
+        except SystemExit as e:
+            # http_api raises SystemExit on terminal failure. Log and keep
+            # going so a single bad row doesn't drop the rest of the batch.
+            print(f"log_twitter_search_attempts: API error for {query!r}: {e}", file=sys.stderr)
+            continue
+
     duds = sum(1 for r in rows if isinstance(r, dict) and not int(r.get("tweets_found") or 0))
     print(
         f"log_twitter_search_attempts: inserted {inserted} rows ({duds} duds) "
