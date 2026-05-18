@@ -48,8 +48,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-import project_excludes as pe_mod
+import project_excludes as pe_mod  # noqa: E402
+from http_api import api_patch  # noqa: E402
 
 
 REASON_MAX = 500
@@ -91,8 +91,6 @@ def main():
         print("log_twitter_skips: no skip entries; nothing to do")
         return 0
 
-    conn = dbmod.get_conn()
-
     updated = 0
     no_match = 0
     bad = 0
@@ -122,64 +120,41 @@ def main():
         if len(reason) > REASON_MAX:
             reason = reason[: REASON_MAX - 1] + "…"
 
+        # Server-side WHERE: status='pending' (+ optional batch_id guard) lives
+        # inside /api/v1/twitter-candidates/by-id action=mark_skipped. 404 is
+        # the "row not pending / batch mismatch" signal; we don't fail the
+        # whole batch on it.
+        body = {
+            "id": cid,
+            "action": "mark_skipped",
+            "reason": reason,
+        }
         if args.require_batch_id:
-            cur = conn.execute(
-                """
-                UPDATE twitter_candidates
-                   SET status='skipped',
-                       skip_reason=%s,
-                       skipped_at=NOW()
-                 WHERE id=%s
-                   AND status='pending'
-                   AND batch_id=%s
-                """,
-                [reason, cid, args.require_batch_id],
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE twitter_candidates
-                   SET status='skipped',
-                       skip_reason=%s,
-                       skipped_at=NOW()
-                 WHERE id=%s
-                   AND status='pending'
-                """,
-                [reason, cid],
-            )
-
-        rc = getattr(cur, "rowcount", None)
-        if rc is None:
-            # Fall back: a follow-up SELECT to confirm.
-            row = conn.execute(
-                "SELECT status FROM twitter_candidates WHERE id=%s",
-                [cid],
-            ).fetchone()
-            if row and row[0] == "skipped":
-                updated += 1
-            else:
-                no_match += 1
-        elif rc >= 1:
-            updated += rc
-        else:
+            body["require_batch_id"] = args.require_batch_id
+        resp = api_patch(
+            "/api/v1/twitter-candidates/by-id",
+            body,
+            ok_on_404=True,
+        )
+        if resp.get("_not_found"):
             no_match += 1
+            row_match = False
+        else:
+            updated += 1
+            row_match = True
 
         # Stage proposed_excludes for THIS skip (only if status flipped to skipped).
-        # Look up the candidate's matched_project for project routing of the exclude.
+        # The PATCH response carries the full updated row, so we extract
+        # matched_project + batch_id from it instead of issuing a second GET.
         proposed = entry.get("proposed_excludes")
-        if proposed and isinstance(proposed, list) and (rc is None or rc >= 1):
-            row = conn.execute(
-                "SELECT matched_project, batch_id FROM twitter_candidates WHERE id=%s",
-                [cid],
-            ).fetchone()
-            if row and row[0]:
-                project = row[0]
-                cand_batch = row[1] or args.require_batch_id
+        if proposed and isinstance(proposed, list) and row_match:
+            data = resp.get("data") or {}
+            cand_row = data.get("candidate") or {}
+            project = cand_row.get("matched_project")
+            cand_batch = cand_row.get("batch_id") or args.require_batch_id
+            if project:
                 for term in proposed[:EXCLUDES_PER_SKIP_CAP]:
                     excludes_pending.append((cid, project, term, cand_batch, reason))
-
-    conn.commit()
-    conn.close()
 
     # Persist proposed excludes via project_excludes.propose(). Each call has
     # its own DB connection (cheap, the volume is tiny: <=POST_LIMIT*EXCLUDES_PER_SKIP_CAP per cycle).
