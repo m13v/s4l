@@ -29,7 +29,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get  # noqa: E402
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 DEFAULT_TOPIC_FLOOR_DAYS = 2
@@ -41,62 +41,36 @@ def load_config():
         return json.load(f)
 
 
-def daily_count_today():
-    """Return the number of original Twitter threads posted in the current
-    UTC calendar day (matching posted_at::date = CURRENT_DATE in Postgres).
+def _fetch_picker_context(angle_window_days=14, counts_window_days=7):
+    """Single call to /api/v1/twitter/picker-context for all three reads.
 
-    Excludes engage-twitter mention-bookkeeping rows that share the
-    thread_url=our_url shape but aren't actually our threads. Those rows have
-    our_content like "(mention - no original post)" and source_summary IS
-    NULL, and exist because the notifications scanner stamps them as a
-    placeholder when it sees we were @mentioned without our own reply.
+    Replaces the previous trio of direct-DB SELECTs (daily_count_today,
+    recent_angles_by_project, recent_posts_by_project) with one HTTP roundtrip.
+    Returned by the route already trimmed to the same row shape we used to
+    derive in Python: { daily_count_today: int, recent_posts_by_project:
+    {name: int}, project_angles: {name: [{summary, days_ago}, ...]} }.
     """
-    conn = dbmod.get_conn()
-    row = conn.execute(
-        """
-        SELECT COUNT(*) FROM posts
-        WHERE platform='twitter'
-          AND thread_url = our_url
-          AND posted_at::date = CURRENT_DATE
-          AND our_content NOT ILIKE '(mention%'
-        """
-    ).fetchone()
-    conn.close()
-    return int(row[0]) if row else 0
+    resp = api_get(
+        "/api/v1/twitter/picker-context",
+        query={
+            "angle_window_days": angle_window_days,
+            "counts_window_days": counts_window_days,
+        },
+    )
+    return resp.get("data") or {}
 
 
-def recent_angles_by_project(days=14):
-    """For each project, return dict: angle_text -> days_since_last_use.
-
-    Uses source_summary to detect which angle was used, since that is what the
-    orchestrator stamps with the chosen topic_angle (same convention the
-    Reddit pipeline uses). We do a substring match: an angle counts as recent
-    if its first 60 chars appear in source_summary.
-
-    Returns: { project_name: { angle_text: days_ago_float } }
+def recent_angles_by_project(project_angles_payload):
+    """Reshape the route's project_angles dict into the same {project: {_rows: [...]}}
+    structure the old direct-DB helper produced, so angle_recency() works
+    unchanged.
     """
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT project_name, source_summary,
-               EXTRACT(EPOCH FROM (NOW() - posted_at))/86400.0 AS days_ago
-        FROM posts
-        WHERE platform='twitter'
-          AND thread_url = our_url
-          AND posted_at > NOW() - INTERVAL '%s days'
-          AND project_name IS NOT NULL
-          AND source_summary IS NOT NULL
-        ORDER BY posted_at DESC
-        """ % int(days)
-    ).fetchall()
-    conn.close()
     out = {}
-    for project_name, summary, days_ago in rows:
-        out.setdefault(project_name, {})
-        # We don't know exactly which angle text was chosen, so the caller
-        # does substring matching against source_summary. For now we just
-        # store (summary, days_ago) tuples and let the caller iterate.
-        out[project_name].setdefault("_rows", []).append((summary or "", float(days_ago)))
+    for project_name, rows in (project_angles_payload or {}).items():
+        bucket = out.setdefault(project_name, {})
+        bucket.setdefault("_rows", []).extend(
+            (r.get("summary") or "", float(r.get("days_ago") or 0)) for r in rows
+        )
     return out
 
 
@@ -117,30 +91,7 @@ def angle_recency(project_recents, angle_text):
     return best
 
 
-def recent_posts_by_project(days=7):
-    """Return dict: project_name -> count of original Twitter threads in last N days.
-
-    Excludes mention-placeholder rows (see daily_count_today docstring).
-    """
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT project_name, COUNT(*)
-        FROM posts
-        WHERE platform='twitter'
-          AND thread_url = our_url
-          AND posted_at > NOW() - INTERVAL '%s days'
-          AND project_name IS NOT NULL
-          AND our_content NOT ILIKE '(mention%%'
-        GROUP BY project_name
-        """ % int(days)
-    ).fetchall()
-    conn.close()
-    return {name: int(cnt) for name, cnt in rows}
-
-
-def build_candidates(config):
-    project_recents = recent_angles_by_project(days=14)
+def build_candidates(config, project_recents):
     candidates = []   # (project_dict, angle_text, floor_days, last_used_days_ago_or_None)
     for p in config.get("projects", []):
         tt = p.get("twitter_threads") or {}
@@ -189,16 +140,22 @@ def main():
 
     config = load_config()
 
+    # One HTTP roundtrip for all picker context (daily count, recent angles
+    # per project, recent post counts per project). Was three separate
+    # psycopg2 SELECTs on `posts` before the 2026-05-18 routes migration.
+    ctx = _fetch_picker_context(angle_window_days=14, counts_window_days=7)
+
     # Hard daily cap. Check FIRST so the picker exits cheap when the day is
     # already saturated.
-    today_count = daily_count_today()
+    today_count = int(ctx.get("daily_count_today") or 0)
     if today_count >= TWITTER_DAILY_CAP and not args.show_all:
         print(f"DAILY_CAP_REACHED: {today_count}/{TWITTER_DAILY_CAP} posts today",
               file=sys.stderr)
         sys.exit(3)
 
-    candidates, project_recents = build_candidates(config)
-    recent_project_counts = recent_posts_by_project(days=7)
+    project_recents = recent_angles_by_project(ctx.get("project_angles"))
+    candidates = build_candidates(config, project_recents)
+    recent_project_counts = ctx.get("recent_posts_by_project") or {}
 
     if args.show_all:
         print(f"Daily cap: {today_count}/{TWITTER_DAILY_CAP} posts today (UTC)")
