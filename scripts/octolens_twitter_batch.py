@@ -8,17 +8,17 @@ See scripts/engagement_styles.py for the valid set and pick targets per
 platform; the caller should choose a style that fits the thread AND is
 under-represented vs target in recent posts.
 """
-import sys, os, time, json, subprocess, psycopg2
+import sys, os, time, subprocess
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engagement_styles import VALID_STYLES
+from http_api import api_post  # noqa: E402
 
+# DB_URL kept as a placeholder for any downstream tooling that still expects
+# it; not used by this script after the 2026-05-18 routes migration. Writes
+# now go through /api/v1/posts via scripts/http_api.py.
 DB_URL = None
-with open(os.path.expanduser('~/social-autoposter/.env')) as f:
-    for line in f:
-        if line.startswith('DATABASE_URL='):
-            DB_URL = line.strip().split('=', 1)[1].strip('"').strip("'")
 
 PROFILE = os.path.expanduser('~/.claude/browser-profiles/twitter')
 LOCK_FILE = os.path.expanduser('~/.claude/browser-profiles/twitter/SingletonLock')
@@ -56,7 +56,7 @@ def wait_for_browser_free(max_wait=300):
     print("Timeout waiting for browser lock.")
     return False
 
-def post_reply_and_log(browser, tweet, db_conn):
+def post_reply_and_log(browser, tweet):
     url = tweet["url"]
     reply_text = tweet["reply"]
     style = tweet.get("engagement_style")
@@ -133,28 +133,33 @@ def post_reply_and_log(browser, tweet, db_conn):
         our_url = url  # fallback
         print(f"Reply posted to {url}")
 
-        # Log to database
-        cur = db_conn.cursor()
-        cur.execute("""
-            INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
-                thread_title, thread_content, our_url, our_content, our_account,
-                source_summary, project_name, engagement_style, status, posted_at)
-            VALUES ('twitter', %s, %s, %s, %s, %s, %s, %s, '@m13v_', %s, %s, %s, 'active', NOW())
-            RETURNING id
-        """, (
-            url,
-            tweet['author'],
-            tweet['author'],
-            thread_title,
-            thread_content,
-            our_url,
-            reply_text,
-            f"octolens: {tweet['keyword']}",
-            tweet['project_name'],
-            style,
-        ))
-        post_id = cur.fetchone()[0]
-        db_conn.commit()
+        # Log to database via /api/v1/posts. Same row shape, route handles
+        # the (platform, thread_url) dedup so re-running this batch is safe.
+        resp = api_post(
+            "/api/v1/posts",
+            {
+                "platform": "twitter",
+                "thread_url": url,
+                "thread_author": tweet["author"],
+                "thread_author_handle": tweet["author"],
+                "thread_title": thread_title,
+                "thread_content": thread_content,
+                "our_url": our_url,
+                "our_content": reply_text,
+                "our_account": "@m13v_",
+                "source_summary": f"octolens: {tweet['keyword']}",
+                "project": tweet["project_name"],
+                "engagement_style": style,
+                "status": "active",
+            },
+            ok_on_conflict=True,
+        )
+        data = resp.get("data") or {}
+        post = data.get("post") or {}
+        if not post and resp.get("error"):
+            details = (resp.get("error") or {}).get("details") or {}
+            post = details.get("post") or {}
+        post_id = post.get("id")
         print(f"Logged to DB with id={post_id}")
 
         page.close()
@@ -180,8 +185,6 @@ def main():
                 print("Browser still running, cannot proceed.")
                 sys.exit(1)
 
-    conn = psycopg2.connect(DB_URL)
-
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
             PROFILE,
@@ -192,13 +195,11 @@ def main():
 
         results = []
         for tweet in TWEETS:
-            post_id = post_reply_and_log(browser, tweet, conn)
+            post_id = post_reply_and_log(browser, tweet)
             results.append({"url": tweet["url"], "post_id": post_id})
             time.sleep(2)
 
         browser.close()
-
-    conn.close()
 
     print("\n=== Results ===")
     for r in results:
