@@ -26,6 +26,11 @@ Flow:
 
 Usage:
     python3 scripts/scan_twitter_thread_followups.py [--days N] [--max-urls N]
+
+Migrated 2026-05-18: reads/writes now route through the s4l.ai HTTP API
+(/api/v1/replies for both filter-list and insert) instead of psycopg2.
+The (platform, their_comment_id) dedup runs server-side; the local
+known_ids cache is now just for in-loop short-circuiting.
 """
 
 import argparse
@@ -35,15 +40,17 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post  # noqa: E402
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 OUR_HANDLE = "m13v_"
 DEFAULT_DAYS = 14
 DEFAULT_MAX_URLS = 40
 REPO_DIR = os.path.expanduser("~/social-autoposter")
+REPLY_PAGE_LIMIT = 500
 
 
 def load_config():
@@ -53,41 +60,53 @@ def load_config():
     return {}
 
 
-def fetch_our_recent_x_replies(conn, days, max_urls):
-    """Return list of (reply_id, our_reply_url, post_id, depth) for our recent X replies."""
-    rows = conn.execute(
-        """
-        SELECT id, our_reply_url, post_id, depth
-        FROM replies
-        WHERE platform = 'x'
-          AND status = 'replied'
-          AND our_reply_url IS NOT NULL
-          AND our_reply_url != ''
-          AND replied_at >= NOW() - (INTERVAL '1 day' * %s)
-        ORDER BY replied_at DESC
-        LIMIT %s
-        """,
-        (days, max_urls),
-    ).fetchall()
+def fetch_our_recent_x_replies(days, max_urls):
+    """Return list of (reply_id, our_reply_url, post_id, depth) for our recent X replies.
+
+    Filters live in the route as:
+      - platform = x
+      - status = replied (the route's WHERE)
+      - has_our_reply_content / has_our_reply_id NOT used here; we need
+        our_reply_url, but the route returns it on every row and we filter
+        client-side after the page comes back.
+      - replied_at >= NOW() - <days>d
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    resp = api_get(
+        "/api/v1/replies",
+        query={
+            "platform": "x",
+            "status": "replied",
+            "since": since,
+            "limit": max_urls,
+            "order_by": "replied_at",
+        },
+    )
+    rows = (resp.get("data") or {}).get("replies") or []
     out = []
     for r in rows:
-        if isinstance(r, (list, tuple)):
-            rid, url, pid, depth = r[0], r[1], r[2], r[3]
-        else:
-            rid, url, pid, depth = r["id"], r["our_reply_url"], r["post_id"], r["depth"]
-        if url:
-            out.append((rid, url, pid, depth or 1))
-    return out
+        url = r.get("our_reply_url")
+        if not url:
+            continue
+        out.append((r["id"], url, r.get("post_id"), int(r.get("depth") or 1)))
+    return out[:max_urls]
 
 
-def existing_comment_ids(conn):
-    rows = conn.execute(
-        "SELECT their_comment_id FROM replies WHERE platform = 'x'"
-    ).fetchall()
-    return {
-        (r[0] if isinstance(r, (list, tuple)) else r["their_comment_id"])
-        for r in rows
-    }
+def existing_comment_ids():
+    """First-page snapshot of replies.their_comment_id for platform=x.
+
+    The route's UNIQUE (platform, their_comment_id) index is the canonical
+    dedup; this cache short-circuits the per-followup POST loop and prints
+    accurate "already tracked" counts. Bounded at REPLY_PAGE_LIMIT (500) by
+    the route — fine because the most recent rows are the ones we'd
+    otherwise collide with.
+    """
+    resp = api_get(
+        "/api/v1/replies",
+        query={"platform": "x", "limit": REPLY_PAGE_LIMIT, "order_by": "id"},
+    )
+    rows = (resp.get("data") or {}).get("replies") or []
+    return {r.get("their_comment_id") for r in rows if r.get("their_comment_id")}
 
 
 def anchor_id_from_url(url):
@@ -126,8 +145,9 @@ def run_browser_scrape(urls, scroll_count=3):
             pass
 
 
-def insert_followup(conn, followup, parent_reply_id, post_id, parent_depth):
-    """Insert one follow-up row. Returns True if inserted, False if skipped."""
+def insert_followup(followup, parent_reply_id, post_id, parent_depth):
+    """Insert one follow-up row via /api/v1/replies. Returns True if inserted,
+    False if skipped (own handle, missing required fields, or 409 duplicate)."""
     tweet_id = followup.get("tweet_id") or ""
     handle = (followup.get("handle") or "").lstrip("@")
     text = followup.get("text") or ""
@@ -136,16 +156,23 @@ def insert_followup(conn, followup, parent_reply_id, post_id, parent_depth):
         return False
     if handle.lower() == OUR_HANDLE.lower():
         return False
-    conn.execute(
-        """
-        INSERT INTO replies (post_id, platform, their_comment_id, their_author,
-            their_content, their_comment_url, depth, status, parent_reply_id)
-        VALUES (%s, 'x', %s, %s, %s, %s, %s, 'pending', %s)
-        ON CONFLICT (platform, their_comment_id) DO NOTHING
-        """,
-        (post_id, tweet_id, handle, text, url, (parent_depth or 1) + 1, parent_reply_id),
+    resp = api_post(
+        "/api/v1/replies",
+        {
+            "post_id": post_id,
+            "platform": "x",
+            "their_comment_id": tweet_id,
+            "their_author": handle,
+            "their_content": text,
+            "their_comment_url": url,
+            "depth": (parent_depth or 1) + 1,
+            "status": "pending",
+            "parent_reply_id": parent_reply_id,
+        },
+        ok_on_conflict=True,
     )
-    conn.commit()
+    if (resp.get("error") or {}).get("code") == "duplicate_reply":
+        return False
     return True
 
 
@@ -161,13 +188,9 @@ def main():
                         help="Print what would be inserted without writing")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
-    our_replies = fetch_our_recent_x_replies(conn, args.days, args.max_urls)
+    our_replies = fetch_our_recent_x_replies(args.days, args.max_urls)
     print(f"Revisiting {len(our_replies)} of our recent X replies (last {args.days}d)")
     if not our_replies:
-        conn.close()
         return 0
 
     url_to_meta = {url: (rid, pid, depth) for rid, url, pid, depth in our_replies}
@@ -177,12 +200,11 @@ def main():
     data = run_browser_scrape(urls, scroll_count=args.scroll_count)
 
     results = data.get("results", [])
-    known_ids = existing_comment_ids(conn)
+    known_ids = existing_comment_ids()
     new_count = 0
     skip_own = 0
     skip_existing = 0
     skip_anchor = 0
-
     skip_not_replying_to_us = 0
 
     for r in results:
@@ -225,13 +247,17 @@ def main():
                 new_count += 1
                 known_ids.add(tid)
                 continue
-            inserted = insert_followup(conn, fu, parent_reply_id, post_id, parent_depth)
+            inserted = insert_followup(fu, parent_reply_id, post_id, parent_depth)
             if inserted:
                 new_count += 1
                 known_ids.add(tid)
                 print(f"  NEW follow-up: @{handle} (tid={tid}) parent_reply={parent_reply_id} depth={(parent_depth or 1) + 1}: {(fu.get('text') or '')[:80]}")
+            else:
+                # 409 duplicate (someone else inserted between our local cache
+                # and this POST). Count it as already-tracked, not new.
+                known_ids.add(tid)
+                skip_existing += 1
 
-    conn.close()
     print(f"\nSummary: {new_count} new follow-ups ingested, "
           f"{skip_existing} already tracked, {skip_own} own account, "
           f"{skip_anchor} anchor skips, {skip_not_replying_to_us} not replying to us")
