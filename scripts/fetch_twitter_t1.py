@@ -11,6 +11,10 @@ delta_score formula:
     Δlikes + 3*Δretweets + 2*Δreplies + Δviews/1000 + Δbookmarks
 Weights picked so retweets/replies (stronger virality signals) beat raw likes,
 views are divided down so they don't dominate.
+
+Migrated 2026-05-18: pending-batch read and per-row T1 writes now go through
+the s4l.ai HTTP API (/api/v1/twitter-candidates/pending-batch +
+/api/v1/twitter-candidates/by-id action=set_t1) instead of psycopg2.
 """
 import argparse
 import json
@@ -21,7 +25,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_patch  # noqa: E402
 
 
 def fetch_fxtwitter(handle, tweet_id):
@@ -56,16 +60,11 @@ def main():
     p.add_argument("--batch-id", required=True)
     args = p.parse_args()
 
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT id, tweet_url,
-               likes_t0, retweets_t0, replies_t0, views_t0, bookmarks_t0
-        FROM twitter_candidates
-        WHERE batch_id = %s AND status = 'pending'
-        """,
-        [args.batch_id],
-    ).fetchall()
+    resp = api_get(
+        "/api/v1/twitter-candidates/pending-batch",
+        query={"batch_id": args.batch_id},
+    )
+    rows = (resp.get("data") or {}).get("candidates") or []
 
     if not rows:
         print(f"No pending rows for batch {args.batch_id}", file=sys.stderr)
@@ -74,7 +73,13 @@ def main():
     print(f"Re-polling {len(rows)} candidates for batch {args.batch_id}", file=sys.stderr)
 
     def fetch_row(row):
-        cid, url, l0, r0, p0, v0, b0 = row
+        cid = row["id"]
+        url = row["tweet_url"]
+        l0 = row.get("likes_t0")
+        r0 = row.get("retweets_t0")
+        p0 = row.get("replies_t0")
+        v0 = row.get("views_t0")
+        b0 = row.get("bookmarks_t0")
         handle, tweet_id = parse(url)
         if not handle:
             return None
@@ -99,23 +104,30 @@ def main():
         if result is None:
             continue
         cid, url, t1, delta = result
-        conn.execute(
-            """
-            UPDATE twitter_candidates
-            SET likes_t1=%s, retweets_t1=%s, replies_t1=%s, views_t1=%s, bookmarks_t1=%s,
-                t1_checked_at=NOW(), delta_score=%s,
-                likes=%s, retweets=%s, replies=%s, views=%s, bookmarks=%s
-            WHERE id=%s
-            """,
-            [t1["likes"], t1["retweets"], t1["replies"], t1["views"], t1["bookmarks"],
-             delta,
-             t1["likes"], t1["retweets"], t1["replies"], t1["views"], t1["bookmarks"],
-             cid],
-        )
-        print(f"  #{cid} {url} Δ={delta:.1f}", file=sys.stderr)
-
-    conn.commit()
-    conn.close()
+        try:
+            api_patch(
+                "/api/v1/twitter-candidates/by-id",
+                {
+                    "id": cid,
+                    "action": "set_t1",
+                    "likes_t1": t1["likes"],
+                    "retweets_t1": t1["retweets"],
+                    "replies_t1": t1["replies"],
+                    "views_t1": t1["views"],
+                    "bookmarks_t1": t1["bookmarks"],
+                    "delta_score": delta,
+                    "likes": t1["likes"],
+                    "retweets": t1["retweets"],
+                    "replies": t1["replies"],
+                    "views": t1["views"],
+                    "bookmarks": t1["bookmarks"],
+                },
+                ok_on_404=True,
+            )
+            print(f"  #{cid} {url} Δ={delta:.1f}", file=sys.stderr)
+        except SystemExit as e:
+            print(f"  #{cid} {url} set_t1 failed: {e}", file=sys.stderr)
+            continue
 
 
 if __name__ == "__main__":
