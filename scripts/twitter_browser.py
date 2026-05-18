@@ -56,30 +56,41 @@ if not DM_PASSCODE:
 def _load_active_twitter_campaigns():
     """Best-effort loader for active Twitter campaigns with literal suffixes.
 
-    Returns [(id, suffix, sample_rate), ...]. On any failure (no DB, missing
-    module, etc.) returns []. This keeps twitter_browser.py usable in non-DB
-    contexts (e.g. ad-hoc invocations from a shell). Mirrors the
+    Returns [(id, suffix, sample_rate), ...]. On any failure (no API, no
+    creds, network glitch) returns []. This keeps twitter_browser.py usable
+    in non-DB contexts (e.g. ad-hoc invocations from a shell). Mirrors the
     `_load_active_reddit_campaigns_for_dm` helper in reddit_browser.py.
+
+    Migrated 2026-05-18: was a direct psycopg2 SELECT; now hits
+    /api/v1/campaigns?platform=twitter&has_suffix=true&with_budget_remaining=true&status=active
+    via scripts/http_api.py. Same WHERE clause runs server-side.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import db as _db
-        _db.load_env()
-        conn = _db.get_conn()
-        try:
-            cur = conn.execute(
-                """SELECT id, suffix, COALESCE(sample_rate, 1.000)
-                   FROM campaigns
-                   WHERE status='active'
-                     AND (',' || platforms || ',') LIKE '%,twitter,%'
-                     AND max_posts_total IS NOT NULL
-                     AND posts_made < max_posts_total
-                     AND suffix IS NOT NULL AND suffix <> ''
-                   ORDER BY id"""
-            )
-            return [(r[0], r[1], float(r[2])) for r in cur.fetchall()]
-        finally:
-            conn.close()
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/campaigns",
+            query={
+                "status": "active",
+                "platform": "twitter",
+                "has_suffix": "true",
+                "with_budget_remaining": "true",
+                "limit": 50,
+            },
+        )
+        rows = (resp.get("data") or {}).get("campaigns") or []
+        out = []
+        for r in rows:
+            suffix = r.get("suffix")
+            if not suffix:
+                continue
+            sample_rate = r.get("sample_rate")
+            try:
+                sample_rate = float(sample_rate if sample_rate is not None else 1.0)
+            except (TypeError, ValueError):
+                sample_rate = 1.0
+            out.append((r.get("id"), suffix, sample_rate))
+        return out
     except Exception as e:
         print(f"[twitter_browser] _load_active_twitter_campaigns failed: {e}",
               file=sys.stderr)
