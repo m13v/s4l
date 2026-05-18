@@ -173,6 +173,58 @@ def annotate_failure(row):
     return " | ".join(reasons)
 
 
+_ACTIVE_CAMPAIGN_SUFFIXES_CACHE = None
+
+
+def _load_active_campaign_suffixes(conn):
+    """Best-effort: return a list of currently-active campaign suffix literals.
+
+    Cached per-process. Used to strip the suffix from `our_content` before
+    feeding it into the few-shot prompt context, so the LLM never learns to
+    echo the suffix in its drafts (which then double-fires with the
+    tool-layer injection, observed 2026-05-18 on Reddit IDs 70412 + 70413).
+    On any DB failure returns []: missing strip is preferable to crashing
+    the report pipeline.
+    """
+    global _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
+    if _ACTIVE_CAMPAIGN_SUFFIXES_CACHE is not None:
+        return _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
+    suffixes = []
+    try:
+        rows = conn.execute(
+            "SELECT suffix FROM campaigns "
+            "WHERE status = 'active' AND suffix IS NOT NULL AND TRIM(suffix) != ''"
+        ).fetchall()
+        for r in rows:
+            s = (r[0] or "").strip()
+            if s and s not in suffixes:
+                suffixes.append(s)
+    except Exception as e:
+        print(f"[top_performers] _load_active_campaign_suffixes failed: {e}",
+              file=sys.stderr)
+    _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = suffixes
+    return suffixes
+
+
+def _strip_active_campaign_suffixes(text, suffixes):
+    """Trailing-only, idempotent strip of any active-campaign suffix.
+
+    Idempotent loop also collapses an already-doubled historical suffix to
+    clean text. Trailing-only so we never touch the body of the comment.
+    """
+    if not text or not suffixes:
+        return text
+    cleaned = text.rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for sfx in suffixes:
+            if sfx and cleaned.endswith(sfx):
+                cleaned = cleaned[: -len(sfx)].rstrip()
+                changed = True
+    return cleaned
+
+
 def get_style_performance(conn, platform=None):
     """Avg upvotes AND avg comments per engagement_style for the given platform.
 
@@ -439,13 +491,19 @@ def get_bottom_posts(conn, project=None, platform=None, limit=10):
     return cur.fetchall()
 
 
-def format_post(row, include_thread_content=True):
+def format_post(row, include_thread_content=True, suffix_strip_list=None):
     """Format a single post as factual text.
 
     Upvotes are reported NET on Reddit and Moltbook: both platforms auto-apply
     a +1 OP self-upvote on every post, so the raw `upvotes` column starts at 1
     for a brand-new post with zero real engagement. Strip that +1 here so the
     display matches SCORE_SQL and the dashboard. Other platforms pass through.
+
+    `suffix_strip_list`: list of active-campaign suffix literals to strip from
+    `our_content` before emitting the "Our comment:" line. Without this, the
+    LLM sees historical tagged comments in the few-shot block, copies the
+    suffix into its draft, and the tool-layer injection (engage_reddit,
+    twitter_browser) appends a second copy. See _strip_active_campaign_suffixes.
     """
     lines = []
     platform_lc = str(row[1] or "").lower()
@@ -457,6 +515,8 @@ def format_post(row, include_thread_content=True):
     comments = row[3] if row[3] is not None else 0
     views = row[4] if row[4] is not None else 0
     our_content = row[5] or ""
+    if suffix_strip_list:
+        our_content = _strip_active_campaign_suffixes(our_content, suffix_strip_list)
     thread_title = row[6] or ""
     thread_content = row[7] or ""
     project = row[8] or "(no project)"
@@ -491,8 +551,14 @@ def format_post(row, include_thread_content=True):
 
 def format_report(summary, top, bottom, project=None, platform=None,
                    top_by_group=None, fallback_top=None, style_perf=None,
-                   top_by_style=None):
-    """Format the full report."""
+                   top_by_style=None, suffix_strip_list=None):
+    """Format the full report.
+
+    `suffix_strip_list` is forwarded to every `format_post` call so
+    historical campaign-tagged comments don't leak the suffix into the
+    LLM's few-shot context. Passed in by `main()` after loading from the
+    `campaigns` table (cached per-process).
+    """
     lines = []
     filters = []
     if project:
@@ -560,7 +626,7 @@ def format_report(summary, top, bottom, project=None, platform=None,
             lines.append(header)
             ex = exemplars.get(style)
             if ex:
-                lines.append(format_post(ex))
+                lines.append(format_post(ex, suffix_strip_list=suffix_strip_list))
             else:
                 lines.append("  (no clean example yet — style unproven or all examples filtered)")
             lines.append("")
@@ -588,7 +654,7 @@ def format_report(summary, top, bottom, project=None, platform=None,
                 continue
             lines.append(f"\n#### {group_name}")
             for p in posts:
-                lines.append(format_post(p))
+                lines.append(format_post(p, suffix_strip_list=suffix_strip_list))
                 lines.append("")
     elif top:
         # Filtered view with results
@@ -596,7 +662,7 @@ def format_report(summary, top, bottom, project=None, platform=None,
             f"### Top {len(top)} Posts for {project or 'all projects'} ({threshold_label})"
         )
         for p in top:
-            lines.append(format_post(p))
+            lines.append(format_post(p, suffix_strip_list=suffix_strip_list))
             lines.append("")
     elif fallback_top:
         # No project-specific posts met threshold — show general high performers
@@ -605,14 +671,15 @@ def format_report(summary, top, bottom, project=None, platform=None,
         lines.append(f"### Showing top posts from OTHER projects{platform_label} as reference:")
         lines.append("")
         for p in fallback_top:
-            lines.append(format_post(p))
+            lines.append(format_post(p, suffix_strip_list=suffix_strip_list))
             lines.append("")
 
     # Bottom posts with failure annotations
     if bottom:
         lines.append(f"### Bottom {len(bottom)} Posts (avoid these patterns)")
         for p in bottom:
-            lines.append(format_post(p, include_thread_content=False))
+            lines.append(format_post(p, include_thread_content=False,
+                                      suffix_strip_list=suffix_strip_list))
             reason = annotate_failure(p)
             lines.append(f"  >> FAILURE REASON: {reason}")
             lines.append("")
