@@ -455,6 +455,33 @@ def post_comment(thread_url, text):
             if not has_comment_form:
                 return {"ok": False, "error": "account_blocked_in_sub"}
 
+            # Some subs render the form but show a gate notice instead of a usable
+            # textarea (CrowdControl on AutoMod-flagged users, "you must have X karma
+            # to comment in r/sub", subreddit quarantine consent, etc.). Detect these
+            # before burning 5+3s of textarea polling. The "infobar" / "md-container"
+            # banner above .commentarea carries the gate text. We pattern-match a few
+            # well-known phrases so we return early with the correct error.
+            gate_phrases = [
+                "you must be a subscriber",
+                "you don't have permission to comment",
+                "you must have at least",
+                "minimum karma",
+                "minimum account age",
+                "crowdcontrol",
+                "this community has restricted",
+                "verified email",
+                "only approved users",
+                "you must agree",  # quarantine consent
+            ]
+            try:
+                preamble = (page.locator(
+                    ".commentarea, .infobar, .md-container, .interstitial"
+                ).first.text_content(timeout=1500) or "").lower()
+                if any(p in preamble for p in gate_phrases):
+                    return {"ok": False, "error": "account_blocked_in_sub"}
+            except Exception:
+                pass
+
             # Find the top-level comment form textarea.
             comment_form = page.locator(
                 ".commentarea > form.usertext textarea, "
@@ -474,6 +501,21 @@ def post_comment(thread_url, text):
                     comment_form.wait_for(state="visible", timeout=3000)
                 except Exception:
                     return {"ok": False, "error": "comment_box_not_found"}
+
+            # Even if the textarea is "visible", a sub may render it disabled or
+            # with a readonly attribute (some quarantined / restricted-mode subs do
+            # this). Fail fast as account_blocked_in_sub so salvage doesn't keep
+            # retrying the same dead thread.
+            try:
+                is_disabled = comment_form.evaluate(
+                    "el => !!(el.disabled || el.readOnly || "
+                    "el.getAttribute('aria-disabled') === 'true' || "
+                    "el.closest('.disabled,.usertext-disabled'))"
+                )
+                if is_disabled:
+                    return {"ok": False, "error": "account_blocked_in_sub"}
+            except Exception:
+                pass
 
             # Fill the textarea (old reddit uses standard textareas)
             comment_form.fill(text)
