@@ -12,16 +12,21 @@ A type that has been posting heavily is dampened toward under-posted ones, but
 never selected above its raw config weight. Settles toward the target ratio
 over time.
 
+Usage:
+  ig_post_type_picker.py                  # pick across all accounts (legacy)
+  ig_post_type_picker.py --account NAME   # scope to one target_account
+
 Output:
   {"post_type": "organic", "video_path": "...", "post_number": 4,
-   "reason": "...", "fallback": false}
+   "target_account": "matt_diak", "reason": "...", "fallback": false}
 
 Exit codes:
   0  — picked successfully
-  2  — no draft videos of either type (queue exhausted)
+  2  — no draft videos of either type (queue exhausted for the scoped account)
   3  — config error / DB error
 """
 
+import argparse
 import json
 import os
 import random
@@ -56,6 +61,10 @@ def load_ig_config():
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--account", help="scope all queries to target_account (default: pick across all)")
+    args = ap.parse_args()
+
     try:
         import psycopg2
     except ImportError:
@@ -69,18 +78,30 @@ def main():
         sys.exit(3)
 
     type_weights_cfg, window_days = load_ig_config()
+    account = args.account
 
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
 
-    # Recent posted counts per type for inverse-share weighting
-    cur.execute(
-        "SELECT post_type, COUNT(*) FROM media_posts "
-        "WHERE status='posted' AND posted_urls ? 'instagram' "
-        "  AND posted_at > NOW() - INTERVAL %s "
-        "GROUP BY post_type",
-        (f"{window_days} days",),
-    )
+    # Recent posted counts per type for inverse-share weighting.
+    # Scoped to target_account when one is requested; otherwise global.
+    if account:
+        cur.execute(
+            "SELECT post_type, COUNT(*) FROM media_posts "
+            "WHERE status='posted' AND posted_urls ? 'instagram' "
+            "  AND target_account=%s "
+            "  AND posted_at > NOW() - INTERVAL %s "
+            "GROUP BY post_type",
+            (account, f"{window_days} days"),
+        )
+    else:
+        cur.execute(
+            "SELECT post_type, COUNT(*) FROM media_posts "
+            "WHERE status='posted' AND posted_urls ? 'instagram' "
+            "  AND posted_at > NOW() - INTERVAL %s "
+            "GROUP BY post_type",
+            (f"{window_days} days",),
+        )
     recent_counts = {r[0]: r[1] for r in cur.fetchall() if r[0]}
     for t in ("organic", "product"):
         recent_counts.setdefault(t, 0)
@@ -99,13 +120,29 @@ def main():
     ws = [effective[n] for n in names]
     target = random.choices(names, weights=ws, k=1)[0]
 
-    cur.execute(
-        "SELECT post_number, video_path FROM media_posts "
-        "WHERE status='draft' AND post_type=%s "
-        "ORDER BY post_number ASC LIMIT 1",
-        (target,),
-    )
-    row = cur.fetchone()
+    def _draft_query(type_):
+        # Drafts for this type, optionally scoped to target_account. We allow
+        # legacy NULL target_account rows to match when no --account is passed
+        # so existing behavior is preserved; when --account is set, rows must
+        # match exactly (account-scoped buffer).
+        if account:
+            cur.execute(
+                "SELECT post_number, video_path FROM media_posts "
+                "WHERE status='draft' AND post_type=%s "
+                "  AND target_account=%s "
+                "ORDER BY post_number ASC LIMIT 1",
+                (type_, account),
+            )
+        else:
+            cur.execute(
+                "SELECT post_number, video_path FROM media_posts "
+                "WHERE status='draft' AND post_type=%s "
+                "ORDER BY post_number ASC LIMIT 1",
+                (type_,),
+            )
+        return cur.fetchone()
+
+    row = _draft_query(target)
     fallback = False
     fallback_from = None
 
@@ -113,20 +150,18 @@ def main():
         # Fall back to the other type if this one has no drafts. Without the
         # fallback the post-cycle would idle even when usable drafts exist.
         other = "product" if target == "organic" else "organic"
-        cur.execute(
-            "SELECT post_number, video_path FROM media_posts "
-            "WHERE status='draft' AND post_type=%s "
-            "ORDER BY post_number ASC LIMIT 1",
-            (other,),
-        )
-        row = cur.fetchone()
+        row = _draft_query(other)
         if row is None:
             sys.stderr.write(
-                "queue empty: no draft rows for either organic or product\n"
+                "queue empty: no draft rows for either organic or product"
+                + (f" (target_account={account})" if account else "")
+                + "\n"
             )
             sys.exit(2)
         sys.stderr.write(
-            f"queue imbalance: target={target} has 0 drafts, falling back to {other}\n"
+            f"queue imbalance: target={target} has 0 drafts, falling back to {other}"
+            + (f" (target_account={account})" if account else "")
+            + "\n"
         )
         fallback_from = target
         target = other
@@ -138,9 +173,11 @@ def main():
         "post_type": target,
         "video_path": video_path,
         "post_number": post_number,
+        "target_account": account,
         "reason": (
-            f"window={window_days}d recent={recent_counts} "
-            f"config_weights={type_weights_cfg} effective={effective} chose={target}"
+            f"window={window_days}d account={account or '<global>'} "
+            f"recent={recent_counts} config_weights={type_weights_cfg} "
+            f"effective={effective} chose={target}"
             + (f" (fallback_from={fallback_from})" if fallback else "")
         ),
         "fallback": fallback,
