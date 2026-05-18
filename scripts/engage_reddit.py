@@ -118,6 +118,35 @@ def load_active_reddit_campaigns():
     ]
 
 
+def strip_active_suffixes(text, active_campaigns):
+    """Remove any active-campaign suffix from `text` (idempotent, trailing-only).
+
+    Used to sanitize `recent_replies` snippets BEFORE feeding them into the
+    LLM prompt. Without this, the LLM sees prior tagged replies in the
+    "Your last N replies" block, copies the literal suffix into its draft,
+    and `engage_reddit.py`'s tool-level injection then appends a SECOND
+    suffix on top, producing posts like "written with s4lai written with
+    s4lai" (observed in production 2026-05-18, ids 70412 + 70413).
+
+    Strips trailing whitespace + suffix repeatedly so a doubled-suffix
+    historical row also collapses to clean text. Active campaign list is
+    passed in by the caller so we only strip patterns we're actively using
+    (avoids unbounded false-positive matches on incidental phrasing).
+    """
+    if not text or not active_campaigns:
+        return text
+    cleaned = text.rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for camp in active_campaigns:
+            suffix = (camp.get("suffix") or "").strip()
+            if suffix and cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)].rstrip()
+                changed = True
+    return cleaned
+
+
 def bump_campaigns(table, row_id, campaign_ids):
     """Attach a row in {posts,replies,dm_messages} to its applied campaigns."""
     if not row_id or not campaign_ids:
@@ -703,8 +732,16 @@ def main():
             meta_callouts_detected += 1
             print(f"[engage_reddit] #{reply['id']} meta-callout detected: keyword={meta_callout['keyword']!r}")
 
-        # Get recent replies for archetype rotation
+        # Get recent replies for archetype rotation. Strip active campaign
+        # suffixes from each snippet BEFORE the LLM sees them; otherwise the
+        # model copies the literal suffix into its draft and the tool-layer
+        # injection below appends a second copy. See strip_active_suffixes
+        # docstring for the 2026-05-18 production incident this prevents.
         recent = get_recent_archetypes(args.platform, limit=3)
+        if reply["platform"] == "reddit" and recent:
+            _active_camps_for_strip = load_active_reddit_campaigns()
+            recent = [strip_active_suffixes(r, _active_camps_for_strip) for r in recent]
+            recent = [r for r in recent if r]
 
         # Build prompt
         prompt = build_prompt(reply, recent, config, excluded_authors,
