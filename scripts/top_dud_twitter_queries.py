@@ -21,25 +21,17 @@ last 48h used min_faves:20" → drop the floor for that project.
 
 Source: twitter_search_attempts (one row per query per cycle, written by
 run-twitter-cycle.sh after the Phase 1 scan parses queries_used).
+
+Migrated 2026-05-18: reads now go through /api/v1/twitter-search-attempts/
+dud-queries via scripts/http_api.py instead of a direct psycopg2 query.
 """
 import argparse
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-
-MIN_FAVES_RE = re.compile(r"min_faves:(\d+)", re.IGNORECASE)
-
-
-def extract_min_faves(query: str):
-    """Return the integer N from `min_faves:N` if present, else None."""
-    if not query:
-        return None
-    m = MIN_FAVES_RE.search(query)
-    return int(m.group(1)) if m else None
+from http_api import api_get  # noqa: E402
 
 
 def main():
@@ -47,33 +39,27 @@ def main():
     p.add_argument("--limit", type=int, default=30)
     p.add_argument("--window-hours", type=int, default=48,
                    help="Look back this many hours for dud queries.")
+    p.add_argument("--project", default=None,
+                   help="If set, only return duds for this project.")
     args = p.parse_args()
 
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT query,
-               COALESCE(project_name, '') AS project,
-               COUNT(*) AS attempts,
-               EXTRACT(EPOCH FROM (NOW() - MAX(ran_at)))/3600.0 AS last_ran_h_ago
-        FROM twitter_search_attempts
-        WHERE tweets_found = 0
-          AND ran_at > NOW() - (%s || ' hours')::interval
-        GROUP BY query, COALESCE(project_name, '')
-        ORDER BY attempts DESC, MAX(ran_at) DESC
-        LIMIT %s
-        """,
-        [str(args.window_hours), args.limit],
-    ).fetchall()
-    conn.close()
+    query = {
+        "limit": args.limit,
+        "window_hours": args.window_hours,
+    }
+    if args.project:
+        query["project"] = args.project
+
+    resp = api_get("/api/v1/twitter-search-attempts/dud-queries", query=query)
+    rows = (resp.get("data") or {}).get("rows") or []
 
     out = [
         {
-            "query": r[0],
-            "project": r[1],
-            "min_faves": extract_min_faves(r[0]),
-            "attempts": r[2],
-            "last_ran_h_ago": round(float(r[3] or 0), 1),
+            "query": r.get("query"),
+            "project": r.get("project") or "",
+            "min_faves": r.get("min_faves"),
+            "attempts": int(r.get("attempts") or 0),
+            "last_ran_h_ago": round(float(r.get("last_ran_h_ago") or 0), 1),
         }
         for r in rows
     ]
