@@ -6,11 +6,13 @@
 #
 # Per-fire logic:
 #   1. acquire_lock instagram-poster (file lock; IG is HTTP-only, no browser)
-#   2. run scripts/ig_post_type_picker.py -> JSON {post_type, video_path, ...}
-#      4:1 sliding-window picker: 4 organic + 1 product per 5 posts.
-#   3. call mixer/post_to_ig.py --file <path> --post-type <type>
+#   2. pick_ig_account.py -> chooses target IG account (inverse-recent-share
+#      over enabled accounts in config.json instagram.accounts).
+#   3. ig_post_type_picker.py --account <name> -> JSON {post_type, video_path, ...}
+#      scoped to the chosen account's draft pool.
+#   4. call mixer/post_to_ig.py --file <path> --post-type <type> --account <name>
 #      which: uploads to GCS, posts via IG Graph API, writes posted.json,
-#      updates media_posts (status=posted, post_type coalesced).
+#      updates media_posts (status=posted, post_type + target_account coalesced).
 #
 # Exit behavior:
 #   0  - posted, OR queue exhausted (logged), OR another run holds the lock
@@ -50,12 +52,22 @@ log "=== instagram-daily fire: $(date) ==="
 source "$REPO_DIR/skill/lock.sh"
 acquire_lock instagram-poster 30
 
-# Step 1: pick post type + video
-log "step 1: ig_post_type_picker"
-if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/ig_post_type_picker.py" > "$PICK_FILE" 2>>"$LOG_FILE"; then
+# Step 1: pick target IG account (inverse-recent-share over enabled accounts)
+log "step 1: pick_ig_account"
+TARGET_ACCOUNT=$(/opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/pick_ig_account.py" 2>>"$LOG_FILE")
+if [ -z "$TARGET_ACCOUNT" ]; then
+  log "pick_ig_account.py produced no account — exiting non-zero"
+  exit 1
+fi
+log "picker chose account: $TARGET_ACCOUNT"
+
+# Step 2: pick post type + video, scoped to that account
+log "step 2: ig_post_type_picker --account $TARGET_ACCOUNT"
+if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/ig_post_type_picker.py" \
+        --account "$TARGET_ACCOUNT" > "$PICK_FILE" 2>>"$LOG_FILE"; then
   rc=$?
   if [ "$rc" -eq 2 ]; then
-    log "queue exhausted (no draft media_posts of either type) — exiting cleanly"
+    log "queue exhausted for account=$TARGET_ACCOUNT (no drafts of either type) — exiting cleanly"
     exit 0
   fi
   log "picker failed rc=$rc — exiting non-zero"
@@ -68,7 +80,7 @@ POST_NUMBER=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open
 REASON=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE'))['reason'])")
 FALLBACK=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$PICK_FILE'))['fallback'])")
 
-log "picker chose: post-${POST_NUMBER} type=${POST_TYPE} fallback=${FALLBACK}"
+log "picker chose: account=${TARGET_ACCOUNT} post-${POST_NUMBER} type=${POST_TYPE} fallback=${FALLBACK}"
 log "picker reason: ${REASON}"
 
 if [ ! -f "$VIDEO_PATH" ]; then
@@ -83,12 +95,12 @@ if [ "${IG_DRY_RUN:-0}" = "1" ]; then
   log "IG_DRY_RUN=1 — passing --dry-run to post_to_ig.py"
 fi
 
-log "step 2: post_to_ig.py --file $(basename "$VIDEO_PATH") --post-type $POST_TYPE $DRY_FLAG"
+log "step 3: post_to_ig.py --file $(basename "$VIDEO_PATH") --post-type $POST_TYPE --account $TARGET_ACCOUNT $DRY_FLAG"
 if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/mixer/post_to_ig.py" \
-        --file "$VIDEO_PATH" --post-type "$POST_TYPE" $DRY_FLAG >>"$LOG_FILE" 2>&1; then
+        --file "$VIDEO_PATH" --post-type "$POST_TYPE" --account "$TARGET_ACCOUNT" $DRY_FLAG >>"$LOG_FILE" 2>&1; then
   log "post_to_ig.py failed — exiting non-zero"
   exit 1
 fi
 
-log "=== finished post-${POST_NUMBER} (${POST_TYPE}) successfully ==="
+log "=== finished post-${POST_NUMBER} (${POST_TYPE}) on ${TARGET_ACCOUNT} successfully ==="
 exit 0
