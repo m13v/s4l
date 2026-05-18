@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post  # noqa: E402
 
 
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
@@ -156,16 +156,17 @@ def upsert_candidates(tweets, config, batch_id=None):
 
     If batch_id is provided, also populates T0 engagement columns and tags
     the row with batch_id so Phase 2 of the cycle can re-poll only this batch.
-    """
-    conn = dbmod.get_conn()
 
+    Migrated 2026-05-18 to call the s4l.ai HTTP API:
+      - dedup probe -> GET /api/v1/posts/thread-urls?platform=twitter
+      - per-tweet upsert -> POST /api/v1/twitter-candidates
+        (route handles the ON CONFLICT + peer-cycle race guard server-side)
+      - freshness gate -> POST /api/v1/twitter-candidates/expire-stale
+        (default 18h window; never deletes rows — status flip only)
+    """
     # Get already-posted thread URLs for dedup
-    posted = set()
-    rows = conn.execute(
-        "SELECT thread_url FROM posts WHERE platform='twitter' AND thread_url IS NOT NULL"
-    ).fetchall()
-    for row in rows:
-        posted.add(row[0])
+    posted_resp = api_get("/api/v1/posts/thread-urls", query={"platform": "twitter"})
+    posted = set((posted_resp.get("data") or {}).get("thread_urls") or [])
 
     inserted = updated = skipped = 0
     skipped_fake_id = 0
@@ -223,100 +224,51 @@ def upsert_candidates(tweets, config, batch_id=None):
             config,
         )
 
-        try:
-            conn.execute(
-                """
-                INSERT INTO twitter_candidates
-                    (tweet_url, author_handle, author_followers, tweet_text,
-                     tweet_posted_at, likes, retweets, replies, views, bookmarks,
-                     engagement_velocity, retweet_ratio, virality_score,
-                     search_topic, matched_project, status, discovered_at,
-                     likes_t0, retweets_t0, replies_t0, views_t0, bookmarks_t0,
-                     batch_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', NOW(),
-                        %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tweet_url) DO UPDATE SET
-                    likes = EXCLUDED.likes,
-                    retweets = EXCLUDED.retweets,
-                    replies = EXCLUDED.replies,
-                    views = EXCLUDED.views,
-                    bookmarks = EXCLUDED.bookmarks,
-                    engagement_velocity = EXCLUDED.engagement_velocity,
-                    retweet_ratio = EXCLUDED.retweet_ratio,
-                    virality_score = EXCLUDED.virality_score,
-                    author_followers = EXCLUDED.author_followers,
-                    status = CASE
-                        WHEN twitter_candidates.status = 'posted' THEN 'posted'
-                        ELSE 'pending'
-                    END,
-                    likes_t0 = EXCLUDED.likes_t0,
-                    retweets_t0 = EXCLUDED.retweets_t0,
-                    replies_t0 = EXCLUDED.replies_t0,
-                    views_t0 = EXCLUDED.views_t0,
-                    bookmarks_t0 = EXCLUDED.bookmarks_t0,
-                    likes_t1 = NULL,
-                    retweets_t1 = NULL,
-                    replies_t1 = NULL,
-                    views_t1 = NULL,
-                    bookmarks_t1 = NULL,
-                    t1_checked_at = NULL,
-                    delta_score = NULL,
-                    batch_id = COALESCE(twitter_candidates.batch_id, EXCLUDED.batch_id)
-                WHERE NOT (
-                    twitter_candidates.status = 'pending'
-                    AND twitter_candidates.batch_id IS DISTINCT FROM EXCLUDED.batch_id
-                    AND EXISTS (
-                        SELECT 1 FROM twitter_batches tb
-                        WHERE tb.batch_id = twitter_candidates.batch_id
-                          AND tb.phase_started_at > NOW() - INTERVAL '20 minutes'
-                    )
-                )
-                """,
-                [
-                    url,
-                    tweet.get("handle", ""),
-                    tweet.get("author_followers", 0),
-                    (tweet.get("text", "") or ""),
-                    posted_at,
-                    tweet.get("likes", 0),
-                    tweet.get("retweets", 0),
-                    tweet.get("replies", 0),
-                    tweet.get("views", 0),
-                    tweet.get("bookmarks", 0),
-                    velocity,
-                    rt_ratio,
-                    score,
-                    tweet.get("search_topic", ""),
-                    project,
-                    tweet.get("likes", 0) if batch_id else None,
-                    tweet.get("retweets", 0) if batch_id else None,
-                    tweet.get("replies", 0) if batch_id else None,
-                    tweet.get("views", 0) if batch_id else None,
-                    tweet.get("bookmarks", 0) if batch_id else None,
-                    batch_id,
-                ],
-            )
-            inserted += 1
-        except Exception as e:
-            print(f"  Error inserting {url}: {e}", file=sys.stderr)
-            conn._conn.rollback()
-            continue
+        body = {
+            "tweet_url": url,
+            "author_handle": tweet.get("handle", ""),
+            "author_followers": tweet.get("author_followers", 0),
+            "tweet_text": tweet.get("text", "") or "",
+            "tweet_posted_at": posted_at.isoformat() if posted_at else None,
+            "likes": tweet.get("likes", 0),
+            "retweets": tweet.get("retweets", 0),
+            "replies": tweet.get("replies", 0),
+            "views": tweet.get("views", 0),
+            "bookmarks": tweet.get("bookmarks", 0),
+            "engagement_velocity": velocity,
+            "retweet_ratio": rt_ratio,
+            "virality_score": score,
+            "search_topic": tweet.get("search_topic", ""),
+            "matched_project": project,
+            "batch_id": batch_id,
+        }
+        # T0 columns only stamped when this row was discovered inside a cycle
+        # batch, mirroring the conditional in the original SQL.
+        if batch_id:
+            body["likes_t0"] = tweet.get("likes", 0)
+            body["retweets_t0"] = tweet.get("retweets", 0)
+            body["replies_t0"] = tweet.get("replies", 0)
+            body["views_t0"] = tweet.get("views", 0)
+            body["bookmarks_t0"] = tweet.get("bookmarks", 0)
 
-    conn.commit()
+        try:
+            api_post("/api/v1/twitter-candidates", body)
+            inserted += 1
+        except SystemExit as e:
+            # http_api raises SystemExit on terminal failure. Keep iterating;
+            # the cycle should not die because one URL hit a 4xx validation
+            # edge case.
+            print(f"  Error inserting {url}: {e}", file=sys.stderr)
+            continue
 
     # Expire old pending candidates (> 18h). This is a freshness GATE
     # (status flip), not a delete — we keep the row forever for analytics.
-    conn.execute(
-        "UPDATE twitter_candidates SET status='expired' "
-        "WHERE status='pending' AND discovered_at < NOW() - INTERVAL '18 hours'"
-    )
-    conn.commit()
+    api_post("/api/v1/twitter-candidates/expire-stale", {"freshness_hours": 18})
 
     # NO PRUNING. We keep every twitter_candidates row forever (chosen, skipped,
     # expired) so we can audit project routing, skip reasons, growth dynamics,
     # and engagement curves over time. Per user instruction (2026-05-08): never
     # add DELETE-by-age back here, regardless of retention window.
-    conn.close()
 
     print(f"Scored: {inserted} upserted, {skipped} skipped (already posted, too old, or fabricated ID: {skipped_fake_id})")
     return inserted
@@ -337,14 +289,14 @@ def main():
 
     if args.expire_only:
         # Freshness gate only. NO PRUNING — see note in upsert_candidates().
-        conn = dbmod.get_conn()
-        conn.execute(
-            "UPDATE twitter_candidates SET status='expired' "
-            "WHERE status='pending' AND discovered_at < NOW() - INTERVAL '18 hours'"
+        # Server-side route runs the same UPDATE atomically; client just kicks
+        # it off and prints the count.
+        resp = api_post(
+            "/api/v1/twitter-candidates/expire-stale",
+            {"freshness_hours": 18},
         )
-        conn.commit()
-        conn.close()
-        print("Expired old pending candidates (no row deletion)")
+        expired = (resp.get("data") or {}).get("expired_count", 0)
+        print(f"Expired {expired} old pending candidates (no row deletion)")
         return
 
     if args.file:
