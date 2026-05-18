@@ -434,8 +434,13 @@ def post_comment(thread_url, text):
                 if "this is an archived post" in interstitial_text.lower():
                     return {"ok": False, "error": "thread_archived"}
 
-            # Check if thread is locked
-            if page.locator(".locked-tagline").count() > 0:
+            # Check if the THREAD itself is locked. Must be scoped to the OP
+            # container (`#siteTable .thing.self`). A bare `.locked-tagline`
+            # lookup matches the per-comment "locked comment" badge that subs
+            # like r/selfhosted use on their stickied moderator comments, which
+            # caused false-positive thread_locked errors for ~3 NightOwl posts
+            # on 2026-05-18 against perfectly open threads.
+            if page.locator("#siteTable .thing.self .locked-tagline").count() > 0:
                 return {"ok": False, "error": "thread_locked"}
 
             # Check if we're actually logged in (login redirect or no user element)
