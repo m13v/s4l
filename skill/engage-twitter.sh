@@ -163,10 +163,10 @@ REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 BATCH_SIZE=500
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# All Twitter engage DB I/O routes through scripts/engage_twitter_helper.py
+# (HTTP API at /api/v1/*) since 2026-05-18. DATABASE_URL is no longer
+# required for this script and is left for downstream tooling only.
+ENGAGE_TWITTER_HELPER="$REPO_DIR/scripts/engage_twitter_helper.py"
 # (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
@@ -194,39 +194,23 @@ rm -f "$NOTIFS_JSON"
 # PHASE B: Respond to pending Twitter replies
 # ═══════════════════════════════════════════════════════
 
-# Reset any 'processing' items older than 2 hours back to 'pending'
-RESET_COUNT=$(psql "$DATABASE_URL" -t -A -c "
-    WITH upd AS (
-        UPDATE replies SET status='pending'
-        WHERE platform='x' AND status='processing' AND processing_at < NOW() - INTERVAL '2 hours'
-        RETURNING id
-    ) SELECT COUNT(*) FROM upd;")
+# Reset any 'processing' items older than 2 hours back to 'pending'.
+# Server-side WHERE in /api/v1/replies/reset-stuck mirrors the old SQL.
+RESET_COUNT=$(python3 "$ENGAGE_TWITTER_HELPER" reset-stuck-replies)
 [ "$RESET_COUNT" -gt 0 ] && log "Phase B: Reset $RESET_COUNT stuck 'processing' Twitter items back to pending"
 
-PENDING_COUNT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='x' AND status='pending';")
+PENDING_COUNT=$(python3 "$ENGAGE_TWITTER_HELPER" pending-count)
 
 if [ "$PENDING_COUNT" -eq 0 ]; then
     log "Phase B: No pending Twitter replies. Done!"
 else
     log "Phase B: $PENDING_COUNT pending Twitter replies to process"
 
-    PENDING_DATA=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT json_agg(q) FROM (
-            SELECT r.id, r.platform, r.their_author,
-                   r.their_content as their_content,
-                   r.their_comment_url, r.their_comment_id, r.depth,
-                   p.thread_title as thread_title,
-                   p.thread_url, p.our_content as our_content, p.our_url,
-                   CASE WHEN p.thread_url = p.our_url THEN 1 ELSE 0 END as is_our_original_post,
-                   p.project_name
-            FROM replies r
-            JOIN posts p ON r.post_id = p.id
-            WHERE r.platform='x' AND r.status='pending'
-            ORDER BY
-                CASE WHEN p.thread_url = p.our_url THEN 0 ELSE 1 END,
-                r.discovered_at ASC
-            LIMIT $BATCH_SIZE
-        ) q;")
+    # /api/v1/replies/next-pending returns the SAME join (replies + posts)
+    # with the SAME priority ordering (our_thread first, then discovered_at
+    # ASC) the previous json_agg() build emitted; the helper just reshapes
+    # the response into the legacy field set the prompt expects.
+    PENDING_DATA=$(python3 "$ENGAGE_TWITTER_HELPER" pending-data --batch-size "$BATCH_SIZE")
 
     # Per-project voice map (so each reply can be drafted in the matched project's voice)
     PROJECTS_VOICE_JSON=$(python3 -c "
@@ -250,24 +234,14 @@ print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) i
     # resolve to empty strings and the prompt's "if empty, do nothing extra"
     # branch fires. Mirrors the Reddit MCP-fallback pattern in
     # engage-dm-replies.sh.
-    TWITTER_CAMPAIGN_SUFFIX_LITERAL=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT suffix FROM campaigns
-        WHERE status='active' AND (',' || platforms || ',') LIKE '%,twitter,%'
-          AND max_posts_total IS NOT NULL AND posts_made < max_posts_total
-          AND suffix IS NOT NULL AND suffix <> ''
-        ORDER BY id LIMIT 1;" 2>/dev/null | tr -d '\n' || echo "")
-    TWITTER_CAMPAIGN_SAMPLE_RATE=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT COALESCE(sample_rate, 1.000) FROM campaigns
-        WHERE status='active' AND (',' || platforms || ',') LIKE '%,twitter,%'
-          AND max_posts_total IS NOT NULL AND posts_made < max_posts_total
-          AND suffix IS NOT NULL AND suffix <> ''
-        ORDER BY id LIMIT 1;" 2>/dev/null | tr -d '\n' || echo "")
-    TWITTER_CAMPAIGN_ID=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT id FROM campaigns
-        WHERE status='active' AND (',' || platforms || ',') LIKE '%,twitter,%'
-          AND max_posts_total IS NOT NULL AND posts_made < max_posts_total
-          AND suffix IS NOT NULL AND suffix <> ''
-        ORDER BY id LIMIT 1;" 2>/dev/null | tr -d '\n' || echo "")
+    # Three psql one-liners collapsed into one HTTP call via active-campaign.
+    # Returns JSON {} when no active campaign matches, or
+    # {id, suffix, sample_rate}. Same WHERE (status='active', platform
+    # contains twitter, budget remaining, non-empty suffix) runs server-side.
+    TWITTER_CAMPAIGN_JSON=$(python3 "$ENGAGE_TWITTER_HELPER" active-campaign 2>/dev/null || echo "{}")
+    TWITTER_CAMPAIGN_SUFFIX_LITERAL=$(echo "$TWITTER_CAMPAIGN_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.stdout.write(d.get('suffix','') or '')" 2>/dev/null || echo "")
+    TWITTER_CAMPAIGN_SAMPLE_RATE=$(echo "$TWITTER_CAMPAIGN_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.stdout.write(str(d.get('sample_rate','') or ''))" 2>/dev/null || echo "")
+    TWITTER_CAMPAIGN_ID=$(echo "$TWITTER_CAMPAIGN_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.stdout.write(str(d.get('id','') or ''))" 2>/dev/null || echo "")
 
     PHASE_B_PROMPT=$(mktemp)
     cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
@@ -327,9 +301,8 @@ CRITICAL: For ALL database operations, use the reply_db.py helper (NOT raw psql)
 NEVER use psql directly for reply status updates.
 
 ### Project tracking on replies
-When you recommend a project in a reply (Tier 2 or Tier 3), set project_name on the reply:
-  source ~/social-autoposter/.env
-  psql "\$DATABASE_URL" -c "UPDATE replies SET project_name='PROJECT_NAME' WHERE id=REPLY_ID;"
+When you recommend a project in a reply (Tier 2 or Tier 3), set project_name on the reply via reply_db.py (which writes through /api/v1/replies/:id — DO NOT shell out to psql):
+  python3 $REPO_DIR/scripts/reply_db.py set_project REPLY_ID "PROJECT_NAME"
 This lets the DM pipeline know which project the conversation is about.
 
 MANDATORY reply flow for every item:
@@ -348,8 +321,7 @@ MANDATORY reply flow for every item:
                python3 $REPO_DIR/scripts/lookup_post.py twitter PARENT_TWEET_ID
              If the response has a non-null \"project\", that's our post — OVERRIDE
              the reply row and use that project's voice for drafting:
-               source ~/social-autoposter/.env
-               psql "\$DATABASE_URL" -c "UPDATE replies SET project_name='RESOLVED_PROJECT' WHERE id=REPLY_ID;"
+               python3 $REPO_DIR/scripts/reply_db.py set_project REPLY_ID "RESOLVED_PROJECT"
              Use the returned \"our_content\" as the FULL text of the post being
              replied to (more accurate than the truncated our_content in PENDING_DATA).
              If \"project\" is null, we're a guest in someone else's thread; keep
@@ -428,21 +400,23 @@ PROMPT_EOF
     rm -f "$PHASE_B_PROMPT"
 fi
 
-# Reset any items left in 'processing' after subprocess exit
-POST_RESET=$(psql "$DATABASE_URL" -t -A -c "
-    WITH upd AS (
-        UPDATE replies SET status='pending'
-        WHERE platform='x' AND status='processing'
-        RETURNING id
-    ) SELECT COUNT(*) FROM upd;")
+# Reset any items left in 'processing' after subprocess exit. The
+# /api/v1/replies/reset-stuck route requires a positive
+# older_than_hours; we use 1h here so a freshly-stuck row from this run's
+# Claude subprocess gets reset on the next cycle's pre-Phase-B sweep
+# instead of immediately (so we don't race a still-progressing Claude that
+# JUST set processing_at = NOW()).
+POST_RESET=$(python3 "$ENGAGE_TWITTER_HELPER" post-reset)
 [ "$POST_RESET" -gt 0 ] && log "Post-run: Reset $POST_RESET 'processing' Twitter items back to pending"
 
 # ═══════════════════════════════════════════════════════
 # Cleanup
 # ═══════════════════════════════════════════════════════
-TOTAL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='x' AND status='pending';")
-TOTAL_REPLIED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='x' AND status='replied';")
-TOTAL_SKIPPED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='x' AND status='skipped';")
+# One HTTP roundtrip for all three counts instead of three psql one-liners.
+COUNTS_JSON=$(python3 "$ENGAGE_TWITTER_HELPER" reply-counts 2>/dev/null || echo '{"pending":0,"replied":0,"skipped":0}')
+TOTAL_PENDING=$(echo "$COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending',0))" 2>/dev/null || echo "0")
+TOTAL_REPLIED=$(echo "$COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('replied',0))" 2>/dev/null || echo "0")
+TOTAL_SKIPPED=$(echo "$COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('skipped',0))" 2>/dev/null || echo "0")
 
 log "Twitter summary: pending=$TOTAL_PENDING replied=$TOTAL_REPLIED skipped=$TOTAL_SKIPPED"
 
