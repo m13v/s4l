@@ -458,12 +458,21 @@ explore, but a gold-tier topic that fits should beat any unproven topic.
 
     project_name = project["name"]
     min_relevance = MIN_RELEVANCE
+    project_github = (project.get("github") or "").strip()
+    github_repo_block = (
+        f"\n\n## Our public repo for self-reply links\n{project_github}\n"
+        f"When the self-reply policy below applies, the github blob URL MUST live "
+        f"under this repo. Pick a real path you have reason to believe exists; if "
+        f"you're unsure, default to the repo root or a top-level README rather "
+        f"than inventing a deep path."
+        if project_github else ""
+    )
     return f"""You are the Social Autoposter drafting GitHub issue comments for project {project_name}.
 
 Read {SKILL_FILE} for content rules (no em dashes, anti-AI tells, voice).
 
 ## Project context
-{content_angle}
+{content_angle}{github_repo_block}
 
 ## Pre-filtered candidates (top {len(candidates)} by recent engagement delta)
 
@@ -481,12 +490,27 @@ shown is the search_topic that surfaced the issue, echo it back verbatim in
   - Excluded repos: {', '.join(excluded_repos) if excluded_repos else '(none)'}
   - Excluded authors: {', '.join(excluded_authors) if excluded_authors else '(none)'}
 
-## Comment style
+## Comment style (parent comment)
 - Lead with the pain you hit, then your fix. "the token overhead is brutal" beats "here is how to optimize".
 - Conversational, no markdown headings, no code blocks unless tiny.
-- 400-600 chars. Short enough to read, long enough to show real experience.
-- Specific (file names, metrics, tradeoffs), not generic advice.
-- NO links. Links are added later by Phase D after the comment earns engagement.
+- 400-600 chars. Short enough to read, long enough to show concrete observation, not generic advice.
+- File names FROM THE MAINTAINER'S ISSUE OR REPO are great evidence you read it. File names from OUR OWN codebase do NOT belong in the parent comment, save them for the self-reply (see below) where they ride a real URL. Bare filenames from our repos with no URL ("server.rs, ChatToolExecutor.swift") are the spam shape that gets us moderated; never do that.
+- NO links in the parent comment. The optional self-reply is where one link goes.
+
+## Self-reply policy (optional follow-up with ONE github link)
+
+Each post may carry an OPTIONAL `self_reply_text` that posts as a separate comment a minute or two after the parent. Its job is to point the maintainer at a specific, public file in one of OUR repos that demonstrates a concrete claim the parent comment made.
+
+The self-reply ONLY fires when ALL THREE hold:
+  1. Your parent comment makes a specific technical claim ("we ran into X and ended up doing Y") that a single file in our repo would back up.
+  2. You can point to a REAL https://github.com/ blob URL with a plausible path. Use the project's public repo (see "Project context" above for the `github` field).
+  3. The file is genuinely relevant to the maintainer's question, not a tangentially-related drop.
+
+If ANY of the three is missing, set `self_reply_text: null`. Quiet bundles are healthy. A forced "here is some code" reply with a bare filename or an off-topic file is the exact pattern that gets us moderated; we'd rather skip the link than post a weak one.
+
+Shape when present (100-220 chars, ONE URL, no markdown):
+  "our X that handles Y: https://github.com/<our-org>/<our-repo>/blob/main/<path>"
+  or just the natural framing + URL. No tagline, no signoff, no project pitch.
 
 ## Relevance scoring (REQUIRED, drop anything < {min_relevance})
 
@@ -548,7 +572,8 @@ Return ONLY a single JSON object. No prose, no markdown fencing, no Bash calls:
       "language": "<ISO 639-1 code matching the issue language: en, ja, zh, es, ...>",
       "relevance": <int 0..3, see scoring rules above; must be >= {min_relevance} to post>,
       "relevance_rationale": "<one short sentence: why this score>",
-      "comment_text": "<the actual comment to post, 400-600 chars, NO links>"
+      "comment_text": "<the actual comment to post, 400-600 chars, NO links>",
+      "self_reply_text": <null OR a 100-220 char follow-up containing exactly ONE https://github.com/... blob URL into one of OUR public repos. See "Self-reply policy" above. Default to null unless all three conditions hold.>
     }}
   ],
   "skipped": [
@@ -1110,6 +1135,84 @@ def main():
         _RUN_STATE["failed"] = failed
         _RUN_STATE["skipped"] = len(skipped)
         log(f"POSTED: {url_or_err or 'ok'}")
+
+        # ---- Optional self-reply with ONE github blob URL ------------------
+        # Restored 2026-05-17 after the April 13 over-correction stripped
+        # github of all CTAs (zero link_edit_content rows in May). The bundle
+        # is the proven pattern for driving clicks; the model gets explicit
+        # license to skip it (self_reply_text=null) when it can't point to a
+        # genuinely relevant file in our repos. See the "Self-reply policy"
+        # section of build_prompt() for the three-condition skip rule.
+        sr_raw = (decision.get("self_reply_text") or "")
+        sr_text = sr_raw.strip() if isinstance(sr_raw, str) else ""
+        if sr_text and re.search(r"https?://github\.com/", sr_text):
+            # 30-90s jitter between parent and child. The March 18 strike pair
+            # (3072/3073) posted 0.2s apart, which is the bot-signature
+            # timing. Humans don't follow up that fast. Random within the
+            # window so we don't accumulate a uniform-timing fingerprint.
+            sr_delay = random.randint(30, 90)
+            log(f"Self-reply queued after {sr_delay}s delay...")
+            time.sleep(sr_delay)
+
+            # URL-wrap the self-reply via dm_short_links so the github blob
+            # link gets /r/<code> or UTM-tagged attribution, same as every
+            # other URL in the pipeline. CLAUDE.md: "Never post bare URLs."
+            sr_minted_session = None
+            if wrap_project:
+                try:
+                    from dm_short_links import wrap_text_for_post, utm_only_text
+                    sr_wrap = wrap_text_for_post(text=sr_text, platform="github_issues",
+                                                 project_name=wrap_project)
+                    if sr_wrap.get("ok"):
+                        sr_text = sr_wrap["text"]
+                        sr_minted_session = sr_wrap.get("minted_session")
+                        if sr_wrap.get("codes"):
+                            log(f"self-reply wrapped {len(sr_wrap['codes'])} URL(s): "
+                                f"{sr_wrap['codes']}")
+                    else:
+                        log(f"WARNING: self-reply URL wrap failed "
+                            f"({sr_wrap.get('error')}); falling back to UTM-only")
+                        sr_text = utm_only_text(text=sr_text, platform="github_issues",
+                                                project_name=wrap_project)
+                except Exception as e:
+                    log(f"WARNING: self-reply URL wrap raised ({e}); "
+                        f"falling back to UTM-only")
+                    try:
+                        from dm_short_links import utm_only_text
+                        sr_text = utm_only_text(text=sr_text, platform="github_issues",
+                                                project_name=wrap_project)
+                    except Exception as ee:
+                        log(f"WARNING: self-reply UTM-only fallback also failed ({ee}); "
+                            f"posting unwrapped")
+
+            ok_sr, sr_url_or_err = post_comment(owner, repo, number, sr_text)
+            if ok_sr:
+                sr_post_id = log_post(
+                    thread_url, sr_url_or_err, sr_text,
+                    decision.get("matched_project") or project_name,
+                    thread_author, thread_title, github_username,
+                    engagement_style=engagement_style,
+                    search_topic=(decision.get("search_topic") or "").strip() or None,
+                    language=language,
+                    claude_session_id=claude_session_id,
+                    generation_trace_path=generation_trace_path,
+                    link_source=audience_page_link_source,
+                )
+                if sr_minted_session and sr_post_id:
+                    try:
+                        from dm_short_links import backfill_post_id
+                        backfill_post_id(minted_session=sr_minted_session,
+                                         post_id=sr_post_id)
+                    except Exception as e:
+                        log(f"WARNING: self-reply backfill_post_id failed ({e})")
+                posted += 1
+                _RUN_STATE["posted"] = posted
+                log(f"SELF-REPLY POSTED: {sr_url_or_err or 'ok'}")
+            else:
+                log(f"SELF-REPLY FAILED: {sr_url_or_err}")
+                failed += 1
+                _RUN_STATE["failed"] = failed
+
         time.sleep(3)
 
     # Clean up the generation_trace temp file. By this point every post
