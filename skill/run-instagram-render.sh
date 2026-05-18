@@ -56,8 +56,25 @@ log "=== instagram-render fire: $(date) ==="
 source "$REPO_DIR/skill/lock.sh"
 acquire_lock instagram-render 60
 
-# Step 1: compute target type + exclusion lists
-log "step 1: querying Neon for target_type, draft_count, exclusions"
+# Step 0: pick TARGET account (inverse-recent-share over enabled IG accounts in
+# config.json:instagram.accounts[]). Honors FORCE_ACCOUNT env override. The
+# chosen account scopes Step 1 queries (type buffer, used angles, used
+# variants, audio LRU) so each account has its own rotation.
+log "step 0: picking target account"
+if [ -n "${FORCE_ACCOUNT:-}" ]; then
+  TARGET_ACCOUNT=$("$REPO_DIR/scripts/pick_ig_account.py" --account "$FORCE_ACCOUNT" 2>>"$LOG_FILE")
+else
+  TARGET_ACCOUNT=$("$REPO_DIR/scripts/pick_ig_account.py" 2>>"$LOG_FILE")
+fi
+if [ -z "$TARGET_ACCOUNT" ]; then
+  log "ERROR: pick_ig_account.py returned empty; no enabled accounts?"
+  exit 1
+fi
+export TARGET_ACCOUNT
+log "target_account=$TARGET_ACCOUNT"
+
+# Step 1: compute target type + exclusion lists (scoped to TARGET_ACCOUNT)
+log "step 1: querying Neon for target_type, draft_count, exclusions (account=$TARGET_ACCOUNT)"
 /opt/homebrew/bin/python3.11 - > "$PICK_FILE" 2>>"$LOG_FILE" <<'PY'
 import glob, json, os, random, psycopg2
 env = {}
@@ -90,11 +107,19 @@ force_project = os.environ.get('FORCE_PROJECT') or ''
 if force_project and not force_type:
     force_type = 'product'  # FORCE_PROJECT implies product
 
+# Target account: scopes every recency / buffer / exclusion query so each
+# account has its own type rotation, variant pool, angle list, audio LRU.
+target_account = os.environ.get('TARGET_ACCOUNT', '').strip()
+if not target_account:
+    raise SystemExit("TARGET_ACCOUNT env var missing (Step 0 should have set it)")
+
 # Last-N posted descriptor (kept for telemetry / log readability).
 c.execute(
     "SELECT post_type FROM media_posts "
     "WHERE status='posted' AND posted_urls ? 'instagram' "
-    "ORDER BY posted_at DESC LIMIT 10"
+    "  AND target_account=%s "
+    "ORDER BY posted_at DESC LIMIT 10",
+    (target_account,),
 )
 last10 = [r[0] for r in c.fetchall()]
 
@@ -102,9 +127,10 @@ last10 = [r[0] for r in c.fetchall()]
 c.execute(
     "SELECT post_type, COUNT(*) FROM media_posts "
     "WHERE status='posted' AND posted_urls ? 'instagram' "
+    "  AND target_account=%s "
     "  AND posted_at > NOW() - INTERVAL %s "
     "GROUP BY post_type",
-    (f'{recent_window_days} days',),
+    (target_account, f'{recent_window_days} days'),
 )
 recent_type_counts = {r[0]: r[1] for r in c.fetchall() if r[0]}
 for t in ('organic', 'product'):
@@ -146,10 +172,11 @@ if target == 'product':
         "SELECT project_name, COUNT(*) FROM media_posts "
         "WHERE post_type='product' AND status='posted' "
         "  AND posted_urls ? 'instagram' "
+        "  AND target_account=%s "
         "  AND posted_at > NOW() - INTERVAL %s "
         "  AND project_name IS NOT NULL "
         "GROUP BY project_name",
-        (f'{recent_window_days} days',),
+        (target_account, f'{recent_window_days} days'),
     )
     recent_proj_counts = {r[0]: r[1] for r in c.fetchall()}
     for p in enabled:
@@ -170,19 +197,21 @@ if target == 'product':
         ws = [project_weights[n] for n in names]
         selected_project = random.choices(names, weights=ws, k=1)[0]
 
-# Per-(type, project) draft buffer. With multi-project, a global product
-# buffer would let one project starve another.
+# Per-(account, type, project) draft buffer. Each account has its own
+# rotation; a build-up on matt_diak should not block a heartfulmatthew render.
 if target == 'product':
     c.execute(
         "SELECT COUNT(*) FROM media_posts "
-        "WHERE status='draft' AND post_type=%s AND project_name=%s",
-        (target, selected_project),
+        "WHERE status='draft' AND post_type=%s AND project_name=%s "
+        "  AND target_account=%s",
+        (target, selected_project, target_account),
     )
 else:
     c.execute(
         "SELECT COUNT(*) FROM media_posts "
-        "WHERE status='draft' AND post_type=%s",
-        (target,),
+        "WHERE status='draft' AND post_type=%s "
+        "  AND target_account=%s",
+        (target, target_account),
     )
 draft_count = c.fetchone()[0]
 
@@ -201,7 +230,9 @@ local_files = sorted(glob.glob(os.path.join(audio_dir, '*.m4a')))
 
 c.execute(
     "SELECT audio_source, COALESCE(posted_at, created_at) "
-    "FROM media_posts WHERE audio_source IS NOT NULL"
+    "FROM media_posts WHERE audio_source IS NOT NULL "
+    "  AND target_account=%s",
+    (target_account,),
 )
 audio_usage = [(r[0] or '', r[1]) for r in c.fetchall()]
 
@@ -231,16 +262,21 @@ local_audio_lru = [f for f, _ in audio_lru]
 c.execute(
     "SELECT DISTINCT metadata->>'theme_angle' FROM media_posts "
     "WHERE created_at > NOW() - INTERVAL '14 days' "
-    "AND metadata->>'theme_angle' IS NOT NULL"
+    "  AND metadata->>'theme_angle' IS NOT NULL "
+    "  AND target_account=%s",
+    (target_account,),
 )
 used_angles = sorted({r[0] for r in c.fetchall() if r[0]})
 
 c.execute(
-    "SELECT DISTINCT variant_id FROM media_posts WHERE variant_id IS NOT NULL"
+    "SELECT DISTINCT variant_id FROM media_posts "
+    "WHERE variant_id IS NOT NULL AND target_account=%s",
+    (target_account,),
 )
 used_variants = sorted({r[0] for r in c.fetchall()})
 
 print(json.dumps({
+    'target_account': target_account,
     'target_type': target,
     'last10_posted': last10,
     'recent_window_days': recent_window_days,
@@ -303,9 +339,15 @@ result = {"use": False}
 try:
     conn = psycopg2.connect(env['DATABASE_URL'])
     c = conn.cursor()
+    target_account = os.environ.get('TARGET_ACCOUNT', '').strip()
+    if not target_account:
+        raise SystemExit("TARGET_ACCOUNT env var missing in unproven-clip step")
     c.execute(
         "SELECT DISTINCT metadata->>'unproven_clip_basename' "
-        "FROM media_posts WHERE metadata ? 'unproven_clip_basename'"
+        "FROM media_posts "
+        "WHERE metadata ? 'unproven_clip_basename' "
+        "  AND target_account=%s",
+        (target_account,),
     )
     used = {r[0] for r in c.fetchall() if r[0]}
     conn.close()
@@ -412,10 +454,13 @@ DELIVERABLES (must all exist when you exit):
    will spawn a focused tighten-only Claude call (up to 3 attempts); if all 3
    fail, the row is flipped to status='caption_too_long' and the render fails.
 3. media_posts row with post_number=${NEXT_NUM}, status='draft',
-   post_type='${TARGET}', and all SKILL Section 5 columns populated
-   (variant_id, video_path, caption_text, source_clips, overlays, audio_source,
-   metadata.theme_angle, etc.).
+   post_type='${TARGET}', target_account='${TARGET_ACCOUNT}', and all
+   SKILL Section 5 columns populated (variant_id, video_path, caption_text,
+   source_clips, overlays, audio_source, metadata.theme_angle, etc.).
    project_name='${SELECTED_PROJECT}' for product, NULL for organic.
+   target_account is a NOT NULL column — you MUST set it to '${TARGET_ACCOUNT}'
+   on this row. The post-cycle uses target_account to load the right token
+   and route the reel to the right Instagram account.
    The caption_text column MUST match the caption.txt file exactly.
 
 VISUAL STYLE (current as of May 7 2026, do NOT regress):
