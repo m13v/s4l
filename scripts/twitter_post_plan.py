@@ -51,7 +51,15 @@ TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
 LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# DATABASE_URL was previously used to issue ad-hoc `psql -c "..."` calls for
+# the pre-post dedup probe and the candidate status updates. As of the
+# 2026-05-18 routes migration both lanes go through the s4l.ai HTTP API
+# (/api/v1/posts/lookup + /api/v1/twitter-candidates/by-id) via http_api, so
+# we no longer need the raw connection string at this layer. Kept around as
+# a no-op constant in case downstream tooling reads it from the environment.
+sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
+from http_api import api_get, api_patch  # noqa: E402
 
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
@@ -107,21 +115,30 @@ def run_subprocess(cmd: list[str], timeout_sec: int = 600) -> tuple[int, str, st
 
 
 def update_candidate(cid: int, status: str) -> None:
-    if not DATABASE_URL:
-        print("[post] DATABASE_URL not set; skipping candidate update", flush=True)
-        return
-    sql_status = status.replace("'", "''")
+    """Flip candidate status (skipped/failed/etc) via the HTTP API.
+
+    Server-side WHERE: `status != 'posted'` so we never stomp the posted
+    state — mirrors the old psql guard exactly. The route returns 404 when
+    the row IS already posted (or absent); we treat that as success here
+    since the caller's intent ("don't retry this row") is already met.
+    """
     if status == "posted":
         # Caller will set post_id separately on success path; here we just
         # mark intermediate states.
         return
-    cmd = [
-        "psql", DATABASE_URL, "-c",
-        f"UPDATE twitter_candidates SET status='{sql_status}' WHERE id={cid} AND status != 'posted'",
-    ]
-    rc, out, err = run_subprocess(cmd, timeout_sec=30)
-    if rc != 0:
-        print(f"[post] candidate {cid} status update failed: {err}", flush=True)
+    try:
+        resp = api_patch(
+            "/api/v1/twitter-candidates/by-id",
+            {"id": int(cid), "action": "set_status", "status": status},
+            ok_on_404=True,
+        )
+        if resp.get("_not_found"):
+            # Either row was already posted (allow_overwrite_posted=false
+            # default blocks it) or it doesn't exist. Either way, no further
+            # action is needed.
+            return
+    except SystemExit as e:
+        print(f"[post] candidate {cid} status update failed: {e}", flush=True)
 
 
 def already_posted_to_thread(thread_url: str) -> tuple[bool, int | None]:
@@ -147,58 +164,52 @@ def already_posted_to_thread(thread_url: str) -> tuple[bool, int | None]:
     that fires once per cycle. log_post.py's post-INSERT dedup is still
     the final backstop.
     """
-    if not DATABASE_URL:
+    try:
+        resp = api_get(
+            "/api/v1/posts/lookup",
+            query={"platform": "twitter", "thread_url": thread_url},
+            ok_on_404=True,
+        )
+    except SystemExit as e:
+        print(f"[post] dedup pre-check API call failed: {e}", flush=True)
         return (False, None)
-    # Use psql -t -A for tab-separated, no header, no padding output.
-    # Quote thread_url for SQL literal; thread_url is captured from the
-    # tweet URL which only ever contains [A-Za-z0-9_/:.] so single-quote
-    # escaping is sufficient.
-    safe_url = thread_url.replace("'", "''")
-    cmd = [
-        "psql", DATABASE_URL, "-t", "-A", "-c",
-        "SELECT id FROM posts "
-        f"WHERE platform='twitter' AND thread_url='{safe_url}' LIMIT 1",
-    ]
-    rc, out, err = run_subprocess(cmd, timeout_sec=15)
-    if rc != 0:
-        print(f"[post] dedup pre-check psql failed (rc={rc}): {err}", flush=True)
+    if resp.get("_not_found"):
         return (False, None)
-    out = (out or "").strip()
-    if not out:
+    data = resp.get("data") or {}
+    post = data.get("post") or {}
+    pid = post.get("id")
+    if pid is None:
         return (False, None)
     try:
-        return (True, int(out.splitlines()[0].strip()))
-    except (ValueError, IndexError):
+        return (True, int(pid))
+    except (TypeError, ValueError):
         return (True, None)
 
 
 def update_candidate_posted(cid: int, post_id: int) -> None:
-    if not DATABASE_URL:
-        print("[post] DATABASE_URL not set; cannot mark candidate posted", flush=True)
-        return
-    # Re-stamp batch_id to the executing cycle's BATCH_ID alongside the
-    # status='posted' flip. Belt-and-suspenders against peer-cycle Phase 0
-    # salvage races: salvage can rewrite our candidate's batch_id while we are
-    # mid-Phase-2b (observed 2026-05-15 with twcycle-20260515-171505's 6 posts
-    # mis-attributed to twcycle-20260515-180005 after the latter salvaged them
-    # while 171505 was queued behind 173005's 42-min Phase 1 lock-hold).
-    # When BATCH_ID env is unset (manual replays, ad-hoc runs), fall back to
-    # leaving batch_id alone so we never NULL-out a live attribution.
+    """Mark the candidate posted via /api/v1/twitter-candidates/by-id.
+
+    Re-stamps batch_id to the executing cycle's BATCH_ID alongside the
+    status='posted' flip. Belt-and-suspenders against peer-cycle Phase 0
+    salvage races: salvage can rewrite our candidate's batch_id while we are
+    mid-Phase-2b (observed 2026-05-15 with twcycle-20260515-171505's 6 posts
+    mis-attributed to twcycle-20260515-180005 after the latter salvaged them
+    while 171505 was queued behind 173005's 42-min Phase 1 lock-hold).
+    When BATCH_ID env is unset (manual replays, ad-hoc runs), fall back to
+    leaving batch_id alone so we never NULL-out a live attribution.
+    """
+    body = {
+        "id": int(cid),
+        "action": "mark_posted",
+        "post_id": int(post_id),
+    }
     batch_id = (os.environ.get("BATCH_ID") or "").strip()
     if batch_id:
-        set_clause = (
-            f"SET status='posted', posted_at=NOW(), post_id={int(post_id)}, "
-            f"batch_id='{batch_id}'"
-        )
-    else:
-        set_clause = f"SET status='posted', posted_at=NOW(), post_id={int(post_id)}"
-    cmd = [
-        "psql", DATABASE_URL, "-c",
-        f"UPDATE twitter_candidates {set_clause} WHERE id={int(cid)}",
-    ]
-    rc, out, err = run_subprocess(cmd, timeout_sec=30)
-    if rc != 0:
-        print(f"[post] candidate {cid} -> posted update failed: {err}", flush=True)
+        body["batch_id"] = batch_id
+    try:
+        api_patch("/api/v1/twitter-candidates/by-id", body)
+    except SystemExit as e:
+        print(f"[post] candidate {cid} -> posted update failed: {e}", flush=True)
 
 
 def post_one(c: dict) -> tuple[str, str]:
