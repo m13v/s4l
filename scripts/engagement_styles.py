@@ -647,6 +647,43 @@ def compute_target_distribution(platform, context="posting"):
 INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
 CURATED_TOP_N = 5   # the model only ever sees one of the top 5 by score
 
+# Sample-size credibility floor for the picker. Below this, a style's score
+# is linearly shrunk toward 0 so a single viral comment with n=6 can't
+# dominate the use_pool. Once n >= MIN_SAMPLE_FULL_WEIGHT the style gets
+# its full raw score weight.
+#
+# Why: LinkedIn 2026-05-19 had data_point_drop n=6 with avg_cm=81 (one
+# viral comment) producing score=290 — 10x the next style. The picker was
+# returning data_point_drop 67% of the time on a near-non-existent
+# evidence base. Shrinkage of `score * min(1.0, n / 20)` brings n=6 →
+# credibility 0.30, knocking 290 down to ~87 and letting n=18 styles
+# (agree_and_extend, etc.) compete fairly. Existence floor stays at
+# MIN_SAMPLE_SIZE=5 so n=2 outliers still get filtered entirely.
+MIN_SAMPLE_FULL_WEIGHT = 20
+
+
+def _credibility_factor(n):
+    """Sample-size shrinkage factor in [0, 1] for the picker.
+
+    n >= MIN_SAMPLE_FULL_WEIGHT → 1.0 (full trust)
+    n <  MIN_SAMPLE_FULL_WEIGHT → n / MIN_SAMPLE_FULL_WEIGHT (linear ramp)
+    n <= 0                       → 0.0
+    """
+    if not n or n <= 0:
+        return 0.0
+    if n >= MIN_SAMPLE_FULL_WEIGHT:
+        return 1.0
+    return float(n) / float(MIN_SAMPLE_FULL_WEIGHT)
+
+
+def _picker_score(row):
+    """Picker-only credibility-adjusted score used to (a) rank into the
+    top-N use_pool and (b) weight the random draw inside that pool.
+
+    Keeps `_style_score` pure so top_performers / dashboard / other
+    surfaces keep showing the raw composite. Only the picker shrinks."""
+    return float(row.get("score", 0.0)) * _credibility_factor(row.get("n", 0))
+
 
 def pick_style_for_post(platform, context="posting",
                         top_n=CURATED_TOP_N, invent_rate=INVENT_RATE,
@@ -700,9 +737,14 @@ def pick_style_for_post(platform, context="posting",
     # Trust-filter first so n=1 outliers (e.g. snarky_oneliner with a single
     # lucky 12-upvote post) can't claim a top reference slot. They stay in
     # distribution_snapshot for audit but not in use_pool or reference_pool.
+    #
+    # Ranking uses `_picker_score` (raw score shrunk by sample-size
+    # credibility) instead of raw `score`. Without this, a style with n=6 and
+    # one viral comment can leapfrog n=400 styles into the use_pool. With
+    # shrinkage, n=6 only contributes ~30% of its raw score weight, so it
+    # competes fairly with the wider-sample alternatives.
     trusted_rows = [r for r in rows if r.get("trusted")]
-    trusted_sorted = sorted(trusted_rows, key=lambda r: r.get("score", 0.0),
-                            reverse=True)
+    trusted_sorted = sorted(trusted_rows, key=_picker_score, reverse=True)
     use_pool = trusted_sorted[:top_n]
     reference_pool = trusted_sorted[:top_n]
 
@@ -750,12 +792,14 @@ def pick_style_for_post(platform, context="posting",
             "picked_at": picked_at,
         }
 
-    # Use path: weighted random sample by raw score. Raw score (not score
-    # ** WEIGHT_EXPONENT) keeps the distribution smoother across the top —
-    # the cap+floor logic that lives in compute_target_distribution is what
-    # the picker historically used to give a winner most weight; here, the
-    # top N is already a curated head, so raw score is the right knob.
-    weights = [max(r.get("score", 0.0), 0.01) for r in use_pool]
+    # Use path: weighted random sample by credibility-shrunk score. Raw score
+    # (not score ** WEIGHT_EXPONENT) keeps the distribution smoother across
+    # the top — the cap+floor logic that lives in compute_target_distribution
+    # is what the picker historically used to give a winner most weight;
+    # here, the top N is already a curated head, so raw score is the right
+    # knob, with the credibility shrink (`_picker_score`) preventing small-n
+    # outliers from dominating the draw.
+    weights = [max(_picker_score(r), 0.01) for r in use_pool]
     total = sum(weights) or 1.0
     pick = rnd.uniform(0.0, total)
     cum = 0.0
