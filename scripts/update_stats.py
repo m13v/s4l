@@ -2055,13 +2055,24 @@ def main():
                 f"empty={r.get('errors_empty', 0)} "
                 f"other={r.get('errors_other', 0)}]"
             )
-            # See update_twitter() print line for the rationale: surface
-            # `changed` (rows whose score/comments actually moved) under the
-            # "updated" label so stats.sh -> log_run.py -> dashboard pill
-            # reflects real activity instead of "every successful poll".
-            print(f"\nReddit: {r['total']} total, {r.get('skipped', 0)} skipped, "
-                  f"{r['total'] - r.get('skipped', 0)} checked, "
-                  f"{r.get('changed', r['updated'])} updated, "
+            # 2026-05-18 relabel pass. The structured stdout line now exposes
+            # five distinct counters that stats.sh greps into log_run.py:
+            #   total    -> "scanned" pill (all rows considered this run)
+            #   skipped  -> "skipped" pill = stable-cooldown + fresh-from-Step1
+            #               (Step 1 already covered them; we'd just waste an API hit)
+            #   checked  -> "checked" pill = rows we actually hit the Reddit JSON
+            #               API for this run (= polled + errored, excludes both
+            #               skip classes). Previously this was `total - skipped`
+            #               which silently inflated when skipped_fresh > 0.
+            #   changed  -> "changed" pill = subset of checked where upvotes or
+            #               comments_count moved. Used to live under the
+            #               misleading "updated" label.
+            #   errors   -> rolls into the "failed" pill on the dashboard.
+            skipped_total = r.get('skipped', 0) + r.get('skipped_fresh', 0)
+            checked = r['total'] - skipped_total
+            print(f"\nReddit: {r['total']} total, {skipped_total} skipped, "
+                  f"{checked} checked, "
+                  f"{r.get('changed', r.get('updated', 0))} changed, "
                   f"{r['deleted']} deleted, {r['removed']} removed, {r['errors']} errors" + err_break)
             if not args.quiet and r["results"]:
                 print(f"{'ID':>4} {'Score':>5} {'Thread':>7} {'Comments':>8}  Title")
@@ -2087,15 +2098,16 @@ def main():
 
         if twitter_stats is not None:
             t = twitter_stats
-            # Note: the "updated" field intentionally reports `changed` (rows
-            # whose views/likes actually moved), not `updated` (every successful
-            # poll). The downstream `stats.sh` greps this line for "updated"
-            # and forwards to log_run.py --updated, which the dashboard renders
-            # as the "updated" pill. Surfacing the no-op poll count there made
-            # "checked == updated" trivially true and hid the real signal.
-            print(f"\nTwitter: {t['total']} total, {t.get('skipped', 0)} skipped, "
-                  f"{t['total'] - t.get('skipped', 0)} checked, "
-                  f"{t.get('changed', t['updated'])} updated, "
+            # 2026-05-18 relabel pass — same shape as the Reddit line above.
+            # `skipped` now combines stable-cooldown + skipped_fresh so the
+            # `checked` count reflects rows we actually polled the fxtwitter
+            # API for, not "everything minus stable skips" (which silently
+            # included fresh rows). `changed` is the metric-moved subset.
+            t_skipped_total = t.get('skipped', 0) + t.get('skipped_fresh', 0)
+            t_checked = t['total'] - t_skipped_total
+            print(f"\nTwitter: {t['total']} total, {t_skipped_total} skipped, "
+                  f"{t_checked} checked, "
+                  f"{t.get('changed', t.get('updated', 0))} changed, "
                   f"{t['deleted']} deleted, {t['errors']} errors")
             if not args.quiet and t["results"]:
                 top = sorted(t["results"], key=lambda x: x.get("views", 0), reverse=True)[:30]
