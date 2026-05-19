@@ -219,12 +219,43 @@ c = json.load(open('$REPO_DIR/config.json'))
 print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) if p.get('voice')}, indent=2))
 " 2>/dev/null || echo "{}")
 
-    # Generate engagement style and content rules from shared module
+    # Engagement-style picker (2026-05-19): pick ONE assigned style per
+    # reply iteration. The picked style flows two places: (1) --style
+    # filter for top_performers.py so the per-style exemplars match the
+    # assignment, (2) saps_render_style_block so the prompt embeds the
+    # same assignment. On invent mode picked_style is empty and
+    # top_performers stays unfiltered.
     source "$REPO_DIR/skill/styles.sh"
-    STYLES_BLOCK=$(generate_styles_block twitter replying)
+    STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_eng_assign_XXXXXX.json)
+    saps_pick_style twitter replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+    PICKED_STYLE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+    PICKED_MODE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+    STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter replying)
+    rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true
 
-    # Top performers feedback report (platform-wide)
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+    # Top performers feedback report — filtered to the picked style when
+    # in 'use' mode so the few-shot exemplars match the assignment.
+    if [ -n "$PICKED_STYLE" ]; then
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+    fi
 
     # Precompute active Twitter campaign suffix + sample_rate + id for the
     # prompt to inline. Phase B replies go through the MCP browser_type path
