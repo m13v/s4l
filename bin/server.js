@@ -9099,54 +9099,54 @@ function renderResult(run) {
     };
     return (
       tipPill('scanned', scanned, 'var(--text)',
-        '**Scanned**\n\n' +
-        'Total rows the run considered (every active row in the relevant platform tables).\n\n' +
+        '**Scanned**\\n\\n' +
+        'Total rows the run considered (every active row in the relevant platform tables).\\n\\n' +
         '= checked + skipped + bypassed-as-fresh.') +
       (skipped ? tipPill('skipped', skipped, 'var(--muted)',
-        '**Skipped**\n\n' +
-        'Rows we deliberately did NOT poll this run.\n\n' +
-        '**Two reasons:**\n' +
-        '• already refreshed by the cheap scrape leg within the last 4h\n' +
-        '• stable cooldown (2+ scans with no metric change AND older than 3 days)\n\n' +
+        '**Skipped**\\n\\n' +
+        'Rows we deliberately did NOT poll this run.\\n\\n' +
+        '**Two reasons:**\\n' +
+        '• already refreshed by the cheap scrape leg within the last 4h\\n' +
+        '• stable cooldown (2+ scans with no metric change AND older than 3 days)\\n\\n' +
         'Saves API calls; data is still current.') : '') +
       tipPill('checked', checked, 'var(--text)',
-        '**Checked**\n\n' +
-        'Rows we actually hit the platform API for this run (Reddit old.reddit.com JSON / fxtwitter / LinkedIn activity feed).\n\n' +
+        '**Checked**\\n\\n' +
+        'Rows we actually hit the platform API for this run (Reddit old.reddit.com JSON / fxtwitter / LinkedIn activity feed).\\n\\n' +
         'Includes both successful polls and the ones that errored mid-fetch.') +
       tipPill('changed', changed, '#22c55e',
-        '**Changed**\n\n' +
-        'Subset of CHECKED where any tracked metric (upvotes, comments_count, views) actually moved since the prior scan.\n\n' +
+        '**Changed**\\n\\n' +
+        'Subset of CHECKED where any tracked metric (upvotes, comments_count, views) actually moved since the prior scan.\\n\\n' +
         'The real-activity signal; everything else is no-op polling.') +
       (viewsRefreshed ? tipPill('views', viewsRefreshed, '#06b6d4',
-        '**Views refreshed**\n\n' +
-        'Rows where the cheap view-scrape leg wrote a fresh view count this run.\n\n' +
-        '• **Reddit:** Step 1 profile-page scrape (sees every comment + thread on /user/<name>/)\n' +
-        '• **Twitter:** built-in to the fxtwitter call\n\n' +
+        '**Views refreshed**\\n\\n' +
+        'Rows where the cheap view-scrape leg wrote a fresh view count this run.\\n\\n' +
+        '• **Reddit:** Step 1 profile-page scrape (sees every comment + thread on /user/<name>/)\\n' +
+        '• **Twitter:** built-in to the fxtwitter call\\n\\n' +
         'Separate from CHANGED because views can tick up without upvotes/comments moving.') : '') +
       (repliesRefreshed ? tipPill('replies', repliesRefreshed, '#3b82f6',
-        '**Replies refreshed**\n\n' +
-        'Per-reply rows refreshed: comments we authored AS replies to someone else replying to our original comment (the DM-rail follow-up). Live in the replies table, not posts.\n\n' +
-        '• **Reddit:** refreshes upvotes + reply-count via batch JSON API\n' +
+        '**Replies refreshed**\\n\\n' +
+        'Per-reply rows refreshed: comments we authored AS replies to someone else replying to our original comment (the DM-rail follow-up). Live in the replies table, not posts.\\n\\n' +
+        '• **Reddit:** refreshes upvotes + reply-count via batch JSON API\\n' +
         '• **Twitter:** also refreshes views via fxtwitter') : '') +
       (removed ? tipPill('removed', removed, '#eab308',
-        '**Removed**\n\n' +
-        'Posts newly flagged deleted/removed this run.\n\n' +
-        '• **Reddit:** comment gone from thread JSON for 2+ consecutive scans (deletion_detect_count threshold)\n' +
+        '**Removed**\\n\\n' +
+        'Posts newly flagged deleted/removed this run.\\n\\n' +
+        '• **Reddit:** comment gone from thread JSON for 2+ consecutive scans (deletion_detect_count threshold)\\n' +
         '• **LinkedIn:** post returned "Post unavailable"') : '') +
       (unavailable ? tipPill('unavail', unavailable, '#eab308',
-        '**Unavailable** (LinkedIn only)\n\n' +
-        'Post explicitly returned a Post Unavailable string.\n\n' +
+        '**Unavailable** (LinkedIn only)\\n\\n' +
+        'Post explicitly returned a Post Unavailable string.\\n\\n' +
         'Subset of REMOVED; rendered as its own pill so an operator can tell hard-deletion from rate-limit or network noise.') : '') +
       (notFound ? tipPill('not found', notFound, 'var(--muted)',
-        '**Not found** (LinkedIn only)\n\n' +
+        '**Not found** (LinkedIn only)\\n\\n' +
         'Post is still active on LinkedIn but our specific comment could not be located on the activity feed (may have aged off our visible recent-activity window).') : '') +
       (failed ? tipPill('failed', failed, '#ef4444',
-        '**Failed**\n\n' +
-        'API errors during the run, broken down by category:\n' +
-        '• 404 not_found\n' +
-        '• rate-limited (429)\n' +
-        '• empty / malformed response\n' +
-        '• other / network\n\n' +
+        '**Failed**\\n\\n' +
+        'API errors during the run, broken down by category:\\n' +
+        '• 404 not_found\\n' +
+        '• rate-limited (429)\\n' +
+        '• empty / malformed response\\n' +
+        '• other / network\\n\\n' +
         'Includes step-exit failures from the shell pipeline as well.') : '')
     );
   }
