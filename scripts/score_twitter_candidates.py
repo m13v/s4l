@@ -26,6 +26,7 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
 
 
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
@@ -241,6 +242,13 @@ def upsert_candidates(tweets, config, batch_id=None):
             "search_topic": tweet.get("search_topic", ""),
             "matched_project": project,
             "batch_id": batch_id,
+            # Stamp the machine's Twitter handle so the (tweet_url, our_account)
+            # composite unique gives each account its own candidate row.
+            # Without this, account A's 'posted' status on tweet X would lock
+            # account B out of the same tweet (ON CONFLICT preserved 'posted').
+            # Defaults server-side to 'm13v_' if omitted; new callers should
+            # always pass it explicitly.
+            "our_account": _resolve_twitter_handle() or "",
         }
         # T0 columns only stamped when this row was discovered inside a cycle
         # batch, mirroring the conditional in the original SQL.
