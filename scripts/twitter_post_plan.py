@@ -361,6 +361,15 @@ def post_one(c: dict) -> tuple[str, str]:
         return ("skipped", "no_reply_url_captured")
 
     # Insert the post row.
+    # Pass --account explicitly so log_post.py stamps posts.our_account with
+    # this machine's configured Twitter handle (e.g. `m13v_` on the local
+    # cron, `matt_diak` on the VM). Without this, log_post.py falls back
+    # through twitter_account.resolve_handle() to the same value, but
+    # forwarding it here makes the per-machine identity visible in the
+    # subprocess argv (useful for grep'ing run logs to confirm scoping).
+    sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
+    from twitter_account import resolve_handle as _resolve_twitter_handle
+
     log_args = [
         "python3", LOG_POST,
         "--platform", "twitter",
@@ -371,6 +380,9 @@ def post_one(c: dict) -> tuple[str, str]:
         "--thread-author", thread_author,
         "--thread-title", thread_text,
     ]
+    twitter_handle = _resolve_twitter_handle()
+    if twitter_handle:
+        log_args += ["--account", twitter_handle]
     if style:
         log_args += ["--engagement-style", style]
     if language:
