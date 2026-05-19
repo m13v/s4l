@@ -281,12 +281,46 @@ def _project_short_links_live(projects: list, name: str) -> bool:
     and every other existing project). Set false in config.json for projects
     where the customer owns the domain and hasn't shipped the resolver (or the
     static CSV) yet, so we emit UTM-tagged URLs instead of broken /r/<code>.
+
+    NOTE: this gate is BYPASSED when the project has `short_links_host` set in
+    config.json. That override points the wrapper at a host we control (e.g.
+    s4l.ai) which already has the resolver deployed, so the customer's own
+    domain status is irrelevant. See _project_short_links_host below.
     """
     for p in projects:
         if p.get('name') == name:
             v = p.get('short_links_live')
             return True if v is None else bool(v)
     return True
+
+
+def _project_short_links_host(projects: list, name: str) -> str | None:
+    """Optional wrapper-hostname override for /r/<code> links.
+
+    Default None → wrapper uses the project's own `website` field (legacy
+    behavior; assumes the customer's domain has the seo-components /r/[code]
+    resolver deployed).
+
+    When set in config.json (e.g. "short_links_host": "https://s4l.ai"), every
+    minted post / DM link is wrapped as `<short_links_host>/r/<code>` instead
+    of `<project.website>/r/<code>`. The override host is presumed live (we
+    only set it for hosts we operate; s4l.ai already has /r/[code] wired via
+    @m13v/seo-components → app.s4l.ai/api/short-links/<code>), so this also
+    implicitly satisfies the `short_links_live` gate.
+
+    Used for projects where the customer hasn't deployed (and may never deploy)
+    a /r/<code> resolver on their own domain — historically those fell back to
+    bare UTM URLs with zero first-party click attribution. Routing through a
+    host we control restores `post_link_clicks` first-party logging.
+
+    The underlying `target_url` (where the resolver 302s) is unchanged — it
+    still points at the customer's site with full UTMs baked in at mint time.
+    """
+    for p in projects:
+        if p.get('name') == name:
+            host = (p.get('short_links_host') or '').strip().rstrip('/')
+            return host or None
+    return None
 
 
 def utm_only_text(*, text: str, platform: str, project_name: str) -> str:
@@ -385,6 +419,9 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
     # Wrapped hostname: use the DM's primary target_project website. Falls back
     # to the matched_project's website if target_project is unset (rare, only on
     # very fresh rows where set-project hasn't fired yet).
+    # If the project has `short_links_host` set in config.json, that overrides
+    # the wrapper hostname (used to route through a host WE operate, e.g.
+    # s4l.ai, when the customer's domain has no /r/<code> resolver).
     primary = dm.get('target_project') or (matched_project if matched_project else None)
     website = _project_website(projects, primary) if primary else None
     if not website:
@@ -394,6 +431,7 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
             'dm_id': dm_id,
             'detail': f"no website for project={primary!r}; set target_project first",
         }
+    wrapper_host = (_project_short_links_host(projects, primary) if primary else None) or website
 
     final_target = _build_target_url(
         target_url,
@@ -423,7 +461,7 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
         return {
             'ok': True,
             'code': code,
-            'short_url': f"{website}/r/{code}",
+            'short_url': f"{wrapper_host}/r/{code}",
             'target_url': final_target,
             'kind': existing.get('kind') or kind,
             'project': matched_project,
@@ -453,7 +491,7 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
                     return {
                         'ok': True,
                         'code': existing2['code'],
-                        'short_url': f"{website}/r/{existing2['code']}",
+                        'short_url': f"{wrapper_host}/r/{existing2['code']}",
                         'target_url': existing2['target_url'],
                         'kind': existing2.get('kind') or kind,
                         'project': matched_project,
@@ -477,7 +515,7 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
     return {
         'ok': True,
         'code': code,
-        'short_url': f"{website}/r/{code}",
+        'short_url': f"{wrapper_host}/r/{code}",
         'target_url': final_target,
         'kind': kind,
         'project': matched_project,
