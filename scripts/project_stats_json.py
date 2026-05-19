@@ -25,6 +25,44 @@ from project_slugs import bookings_require_utm as _bookings_require_utm
 _PAGE_FILENAMES = ("page.tsx", "page.ts", "page.jsx", "page.js", "page.mdx", "page.md")
 
 
+def _normalize_platform(p):
+    """Lowercase + alias 'x' -> 'twitter'. Empty / 'all' / None -> '' (no filter).
+
+    Matches the same normalization used by /api/style/stats so the
+    project final stats table speaks the same vocabulary as the
+    engagement-style table when the dashboard's platform pill is set.
+    """
+    if not p:
+        return ""
+    v = str(p).strip().lower()
+    if v in ("", "all"):
+        return ""
+    return "twitter" if v == "x" else v
+
+
+def _platform_sql_clause(platform, table_alias=""):
+    """Return ('AND <expr>', ()) SQL fragment that matches the given platform.
+
+    Folds the 'x' -> 'twitter' alias inside the SQL so reddit/linkedin/twitter
+    all just work. Empty platform returns ('', ()) so callers can splat it
+    unconditionally. Caller is responsible for placement inside the WHERE.
+
+    Also emits the same mention-row exclusion as /api/style/stats so the
+    two surfaces stay in sync (a mention-only row is one where we didn't
+    post original content; counting its views in our project tally is
+    misleading on the social side).
+    """
+    prefix = (table_alias + ".") if table_alias else ""
+    if not platform:
+        return ""
+    # Safe: platform has already passed the [a-z0-9_]{1,32} regex in the caller.
+    return (
+        " AND LOWER(CASE WHEN LOWER(" + prefix + "platform)='x' "
+        "THEN 'twitter' ELSE " + prefix + "platform END) = '" + platform + "'"
+        " AND " + prefix + "our_content <> '(mention - no original post)'"
+    )
+
+
 def _bridge_per_project_posthog_keys_from_keychain(config, env):
     import subprocess
     seen = set()
@@ -614,7 +652,7 @@ def _dm_booking_count(conn, bookings_conn, name, days):
         return 0
 
 
-def _period_total_engagement(conn, name, days):
+def _period_total_engagement(conn, name, days, platform=None):
     """Total engagement *gained during the window* across ALL posts, regardless
     of when each post was created.
 
@@ -661,6 +699,10 @@ def _period_total_engagement(conn, name, days):
     #             FILTER clause in _windowed_post_engagement).
     days_sql = "INTERVAL '" + str(int(days)) + " days'"
     views_excl = "LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')"
+    # When platform is set, also apply the mention-row exclusion so this
+    # function lines up with the /api/style/stats view that the dashboard
+    # shows above the Project Final Stats table.
+    plat_clause = _platform_sql_clause(platform, "p")
     cur = conn.execute(
         # Branch 1: posts CREATED in the window. Full live posts.* values
         # are credited as in-window gain. No -1 OP discount on upvotes, so
@@ -672,7 +714,7 @@ def _period_total_engagement(conn, name, days):
             "COALESCE(SUM(p.views) FILTER (WHERE " + views_excl + "), 0)::bigint AS views "
           "FROM posts p "
           "WHERE p.project_name = %s "
-            "AND p.posted_at >= NOW() - " + days_sql +
+            "AND p.posted_at >= NOW() - " + days_sql + plat_clause +
         "), "
         # Branch 2: posts created BEFORE the window. LAG over snapshots
         # inside the window. Reddit/moltbook post_views_daily rows carry
@@ -689,7 +731,7 @@ def _period_total_engagement(conn, name, days):
           "JOIN posts p ON p.id = pvd.post_id "
           "WHERE pvd.day >= CURRENT_DATE - " + days_sql + " "
             "AND p.project_name = %s "
-            "AND p.posted_at < NOW() - " + days_sql + " "
+            "AND p.posted_at < NOW() - " + days_sql + plat_clause + " "
           "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
         "), "
         "old_posts AS ("
@@ -729,7 +771,7 @@ def _period_total_engagement(conn, name, days):
             "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
           ") pl ON pl.post_id = p.id "
           "WHERE p.project_name = %s "
-            "AND p.posted_at >= NOW() - " + days_sql +
+            "AND p.posted_at >= NOW() - " + days_sql + plat_clause +
         "), "
         "old_event_clicks AS ("
           "SELECT COALESCE(COUNT(*), 0)::bigint AS clicks "
@@ -739,7 +781,7 @@ def _period_total_engagement(conn, name, days):
           "WHERE plc.ts >= NOW() - " + days_sql + " "
             "AND plc.is_bot = FALSE "
             "AND p.project_name = %s "
-            "AND p.posted_at < NOW() - " + days_sql +
+            "AND p.posted_at < NOW() - " + days_sql + plat_clause +
         ") "
         "SELECT n.clicks + o.clicks "
         "FROM new_clicks n CROSS JOIN old_event_clicks o",
@@ -756,13 +798,17 @@ def _period_total_engagement(conn, name, days):
     }
 
 
-def _windowed_post_engagement(conn, name, days):
+def _windowed_post_engagement(conn, name, days, platform=None):
     """Sum engagement only for posts *created within the window*.
 
     project_stats.get_post_stats aggregates engagement over ALL time for the
     project, which is misleading when the window is a day or a week. Here we
     filter by posted_at so upvotes/comments/views/post_clicks match the same
     24h slice as the 'recent' post count.
+
+    When `platform` is set, also folds in the same platform/mention filter
+    that /api/style/stats uses so the Project Final Stats and Posts by
+    Engagement Style tables agree on the same denominator.
 
     post_clicks: SUM of post_links.clicks attributable to short links minted
     for posts in this project's window (post_id-keyed; reply-keyed clicks
@@ -774,6 +820,7 @@ def _windowed_post_engagement(conn, name, days):
     # funnel reflects organic engagement, not (posts * 1) + organic. X /
     # LinkedIn / GitHub have no equivalent auto-vote so they pass through.
     # Matches top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
+    plat_clause = _platform_sql_clause(platform, "p")
     cur = conn.execute(
         "SELECT COALESCE(SUM(CASE WHEN LOWER(p.platform) IN ('reddit', 'moltbook') "
         "  THEN GREATEST(0, COALESCE(p.upvotes, 0) - 1) "
@@ -787,7 +834,8 @@ def _windowed_post_engagement(conn, name, days):
         "  SELECT post_id, SUM(clicks)::int AS total_clicks "
         "  FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
         ") pl ON pl.post_id = p.id "
-        "WHERE p.project_name = %s AND p.posted_at >= NOW() - INTERVAL '" + str(days) + " days'",
+        "WHERE p.project_name = %s AND p.posted_at >= NOW() - INTERVAL '" + str(days) + " days'"
+        + plat_clause,
         (name,),
     )
     row = cur.fetchone() or (0, 0, 0, 0, 0)
@@ -916,13 +964,29 @@ def _amplitude_signups(proj, days, env):
     return int(sum(int(x or 0) for x in series))
 
 
-def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, ph_results):
+def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, ph_results, platform=None):
     name = proj["name"]
     post_stats = ps.get_post_stats(conn, name, days)
     platforms = ps.get_platform_breakdown(conn, name, days)
-    eng_recent = _windowed_post_engagement(conn, name, days)
-    eng_period_total = _period_total_engagement(conn, name, days)
+    eng_recent = _windowed_post_engagement(conn, name, days, platform=platform)
+    eng_period_total = _period_total_engagement(conn, name, days, platform=platform)
     seo_pages_recent = _seo_pages_count(conn, name, days)
+
+    # When a platform filter is active, override the "recent" post count
+    # in post_stats (which project_stats.get_post_stats computes across all
+    # platforms and is chflags-locked so we can't add a param there) so the
+    # "Posts" column in the dashboard's Project Final Stats table speaks the
+    # same vocabulary as Upvotes/Comments/Views.
+    if platform:
+        plat_clause = _platform_sql_clause(platform, "")
+        cur_pf = conn.execute(
+            "SELECT COUNT(*) FROM posts "
+            "WHERE project_name = %s "
+            "AND posted_at >= NOW() - INTERVAL '" + str(int(days)) + " days'"
+            + plat_clause,
+            (name,),
+        )
+        post_stats["recent"] = int((cur_pf.fetchone() or (0,))[0])
 
     domains = ps.get_project_domains(proj)
     ph_override = proj.get("posthog", {}) or {}
@@ -1120,7 +1184,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=1)
     parser.add_argument("--project", help="Filter to a single project name")
+    parser.add_argument(
+        "--platform",
+        default="",
+        help=(
+            "Filter to a single platform (twitter|reddit|linkedin|github|moltbook). "
+            "'x' is folded into 'twitter'. Empty / 'all' = no filter. "
+            "Matches the same normalization used by /api/style/stats."
+        ),
+    )
     args = parser.parse_args()
+
+    # Normalize platform early; pass empty string when no filter so build_project_entry
+    # can splat it unconditionally without spreading the alias logic everywhere.
+    platform = _normalize_platform(args.platform)
+    # Safety: enforce the same regex /api/funnel/stats accepts so a bad CLI
+    # value can't smuggle SQL through _platform_sql_clause.
+    if platform and not re.match(r"^[a-z0-9_]{1,32}$", platform):
+        print(json.dumps({"error": f"invalid platform: {args.platform!r}"}), file=sys.stdout)
+        sys.exit(1)
 
     ps.load_env()
     env = os.environ
@@ -1202,13 +1284,18 @@ def main():
         name = proj["name"]
         try:
             out_projects.append(build_project_entry(
-                conn, proj, args.days, api_key, project_id, bookings_conn, env, ph_results
+                conn, proj, args.days, api_key, project_id, bookings_conn, env, ph_results,
+                platform=platform,
             ))
         except Exception as e:
             out_projects.append({"name": name, "error": str(e)})
 
+    # `overall.recent` also respects the platform filter so the dashboard's
+    # "N project(s)" / total header stays self-consistent with the per-row data.
+    plat_clause_overall = _platform_sql_clause(platform, "")
     cur = conn.execute(
         "SELECT COUNT(*) FROM posts WHERE posted_at >= NOW() - INTERVAL '" + str(args.days) + " days'"
+        + plat_clause_overall
     )
     total_recent = cur.fetchone()[0]
     cur = conn.execute("SELECT COUNT(*) FROM posts")
@@ -1221,6 +1308,7 @@ def main():
     print(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "days": args.days,
+        "platform": platform or "all",
         "projects": out_projects,
         "overall": {"total": total_all, "recent": total_recent},
     }))
