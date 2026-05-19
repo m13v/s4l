@@ -5867,22 +5867,36 @@ async function handleApi(req, res) {
   // slow (~15-30s), so we cache for 10 min and dedupe concurrent callers.
   // A launchd timer (com.m13v.social-precompute-stats) also writes fresh
   // snapshots to skill/cache/funnel_stats_<N>d.json so cold starts are instant.
+  // The optional platform filter is applied AFTER snapshot read by re-running
+  // python live (snapshots are always all-platform). Cache key includes
+  // platform so warm hits stay correct.
   if (p === '/api/funnel/stats' && req.method === 'GET') {
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '1', 10) || 1));
-    const entry = funnelStatsCache.get(days);
+    // Normalize platform the same way /api/style/stats does so both surfaces
+    // speak the same vocabulary: empty/'all' = no filter, 'x' folds into 'twitter'.
+    const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
+    const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
+                     (rawPlatform === 'x' ? 'twitter' : rawPlatform);
+    const platformOk = platform === '' || /^[a-z0-9_]{1,32}$/.test(platform);
+    if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
+    const cacheKey = days + '|' + platform;
+    const entry = funnelStatsCache.get(cacheKey);
     const TTL_MS = 600000;
     if (entry && entry.value && Date.now() - entry.at < TTL_MS) {
-      return json(res, scopeFunnelStatsPayload({ days, ...entry.value, cachedAt: entry.at }, req.user));
+      return json(res, scopeFunnelStatsPayload({ days, platform: platform || 'all', ...entry.value, cachedAt: entry.at }, req.user));
     }
-    const snap = await readSnapshotCached(`funnel_stats_${days}d.json`);
-    if (snap && snap.value && !snap.value.error) {
-      // Warm the in-memory cache so subsequent hits skip the disk read too.
-      funnelStatsCache.set(days, { at: snap.at, value: snap.value });
-      return json(res, scopeFunnelStatsPayload({ ...snap.value, cachedAt: snap.at }, req.user));
+    // Disk snapshots are only precomputed for the all-platform view; any
+    // platform filter has to run live (still cached in memory after).
+    if (!platform) {
+      const snap = await readSnapshotCached(`funnel_stats_${days}d.json`);
+      if (snap && snap.value && !snap.value.error) {
+        funnelStatsCache.set(cacheKey, { at: snap.at, value: snap.value });
+        return json(res, scopeFunnelStatsPayload({ ...snap.value, cachedAt: snap.at }, req.user));
+      }
     }
     if (entry && entry.pending) {
-      entry.pending.then(val => json(res, scopeFunnelStatsPayload({ days, ...val, cachedAt: Date.now() }, req.user)))
+      entry.pending.then(val => json(res, scopeFunnelStatsPayload({ days, platform: platform || 'all', ...val, cachedAt: Date.now() }, req.user)))
                    .catch(err => json(res, { error: String(err && err.message || err) }, 500));
       return;
     }
@@ -5890,11 +5904,13 @@ async function handleApi(req, res) {
     // operator's local server can run the live pipeline. Return whatever
     // we've got (empty snapshot if nothing) rather than hanging.
     if (auth.CLIENT_MODE) {
-      return json(res, { days, error: 'snapshot_missing', cachedAt: null }, 503);
+      return json(res, { days, platform: platform || 'all', error: 'snapshot_missing', cachedAt: null }, 503);
     }
     const scriptPath = path.join(DEST, 'scripts', 'project_stats_json.py');
+    const pyArgs = [scriptPath, '--days', String(days)];
+    if (platform) pyArgs.push('--platform', platform);
     const pending = new Promise((resolve, reject) => {
-      const child = spawn('python3', [scriptPath, '--days', String(days)], {
+      const child = spawn('python3', pyArgs, {
         env: process.env, cwd: DEST,
       });
       let out = '', err = '';
@@ -5906,12 +5922,12 @@ async function handleApi(req, res) {
         try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
       });
     });
-    funnelStatsCache.set(days, { at: Date.now(), pending });
+    funnelStatsCache.set(cacheKey, { at: Date.now(), pending });
     pending.then(val => {
-      funnelStatsCache.set(days, { at: Date.now(), value: val });
-      json(res, scopeFunnelStatsPayload({ days, ...val, cachedAt: Date.now() }, req.user));
+      funnelStatsCache.set(cacheKey, { at: Date.now(), value: val });
+      json(res, scopeFunnelStatsPayload({ days, platform: platform || 'all', ...val, cachedAt: Date.now() }, req.user));
     }).catch(err => {
-      funnelStatsCache.delete(days);
+      funnelStatsCache.delete(cacheKey);
       json(res, { error: String(err && err.message || err) }, 500);
     });
     return;
@@ -10452,8 +10468,12 @@ async function reloadStatsTabSections() {
   // of the filter bar.
   const funnelEl = document.getElementById('funnel-stats');
   if (funnelEl && funnelEl.open) {
-    if (_lastFunnelPayload) renderFunnelStats(_lastFunnelPayload);
-    else pending.push(loadFunnelStats(true));
+    // Always refetch when a filter pill changes — the cached payload was
+    // built against the *previous* platform/window and rendering it would
+    // contradict the engagement-style table above it. loadFunnelStats's
+    // own (loadKey) check still keeps redundant fetches off when nothing
+    // actually changed.
+    pending.push(loadFunnelStats(true));
   }
   const dmEl = document.getElementById('dm-stats');
   if (dmEl && dmEl.open) pending.push(loadDmStats(true));
@@ -11336,7 +11356,12 @@ function _perProjectInvalidate() {
 // one project, mirroring the shape of loadDailyMetrics. Returns a flat
 // { series: { metricId: { day: value } }, failed: [...] } record.
 async function _perProjectFetchOne(project, gran, platform, fetchDays, dailyAxis) {
-  const FETCH_TIMEOUT_MS = 9000;
+  // 30s per endpoint. /api/funnel/per-day shells out to PostHog HogQL which
+  // routinely takes 10-25s on a cold cache; 9s was killing 19 of 23 projects'
+  // funnel fetch on first page-load and rendering them as silent zeros.
+  // Pair this with the funnel pre-warmer (launchd com.m13v.social-funnel-prewarm)
+  // which keeps the 5-min server cache hot so most fetches return instantly.
+  const FETCH_TIMEOUT_MS = 30000;
   const fetchOne = async (url) => {
     const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, FETCH_TIMEOUT_MS) : null;
@@ -11585,11 +11610,29 @@ function _renderPerProjectChart(project, scope) {
   }
   rowEl.classList.remove('pp-loading');
   const days = _perProjectState.days;
+  // Map each metric id -> the endpoint key its data comes from in _perProjectFetchOne.
+  // Used below to detect when ALL visible metrics are powered by a failed endpoint
+  // (e.g. funnel timed out for this project), so we can render an explicit "failed
+  // to load" hint instead of silently drawing flat zeros that look like real data.
+  const failedKeys = new Set((_perProjectState.failed[project] || []).map(f => f.key));
+  const _sourceKeyForMetric = (m) => {
+    if (m.funnel) return 'funnel';
+    if (m.id === 'posts' || m.id === 'threads' || m.id === 'comments_made') return 'posts';
+    return m.id; // views / upvotes / comments / clicks / bookings / cost match by id
+  };
   if (scope === 'daily') {
     const active = _loadDailyMetricsActive();
     const visible = DAILY_METRICS.filter(m => active.has(m.id));
     if (!visible.length) {
       chartEl.innerHTML = '<div class="pp-empty">No metrics selected.</div>';
+      return;
+    }
+    // If every visible metric's source endpoint failed for this project,
+    // show a clear failure hint instead of silent zeros.
+    if (visible.every(m => failedKeys.has(_sourceKeyForMetric(m)))) {
+      const failKeys = Array.from(new Set(visible.map(m => _sourceKeyForMetric(m))));
+      const timedOut = (_perProjectState.failed[project] || []).some(f => f.timedOut && failKeys.includes(f.key));
+      chartEl.innerHTML = '<div class="pp-empty" style="color:#dc2626;">Failed to load (' + (timedOut ? 'timed out' : 'error') + ': ' + escapeHtml(failKeys.join(', ')) + ')</div>';
       return;
     }
     const valueOf = (m, d) => Number((projectSeries[m.id] || {})[d]) || 0;
@@ -11816,13 +11859,14 @@ async function loadDailyMetrics() {
   // or any transient 5xx) renders the affected series as flat zeros instead
   // of killing the whole chart. The "Unable to load daily metrics" fallback
   // below now only triggers when literally every fetch failed.
-  // Per-endpoint timeout. /api/funnel/per-day shells out to PostHog +
-  // Postgres and at days=91 (weekly window) it can hang well past 15s,
-  // which previously froze the entire chart because Promise.all waited on
-  // the slowest of 5. Cap each fetch at ~9s so a slow endpoint degrades
-  // gracefully (renders as flat zeros with the "rendered N of 5" note in
-  // the status pill) instead of leaving a permanent "Loading…" placeholder.
-  const FETCH_TIMEOUT_MS = 9000;
+  // Per-endpoint timeout. /api/funnel/per-day shells out to PostHog HogQL
+  // and at days=91 (weekly window) routinely takes 15-25s on a cold cache.
+  // 9s was too tight: on a fresh page load the funnel endpoint timed out
+  // and the top chart's Get Started / Visitors / Email Signups / Schedule
+  // Clicks series all rendered as flat zeros. Bumped to 30s; paired with
+  // the funnel pre-warmer (launchd com.m13v.social-funnel-prewarm) which
+  // keeps the 5-min server cache hot so most fetches still return fast.
+  const FETCH_TIMEOUT_MS = 30000;
   const fetchOne = async (url) => {
     const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, FETCH_TIMEOUT_MS) : null;
@@ -15954,7 +15998,11 @@ async function loadFunnelStats(force) {
   if (_funnelStatsLoading) return;
   if (saAuthNotReady()) return;
   const days = currentStatsWindow().days;
-  if (_funnelStatsLoadedFor === days && !force) return;
+  const platform = currentStatsPlatform();
+  // Cache key is window+platform so a platform-pill change forces a refetch
+  // even when the days dropdown stayed the same. Matches the server's cache key.
+  const loadKey = days + '|' + platform;
+  if (_funnelStatsLoadedFor === loadKey && !force) return;
   _funnelStatsLoading = true;
   const totalEl = document.getElementById('funnel-stats-total');
   const body = document.getElementById('funnel-stats-body');
@@ -15963,11 +16011,13 @@ async function loadFunnelStats(force) {
     body.innerHTML = '<div class="style-stats-empty">Loading\u2026 (first call can take 15\u201330s)</div>';
   }
   try {
-    const res = await fetch('/api/funnel/stats?days=' + days);
+    const params = ['days=' + days];
+    if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
+    const res = await fetch('/api/funnel/stats?' + params.join('&'));
     const data = await res.json();
     if (data && !data.error) _lastFunnelPayload = data;
     renderFunnelStats(data);
-    _funnelStatsLoadedFor = days;
+    _funnelStatsLoadedFor = loadKey;
   } catch (e) {
     if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
