@@ -58,8 +58,11 @@ import audience_pages as audience_pages_mod  # noqa: E402
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 GENERATE_PAGE = os.path.join(REPO_DIR, "seo", "generate_page.py")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
-GEN_TIMEOUT_SEC = 900  # 15 min per page; hang fallback uses plain URL
-MAX_AB_HITS_PER_CYCLE = 4  # cap concurrent gen budget at ~60 min worst case
+GEN_TIMEOUT_SEC = 3600  # 60 min per page; observed legit runs take 45-50 min
+                        # (pre-Claude inventory + decision + improve/new pipeline +
+                        # deploy verify). Don't lower without re-measuring.
+MAX_AB_HITS_PER_CYCLE = 2  # cap cumulative gen budget at ~2 x 60 min worst case
+                           # so cycle has room under the 180-min watchdog cap.
 
 # A/B gate: per-candidate coin flip for the page-gen lane. 0.25 means 25% of
 # eligible candidates (project has landing_pages config + LLM provided
