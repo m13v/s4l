@@ -641,6 +641,10 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
 
     # Wrapper hostname comes from the project we're posting AS, not from any
     # URL classification. Posts always know which project they are for.
+    # If the project has `short_links_host` set in config.json (e.g. for clients
+    # whose own domain doesn't have a /r/<code> resolver), that overrides the
+    # wrapper hostname and routes through a host we operate (s4l.ai). The
+    # underlying target_url is unchanged; only the wrapper changes.
     website = _project_website(projects, project_name)
     if not website:
         return {
@@ -649,6 +653,8 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'project': project_name,
             'detail': f"no website for project={project_name!r} in config.json",
         }
+    host_override = _project_short_links_host(projects, project_name)
+    wrapper_host = host_override or website
 
     platform_norm = (platform or '').lower()
     if platform_norm == 'x':
@@ -682,7 +688,10 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'fallback_reason': reason,
         }
 
-    if not _project_short_links_live(projects, project_name):
+    # The short_links_live gate only applies when wrapping through the
+    # project's OWN domain. When host_override is set, we route through a host
+    # we operate (verified live), so the customer-domain status is irrelevant.
+    if not host_override and not _project_short_links_live(projects, project_name):
         return _utm_fallback('short_links_not_live')
 
     if project_cfg and project_cfg.get('external_short_links'):
@@ -732,7 +741,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
         return {
             'ok': True,
             'code': pool_code,
-            'short_url': f"{website}/r/{pool_code}",
+            'short_url': f"{wrapper_host}/r/{pool_code}",
             'target_url': pool_target,
             'kind': 'website',
             'from_pool': True,
@@ -754,7 +763,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
                 return {
                     'ok': True,
                     'code': code,
-                    'short_url': f"{website}/r/{code}",
+                    'short_url': f"{wrapper_host}/r/{code}",
                     'target_url': fallback_target,
                     'kind': kind,
                 }
@@ -789,7 +798,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             return {
                 'ok': True,
                 'code': code,
-                'short_url': f"{website}/r/{code}",
+                'short_url': f"{wrapper_host}/r/{code}",
                 'target_url': fallback_target,
                 'kind': kind,
             }
