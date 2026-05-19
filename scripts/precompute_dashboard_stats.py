@@ -197,14 +197,19 @@ def precompute_style(hours=24):
         "    ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes_discounted, "
         "  COALESCE(SUM(comments_count), 0)::int AS comments, "
         "  COALESCE(SUM(views) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::int AS views, "
-        # post_clicks: SUM of post_links.clicks attributable to short links
-        # minted for these posts (post_id-keyed). Mirrors the live query in
-        # bin/server.js /api/style/stats.
+        # post_clicks: bot-filtered click events from post_link_clicks for
+        # short links minted for these posts (post_id-keyed). Mirrors the
+        # live query in bin/server.js /api/style/stats and the picker source
+        # (engagement_styles._fetch_style_stats / top_performers.SCORE_SQL).
         "  COALESCE(SUM(pl.total_clicks), 0)::int AS post_clicks, "
         "  COALESCE(SUM(CASE WHEN is_recommendation THEN 1 ELSE 0 END), 0)::int AS recommendations "
         f"  FROM posts LEFT JOIN ("
-        "    SELECT post_id, SUM(clicks)::int AS total_clicks "
-        "    FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+        "    SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks "
+        "    FROM post_links pl2 "
+        "    LEFT JOIN post_link_clicks plc "
+        "      ON plc.code = pl2.code AND plc.is_bot = false "
+        "    WHERE pl2.post_id IS NOT NULL "
+        "    GROUP BY pl2.post_id"
         f"  ) pl ON pl.post_id = posts.id WHERE posted_at >= NOW() - {win} "
         "  AND our_content <> '(mention - no original post)' "
         "  GROUP BY engagement_style"
