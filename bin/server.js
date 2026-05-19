@@ -5519,10 +5519,47 @@ async function handleApi(req, res) {
     const pc = auth.projectClause(req.user, 'project_name', url.searchParams.get('project'));
     if (!pc.ok) return json(res, { posts: [], window: windowKey, platform: platformFilter || 'all', kind: kindFilter });
     if (pc.clause) whereParts.push(pc.clause.replace(/^\s*AND\s+/, ''));
+    // 2026-05-18 dashboard parity for Reddit DM-rail follow-ups.
+    // Reply-to-reply rows (we replied back to someone who replied to our
+    // top-level comment) live in the `replies` table, not `posts`, so they
+    // were invisible on the Top tab even though they have real engagement
+    // (some routinely break 1000 views). LinkedIn migrated the analogous
+    // data into `posts` on 2026-05-11, but the (platform, thread_url) dedup
+    // on /api/v1/posts blocks the same migration for Reddit (most reply-
+    // to-replies share thread_url with our top-level post in the same
+    // thread). UNION-into-/api/top sidesteps that entirely: the `replies`
+    // table stays the source of truth, and the Top tab surfaces both
+    // surfaces. The activity feed (line ~3919) already filters
+    // r.status='replied' so reply-to-replies appear ONCE there.
+    //
+    // Build the same WHERE clause for the replies branch, but referencing
+    // `r2.replied_at` for the time window and `parent.thread_url` semantics
+    // for the kind filter. Replies are by definition never threads, so
+    // kind='threads' must exclude the whole branch.
+    const repliesPc = auth.projectClause(req.user, 'parent.project_name', url.searchParams.get('project'));
+    const repliesWhere = [
+      "r2.platform = 'reddit'",          // only Reddit has the gap today
+      "r2.status = 'replied'",
+      "r2.our_reply_id IS NOT NULL",
+      "r2.our_reply_url IS NOT NULL",
+      "r2.our_reply_content IS NOT NULL AND LENGTH(r2.our_reply_content) >= 30",
+    ];
+    if (windowHours != null) {
+      repliesWhere.push("r2.replied_at >= NOW() - INTERVAL '" + windowHours + " hours'");
+    }
+    if (platformFilter && platformFilter !== 'reddit') {
+      // Caller filtered to a non-Reddit platform; replies branch yields nothing.
+      repliesWhere.push("FALSE");
+    }
+    // kind: 'threads' excludes replies entirely; 'comments' and 'all' include.
+    if (kindFilter === 'threads') {
+      repliesWhere.push("FALSE");
+    }
+    if (repliesPc.clause) repliesWhere.push(repliesPc.clause.replace(/^\s*AND\s+/, ''));
     // Moltbook and GitHub have no views metric; return NULL for those so the UI can
     // render a dash instead of a misleading 0. Score still uses COALESCE so they
     // rank alongside other platforms based on upvotes + comments only.
-    const q = "SELECT json_agg(row_to_json(r)) FROM (" +
+    const postsBranch =
       "SELECT posts.id, posts.platform, " +
         // Upvotes are reported NET on Reddit/Moltbook (both auto-apply a +1 OP
         // self-upvote on every post). Strip it per row, clamped at 0 so
@@ -5554,7 +5591,8 @@ async function handleApi(req, res) {
         "COALESCE(pl.bot_clicks, 0)::int AS link_bot_clicks, " +
         "COALESCE(pl.backfill_real, 0)::int AS link_backfill_real, " +
         "COALESCE(pl.link_count, 0)::int AS link_count, " +
-        "pl.first_code AS link_code " +
+        "pl.first_code AS link_code, " +
+        "'post'::text AS row_kind " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
       // pl rollup: legacy `total_clicks` reads the post_links.clicks integer
       // (humans-only after 2026-05-07; pre-existing rows include bots).
@@ -5582,6 +5620,50 @@ async function handleApi(req, res) {
         "GROUP BY pl0.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE " + whereParts.join(' AND ') + " " +
+      "ORDER BY upvotes DESC NULLS LAST, comments_count DESC NULLS LAST, views DESC NULLS LAST " +
+      "LIMIT " + limit;
+    // Replies branch: shape-compatible SELECT against `replies` JOIN `posts` (parent)
+    // for thread context. ID is negated to guarantee uniqueness within the UNION
+    // (posts.id and replies.id are independent sequences and would otherwise
+    // collide for sort/key purposes). The FE only uses `id` as a React key, so
+    // negative integers are fine.
+    const repliesBranch =
+      "SELECT (-r2.id)::int AS id, r2.platform, " +
+        // Reddit-only branch today; strip the OP self-upvote like the posts branch.
+        "GREATEST(0, COALESCE(r2.upvotes, 0) - 1)::int AS upvotes, " +
+        "COALESCE(r2.comments_count, 0)::int AS comments_count, " +
+        "COALESCE(r2.views, 0)::int AS views, " +
+        // Same score formula. Views (Reddit only) contribute /100.
+        "(COALESCE(r2.comments_count,0) * 5 " +
+          "+ GREATEST(0, COALESCE(r2.upvotes,0) - 1) * 5 " +
+          "+ COALESCE(r2.views,0) / 100)::int AS score, " +
+        "FALSE AS is_thread, " +
+        "r2.replied_at AS posted_at, " +
+        "r2.engagement_updated_at, " +
+        "r2.our_reply_content AS our_content, " +
+        "r2.our_reply_url AS our_url, " +
+        "parent.thread_url, parent.thread_title, " +
+        "LEFT(COALESCE(parent.thread_content, ''), 400) AS thread_content, " +
+        "parent.our_account, parent.project_name, " +
+        "r2.engagement_style, r2.is_recommendation, " +
+        "cr.name AS campaign_name, " +
+        // No link tracking on reply-to-replies yet (we don't usually drop a CTA
+        // there). All link counters return 0 so they sort to the bottom of
+        // any link-clicks ordering.
+        "0::int AS link_clicks, 0::int AS link_real_clicks, " +
+        "0::int AS link_bot_clicks, 0::int AS link_backfill_real, " +
+        "0::int AS link_count, NULL::text AS link_code, " +
+        "'reply'::text AS row_kind " +
+      "FROM replies r2 " +
+      "LEFT JOIN posts parent ON parent.id = r2.post_id " +
+      "LEFT JOIN campaigns cr ON cr.id = r2.campaign_id " +
+      "WHERE " + repliesWhere.join(' AND ') + " " +
+      "ORDER BY r2.upvotes DESC NULLS LAST, r2.comments_count DESC NULLS LAST, r2.views DESC NULLS LAST " +
+      "LIMIT " + limit;
+    const q = "SELECT json_agg(row_to_json(r)) FROM (" +
+      "SELECT * FROM (" + postsBranch + ") posts_branch " +
+      "UNION ALL " +
+      "SELECT * FROM (" + repliesBranch + ") replies_branch " +
       "ORDER BY upvotes DESC NULLS LAST, comments_count DESC NULLS LAST, views DESC NULLS LAST " +
       "LIMIT " + limit +
       ") r";
