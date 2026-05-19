@@ -32,11 +32,22 @@ CONFIG_PATH = Path.home() / "social-autoposter" / "config.json"
 REPO_DIR = Path.home() / "social-autoposter"
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 
-POST_LABEL = "com.m13v.social-instagram-daily"
-RENDER_LABEL = "com.m13v.social-instagram-render"
+POST_LABEL_PREFIX = "com.m13v.social-instagram-daily"
+RENDER_LABEL_PREFIX = "com.m13v.social-instagram-render"
+# Legacy unified plists (one shared label across all accounts). Booted out
+# during --apply if present; replaced by per-account plists labelled
+# `<prefix>-<username>`.
+LEGACY_POST_LABEL = POST_LABEL_PREFIX
+LEGACY_RENDER_LABEL = RENDER_LABEL_PREFIX
 POST_SHELL = REPO_DIR / "skill" / "run-instagram-daily.sh"
 RENDER_SHELL = REPO_DIR / "skill" / "run-instagram-render.sh"
 LOG_DIR = REPO_DIR / "skill" / "logs"
+
+
+def plist_label_for(prefix, username):
+    """Per-account launchd label, e.g. com.m13v.social-instagram-daily-matt_diak."""
+    safe = username.replace(".", "_")  # launchd labels can't contain dots beyond the reverse-DNS prefix
+    return f"{prefix}-{safe}"
 
 
 def load_cfg():
@@ -118,13 +129,15 @@ def plist_xml(label, shell_path, slots, extra_env=None):
         f"\t\t\t<key>Minute</key>\n\t\t\t<integer>{m}</integer>\n\t\t</dict>"
         for h, m in slots
     )
-    env_block = (
-        "\t\t<key>HOME</key>\n"
-        f"\t\t<string>{Path.home()}</string>\n"
-        "\t\t<key>PATH</key>\n"
-        "\t\t<string>"
-        + (extra_env.get("PATH") if extra_env and "PATH" in extra_env else "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
-        + "</string>"
+    env_keys = {
+        "HOME": str(Path.home()),
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    }
+    if extra_env:
+        env_keys.update(extra_env)
+    env_block = "\n".join(
+        f"\t\t<key>{k}</key>\n\t\t<string>{v}</string>"
+        for k, v in env_keys.items()
     )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -182,27 +195,29 @@ def main():
     if n_accounts == 0:
         sys.stderr.write("no enabled accounts in config.json:instagram.accounts; refusing to rewrite plists\n")
         sys.exit(2)
-    # Total slots = sum of per-account posts_per_day (each account opts in to
-    # its own daily cadence; defaults to global posts_per_account_per_day).
-    n_slots = cfg["total_slots"]
-    post_slots = compute_post_slots(cfg["start_hour"], cfg["end_hour"], n_slots)
-    render_slots = [render_slot_for(h, m) for h, m in post_slots]
 
-    per_acct = ", ".join(
-        f"{u}={c}" for u, c in sorted(cfg["per_account_posts_per_day"].items())
-    )
+    per_account = cfg["per_account_posts_per_day"]
+    start_h, end_h = cfg["start_hour"], cfg["end_hour"]
+
+    # Plan: one render + one post plist PER enabled account. Slots within each
+    # plist are spread evenly over [start_hour, end_hour] sized by that
+    # account's posts_per_day. Per-account plists set FORCE_ACCOUNT in env so
+    # the shells hard-pin the slot to the right account without ever calling
+    # pick_ig_account.py.
     print(
-        f"plan: {n_accounts} enabled account(s) [{per_acct}] "
-        f"= {n_slots} slots/day; window {cfg['start_hour']}:00-{cfg['end_hour']}:00"
+        f"plan: {n_accounts} enabled account(s); per-account plists, "
+        f"window {start_h}:00-{end_h}:00"
     )
-    print("post slots:")
-    for h, m in post_slots:
-        print(f"  {h:02d}:{m:02d}")
-    print("render slots (post - 30min):")
-    for h, m in render_slots:
-        print(f"  {h:02d}:{m:02d}")
+    plans = []  # list of (username, post_slots, render_slots)
+    for username, ppd in sorted(per_account.items()):
+        post_slots = compute_post_slots(start_h, end_h, ppd)
+        render_slots = [render_slot_for(h, m) for h, m in post_slots]
+        plans.append((username, post_slots, render_slots))
+        print(f"\n  {username}: posts_per_day={ppd}")
+        print(f"    post slots:   " + ", ".join(f"{h:02d}:{m:02d}" for h, m in post_slots))
+        print(f"    render slots: " + ", ".join(f"{h:02d}:{m:02d}" for h, m in render_slots))
 
-    # Render plist must carry the rich PATH the existing one has (ffmpeg + nvm)
+    # Render plist needs the rich PATH (ffmpeg + nvm).
     render_path = (
         "/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:"
         "/Users/matthewdi/.nvm/versions/node/v23.10.0/bin:"
@@ -210,17 +225,39 @@ def main():
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     )
 
-    post_xml = plist_xml(POST_LABEL, str(POST_SHELL), post_slots)
-    render_xml = plist_xml(RENDER_LABEL, str(RENDER_SHELL), render_slots, extra_env={"PATH": render_path})
+    # Build (label, path, xml) tuples for everything we want installed.
+    desired = []
+    for username, post_slots, render_slots in plans:
+        post_label = plist_label_for(POST_LABEL_PREFIX, username)
+        render_label = plist_label_for(RENDER_LABEL_PREFIX, username)
+        post_xml = plist_xml(
+            post_label, str(POST_SHELL), post_slots,
+            extra_env={"FORCE_ACCOUNT": username},
+        )
+        render_xml = plist_xml(
+            render_label, str(RENDER_SHELL), render_slots,
+            extra_env={"FORCE_ACCOUNT": username, "PATH": render_path},
+        )
+        desired.append((post_label, LAUNCH_AGENTS / f"{post_label}.plist", post_xml))
+        desired.append((render_label, LAUNCH_AGENTS / f"{render_label}.plist", render_xml))
 
-    post_target = LAUNCH_AGENTS / f"{POST_LABEL}.plist"
-    render_target = LAUNCH_AGENTS / f"{RENDER_LABEL}.plist"
+    desired_labels = {d[0] for d in desired}
+
+    # Stale plists to bootout + remove: legacy unified labels, plus per-account
+    # plists for accounts that are no longer enabled.
+    stale = []
+    if (LAUNCH_AGENTS / f"{LEGACY_POST_LABEL}.plist").exists():
+        stale.append((LEGACY_POST_LABEL, LAUNCH_AGENTS / f"{LEGACY_POST_LABEL}.plist"))
+    if (LAUNCH_AGENTS / f"{LEGACY_RENDER_LABEL}.plist").exists():
+        stale.append((LEGACY_RENDER_LABEL, LAUNCH_AGENTS / f"{LEGACY_RENDER_LABEL}.plist"))
+    for p in sorted(LAUNCH_AGENTS.glob(f"{POST_LABEL_PREFIX}-*.plist")) + \
+             sorted(LAUNCH_AGENTS.glob(f"{RENDER_LABEL_PREFIX}-*.plist")):
+        label = p.stem
+        if label not in desired_labels:
+            stale.append((label, p))
 
     if args.diff:
-        for label, target, xml in (
-            (POST_LABEL, post_target, post_xml),
-            (RENDER_LABEL, render_target, render_xml),
-        ):
+        for label, target, xml in desired:
             print(f"\n=== diff {label} ===")
             if not target.exists():
                 print(f"  (no existing file at {target})")
@@ -237,19 +274,39 @@ def main():
                     lineterm="",
                 ):
                     print(line)
+        if stale:
+            print("\n=== stale (will be booted out + removed) ===")
+            for label, p in stale:
+                print(f"  - {label} ({p.name})")
         return
 
     if not args.apply:
+        if stale:
+            print("\nstale plists (will be booted out + removed on --apply):")
+            for label, p in stale:
+                print(f"  - {label} ({p.name})")
         print("\n(dry-run; pass --apply to write + reload)")
         return
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
 
-    for label, target, xml in (
-        (POST_LABEL, post_target, post_xml),
-        (RENDER_LABEL, render_target, render_xml),
-    ):
+    # 1. Bootout + remove stale plists (legacy unified + disabled per-account)
+    uid = os.getuid()
+    domain = f"gui/{uid}"
+    for label, p in stale:
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            capture_output=True, check=False, text=True,
+        )
+        try:
+            p.unlink()
+            print(f"removed stale plist: {label} ({p})")
+        except FileNotFoundError:
+            pass
+
+    # 2. Write + reload desired plists
+    for label, target, xml in desired:
         target.write_text(xml)
         rc, out = reload_plist(target, label)
         if rc != 0:
