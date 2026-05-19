@@ -412,15 +412,36 @@ if [ -n "$REDDIT_VIEWS_LINE" ]; then
     }')
 fi
 
+# 2026-05-18 relabel pass. update_stats.py's structured stdout lines now
+# emit five cleanly-separated fields per platform: total / skipped /
+# checked / changed / errors. Map them to the new dashboard pills:
+#   REDDIT_SCANNED          -> 'scanned' pill (total considered)
+#   REDDIT_SKIPPED          -> 'skipped' pill (stable + fresh combined)
+#   REDDIT_CHECKED          -> 'checked' pill (rows actually hit the API)
+#   REDDIT_CHANGED          -> 'changed' pill (metric-moved subset)
+#   REDDIT_VIEWS_UPDATED    -> 'views' pill (Step 1 scrape leg, separate)
+# `updated` is the legacy field name; if update_stats.py is mid-deploy and
+# the new `changed` field is missing on the line, fall back to `updated`.
+REDDIT_SCANNED=$(extract_field "$REDDIT_DETAIL_LINE" "total")
 REDDIT_CHECKED=$(extract_field "$REDDIT_DETAIL_LINE" "checked")
-REDDIT_DETAIL_UPDATED=$(extract_field "$REDDIT_DETAIL_LINE" "updated")
+REDDIT_CHANGED=$(extract_field "$REDDIT_DETAIL_LINE" "changed")
+if [ "$REDDIT_CHANGED" = "0" ]; then
+    # Back-compat: pre-relabel lines used `updated` for the same value.
+    REDDIT_CHANGED=$(extract_field "$REDDIT_DETAIL_LINE" "updated")
+fi
+REDDIT_DETAIL_UPDATED="$REDDIT_CHANGED"  # legacy alias
 REDDIT_DELETED=$(extract_field "$REDDIT_DETAIL_LINE" "deleted")
 REDDIT_REMOVED_FIELD=$(extract_field "$REDDIT_DETAIL_LINE" "removed")
 REDDIT_SKIPPED=$(extract_field "$REDDIT_DETAIL_LINE" "skipped")
 REDDIT_ERRORS=$(extract_field "$REDDIT_DETAIL_LINE" "errors")
 
+TWITTER_SCANNED=$(extract_field "$TWITTER_LINE" "total")
 TWITTER_CHECKED=$(extract_field "$TWITTER_LINE" "checked")
-TWITTER_UPDATED=$(extract_field "$TWITTER_LINE" "updated")
+TWITTER_CHANGED=$(extract_field "$TWITTER_LINE" "changed")
+if [ "$TWITTER_CHANGED" = "0" ]; then
+    TWITTER_CHANGED=$(extract_field "$TWITTER_LINE" "updated")
+fi
+TWITTER_UPDATED="$TWITTER_CHANGED"  # legacy alias
 TWITTER_DELETED=$(extract_field "$TWITTER_LINE" "deleted")
 TWITTER_SKIPPED=$(extract_field "$TWITTER_LINE" "skipped")
 TWITTER_ERRORS=$(extract_field "$TWITTER_LINE" "errors")
@@ -445,7 +466,18 @@ if [ -s "$LINKEDIN_SUMMARY_FILE" ]; then
 fi
 
 CHECKED=$(( REDDIT_CHECKED + TWITTER_CHECKED + MOLTBOOK_CHECKED + LINKEDIN_REFRESHED ))
-UPDATED=$(( REDDIT_VIEWS_UPDATED + REDDIT_DETAIL_UPDATED + TWITTER_UPDATED + MOLTBOOK_UPDATED + LINKEDIN_REFRESHED ))
+# 2026-05-18 relabel: the legacy `UPDATED` summed Reddit's Step 1 view-scrape
+# leg into the same pill as Step 2's "metric actually changed" leg, which
+# silently inflated the number. Keep `UPDATED` wired for back-compat (the
+# log line still emits `updated=N`), but it is now the same value as
+# `CHANGED` so old dashboards behave sanely. New dashboards read the
+# explicit `changed=` and `views_refreshed=` fields instead.
+CHANGED=$(( REDDIT_CHANGED + TWITTER_CHANGED + MOLTBOOK_UPDATED + LINKEDIN_REFRESHED ))
+VIEWS_REFRESHED=$REDDIT_VIEWS_UPDATED
+UPDATED=$CHANGED
+# `SCANNED` is the total rows the run considered, across all platforms.
+# Moltbook has no skip class so its "scanned" == "checked"; LinkedIn ditto.
+SCANNED=$(( REDDIT_SCANNED + TWITTER_SCANNED + MOLTBOOK_CHECKED + LINKEDIN_REFRESHED ))
 REMOVED=$(( REDDIT_DELETED + REDDIT_REMOVED_FIELD + TWITTER_DELETED + MOLTBOOK_DELETED + LINKEDIN_REMOVED ))
 SKIPPED_REAL=$(( REDDIT_SKIPPED + TWITTER_SKIPPED ))
 UNAVAILABLE=$LINKEDIN_UNAVAILABLE
@@ -480,6 +512,9 @@ python3 "$REPO_DIR/scripts/log_run.py" \
     --removed "$REMOVED" \
     --unavailable "$UNAVAILABLE" \
     --not-found "$NOT_FOUND" \
+    --scanned "$SCANNED" \
+    --changed "$CHANGED" \
+    --views-refreshed "$VIEWS_REFRESHED" \
     --cost "$_COST" \
     --elapsed "$RUN_ELAPSED"
 
