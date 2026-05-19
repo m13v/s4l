@@ -87,13 +87,23 @@ def recent_posts_by_account(window_days):
 
 
 def pick_account(accounts, window_days):
-    """Inverse-recent-share weighted draw from enabled accounts."""
+    """Inverse-recent-share weighted draw from enabled accounts.
+
+    Effective weight is `posts_per_day * weight` (defaults: posts_per_day=
+    global instagram.posts_per_account_per_day, weight=1). Dividing by
+    (1 + recent_posts) damps over-posting toward the target rate.
+    """
     enabled = [a for a in accounts if a.get("enabled") and float(a.get("weight", 0)) > 0]
     if not enabled:
         return None, {}, {}
     counts = recent_posts_by_account(window_days)
+    # Pull global default for posts_per_day fallback.
+    cfg = json.loads(CONFIG_PATH.read_text())
+    global_ppd = int((cfg.get("instagram") or {}).get("posts_per_account_per_day", 5))
     effective = {
-        a["username"]: float(a["weight"]) / (1 + counts.get(a["username"], 0))
+        a["username"]: (
+            float(a["weight"]) * float(a.get("posts_per_day", global_ppd))
+        ) / (1 + counts.get(a["username"], 0))
         for a in enabled
     }
     names = list(effective.keys())
@@ -120,13 +130,19 @@ def main():
 
     if args.show_weights:
         counts = recent_posts_by_account(window_days)
-        print(f"{'Account':25} {'Enabled':>8} {'Weight':>7} {'Recent':>7} {'Effective':>10}")
-        print("-" * 62)
+        cfg = json.loads(CONFIG_PATH.read_text())
+        global_ppd = int((cfg.get("instagram") or {}).get("posts_per_account_per_day", 5))
+        print(f"{'Account':25} {'Enabled':>8} {'Weight':>7} {'PPD':>5} {'Recent':>7} {'Effective':>10}")
+        print("-" * 70)
         for a in accounts:
-            eff = (float(a.get("weight", 0)) / (1 + counts.get(a["username"], 0))) if a.get("enabled") else 0
+            ppd = int(a.get("posts_per_day", global_ppd))
+            eff = (
+                (float(a.get("weight", 0)) * ppd) / (1 + counts.get(a["username"], 0))
+                if a.get("enabled") else 0
+            )
             print(
                 f"{a['username']:25} {str(a.get('enabled', False)):>8} "
-                f"{a.get('weight', 0):>7} {counts.get(a['username'], 0):>7} "
+                f"{a.get('weight', 0):>7} {ppd:>5} {counts.get(a['username'], 0):>7} "
                 f"{eff:>10.3f}"
             )
         return
