@@ -1193,6 +1193,20 @@ def main():
             "Matches the same normalization used by /api/style/stats."
         ),
     )
+    parser.add_argument(
+        "--posts-only",
+        action="store_true",
+        help=(
+            "Emit ONLY the per-project posts.* engagement counters; skip the "
+            "PostHog batch (pageviews/CTAs), the bookings DB, Amplitude, and "
+            "SEO page counts. Drops the python runtime from ~30s+ to ~1s. "
+            "Used by /api/funnel/stats as a fast overlay path when the "
+            "dashboard's platform pill changes — those slow sources are "
+            "platform-independent so the all-platform snapshot's values for "
+            "them stay correct, and only the engagement columns need to "
+            "react to the filter."
+        ),
+    )
     args = parser.parse_args()
 
     # Normalize platform early; pass empty string when no filter so build_project_entry
@@ -1213,6 +1227,186 @@ def main():
     bookings_db_url = env.get("BOOKINGS_DATABASE_URL")
 
     _bridge_per_project_posthog_keys_from_keychain(config, env)
+
+    # Fast path: --posts-only skips the slow PostHog/Amplitude/bookings work
+    # and emits ONLY the per-project posts.* counters. Used as a low-latency
+    # overlay on top of the cached all-platform snapshot when the dashboard's
+    # platform pill changes (see /api/funnel/stats in bin/server.js). Runs
+    # in ~1s instead of ~30s because there are no external HTTP calls AND
+    # the per-project SQL is collapsed into 3 batched GROUP BY queries
+    # (the naive per-project loop pays N x ~180ms Neon round-trip).
+    if args.posts_only:
+        conn = ps.dbmod.get_conn()
+        days_sql = "INTERVAL '" + str(int(args.days)) + " days'"
+        plat_clause_p = _platform_sql_clause(platform, "p")
+        plat_clause_bare = _platform_sql_clause(platform, "")
+
+        # Query 1: lifetime stats per project (matches project_stats.get_post_stats
+        # shape). Lifetime aggregates are platform-independent in scope (they
+        # describe what's in the table) — but for the posts-only overlay we
+        # echo the snapshot's lifetime numbers anyway by NOT applying the
+        # platform filter here, so the "Total" tooltip etc. stays stable.
+        cur = conn.execute(
+            "SELECT project_name, "
+              "COUNT(*)::bigint AS total, "
+              "COUNT(*) FILTER (WHERE posted_at >= NOW() - " + days_sql + plat_clause_bare + ")::bigint AS recent, "
+              "COUNT(*) FILTER (WHERE status = 'active')::bigint AS active, "
+              "COUNT(*) FILTER (WHERE status IN ('removed', 'deleted'))::bigint AS removed, "
+              "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+                "THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+                "ELSE COALESCE(upvotes, 0) END), 0)::bigint AS total_upvotes, "
+              "COALESCE(SUM(comments_count), 0)::bigint AS total_comments, "
+              "COALESCE(SUM(views), 0)::bigint AS total_views "
+            "FROM posts WHERE project_name IS NOT NULL "
+            "GROUP BY project_name"
+        )
+        lifetime = {r[0]: {
+            "total": int(r[1]), "recent": int(r[2]), "active": int(r[3]),
+            "removed": int(r[4]), "total_upvotes": int(r[5]),
+            "total_comments": int(r[6]), "total_views": int(r[7]),
+        } for r in cur.fetchall()}
+
+        # Query 2: windowed engagement per project (_windowed_post_engagement).
+        cur = conn.execute(
+            "SELECT p.project_name, "
+              "COALESCE(SUM(CASE WHEN LOWER(p.platform) IN ('reddit', 'moltbook') "
+                "THEN GREATEST(0, COALESCE(p.upvotes, 0) - 1) "
+                "ELSE COALESCE(p.upvotes, 0) END), 0)::bigint AS upvotes_recent, "
+              "COALESCE(SUM(p.comments_count), 0)::bigint AS comments_recent, "
+              "COALESCE(SUM(p.views) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::bigint AS views_recent, "
+              "COUNT(*) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues'))::bigint AS views_posts, "
+              "COALESCE(SUM(pl.total_clicks), 0)::bigint AS post_clicks_recent "
+            "FROM posts p "
+            "LEFT JOIN ("
+              "SELECT post_id, SUM(clicks)::int AS total_clicks "
+              "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+            ") pl ON pl.post_id = p.id "
+            "WHERE p.project_name IS NOT NULL "
+              "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p + " "
+            "GROUP BY p.project_name"
+        )
+        windowed = {r[0]: {
+            "upvotes": int(r[1]), "comments": int(r[2]),
+            "views": int(r[3]), "views_posts": int(r[4]),
+            "post_clicks": int(r[5]),
+        } for r in cur.fetchall()}
+
+        # Query 3: period-total engagement per project (new_posts + old_posts
+        # branches, GROUP BY project_name). Mirrors _period_total_engagement.
+        views_excl = "LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')"
+        cur = conn.execute(
+            "WITH new_posts AS ("
+              "SELECT p.project_name, "
+                "COALESCE(SUM(p.upvotes), 0)::bigint AS upvotes, "
+                "COALESCE(SUM(p.comments_count), 0)::bigint AS comments, "
+                "COALESCE(SUM(p.views) FILTER (WHERE " + views_excl + "), 0)::bigint AS views "
+              "FROM posts p "
+              "WHERE p.project_name IS NOT NULL "
+                "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p + " "
+              "GROUP BY p.project_name"
+            "), "
+            "old_post_daily AS ("
+              "SELECT p.project_name, pvd.post_id, p.platform, "
+                "pvd.upvotes,  LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
+                "pvd.comments, LAG(pvd.comments) OVER w AS prev_comments, "
+                "pvd.views,    LAG(pvd.views)    OVER w AS prev_views "
+              "FROM post_views_daily pvd "
+              "JOIN posts p ON p.id = pvd.post_id "
+              "WHERE pvd.day >= CURRENT_DATE - " + days_sql + " "
+                "AND p.project_name IS NOT NULL "
+                "AND p.posted_at < NOW() - " + days_sql + plat_clause_p + " "
+              "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
+            "), "
+            "old_posts AS ("
+              "SELECT project_name, "
+                "COALESCE(SUM(GREATEST(upvotes - prev_upvotes, 0)) "
+                  "FILTER (WHERE prev_upvotes IS NOT NULL AND upvotes IS NOT NULL), 0)::bigint AS upvotes, "
+                "COALESCE(SUM(GREATEST(comments - prev_comments, 0)) "
+                  "FILTER (WHERE prev_comments IS NOT NULL AND comments IS NOT NULL), 0)::bigint AS comments, "
+                "COALESCE(SUM(GREATEST(views - prev_views, 0)) "
+                  "FILTER (WHERE prev_views IS NOT NULL AND views IS NOT NULL "
+                    "AND LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::bigint AS views "
+              "FROM old_post_daily GROUP BY project_name"
+            ") "
+            "SELECT COALESCE(n.project_name, o.project_name) AS project_name, "
+              "COALESCE(n.upvotes, 0) + COALESCE(o.upvotes, 0), "
+              "COALESCE(n.comments, 0) + COALESCE(o.comments, 0), "
+              "COALESCE(n.views, 0) + COALESCE(o.views, 0) "
+            "FROM new_posts n FULL OUTER JOIN old_posts o ON n.project_name = o.project_name"
+        )
+        period = {r[0]: {
+            "upvotes": int(r[1]), "comments": int(r[2]), "views": int(r[3]),
+        } for r in cur.fetchall()}
+
+        # Query 4: period-total post_clicks per project (new clicks + old
+        # plc events). Same shape as _period_total_engagement's clicks leg.
+        cur = conn.execute(
+            "WITH new_clicks AS ("
+              "SELECT p.project_name, "
+                "COALESCE(SUM(pl.total_clicks), 0)::bigint AS clicks "
+              "FROM posts p "
+              "LEFT JOIN ("
+                "SELECT post_id, SUM(clicks)::int AS total_clicks "
+                "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+              ") pl ON pl.post_id = p.id "
+              "WHERE p.project_name IS NOT NULL "
+                "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p + " "
+              "GROUP BY p.project_name"
+            "), "
+            "old_event_clicks AS ("
+              "SELECT p.project_name, COUNT(*)::bigint AS clicks "
+              "FROM post_link_clicks plc "
+              "JOIN post_links pl ON pl.code = plc.code "
+              "JOIN posts p ON p.id = pl.post_id "
+              "WHERE plc.ts >= NOW() - " + days_sql + " "
+                "AND plc.is_bot = FALSE "
+                "AND p.project_name IS NOT NULL "
+                "AND p.posted_at < NOW() - " + days_sql + plat_clause_p + " "
+              "GROUP BY p.project_name"
+            ") "
+            "SELECT COALESCE(n.project_name, o.project_name), "
+              "COALESCE(n.clicks, 0) + COALESCE(o.clicks, 0) "
+            "FROM new_clicks n FULL OUTER JOIN old_event_clicks o ON n.project_name = o.project_name"
+        )
+        period_clicks = {r[0]: int(r[1]) for r in cur.fetchall()}
+
+        out_projects = []
+        for proj in config.get("projects", []):
+            name = proj["name"]
+            if args.project and args.project.lower() != name.lower():
+                continue
+            life = lifetime.get(name) or {}
+            w = windowed.get(name) or {"upvotes": 0, "comments": 0, "views": 0, "views_posts": 0, "post_clicks": 0}
+            pe = period.get(name) or {"upvotes": 0, "comments": 0, "views": 0}
+            out_projects.append({
+                "name": name,
+                "posts": {
+                    "total": int(life.get("total", 0)),
+                    "recent": int(life.get("recent", 0)),
+                    "active": int(life.get("active", 0)),
+                    "removed": int(life.get("removed", 0)),
+                    "upvotes": int(life.get("total_upvotes", 0)),
+                    "comments": int(life.get("total_comments", 0)),
+                    "views": int(life.get("total_views", 0)),
+                    "upvotes_recent": w["upvotes"],
+                    "comments_recent": w["comments"],
+                    "views_recent": w["views"] if w["views_posts"] > 0 else None,
+                    "post_clicks_recent": w["post_clicks"],
+                    "upvotes_period_total": pe["upvotes"],
+                    "comments_period_total": pe["comments"],
+                    "views_period_total": pe["views"],
+                    "post_clicks_period_total": int(period_clicks.get(name, 0)),
+                },
+            })
+        conn.close()
+        print(json.dumps({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "days": args.days,
+            "platform": platform or "all",
+            "posts_only": True,
+            "projects": out_projects,
+        }))
+        return
 
     if not api_key:
         print(json.dumps({"error": "POSTHOG_PERSONAL_API_KEY not set"}), file=sys.stdout)
