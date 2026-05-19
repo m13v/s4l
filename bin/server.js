@@ -477,7 +477,11 @@ const RUN_MONITOR_PATH = path.join(LOG_DIR, 'run_monitor.log');
 // queries+candidates+above_floor only. Each sub-key is omitted when zero, so
 // `discover=` itself is absent on lines from pipelines that don't emit it.
 // Old log lines without the segment still parse cleanly via the optional `?`.
-const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?/;
+// 2026-05-18 stats-pill relabel: three new optional groups (scanned,
+// changed, views_refreshed) tail the unavailable/not_found block so old log
+// lines still parse via the existing positional regex. Each is independently
+// optional so a partial roll-out (just scanned, just changed) also parses.
+const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+scanned=(\d+))?(?:\s+changed=(\d+))?(?:\s+views_refreshed=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?/;
 
 // posts.platform is lowercase; UI labels are capitalized.
 const PLATFORM_LABELS = {
@@ -586,7 +590,7 @@ function parseRunMonitorLog(maxLines) {
   for (const line of tail) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
-    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr] = m;
+    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, scannedRaw, changedRaw, viewsRefreshedRaw, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr] = m;
     if (JOB_HISTORY_HIDDEN_SCRIPTS.has(script)) continue;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
@@ -670,6 +674,13 @@ function parseRunMonitorLog(maxLines) {
         removed: removed ? parseInt(removed, 10) : 0,
         unavailable: unavailable ? parseInt(unavailable, 10) : 0,
         not_found: notFound ? parseInt(notFound, 10) : 0,
+        // 2026-05-18 stats-pill relabel: three new fields surface the split
+        // between Step 1 view-scrape leg and Step 2 metric-changed leg.
+        // Absent on pre-relabel log lines (defaults to 0); renderResultPills
+        // falls back to `checked`/`updated` when these are 0.
+        scanned: scannedRaw ? parseInt(scannedRaw, 10) : 0,
+        changed: changedRaw ? parseInt(changedRaw, 10) : 0,
+        views_refreshed: viewsRefreshedRaw ? parseInt(viewsRefreshedRaw, 10) : 0,
         salvaged: salvaged ? parseInt(salvaged, 10) : 0,
         discover, // {} when no `discover=` segment was present on the line
         scan, // {} when no `scan=` segment was present on the line
@@ -8687,6 +8698,26 @@ function renderResult(run) {
   // the old "posted=18216" pill was the total active-posts count from the
   // DB, which had nothing to do with what the run did. Render the real
   // per-run counters parsed out of the stats log instead.
+  //
+  // 2026-05-18 relabel: split the misleading single "updated" pill into
+  // four explicit pills (scanned / checked / changed / views) so the
+  // operator can read at a glance what the run actually did:
+  //
+  //   scanned -> total rows considered (= polled + every flavor of skip)
+  //   skipped -> rows we deliberately did NOT poll (covered by Step 1
+  //              scrape or stable cooldown). Saves API calls.
+  //   checked -> rows we actually hit the platform API for this run.
+  //   changed -> subset of "checked" where any tracked metric moved.
+  //              Was the original intent of "updated" but the legacy
+  //              field also summed in the Step 1 view-scrape count.
+  //   views   -> Step 1 scrape leg only: rows where the cheap profile-
+  //              page scrape wrote a fresh view count (Reddit) or
+  //              fxtwitter view (Twitter). Distinct from "changed".
+  //   replies -> per-reply rows refreshed (DM-rail follow-ups we made
+  //              on someone else thread, live in the "replies" table).
+  //
+  // Each pill carries data-tooltip so hovering surfaces the meaning
+  // line-by-line via the global .sa-tooltip handler.
   if (run.job_type === 'stats') {
     const checked = r.checked || 0;
     const updated = r.updated || 0;
@@ -8696,19 +8727,71 @@ function renderResult(run) {
     const skipped = r.skipped || 0;
     const failed = r.failed || 0;
     const repliesRefreshed = r.replies_refreshed || 0;
+    // New 2026-05-18 fields; fall back to derived values when the log line
+    // pre-dates the relabel pass (so historical rows still render sanely).
+    const scanned = r.scanned || (checked + skipped) || 0;
+    const changed = r.changed || 0;
+    const viewsRefreshed = r.views_refreshed || 0;
     if (!checked && !updated && !removed && !unavailable && !notFound &&
-        !skipped && !failed && !repliesRefreshed) {
+        !skipped && !failed && !repliesRefreshed &&
+        !scanned && !changed && !viewsRefreshed) {
       return '<span style="color:var(--muted);font-size:12px;">—</span>';
     }
+    // Inline helper: pill with a `data-tooltip` attribute for per-pill hover
+    // explanations. Plain `pill()` (above) has no tooltip slot; this is
+    // local to stats-job rendering only.
+    const tipPill = (label, n, color, tip) => {
+      const tipEsc = (tip || '').replace(/"/g, '&quot;');
+      return '<span data-tooltip="' + tipEsc + '" style="display:inline-block;' +
+        'margin-right:10px;font-size:12px;color:var(--muted);cursor:help;">' +
+        label + ' <span style="color:' + (color || 'var(--text)') +
+        ';font-weight:600;">' + n + '</span></span>';
+    };
     return (
-      pill('checked', checked, 'var(--text)') +
-      pill('updated', updated, '#22c55e') +
-      (removed ? pill('removed', removed, '#eab308') : '') +
-      (unavailable ? pill('unavail', unavailable, '#eab308') : '') +
-      (notFound ? pill('not found', notFound, 'var(--muted)') : '') +
-      (skipped ? pill('skipped', skipped, 'var(--muted)') : '') +
-      (repliesRefreshed ? pill('replies', repliesRefreshed, '#3b82f6') : '') +
-      (failed ? pill('failed', failed, '#ef4444') : '')
+      tipPill('scanned', scanned, 'var(--text)',
+        'Total rows the run considered (every active row in the relevant ' +
+        'platform tables). = checked + skipped + bypassed-as-fresh.') +
+      (skipped ? tipPill('skipped', skipped, 'var(--muted)',
+        'Rows we deliberately did NOT poll this run. Two reasons: ' +
+        '(1) already refreshed by the cheap scrape leg within the last 4h, ' +
+        '(2) stable cooldown (2+ scans with no metric change AND older than ' +
+        '3 days). Saves API calls; data is still current.') : '') +
+      tipPill('checked', checked, 'var(--text)',
+        'Rows we actually hit the platform API for this run ' +
+        '(Reddit old.reddit.com JSON / fxtwitter / LinkedIn activity feed). ' +
+        'Includes both successful polls and the ones that errored mid-fetch.') +
+      tipPill('changed', changed, '#22c55e',
+        'Subset of `checked` where any tracked metric (upvotes / ' +
+        'comments_count / views) actually moved since the prior scan. ' +
+        'The real-activity signal; everything else is no-op polling.') +
+      (viewsRefreshed ? tipPill('views', viewsRefreshed, '#06b6d4',
+        'Rows where the cheap view-scrape leg wrote a fresh view count ' +
+        'this run. Reddit: Step 1 profile-page scrape (sees every ' +
+        'comment + thread on /user/<name>/). Twitter: built-in to the ' +
+        'fxtwitter call. Separate from `changed` because views can ' +
+        'tick up without upvotes/comments moving.') : '') +
+      (repliesRefreshed ? tipPill('replies', repliesRefreshed, '#3b82f6',
+        'Per-reply rows refreshed: comments we authored AS replies to ' +
+        'someone else\'s reply to our original comment (the DM-rail ' +
+        'follow-up). Live in the `replies` table, not `posts`. ' +
+        'Reddit refreshes upvotes + reply-count via batch JSON API. ' +
+        'Twitter also refreshes views via fxtwitter.') : '') +
+      (removed ? tipPill('removed', removed, '#eab308',
+        'Posts newly flagged deleted/removed this run. Reddit: comment ' +
+        'gone from thread JSON for 2+ consecutive scans (deletion_detect_' +
+        'count threshold). LinkedIn: post returned "Post unavailable".') : '') +
+      (unavailable ? tipPill('unavail', unavailable, '#eab308',
+        'LinkedIn only: post explicitly returned "Post unavailable" ' +
+        'string. Subset of `removed`; rendered as its own pill so an ' +
+        'operator can tell hard-deletion from rate-limit / network noise.') : '') +
+      (notFound ? tipPill('not found', notFound, 'var(--muted)',
+        'LinkedIn only: post is still active on LinkedIn but our specific ' +
+        'comment couldn\'t be located on the activity feed (may have ' +
+        'aged off our visible recent-activity window).') : '') +
+      (failed ? tipPill('failed', failed, '#ef4444',
+        'API errors during the run, broken down by category: 404 not_found, ' +
+        'rate-limited (429), empty / malformed response, or other / network. ' +
+        'Includes step-exit failures from the shell pipeline as well.') : '')
     );
   }
   // seo_expire (delete dead-weight pages): repurposes posted/skipped from the
