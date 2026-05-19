@@ -8118,11 +8118,27 @@ function toast(msg, isError) {
     tipEl.style.left = left + 'px';
     tipEl.style.top  = top + 'px';
   }
+  // Render tooltip text with safe minimal markup:
+  //   1. Escape all HTML special chars (so dynamic data can never inject HTML).
+  //   2. Then turn **word** sequences into <b>word</b>. The escape step happens
+  //      FIRST, so even **<script>** becomes <b>&lt;script&gt;</b>.
+  //   3. Newlines render via CSS white-space:pre-line (already on .sa-tooltip).
+  //      No need to convert \n to <br>.
+  function renderTooltipMarkup(text) {
+    var html = String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    // Non-greedy match so multiple **bold** runs on one line work.
+    html = html.replace(/\*\*([^*\n]+?)\*\*/g, '<b>$1</b>');
+    return html;
+  }
   function show(host) {
     const text = getText(host);
     if (!text) return;
     const el = ensureTip();
-    el.textContent = text;
+    el.innerHTML = renderTooltipMarkup(text);
     el.classList.add('visible');
     position(host);
     currentHost = host;
@@ -8577,12 +8593,16 @@ function renderResult(run) {
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
-    const tooltip = 'searches: ' + searches +
-      ' / raw SERP candidates: ' + raw +
-      ' / passed 20.0 floor: ' + passed +
-      ' / dropped below floor: ' + dropped +
-      ' / posted: ' + posted +
-      ' / pending queue: ' + queue;
+    const LNL = String.fromCharCode(10);
+    const tooltip =
+      '**LinkedIn post-comment funnel**' + LNL +
+      LNL +
+      '• **searches:** ' + searches + LNL +
+      '• **raw SERP candidates:** ' + raw + LNL +
+      '• **passed 20.0 floor:** ' + passed + LNL +
+      '• **dropped below floor:** ' + dropped + LNL +
+      '• **posted:** ' + posted + LNL +
+      '• **pending queue:** ' + queue;
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
@@ -8668,27 +8688,27 @@ function renderResult(run) {
     // CSS .sa-tooltip white-space:pre-line turns these into line breaks.
     const NL = String.fromCharCode(10);
     const tooltip =
-      'Phase 0 (cleanup):' + NL +
-      '• salvaged ' + salvAttempted + ': orphan rows adopted from prior dead cycles (' + salvPosted + ' posted this cycle)' + NL +
-      '• pool for next cycle: ' + salvageableLive + ' salvageable (+' + salvAdded + ' / -' + salvDrained + ' this run)' + NL +
+      '**Phase 0 — cleanup**' + NL +
+      '• **salvaged ' + salvAttempted + '** — orphan rows adopted from prior dead cycles (' + salvPosted + ' posted this cycle)' + NL +
+      '• pool for next cycle: **' + salvageableLive + '** salvageable (+' + salvAdded + ' / -' + salvDrained + ' this run)' + NL +
       NL +
-      'Phase 1 (scrape):' + NL +
-      '• searches ' + searches + ': queries run' + NL +
-      '• raw ' + raw + ': tweets returned' + NL +
-      '• passed ' + passed + ': after dedup + age>18h cuts (' + dropped + ' dropped)' + NL +
+      '**Phase 1 — scrape**' + NL +
+      '• **searches ' + searches + '** — queries run' + NL +
+      '• **raw ' + raw + '** — tweets returned' + NL +
+      '• **passed ' + passed + '** — after dedup + age>18h cuts (' + dropped + ' dropped)' + NL +
       NL +
-      'Phase 2a (Δ re-score):' + NL +
-      '• expired ' + expired + ': below Δ<1 likes floor' + NL +
+      '**Phase 2a — Δ re-score**' + NL +
+      '• **expired ' + expired + '** — below Δ<1 likes floor' + NL +
       NL +
-      'Phase 2b (draft + post):' + NL +
-      '• Δ≥10 ' + aboveFloor + ': crossed POST_LIMIT=3 review cap' + NL +
-      '• posted ' + posted + ': shipped' + NL +
-      '• failed ' + failed + ': post errors' + NL +
+      '**Phase 2b — draft + post**' + NL +
+      '• **Δ≥10: ' + aboveFloor + '** — crossed POST_LIMIT=3 review cap' + NL +
+      '• **posted ' + posted + '** — shipped' + NL +
+      '• **failed ' + failed + '** — post errors' + NL +
       NL +
-      'Pending end-of-run: ' + queue +
-      ' (start ' + queueStart + ', +' + qAdded + ' / -' + qDrained + ' = ' +
-        qDrainedPosted + ' posted, ' + qDrainedExpired + ' expired, ' + qDrainedSkipped + ' skipped)' + NL +
-      'Pending live: ' + pendingLive;
+      '**Pending end-of-run:** ' + queue + NL +
+      '  start ' + queueStart + ', +' + qAdded + ' / -' + qDrained + ' = ' +
+        qDrainedPosted + ' posted, ' + qDrainedExpired + ' expired, ' + qDrainedSkipped + ' skipped' + NL +
+      '**Pending live:** ' + pendingLive;
     // Pill order mirrors the tooltip story: salvaged (Phase 0 input) leads,
     // then Phase 1 funnel (searches, raw, passed), Phase 2a drop (expired),
     // Phase 2b decision and outcome (Δ≥10, posted, failed).
@@ -8796,17 +8816,28 @@ function renderResult(run) {
       //     now means "threads that ACTUALLY came through the ripen step
       //     with positive momentum", which is what the word implies in plain
       //     English. Final chain: raw → passed → ripened → drafted → posted.
-      const ripenTip = 'ripen iters: ' + ripenIters +
-        ' / input decisions (=passed): ' + ripenInput +
-        ' / ripened (composite > ' + (ripenFloor != null ? ripenFloor : '?') + '): ' + ripenSurvivors +
-        ' / drops: ' + ripenDrops +
-        ' / iters skipped (0 survivors): ' + ripenSkipped +
-        ' / iters passthrough (no urls / rate limit): ' + ripenPassthrough +
-        (ripenWindow != null ? ' / window: ' + ripenWindow + 's' : '') +
-        (ripenW != null ? ' / formula: Δup + ' + ripenW + '*Δcomments' : '') +
-        (bestComp != null ? ' / best: composite=' + bestComp.toFixed(1) +
-          ' (Δup=' + (bestDup != null ? bestDup : '?') +
-          ', Δcomm=' + (bestDco != null ? bestDco : '?') + ')' : '');
+      // Build the ripen tooltip with explicit newlines (NL is defined in the
+      // outer scope; use String.fromCharCode(10) here in case the closure
+      // walked away from it). See feedback_server_js_template_regex memory:
+      // literal \n inside the outer HTML backtick template gets eaten, so we
+      // build the newline char numerically.
+      const RNL = String.fromCharCode(10);
+      const ripenTip =
+        '**Ripen step** — 5-min Δ re-score' + RNL +
+        RNL +
+        '• **iterations:** ' + ripenIters + RNL +
+        '• **input decisions** (= passed): ' + ripenInput + RNL +
+        '• **ripened** (composite > ' + (ripenFloor != null ? ripenFloor : '?') + '): ' + ripenSurvivors + RNL +
+        '• **drops:** ' + ripenDrops + RNL +
+        '• **iters skipped** (0 survivors): ' + ripenSkipped + RNL +
+        '• **iters passthrough** (no urls / rate limit): ' + ripenPassthrough +
+        (ripenWindow != null ? RNL + RNL + '**window:** ' + ripenWindow + 's' : '') +
+        (ripenW != null ? RNL + '**formula:** Δup + ' + ripenW + '×Δcomments' : '') +
+        (bestComp != null
+          ? RNL + RNL + '**best:** composite=' + bestComp.toFixed(1) +
+            ' (Δup=' + (bestDup != null ? bestDup : '?') +
+            ', Δcomm=' + (bestDco != null ? bestDco : '?') + ')'
+          : '');
       const bestLabel = bestComp != null
         ? ('best Δ' + bestComp.toFixed(1))
         : (ripenSurvivors > 0 ? 'best Δ?' : 'no Δ');
@@ -8863,16 +8894,23 @@ function renderResult(run) {
         bracket = ' <span style="color:var(--muted);font-weight:400;">(' +
                   '+' + salvAdded + '/-' + salvDrained + ' pool)</span>';
       }
-      const qTip = 'salvage attempts this run (Phase 0 row pulls): ' + salvAttempted +
-        ' / salvage lane posted: ' + salvPosted +
-        ' / salvage lane failed: ' + salvFailedNow +
-        ' / salvageable now (pool size for next cycle): ' + salvageableLive +
-        ' (+' + salvAdded + ' became salvageable / -' + salvDrained + ' drained out)' +
-        ' / pending pool end-of-run: ' + queue + ' (start: ' + queueStartV +
-        ', +' + qAdded + ' added, -' + qDrained + ' drained = ' +
-        qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
-        qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped)' +
-        ' / pending right now (live): ' + pendingLive;
+      const QNL = String.fromCharCode(10);
+      const qTip =
+        '**Salvage lane** — Phase 0 cleanup' + QNL +
+        QNL +
+        '• **attempts this run:** ' + salvAttempted + QNL +
+        '• **posted:** ' + salvPosted + QNL +
+        '• **failed:** ' + salvFailedNow + QNL +
+        QNL +
+        '**Salvageable pool** (next cycle): ' + salvageableLive + QNL +
+        '  +' + salvAdded + ' became salvageable, -' + salvDrained + ' drained out' + QNL +
+        QNL +
+        '**Pending pool end-of-run:** ' + queue + QNL +
+        '  start: ' + queueStartV + ', +' + qAdded + ' added, -' + qDrained + ' drained' + QNL +
+        '  drained = ' + qDrainedPosted + ' posted + ' + qDrainedFailed + ' failed + ' +
+        qDrainedExpired + ' expired + ' + qDrainedSkipped + ' skipped' + QNL +
+        QNL +
+        '**Pending live now:** ' + pendingLive;
       return '<span title="' + qTip.replace(/"/g, '&quot;') + '" ' +
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         'salvaged <span style="color:var(--text);font-weight:600;">' + primaryN + '</span>' +
