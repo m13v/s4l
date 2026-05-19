@@ -90,7 +90,10 @@ _TRANSIENT_CDP_ERRORS = {
     "not_logged_in",
 }
 
-from engagement_styles import VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register
+from engagement_styles import (
+    VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register,
+    pick_style_for_post,
+)
 # Audience-page routing: tells Claude which curated landing pages exist for the
 # project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
 # draft when the thread topic matches. See scripts/audience_pages.py + the
@@ -615,12 +618,22 @@ def pick_project(platform="reddit", exclude=None):
     return None
 
 
-def get_top_performers(project_name, platform="reddit"):
+def get_top_performers(project_name, platform="reddit", style=None):
+    """Fetch the top_performers feedback report.
+
+    2026-05-19: optional `style` arg passes through to top_performers.py
+    as --style so the per-style exemplars section gets restricted to the
+    style assigned by pick_style_for_post(). When None, returns the full
+    multi-style report (legacy behavior, still used in invent mode and by
+    callers that have not flipped to the picker yet).
+    """
     try:
+        cmd = ["python3", os.path.join(REPO_DIR, "scripts", "top_performers.py"),
+               "--platform", platform, "--project", project_name]
+        if style:
+            cmd.extend(["--style", style])
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_performers.py"),
-             "--platform", platform, "--project", project_name],
-            capture_output=True, text=True, timeout=15,
+            cmd, capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -867,12 +880,17 @@ def build_content_angle(project, config):
 
 def build_discover_prompt(project, config, limit, top_report, recent_comments,
                           top_topics_report="", dud_queries_report="",
-                          omitted_topics_report=""):
+                          omitted_topics_report="", style_assignment=None):
     """DISCOVER phase: search and select threads only. No drafting.
 
     Claude outputs action=candidate JSON objects (thread_url, title, author,
     search_topic, engagement_style — no text). Drafting is deferred until after
     ripen filters the list so LLM spend only hits threads that passed the delta gate.
+
+    2026-05-19: `style_assignment` is the pick_style_for_post() result for
+    this cycle. When provided, the assigned-style block is embedded so the
+    discover model is told which style to attach to every candidate. When
+    omitted, get_styles_prompt() picks fresh internally (legacy callers).
     """
     content_angle = build_content_angle(project, config)
     topics_list = project.get("search_topics") or []
@@ -1221,7 +1239,7 @@ CRITICAL: every comment picks ONE of two lanes (see the GROUNDING RULE below).
   breaks down is...", "the typical failure mode is...").
 Never present an invented specific as a personal first-hand claim without a Lane 1 opener.
 {recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
-{get_styles_prompt("reddit", context="posting")}
+{get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
 
 ## Tools (via Bash) - ALWAYS foreground, NEVER run_in_background
 - Search (global, by relevance): python3 {REDDIT_TOOLS} search "QUERY" --limit 15
@@ -1746,7 +1764,18 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         # Visibility-only path. Never fail discover because of it.
         print(f"[project_excludes] WARN: active-excludes log failed: {e}", file=sys.stderr)
 
-    top_report = get_top_performers(project_name)
+    # Pick the engagement style FIRST (2026-05-19 picker rollout). The
+    # picked style flows into two places: (1) --style filter for
+    # top_performers so exemplars match the assignment, (2) assignment
+    # arg into build_discover_prompt so the prompt embeds the same
+    # assignment via get_assigned_style_prompt. On invent mode the
+    # picker returns style=None and top_performers stays unfiltered so
+    # the model sees the full top-5 reference landscape.
+    style_assignment = pick_style_for_post("reddit", context="posting")
+    picked_style = style_assignment.get("style")
+    print(f"[post_reddit] discover style assigned: mode={style_assignment['mode']} "
+          f"style={picked_style or '(invent)'}")
+    top_report = get_top_performers(project_name, style=picked_style)
     recent_comments = get_recent_comments()
     top_topics_report = get_top_search_topics(project_name, platform="reddit")
     dud_queries_report = get_dud_reddit_queries(project_name)
@@ -1754,7 +1783,8 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     prompt = build_discover_prompt(project, config, args.limit, top_report, recent_comments,
                                    top_topics_report=top_topics_report,
                                    dud_queries_report=dud_queries_report,
-                                   omitted_topics_report=omitted_topics_report)
+                                   omitted_topics_report=omitted_topics_report,
+                                   style_assignment=style_assignment)
 
     if args.dry_run:
         print(f"=== DRY RUN discover (project={project_name}) ===")
