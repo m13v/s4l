@@ -200,11 +200,62 @@ def update_views(db, scraped_data, quiet=False):
                 matched_thread_stats += 1
         else:
             unmatched += 1
+
+    # ---- Second pass: walk the `replies` table (DM-rail follow-ups) ----
+    # 2026-05-18: the Reddit profile-page scrape already captures view + score
+    # for every comment we've made, including reply-to-replies that live in
+    # the `replies` table (not `posts`). Before this pass those rows defaulted
+    # to views=0 because update_reddit_replies() uses Reddit's JSON API, which
+    # doesn't expose per-comment views. The scrape data is already on disk;
+    # all we have to do is also match `replies.our_reply_id` against the
+    # scraped (post_id, comment_id) keys and PATCH the row.
+    replies_matched = 0
+    replies_unmatched = 0
+    try:
+        resp = api_get(
+            "/api/v1/replies",
+            query={
+                "platform": "reddit",
+                "status": "replied",
+                "has_our_reply_id": "true",
+                "order_by": "id",
+                "limit": 500,
+            },
+        )
+        reply_rows = ((resp or {}).get("data") or {}).get("replies") or []
+    except Exception:
+        reply_rows = []
+
+    for r in reply_rows:
+        rid = r.get("id")
+        our_reply_id = r.get("our_reply_id")
+        if not rid or not our_reply_id:
+            continue
+        # our_reply_id is the bare base-36 comment ID (no `t1_` prefix).
+        cid = our_reply_id.replace("t1_", "")
+        views = views_by_comment.get(cid)
+        score = score_by_comment.get(cid)
+        if views is None and score is None:
+            replies_unmatched += 1
+            continue
+        patch_body = {"stamp_engagement_now": True}
+        if views is not None:
+            patch_body["views"] = int(views)
+        if score is not None:
+            patch_body["upvotes"] = int(score)
+        try:
+            http_api.api_patch(f"/api/v1/replies/{int(rid)}", patch_body)
+            replies_matched += 1
+        except Exception:
+            replies_unmatched += 1
+
     return {
         "matched": matched,
         "matched_comment_score": matched_comment_score,
         "matched_thread_stats": matched_thread_stats,
         "unmatched": unmatched,
+        "replies_matched": replies_matched,
+        "replies_unmatched": replies_unmatched,
         "scraped_total": len(normalised),
         "with_views": len(views_by_comment) + len(views_by_post),
         "with_score_comment": len(score_by_comment),
@@ -272,9 +323,16 @@ def main():
 
     if args.summary:
         try:
+            # `refreshed` is the count stats.sh consumes for the "views-refreshed"
+            # pill. Sum both legs: posts table + replies table (DM-rail follow-ups,
+            # added 2026-05-18). Pre-2026-05-18 logs only had the posts leg.
+            refreshed_total = int(result.get("matched", 0) or 0) + \
+                              int(result.get("replies_matched", 0) or 0)
             with open(args.summary, "w") as f:
                 json.dump({
-                    "refreshed": int(result.get("matched", 0) or 0),
+                    "refreshed": refreshed_total,
+                    "refreshed_posts": int(result.get("matched", 0) or 0),
+                    "refreshed_replies": int(result.get("replies_matched", 0) or 0),
                     "unmatched": int(result.get("unmatched", 0) or 0),
                 }, f)
         except Exception as e:
@@ -283,9 +341,15 @@ def main():
     if args.json:
         print(json.dumps(result, indent=2))
     else:
+        # Stats.sh greps for "^Reddit Views:" and extracts the "<N> DB posts
+        # updated" number for the views-refreshed pill. Include the replies
+        # leg in the same number so the pill reflects ALL rows whose view
+        # counts got written this run, not just the posts table.
+        total_refreshed = result.get("matched", 0) + result.get("replies_matched", 0)
         print(
             f"Reddit Views: {result['with_views']} had views, "
-            f"{result['matched']} DB posts updated, "
+            f"{total_refreshed} DB posts updated "
+            f"(posts={result.get('matched', 0)} replies={result.get('replies_matched', 0)}), "
             f"{result['unmatched']} unmatched"
         )
         t = result["totals"]
