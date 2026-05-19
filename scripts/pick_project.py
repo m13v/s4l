@@ -76,13 +76,18 @@ def get_posts_today_by_project(platform=None):
     return _counts_via_api(platform)
 
 
-def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
-    """Return {project_name: post count} over the last `days` days.
+def _recent_counts_via_api(platform=None, days=RECENT_WINDOW_DAYS):
+    from http_api import api_get
+    query = {"days": str(int(days))}
+    if platform:
+        query["platform"] = platform
+    resp = api_get("/api/v1/posts/counts-by-project-window", query=query)
+    data = (resp or {}).get("data") or {}
+    counts = data.get("counts") or {}
+    return {k: int(v) for k, v in counts.items()}
 
-    Direct Neon read (the cron-proven pattern; this is what the old
-    post_github.recent_github_posts_by_project did). Feeds the
-    inverse-recent-share weighting in pick_projects().
-    """
+
+def _recent_counts_via_neon(platform=None, days=RECENT_WINDOW_DAYS):
     import db as dbmod
 
     days = int(days)
@@ -102,6 +107,20 @@ def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
     finally:
         conn.close()
     return {row[0]: int(row[1]) for row in rows}
+
+
+def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
+    """Return {project_name: post count} over the last `days` days.
+
+    Routes through /api/v1/posts/counts-by-project-window by default.
+    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct Neon. Feeds the
+    inverse-recent-share weighting in pick_projects(). HTTPS-only is
+    required for e2b VM / sandbox installs that intentionally omit
+    DATABASE_URL.
+    """
+    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
+        return _recent_counts_via_neon(platform, days)
+    return _recent_counts_via_api(platform, days)
 
 
 def _eligible_pool(config, platform=None, exclude=None):
