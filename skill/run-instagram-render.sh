@@ -113,6 +113,20 @@ target_account = os.environ.get('TARGET_ACCOUNT', '').strip()
 if not target_account:
     raise SystemExit("TARGET_ACCOUNT env var missing (Step 0 should have set it)")
 
+# Per-account overrides: each account in instagram.accounts[] may override the
+# global post_type_weights and supply a `tlh` block (source_dir,
+# variant_prefix, story_brief, unproven_dir, caption_opener) that scopes the
+# TLH render to its own clip pool + voice. Accounts without these fields
+# fall back to globals (matt_diak / matthewheartful behavior is unchanged).
+account_record = next(
+    (a for a in (ig_cfg.get('accounts') or [])
+     if a.get('username', '').lower() == target_account.lower()),
+    {}
+)
+if account_record.get('post_type_weights'):
+    post_type_weights_cfg = account_record['post_type_weights']
+account_tlh_config = account_record.get('tlh') or {}
+
 # Last-N posted descriptor (kept for telemetry / log readability).
 c.execute(
     "SELECT post_type FROM media_posts "
@@ -293,6 +307,11 @@ print(json.dumps({
     'mixer_enabled_projects': mixer_enabled_projects,
     'recent_product_posts_by_project': project_post_counts,
     'project_weights_effective': project_weights,
+    # Per-account TLH overrides (organic format). Empty dict {} means
+    # this account uses SKILL.md defaults (Matt's '5. time lapse hooks/'
+    # source + AI-defeat caption arc). When non-empty, Claude MUST use
+    # these overrides for source_dir, variant_prefix, and story_brief.
+    'account_tlh_config': account_tlh_config,
 }, indent=2))
 conn.close()
 PY
@@ -329,13 +348,33 @@ if [ "$TARGET" = "organic" ]; then
   /opt/homebrew/bin/python3.11 - "$UNPROVEN_JSON_FILE" > /dev/null 2>>"$LOG_FILE" <<'PY'
 import json, os, random, sys, glob, psycopg2
 out_path = sys.argv[1]
-unproven_dir = os.path.expanduser('~/social-autoposter/mixer/unproven new content')
 env = {}
 for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
     if '=' in ln and not ln.strip().startswith('#'):
         k, v = ln.split('=', 1)
         env[k.strip()] = v.strip()
+# Resolve per-account unproven_dir override from config.json. If the
+# account opts out (tlh.unproven_dir == null) the step short-circuits.
+cfg = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
+target_account_init = os.environ.get('TARGET_ACCOUNT', '').strip()
+account_record_init = next(
+    (a for a in ((cfg.get('instagram') or {}).get('accounts') or [])
+     if a.get('username', '').lower() == target_account_init.lower()),
+    {}
+)
+tlh_cfg_init = account_record_init.get('tlh') or {}
+if 'unproven_dir' in tlh_cfg_init:
+    unproven_dir_raw = tlh_cfg_init.get('unproven_dir')
+    unproven_dir = os.path.expanduser(unproven_dir_raw) if unproven_dir_raw else None
+else:
+    # Default: matt_diak / matthewheartful unchanged.
+    unproven_dir = os.path.expanduser('~/social-autoposter/mixer/unproven new content')
 result = {"use": False}
+if unproven_dir is None:
+    result = {"use": False, "reason": "account opted out of unproven rotation (tlh.unproven_dir=null)"}
+    with open(out_path, 'w') as f:
+        json.dump(result, f, indent=2)
+    raise SystemExit(0)
 try:
     conn = psycopg2.connect(env['DATABASE_URL'])
     c = conn.cursor()
@@ -516,14 +555,36 @@ Pick the variant within the selected project that is least-recently-rendered
 ORGANIC-PATH (post_type='organic'):
 Compose a new TLH variant. You may remix existing pre-encoded
 remotion/public/mixer/tlh-*.mp4 slots (cheaper, faster) OR encode fresh raw
-clips from ~/social-autoposter/mixer/'5. time lapse hooks/' if available
-(only if remixing produces a stale recombination). The audio_source MUST be a
-LOCAL file from local_audio_lru -- pick the least-recently-used (first) entry.
-NEVER source audio from the network. The caption MUST follow SKILL Section 3
-caption arc (8 beats: opener, age+setup, wrong-about-AI moment, breaking
-event, felt-sense, workflow change, contrarian one-liner, closing
-instruction). Theme angle must be in SKILL Section 3 list and NOT in
+clips from the account's source folder if available (only if remixing
+produces a stale recombination). The audio_source MUST be a LOCAL file from
+local_audio_lru -- pick the least-recently-used (first) entry. NEVER source
+audio from the network. The caption MUST follow SKILL Section 3 caption arc
+(8 beats). Theme angle must be in SKILL Section 3 list and NOT in
 used_theme_angles_14d.
+
+PER-ACCOUNT TLH CONFIG (account_tlh_config in the envelope above):
+- If account_tlh_config is non-empty, it REPLACES the SKILL Section 3 defaults
+  for THIS account's organic renders. Specifically:
+    * source_dir     -> raw clip folder (use this, NOT '5. time lapse hooks/')
+    * variant_prefix -> variant_id prefix (e.g. 'omi-lesson-'); pick the next
+                        free integer (omi-lesson-1, omi-lesson-2, ...).
+                        Existing variants for this account are in
+                        used_variant_ids; the new variant_id MUST start with
+                        variant_prefix AND not collide with used_variant_ids.
+    * unproven_dir   -> null means this account opts out of the unproven
+                        rotation entirely (the harness already short-circuits
+                        the injection step; treat 'use':false as authoritative).
+    * caption_opener -> override the 'here is a story.' default if set.
+    * story_brief    -> REPLACES SKILL Section 3's AI-defeat brief. The
+                        8-beat structure still applies but the persona,
+                        setup, forgetting moment, etc. come from the brief.
+                        Voice + content come from THE BRIEF, not from
+                        SKILL examples. SKILL examples are reference for the
+                        default (matt_diak / matthewheartful) account.
+- If account_tlh_config is empty {}, use SKILL Section 3 defaults as before
+  (matt_diak / matthewheartful behavior is unchanged).
+- Variant encoding still uses the pure-speedup recipe in SKILL Section 3
+  step 2. Variant registration in data.ts is unchanged.
 
 DO NOT post to Instagram. The post-cycle (skill/run-instagram-daily.sh)
 posts separately on its own schedule. Your job ends at status='draft'.
