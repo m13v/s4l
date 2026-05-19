@@ -864,29 +864,31 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
 
 # ── Prompt generators ───────────────────────────────────────────────
 
-def get_styles_prompt(platform, context="posting"):
+def get_styles_prompt(platform, context="posting", assignment=None):
     """Generate the engagement styles prompt block for a given platform.
 
     2026-05-19 picker rollout: this function now internally calls
     pick_style_for_post() and returns the compact assigned-style prompt
     (one style + description + example + note, or invent mode with top-N
-    references). Callers that need to know which style was picked (for
-    top_performers filtering, drift detection, log_post) should call
-    pick_style_for_post() + get_assigned_style_prompt() directly instead
-    of using this function. This wrapper exists so callers that haven't
-    been upgraded yet (mostly shell pipelines for GitHub/LinkedIn/Moltbook)
-    still benefit from the picker without code changes.
+    references).
 
     Args:
         platform: "reddit", "twitter", "linkedin", "github", "moltbook"
         context: "posting" (new posts) or "replying" (engagement replies)
+        assignment: an optional pre-computed pick_style_for_post() result.
+                    Orchestrators that need to know the picked style (to
+                    filter top_performers, log drift, etc.) pick once,
+                    then pass the assignment in to avoid double-picking.
+                    Callers that don't care can omit it and get a fresh
+                    pick.
+
+    Legacy "show all styles, let the model pick" prompt is reachable via
+    SAPS_LEGACY_STYLES_PROMPT=1 for rollback / A/B comparison only. Not
+    used in normal operation.
     """
     if os.environ.get("SAPS_LEGACY_STYLES_PROMPT") != "1":
-        # New default: pick programmatically and emit the compact prompt.
-        # The legacy "show all styles, let the model pick" prompt is kept
-        # accessible behind SAPS_LEGACY_STYLES_PROMPT=1 for debugging /
-        # rollback. Should not be needed in normal operation.
-        assignment = pick_style_for_post(platform, context=context)
+        if assignment is None:
+            assignment = pick_style_for_post(platform, context=context)
         return get_assigned_style_prompt(platform, assignment, context=context)
 
     policy = PLATFORM_POLICY.get(platform, PLATFORM_POLICY["reddit"])
