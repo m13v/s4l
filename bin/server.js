@@ -8868,7 +8868,7 @@ function renderResult(run) {
         'operator can tell hard-deletion from rate-limit or network noise.') : '') +
       (notFound ? tipPill('not found', notFound, 'var(--muted)',
         'LinkedIn only: post is still active on LinkedIn but our specific ' +
-        'comment couldn\'t be located on the activity feed (may have ' +
+        'comment could not be located on the activity feed (may have ' +
         'aged off our visible recent-activity window).') : '') +
       (failed ? tipPill('failed', failed, '#ef4444',
         'API errors during the run, broken down by category: 404 not_found, ' +
