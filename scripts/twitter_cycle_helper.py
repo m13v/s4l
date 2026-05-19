@@ -156,10 +156,19 @@ def cmd_candidates(batch_id: str) -> int:
     import re
     from datetime import datetime, timezone
 
-    resp = api_get(
-        "/api/v1/twitter-candidates",
-        query={"batch_id": batch_id, "status": "pending", "limit": 500},
-    )
+    # Scope by our_account so a peer machine's pending rows on the same
+    # tweet_url don't surface in this machine's batch. The composite
+    # (tweet_url, our_account) unique guarantees each machine has its own
+    # candidate row; this filter just makes the GET match the INSERT shape.
+    query: dict[str, object] = {
+        "batch_id": batch_id,
+        "status": "pending",
+        "limit": 500,
+    }
+    handle = _resolve_twitter_handle()
+    if handle:
+        query["our_account"] = handle
+    resp = api_get("/api/v1/twitter-candidates", query=query)
     rows = (resp.get("data") or {}).get("candidates") or []
 
     INTENT_RE = re.compile(
