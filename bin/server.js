@@ -385,11 +385,19 @@ function getPool() {
   if (_pool) return _pool;
   const dbUrl = getDbUrl();
   if (!dbUrl) return null;
+  // Pool sized for the per-project breakdown load pattern: 8 pg-backed
+  // endpoints (views/upvotes/comments/clicks/posts/bookings/cost + funnel
+  // metadata) firing for 2-3 concurrent projects = ~24 simultaneous queries,
+  // on top of normal page load. max:5 caused ~219k connection timeouts in
+  // skill/logs/launchd-dashboard-stderr.log on 2026-05-19 because every
+  // pg-backed request started failing at the 10s connectionTimeoutMillis cap
+  // (blank Get Started card, empty per-project rows). Neon free tier allows
+  // 100 concurrent connections per project, so 25 is well within budget.
   _pool = new Pool({
     connectionString: dbUrl,
-    max: 5,
+    max: 25,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 30000,
   });
   _pool.on('error', (err) => {
     console.error('[pg.Pool] idle client error:', err.message);
@@ -416,9 +424,9 @@ function getBookingsPool() {
   if (!dbUrl) return null;
   _bookingsPool = new Pool({
     connectionString: dbUrl,
-    max: 3,
+    max: 10,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 30000,
   });
   _bookingsPool.on('error', (err) => {
     console.error('[bookings pg.Pool] idle client error:', err.message);
@@ -5867,14 +5875,20 @@ async function handleApi(req, res) {
   // slow (~15-30s), so we cache for 10 min and dedupe concurrent callers.
   // A launchd timer (com.m13v.social-precompute-stats) also writes fresh
   // snapshots to skill/cache/funnel_stats_<N>d.json so cold starts are instant.
-  // The optional platform filter is applied AFTER snapshot read by re-running
-  // python live (snapshots are always all-platform). Cache key includes
-  // platform so warm hits stay correct.
+  //
+  // Platform filter handling:
+  //   !platform: read the all-platform snapshot from disk (~instant).
+  //   platform set: read the snapshot for funnel cells (pageviews / signups /
+  //     bookings / amplitude are platform-independent since they measure on-
+  //     site behavior, not which social platform drove the visitor) AND spawn
+  //     python with --posts-only --platform=X to recompute ONLY the per-project
+  //     posts.* engagement counters (~1.5s instead of ~30s+ because the
+  //     PostHog/Amplitude/bookings batch is skipped). Merge the two into one
+  //     payload so the dashboard sees platform-scoped engagement on the same
+  //     row as the all-source funnel cells.
   if (p === '/api/funnel/stats' && req.method === 'GET') {
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '1', 10) || 1));
-    // Normalize platform the same way /api/style/stats does so both surfaces
-    // speak the same vocabulary: empty/'all' = no filter, 'x' folds into 'twitter'.
     const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
     const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
                      (rawPlatform === 'x' ? 'twitter' : rawPlatform);
@@ -5886,33 +5900,19 @@ async function handleApi(req, res) {
     if (entry && entry.value && Date.now() - entry.at < TTL_MS) {
       return json(res, scopeFunnelStatsPayload({ days, platform: platform || 'all', ...entry.value, cachedAt: entry.at }, req.user));
     }
-    // Disk snapshots are only precomputed for the all-platform view; any
-    // platform filter has to run live (still cached in memory after).
-    if (!platform) {
-      const snap = await readSnapshotCached(`funnel_stats_${days}d.json`);
-      if (snap && snap.value && !snap.value.error) {
-        funnelStatsCache.set(cacheKey, { at: snap.at, value: snap.value });
-        return json(res, scopeFunnelStatsPayload({ ...snap.value, cachedAt: snap.at }, req.user));
-      }
-    }
     if (entry && entry.pending) {
       entry.pending.then(val => json(res, scopeFunnelStatsPayload({ days, platform: platform || 'all', ...val, cachedAt: Date.now() }, req.user)))
                    .catch(err => json(res, { error: String(err && err.message || err) }, 500));
       return;
     }
-    // Cloud Run has no python runtime and no PostHog creds; only the
-    // operator's local server can run the live pipeline. Return whatever
-    // we've got (empty snapshot if nothing) rather than hanging.
     if (auth.CLIENT_MODE) {
       return json(res, { days, platform: platform || 'all', error: 'snapshot_missing', cachedAt: null }, 503);
     }
+
     const scriptPath = path.join(DEST, 'scripts', 'project_stats_json.py');
-    const pyArgs = [scriptPath, '--days', String(days)];
-    if (platform) pyArgs.push('--platform', platform);
-    const pending = new Promise((resolve, reject) => {
-      const child = spawn('python3', pyArgs, {
-        env: process.env, cwd: DEST,
-      });
+    const runPython = (extraArgs) => new Promise((resolve, reject) => {
+      const args = [scriptPath, '--days', String(days), ...extraArgs];
+      const child = spawn('python3', args, { env: process.env, cwd: DEST });
       let out = '', err = '';
       child.stdout.on('data', d => out += d);
       child.stderr.on('data', d => err += d);
@@ -5922,6 +5922,57 @@ async function handleApi(req, res) {
         try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
       });
     });
+
+    let pending;
+    if (platform) {
+      // Fast platform-filtered path: snapshot (funnel cells) + posts-only overlay.
+      // Falls back to the slow full pipeline if no all-platform snapshot exists.
+      pending = (async () => {
+        // Use a 24h freshness window for the overlay base: the snapshot only
+        // contributes the funnel cells (pageviews / signups / bookings /
+        // amplitude / SEO pages), all of which move on a daily-ish timescale.
+        // The posts.* counters (which DO move every few minutes) are
+        // recomputed live via --posts-only, so a stale funnel-cell base is
+        // safe and avoids falling back to the 30s+ full pipeline whenever
+        // the precompute job lags >15min.
+        const STALE_OK = 24 * 60 * 60 * 1000;
+        const snap = await readSnapshotCached(`funnel_stats_${days}d.json`, STALE_OK);
+        if (!snap || !snap.value || snap.value.error || !Array.isArray(snap.value.projects)) {
+          return runPython(['--platform', platform]);
+        }
+        const overlay = await runPython(['--platform', platform, '--posts-only']);
+        const overlayByName = new Map();
+        for (const op of overlay.projects || []) {
+          if (op && op.name) overlayByName.set(op.name, op);
+        }
+        const mergedProjects = snap.value.projects.map(snapP => {
+          if (!snapP || !snapP.name) return snapP;
+          const op = overlayByName.get(snapP.name);
+          if (!op || op.error || !op.posts) return snapP;
+          // Replace ONLY the posts.* counters from the overlay; everything
+          // else (funnel, posthog, bookings, seo, platforms, analytics flags)
+          // stays at the snapshot's all-platform value because those metrics
+          // don't move with the social-platform filter.
+          return { ...snapP, posts: { ...(snapP.posts || {}), ...op.posts } };
+        });
+        return {
+          generated_at: overlay.generated_at || snap.value.generated_at,
+          days,
+          platform,
+          posts_only_overlay: true,
+          projects: mergedProjects,
+          overall: snap.value.overall || null,
+        };
+      })();
+    } else {
+      const snap = await readSnapshotCached(`funnel_stats_${days}d.json`);
+      if (snap && snap.value && !snap.value.error) {
+        funnelStatsCache.set(cacheKey, { at: snap.at, value: snap.value });
+        return json(res, scopeFunnelStatsPayload({ ...snap.value, cachedAt: snap.at }, req.user));
+      }
+      pending = runPython([]);
+    }
+
     funnelStatsCache.set(cacheKey, { at: Date.now(), pending });
     pending.then(val => {
       funnelStatsCache.set(cacheKey, { at: Date.now(), value: val });
@@ -11751,7 +11802,11 @@ async function _perProjectLoadIfNeeded() {
   let done = 0;
   _setPerProjectStatus('0 / ' + projects.length);
   try {
-    await _perProjectRunConcurrency(projects, 3, async (project) => {
+    // 2 concurrent projects = 16 simultaneous endpoint calls (8 per project).
+    // 3 was overloading the dashboard's pg pool and PostHog rate limits on a
+    // cold cache; 2 keeps the per-project load slow-but-steady and lets the
+    // pg pool (now max:25) actually drain between waves.
+    await _perProjectRunConcurrency(projects, 2, async (project) => {
       // Bail if filters changed mid-load.
       if (_perProjectState.loadedKey !== want) return;
       const { series, failed } = await _perProjectFetchOne(project, gran, platform, fetchDays, dailyAxis);
