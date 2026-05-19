@@ -60,7 +60,12 @@ PER_SCRIPT_CAP_SEC = {
     # uniform across platforms.
     ("run-reddit-search.sh", None): 120 * 60,
     ("run-reddit-threads.sh", None): 120 * 60,
-    ("run-twitter-cycle.sh", None): 120 * 60,
+    # 2026-05-19: raised 120 → 180 min after two consecutive cycles died at the
+    # 120 cap mid-Phase-2b-gen with `phase2b_silent:1`. Combined with
+    # twitter_gen_links.GEN_TIMEOUT_SEC drop (3000 → 900s) and
+    # MAX_AB_HITS_PER_CYCLE cap (4), gen phase now has a 60min worst-case
+    # ceiling, leaving 120min for scan + T1 sleep + prep + post.
+    ("run-twitter-cycle.sh", None): 180 * 60,
     ("run-linkedin.sh", None): 120 * 60,
     ("run-moltbook.sh", None): 120 * 60,
     ("run-github.sh", None): 120 * 60,
