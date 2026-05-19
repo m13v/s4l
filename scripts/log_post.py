@@ -60,6 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import http_api
 import linkedin_url as li_url
 from db import load_env
+from twitter_account import resolve_handle as resolve_twitter_handle
 
 URN_ID_RE = re.compile(r"\b(\d{16,19})\b")
 
@@ -83,11 +84,28 @@ VALID_PLATFORMS = ("reddit", "twitter", "linkedin", "github_issues", "moltbook")
 
 DEFAULT_ACCOUNTS = {
     "reddit": "Deep_Ad1959",
-    "twitter": "m13v_",
     "linkedin": "Matthew Diakonov",
     "github_issues": "m13v",
     "moltbook": "matthew-autoposter",
 }
+
+
+def _resolve_default_account(platform: str) -> str:
+    """Return the canonical account handle for `platform` on this machine.
+
+    Twitter is multi-machine-aware: each machine declares its own handle via
+    `AUTOPOSTER_TWITTER_HANDLE` env or `accounts.twitter.handle` in
+    config.json, and `twitter_account.resolve_handle()` returns the
+    normalized form (no `@` prefix). Other platforms keep their static
+    defaults until each gets the same multi-machine treatment.
+
+    Returns empty string when nothing is configured; the caller's
+    `args.account or _resolve_default_account(...)` chain still lets an
+    explicit `--account` flag win.
+    """
+    if platform == "twitter":
+        return resolve_twitter_handle() or ""
+    return DEFAULT_ACCOUNTS.get(platform, "")
 
 
 def mark_self_reply(args):
@@ -128,7 +146,7 @@ def log_rejected(args):
         }))
         sys.exit(1)
 
-    account = args.account or DEFAULT_ACCOUNTS.get(args.platform, "")
+    account = args.account or _resolve_default_account(args.platform)
 
     summary_parts = []
     if args.rejection_reason:
@@ -277,7 +295,7 @@ def main():
         }))
         sys.exit(1)
 
-    account = args.account or DEFAULT_ACCOUNTS.get(args.platform, "")
+    account = args.account or _resolve_default_account(args.platform)
 
     # LinkedIn: same post surfaces under multiple URL shapes (/feed/update/
     # vs /posts/...-share-...) with different numeric URNs. Canonicalize
