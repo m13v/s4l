@@ -83,6 +83,23 @@ UPVOTES_NET_SQL = (
     "ELSE COALESCE(upvotes,0) END)"
 )
 
+# Recency window for every SCORE_SQL-driven query in this module. Lifetime
+# aggregation drifted too far from current performance reality (old wins kept
+# old styles in the picker pool even after the audience/algorithm shifted).
+# 30 days keeps n large enough for stable averages while letting the report
+# track the live algorithm. Set RECENCY_DAYS=0 to fall back to lifetime.
+# Mirrors engagement_styles.RECENCY_DAYS so the picker and few-shot context
+# never disagree on which window defines "top".
+RECENCY_DAYS = 30
+
+
+def _recency_clause():
+    """Return a WHERE-clause fragment that limits posts to the recency window,
+    or an empty string if RECENCY_DAYS == 0 (lifetime mode)."""
+    if not RECENCY_DAYS or RECENCY_DAYS <= 0:
+        return ""
+    return f"posted_at >= NOW() - INTERVAL '{int(RECENCY_DAYS)} days'"
+
 # Per-platform "meaningful engagement" floor for the SCORE_SQL composite.
 # Twitter/LinkedIn reactions are rarer than Reddit upvotes, so thresholds differ.
 PLATFORM_MIN_SCORE = {
@@ -259,6 +276,9 @@ def get_style_performance(conn, platform=None):
         f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
         "upvotes IS NOT NULL",
     ]
+    _r = _recency_clause()
+    if _r:
+        where_clauses.append(_r)
     params = []
     if platform:
         where_clauses.append("platform = %s")
@@ -297,6 +317,9 @@ def get_project_platform_summary(conn, project=None, platform=None):
         "our_content IS NOT NULL",
         f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
     ]
+    _r = _recency_clause()
+    if _r:
+        where_clauses.append(_r)
 
     if project and platform:
         # Show this project on all platforms + this platform for all projects
@@ -354,6 +377,9 @@ def get_top_posts(conn, project=None, platform=None, limit=15, min_score=None):
         f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
         "platform NOT IN ('github_issues')",
     ]
+    _r = _recency_clause()
+    if _r:
+        where_clauses.append(_r)
     params = []
     if project:
         where_clauses.append("project_name = %s")
@@ -441,6 +467,9 @@ def get_top_post_per_style(conn, platform=None):
         f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
         "platform NOT IN ('github_issues')",
     ]
+    _r = _recency_clause()
+    if _r:
+        where_clauses.append(_r)
     params = []
     if platform:
         where_clauses.append("platform = %s")
@@ -486,6 +515,9 @@ def get_bottom_posts(conn, project=None, platform=None, limit=10):
         f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
         "platform NOT IN ('github_issues')",
     ]
+    _r = _recency_clause()
+    if _r:
+        where_clauses.append(_r)
     params = []
     if project:
         where_clauses.append("project_name = %s")
@@ -809,13 +841,15 @@ def _fetch_report_via_neon(*, platform, project, top, bottom):
             min_score = min_score_for(platform)
             platform_filter = "AND platform = %s" if platform else ""
             platform_params = [platform] if platform else []
+            _r = _recency_clause()
+            recency_filter = f"AND {_r} " if _r else ""
             cur = conn.execute(
                 f"{POSTS_WITH_CLICKS_CTE}"
                 f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts_w_clicks "
                 f"WHERE status = 'active' AND platform NOT IN ('github_issues') "
                 f"AND our_content IS NOT NULL AND LENGTH(our_content) >= %s "
                 f"AND upvotes IS NOT NULL AND {SCORE_SQL} >= %s "
-                f"{platform_filter} "
+                f"{platform_filter} {recency_filter}"
                 f"ORDER BY 1",
                 [MIN_CONTENT_LEN, min_score] + platform_params,
             )
@@ -832,7 +866,7 @@ def _fetch_report_via_neon(*, platform, project, top, bottom):
                     f"FROM posts_w_clicks WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
                     f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
                     f"AND platform NOT IN ('github_issues') "
-                    f"{where_extra} {platform_filter} "
+                    f"{where_extra} {platform_filter} {recency_filter}"
                     f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
                     f"         {UPVOTES_NET_SQL} DESC LIMIT 5",
                     params,
