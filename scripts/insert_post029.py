@@ -65,16 +65,19 @@ with psycopg.connect(DB, autocommit=False) as conn:
             INSERT INTO media_posts (
                 post_number, project_name, variant_id, video_path, audio_source,
                 caption_text, caption_version, duration_sec, width, height, status,
+                post_type, target_account,
                 posted_urls, source_clips, overlays, engagement, metadata
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
+                %s, %s,
                 %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb
             )
             RETURNING id, post_number
         """, (
-            POST_NUMBER, "fazm", VARIANT_ID, VIDEO_PATH, f"local:{AUDIO_PATH}",
+            POST_NUMBER, None, VARIANT_ID, VIDEO_PATH, f"local:{AUDIO_PATH}",
             CAPTION, "v1", 8.0, 1080, 1920, "draft",
+            "organic", "matt_diak",
             json.dumps({}),
             json.dumps(source_clips),
             json.dumps(overlays),
