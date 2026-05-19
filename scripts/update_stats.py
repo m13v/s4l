@@ -1497,12 +1497,25 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
 
     for post in posts:
         total += 1
-        post_id, our_url = post[0], post[1]
-        no_change = post[2]
-        posted_at = post[3]
-        prev_upvotes = post[4]
-        prev_views = post[5]
-        prev_comments = post[6]
+        # The HTTP shape is a dict; the previous direct-SQL shape was a tuple.
+        # Read by column name so callers downstream stay decoupled from SQL
+        # ordinal positions.
+        post_id = post.get("id")
+        our_url = post.get("our_url") or ""
+        no_change = int(post.get("scan_no_change_count") or 0)
+        posted_at_raw = post.get("posted_at")
+        prev_upvotes = post.get("upvotes")
+        prev_views = post.get("views")
+        prev_comments = post.get("comments_count")
+        # posted_at arrives as an ISO-8601 string over JSON; parse to a tz-aware
+        # datetime so the audit-mode age check still works.
+        if isinstance(posted_at_raw, str) and posted_at_raw:
+            try:
+                posted_at = datetime.fromisoformat(posted_at_raw.replace("Z", "+00:00"))
+            except ValueError:
+                posted_at = None
+        else:
+            posted_at = posted_at_raw
 
         # Stable-skip applies only to the cold tier (audit). The hot tier's
         # SQL filter restricts to posted_at > NOW() - 7d, so the "older than
@@ -1552,26 +1565,16 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
 
         if code == 404 or tweet is None:
             # Tweet not found, could be deleted or suspended. Run the 2-strike
-            # confirmation in both modes so hot-tier deletions surface within
-            # hours; the cold-tier audit still runs the same pipeline daily.
-            row = db.execute(
-                "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-            ).fetchone()
-            detect_count = (row[0] if row else 0) + 1
-            if detect_count >= 2:
-                db.execute(
-                    "UPDATE posts SET status='deleted', deletion_detect_count=%s, "
-                    "status_checked_at=NOW() WHERE id=%s",
-                    [detect_count, post_id]
-                )
+            # confirmation atomically server-side via /detect-deletion so the
+            # bump+threshold check is one HTTP round trip instead of read +
+            # write. detect_count = the new value after bump; status_set=True
+            # when the threshold was met and posts.status flipped to 'deleted'.
+            detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+            if status_set:
                 deleted += 1
                 if not quiet:
                     print(f"DELETED [{post_id}] (confirmed after {detect_count} detections)")
             else:
-                db.execute(
-                    "UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                    [detect_count, post_id]
-                )
                 if not quiet:
                     print(f"DELETION PENDING [{post_id}] (detection {detect_count}/2)")
             continue
@@ -1583,43 +1586,55 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         retweets = tweet.get("retweets") or 0
         bookmarks = tweet.get("bookmarks") or 0
 
-        db.execute(
-            "UPDATE posts SET views=%s, upvotes=%s, comments_count=%s, "
-            "engagement_updated_at=NOW(), status_checked_at=NOW(), "
-            "deletion_detect_count=0 WHERE id=%s",
-            [views, likes, replies, post_id],
-        )
-        dbmod.snapshot_post_views(db, post_id, views)
+        # Track no-change so the next-poll cycle can skip stable posts. Compute
+        # this BEFORE the PATCH so we send the right scan_no_change_delta in
+        # the same call (server-side: +1 to bump, signal a reset via the
+        # current absolute value approach below).
+        stayed_same = (likes == prev_upvotes
+                       and views == prev_views
+                       and replies == prev_comments)
+
+        # One PATCH per post: stats + freshness stamps + counter delta + the
+        # deletion_detect_count reset (the row didn't 404 this round). The
+        # server keys "scan_no_change_delta=+1 then reset_via=N=0" off the
+        # absolute value when we send scan_no_change_count=0; the +1 bump
+        # path uses scan_no_change_delta=1 so the row's prior count is
+        # incremented atomically without read-modify-write race conditions.
+        patch_body = {
+            "views": int(views),
+            "upvotes": int(likes),
+            "comments_count": int(replies),
+            "stamp_engagement_now": True,
+            "stamp_status_checked_now": True,
+            "reset_deletion_detect_count": True,
+        }
+        if stayed_same:
+            patch_body["scan_no_change_delta"] = 1
+        else:
+            patch_body["scan_no_change_count"] = 0
+        _http_patch_post(post_id, patch_body)
+
+        # snapshot_post_views: separate POST so a transient failure here only
+        # loses today's per-day rollup datapoint, not the parent stats update.
+        _http_snapshot_post_views(post_id, views)
 
         updated += 1
+        if not stayed_same:
+            changed += 1
         results.append({"id": post_id, "views": views, "likes": likes,
                         "replies": replies, "retweets": retweets})
-
-        # Track no-change for skip optimization. The "actually moved" branch
-        # also bumps `changed` so the printed summary can distinguish a
-        # successful poll (updated) from one where any tracked stat shifted.
-        # All three signals are watched (views, likes, replies) so a tweet
-        # that stays flat on views/likes but is still picking up replies is
-        # NOT mistakenly classified as "stable" and isn't skip-optimized.
-        if (likes == prev_upvotes
-                and views == prev_views
-                and replies == prev_comments):
-            db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s", [post_id])
-        else:
-            changed += 1
-            db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id = %s", [post_id])
 
         # Rate limit: 1 request per second to be safe with fxtwitter
         time.sleep(1)
 
-        # Commit every 50 tweets to save progress
+        # Progress tick every 50 polls. No db.commit() needed: each
+        # _http_patch_post / _http_snapshot_post_views is its own
+        # auto-committed transaction server-side.
         if total % 50 == 0:
-            db.commit()
             progress.tick("twitter", total, len(posts),
                           updated=updated, changed=changed, deleted=deleted,
                           suspended=suspended, errors=errors, skipped=skipped)
 
-    db.commit()
     progress.done("twitter", len(posts),
                   updated=updated, changed=changed, deleted=deleted,
                   suspended=suspended, errors=errors, skipped=skipped)
@@ -1720,19 +1735,35 @@ def update_reddit_replies(db, user_agent, quiet=False):
 def update_twitter_replies(db, quiet=False):
     """Refresh per-reply stats (likes, replies count, views) for our reply
     tweets stored in `replies`. Reuses the fxtwitter API per reply tweet ID.
+
+    Multi-account safety: the read is scoped server-side to this caller's
+    install_id (via X-Installation auth), so two machines refreshing in
+    parallel don't both poll the same set of reply tweets. Historical NULL-
+    install_id rows are claimed by the primary local install per the
+    backfill in 2026-05-19 — see active-for-stats/route.ts for the WHERE
+    detail.
+
+    `db` is accepted for orchestrator signature compatibility but the
+    function makes no direct SQL calls — every read/write is HTTP.
     """
     FRESH_WINDOW = timedelta(days=7)
     now_utc = datetime.now(timezone.utc)
 
-    rows = db.execute(
-        "SELECT id, our_reply_url, engagement_updated_at FROM replies "
-        "WHERE platform='twitter' AND status='replied' AND our_reply_url IS NOT NULL "
-        "ORDER BY id"
-    ).fetchall()
+    rows = _http_list_twitter_replies_to_refresh()
 
     total = updated = errors = skipped_fresh = 0
     for row in rows:
-        rid, url, eu = row[0], row[1], row[2]
+        rid = row.get("id")
+        url = row.get("our_reply_url") or ""
+        eu_raw = row.get("engagement_updated_at")
+        # engagement_updated_at arrives as ISO-8601 over JSON.
+        if isinstance(eu_raw, str) and eu_raw:
+            try:
+                eu = datetime.fromisoformat(eu_raw.replace("Z", "+00:00"))
+            except ValueError:
+                eu = None
+        else:
+            eu = eu_raw
         if eu:
             if eu.tzinfo is None:
                 eu = eu.replace(tzinfo=timezone.utc)
@@ -1774,21 +1805,20 @@ def update_twitter_replies(db, quiet=False):
         likes = int(tweet.get("likes") or 0)
         replies_count = int(tweet.get("replies") or 0)
 
-        db.execute(
-            "UPDATE replies SET upvotes=%s, comments_count=%s, views=%s, "
-            "engagement_updated_at=NOW() WHERE id=%s",
-            [likes, replies_count, views, rid],
-        )
+        _http_patch_reply(rid, {
+            "upvotes": likes,
+            "comments_count": replies_count,
+            "views": views,
+            "stamp_engagement_now": True,
+        })
         updated += 1
 
         # fxtwitter pacing — same 1s as posts
         time.sleep(1)
         if total % 50 == 0:
-            db.commit()
             progress.tick("twitter_replies", total, len(rows) - skipped_fresh,
                           updated=updated, errors=errors)
 
-    db.commit()
     progress.done("twitter_replies", total, updated=updated, errors=errors)
     if not quiet:
         print(f"  twitter replies: {total} checked, {updated} updated, "
