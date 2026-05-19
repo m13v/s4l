@@ -867,18 +867,28 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
 def get_styles_prompt(platform, context="posting"):
     """Generate the engagement styles prompt block for a given platform.
 
-    Shows an explicit per-style target pick% (computed from a live
-    click-weighted score via compute_target_distribution) plus the last 10
-    picks on this platform, so the LLM can preferentially pick styles that
-    are under-used vs target.
-
-    Replaces the old PRIMARY/SECONDARY/RARE buckets, which tended to make
-    the LLM fixate on one "safe" style regardless of actual performance data.
+    2026-05-19 picker rollout: this function now internally calls
+    pick_style_for_post() and returns the compact assigned-style prompt
+    (one style + description + example + note, or invent mode with top-N
+    references). Callers that need to know which style was picked (for
+    top_performers filtering, drift detection, log_post) should call
+    pick_style_for_post() + get_assigned_style_prompt() directly instead
+    of using this function. This wrapper exists so callers that haven't
+    been upgraded yet (mostly shell pipelines for GitHub/LinkedIn/Moltbook)
+    still benefit from the picker without code changes.
 
     Args:
         platform: "reddit", "twitter", "linkedin", "github", "moltbook"
         context: "posting" (new posts) or "replying" (engagement replies)
     """
+    if os.environ.get("SAPS_LEGACY_STYLES_PROMPT") != "1":
+        # New default: pick programmatically and emit the compact prompt.
+        # The legacy "show all styles, let the model pick" prompt is kept
+        # accessible behind SAPS_LEGACY_STYLES_PROMPT=1 for debugging /
+        # rollback. Should not be needed in normal operation.
+        assignment = pick_style_for_post(platform, context=context)
+        return get_assigned_style_prompt(platform, assignment, context=context)
+
     policy = PLATFORM_POLICY.get(platform, PLATFORM_POLICY["reddit"])
     never_styles = set(policy.get("never", []))
 
