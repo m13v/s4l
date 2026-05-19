@@ -41,25 +41,30 @@ def _normalize_platform(p):
 
 
 def _platform_sql_clause(platform, table_alias=""):
-    """Return ('AND <expr>', ()) SQL fragment that matches the given platform.
+    """Return an SQL fragment (string, no placeholders) that:
+
+    1. Filters to the given platform when one is provided (empty = no filter).
+    2. Always excludes mention-only rows (our_content = '(mention - no original
+       post)'). This exclusion is unconditional so that all-platform queries
+       match the /api/style/stats filter and the two views show the same total.
+       Previously the exclusion was bundled inside the platform branch and was
+       silently skipped when no platform was selected, causing a gap of ~50k+
+       views between the "Posts by Engagement Style" and "Project Funnel Stats"
+       tables (the gap equals the views on mention rows in the window).
 
     Folds the 'x' -> 'twitter' alias inside the SQL so reddit/linkedin/twitter
-    all just work. Empty platform returns ('', ()) so callers can splat it
-    unconditionally. Caller is responsible for placement inside the WHERE.
-
-    Also emits the same mention-row exclusion as /api/style/stats so the
-    two surfaces stay in sync (a mention-only row is one where we didn't
-    post original content; counting its views in our project tally is
-    misleading on the social side).
+    all just work. Caller is responsible for placement inside the WHERE.
     """
     prefix = (table_alias + ".") if table_alias else ""
+    # Mention-row exclusion is always applied regardless of platform filter.
+    mention_excl = " AND " + prefix + "our_content <> '(mention - no original post)'"
     if not platform:
-        return ""
+        return mention_excl
     # Safe: platform has already passed the [a-z0-9_]{1,32} regex in the caller.
     return (
         " AND LOWER(CASE WHEN LOWER(" + prefix + "platform)='x' "
         "THEN 'twitter' ELSE " + prefix + "platform END) = '" + platform + "'"
-        " AND " + prefix + "our_content <> '(mention - no original post)'"
+        + mention_excl
     )
 
 
