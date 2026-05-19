@@ -57,6 +57,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
 
 
 def _counts(batch_id: str) -> dict:
@@ -107,10 +108,16 @@ def cmd_phase0_salvage(batch_id: str, freshness_hours: int, legacy_cutoff: str) 
 
 
 def cmd_engaged_tweet_ids(window_hours: int) -> int:
-    resp = api_get(
-        "/api/v1/twitter/engaged-tweet-ids",
-        query={"window_hours": window_hours},
-    )
+    # Scope the dedupe pool to THIS machine's Twitter handle. Without
+    # this, two machines posting as different handles (e.g. @m13v_ on the
+    # local cron, @matt_diak on the VM) share one 486-ID pool and starve
+    # each other's candidate supply. Falls back to unscoped (legacy) when
+    # no handle is configured, preserving single-account behavior.
+    query: dict[str, object] = {"window_hours": window_hours}
+    handle = _resolve_twitter_handle()
+    if handle:
+        query["our_account"] = handle
+    resp = api_get("/api/v1/twitter/engaged-tweet-ids", query=query)
     ids = (resp.get("data") or {}).get("tweet_ids") or []
     # The legacy shell expects a JSON array string; mirror that exactly so
     # `python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'`
