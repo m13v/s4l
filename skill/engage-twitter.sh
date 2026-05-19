@@ -258,8 +258,8 @@ except Exception:
     fi
 
     # Precompute active Twitter campaign suffix + sample_rate + id for the
-    # prompt to inline. Phase B replies go through the MCP browser_type path
-    # (twitter_browser.py reply wedges against the MCP profile), so tool-level
+    # prompt to inline. Phase B replies go through the browser typing tool
+    # (twitter_browser.py reply wedges against the same profile), so tool-level
     # injection is unavailable; the LLM has to flip a coin and append the
     # literal suffix by hand. When no active campaign exists, all three vars
     # resolve to empty strings and the prompt's "if empty, do nothing extra"
@@ -286,8 +286,8 @@ EXCLUSIONS - do NOT engage with these accounts (skip and mark as 'skipped' with 
 - Excluded authors: $EXCLUDED_AUTHORS
 - Excluded Twitter accounts: $EXCLUDED_TWITTER
 
-CRITICAL - Reply posting: Use the SAME mcp__twitter-agent__ browser session you used in Step 2 (navigate). Do NOT call scripts/twitter_browser.py reply: that launches a second Chromium against the same profile dir as the MCP, which wedges x.com on a Loading state and times out. NEVER use mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* browser tools for posting either.
-CRITICAL: If a browser_click or browser_type fails (stale ref, button not found, page not ready, page wedged on Loading), take a fresh mcp__twitter-agent__browser_snapshot and retry up to 2 times.
+CRITICAL - Reply posting: Use the SAME browser session you used in Step 2 (navigate), via the tools described in the BROWSER BACKEND block above. Do NOT call scripts/twitter_browser.py reply: that launches a second Chromium against the same profile dir, which wedges x.com on a Loading state and times out. NEVER use any other browser MCP (playwright-extension, isolated-browser, macos-use, etc.) for posting.
+CRITICAL: If a click or type fails (stale ref, button not found, page not ready, page wedged on Loading), re-snapshot the page (per the BROWSER BACKEND block) and retry up to 2 times.
 CRITICAL: TECHNICAL FAILURES ARE NOT TERMINAL. If after retries the post still failed for any technical reason (browser, network, MCP, x.com unreachable, page rendering issue), DO NOT call reply_db.py skipped. Leave the row in 'processing' status (i.e., do nothing further with it) and move on to the next pending item. The post-run cleanup will reset 'processing' rows back to 'pending' so the next engage run retries automatically.
 CRITICAL: ONLY call reply_db.py skipped for content/policy reasons (e.g., light_acknowledgment, drive_by_self_promo_link_drop, hostile_user, off_topic, troll, mod_removal, excluded_author). NEVER skip for technical browser/network failures: those must be retry-able.
 
@@ -341,8 +341,8 @@ MANDATORY reply flow for every item:
   Step 2: NAVIGATE TO THE THREAD AND READ CONTEXT (mandatory, do NOT skip).
           Do NOT draft a reply from the notification snippet alone — the snippet
           is truncated and lacks the parent tweet content + sibling replies.
-          a) mcp__twitter-agent__browser_navigate to their_comment_url
-          b) mcp__twitter-agent__browser_snapshot (or browser_run_code) to read:
+          a) Navigate to their_comment_url (use the navigate tool from the BROWSER BACKEND block above)
+          b) Snapshot or query the DOM (per the BROWSER BACKEND block) to read:
              - the FULL parent tweet text (our original post if this is on our thread)
              - the immediate ancestors of their_comment_id (so you understand the
                conversational beat being replied to)
@@ -360,8 +360,8 @@ MANDATORY reply flow for every item:
   Step 3: Draft the reply using the resolved project's voice + chosen engagement
           style. 1-2 sentences. NEVER em dashes. Match parent tweet language.
   Step 3a: ACTIVE CAMPAIGN SUFFIX (MCP fallback, mirrors Reddit's pattern).
-          The phase-B reply path goes through mcp__twitter-agent__browser_type
-          (twitter_browser.py reply wedges against the same MCP profile), so
+          The phase-B reply path goes through the browser typing tool
+          (twitter_browser.py reply wedges against the same profile), so
           the tool layer can NOT inject the campaign suffix — the LLM has to
           do it by hand. Active Twitter campaign (precomputed by the shell):
             TWITTER_CAMPAIGN_ID=$TWITTER_CAMPAIGN_ID
@@ -377,7 +377,7 @@ MANDATORY reply flow for every item:
           or reformat the suffix.
   Step 3b: UTM-WRAP ANY URL IN YOUR_REPLY_TEXT. Mandatory for Tier 2/3 replies
            that drop a brand URL (runner.now, agora.xyz, podlog.io, fazm.ai,
-           usenightowl.com, etc.). The MCP browser_type path has NO Python
+           usenightowl.com, etc.). The browser type path has NO Python
            wrap layer, so a bare URL would be posted as-is and we lose all
            per-post attribution. Run, in bash:
              python3 \$REPO_DIR/scripts/dm_short_links.py utm-text \\
@@ -392,25 +392,26 @@ MANDATORY reply flow for every item:
            (Tier 1, default case), the helper is a no-op and the text comes
            back unchanged, so it is safe to run unconditionally.
 
-  Step 4: Post the reply via the SAME mcp__twitter-agent__ browser from Step 2.
-          a) mcp__twitter-agent__browser_snapshot to refresh element refs.
+  Step 4: Post the reply via the SAME browser session from Step 2 (use the
+          tools described in the BROWSER BACKEND block).
+          a) Re-snapshot the page to refresh element state.
           b) Find the reply textbox: role="textbox" with name like "Post your reply"
-             or "Post text". Then mcp__twitter-agent__browser_click on its ref.
-          c) mcp__twitter-agent__browser_type the YOUR_REPLY_TEXT (post-Step-3b
-             UTM-wrapped form, post-Step-3a suffix) into that textbox.
-             Pass submit=false (we click the Reply button explicitly in step e).
-          d) mcp__twitter-agent__browser_snapshot again (refs can shift after typing).
+             or "Post text". Click it.
+          c) Type YOUR_REPLY_TEXT (post-Step-3b UTM-wrapped form, post-Step-3a
+             suffix) into that textbox. Do NOT auto-submit; we click the Reply
+             button explicitly in step e.
+          d) Re-snapshot the page (refs can shift after typing).
           e) Find the submit button: role="button" with name="Reply", or selector
-             [data-testid="tweetButtonInline"]. mcp__twitter-agent__browser_click it.
+             [data-testid="tweetButtonInline"]. Click it.
              Do NOT match a generic "Reply" by accessible name without checking testid:
              every reply icon on the page also reads as "Reply" and you'll click the
              wrong one.
-          f) Wait ~3s, then mcp__twitter-agent__browser_snapshot to confirm the
-             textbox is empty (= post landed). If your draft text is still in the
-             textbox after 8s, treat as a failed click and retry per the rule above.
+          f) Wait ~3s, then re-snapshot to confirm the textbox is empty
+             (= post landed). If your draft text is still in the textbox after
+             8s, treat as a failed click and retry per the rule above.
           g) Capture REPLY_URL:
-             - mcp__twitter-agent__browser_navigate to https://x.com/m13v_/with_replies
-             - mcp__twitter-agent__browser_snapshot
+             - Navigate to https://x.com/m13v_/with_replies
+             - Snapshot the page
              - Find the topmost link matching /m13v_/status/<digits>. That is REPLY_URL.
              If no fresh reply URL appears within 30s, leave REPLY_URL empty and
              continue to Step 5 (the reply IS posted; we just lack the URL link).
