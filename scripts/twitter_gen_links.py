@@ -58,7 +58,8 @@ import audience_pages as audience_pages_mod  # noqa: E402
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 GENERATE_PAGE = os.path.join(REPO_DIR, "seo", "generate_page.py")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
-GEN_TIMEOUT_SEC = 3000  # generate_page.py's own 2400s budget + slack
+GEN_TIMEOUT_SEC = 900  # 15 min per page; hang fallback uses plain URL
+MAX_AB_HITS_PER_CYCLE = 4  # cap concurrent gen budget at ~60 min worst case
 
 # A/B gate: per-candidate coin flip for the page-gen lane. 0.25 means 25% of
 # eligible candidates (project has landing_pages config + LLM provided
@@ -241,9 +242,21 @@ def main() -> int:
     page_gen_rate = _page_gen_rate()
     print(f"[gen] page_gen_rate={page_gen_rate:.3f} "
           f"(env TWITTER_PAGE_GEN_RATE)", flush=True)
+    print(f"[gen] max_ab_hits_per_cycle={MAX_AB_HITS_PER_CYCLE} "
+          f"timeout_per_call_sec={GEN_TIMEOUT_SEC}", flush=True)
 
+    ab_hits = 0
     for c in candidates:
-        link_url, source = resolve_link(c, projects, page_gen_rate)
+        cap_reached = ab_hits >= MAX_AB_HITS_PER_CYCLE
+        if cap_reached:
+            print(f"[gen] AB cap reached ({ab_hits}/"
+                  f"{MAX_AB_HITS_PER_CYCLE}); forcing plain URL", flush=True)
+        link_url, source = resolve_link(c, projects,
+                                        0.0 if cap_reached else page_gen_rate)
+        if source == "seo_page":
+            ab_hits += 1
+        elif cap_reached and source == "plain_url_ab_skip":
+            source = "plain_url_ab_cap"
         c["link_url"] = link_url
         c["link_source"] = source
         print(f"[gen] candidate_id={c.get('candidate_id')} "
