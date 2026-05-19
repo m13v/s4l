@@ -5965,7 +5965,13 @@ async function handleApi(req, res) {
         };
       })();
     } else {
-      const snap = await readSnapshotCached(`funnel_stats_${days}d.json`);
+      // Prefer a fresh snapshot. If none, accept a stale-but-recent one
+      // (<24h) to avoid blocking the user behind a 30s+ live python run
+      // every time the precompute job lags. The 5-min precompute timer
+      // cycles through all five windows (1d/7d/14d/30d/90d) so any one
+      // can be 20-30min old at random.
+      const STALE_OK = 24 * 60 * 60 * 1000;
+      const snap = await readSnapshotCached(`funnel_stats_${days}d.json`, STALE_OK);
       if (snap && snap.value && !snap.value.error) {
         funnelStatsCache.set(cacheKey, { at: snap.at, value: snap.value });
         return json(res, scopeFunnelStatsPayload({ ...snap.value, cachedAt: snap.at }, req.user));
