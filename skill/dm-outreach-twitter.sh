@@ -58,7 +58,7 @@ log "=== Twitter DM Outreach Run: $(date) ==="
 log "Scanning for DM candidates (all platforms)..."
 (PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_dm_candidates.py" 2>&1 || true) | tee -a "$LOG_FILE"
 
-DM_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE status='pending' AND platform IN ('twitter','x');" 2>/dev/null || echo "0")
+DM_PENDING=$(python3 "$REPO_DIR/scripts/dm_outreach_twitter_helper.py" pending-count 2>/dev/null || echo "0")
 
 if [ "$DM_PENDING" -eq 0 ]; then
     log "No pending Twitter DMs"
@@ -68,35 +68,11 @@ fi
 
 log "Twitter: $DM_PENDING DMs to send"
 
-DM_DATA=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT d.id, d.platform, d.their_author, d.their_content, d.comment_context,
-               d.target_project, d.prospect_id,
-               r.their_comment_url, r.our_reply_content,
-               p.thread_title, p.our_content as our_post_content,
-               (SELECT json_agg(e) FROM (
-                   SELECT p2.thread_title,
-                          r2.their_content AS their_content,
-                          COALESCE(r2.our_reply_content, '') AS our_reply_content,
-                          r2.status,
-                          r2.depth,
-                          r2.their_comment_url,
-                          r2.replied_at
-                   FROM replies r2
-                   LEFT JOIN posts p2 ON r2.post_id = p2.id
-                   WHERE r2.their_author = d.their_author
-                     AND r2.platform = d.platform
-                     AND r2.id != d.reply_id
-                     AND r2.discovered_at >= NOW() - INTERVAL '60 days'
-                   ORDER BY r2.discovered_at DESC
-                   LIMIT 8
-               ) e) AS other_engagement
-        FROM dms d
-        JOIN replies r ON d.reply_id = r.id
-        JOIN posts p ON d.post_id = p.id
-        WHERE d.status='pending' AND d.platform IN ('twitter','x')
-        ORDER BY d.discovered_at ASC
-    ) q;")
+# Prompt-feed JSON now comes from /api/v1/dms/outreach-queue (same
+# correlated other_engagement subquery, same 60-day window, same join
+# graph). Helper canonicalises platform=twitter → 'x' to match the dms
+# table's stored value.
+DM_DATA=$(python3 "$REPO_DIR/scripts/dm_outreach_twitter_helper.py" outreach-queue 2>/dev/null || echo "[]")
 
 # Per-project qualification context for ICP pre-check
 PROJECTS_QUALIFICATION=$(python3 -c "
@@ -229,14 +205,14 @@ Inspect the send_dm tool's return value. There are exactly three outcomes:
   python3 $REPO_DIR/scripts/dm_conversation.py set-url --dm-id DM_ID --url "CHAT_URL"
   The validator only accepts /i/chat/<id> or /messages/<id>; if the URL is something else (you got bounced to a profile or inbox), skip this step.
 
-(B) ok=false OR verified=false  ->  send did not land, mark error:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='send_unverified', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+(B) ok=false OR verified=false  ->  send did not land, mark error via /api/v1/dms/DM_ID PATCH (DO NOT shell out to psql):
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status error --skip-reason send_unverified --claude-session-id "$CLAUDE_SESSION_ID"
 
 (C) Rate limit, account blocked, or any other thrown exception:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='REASON', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status error --skip-reason REASON --claude-session-id "$CLAUDE_SESSION_ID"
 
 DMs disabled (recipient setting, not a send failure):
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='skipped', skip_reason='chat_disabled', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status skipped --skip-reason chat_disabled --claude-session-id "$CLAUDE_SESSION_ID"
 
 CRITICAL: ALL browser calls MUST use mcp__twitter-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a twitter-agent tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 
@@ -267,24 +243,22 @@ rm -f "$PROMPT_FILE"
 # candidate. That's how the 2026-05-12 incident permanently lost 7 warm leads.
 # This revert closes the gap by ensuring transient-MCP failures don't lock rows
 # into a status=error state that the scanner can't see past.
-RECOVERED=$(psql "$DATABASE_URL" -t -A -c "
-    UPDATE dms
-    SET status='pending', skip_reason=NULL
-    WHERE platform IN ('twitter','x')
-      AND status='error'
-      AND claude_session_id = '$CLAUDE_SESSION_ID'::uuid
-      AND (skip_reason ILIKE 'twitter_agent_mcp_unavailable%'
-           OR skip_reason ILIKE '%mcp server not connected%'
-           OR skip_reason ILIKE '%no mcp tools%'
-           OR skip_reason ILIKE 'mcp_unavailable%')
-    RETURNING id;
-" 2>/dev/null | grep -c '^[0-9]' || echo "0")
+# MCP-failure recovery sweep now lives at /api/v1/dms/recover-mcp-failures
+# (same UPDATE WHERE filter, same RETURNING shape). Helper prints the
+# recovered_count integer so this $() capture is byte-equivalent.
+RECOVERED=$(python3 "$REPO_DIR/scripts/dm_outreach_twitter_helper.py" \
+    recover-mcp --session-id "$CLAUDE_SESSION_ID" 2>/dev/null || echo "0")
 if [ "$RECOVERED" -gt 0 ]; then
     log "Reverted $RECOVERED row(s) from status='error' (transient MCP failure) back to pending"
 fi
 
-SENT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform IN ('twitter','x') AND status='sent';" 2>/dev/null || echo "0")
-STILL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform IN ('twitter','x') AND status='pending';" 2>/dev/null || echo "0")
+# Final summary counts: one HTTP roundtrip via /api/v1/dms/counts vs the
+# two psql one-liners. Helper prints "<sent> <pending>" space-separated.
+_DM_SUMMARY=$(python3 "$REPO_DIR/scripts/dm_outreach_twitter_helper.py" summary 2>/dev/null || echo "0 0")
+SENT=$(echo "$_DM_SUMMARY" | awk '{print $1}')
+STILL_PENDING=$(echo "$_DM_SUMMARY" | awk '{print $2}')
+: "${SENT:=0}"
+: "${STILL_PENDING:=0}"
 log "Twitter DM outreach summary: sent (all-time)=$SENT, still_pending=$STILL_PENDING"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
