@@ -222,6 +222,22 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
     topic_index = build_project_topic_index(config, platform)
     age_days = max_age_days if max_age_days is not None else MAX_AGE_DAYS
 
+    # Multi-account scoping (Twitter only): when this machine has a Twitter
+    # handle configured, only surface candidates from replies on posts THIS
+    # account made. Without this, a VM running as @matt_diak would discover
+    # DM candidates from @m13v_'s public reply threads and propose outreach
+    # about conversations the wrong account had. The other platforms
+    # (reddit, linkedin) don't yet have multi-machine fanout, so they fall
+    # through unscoped. Treat the filter as additive: NULL handle == legacy
+    # unscoped behavior.
+    twitter_handle = None
+    if platform == "x":
+        try:
+            from twitter_account import resolve_handle as _resolve_twitter_handle
+            twitter_handle = _resolve_twitter_handle()
+        except Exception:
+            twitter_handle = None
+
     candidates = conn.execute("""
         SELECT r.id as reply_id, r.post_id, r.platform, r.their_author, r.their_content,
                r.their_comment_url, r.depth,
@@ -248,8 +264,10 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
           AND d.id IS NULL
           AND r.replied_at >= NOW() - INTERVAL '%s days'
           AND r.replied_at <= NOW() - (INTERVAL '1 hour' * %s)
+          AND (%s::text IS NULL OR p.our_account = %s)
         ORDER BY r.replied_at DESC
-    """, (platform, list(TRANSIENT_SKIP_REASON_PATTERNS), platform, age_days, POST_REPLY_COOLDOWN_HOURS)).fetchall()
+    """, (platform, list(TRANSIENT_SKIP_REASON_PATTERNS), platform, age_days,
+          POST_REPLY_COOLDOWN_HOURS, twitter_handle, twitter_handle)).fetchall()
 
     inserted = 0
     skipped_reasons = {}
