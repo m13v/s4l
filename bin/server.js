@@ -8544,12 +8544,14 @@ function renderResult(run) {
     const unmatchedN = scan.unmatched || 0;
     const backfillN = scan.backfill || 0;
     const hasScan = scannedN || newN || excludedN || unmatchedN || backfillN;
+    const SNL = String.fromCharCode(10);
     const scanTooltip = hasScan
-      ? ('inbox scan: seen=' + scannedN +
-         ' / new=' + newN +
-         ' / excluded=' + excludedN +
-         ' / unmatched=' + unmatchedN +
-         ' / backfill_skipped=' + backfillN)
+      ? ('**Inbox scan**' + SNL + SNL +
+         '• **seen:** ' + scannedN + SNL +
+         '• **new:** ' + newN + SNL +
+         '• **excluded:** ' + excludedN + SNL +
+         '• **unmatched:** ' + unmatchedN + SNL +
+         '• **backfill_skipped:** ' + backfillN)
       : '';
     const scanPills = hasScan
       ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
@@ -8583,7 +8585,8 @@ function renderResult(run) {
       if (!failed && !reasons.length) return '';
       const top = reasons[0];
       const tt = reasons.length
-        ? reasons.map(function (x) { return x.reason + ' x' + x.count; }).join(', ')
+        ? '**Failure reasons**' + String.fromCharCode(10) +
+          reasons.map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       const label = top
         ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
@@ -8653,7 +8656,8 @@ function renderResult(run) {
       if (!failed && !reasons.length) return '';
       const top = reasons[0];
       const tt = reasons.length
-        ? reasons.map(function (x) { return x.reason + ' x' + x.count; }).join(', ')
+        ? '**Failure reasons**' + String.fromCharCode(10) +
+          reasons.map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       const label = top
         ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
@@ -8792,7 +8796,8 @@ function renderResult(run) {
         ? ' (' + reasons.map(function (x) { return x.reason + ' ' + x.count; }).join('; ') + ')'
         : '';
       const tt = reasons.length
-        ? reasons.map(function (x) { return x.reason + ': ' + x.count; }).join(', ')
+        ? '**Failure reasons**' + String.fromCharCode(10) +
+          reasons.map(function (x) { return '• ' + x.reason + ': **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
@@ -8917,17 +8922,23 @@ function renderResult(run) {
         bracket + '</span>';
     };
 
-    const tooltip = 'iterations: ' + iterations +
-      ' / searches: ' + searches +
-      ' / raw API results: ' + raw +
-      ' / passed (post-API filter): ' + passed +
-      ' / dropped (blocked sub / archived / locked / age>180d): ' + dropped +
-      ' / fetched (model opened to read): ' + fetched +
-      ' / drafted: ' + drafted +
-      (ripenIters ? ' / ripen survivors: ' + ripenSurvivors + '/' + ripenInput +
-        (bestComp != null ? ' (best composite ' + bestComp.toFixed(1) + ')' : '') : '') +
-      ' / posted: ' + posted +
-      (salvageableLive ? ' / salvageable in DB: ' + salvageableLive : '');
+    const RDNL = String.fromCharCode(10);
+    const tooltip =
+      '**Reddit post-comment funnel**' + RDNL +
+      RDNL +
+      '• **iterations:** ' + iterations + RDNL +
+      '• **searches:** ' + searches + RDNL +
+      '• **raw API results:** ' + raw + RDNL +
+      '• **passed** (post-API filter): ' + passed + RDNL +
+      '• **dropped** (blocked sub / archived / locked / age>180d): ' + dropped + RDNL +
+      '• **fetched** (model opened to read): ' + fetched + RDNL +
+      '• **drafted:** ' + drafted +
+      (ripenIters
+        ? RDNL + '• **ripen survivors:** ' + ripenSurvivors + ' / ' + ripenInput +
+          (bestComp != null ? ' (best composite ' + bestComp.toFixed(1) + ')' : '')
+        : '') + RDNL +
+      '• **posted:** ' + posted +
+      (salvageableLive ? RDNL + RDNL + '**Salvageable in DB:** ' + salvageableLive : '');
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('iterations', iterations, iterations > 0 ? 'var(--text)' : 'var(--muted)') +
@@ -8986,7 +8997,8 @@ function renderResult(run) {
       if (!failed) return '';
       const top = reasons[0];
       const tooltip = reasons.length
-        ? reasons.map(function (x) { return x.reason + ' x' + x.count; }).join(', ')
+        ? '**Failure reasons**' + String.fromCharCode(10) +
+          reasons.map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       const label = top
         ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
@@ -9006,12 +9018,14 @@ function renderResult(run) {
     const unmatchedN = scan.unmatched || 0;
     const backfillN = scan.backfill || 0;
     const hasScan = scannedN || newN || excludedN || unmatchedN || backfillN;
+    const SNL = String.fromCharCode(10);
     const scanTooltip = hasScan
-      ? ('inbox scan: seen=' + scannedN +
-         ' / new=' + newN +
-         ' / excluded=' + excludedN +
-         ' / unmatched=' + unmatchedN +
-         ' / backfill_skipped=' + backfillN)
+      ? ('**Inbox scan**' + SNL + SNL +
+         '• **seen:** ' + scannedN + SNL +
+         '• **new:** ' + newN + SNL +
+         '• **excluded:** ' + excludedN + SNL +
+         '• **unmatched:** ' + unmatchedN + SNL +
+         '• **backfill_skipped:** ' + backfillN)
       : '';
     const scanPills = hasScan
       ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
@@ -9145,7 +9159,8 @@ function renderResult(run) {
       if (!failed && !reasons.length) return '';
       const top = reasons[0];
       const tt = reasons.length
-        ? reasons.map(function (x) { return x.reason + ' x' + x.count; }).join(', ')
+        ? '**Failure reasons**' + String.fromCharCode(10) +
+          reasons.map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       const label = top
         ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
@@ -9155,10 +9170,16 @@ function renderResult(run) {
         'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
         label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
-    const tooltip = 'total pages in scope (zero-click 30+ days, all projects): ' + total +
-      ' / deleted this run: ' + deleted +
-      ' / queue (waiting for next run, capped by DAILY_MAX): ' + queue +
-      ' / failed: ' + failed;
+    const ENL = String.fromCharCode(10);
+    const tooltip =
+      '**SEO page expire**' + ENL +
+      ENL +
+      '• **total pages in scope:** ' + total + ENL +
+      '  (zero-click 30+ days, all projects)' + ENL +
+      '• **deleted this run:** ' + deleted + ENL +
+      '• **queue:** ' + queue + ENL +
+      '  (waiting for next run, capped by DAILY_MAX)' + ENL +
+      '• **failed:** ' + failed;
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('total pages', total, total > 0 ? 'var(--text)' : 'var(--muted)') +
@@ -9183,7 +9204,8 @@ function renderResult(run) {
     if (!failed && !reasons.length) return '';
     const top = reasons[0];
     const tooltip = reasons.length
-      ? reasons.map(function (x) { return x.reason + ' x' + x.count; }).join(', ')
+      ? '**Failure reasons**' + String.fromCharCode(10) +
+        reasons.map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; }).join(String.fromCharCode(10))
       : 'failed (no reason logged)';
     const label = top
       ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
@@ -9200,8 +9222,10 @@ function renderResult(run) {
   const renderSkipReasonsPill = () => {
     if (!skipBreakdown.length) return '';
     const top = skipBreakdown[0];
-    const tooltip = skipBreakdown
-      .map(function (x) { return x.reason + ' x' + x.count; }).join(', ');
+    const tooltip = '**Skip reasons**' + String.fromCharCode(10) +
+      skipBreakdown
+        .map(function (x) { return '• ' + x.reason + ' × **' + x.count + '**'; })
+        .join(String.fromCharCode(10));
     const label = 'skipped: ' + top.reason +
       (skipBreakdown.length > 1 ? ' +' + (skipBreakdown.length - 1) : '');
     const count = top.count;
@@ -9223,10 +9247,17 @@ function renderResult(run) {
     const tp = discover.tweets_pulled || 0;
     const c = discover.candidates || 0;
     const af = discover.above_floor || 0;
-    const tip = (q + ' queries' + (d ? ' (' + d + ' duds)' : '')) + ' \u2192 ' +
-      (tp + ' tweets pulled') + ' \u2192 ' +
-      (c + ' candidates after floor') + ' \u2192 ' +
-      (af + ' cleared review cap');
+    const DNL = String.fromCharCode(10);
+    const tip =
+      '**Discovery funnel**' + DNL +
+      DNL +
+      '• **' + q + ' queries**' + (d ? ' (' + d + ' duds)' : '') + DNL +
+      '  \u2193' + DNL +
+      '• **' + tp + ' tweets pulled**' + DNL +
+      '  \u2193' + DNL +
+      '• **' + c + ' candidates** after floor' + DNL +
+      '  \u2193' + DNL +
+      '• **' + af + ' cleared** review cap';
     const visStr = q + '\u2192' + c + '\u2192' + af;
     const color = (q || c || af) ? 'var(--text)' : 'var(--muted)';
     return '<span title="' + tip.replace(/"/g, '&quot;') + '" ' +
@@ -10339,11 +10370,11 @@ function fmtCostCell(displayed, orchestrator, estimated, subagent) {
     ? fmtCost(Number(orchestrator))
     : '<span style="color:var(--text-very-faint);">n/a</span>';
   const lines = [
-    'Cost (SDK orchestrator): ' + fmtLane(orchestrator),
+    '**Cost (SDK orchestrator):** ' + fmtLane(orchestrator),
     '',
-    'Diagnostic-only (not actual billing):',
-    '  Transcript estimate: ' + fmtLane(estimated),
-    '  Subagent (est): ' + fmtLane(subagent),
+    '**Diagnostic-only** (not actual billing)',
+    '• Transcript estimate: ' + fmtLane(estimated),
+    '• Subagent (est): ' + fmtLane(subagent),
     '',
     'Displays Anthropic-reported orchestrator_cost_usd only. "n/a" means the wrapper didn\\'t capture the SDK cost (no --output-format json on the claude call). Transcript estimate and subagent figures are computed locally from a hardcoded pricing table — informational, not billing-accurate on subscription plans.',
   ];
