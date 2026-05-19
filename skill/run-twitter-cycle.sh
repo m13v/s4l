@@ -991,7 +991,40 @@ config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 print(json.dumps({p['name']: p for p in config.get('projects', [])}, indent=2))
 " 2>/dev/null || echo "{}")
 
-TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+# Engagement-style picker (2026-05-19): pick ONE assigned style for this
+# cycle. The picked style flows two places: (1) --style filter for
+# top_performers.py so the per-style exemplars section shows only posts
+# matching the assigned style, (2) saps_render_style_block (below) so the
+# prompt block embeds the same assignment. On invent mode picked_style is
+# empty and top_performers stays unfiltered (model sees full landscape).
+source "$REPO_DIR/skill/styles.sh"
+STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_assign_XXXXXX.json)
+saps_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+PICKED_STYLE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+PICKED_MODE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
+
+if [ -n "$PICKED_STYLE" ]; then
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
+else
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter 2>/dev/null || echo "(top performers report unavailable)")
+fi
 
 # --- Generation trace -------------------------------------------------------
 # Snapshot the few-shot context this cycle will feed to Claude — top_performers
@@ -1017,11 +1050,13 @@ payload = {
         'top_queries': json.loads(sys.argv[2] or '[]'),
         'supply_signal': json.loads(sys.argv[3] or '[]'),
         'dud_queries': json.loads(sys.argv[4] or '[]'),
+        'auto_picked_style': sys.argv[5] or None,
+        'auto_picked_mode': sys.argv[6] or 'use',
     },
     'min_score_floor': 5,
 }
 print(json.dumps(payload))
-" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" 2>/dev/null || echo '{}')
+" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" 2>/dev/null || echo '{}')
 SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
 export SAPS_TWITTER_GEN_TRACE_PATH
 if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
@@ -1030,8 +1065,10 @@ else
     log "WARN: generation_trace build returned empty path; posts this cycle will have NULL trace"
 fi
 
-source "$REPO_DIR/skill/styles.sh"
-STYLES_BLOCK=$(generate_styles_block twitter posting)
+STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
+# Style assignment file is the same one we picked above; styles.sh already sourced.
+# Cleanup at cycle end (best effort).
+trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
 
 # Phase 2b is split into three sub-phases so the twitter-browser lock is only
 # held during actual browser work. The killer in the old single-session flow
