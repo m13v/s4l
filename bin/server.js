@@ -1150,7 +1150,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   const candidateRows = await pq(
     "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
     "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id, " +
-    "       matched_project " +
+    "       matched_project, tweet_url " +
     "FROM twitter_candidates " +
     "WHERE discovered_at >= $1::timestamp OR posted_at >= $1::timestamp OR t1_checked_at >= $1::timestamp OR status='pending'",
     [since]
@@ -1186,7 +1186,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
   // Bulk-fetch twitter/x posts in window to compute per-run style breakdown.
   const twitterPostRows = await pq(
-    "SELECT posted_at, engagement_style FROM posts " +
+    "SELECT posted_at, thread_url, engagement_style FROM posts " +
     "WHERE platform IN ('twitter', 'x') AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
     [since]
   ) || [];
@@ -1198,6 +1198,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   };
   const twitterPostNorm = twitterPostRows.map(r => ({
     postedMs: toMs(r.posted_at),
+    threadUrl: r.thread_url || '',
     style: r.engagement_style || '',
   }));
   const searchNorm = searchRows.map(r => ({
@@ -1225,6 +1226,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
       status: r.status,
       batch_id: r.batch_id || '',
       matched_project: r.matched_project || '',
+      tweet_url: r.tweet_url || '',
     };
   });
 
@@ -1401,10 +1403,26 @@ async function enrichPostCommentsTwitterRuns(runs) {
         }
       }
     }
+    // Style counting: scope to the URLs this batch posted, not the time window.
+    // Time-window approach captured concurrent cycles during long-running cycles.
+    const batchPostedUrls = new Set();
+    for (const c of candNorm) {
+      if (ownBatchId && c.batch_id === ownBatchId && c.status === 'posted' && c.tweet_url) {
+        batchPostedUrls.add(c.tweet_url);
+      }
+    }
     const stylesMapTx = {};
     for (const p of twitterPostNorm) {
-      if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+      if (!p.threadUrl || !batchPostedUrls.has(p.threadUrl)) continue;
       stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+    }
+    // Fall back to time-window if batch URL matching found nothing (e.g. old
+    // rows before tweet_url was added to the SELECT, or cycle with no ownBatchId).
+    if (!Object.keys(stylesMapTx).length && !ownBatchId) {
+      for (const p of twitterPostNorm) {
+        if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+        stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+      }
     }
     const stylesUsedTx = Object.entries(stylesMapTx)
       .sort(function (a, b) { return b[1] - a[1]; })
