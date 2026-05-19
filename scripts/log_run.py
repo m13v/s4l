@@ -26,14 +26,43 @@ def main():
                              "(stats_*, engage_github). Surfaces as a separate pill "
                              "in the dashboard Jobs table.")
     parser.add_argument("--checked", type=int, default=0,
-                        help="Stats jobs only: posts the run pulled fresh data for "
-                             "(per platform). Renders as a 'checked' pill on stats rows.")
+                        help="Stats jobs only: rows the run actually hit the "
+                             "platform API for (Reddit JSON, fxtwitter, LinkedIn "
+                             "feed scrape, etc.). Excludes skipped-as-fresh and "
+                             "skipped-as-stable. Renders as 'checked' pill.")
     parser.add_argument("--updated", type=int, default=0,
-                        help="Stats jobs only: rows where any tracked metric "
-                             "(views/upvotes/comments) actually changed. Renders as 'updated'.")
+                        help="Stats jobs only: legacy/back-compat field. Pre-2026-05-18 "
+                             "this was 'rows where any tracked metric moved' but it "
+                             "silently summed in Step 1 view-scrape counts too. Use "
+                             "`--changed` for the new clean semantics; keep `--updated` "
+                             "wired only for old log lines.")
     parser.add_argument("--removed", type=int, default=0,
                         help="Stats jobs only: posts newly flagged deleted/removed in this run. "
                              "Renders as 'removed'.")
+    # 2026-05-18 stats-pill relabel pass. The legacy `updated` field conflated
+    # two distinct things (Step 1 view scrape count + Step 2 detail-leg
+    # changed count) which made "updated" balloon meaninglessly. The new
+    # split lets the dashboard show four clean pills:
+    #   scanned         -> total rows considered this run (= polled + skipped)
+    #   checked         -> rows we actually hit the platform API for
+    #   changed         -> subset of checked where any tracked metric moved
+    #   views-refreshed -> rows where the cheap view-scrape leg wrote a value
+    # All four are optional, additive to the existing stats_segment, and
+    # default to 0 so existing callers don't have to change.
+    parser.add_argument("--scanned", type=int, default=0,
+                        help="Stats jobs only: TOTAL rows considered this run "
+                             "(polled + skipped + bypassed-as-fresh). "
+                             "Renders as a 'scanned' pill on stats rows.")
+    parser.add_argument("--changed", type=int, default=0,
+                        help="Stats jobs only: subset of `checked` where any "
+                             "tracked metric actually moved. Renders as a "
+                             "'changed' pill. Distinct from `--updated` which "
+                             "stays for back-compat with the old field name.")
+    parser.add_argument("--views-refreshed", dest="views_refreshed", type=int, default=0,
+                        help="Stats jobs only: rows where the cheap view-scrape "
+                             "leg (Step 1 profile scrape on Reddit; built-in on "
+                             "Twitter) wrote a fresh view count. Distinct from "
+                             "`--changed`, which is the per-row JSON-API leg.")
     parser.add_argument("--unavailable", type=int, default=0,
                         help="Stats jobs (LinkedIn): posts where the platform "
                              "explicitly returned a 'post unavailable' string. "
@@ -126,15 +155,27 @@ def main():
     # stays as a single optional capture group for the bin/server.js regex.
     # The LinkedIn-specific extras (unavailable/not_found) tail the base
     # segment as their own optional groups so older lines still parse.
+    # 2026-05-18 relabel: scanned/changed/views_refreshed tail the segment as
+    # their own optional groups. Old log lines without them still parse.
+    # Trigger the segment if ANY stats-job field is set so the new fields
+    # surface even when the legacy three are zero.
+    _any_stats = (args.checked or args.updated or args.removed
+                  or args.unavailable or args.not_found
+                  or args.scanned or args.changed or args.views_refreshed)
     stats_segment = (
         f" checked={args.checked} updated={args.updated} removed={args.removed}"
-        if (args.checked or args.updated or args.removed
-            or args.unavailable or args.not_found) else ""
+        if _any_stats else ""
     )
     if args.unavailable:
         stats_segment += f" unavailable={args.unavailable}"
     if args.not_found:
         stats_segment += f" not_found={args.not_found}"
+    if args.scanned:
+        stats_segment += f" scanned={args.scanned}"
+    if args.changed:
+        stats_segment += f" changed={args.changed}"
+    if args.views_refreshed:
+        stats_segment += f" views_refreshed={args.views_refreshed}"
     # `salvaged=N` segment tails the stats segment as its own optional capture
     # so old log lines (no salvage info) still parse cleanly. Twitter-cycle
     # specific today, but any pipeline that retries pending work cross-cycle
