@@ -8737,8 +8737,8 @@ function renderResult(run) {
         !scanned && !changed && !viewsRefreshed) {
       return '<span style="color:var(--muted);font-size:12px;">—</span>';
     }
-    // Inline helper: pill with a `data-tooltip` attribute for per-pill hover
-    // explanations. Plain `pill()` (above) has no tooltip slot; this is
+    // Inline helper: pill with a data-tooltip attribute for per-pill hover
+    // explanations. Plain pill() (above) has no tooltip slot; this is
     // local to stats-job rendering only.
     const tipPill = (label, n, color, tip) => {
       const tipEsc = (tip || '').replace(/"/g, '&quot;');
@@ -8761,19 +8761,19 @@ function renderResult(run) {
         '(Reddit old.reddit.com JSON / fxtwitter / LinkedIn activity feed). ' +
         'Includes both successful polls and the ones that errored mid-fetch.') +
       tipPill('changed', changed, '#22c55e',
-        'Subset of `checked` where any tracked metric (upvotes / ' +
-        'comments_count / views) actually moved since the prior scan. ' +
+        'Subset of CHECKED where any tracked metric (upvotes, ' +
+        'comments_count, views) actually moved since the prior scan. ' +
         'The real-activity signal; everything else is no-op polling.') +
       (viewsRefreshed ? tipPill('views', viewsRefreshed, '#06b6d4',
         'Rows where the cheap view-scrape leg wrote a fresh view count ' +
         'this run. Reddit: Step 1 profile-page scrape (sees every ' +
         'comment + thread on /user/<name>/). Twitter: built-in to the ' +
-        'fxtwitter call. Separate from `changed` because views can ' +
+        'fxtwitter call. Separate from CHANGED because views can ' +
         'tick up without upvotes/comments moving.') : '') +
       (repliesRefreshed ? tipPill('replies', repliesRefreshed, '#3b82f6',
         'Per-reply rows refreshed: comments we authored AS replies to ' +
-        'someone else\'s reply to our original comment (the DM-rail ' +
-        'follow-up). Live in the `replies` table, not `posts`. ' +
+        'someone else reply to our original comment (the DM-rail ' +
+        'follow-up). Live in the replies table, not posts. ' +
         'Reddit refreshes upvotes + reply-count via batch JSON API. ' +
         'Twitter also refreshes views via fxtwitter.') : '') +
       (removed ? tipPill('removed', removed, '#eab308',
@@ -8781,9 +8781,9 @@ function renderResult(run) {
         'gone from thread JSON for 2+ consecutive scans (deletion_detect_' +
         'count threshold). LinkedIn: post returned "Post unavailable".') : '') +
       (unavailable ? tipPill('unavail', unavailable, '#eab308',
-        'LinkedIn only: post explicitly returned "Post unavailable" ' +
-        'string. Subset of `removed`; rendered as its own pill so an ' +
-        'operator can tell hard-deletion from rate-limit / network noise.') : '') +
+        'LinkedIn only: post explicitly returned a Post Unavailable ' +
+        'string. Subset of REMOVED; rendered as its own pill so an ' +
+        'operator can tell hard-deletion from rate-limit or network noise.') : '') +
       (notFound ? tipPill('not found', notFound, 'var(--muted)',
         'LinkedIn only: post is still active on LinkedIn but our specific ' +
         'comment couldn\'t be located on the activity feed (may have ' +
