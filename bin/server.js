@@ -12526,17 +12526,31 @@ function formatStyleCell(name, metaMap) {
   const m = (metaMap && metaMap[name]) || null;
   if (!m || name === '(none)') return safeName;
   const lines = [];
-  if (m.description) lines.push(m.description);
-  if (m.note) lines.push('Note: ' + m.note);
-  if (m.why_existing_didnt_fit) lines.push('Why invented: ' + m.why_existing_didnt_fit);
+  // Bold the style name as the tooltip header.
+  lines.push('**' + name + '**');
+  if (m.description) {
+    lines.push('');
+    lines.push(m.description);
+  }
+  if (m.note) {
+    lines.push('');
+    lines.push('**Note:** ' + m.note);
+  }
+  if (m.why_existing_didnt_fit) {
+    lines.push('');
+    lines.push('**Why invented:** ' + m.why_existing_didnt_fit);
+  }
   const status = m.status || 'active';
   const provenance = [];
   if (status && status !== 'active') provenance.push('status=' + status);
   if (m.invented_at) provenance.push('invented ' + String(m.invented_at).slice(0, 10));
   if (m.first_post_platform) provenance.push('first on ' + m.first_post_platform);
   if (m.promoted_at) provenance.push('promoted ' + String(m.promoted_at).slice(0, 10));
-  if (provenance.length) lines.push(provenance.join(' · '));
-  if (!lines.length) return safeName;
+  if (provenance.length) {
+    lines.push('');
+    lines.push(provenance.join(' · '));
+  }
+  if (lines.length <= 1) return safeName;
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) + '" style="cursor: help; border-bottom: 1px dotted var(--text-muted);">' + safeName + '</span>';
 }
@@ -13944,7 +13958,15 @@ function renderTopPosts(payload) {
           let clickLine = '';
           if (hasLink) {
             if (havePerClick) {
-              const tip = 'Humans / bots split from post_link_clicks (UA bot regex). Real clicks are the human number. Bots are Twitter card / LinkedIn unfurl / Slack preview prefetches. CTR = humans / views.';
+              const tip =
+                '**Clicks: humans / bots**' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Split from post_link_clicks (UA bot regex).' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '• **Real clicks** = the human number' + String.fromCharCode(10) +
+                '• **Bots** = Twitter card / LinkedIn unfurl / Slack preview prefetches' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = humans / views';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + real
@@ -13952,7 +13974,14 @@ function renderTopPosts(payload) {
                 + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
                 + '</span>';
             } else if (backfill > 0) {
-              const tip = 'Estimated from PostHog $pageview events with matching utm_content (real humans only, bots already filtered by PostHog). Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py. CTR = backfill / views.';
+              const tip =
+                '**Clicks (estimated)**' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Estimated from PostHog $pageview events with matching utm_content. Real humans only — bots already filtered by PostHog.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = backfill / views';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + backfill
@@ -13960,7 +13989,14 @@ function renderTopPosts(payload) {
                 + ' <span style="color:var(--text-muted);">(estimated)</span>'
                 + '</span>';
             } else if (legacy > 0) {
-              const tip = 'Legacy click count (pre 2026-05-07). Twitter card / LinkedIn / Slack preview bots inflated this ~20x. New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number. CTR = legacy / views (also inflated).';
+              const tip =
+                '**Clicks (legacy)** — pre 2026-05-07' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Twitter card / LinkedIn / Slack preview bots inflated this ~20×.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = legacy / views (also inflated)';
               clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
                 + '<span class="top-stats-k">clicks</span>'
                 + legacy
@@ -15087,7 +15123,11 @@ function renderTopDms(payload) {
           clickLine = '<div class="dm-stat-line dm-stat-line-muted"><span class="dm-stat-num">—</span> <span class="dm-stat-label">clicks</span></div>';
         } else {
           const lastAt = r.short_link_last_click_at ? new Date(r.short_link_last_click_at).toLocaleString() : 'never';
-          const tip = '/r/' + String(r.short_link_code) + (clicks ? (' • last click: ' + lastAt) : ' • no clicks yet');
+          const tipNL = String.fromCharCode(10);
+          const tip = '**Short link** /r/' + String(r.short_link_code) + tipNL +
+            (clicks
+              ? tipNL + '**Last click:** ' + lastAt
+              : tipNL + 'No clicks yet');
           const color = clicks > 0 ? 'var(--accent)' : 'var(--text-muted)';
           clickLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(clicks) + '</span> <span class="dm-stat-label">clicks</span></div>';
         }
@@ -15097,7 +15137,14 @@ function renderTopDms(payload) {
           bookedLine = '<div class="dm-stat-line dm-stat-line-muted"><span class="dm-stat-num">—</span> <span class="dm-stat-label">booked</span></div>';
         } else {
           const lastAt = r.last_booking_at ? new Date(r.last_booking_at).toLocaleString() : '';
-          const tip = booked + ' booked' + (cancelled ? (' • ' + cancelled + ' cancelled') : '') + (lastAt ? (' • last: ' + lastAt) : '');
+          const bNL = String.fromCharCode(10);
+          const tipParts = ['**Bookings**', '', '• **Booked:** ' + booked];
+          if (cancelled) tipParts.push('• **Cancelled:** ' + cancelled);
+          if (lastAt) {
+            tipParts.push('');
+            tipParts.push('**Last booking:** ' + lastAt);
+          }
+          const tip = tipParts.join(bNL);
           bookedLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color:var(--success);font-weight:600;"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(booked) + '</span> <span class="dm-stat-label">booked</span></div>';
         }
 
@@ -15110,13 +15157,19 @@ function renderTopDms(payload) {
         const wrapped = !!(r.booking_link_sent_at || linkCount > 0);
         const detected = !!r.outbound_url_detected;
         if (!wrapped && !detected) return '<span style="color:var(--text-faint);">No</span>';
-        const tipParts = [];
-        if (r.booking_link_sent_at) tipParts.push('booking link sent: ' + new Date(r.booking_link_sent_at).toLocaleString());
-        if (linkCount > 0) tipParts.push(linkCount + ' wrapped link' + (linkCount === 1 ? '' : 's'));
-        if (r.short_link_code) tipParts.push('latest: /r/' + String(r.short_link_code));
-        if (!wrapped && detected) tipParts.push('raw URL detected in outbound text (wrap pipeline bypassed - no dm_links row, click tracking missing)');
-        else if (detected && wrapped) tipParts.push('also: raw URL in outbound text');
-        const tip = tipParts.join(' • ');
+        const tipParts = ['**Link tracking**', ''];
+        if (r.booking_link_sent_at) tipParts.push('• **Booking link sent:** ' + new Date(r.booking_link_sent_at).toLocaleString());
+        if (linkCount > 0) tipParts.push('• **' + linkCount + ' wrapped link' + (linkCount === 1 ? '' : 's') + '**');
+        if (r.short_link_code) tipParts.push('• **Latest:** /r/' + String(r.short_link_code));
+        if (!wrapped && detected) {
+          tipParts.push('');
+          tipParts.push('**Raw URL detected** in outbound text');
+          tipParts.push('(wrap pipeline bypassed — no dm_links row, click tracking missing)');
+        } else if (detected && wrapped) {
+          tipParts.push('');
+          tipParts.push('Also: raw URL in outbound text');
+        }
+        const tip = tipParts.join(String.fromCharCode(10));
         const tipAttr = tip ? ' data-tooltip="' + escapeHtml(tip) + '"' : '';
         const label = wrapped ? 'Yes' : 'Yes*';
         const color = wrapped ? 'var(--success)' : '#b45309';
