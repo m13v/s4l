@@ -213,13 +213,16 @@ _sa_emit_run_summary_oneshot() {
     if [ -n "${EXEC_POSTED:-}" ] || [ -n "${EXEC_SKIPPED:-}" ]; then
         posted_ct="${EXEC_POSTED:-0}"
         skipped_ct="${EXEC_SKIPPED:-0}"
-    elif [ -n "${BATCH_ID:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
-        posted_ct=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
-            "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='posted'" \
-            2>/dev/null || echo 0)
-        skipped_ct=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
-            "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status IN ('skipped','expired')" \
-            2>/dev/null || echo 0)
+    elif [ -n "${BATCH_ID:-}" ]; then
+        # /api/v1/twitter-candidates/counts-by-batch returns posted +
+        # skipped_or_expired in one roundtrip; helper prints them space-
+        # separated so this stays a single $() capture.
+        _SC=$(timeout 10 python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" \
+                status-counts --batch-id "$BATCH_ID" 2>/dev/null || echo "0 0")
+        posted_ct=$(echo "$_SC" | awk '{print $1}')
+        skipped_ct=$(echo "$_SC" | awk '{print $2}')
+        : "${posted_ct:=0}"
+        : "${skipped_ct:=0}"
     fi
     cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
                 --since "${RUN_START:-0}" \
@@ -339,59 +342,17 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 # Postgres session-TZ trap that would otherwise mis-interpret batch_id.
 LEGACY_SALVAGE_CUTOFF_MIN=20
 LEGACY_SALVAGE_CUTOFF_BATCH_ID="twcycle-$(date -v-${LEGACY_SALVAGE_CUTOFF_MIN}M +%Y%m%d-%H%M%S)"
-PHASE0_RESULT=$(psql "$DATABASE_URL" --single-transaction -t -A -c "
-SELECT pg_advisory_xact_lock(7472346);
-WITH expired AS (
-    UPDATE twitter_candidates
-    SET status='expired'
-    WHERE status='pending' AND tweet_posted_at < NOW() - INTERVAL '$FRESHNESS_HOURS hours'
-    RETURNING id
-), salvaged AS (
-    UPDATE twitter_candidates tc
-    SET batch_id='$BATCH_ID'
-    WHERE tc.status='pending'
-      AND tc.batch_id != '$BATCH_ID'
-      AND tc.batch_id LIKE 'twcycle-%'
-      AND tc.tweet_posted_at >= NOW() - INTERVAL '$FRESHNESS_HOURS hours'
-      -- Skip threads we already posted to. score_twitter_candidates.py applies
-      -- this filter on FRESH scrapes; salvage must repeat it because Bug 1
-      -- (DATABASE_URL not exported, fixed 2026-05-01) left successful posts'
-      -- candidate rows stuck at status='pending', and salvage was re-claiming
-      -- already-posted threads, double-firing browser replies (4 observed
-      -- duplicates on m13v_ timeline 2026-05-01). Belt-and-suspenders.
-      AND tc.tweet_url NOT IN (
-          SELECT thread_url FROM posts
-          WHERE platform='twitter' AND thread_url IS NOT NULL
-      )
-      AND (
-          -- Phase-aware path: owner has a twitter_batches row, use the
-          -- per-phase budget. Owner's phase_started_at is reset by every
-          -- twitter_batch_phase.py advance call.
-          EXISTS (
-              SELECT 1 FROM twitter_batches tb
-              WHERE tb.batch_id = tc.batch_id
-                AND tb.phase_started_at < NOW() - CASE tb.current_phase
-                    WHEN 'phase0'        THEN INTERVAL '5 minutes'
-                    WHEN 'phase1'        THEN INTERVAL '20 minutes'
-                    WHEN 'phase2a'       THEN INTERVAL '20 minutes'
-                    WHEN 'phase2b-prep'  THEN INTERVAL '30 minutes'
-                    WHEN 'phase2b-gen'   THEN INTERVAL '60 minutes'
-                    WHEN 'phase2b-post'  THEN INTERVAL '15 minutes'
-                    ELSE INTERVAL '20 minutes'
-                END
-          )
-          -- Legacy fallback: no batches row, use the old 20-min batch_id
-          -- string-cutoff heuristic. Self-cleans within FRESHNESS_HOURS of
-          -- migration deploy.
-          OR (
-              NOT EXISTS (SELECT 1 FROM twitter_batches tb WHERE tb.batch_id = tc.batch_id)
-              AND tc.batch_id < '$LEGACY_SALVAGE_CUTOFF_BATCH_ID'
-          )
-      )
-    RETURNING id
-)
-SELECT (SELECT COUNT(*) FROM expired) || '|' || (SELECT COUNT(*) FROM salvaged);
-" 2>/dev/null | tail -1 | tr -d ' ')
+# Single-transaction Phase 0 salvage now lives server-side at
+# /api/v1/twitter-candidates/phase0-salvage. Same advisory lock (7472346),
+# same expire + salvage CTE, same phase-aware budget table. The helper
+# prints "<expired_count>|<salvaged_count>" so the legacy cut/cut shape
+# downstream still works.
+PHASE0_RESULT=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" \
+    phase0-salvage \
+    --batch-id "$BATCH_ID" \
+    --freshness-hours "$FRESHNESS_HOURS" \
+    --legacy-cutoff "$LEGACY_SALVAGE_CUTOFF_BATCH_ID" \
+    2>/dev/null | tail -1 | tr -d ' ')
 EXPIRED_STALE=$(echo "$PHASE0_RESULT" | cut -d'|' -f1)
 SALVAGED=$(echo "$PHASE0_RESULT" | cut -d'|' -f2)
 [ "${EXPIRED_STALE:-0}" -gt 0 ] && log "Phase 0: hard-expired $EXPIRED_STALE pending rows older than ${FRESHNESS_HOURS}h"
@@ -497,7 +458,7 @@ log "Per-project supply signal loaded: $SUPPLY_COUNT projects"
 # scraping instead of spending tokens evaluating tweets it can't post to.
 # 48h is ample: the 6h freshness wall means any dup is necessarily a recent
 # reply. Scoring remains the backstop; this is purely a token cleanup.
-ENGAGED_TWEET_IDS=$(psql "$DATABASE_URL" -t -A -c "SELECT COALESCE(json_agg(DISTINCT sid), '[]'::json) FROM (SELECT (regexp_match(thread_url, '/status/([0-9]+)'))[1] AS sid FROM posts WHERE platform='twitter' AND thread_url IS NOT NULL AND posted_at > NOW() - INTERVAL '48 hours') t WHERE sid IS NOT NULL" 2>/dev/null || echo "[]")
+ENGAGED_TWEET_IDS=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" engaged-tweet-ids --window-hours 48 2>/dev/null || echo "[]")
 [ -z "$ENGAGED_TWEET_IDS" ] && ENGAGED_TWEET_IDS="[]"
 ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
@@ -908,7 +869,7 @@ cat "$RAW_FILE" \
     2>&1 | tee -a "$LOG_FILE"
 rm -f "$RAW_FILE"
 
-BATCH_COUNT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID'" 2>/dev/null || echo 0)
+BATCH_COUNT=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" batch-count --batch-id "$BATCH_ID" 2>/dev/null || echo 0)
 log "Phase 1 complete. Batch has $BATCH_COUNT candidates with T0 snapshot."
 
 if [ "$BATCH_COUNT" = "0" ]; then
@@ -964,32 +925,20 @@ python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | te
 # thread to the right audience. Sort is still hybrid (delta + intent) DESC so
 # the hottest tweets land at the top of the prompt; LIMIT 25 stays as a
 # draft-budget cap, not a ripening gate.
-CANDIDATES=$(psql "$DATABASE_URL" -t -A -F '|' -c "
-    SELECT id, tweet_url, author_handle,
-           REPLACE(REPLACE(COALESCE(tweet_text, ''), E'\n', ' '), E'\r', ' '),
-           virality_score,
-           COALESCE(delta_score, 0), matched_project, search_topic,
-           likes_t1, retweets_t1, replies_t1, views_t1, author_followers,
-           EXTRACT(EPOCH FROM (NOW() - tweet_posted_at))/3600,
-           REPLACE(REPLACE(COALESCE(draft_reply_text, ''), E'\n', ' '), E'\r', ' '),
-           COALESCE(draft_engagement_style, ''),
-           CASE WHEN drafted_at IS NULL THEN -1
-                ELSE EXTRACT(EPOCH FROM (NOW() - drafted_at))/60
-           END
-    FROM twitter_candidates
-    WHERE batch_id='$BATCH_ID' AND status='pending'
-    ORDER BY (
-        COALESCE(delta_score, 0)
-        + CASE WHEN tweet_text ~* '\m(wish|need a|need an|looking for|recommend|alternative to|frustrated|hate (that|when)|should exist|would pay|missing.*(feature|tool|app)|why (is there no|doesn''t)|anyone know|anyone use|how do you|what do you use|best (tool|app))\M' THEN 5 ELSE 0 END
-    ) DESC
-    LIMIT 25;
-" 2>/dev/null || echo "")
+# Candidate list now comes through /api/v1/twitter-candidates (route returns
+# all pending rows for the batch); the helper applies the same intent-boost
+# composite sort + 25-row cap client-side and emits the SAME pipe-separated
+# columns the legacy psql -F '|' query produced. Pipe shape is documented in
+# scripts/twitter_cycle_helper.py:cmd_candidates.
+CANDIDATES=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" candidates --batch-id "$BATCH_ID" 2>/dev/null || echo "")
 
 if [ -z "$CANDIDATES" ]; then
     log "No candidates with delta scores. Marking batch expired."
-    psql "$DATABASE_URL" -c "UPDATE twitter_candidates SET status='expired' WHERE batch_id='$BATCH_ID' AND status='pending'" 2>&1 | tee -a "$LOG_FILE"
+    # /api/v1/twitter-candidates/expire-batch performs the same status-flip
+    # UPDATE atomically and prints the resulting expired_count integer that
+    # the EXPIRED_BATCH variable previously got from a second COUNT(*) query.
+    EXPIRED_BATCH=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" expire-batch --batch-id "$BATCH_ID" 2>/dev/null || echo 0)
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-    EXPIRED_BATCH=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' AND status='expired'" 2>/dev/null || echo 0)
     # Not a hard error — batch had candidates but none remained 'pending' after
     # Phase 2a (typically: every row already flipped to posted/skipped/expired
     # by an earlier salvage pass). With the ripening floor removed (2026-05-15),
@@ -1356,9 +1305,10 @@ fi
 # Per-run-log human readout. The persistent run_monitor.log row is written
 # by _sa_emit_run_summary_oneshot (defined near the top of this script) so
 # SIGTERM during the summary block still produces a dashboard-visible row.
-SUMMARY=$(psql "$DATABASE_URL" -t -A -F '|' -c "
-SELECT status, COUNT(*) FROM twitter_candidates WHERE batch_id='$BATCH_ID' GROUP BY status
-" 2>/dev/null)
+# Summary now comes from /api/v1/twitter-candidates/counts-by-batch via
+# the helper, formatted as "status|count\nstatus|count..." to match the
+# legacy psql -F '|' shape this log line consumed.
+SUMMARY=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" batch-summary --batch-id "$BATCH_ID" 2>/dev/null)
 log "Batch summary: $SUMMARY"
 
 _sa_emit_run_summary_oneshot
