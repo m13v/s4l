@@ -152,6 +152,7 @@ def log_rejected(args):
         "status": "rejected_by_platform",
         "thread_author": args.thread_author or "",
         "thread_title": args.thread_title or "",
+        "thread_content": args.thread_content or "",
         "our_account": account,
         "source_summary": summary,
     }
@@ -208,6 +209,12 @@ def main():
     parser.add_argument("--project")
     parser.add_argument("--thread-author", default="")
     parser.add_argument("--thread-title", default="")
+    parser.add_argument("--thread-content", default="",
+                        help="Body text of the original thread/post we're "
+                             "replying to. Stored in posts.thread_content and "
+                             "surfaced on the public dashboard so visitors see "
+                             "the conversation context our comment lives in. "
+                             "Capped at 4000 chars by the API.")
     parser.add_argument("--account", default=None,
                         help="Override default account for the platform")
     parser.add_argument("--engagement-style", default=None,
@@ -299,6 +306,7 @@ def main():
         "project": args.project,
         "thread_author": args.thread_author or "",
         "thread_title": args.thread_title or "",
+        "thread_content": args.thread_content or "",
         "our_account": account,
         "is_recommendation": bool(args.is_recommendation),
     }
