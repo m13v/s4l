@@ -13308,7 +13308,7 @@ function renderSearchQueriesStats(payload) {
         formatter: (v, row) => {
           const n = Number(v) || 0;
           if (row.serp_quality_avg != null) {
-            const tip = 'avg SERP quality (LinkedIn only): ' + row.serp_quality_avg.toFixed(1) + '/10';
+            const tip = '**Avg SERP quality** (LinkedIn only): **' + row.serp_quality_avg.toFixed(1) + '/10**';
             return '<span data-tooltip="' + escapeHtml(tip) + '">' + fmt(n) + '</span>';
           }
           return fmt(n);
@@ -13316,7 +13316,7 @@ function renderSearchQueriesStats(payload) {
       { key: 'dud_rate',    label: 'Dud %',     type: 'numeric', align: 'right', widthPct: 5,
         formatter: (v, row) => {
           const n = Number(v) || 0;
-          const tip = (row.dud_attempts || 0) + ' of ' + (row.attempts || 0) + ' attempts returned 0';
+          const tip = '**' + (row.dud_attempts || 0) + '** of **' + (row.attempts || 0) + '** attempts returned 0';
           const color = n >= 0.5 ? 'var(--danger,#dc2626)' : (n >= 0.25 ? 'var(--warn,#d97706)' : 'var(--text-secondary)');
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
         } },
@@ -13329,13 +13329,15 @@ function renderSearchQueriesStats(payload) {
       { key: 'avg_engagement', label: 'Avg Eng', type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
           if (v == null) return '<span style="color:var(--text-faint);">\u2014</span>';
-          const tip = 'comments\u00D73 + upvotes on our reply (same formula as top_performers.py)';
+          const tip = '**Formula:** comments\u00D73 + upvotes on our reply' + String.fromCharCode(10) +
+                      '(same as top_performers.py)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt1(v) + '</span>';
         } },
       { key: 'avg_views',   label: 'Avg Views', type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
           if (v == null) return '<span data-tooltip="LinkedIn does not expose comment views" style="color:var(--text-faint);">\u2014</span>';
-          const tip = 'avg view count on our Twitter reply (raw, not weighted into Avg Eng)';
+          const tip = '**Avg view count** on our Twitter reply' + String.fromCharCode(10) +
+                      '(raw, not weighted into Avg Eng)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt(Math.round(v)) + '</span>';
         } },
       { key: 'last_run',    label: 'Last Run',  type: 'numeric', align: 'right', widthPct: 4,
