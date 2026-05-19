@@ -49,7 +49,7 @@ def load_env():
 
 
 def load_ig_config():
-    """Return (post_type_weights dict, recent_window_days int) from config.json."""
+    """Return (post_type_weights dict, recent_window_days int, product_cooldown_posts int) from config.json."""
     cfg = json.loads(CONFIG_FILE.read_text())
     ig = cfg.get("instagram") or {}
     weights = ig.get("post_type_weights") or ig.get("post_type_ratio") or {
@@ -57,7 +57,14 @@ def load_ig_config():
         "product": 1,
     }
     days = int(ig.get("recent_window_days", 7))
-    return weights, days
+    # Project diversity cooldown: how many of the most recent posts on this
+    # account to look at when deciding which projects are "recently posted"
+    # and therefore ineligible for the next product draft. Default 6 means
+    # the same project cannot appear twice within any 6-post sliding window
+    # per account. Cascading fallback (6 -> 3 -> 1 -> 0) kicks in if the
+    # cooldown filters out every product draft, so cadence is preserved.
+    cooldown = int(ig.get("product_cooldown_posts", 6))
+    return weights, days, cooldown
 
 
 def main():
