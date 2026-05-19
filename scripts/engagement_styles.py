@@ -682,14 +682,14 @@ def pick_style_for_post(platform, context="posting",
     rows = compute_target_distribution(platform, context=context)
     rows = [r for r in rows if r["style"] not in never]
 
-    rows_sorted_by_score = sorted(rows, key=lambda r: r.get("score", 0.0),
-                                  reverse=True)
-    # Top N candidates for the USE path: trusted styles only (exclude
-    # below-threshold styles to avoid n=1 lucky outliers from dominating;
-    # they still get shown as invent-mode references).
-    use_pool = [r for r in rows_sorted_by_score if r.get("trusted")][:top_n]
-    # Reference pool for invent mode is the same top N (or as many as exist).
-    reference_pool = rows_sorted_by_score[:top_n]
+    # Trust-filter first so n=1 outliers (e.g. snarky_oneliner with a single
+    # lucky 12-upvote post) can't claim a top reference slot. They stay in
+    # distribution_snapshot for audit but not in use_pool or reference_pool.
+    trusted_rows = [r for r in rows if r.get("trusted")]
+    trusted_sorted = sorted(trusted_rows, key=lambda r: r.get("score", 0.0),
+                            reverse=True)
+    use_pool = trusted_sorted[:top_n]
+    reference_pool = trusted_sorted[:top_n]
 
     universe = get_all_styles()
 
