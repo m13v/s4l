@@ -1184,12 +1184,22 @@ async function enrichPostCommentsTwitterRuns(runs) {
     "  )"
   );
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
+  // Bulk-fetch twitter/x posts in window to compute per-run style breakdown.
+  const twitterPostRows = await pq(
+    "SELECT posted_at, engagement_style FROM posts " +
+    "WHERE platform IN ('twitter', 'x') AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
+    [since]
+  ) || [];
 
   const toMs = (d) => {
     if (!d) return null;
     const dt = d instanceof Date ? d : new Date(d);
     return dt.getTime();
   };
+  const twitterPostNorm = twitterPostRows.map(r => ({
+    postedMs: toMs(r.posted_at),
+    style: r.engagement_style || '',
+  }));
   const searchNorm = searchRows.map(r => ({
     ms: toMs(r.ran_at),
     found: r.tweets_found || 0,
@@ -1391,6 +1401,14 @@ async function enrichPostCommentsTwitterRuns(runs) {
         }
       }
     }
+    const stylesMapTx = {};
+    for (const p of twitterPostNorm) {
+      if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+      stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+    }
+    const stylesUsedTx = Object.entries(stylesMapTx)
+      .sort(function (a, b) { return b[1] - a[1]; })
+      .map(function (e) { return e[0] + '(' + e[1] + ')'; });
     const prior = run.result || {};
     const priorDiscover = (prior.discover && typeof prior.discover === 'object') ? prior.discover : {};
     run.result = {
@@ -1429,6 +1447,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
       // pill row so the operator can see at a glance which projects consumed
       // the cycle, even when posted=0. Mirrors enrichPostCommentsRedditRuns.
       projects_worked: projectsList,
+      styles_used: stylesUsedTx,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -1512,12 +1531,22 @@ async function enrichPostCommentsRedditRuns(runs) {
     "  )"
   );
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
+  // Bulk-fetch reddit posts in window to compute per-run style breakdown.
+  const redditPostRows = await pq(
+    "SELECT posted_at, engagement_style FROM posts " +
+    "WHERE platform = 'reddit' AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
+    [since]
+  ) || [];
 
   const toMs = (d) => {
     if (!d) return null;
     const dt = d instanceof Date ? d : new Date(d);
     return dt.getTime();
   };
+  const redditPostNorm = redditPostRows.map(r => ({
+    postedMs: toMs(r.posted_at),
+    style: r.engagement_style || '',
+  }));
   // exitMs = the moment the row left 'pending'. Null for rows still pending.
   // posted  -> posted_at
   // failed  -> last_attempt_at  (set by _db_mark_candidate_attempt + html_locked)
@@ -1855,6 +1884,14 @@ async function enrichPostCommentsRedditRuns(runs) {
                        + queueDrainedExpired + queueDrainedSkipped;
 
     const dropped = Math.max(0, raw - passed);
+    const stylesMapRd = {};
+    for (const p of redditPostNorm) {
+      if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+      stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+    }
+    const stylesUsedRd = Object.entries(stylesMapRd)
+      .sort(function (a, b) { return b[1] - a[1]; })
+      .map(function (e) { return e[0] + '(' + e[1] + ')'; });
     const prior = run.result || {};
     // Trust the per-iter rollup `phase=post posted=N` over the bare POSTED:
     // grep when both exist (POSTED: can fire mid-retry). Fall back to the
@@ -1889,6 +1926,7 @@ async function enrichPostCommentsRedditRuns(runs) {
       // end of the dashboard pill row so the operator can see at a glance which
       // project(s) consumed the cycle (often 2 distinct: salvage lane + discover).
       projects_worked: projectsList,
+      styles_used: stylesUsedRd,
       // Ripen phase (5-min delta gate, scripts/ripen_reddit_plan.py). Reflects
       // the per-run sum across all iterations that reached the ripen step.
       // ripen_iters counts iterations where the [ripen] summary marker fired
@@ -8628,6 +8666,13 @@ function renderResult(run) {
             + r.projects_worked.join(', ')
             + '</span></span>'
           : '') +
+        (Array.isArray(r.styles_used) && r.styles_used.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+            + 'styles '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.styles_used.join(', ')
+            + '</span></span>'
+          : '') +
       '</span>'
     );
   }
@@ -8824,6 +8869,13 @@ function renderResult(run) {
             + 'projects '
             + '<span style="color:var(--text);font-weight:600;">'
             + r.projects_worked.join(', ')
+            + '</span></span>'
+          : '') +
+        (Array.isArray(r.styles_used) && r.styles_used.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+            + 'styles '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.styles_used.join(', ')
             + '</span></span>'
           : '') +
       '</span>'
