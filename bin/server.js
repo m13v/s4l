@@ -8120,10 +8120,14 @@ function toast(msg, isError) {
   }
   // Render tooltip text with safe minimal markup:
   //   1. Escape all HTML special chars (so dynamic data can never inject HTML).
-  //   2. Then turn **word** sequences into <b>word</b>. The escape step happens
-  //      FIRST, so even **<script>** becomes <b>&lt;script&gt;</b>.
+  //   2. Then turn double-asterisk sequences into bold. The escape step happens
+  //      FIRST, so even bolded angle-bracket text becomes inert.
   //   3. Newlines render via CSS white-space:pre-line (already on .sa-tooltip).
-  //      No need to convert \n to <br>.
+  //      No conversion to br needed.
+  // NOTE: this whole file sits inside the outer HTML backtick template, so all
+  // escapes here must be DOUBLE backslashes — the outer template eats single
+  // backslashes. The served JS sees single-backslash escapes, which the regex
+  // engine then handles correctly.
   function renderTooltipMarkup(text) {
     var html = String(text)
       .replace(/&/g, '&amp;')
@@ -8131,7 +8135,7 @@ function toast(msg, isError) {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
     // Non-greedy match so multiple **bold** runs on one line work.
-    html = html.replace(/\*\*([^*\n]+?)\*\*/g, '<b>$1</b>');
+    html = html.replace(/\\*\\*([^*\\n]+?)\\*\\*/g, '<b>$1</b>');
     return html;
   }
   function show(host) {
@@ -8824,8 +8828,8 @@ function renderResult(run) {
       // Build the ripen tooltip with explicit newlines (NL is defined in the
       // outer scope; use String.fromCharCode(10) here in case the closure
       // walked away from it). See feedback_server_js_template_regex memory:
-      // literal \n inside the outer HTML backtick template gets eaten, so we
-      // build the newline char numerically.
+      // literal backslash-n inside the outer HTML backtick template gets eaten,
+      // so we build the newline char numerically.
       const RNL = String.fromCharCode(10);
       const ripenTip =
         '**Ripen step** — 5-min Δ re-score' + RNL +
