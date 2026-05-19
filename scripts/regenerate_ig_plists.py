@@ -43,9 +43,19 @@ def load_cfg():
     cfg = json.loads(CONFIG_PATH.read_text())
     ig = cfg.get("instagram") or {}
     accounts = [a for a in (ig.get("accounts") or []) if a.get("enabled")]
+    # Per-account posts_per_day overrides the global default. Accounts without
+    # the field fall back to instagram.posts_per_account_per_day.
+    global_default = int(ig.get("posts_per_account_per_day", 5))
+    per_account = {
+        a["username"]: int(a.get("posts_per_day", global_default))
+        for a in accounts
+    }
+    total_slots = sum(per_account.values())
     return {
         "enabled_account_count": len(accounts),
-        "posts_per_account_per_day": int(ig.get("posts_per_account_per_day", 5)),
+        "posts_per_account_per_day": global_default,
+        "per_account_posts_per_day": per_account,
+        "total_slots": total_slots,
         "start_hour": int(ig.get("schedule_start_hour", 9)),
         "end_hour": int(ig.get("schedule_end_hour", 22)),
     }
@@ -172,12 +182,17 @@ def main():
     if n_accounts == 0:
         sys.stderr.write("no enabled accounts in config.json:instagram.accounts; refusing to rewrite plists\n")
         sys.exit(2)
-    n_slots = cfg["posts_per_account_per_day"] * n_accounts
+    # Total slots = sum of per-account posts_per_day (each account opts in to
+    # its own daily cadence; defaults to global posts_per_account_per_day).
+    n_slots = cfg["total_slots"]
     post_slots = compute_post_slots(cfg["start_hour"], cfg["end_hour"], n_slots)
     render_slots = [render_slot_for(h, m) for h, m in post_slots]
 
+    per_acct = ", ".join(
+        f"{u}={c}" for u, c in sorted(cfg["per_account_posts_per_day"].items())
+    )
     print(
-        f"plan: {n_accounts} enabled account(s) * {cfg['posts_per_account_per_day']} posts/day "
+        f"plan: {n_accounts} enabled account(s) [{per_acct}] "
         f"= {n_slots} slots/day; window {cfg['start_hour']}:00-{cfg['end_hour']}:00"
     )
     print("post slots:")
