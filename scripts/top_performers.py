@@ -850,6 +850,16 @@ def main():
     parser.add_argument("--project", default=None, help="Filter to specific project")
     parser.add_argument("--top", type=int, default=5, help="Number of top posts to show (per group or total)")
     parser.add_argument("--bottom", type=int, default=5, help="Number of bottom posts to show")
+    parser.add_argument("--style", default=None,
+                        help=("Restrict per-style exemplars + perf table to the "
+                              "given engagement_style(s). Accepts a single style "
+                              "(data_point_drop) or comma-separated (style1,style2). "
+                              "Added 2026-05-19 for the assigned-style picker rollout: "
+                              "when a post_*/engage_* orchestrator assigns one style "
+                              "via pick_style_for_post(), it passes that style here so "
+                              "the few-shot exemplar section shows only the matching "
+                              "high-scoring posts instead of every style. Summary, "
+                              "fallback_top, and top_by_group are not affected."))
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
@@ -862,6 +872,15 @@ def main():
         platform=args.platform, project=args.project, top=args.top, bottom=args.bottom,
     )
 
+    if args.style:
+        wanted = {s.strip() for s in args.style.split(",") if s.strip()}
+        # style_perf row col 0 = style name. top_by_style row col 12 = style name.
+        style_perf = [row for row in style_perf if row and row[0] in wanted]
+        top_by_style = [
+            row for row in top_by_style
+            if row and len(row) > 12 and row[12] in wanted
+        ]
+
     if args.json:
         output = {
             "summary": [list(row) for row in summary],
@@ -869,6 +888,7 @@ def main():
             "bottom_posts": [list(row) for row in bottom],
             "fallback_top": [list(row) for row in fallback_top] if fallback_top else [],
             "top_by_style": [list(row) for row in top_by_style],
+            "style_perf": [list(row) for row in style_perf],
         }
         print(json.dumps(output, indent=2, default=str))
     else:
