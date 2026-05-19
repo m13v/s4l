@@ -129,6 +129,54 @@ def _http_list_reddit_replies_to_refresh():
 
 def _http_patch_reply(reply_id, body):
     return api_patch(f"/api/v1/replies/{int(reply_id)}", body)
+
+
+# --- HTTP wrappers for the Twitter branch (2026-05-19 migration) -------------
+# Mirror the Reddit pattern: every read + write in update_twitter() and
+# update_twitter_replies() goes through HTTP so the VM (no DATABASE_URL) can
+# run the stats job too. Scoping by `our_account` happens server-side in the
+# /api/v1/posts/active-for-stats endpoint; the local mac passes 'm13v_', the
+# VM passes 'matt_diak'. Strict scoping means neither machine touches the
+# other's posts even when both cron-fire concurrently.
+
+def _http_list_twitter_active_posts(our_account, audit_mode=False, stale_hours=5):
+    """Posts to refresh for the Twitter stats job, scoped by handle."""
+    resp = api_get(
+        "/api/v1/posts/active-for-stats",
+        query={
+            "platform": "twitter",
+            "our_account": our_account,
+            "audit": "true" if audit_mode else "false",
+            "engagement_stale_after_hours": int(stale_hours),
+        },
+    )
+    return ((resp or {}).get("data") or {}).get("posts") or []
+
+
+def _http_list_twitter_replies_to_refresh():
+    """Reply rows to refresh for the Twitter stats job, scoped by install_id
+    via the auth header (route reads resolveAuth().install_id and filters)."""
+    resp = api_get(
+        "/api/v1/replies/active-for-stats",
+        query={"platform": "x"},
+    )
+    return ((resp or {}).get("data") or {}).get("replies") or []
+
+
+def _http_snapshot_post_views(post_id, views):
+    """HTTP equivalent of dbmod.snapshot_post_views — UPSERT one row of
+    post_views_daily for CURRENT_DATE. Errors swallowed so a transient
+    network blip doesn't abort the stats run (the parent row's views/upvotes
+    are already updated; the daily rollup is best-effort)."""
+    try:
+        api_post(
+            "/api/v1/post-views-daily/snapshot",
+            {"post_id": int(post_id), "views": int(views)},
+        )
+    except Exception:
+        pass
+
+
 import progress
 from moltbook_tools import (
     fetch_moltbook_json,
@@ -1403,33 +1451,37 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
         older than 5 days) keeps the long tail cheap; deletion detection
         confirms removed tweets after 2 strikes.
 
+    Multi-account safety (2026-05-19): the read is scoped to THIS machine's
+    Twitter handle so two machines (e.g. local-mac as @m13v_, mk0r VM as
+    @matt_diak) never refresh each other's posts. Without scoping, both
+    crons would burn fxtwitter quota on the union, race on engagement
+    column writes, and the dashboard would render whichever machine
+    finished last. The handle comes from twitter_account.resolve_handle()
+    which reads `AUTOPOSTER_TWITTER_HANDLE` env or `accounts.twitter.handle`
+    in config.json.
+
     Before this split, audit refreshed every active row daily and stamped
     engagement_updated_at on all of them, which silently locked the per-6h
     job out of the hot tier for a week at a time.
+
+    `db` is accepted for signature compatibility with the orchestrator but
+    no direct SQL runs here — every read/write goes through HTTP so the VM
+    (no DATABASE_URL) can run this branch too.
     """
+    from twitter_account import resolve_handle as _resolve_twitter_handle
     config = config or {}
 
-    if audit_mode:
-        posts = db.execute(
-            "SELECT id, our_url, "
-            "COALESCE(scan_no_change_count, 0) as scan_no_change_count, posted_at, "
-            "upvotes, views, comments_count "
-            "FROM posts "
-            "WHERE platform='twitter' AND status='active' AND our_url IS NOT NULL "
-            "AND posted_at <= NOW() - INTERVAL '7 days' "
-            "ORDER BY id"
-        ).fetchall()
-    else:
-        posts = db.execute(
-            "SELECT id, our_url, "
-            "COALESCE(scan_no_change_count, 0) as scan_no_change_count, posted_at, "
-            "upvotes, views, comments_count "
-            "FROM posts "
-            "WHERE platform='twitter' AND status='active' AND our_url IS NOT NULL "
-            "AND posted_at > NOW() - INTERVAL '7 days' "
-            "AND (engagement_updated_at IS NULL OR engagement_updated_at < NOW() - INTERVAL '5 hours') "
-            "ORDER BY id"
-        ).fetchall()
+    handle = _resolve_twitter_handle()
+    if not handle:
+        if not quiet:
+            print("  twitter: no handle configured (AUTOPOSTER_TWITTER_HANDLE / "
+                  "accounts.twitter.handle); skipping refresh", flush=True)
+        return {"total": 0, "updated": 0, "changed": 0, "deleted": 0,
+                "suspended": 0, "errors": 0, "skipped": 0, "results": []}
+
+    posts = _http_list_twitter_active_posts(
+        our_account=handle, audit_mode=audit_mode, stale_hours=5,
+    )
 
     total = updated = changed = deleted = suspended = errors = skipped = 0
     # `updated`: rows the fxtwitter API answered for and we wrote back (i.e.
