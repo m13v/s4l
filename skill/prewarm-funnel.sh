@@ -25,6 +25,24 @@ mkdir -p "$LOG_DIR"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 log() { echo "[$(ts)] $*" >> "$LOG_FILE"; }
 
+# Single-instance guard. A full cycle takes 2-5min (25 projects x 2 day-windows
+# x N ports, each call 5-180s); launchd fires every 240s, so without this guard
+# the script stacks (saw 2 stale processes from 11:22 + 11:33 on 2026-05-19
+# both still running at 11:35, multiplying PostHog + dashboard pg-pool load and
+# wedging both Get Started cards and per-project breakdown).
+# macOS ships no flock(1), so we use a PID file: a previous process's PID is
+# considered live iff `kill -0 PID` succeeds and the proc is still bash.
+PID_FILE="/tmp/social-autoposter-prewarm-funnel.pid"
+if [ -f "$PID_FILE" ]; then
+  prev=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null && ps -p "$prev" -o comm= 2>/dev/null | grep -qE "bash|sh"; then
+    log "another prewarm cycle (pid=$prev) in progress; skipping this tick"
+    exit 0
+  fi
+fi
+echo "$$" > "$PID_FILE"
+trap 'rm -f "$PID_FILE"' EXIT INT TERM
+
 projects=()
 while IFS= read -r line; do
   [ -n "$line" ] && projects+=("$line")
