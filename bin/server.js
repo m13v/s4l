@@ -7209,6 +7209,34 @@ const HTML = `<!DOCTYPE html>
   .daily-metrics-tooltip .tt-row { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; color: var(--text); }
   .daily-metrics-tooltip .tt-row .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
   .daily-metrics-tooltip .tt-row .val { margin-left: auto; }
+  /* Trends tab — per-project breakdown. One row per project, each row has a
+     left-aligned project label and the same column chart used in the main
+     section (just shorter). Stack vertically, lazy-loaded on details open;
+     re-rendered (no refetch) when the user toggles legend pills. */
+  .per-project-breakdown { padding: 0 20px 14px; }
+  .per-project-breakdown > summary { display: flex; align-items: center; gap: 8px; padding: 6px 0; cursor: pointer; font-size: 12px; color: var(--text-secondary); user-select: none; list-style: none; }
+  .per-project-breakdown > summary::-webkit-details-marker { display: none; }
+  .per-project-breakdown > summary .pp-caret { display: inline-block; width: 10px; transition: transform 0.1s; }
+  .per-project-breakdown[open] > summary .pp-caret { transform: rotate(90deg); }
+  .per-project-breakdown > summary .pp-status { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+  .per-project-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .per-project-row { display: grid; grid-template-columns: 140px 1fr; align-items: stretch; gap: 8px; padding: 4px 0; border-top: 1px dashed var(--border); }
+  .per-project-row:first-child { border-top: none; }
+  .per-project-label { font-size: 12px; color: var(--text); font-weight: 500; padding: 6px 0 0 4px; word-break: break-word; }
+  .per-project-chart { position: relative; min-height: 130px; }
+  .per-project-chart svg { display: block; width: 100%; height: 130px; overflow: visible; }
+  .per-project-chart .gridline { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 3; }
+  .per-project-chart .axis-text { fill: var(--text-secondary); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .per-project-chart .series-bar { transition: opacity 0.1s; }
+  .per-project-chart .series-bar:hover { opacity: 0.85; }
+  .per-project-chart .hover-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
+  .per-project-chart .pp-tooltip { position: absolute; pointer-events: none; background: var(--bg-panel, #fff); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 11px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); min-width: 160px; max-width: 240px; opacity: 0; transition: opacity 0.08s; z-index: 5; left: 0; top: 0; }
+  .per-project-chart .pp-tooltip .tt-day { font-weight: 600; margin-bottom: 3px; color: var(--text); }
+  .per-project-chart .pp-tooltip .tt-row { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; color: var(--text); }
+  .per-project-chart .pp-tooltip .tt-row .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .per-project-chart .pp-tooltip .tt-row .val { margin-left: auto; }
+  .per-project-chart .pp-empty { padding: 14px 12px; color: var(--text-muted); font-size: 11px; text-align: center; }
+  .per-project-row.pp-loading .per-project-chart .pp-empty { color: var(--text-secondary); }
   /* Deploy Health: slim inline bar when collapsed, alert colors when there is something worth attention */
   #deploy-health:not([open]) { margin-bottom: 10px; border-radius: 8px; }
   #deploy-health:not([open]) > summary { padding: 6px 14px; }
@@ -7587,6 +7615,16 @@ const HTML = `<!DOCTYPE html>
       <div id="daily-metrics-chart" class="daily-metrics-chart">
         <div class="views-chart-empty">Loading…</div>
       </div>
+      <details class="per-project-breakdown" id="daily-metrics-per-project" data-scope="daily">
+        <summary>
+          <span class="pp-caret">▶</span>
+          <span class="pp-label">Per-project breakdown</span>
+          <span class="pp-status" id="daily-metrics-per-project-status"></span>
+        </summary>
+        <div class="per-project-rows" id="daily-metrics-per-project-rows">
+          <div class="views-chart-empty">Click to load per-project charts.</div>
+        </div>
+      </details>
     </div>
   </details>
   <details class="style-stats-section" id="ratio-metrics" open>
@@ -7599,6 +7637,16 @@ const HTML = `<!DOCTYPE html>
       <div id="ratio-metrics-chart" class="daily-metrics-chart">
         <div class="views-chart-empty">Loading&hellip;</div>
       </div>
+      <details class="per-project-breakdown" id="ratio-metrics-per-project" data-scope="ratio">
+        <summary>
+          <span class="pp-caret">&#9654;</span>
+          <span class="pp-label">Per-project breakdown</span>
+          <span class="pp-status" id="ratio-metrics-per-project-status"></span>
+        </summary>
+        <div class="per-project-rows" id="ratio-metrics-per-project-rows">
+          <div class="views-chart-empty">Click to load per-project charts.</div>
+        </div>
+      </details>
     </div>
   </details>
 </div>
@@ -10733,6 +10781,13 @@ function renderDailyMetrics() {
       if (active.has(id)) active.delete(id); else active.add(id);
       _saveDailyMetricsActive();
       renderDailyMetrics();
+      // Mirror the legend change across all per-project mini charts so they
+      // stay in sync with the main chart's metric selection. No fetch.
+      try {
+        if (_perProjectState && _perProjectState.loadedKey) {
+          _perProjectGetProjects().forEach(p => _renderPerProjectChart(p, 'daily'));
+        }
+      } catch {}
     });
   });
 
@@ -11056,6 +11111,13 @@ function renderRatioMetrics() {
       if (active.has(id)) active.delete(id); else active.add(id);
       _saveRatioMetricsActive();
       renderRatioMetrics();
+      // Same pattern as the daily-metrics legend: mirror the toggle across
+      // the per-project ratio mini-charts (no fetch, just SVG rebuild).
+      try {
+        if (_perProjectState && _perProjectState.loadedKey) {
+          _perProjectGetProjects().forEach(p => _renderPerProjectChart(p, 'ratio'));
+        }
+      } catch {}
     });
   });
   const visible = RATIO_METRICS.filter(r => active.has(r.id));
@@ -11202,6 +11264,481 @@ function renderRatioMetrics() {
     rect.addEventListener('mousemove', show);
     rect.addEventListener('mouseleave', hide);
   }
+}
+
+// ============================================================================
+// Per-project breakdown for the Trends tab. Renders the same Daily Metrics
+// and Engagement Ratios charts (sharing the user's legend selection) once per
+// project, stacked vertically. Lazy-loaded on first details open; cached by
+// granularity+platform (so toggling either filter triggers a refetch but the
+// legend pills just re-render from the cached series). Always shows ALL
+// projects regardless of the Trends project filter — the breakdown is the
+// place to compare projects against each other.
+// ============================================================================
+const _perProjectState = {
+  loadedKey: null,        // 'daily|all' style cache key
+  series: {},             // { project: { metricId: { dayISO: value } } }
+  days: [],               // axis (daily or weekly buckets)
+  failed: {},             // { project: [{key, timedOut}] }
+  loading: false,         // a fetch cycle is in flight
+};
+
+function _perProjectGetProjects() {
+  const pills = document.querySelectorAll('#trends-project-pills .style-stats-pill[data-value]');
+  return Array.from(pills)
+    .map(p => p.getAttribute('data-value'))
+    .filter(v => v && v !== 'all');
+}
+
+function _perProjectCacheKey() {
+  return currentTrendsGranularity() + '|' + currentTrendsPlatform();
+}
+
+// True when at least one of the per-project details elements is open.
+// Used to decide whether to (re)load on filter change; if both are closed
+// the data is irrelevant until the user opens one.
+function _perProjectIsAnyOpen() {
+  const a = document.getElementById('daily-metrics-per-project');
+  const b = document.getElementById('ratio-metrics-per-project');
+  return !!((a && a.open) || (b && b.open));
+}
+
+// Maybe-invalidate: only clears state when the cache key (granularity +
+// platform) actually changed. Project filter is irrelevant to per-project
+// breakdown (it always shows all projects), so a project-only change is a
+// no-op. Called from loadDailyMetrics on every refilter; cheap when no
+// section is open and no key change happened.
+function _perProjectInvalidate() {
+  const want = _perProjectCacheKey();
+  const changed = _perProjectState.loadedKey && _perProjectState.loadedKey !== want;
+  if (changed) {
+    _perProjectState.loadedKey = null;
+    _perProjectState.series = {};
+    _perProjectState.failed = {};
+  }
+  if (_perProjectIsAnyOpen()) {
+    _perProjectLoadIfNeeded();
+  } else if (changed) {
+    // Reset both row containers to a hint state so when the user opens the
+    // section next, they don't see stale data.
+    ['daily-metrics-per-project-rows', 'ratio-metrics-per-project-rows'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '<div class="views-chart-empty">Click to load per-project charts.</div>';
+    });
+    ['daily-metrics-per-project-status', 'ratio-metrics-per-project-status'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = '';
+    });
+  }
+}
+
+// Single fetch helper: 7 best-effort endpoints (8 in admin mode w/ cost) for
+// one project, mirroring the shape of loadDailyMetrics. Returns a flat
+// { series: { metricId: { day: value } }, failed: [...] } record.
+async function _perProjectFetchOne(project, gran, platform, fetchDays, dailyAxis) {
+  const FETCH_TIMEOUT_MS = 9000;
+  const fetchOne = async (url) => {
+    const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, FETCH_TIMEOUT_MS) : null;
+    try {
+      const res = await fetch(url, ctl ? { signal: ctl.signal } : undefined);
+      if (!res.ok) return { rows: [], failed: true, status: res.status };
+      const data = await res.json();
+      return { rows: data.rows || [], failed: false };
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      const timedOut = msg.includes('aborted') || msg.includes('Timeout') || msg.includes('timed out');
+      return { rows: [], failed: true, timedOut };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  // Force the project filter; platform stays inherited from the Trends bar.
+  const platformAwareParams = ['days=' + fetchDays, 'project=' + encodeURIComponent(project)];
+  if (platform && platform !== 'all') platformAwareParams.push('platform=' + encodeURIComponent(platform));
+  const projectOnlyParams = ['days=' + fetchDays, 'project=' + encodeURIComponent(project)];
+  const qsAware = platformAwareParams.join('&');
+  const qsProj  = projectOnlyParams.join('&');
+  const costAvail = window.SA_IS_ADMIN !== false;
+  const [views, upvotes, comments, clicks, bookings, funnel, cost, posts] = await Promise.all([
+    fetchOne('/api/views/per-day?'    + qsAware),
+    fetchOne('/api/upvotes/per-day?'  + qsAware),
+    fetchOne('/api/comments/per-day?' + qsAware),
+    fetchOne('/api/clicks/per-day?'   + qsAware),
+    fetchOne('/api/bookings/per-day?' + qsProj),
+    fetchOne('/api/funnel/per-day?'   + qsProj),
+    costAvail ? fetchOne('/api/cost/per-day?' + qsAware) : Promise.resolve({ rows: [], failed: false }),
+    fetchOne('/api/posts/per-day?'    + qsAware),
+  ]);
+  const series = {};
+  const intoSeries = (id, rows, key) => {
+    const map = {};
+    rows.forEach(r => { if (r && r.day) map[r.day] = Number(r[key]) || 0; });
+    series[id] = map;
+  };
+  intoSeries('views',         views.rows,    'views_gained');
+  intoSeries('upvotes',       upvotes.rows,  'upvotes_gained');
+  intoSeries('comments',      comments.rows, 'comments_gained');
+  intoSeries('clicks',        clicks.rows,   'clicks_gained');
+  intoSeries('bookings',      bookings.rows, 'bookings_gained');
+  intoSeries('cost',          cost.rows,     'cost_usd');
+  intoSeries('posts',         posts.rows,    'posts_made');
+  intoSeries('threads',       posts.rows,    'threads_made');
+  intoSeries('comments_made', posts.rows,    'comments_made');
+  DAILY_METRICS.filter(m => m.funnel).forEach(m => {
+    intoSeries(m.id, funnel.rows, m.valueKey);
+  });
+  // Apply weekly bucketing if needed (same shape as loadDailyMetrics).
+  let outSeries = series;
+  if (gran === 'weekly') {
+    const aggregated = {};
+    DAILY_METRICS.forEach(m => {
+      const bucketed = _bucketWeekly(dailyAxis, series[m.id] || {});
+      aggregated[m.id] = bucketed.weeklyMap;
+    });
+    outSeries = aggregated;
+  }
+  const fetchResults = { views, upvotes, comments, clicks, bookings, funnel, cost, posts };
+  const failed = Object.keys(fetchResults)
+    .filter(k => fetchResults[k].failed)
+    .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
+  return { series: outSeries, failed };
+}
+
+// Run an async fn over items with bounded concurrency. Used so we don't
+// fire 8 endpoints * 25 projects = 200 simultaneous requests at PostHog.
+async function _perProjectRunConcurrency(items, limit, fn) {
+  const queue = items.slice();
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, queue.length); i++) {
+    workers.push((async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        if (item == null) break;
+        try { await fn(item); } catch {}
+      }
+    })());
+  }
+  await Promise.all(workers);
+}
+
+// Build a compact column chart SVG. Same visual model as renderDailyMetrics
+// but smaller (130px tall, no value labels above bars, X labels at first/
+// middle/last only). Returns { svgHtml, plot } where plot exposes the
+// padding + dimensions for hover wiring.
+function _buildMiniChartSvg(opts) {
+  const days = opts.days || [];
+  const visible = opts.visible || [];
+  const valueOf = opts.valueOf; // (metric, day) => number|null
+  const isRatio = !!opts.isRatio;
+  const formatter = opts.formatter; // (metric, value) => string
+  const seriesPeak = {};
+  visible.forEach(m => {
+    let p = 0;
+    days.forEach(d => {
+      const v = valueOf(m, d);
+      if (v == null || !isFinite(v)) return;
+      p = Math.max(p, v);
+    });
+    seriesPeak[m.id] = p;
+  });
+  const isSingle = visible.length === 1;
+  const singleMetric = isSingle ? visible[0] : null;
+  const yMax = isSingle ? _niceMax(Math.max(isRatio ? 0.01 : 0, seriesPeak[visible[0].id] || 0)) : 0;
+  const width = 960;
+  const height = 130;
+  const padL = isSingle ? 44 : 12;
+  const padR = 12, padT = 10, padB = 16;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const groupWidth = days.length > 0 ? plotW / days.length : 0;
+  const groupGap = Math.max(1, groupWidth * 0.18);
+  const barCount = visible.length;
+  const barSpacing = barCount > 1 ? 1 : 0;
+  const innerWidth = Math.max(1, groupWidth - groupGap);
+  const barWidth = Math.max(1, (innerWidth - barSpacing * (barCount - 1)) / barCount);
+  const yOfFor = (m) => {
+    const peak = isSingle ? yMax : (seriesPeak[m.id] || 0);
+    return v => padT + plotH - (peak > 0 ? (v / peak) * plotH : 0);
+  };
+  const xCenter = i => padL + groupWidth * i + groupWidth / 2;
+  const yGrid = [0, 0.5, 1].map(t => {
+    const y = padT + plotH - t * plotH;
+    let label = '';
+    if (isSingle) {
+      const v = yMax * t;
+      label = '<text class="axis-text" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + escapeHtml(formatter(singleMetric, v)) + '</text>';
+    }
+    return '<line class="gridline" x1="' + padL + '" x2="' + (width - padR) + '" y1="' + y + '" y2="' + y + '"/>' + label;
+  }).join('');
+  const xLabelIdxs = days.length <= 1
+    ? [0]
+    : [0, Math.floor(days.length / 2), days.length - 1];
+  const xLabels = Array.from(new Set(xLabelIdxs)).map(i => {
+    return '<text class="axis-text" x="' + xCenter(i) + '" y="' + (height - 4) + '" text-anchor="middle">' + escapeHtml(_fmtDay(days[i])) + '</text>';
+  }).join('');
+  const bars = days.map((d, i) => {
+    const groupX = padL + groupWidth * i + groupGap / 2;
+    return visible.map((m, mi) => {
+      const v = valueOf(m, d);
+      if (v == null || !isFinite(v)) return '';
+      if (!isRatio && v === 0) return ''; // skip zero bars for cleanliness
+      const x = groupX + (barWidth + barSpacing) * mi;
+      const yOf = yOfFor(m);
+      const y = yOf(v);
+      const h = Math.max(0, padT + plotH - y);
+      return '<rect class="series-bar" data-day="' + escapeHtml(d) + '" data-metric="' + escapeHtml(m.id) + '" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barWidth.toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + m.color + '"/>';
+    }).join('');
+  }).join('');
+  const svgHtml =
+    '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" role="img">' +
+      yGrid + xLabels + bars +
+      '<line class="hover-line" x1="0" y1="' + padT + '" x2="0" y2="' + (padT + plotH) + '"/>' +
+      '<rect class="pp-hover-rect" x="' + padL + '" y="' + padT + '" width="' + plotW + '" height="' + plotH + '" fill="transparent"/>' +
+    '</svg>' +
+    '<div class="pp-tooltip"></div>';
+  return { svgHtml, plot: { width, height, padL, padR, padT, padB, plotW, plotH, groupWidth, xCenter } };
+}
+
+// Attach hover behavior to a mini chart inside chartEl. visible / valueOf /
+// formatter match the build call so the tooltip shows the same values.
+function _wireMiniChartHover(chartEl, plot, opts) {
+  const days = opts.days;
+  const visible = opts.visible;
+  const valueOf = opts.valueOf;
+  const formatter = opts.formatter;
+  const emptyLabelFor = opts.emptyLabelFor; // (metric) => string | null
+  const rect = chartEl.querySelector('.pp-hover-rect');
+  const hoverLine = chartEl.querySelector('.hover-line');
+  const tip = chartEl.querySelector('.pp-tooltip');
+  if (!rect || !hoverLine || !tip) return;
+  const show = e => {
+    const svgEl = chartEl.querySelector('svg');
+    const box = svgEl.getBoundingClientRect();
+    const relX = e.clientX - box.left;
+    const scale = plot.width / box.width;
+    const svgX = relX * scale;
+    const idxRaw = (svgX - plot.padL) / (plot.groupWidth || 1);
+    const idx = Math.max(0, Math.min(days.length - 1, Math.floor(idxRaw)));
+    const snapX = plot.xCenter(idx);
+    hoverLine.setAttribute('x1', snapX);
+    hoverLine.setAttribute('x2', snapX);
+    hoverLine.style.opacity = '1';
+    const day = days[idx];
+    const rows = visible.map(m => {
+      const v = valueOf(m, day);
+      let display;
+      if (v == null || !isFinite(v)) {
+        display = (emptyLabelFor ? emptyLabelFor(m) : '\u2014');
+      } else {
+        display = formatter(m, v);
+      }
+      return '<div class="tt-row"><span class="swatch" style="background:' + m.color + ';"></span>' +
+             '<span>' + escapeHtml(m.label) + '</span>' +
+             '<span class="val">' + escapeHtml(display) + '</span></div>';
+    }).join('');
+    tip.innerHTML = '<div class="tt-day">' + escapeHtml(_fmtDay(day)) + '</div>' + rows;
+    const cssX = snapX / scale;
+    tip.style.transform = 'none';
+    tip.style.visibility = 'hidden';
+    tip.style.opacity = '1';
+    const tipW = tip.offsetWidth;
+    const tipH = tip.offsetHeight;
+    const cw = chartEl.clientWidth;
+    const margin = 4;
+    const gap = 10;
+    const chartBox = chartEl.getBoundingClientRect();
+    const svgOffsetLeft = box.left - chartBox.left;
+    const cursorPx = svgOffsetLeft + cssX;
+    let leftPx = cursorPx - tipW / 2;
+    if (leftPx + tipW > cw - margin) {
+      leftPx = cursorPx - tipW - gap;
+      if (leftPx < margin) leftPx = Math.max(margin, cw - margin - tipW);
+    } else if (leftPx < margin) {
+      leftPx = cursorPx + gap;
+      if (leftPx + tipW > cw - margin) leftPx = Math.max(margin, cw - margin - tipW);
+    }
+    let topPx = plot.padT - 6 - tipH;
+    if (topPx < margin) topPx = plot.padT + 12;
+    tip.style.left = leftPx + 'px';
+    tip.style.top = topPx + 'px';
+    tip.style.visibility = '';
+  };
+  const hide = () => { hoverLine.style.opacity = '0'; tip.style.opacity = '0'; };
+  rect.addEventListener('mousemove', show);
+  rect.addEventListener('mouseleave', hide);
+}
+
+// Render one mini chart for `project` in either 'daily' or 'ratio' scope.
+function _renderPerProjectChart(project, scope) {
+  const rowsEl = document.getElementById(scope === 'daily' ? 'daily-metrics-per-project-rows' : 'ratio-metrics-per-project-rows');
+  if (!rowsEl) return;
+  const rowEl = rowsEl.querySelector('.per-project-row[data-project="' + (window.CSS && CSS.escape ? CSS.escape(project) : project) + '"]');
+  if (!rowEl) return;
+  const chartEl = rowEl.querySelector('.per-project-chart');
+  if (!chartEl) return;
+  const projectSeries = _perProjectState.series[project];
+  if (!projectSeries) {
+    chartEl.innerHTML = '<div class="pp-empty">Loading\u2026</div>';
+    rowEl.classList.add('pp-loading');
+    return;
+  }
+  rowEl.classList.remove('pp-loading');
+  const days = _perProjectState.days;
+  if (scope === 'daily') {
+    const active = _loadDailyMetricsActive();
+    const visible = DAILY_METRICS.filter(m => active.has(m.id));
+    if (!visible.length) {
+      chartEl.innerHTML = '<div class="pp-empty">No metrics selected.</div>';
+      return;
+    }
+    const valueOf = (m, d) => Number((projectSeries[m.id] || {})[d]) || 0;
+    const formatter = (m, v) => _fmtForMetric(m, v);
+    const { svgHtml, plot } = _buildMiniChartSvg({ days, visible, valueOf, isRatio: false, formatter });
+    chartEl.innerHTML = svgHtml;
+    _wireMiniChartHover(chartEl, plot, { days, visible, valueOf, formatter });
+  } else {
+    const active = _loadRatioMetricsActive();
+    const visible = RATIO_METRICS.filter(r => active.has(r.id));
+    if (!visible.length) {
+      chartEl.innerHTML = '<div class="pp-empty">No ratios selected.</div>';
+      return;
+    }
+    // Build per-ratio per-day series from this project's numerator/denominator.
+    const ratioCache = {};
+    visible.forEach(r => {
+      const numByDay = projectSeries[r.numerator]   || {};
+      const denByDay = projectSeries[r.denominator] || {};
+      const scale = (typeof r.scaleFactor === 'number') ? r.scaleFactor : 100;
+      const map = {};
+      days.forEach(d => {
+        const num = Number(numByDay[d]) || 0;
+        const den = Number(denByDay[d]) || 0;
+        map[d] = (den > 0) ? (num / den * scale) : null;
+      });
+      ratioCache[r.id] = map;
+    });
+    const valueOf = (r, d) => ratioCache[r.id][d];
+    const formatter = (r, v) => _fmtForRatio(r, v);
+    const emptyLabelFor = (r) => (r.denominator === 'pageviews') ? 'no visitors'
+                                : (r.denominator === 'posts')     ? 'no posts'
+                                : 'no views';
+    const { svgHtml, plot } = _buildMiniChartSvg({ days, visible, valueOf, isRatio: true, formatter });
+    chartEl.innerHTML = svgHtml;
+    _wireMiniChartHover(chartEl, plot, { days, visible, valueOf, formatter, emptyLabelFor });
+  }
+}
+
+// Render BOTH scopes (daily + ratio) for one project. Cheap; only the open
+// section will be visually scrolled into view, but rendering both keeps the
+// state symmetric.
+function _renderPerProjectBoth(project) {
+  _renderPerProjectChart(project, 'daily');
+  _renderPerProjectChart(project, 'ratio');
+}
+
+// Re-render every per-project row for both scopes. Used after legend pill
+// toggles (no fetch, just SVG rebuild) and after a fresh load completes.
+function _renderPerProjectAll() {
+  const projects = _perProjectGetProjects();
+  projects.forEach(p => _renderPerProjectBoth(p));
+}
+
+// Build (or rebuild) the row skeleton in both containers. One row per project
+// with a project label and an empty .per-project-chart waiting for render.
+function _renderPerProjectSkeleton() {
+  const projects = _perProjectGetProjects();
+  ['daily-metrics-per-project-rows', 'ratio-metrics-per-project-rows'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!projects.length) {
+      el.innerHTML = '<div class="views-chart-empty">No projects.</div>';
+      return;
+    }
+    el.innerHTML = projects.map(p => (
+      '<div class="per-project-row pp-loading" data-project="' + escapeHtml(p) + '">' +
+        '<div class="per-project-label">' + escapeHtml(p) + '</div>' +
+        '<div class="per-project-chart"><div class="pp-empty">Loading\u2026</div></div>' +
+      '</div>'
+    )).join('');
+  });
+}
+
+function _setPerProjectStatus(text) {
+  ['daily-metrics-per-project-status', 'ratio-metrics-per-project-status'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text || '';
+  });
+}
+
+// Lazy-load entry point. Triggered by details toggle and by filter changes
+// while at least one details is open. No-op if already loading or already
+// loaded for the current (granularity, platform) key.
+async function _perProjectLoadIfNeeded() {
+  const want = _perProjectCacheKey();
+  if (_perProjectState.loadedKey === want) {
+    _renderPerProjectSkeleton();
+    _renderPerProjectAll();
+    return;
+  }
+  if (_perProjectState.loading) return;
+  _perProjectState.loading = true;
+  _perProjectState.loadedKey = want;
+  _perProjectState.series = {};
+  _perProjectState.failed = {};
+  const gran = currentTrendsGranularity();
+  const platform = currentTrendsPlatform();
+  const fetchDays = gran === 'weekly' ? DAILY_METRICS_DAYS_WEEKLY : DAILY_METRICS_DAYS_DAILY;
+  const today = new Date();
+  const dailyAxis = [];
+  for (let i = fetchDays - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    dailyAxis.push(d.toISOString().slice(0, 10));
+  }
+  // Axis stored on state matches the granularity (weekly buckets or daily).
+  if (gran === 'weekly') {
+    const { weekKeys } = _bucketWeekly(dailyAxis, {});
+    _perProjectState.days = weekKeys;
+  } else {
+    _perProjectState.days = dailyAxis;
+  }
+  _renderPerProjectSkeleton();
+  const projects = _perProjectGetProjects();
+  let done = 0;
+  _setPerProjectStatus('0 / ' + projects.length);
+  try {
+    await _perProjectRunConcurrency(projects, 3, async (project) => {
+      // Bail if filters changed mid-load.
+      if (_perProjectState.loadedKey !== want) return;
+      const { series, failed } = await _perProjectFetchOne(project, gran, platform, fetchDays, dailyAxis);
+      if (_perProjectState.loadedKey !== want) return;
+      _perProjectState.series[project] = series;
+      _perProjectState.failed[project] = failed;
+      _renderPerProjectBoth(project);
+      done += 1;
+      _setPerProjectStatus(done + ' / ' + projects.length);
+    });
+  } finally {
+    _perProjectState.loading = false;
+  }
+  // Final status: how many had any failed endpoint?
+  const failedCount = Object.values(_perProjectState.failed).filter(arr => arr && arr.length).length;
+  _setPerProjectStatus(projects.length + ' / ' + projects.length + (failedCount ? ' · ' + failedCount + ' partial' : ''));
+}
+
+// Wire details toggle on first DOMContentLoaded. Idempotent so it survives
+// any partial reloads. Hook is delayed via setTimeout to make sure the
+// elements exist before we attach.
+function _wirePerProjectToggles() {
+  ['daily-metrics-per-project', 'ratio-metrics-per-project'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.wired === '1') return;
+    el.dataset.wired = '1';
+    el.addEventListener('toggle', () => {
+      if (el.open) _perProjectLoadIfNeeded();
+    });
+  });
 }
 
 // Trends-tab filter state. Selection is read off the trends pill rows by
