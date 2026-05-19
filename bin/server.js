@@ -9400,16 +9400,16 @@ function _jobHistoryCostCell(result) {
     headerHtml = fmtCost(totalForDisplay);
   }
   const lines = [
-    'Cost (SDK orchestrator): ' + (sessionsWithSdk > 0 ? fmtLane(orch) : 'n/a'),
+    '**Cost (SDK orchestrator):** ' + (sessionsWithSdk > 0 ? fmtLane(orch) : 'n/a'),
   ];
   if (sessionsAll > 0) {
-    lines.push('  Sessions: ' + sessionsAll +
-      '  ·  with SDK data: ' + sessionsWithSdk +
-      '  ·  missing SDK: ' + sessionsMissing);
+    lines.push('• Sessions: **' + sessionsAll + '**');
+    lines.push('• with SDK data: **' + sessionsWithSdk + '**');
+    lines.push('• missing SDK: **' + sessionsMissing + '**');
   }
   if (bd && Array.isArray(bd.phases) && bd.phases.length) {
     lines.push('');
-    lines.push('Per-phase (claude_sessions.script grouping):');
+    lines.push('**Per-phase** (claude_sessions.script grouping)');
     const shown = bd.phases.slice(0, 10);
     for (const p of shown) {
       const missing = (p.sessions_missing_sdk && p.sessions_missing_sdk > 0)
@@ -9418,7 +9418,7 @@ function _jobHistoryCostCell(result) {
       const orchVal = (p.sessions_with_sdk && p.sessions_with_sdk > 0)
         ? fmtLane(p.orch)
         : 'n/a';
-      lines.push('  ' + (p.phase || '(unknown)') + '  x' + p.sessions +
+      lines.push('• ' + (p.phase || '(unknown)') + ' ×' + p.sessions +
         '  ' + orchVal + missing);
     }
     if (bd.phases.length > shown.length) {
@@ -9427,12 +9427,12 @@ function _jobHistoryCostCell(result) {
   }
   if (typeof result.cost_usd_from_log === 'number') {
     lines.push('');
-    lines.push('Wrapper shell-log value: ' + fmtLane(result.cost_usd_from_log));
+    lines.push('**Wrapper shell-log value:** ' + fmtLane(result.cost_usd_from_log));
   }
   lines.push('');
-  lines.push('Diagnostic-only (local pricing estimate, not actual billing):');
-  lines.push('  Transcript estimate: ' + fmtLane(est));
-  lines.push('  Subagent (est): ' + fmtLane(sub));
+  lines.push('**Diagnostic-only** (local pricing estimate, not actual billing)');
+  lines.push('• Transcript estimate: ' + fmtLane(est));
+  lines.push('• Subagent (est): ' + fmtLane(sub));
   lines.push('');
   lines.push('SDK-only mode: shows orchestrator_cost_usd captured by the SDK result event. "missing SDK" = wrapper script didn\\'t pass --output-format json to claude, so no result event = no cost data recorded. Patch the wrapper to fix.');
   const tip = lines.join('\\n');
@@ -13381,11 +13381,11 @@ function renderCostStats(payload) {
   if (totalEl) {
     totalEl.textContent = '$' + totalCost.toFixed(2) + ' · ' + totalCount.toLocaleString() + ' activit' + (totalCount === 1 ? 'y' : 'ies');
     const tipLines = [
-      'Cost (SDK orchestrator): $' + totalOrch.toFixed(4),
+      '**Cost (SDK orchestrator):** $' + totalOrch.toFixed(4),
       '',
-      'Diagnostic-only (local pricing estimate, not actual billing):',
-      '  Transcript estimate: $' + totalEst.toFixed(4),
-      '  Subagent (est): $' + totalSub.toFixed(4),
+      '**Diagnostic-only** (local pricing estimate, not actual billing)',
+      '• Transcript estimate: $' + totalEst.toFixed(4),
+      '• Subagent (est): $' + totalSub.toFixed(4),
       '',
       'Anthropic SDK-reported orchestrator_cost_usd. Pipelines whose wrappers don\\'t capture --orchestrator-cost-usd contribute $0 — see the per-phase table for which scripts are missing coverage.',
     ];
@@ -13402,11 +13402,11 @@ function renderCostStats(payload) {
   function fmtCount(v) { return (Number(v) || 0).toLocaleString(); }
   function moneyCell(displayed, orch, est, sub) {
     const tip = [
-      'Cost (SDK orchestrator): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
+      '**Cost (SDK orchestrator):** ' + (orch != null ? fmtMoney(orch) : 'n/a'),
       '',
-      'Diagnostic-only (local pricing estimate):',
-      '  Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
-      '  Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
+      '**Diagnostic-only** (local pricing estimate)',
+      '• Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
+      '• Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
     ].join('\\n');
     return '<span data-tooltip="' + escapeHtml(tip) +
       '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
@@ -15926,11 +15926,11 @@ function renderProjectStatus(data, opts) {
     // SDK-only mode: displayed value comes from orchestrator_cost_usd; the
     // estimate and subagent are diagnostic-only (local pricing table).
     const tip = [
-      'Cost (SDK orchestrator): ' + (orch != null ? fmtMoney(orch) : 'n/a'),
+      '**Cost (SDK orchestrator):** ' + (orch != null ? fmtMoney(orch) : 'n/a'),
       '',
-      'Diagnostic-only (local pricing estimate, not actual billing):',
-      '  Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
-      '  Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
+      '**Diagnostic-only** (local pricing estimate, not actual billing)',
+      '• Transcript estimate: ' + (est != null ? fmtMoney(est) : 'n/a'),
+      '• Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
       '',
       'Anthropic SDK-reported cost only. "n/a" or $0 means the wrapper didn\\'t capture --orchestrator-cost-usd (no --output-format json on the claude call) for one or more sessions in this window. Subagent and transcript estimates are computed from a local pricing table and are not billing-accurate on subscription plans.',
     ].join('\\n');
@@ -15948,11 +15948,11 @@ function renderProjectStatus(data, opts) {
       : base;
     if (costAvailable) {
       const tipLines = [
-        'Cost (SDK orchestrator): ' + fmtMoney(grandCostOrch),
+        '**Cost (SDK orchestrator):** ' + fmtMoney(grandCostOrch),
         '',
-        'Diagnostic-only (local pricing estimate, not actual billing):',
-        '  Transcript estimate: ' + fmtMoney(grandCostEst),
-        '  Subagent (est): ' + fmtMoney(grandCostSub),
+        '**Diagnostic-only** (local pricing estimate, not actual billing)',
+        '• Transcript estimate: ' + fmtMoney(grandCostEst),
+        '• Subagent (est): ' + fmtMoney(grandCostSub),
         '',
         'Anthropic SDK-reported orchestrator_cost_usd across all activity rows in this window. Per-session attribution is the session\\'s cost split evenly across its activity rows. Pipelines whose wrappers don\\'t pass --output-format json to claude contribute $0.',
       ];
