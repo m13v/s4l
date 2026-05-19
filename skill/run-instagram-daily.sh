@@ -52,9 +52,17 @@ log "=== instagram-daily fire: $(date) ==="
 source "$REPO_DIR/skill/lock.sh"
 acquire_lock instagram-poster 30
 
-# Step 1: pick target IG account (inverse-recent-share over enabled accounts)
-log "step 1: pick_ig_account"
-TARGET_ACCOUNT=$(/opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/pick_ig_account.py" 2>>"$LOG_FILE")
+# Step 1: pick target IG account. Per-account plists set FORCE_ACCOUNT in
+# their EnvironmentVariables block so the slot is hard-pinned to one account;
+# fall back to inverse-recent-share picker only when no FORCE_ACCOUNT is set
+# (manual / legacy invocation).
+if [ -n "${FORCE_ACCOUNT:-}" ]; then
+  log "step 1: FORCE_ACCOUNT=$FORCE_ACCOUNT honored from env"
+  TARGET_ACCOUNT=$(/opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/pick_ig_account.py" --account "$FORCE_ACCOUNT" 2>>"$LOG_FILE")
+else
+  log "step 1: pick_ig_account (no FORCE_ACCOUNT in env)"
+  TARGET_ACCOUNT=$(/opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/pick_ig_account.py" 2>>"$LOG_FILE")
+fi
 if [ -z "$TARGET_ACCOUNT" ]; then
   log "pick_ig_account.py produced no account — exiting non-zero"
   exit 1
