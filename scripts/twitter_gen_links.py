@@ -197,6 +197,10 @@ def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple
                   f"(skipping A/B page-gen)", flush=True)
             return (url, f"audience_page:{angle}")
 
+    if proj.get("page_gen_disabled"):
+        print(f"[gen] page_gen_disabled=true for {proj_name}; using plain URL", flush=True)
+        return (plain_url, "plain_url_no_lp")
+
     if has_lp and keyword and slug and proj.get("landing_pages"):
         roll = random.random()
         if roll >= page_gen_rate:
