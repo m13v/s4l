@@ -168,33 +168,25 @@ echo "--- Context block ---" | tee -a "$LOG_FILE"
 echo "$CONTEXT_BLOCK"        | tee -a "$LOG_FILE"
 echo "---------------------" | tee -a "$LOG_FILE"
 
-# Recent originals by us in last 14 days for THIS project (avoid repeats; show endings to vary closer)
-RECENT_POSTS=$(/opt/homebrew/opt/postgresql@14/bin/psql "$DATABASE_URL" -t -A -c "
-  SELECT our_content::text FROM posts
-  WHERE platform='twitter' AND thread_url = our_url
-    AND project_name='${PROJECT}'
-    AND posted_at > NOW() - INTERVAL '14 days'
-    AND our_content NOT ILIKE '(mention%'
-  ORDER BY posted_at DESC LIMIT 10
-" 2>/dev/null || echo "(psql error)")
+# Prompt context loaders below all route through scripts/twitter_threads_helper.py
+# (HTTP /api/v1/posts) instead of three direct psql one-liners as of 2026-05-18.
+# Filters preserved byte-equivalent: thread_url = our_url, NOT ILIKE '(mention%',
+# project + window + status WHERE clauses.
 
-# Recent engagement styles for this project on Twitter
-RECENT_STYLES=$(/opt/homebrew/opt/postgresql@14/bin/psql "$DATABASE_URL" -t -A -c "
-  SELECT engagement_style FROM posts
-  WHERE platform='twitter' AND project_name='${PROJECT}' AND thread_url = our_url
-    AND engagement_style IS NOT NULL AND engagement_style != ''
-    AND our_content NOT ILIKE '(mention%'
-  ORDER BY posted_at DESC LIMIT 5
-" 2>/dev/null || echo "(psql error)")
+# Recent originals by us in last 14 days for THIS project (avoid repeats).
+RECENT_POSTS=$(python3 "$REPO_DIR/scripts/twitter_threads_helper.py" \
+  recent-posts --project "$PROJECT" --days 14 --limit 10 \
+  2>/dev/null || echo "(api error)")
 
-# Top performers (tone calibration). Twitter: reuse upvotes + comments_count + views as a loose engagement score.
-TOP_POSTS=$(/opt/homebrew/opt/postgresql@14/bin/psql "$DATABASE_URL" -t -A -c "
-  SELECT our_content::text, upvotes, comments_count, views FROM posts
-  WHERE platform='twitter' AND project_name='${PROJECT}' AND thread_url=our_url AND status='active'
-    AND our_content NOT ILIKE '(mention%'
-    AND (COALESCE(upvotes,0) + COALESCE(comments_count,0)*3 + COALESCE(views,0)/100) > 5
-  ORDER BY (COALESCE(upvotes,0) + COALESCE(comments_count,0)*3 + COALESCE(views,0)/100) DESC LIMIT 8
-" 2>/dev/null || echo "(psql error)")
+# Recent engagement styles for this project on Twitter.
+RECENT_STYLES=$(python3 "$REPO_DIR/scripts/twitter_threads_helper.py" \
+  recent-styles --project "$PROJECT" --limit 5 \
+  2>/dev/null || echo "(api error)")
+
+# Top performers (tone calibration) — composite (upvotes + 3*comments + views/100).
+TOP_POSTS=$(python3 "$REPO_DIR/scripts/twitter_threads_helper.py" \
+  top-posts --project "$PROJECT" --limit 8 \
+  2>/dev/null || echo "(api error)")
 
 # Structured output schema. The model returns a "tweets" array (1-6 items)
 # representing a single chained Twitter thread, plus the same compliance fields
