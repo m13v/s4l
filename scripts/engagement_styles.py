@@ -23,6 +23,7 @@ Style universe:
 
 import json
 import os
+import random
 import sys as _sys_mod
 from datetime import datetime, timezone
 
@@ -615,6 +616,252 @@ def compute_target_distribution(platform, context="posting"):
     return rows
 
 
+# ── Programmatic picker (2026-05-19) ────────────────────────────────
+#
+# The old flow ("show the model 9 styles + target % and let it pick") was
+# soft: the model anchored on the most-generic-fit style (pattern_recognizer)
+# and over-picked it ~30% of posts even when its target % was the 5% floor.
+# This picker flips the contract: code picks ONE style by weighted sample
+# from the top N by composite score, the prompt assigns that style, and the
+# model only authors the comment. Curation to top N happens dynamically per
+# score, so styles auto-rotate as their click-weighted score shifts. The
+# model can still invent: with probability INVENT_RATE the picker returns
+# mode="invent" and the prompt hands the model the top N as reference
+# material to derive a new style from.
+
+INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
+CURATED_TOP_N = 5   # the model only ever sees one of the top 5 by score
+
+
+def pick_style_for_post(platform, context="posting",
+                        top_n=CURATED_TOP_N, invent_rate=INVENT_RATE,
+                        rng=None):
+    """Programmatically pick ONE engagement style for the model to use.
+
+    Replaces the legacy "show all styles, model picks" flow. Returns a
+    dict that get_assigned_style_prompt() turns into a compact prompt
+    block (one style + description + example + note, or invent + top-N
+    reference). The caller also passes the picked style downstream to
+    log_post / validate_or_register so we can detect drift between the
+    assignment and the final logged style.
+
+    Curation is automatic: top_n styles by composite score (clicks*10 +
+    comments*3 + upvotes_net) are eligible. As performance shifts, the
+    curated set rotates. Styles in PLATFORM_POLICY.never are excluded.
+    Sidecar candidate styles (status="candidate") are excluded from the
+    use path until the promoter graduates them, but stay available as
+    invent-mode references once graduated.
+
+    Args:
+        platform: "reddit" | "twitter" | "linkedin" | "github" | "moltbook"
+        context: "posting" | "replying"
+        top_n: curation size. Top N styles by score are eligible.
+        invent_rate: probability of returning mode="invent" so the model
+                     creates a new style from the top N references.
+                     Set to 0 to disable invention entirely.
+        rng: optional random.Random for deterministic tests.
+
+    Returns:
+        {
+            "mode": "use" | "invent",
+            "style": str | None,                  # the assigned style, None on invent
+            "description": str | None,
+            "example": str | None,
+            "note": str | None,
+            "reference_styles": [                 # top-N meta (always populated)
+                {"style", "description", "example", "note",
+                 "score", "pct", "n", "avg_clicks", "avg_cm", "avg_up"},
+                ...
+            ],
+            "distribution_snapshot": list,         # full target distribution at pick time
+            "picked_at": ISO-8601 UTC,
+        }
+    """
+    rnd = rng or random
+    never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
+    rows = compute_target_distribution(platform, context=context)
+    rows = [r for r in rows if r["style"] not in never]
+
+    rows_sorted_by_score = sorted(rows, key=lambda r: r.get("score", 0.0),
+                                  reverse=True)
+    # Top N candidates for the USE path: trusted styles only (exclude
+    # below-threshold styles to avoid n=1 lucky outliers from dominating;
+    # they still get shown as invent-mode references).
+    use_pool = [r for r in rows_sorted_by_score if r.get("trusted")][:top_n]
+    # Reference pool for invent mode is the same top N (or as many as exist).
+    reference_pool = rows_sorted_by_score[:top_n]
+
+    universe = get_all_styles()
+
+    def _meta_for(row):
+        m = universe.get(row["style"], {})
+        return {
+            "style": row["style"],
+            "description": m.get("description", ""),
+            "example": m.get("example", ""),
+            "note": m.get("note", ""),
+            "score": round(row.get("score", 0.0), 3),
+            "pct": round(row.get("pct", 0.0), 1),
+            "n": row.get("n", 0),
+            "avg_clicks": round(row.get("avg_clicks", 0.0), 3),
+            "avg_cm": round(row.get("avg_cm", 0.0), 3),
+            "avg_up": round(row.get("avg_up", 0.0), 3),
+        }
+
+    reference_styles = [_meta_for(r) for r in reference_pool]
+    distribution_snapshot = [
+        {"style": r["style"], "score": round(r.get("score", 0.0), 3),
+         "pct": round(r.get("pct", 0.0), 1), "n": r.get("n", 0),
+         "trusted": bool(r.get("trusted"))}
+        for r in rows
+    ]
+    picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # Invent path. Also fires as fallback when no trusted style exists yet
+    # (cold start), because we'd rather the model invent something fresh
+    # than be assigned a noisy n=1 outlier.
+    invent = (not use_pool) or (
+        invent_rate > 0 and rnd.random() < invent_rate
+    )
+    if invent:
+        return {
+            "mode": "invent",
+            "style": None,
+            "description": None,
+            "example": None,
+            "note": None,
+            "reference_styles": reference_styles,
+            "distribution_snapshot": distribution_snapshot,
+            "picked_at": picked_at,
+        }
+
+    # Use path: weighted random sample by raw score. Raw score (not score
+    # ** WEIGHT_EXPONENT) keeps the distribution smoother across the top —
+    # the cap+floor logic that lives in compute_target_distribution is what
+    # the picker historically used to give a winner most weight; here, the
+    # top N is already a curated head, so raw score is the right knob.
+    weights = [max(r.get("score", 0.0), 0.01) for r in use_pool]
+    total = sum(weights) or 1.0
+    pick = rnd.uniform(0.0, total)
+    cum = 0.0
+    chosen_row = use_pool[0]
+    for r, w in zip(use_pool, weights):
+        cum += w
+        if pick <= cum:
+            chosen_row = r
+            break
+
+    meta = _meta_for(chosen_row)
+    return {
+        "mode": "use",
+        "style": chosen_row["style"],
+        "description": meta["description"],
+        "example": meta["example"],
+        "note": meta["note"],
+        "reference_styles": reference_styles,
+        "distribution_snapshot": distribution_snapshot,
+        "picked_at": picked_at,
+    }
+
+
+def get_assigned_style_prompt(platform, assignment, context="posting"):
+    """Compact prompt block built from a pick_style_for_post() assignment.
+
+    Replaces get_styles_prompt() for callers that have flipped to the
+    programmatic picker. Two shapes:
+
+    USE mode (the common case):
+      One style is assigned. The block shows description / example / note
+      plus the platform tone hint and the grounding rule. No list of other
+      styles, no target %, no over/under-used hints. Decision was already
+      made; the model only needs to know what the assigned style means.
+
+    INVENT mode (~5% of posts):
+      No style assigned. The block shows the top N curated styles as
+      reference (each with description + example + score) and instructs
+      the model to invent a fresh style. Output JSON must set
+      engagement_style=<new_snake_case_name> AND include a new_style block;
+      validate_or_register handles the rest.
+    """
+    policy = PLATFORM_POLICY.get(platform, PLATFORM_POLICY["reddit"])
+    lines = []
+
+    if assignment["mode"] == "use":
+        lines.append(f"## Your assigned engagement style: **{assignment['style']}**")
+        lines.append("")
+        lines.append(
+            f"This style was selected by the picker (weighted by live "
+            f"click-driven performance across {platform}). Use it. Do not "
+            f"swap it for a different listed style."
+        )
+        lines.append("")
+        lines.append(f"Platform tone: {policy.get('note', '')}")
+        lines.append("")
+        lines.append(f"**{assignment['style']}**: {assignment.get('description', '')}")
+        if assignment.get("example"):
+            lines.append(f'  Example: "{assignment["example"]}"')
+        if assignment.get("note"):
+            lines.append(f"  Note: {assignment['note']}")
+        lines.append("")
+        lines.append(
+            'In your output JSON, set "engagement_style" to '
+            f'"{assignment["style"]}" and leave "new_style" as null.'
+        )
+        lines.append("")
+        lines.append(
+            "Escape hatch: if and only if this assigned style genuinely "
+            "cannot fit the thread (rare), you may instead invent a new "
+            "style by setting `engagement_style` to your snake_case name "
+            "AND replacing `\"new_style\": null` with a full new_style "
+            "block (description / example / note / why_existing_didnt_fit). "
+            "Do not silently substitute a different listed style."
+        )
+    else:
+        lines.append("## Invent a new engagement style for this post")
+        lines.append("")
+        lines.append(
+            "The picker is asking you to derive a fresh style for this "
+            f"thread (~{int(INVENT_RATE * 100)}% of posts get the invent path). "
+            "Look at our top performers below as reference for what already "
+            "works on this platform, then pick a fresh angle that none of "
+            "them captures. Set `engagement_style` to your snake_case name "
+            "AND include a full `new_style` block in the same JSON."
+        )
+        lines.append("")
+        lines.append(f"Platform tone: {policy.get('note', '')}")
+        lines.append("")
+        lines.append(f"### Top {len(assignment.get('reference_styles', []))} reference styles on {platform}")
+        lines.append("")
+        for ref in assignment.get("reference_styles", []):
+            lines.append(
+                f"- **{ref['style']}** "
+                f"(score {ref['score']:.2f}, clicks {ref['avg_clicks']:.2f}, "
+                f"cm {ref['avg_cm']:.2f}, up {ref['avg_up']:.2f}, n={ref['n']})"
+            )
+            lines.append(f"  {ref['description']}")
+            if ref.get("example"):
+                lines.append(f'  Example: "{ref["example"]}"')
+        lines.append("")
+        lines.append(
+            "Your new style should be a real third option — not a rename "
+            "of one above. Set the new_style block fields:"
+        )
+        lines.append("  - description: one sentence")
+        lines.append("  - example: short utterance demonstrating the style")
+        lines.append("  - note: when to use / when not to")
+        lines.append("  - why_existing_didnt_fit: why none of the above worked here")
+
+    lines.append("")
+    lines.append(
+        'AVOID the "pleaser/validator" style ("this is great", "had similar '
+        'results", "100% agree"). Consistently the lowest engagement on every '
+        'platform.'
+    )
+    lines.append("")
+    lines.append(get_grounding_rule())
+    return "\n".join(lines)
+
+
 # ── Prompt generators ───────────────────────────────────────────────
 
 def get_styles_prompt(platform, context="posting"):
@@ -976,6 +1223,20 @@ if __name__ == "__main__":
     )
     _td.add_argument("--platform", required=True)
     _td.add_argument("--context", default="posting", choices=["posting", "replying"])
+
+    _pk = _sub.add_parser(
+        "pick",
+        help="Run pick_style_for_post() and print the assignment + prompt block",
+    )
+    _pk.add_argument("--platform", required=True)
+    _pk.add_argument("--context", default="posting", choices=["posting", "replying"])
+    _pk.add_argument("--top-n", type=int, default=CURATED_TOP_N)
+    _pk.add_argument("--invent-rate", type=float, default=INVENT_RATE)
+    _pk.add_argument("--seed", type=int, default=None,
+                     help="Deterministic seed for the picker RNG")
+    _pk.add_argument("--show-prompt", action="store_true",
+                     help="Also print the compact prompt block the model would see")
+
     _args = _parser.parse_args()
 
     if _args.cmd == "target-distribution":
@@ -983,5 +1244,19 @@ if __name__ == "__main__":
             target_distribution_snapshot(_args.platform, context=_args.context),
             ensure_ascii=False,
         ))
+    elif _args.cmd == "pick":
+        _rng = random.Random(_args.seed) if _args.seed is not None else random
+        _assignment = pick_style_for_post(
+            _args.platform, context=_args.context,
+            top_n=_args.top_n, invent_rate=_args.invent_rate, rng=_rng,
+        )
+        print(_json.dumps(_assignment, ensure_ascii=False, indent=2))
+        if _args.show_prompt:
+            print()
+            print("=" * 60)
+            print("PROMPT BLOCK")
+            print("=" * 60)
+            print(get_assigned_style_prompt(
+                _args.platform, _assignment, context=_args.context))
     else:
         _parser.print_help()
