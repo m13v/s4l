@@ -385,7 +385,15 @@ STYLE_FLOOR_PCT = 5.0
 STYLE_CAP_PCT = 50.0
 
 
-def _fetch_style_stats(platform):
+# Recency window for the picker target distribution. Lifetime aggregation
+# drifted too far from current performance reality (e.g. 2025 wins from
+# pattern_recognizer kept it in the pool even after 2026's audience shift).
+# 30 days keeps n>=50 per active style on Reddit/Twitter while letting the
+# pool track the live algorithm. Set RECENCY_DAYS=0 to fall back to lifetime.
+RECENCY_DAYS = 30
+
+
+def _fetch_style_stats(platform, days=None):
     """Query the autoposter API for per-engagement_style performance.
 
     Returns a dict:
@@ -396,6 +404,9 @@ def _fetch_style_stats(platform):
     top_performers report ranks on. Returns {} on any error (API unreachable,
     missing env, cold start).
 
+    Recency: `days` overrides the module-level RECENCY_DAYS (default 30).
+    Pass days=0 for lifetime aggregation.
+
     Routes through the social-autoposter-website API (no direct Neon access)
     so VMs / sandboxes without a DATABASE_URL still get live weights.
     """
@@ -404,7 +415,11 @@ def _fetch_style_stats(platform):
         import sys as _sys
         _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from http_api import api_get
-        resp = api_get("/api/v1/engagement-styles/style-stats", {"platform": platform})
+        eff_days = RECENCY_DAYS if days is None else int(days)
+        resp = api_get(
+            "/api/v1/engagement-styles/style-stats",
+            {"platform": platform, "days": str(eff_days)},
+        )
         data = (resp or {}).get("data") or {}
         stats = data.get("stats") or {}
         return {
