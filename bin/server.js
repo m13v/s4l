@@ -4271,18 +4271,23 @@ async function handleApi(req, res) {
           "ELSE COALESCE(upvotes,0) END), 0)::int AS upvotes_discounted, " +
         "COALESCE(SUM(comments_count), 0)::int AS comments, " +
         "COALESCE(SUM(views) FILTER (WHERE LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::int AS views, " +
-        // post_clicks: SUM of post_links.clicks attributable to short links
-        // minted for these posts (post_id-keyed). Reply-keyed clicks are
-        // excluded so we don't double-count engagement on replies that hang
-        // off someone else's thread.
+        // post_clicks: bot-filtered click events from post_link_clicks for
+        // short links minted for these posts (post_id-keyed). Reply-keyed
+        // clicks are excluded so we don't double-count engagement on replies
+        // that hang off someone else's thread. Source matches the picker
+        // (engagement_styles._fetch_style_stats) and top_performers.SCORE_SQL.
         "COALESCE(SUM(pl.total_clicks), 0)::int AS post_clicks, " +
         // Intent dimension (is_recommendation) is independent of tone (engagement_style).
         // This sum tells us "of N posts in this tone, how many carried a project mention".
         "COALESCE(SUM(CASE WHEN is_recommendation THEN 1 ELSE 0 END), 0)::int AS recommendations " +
       "FROM posts " +
       "LEFT JOIN (" +
-        "SELECT post_id, SUM(clicks)::int AS total_clicks " +
-        "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id" +
+        "SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks " +
+        "FROM post_links pl2 " +
+        "LEFT JOIN post_link_clicks plc " +
+          "ON plc.code = pl2.code AND plc.is_bot = false " +
+        "WHERE pl2.post_id IS NOT NULL " +
+        "GROUP BY pl2.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
       "AND our_content <> '(mention - no original post)' " +
@@ -4310,9 +4315,10 @@ async function handleApi(req, res) {
   }
 
   // GET /api/cohort/stats - posts bucketed into 4 score cohorts over a trailing window.
-  // Score formula matches top_performers.py SCORE_SQL:
-  //   score = comments_count*3 + upvotes (Reddit/Moltbook: -1 to strip OP self-upvote)
-  // Cohorts: dead=0, low=1-4, mid=5-14, high=15+.
+  // Score formula matches top_performers.py SCORE_SQL and engagement_styles.py picker:
+  //   score = clicks*10 + comments_count*3 + upvotes (Reddit/Moltbook: -1 to strip OP self-upvote)
+  // clicks = COUNT(post_link_clicks WHERE is_bot=false) per post (bot-filtered).
+  // Cohorts: dead=0, low=1-9, mid=10-29, high=30+ (rebucketed for the click-weighted score).
   // Honors the same window/platform/project filters as the rest of the Stats tab.
   if (p === '/api/cohort/stats' && req.method === 'GET') {
     const url = new URL(req.url, 'http://localhost');
@@ -4339,17 +4345,27 @@ async function handleApi(req, res) {
       : '';
     const projectFilter = cohortPc.clause ? cohortPc.clause + ' '
       : (project ? "AND project_name = '" + project.replace(/'/g, "''") + "' " : '');
-    // Score expression (must stay aligned with scripts/top_performers.SCORE_SQL).
+    // Score expression (must stay aligned with scripts/top_performers.SCORE_SQL
+    // and scripts/engagement_styles.py picker). clicks weighted ×10 because a
+    // real human click outvalues 10 likes of vibes. Clicks come from a
+    // bot-filtered subquery against post_link_clicks (matching the picker).
     const scoreExpr =
-      "(COALESCE(comments_count,0) * 3 + " +
+      "(COALESCE(clicks, 0) * 10 + " +
+        "COALESCE(comments_count,0) * 3 + " +
         "CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') " +
           "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
           "ELSE COALESCE(upvotes,0) END)";
+    // Cohort bands rescaled for the click-weighted score so most posts don't
+    // collapse into 'high' (a single click already adds 10). Empirically:
+    //   dead = 0   no engagement at all
+    //   low  = 1-9 some upvotes/comments OR no clicks
+    //   mid  = 10-29 a click OR strong comment/upvote
+    //   high = 30+  clicks + discussion combined
     const cohortExpr =
       "CASE " +
         "WHEN " + scoreExpr + " = 0 THEN 'dead' " +
-        "WHEN " + scoreExpr + " BETWEEN 1 AND 4 THEN 'low' " +
-        "WHEN " + scoreExpr + " BETWEEN 5 AND 14 THEN 'mid' " +
+        "WHEN " + scoreExpr + " BETWEEN 1 AND 9 THEN 'low' " +
+        "WHEN " + scoreExpr + " BETWEEN 10 AND 29 THEN 'mid' " +
         "ELSE 'high' END";
     // Views excluded from moltbook/github (no public view counter on those
     // platforms); use FILTER so the views range only reflects platforms that
@@ -12385,7 +12401,7 @@ let _styleStatsTableState = { sortField: 'score', sortDir: 'desc', filters: {} }
 // OS-level title-attribute delay.
 const STYLE_STATS_HELP = {
   style:    'Engagement tone Claude used to draft this first-touch comment/post (slug from scripts/engagement_styles.py). The A/B testing system uses these stats to decide which tones to imitate next. Note: a row in the posts table = our FIRST-TOUCH engagement on a thread, not (usually) an original thread we authored. Reddit/Moltbook/GitHub = our top-level comment on someone else’s thread; X = our reply; LinkedIn = our comment. Subsequent back-and-forth replies live in a separate replies pipeline and are not counted here.',
-  score:    'Per-post quality signal computed on engagement that landed on OUR comment/post (replies to it, upvotes on it), not on the underlying third-party thread. Formula: (comments * 3 + upvotes_discounted) / posts. upvotes_discounted subtracts the OP self-upvote on Reddit and Moltbook so those platforms compare fairly with X/LinkedIn. Views are deliberately excluded so low-volume styles compare fairly with high-volume ones. Same signal the feedback report uses.',
+  score:    'Per-post quality signal computed on engagement that landed on OUR comment/post (clicks on our short link, replies to it, upvotes on it), not on the underlying third-party thread. Formula: (post_clicks * 10 + comments * 3 + upvotes_discounted) / posts. Click weight ×10 because a real human click outvalues 10 likes of vibes (matches top_performers.SCORE_SQL and the engagement_styles.py picker). upvotes_discounted subtracts the OP self-upvote on Reddit and Moltbook so those platforms compare fairly with X/LinkedIn. Views are deliberately excluded so low-volume styles compare fairly with high-volume ones.',
   posts:    'Count of first-touch comments/posts published in this style during the selected window. (Reddit comments on others’ threads, X replies, LinkedIn comments, etc. The rare run-reddit-threads.sh original-thread rows are also counted.)',
   upvotes:  'Sum of upvotes/likes received by OUR comment (or our thread, in the rare original-thread case). Net of the Reddit/Moltbook OP self-upvote (both platforms auto-apply +1 on every post; we strip it so a brand-new post starts at 0, not 1). Other platforms (X, LinkedIn, GitHub) pass through unchanged. Per-post average shown in parentheses.',
   comments: 'Sum of replies received by OUR comment (or comments under our thread). Per-post average in parentheses. Tracked in the posts.comments_count column, independent of the separate replies pipeline that records replies WE author.',
@@ -12505,15 +12521,17 @@ function renderStyleStats(payload, meta) {
     const per   = total / denom;
     return fmt(total) + ' <span style="color:var(--text-muted);">(' + perPostStr(per) + ')</span>';
   };
-  // Per-post score matches top_performers.SCORE_SQL (comments*3 + upvotes, Reddit
-  // self-upvote discounted at SQL layer). Views deliberately excluded so this is
-  // the same signal Claude uses for imitation; comparing by per-post keeps low-
-  // volume styles on equal footing with high-volume ones.
+  // Per-post score matches top_performers.SCORE_SQL and engagement_styles.py
+  // picker (clicks*10 + comments*3 + upvotes, Reddit self-upvote discounted
+  // at SQL layer). Click weight ×10: one real human click outvalues 10 likes
+  // of vibes when ranking styles. Views deliberately excluded. Per-post avg
+  // keeps low-volume styles on equal footing with high-volume ones.
   const normalized = rows.map(r => {
     const posts            = Number(r.posts)             || 0;
     const comments         = Number(r.comments)          || 0;
     const upvotesDiscounted = Number(r.upvotes_discounted) || 0;
-    const score = posts > 0 ? (comments * 3 + upvotesDiscounted) / posts : 0;
+    const postClicks       = Number(r.post_clicks)       || 0;
+    const score = posts > 0 ? (postClicks * 10 + comments * 3 + upvotesDiscounted) / posts : 0;
     return {
       style:       r.style || '(none)',
       posts,
@@ -12521,7 +12539,7 @@ function renderStyleStats(payload, meta) {
       upvotes:     Number(r.upvotes)     || 0,
       comments,
       views:       Number(r.views)       || 0,
-      post_clicks: Number(r.post_clicks) || 0,
+      post_clicks: postClicks,
       recommendations: Number(r.recommendations) || 0,
       score,
     };
