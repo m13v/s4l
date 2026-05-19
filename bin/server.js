@@ -4155,7 +4155,7 @@ async function handleApi(req, res) {
     // Project is case-sensitive (stored as 'Assrt', 'Cyrano', 'fazm', etc.).
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     // Non-admin clients can only see projects in their claim. Reject if the
     // requested project isn't allowed, and force-filter the default "all" view.
@@ -4260,7 +4260,7 @@ async function handleApi(req, res) {
     if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cohortPc = auth.projectClause(req.user, 'project_name', project || null);
     if (!cohortPc.ok) return json(res, { windowHours, platform: platform || 'all', project: project || 'all', rows: [], totalPosts: 0 });
@@ -4507,7 +4507,7 @@ async function handleApi(req, res) {
     if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cacheKey = days + '|' + platform + '|' + project;
     const cached = cache.get(cacheKey);
@@ -4587,7 +4587,7 @@ async function handleApi(req, res) {
     if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cacheKey = days + '|' + platform + '|' + project;
     const cached = clicksPerDayCache.get(cacheKey);
@@ -4639,7 +4639,7 @@ async function handleApi(req, res) {
     if (!platformOk) return json(res, { error: 'invalid platform' }, 400);
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cacheKey = days + '|' + platform + '|' + project;
     const cached = postsPerDayCache.get(cacheKey);
@@ -4690,7 +4690,7 @@ async function handleApi(req, res) {
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cacheKey = days + '|' + project;
     const cached = bookingsPerDayCache.get(cacheKey);
@@ -4730,7 +4730,7 @@ async function handleApi(req, res) {
     const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const cacheKey = days + '|' + project;
     const cached = funnelPerDayCache.get(cacheKey);
@@ -4921,7 +4921,7 @@ async function handleApi(req, res) {
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
-    const projectOk = project === '' || /^[A-Za-z0-9_\-]{1,64}$/.test(project);
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
     const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email']);
     let rawPlat = String(url.searchParams.get('platform') || '').toLowerCase().trim();
@@ -11569,7 +11569,7 @@ function _wireMiniChartHover(chartEl, plot, opts) {
   rect.addEventListener('mouseleave', hide);
 }
 
-// Render one mini chart for `project` in either 'daily' or 'ratio' scope.
+// Render one mini chart for a single project in either 'daily' or 'ratio' scope.
 function _renderPerProjectChart(project, scope) {
   const rowsEl = document.getElementById(scope === 'daily' ? 'daily-metrics-per-project-rows' : 'ratio-metrics-per-project-rows');
   if (!rowsEl) return;
@@ -11908,6 +11908,11 @@ async function loadDailyMetrics() {
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
     renderDailyMetrics();
     renderRatioMetrics();
+    // Propagate filter changes to the per-project breakdown. Cheap no-op
+    // when neither section is open and the cache key (granularity+platform)
+    // hasn't actually changed; otherwise it kicks off a fresh per-project
+    // fetch in the background.
+    try { _perProjectInvalidate(); } catch {}
   } catch (e) {
     if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
   }
@@ -16343,6 +16348,15 @@ _saInstallDeleteListener();
     });
     loadDailyMetrics();
   });
+})();
+
+// Wire the per-project breakdown <details> toggles so the first time the
+// user opens either one we kick off a lazy fetch. Subsequent opens reuse
+// the cache built for the current (granularity, platform) key.
+(function wirePerProjectBreakdownToggles() {
+  if (typeof _wirePerProjectToggles === 'function') {
+    _wirePerProjectToggles();
+  }
 })();
 
 // Lazy-load funnel stats the first time the user opens the section. The fetch
