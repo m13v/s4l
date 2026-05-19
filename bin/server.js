@@ -4394,11 +4394,20 @@ async function handleApi(req, res) {
         "MAX(COALESCE(views,0)) " + viewsFilter + " AS max_views, " +
         "(AVG(COALESCE(views,0)) " + viewsFilter + ")::numeric(10,0) AS avg_views " +
       "FROM (" +
-        "SELECT platform, " + upvotesNetExpr + " AS upvotes_net, " +
+        "SELECT posts.platform, " + upvotesNetExpr + " AS upvotes_net, " +
+          "COALESCE(pl.total_clicks, 0) AS clicks, " +
           "comments_count, views, " +
           scoreExpr + " AS score, " +
           cohortExpr + " AS cohort " +
         "FROM posts " +
+        "LEFT JOIN (" +
+          "SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks " +
+          "FROM post_links pl2 " +
+          "LEFT JOIN post_link_clicks plc " +
+            "ON plc.code = pl2.code AND plc.is_bot = false " +
+          "WHERE pl2.post_id IS NOT NULL " +
+          "GROUP BY pl2.post_id" +
+        ") pl ON pl.post_id = posts.id " +
         "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND upvotes IS NOT NULL " +
           "AND our_content <> '(mention - no original post)' " +
@@ -7682,7 +7691,7 @@ const HTML = `<!DOCTYPE html>
   </div>
   <details class="style-stats-section" id="cohort-stats" open>
     <summary>
-      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="cohort-stats-heading">Score Cohort Distribution (24h)</span><span class="stat-card-info" data-tooltip="Buckets posts by composite score (comments \u00D7 3 + upvotes; Reddit/Moltbook subtract 1 to strip OP self-upvote). Views are deliberately excluded from the score. Cohorts: Dead = 0, Low = 1-4, Mid = 5-14, High = 15+. Honors the Window / Platform / Project filters above.">i</span></span>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="cohort-stats-heading">Score Cohort Distribution (24h)</span><span class="stat-card-info" data-tooltip="Buckets posts by composite score (clicks \u00D7 10 + comments \u00D7 3 + upvotes; Reddit/Moltbook subtract 1 to strip OP self-upvote). Click weight \u00D710 because a real human click outvalues 10 likes of vibes (matches top_performers.SCORE_SQL and the engagement_styles.py picker). Views are deliberately excluded. Cohorts: Dead = 0, Low = 1\u20139, Mid = 10\u201329, High = 30+. Honors the Window / Platform / Project filters above.">i</span></span>
       <span class="style-stats-total" id="cohort-stats-total"></span>
     </summary>
     <div id="cohort-stats-body">
@@ -12621,13 +12630,15 @@ async function loadStyleStats() {
 }
 
 // Score-cohort distribution. Buckets posts in the trailing window into
-// 4 cohorts (dead/low/mid/high) by composite score (comments*3 + upvotes,
-// minus 1 on Reddit/Moltbook to strip the OP self-upvote). Mirrors top_performers.
+// 4 cohorts (dead/low/mid/high) by composite score (clicks*10 + comments*3 +
+// upvotes, minus 1 on Reddit/Moltbook to strip the OP self-upvote). Mirrors
+// top_performers.SCORE_SQL and the engagement_styles.py picker. Bands
+// rescaled to absorb the click ×10 weight (a single click already adds 10).
 const COHORT_DEFS = [
-  { key: 'dead', label: 'Dead',  scoreLabel: '0',     blurb: 'No discussion, no upvotes beyond the OP self-upvote (Reddit/Moltbook). Skip imitating.' },
-  { key: 'low',  label: 'Low',   scoreLabel: '1\u20134',  blurb: 'A handful of upvotes OR a single comment. Faint signal, below the per-platform meaningful-engagement floor.' },
-  { key: 'mid',  label: 'Mid',   scoreLabel: '5\u201314', blurb: 'Real but modest reaction. Roughly 1\u20134 comments, or 5\u201314 upvotes, or a mix.' },
-  { key: 'high', label: 'High',  scoreLabel: '15+',   blurb: 'Posts that actually sparked discussion. Imitate these.' },
+  { key: 'dead', label: 'Dead',  scoreLabel: '0',     blurb: 'No discussion, no upvotes beyond the OP self-upvote (Reddit/Moltbook), no clicks. Skip imitating.' },
+  { key: 'low',  label: 'Low',   scoreLabel: '1\u20139',  blurb: 'A handful of upvotes OR a couple of comments, but no real clicks. Faint signal.' },
+  { key: 'mid',  label: 'Mid',   scoreLabel: '10\u201329', blurb: 'A single real click (×10), OR strong discussion (3+ comments), OR 10\u201329 upvotes. Worth imitating.' },
+  { key: 'high', label: 'High',  scoreLabel: '30+',   blurb: 'Multiple clicks plus discussion, or a viral comment thread. Imitate these.' },
 ];
 const COHORT_COLORS = { dead: '#9ca3af', low: '#60a5fa', mid: '#22c55e', high: '#a855f7' };
 
@@ -12667,7 +12678,7 @@ function renderCohortStats(payload) {
   const headers = [
     { label: 'Cohort',   tip: 'Bucket name. Tooltip on each row explains what that range means.' },
     { label: 'Posts',    tip: 'Number of posts in the bucket (and share of total in the current window/platform/project filter).' },
-    { label: 'Score',    tip: 'Composite score = comments \u00D7 3 + upvotes (Reddit/Moltbook subtract 1 to strip OP self-upvote). Range and average within this cohort.' },
+    { label: 'Score',    tip: 'Composite score = clicks \u00D7 10 + comments \u00D7 3 + upvotes (Reddit/Moltbook subtract 1 to strip OP self-upvote). Click weight \u00D710 matches top_performers.SCORE_SQL and the engagement_styles.py picker. Range and average within this cohort.' },
     { label: 'Upvotes',  tip: 'Upvote/like/reaction count range (min\u2013max) and average within this cohort. Raw, before the Reddit/Moltbook self-upvote discount.' },
     { label: 'Comments', tip: 'Reply/comment count range (min\u2013max) and average within this cohort.' },
     { label: 'Views',    tip: 'View count range (min\u2013max) and average within this cohort. Excludes Moltbook and GitHub since those platforms do not expose view counts.' },
