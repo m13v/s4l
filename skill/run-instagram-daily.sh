@@ -38,8 +38,28 @@ fi
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
+# Run accounting for dashboard Job History (Post Threads · Instagram).
+# Each exit site updates POSTED_CT / SKIPPED_CT / FAILED_CT; the EXIT trap
+# always emits one log_run.py line so the run shows up under
+# thread_instagram, matching how thread_twitter / thread_reddit log.
+RUN_START_EPOCH=$(date +%s)
+POSTED_CT=0
+SKIPPED_CT=0
+FAILED_CT=0
+
 cleanup() {
+  local rc=$?
   rm -f "$PICK_FILE"
+  if [ "$POSTED_CT" -eq 0 ] && [ "$SKIPPED_CT" -eq 0 ] && [ "$FAILED_CT" -eq 0 ]; then
+    if [ "$rc" -eq 0 ]; then SKIPPED_CT=1; else FAILED_CT=1; fi
+  fi
+  local elapsed=$(( $(date +%s) - RUN_START_EPOCH ))
+  local cost
+  cost=$(/usr/bin/python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-instagram-daily" 2>/dev/null || echo "0.0000")
+  /usr/bin/python3 "$REPO_DIR/scripts/log_run.py" \
+      --script "thread_instagram" \
+      --posted "$POSTED_CT" --skipped "$SKIPPED_CT" --failed "$FAILED_CT" \
+      --cost "$cost" --elapsed "$elapsed" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -65,6 +85,7 @@ else
 fi
 if [ -z "$TARGET_ACCOUNT" ]; then
   log "pick_ig_account.py produced no account — exiting non-zero"
+  FAILED_CT=1
   exit 1
 fi
 log "picker chose account: $TARGET_ACCOUNT"
@@ -76,9 +97,11 @@ if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/ig_post_type_picker.py" \
   rc=$?
   if [ "$rc" -eq 2 ]; then
     log "queue exhausted for account=$TARGET_ACCOUNT (no drafts of either type) — exiting cleanly"
+    SKIPPED_CT=1
     exit 0
   fi
   log "picker failed rc=$rc — exiting non-zero"
+  FAILED_CT=1
   exit 1
 fi
 
@@ -93,6 +116,7 @@ log "picker reason: ${REASON}"
 
 if [ ! -f "$VIDEO_PATH" ]; then
   log "ERROR: picker pointed at $VIDEO_PATH but file missing on disk"
+  FAILED_CT=1
   exit 1
 fi
 
@@ -107,9 +131,11 @@ log "step 3: post_to_ig.py --file $(basename "$VIDEO_PATH") --post-type $POST_TY
 if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/mixer/post_to_ig.py" \
         --file "$VIDEO_PATH" --post-type "$POST_TYPE" --account "$TARGET_ACCOUNT" $DRY_FLAG >>"$LOG_FILE" 2>&1; then
   log "post_to_ig.py failed — exiting non-zero"
+  FAILED_CT=1
   exit 1
 fi
 
+POSTED_CT=1
 log "=== finished post-${POST_NUMBER} (${POST_TYPE}) on ${TARGET_ACCOUNT} successfully ==="
 
 # Step 4: mirror the new media_posts row into the cross-platform `posts` table
