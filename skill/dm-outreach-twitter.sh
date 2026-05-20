@@ -22,15 +22,9 @@ LOG_FILE="$LOG_DIR/dm-outreach-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
-# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+# Harness-only browser bootstrap (twitter-agent path fully removed 2026-05-19).
+# Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS, exports TWITTER_CDP_URL=9555.
 source "$(dirname "$0")/lib/twitter-backend.sh"
-
-# Skip cleanly if an interactive twitter-agent MCP session (Fazm Dev / IDE /
-# another cron) already owns the profile. See engage-twitter.sh for context.
-# Harness backend skips this check (CDP supports multiple concurrent clients).
-if defer_if_foreign_for_backend "$LOG_FILE"; then
-    exit 0
-fi
 
 acquire_lock "twitter-browser" 3600
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
