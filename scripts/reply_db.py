@@ -16,9 +16,11 @@ the Reddit pipeline.
 """
 import sys, json, os
 sys.path.insert(0, os.path.dirname(__file__))
+from version import read_version as read_autoposter_version
 
 CLAUDE_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID") or None
 API_BASE = (os.environ.get("AUTOPOSTER_API_BASE") or "https://s4l.ai").rstrip("/")
+AUTOPOSTER_VERSION = read_autoposter_version()
 
 
 def _http_patch(rid: int, body: dict) -> None:
@@ -109,6 +111,10 @@ elif cmd == "replied":
         "our_reply_url": url,
         "engagement_style": style,
         "claude_session_id": CLAUDE_SESSION_ID,
+        # autoposter_version: stamp on the replied transition so we can
+        # attribute reply engagement back to the release that produced
+        # this comment. None when package.json + env are both missing.
+        "autoposter_version": AUTOPOSTER_VERSION,
     }
     # Server uses COALESCE for is_recommendation: only send TRUE so we
     # never accidentally clobber an existing TRUE flag back to FALSE.
