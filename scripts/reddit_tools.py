@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
+from version import read_version as read_autoposter_version
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
@@ -776,6 +777,12 @@ def cmd_log_post(args):
     # post_reddit.py based on which URL Claude baked into the reply text.
     if getattr(args, "link_source", None):
         body["link_source"] = args.link_source
+    # autoposter_version: social-autoposter package.json version at the moment
+    # we posted. Powers per-release attribution: "did 1.5.0 outperform 1.4.x
+    # on Reddit?". None when package.json + env are both missing.
+    autoposter_version = read_autoposter_version()
+    if autoposter_version:
+        body["autoposter_version"] = autoposter_version
     resp = api_post("/api/v1/posts", body, ok_on_conflict=True)
     err = resp.get("error") if isinstance(resp, dict) else None
     if err:
