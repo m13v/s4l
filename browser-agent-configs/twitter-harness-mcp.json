@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "twitter-harness": {
+      "type": "stdio",
+      "command": "__UV_BIN__",
+      "args": [
+        "run",
+        "--quiet",
+        "--with",
+        "mcp",
+        "__HOME__/.claude/mcp-servers/browser-harness/server.py"
+      ],
+      "env": {
+        "PATH": "__HOME__/.local/bin:__NODE_BIN__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}
