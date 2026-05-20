@@ -28,6 +28,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch
+from author_history_block import render as _render_author_history
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -1047,10 +1048,20 @@ def build_draft_prompt(project, config, candidates, top_report, recent_comments,
                           f" Δcomm={rip.get('delta_comments', 0)},"
                           f" composite={rip.get('composite', 0):.1f} over"
                           f" {rip.get('window_sec', 300)}s]")
+        history_line = ""
+        try:
+            _hb = _render_author_history(
+                "reddit", c.get("thread_author") or "", days=30, limit=5
+            )
+            if _hb:
+                history_line = "\n    " + _hb.replace("\n", "\n    ")
+        except Exception:
+            pass
         candidate_lines.append(
             f"  - {c['thread_url']}{delta_info}\n"
             f"    title: {c.get('thread_title', '')}\n"
             f"    suggested style: {c.get('engagement_style', '')}"
+            f"{history_line}"
         )
     candidates_block = "\n".join(candidate_lines)
 
