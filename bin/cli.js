@@ -142,7 +142,7 @@ function registerBrowserAgentMcpServers() {
       continue;
     }
     // `claude mcp list` prints one server per line starting with the name.
-    // Use a word-boundary check so twitter-agent does not false-match reddit-agent.
+    // Use a word-boundary check so e.g. reddit-agent does not false-match linkedin-agent.
     const re = new RegExp(`(^|\\s)${s.name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(:|\\s|$)`, 'm');
     if (re.test(existing)) {
       skipped++;
