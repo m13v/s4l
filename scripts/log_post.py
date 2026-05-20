@@ -61,6 +61,7 @@ import http_api
 import linkedin_url as li_url
 from db import load_env
 from twitter_account import resolve_handle as resolve_twitter_handle
+from version import read_version as read_autoposter_version
 
 URN_ID_RE = re.compile(r"\b(\d{16,19})\b")
 
@@ -182,6 +183,13 @@ def log_rejected(args):
         body["claude_session_id"] = claude_session_id
     if urn_ids:
         body["urns"] = urn_ids
+    # autoposter_version: stamped on every write so we can attribute
+    # engagement back to the release of the autoposter code that produced
+    # this row. None when package.json + env are both missing; API stores
+    # NULL in that case (doesn't block the insert).
+    autoposter_version = read_autoposter_version()
+    if autoposter_version:
+        body["autoposter_version"] = autoposter_version
 
     resp = http_api.api_post("/api/v1/posts", body, ok_on_conflict=True)
     if resp and resp.get("error") in ("duplicate_thread", "conflict"):
@@ -338,6 +346,12 @@ def main():
         body["urns"] = urn_ids
     if args.link_source:
         body["link_source"] = args.link_source
+    # autoposter_version: stamped on every write so we can attribute
+    # engagement back to the release of the autoposter code that produced
+    # this row. None when package.json + env are both missing.
+    autoposter_version = read_autoposter_version()
+    if autoposter_version:
+        body["autoposter_version"] = autoposter_version
     # Generation trace: read the JSON file and pass as-is. We do NOT
     # validate the inner shape here; the API enforces the 64 KB cap and
     # rejects non-object payloads. If the file is missing or unparseable
