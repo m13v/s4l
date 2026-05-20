@@ -5727,16 +5727,24 @@ async function handleApi(req, res) {
         "COALESCE(comments_count, 0)::int AS comments_count, " +
         "CASE WHEN LOWER(posts.platform) IN ('moltbook', 'github', 'github_issues') " +
           "THEN NULL ELSE COALESCE(views, 0)::int END AS views, " +
-        // Score weights comments and upvotes equally (5 each); views are 1/100.
-        // Reddit bakes the OP's self-upvote into the API's `score` field, and our
-        // moltbook_post.py self_upvote() call does the same for Moltbook, so a fresh
-        // post on either platform shows upvotes=1; discount 1, clamped at 0 so
-        // downvoted posts don't go negative.
-        "(COALESCE(comments_count,0) * 5 " +
+        // 2026-05-19: per-post score now matches the unified composite used
+        // by top_performers.SCORE_SQL, the engagement_styles.py picker, and
+        // the dashboard "Posts by Engagement Style" section:
+        //   score = clicks×10 + comments×3 + upvotes_discounted
+        // Click weight ×10 because a real human click outvalues 10 likes of
+        // vibes when ranking engagement quality. Views are deliberately
+        // excluded (viral-by-algorithm ≠ a pattern worth imitating).
+        // Reddit/Moltbook subtract 1 from upvotes to strip the OP self-upvote.
+        // Clicks come from `pl.real_clicks` = the bot-filtered per-hit log
+        // (post_link_clicks). Posts predating the 2026-05-07 log start get 0
+        // clicks here even if they accumulated PostHog $pageview backfill —
+        // by design: the picker uses the same source so the score the model
+        // sees and the score the dashboard shows agree on the same ground truth.
+        "(COALESCE(pl.real_clicks, 0) * 10 " +
+          "+ COALESCE(comments_count,0) * 3 " +
           "+ CASE WHEN LOWER(posts.platform) IN ('reddit', 'moltbook') " +
-            "THEN GREATEST(0, COALESCE(upvotes,0) - 1) * 5 " +
-            "ELSE COALESCE(upvotes,0) * 5 END " +
-          "+ COALESCE(views,0) / 100)::int AS score, " +
+            "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
+            "ELSE COALESCE(upvotes,0) END)::int AS score, " +
         "(our_url IS NOT NULL AND thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account)) AS is_thread, " +
         "posted_at, engagement_updated_at, our_content, our_url, thread_url, thread_title, " +
         "LEFT(COALESCE(thread_content, ''), 400) AS thread_content, " +
@@ -5789,10 +5797,13 @@ async function handleApi(req, res) {
         "GREATEST(0, COALESCE(r2.upvotes, 0) - 1)::int AS upvotes, " +
         "COALESCE(r2.comments_count, 0)::int AS comments_count, " +
         "COALESCE(r2.views, 0)::int AS views, " +
-        // Same score formula. Views (Reddit only) contribute /100.
-        "(COALESCE(r2.comments_count,0) * 5 " +
-          "+ GREATEST(0, COALESCE(r2.upvotes,0) - 1) * 5 " +
-          "+ COALESCE(r2.views,0) / 100)::int AS score, " +
+        // 2026-05-19: aligned with the unified composite (see posts branch
+        // for full rationale). Replies have no associated `post_links` row
+        // (we don't mint short links for reply-to-comment threads), so the
+        // clicks term is implicitly 0 here. Score = comments×3 + upvotes_net.
+        // Reddit-only branch → always discount the self-upvote.
+        "(COALESCE(r2.comments_count,0) * 3 " +
+          "+ GREATEST(0, COALESCE(r2.upvotes,0) - 1))::int AS score, " +
         "FALSE AS is_thread, " +
         "r2.replied_at AS posted_at, " +
         "r2.engagement_updated_at, " +
@@ -7863,7 +7874,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="search-queries-stats" open>
+  <details class="style-stats-section" id="search-queries-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-queries-stats-heading">Search Queries (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-query stats from twitter_search_attempts + linkedin_search_attempts + reddit_search_attempts. GitHub isn\u2019t represented. Reddit rows show seed concepts (topic buckets) rather than literal search phrases. attempts = times the query was drafted and run. attempts = times the query was drafted and run. candidates_found = sum of tweets/posts the search returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this query that we actually posted to. avg_engagement = comments\u00D73 + upvotes on those resulting posts (same formula as top_performers.py). Honors Window/Platform/Project filters above.">i</span></span>
       <span class="style-stats-total" id="search-queries-stats-total"></span>
