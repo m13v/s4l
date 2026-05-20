@@ -42,7 +42,7 @@ function agentPath(job) {
 
 // Matrix: rows = job types, columns = platforms
 // Each cell is a job (or null if that combo doesn't exist)
-const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub'];
+const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
 const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
 
 const JOBS = [
@@ -86,6 +86,7 @@ const JOBS = [
   { label: 'com.m13v.social-stats-twitter', name: 'Stats Twitter', type: 'Stats', platform: 'Twitter', script: 'stats-twitter.sh', logPrefix: 'stats-twitter-', plist: 'com.m13v.social-stats-twitter.plist' },
   { label: 'com.m13v.social-stats-linkedin', name: 'Stats LinkedIn', type: 'Stats', platform: 'LinkedIn', script: 'stats-linkedin.sh', logPrefix: 'stats-linkedin-', plist: 'com.m13v.social-stats-linkedin.plist' },
   { label: 'com.m13v.social-stats-moltbook', name: 'Stats MoltBook', type: 'Stats', platform: 'MoltBook', script: 'stats-moltbook.sh', logPrefix: 'stats-moltbook-', plist: 'com.m13v.social-stats-moltbook.plist' },
+  { label: 'com.m13v.social-stats-instagram', name: 'Stats Instagram', type: 'Stats', platform: 'Instagram', script: 'stats-instagram.sh', logPrefix: 'stats-instagram-', plist: 'com.m13v.social-stats-instagram.plist' },
   // Post Audit row (verify posts still exist / API health)
   { label: 'com.m13v.social-audit-reddit', name: 'Post Audit Reddit', type: 'Post Audit', platform: 'Reddit', script: 'audit-reddit.sh', logPrefix: 'audit-reddit-', plist: 'com.m13v.social-audit-reddit.plist' },
   { label: 'com.m13v.social-audit-twitter', name: 'Post Audit Twitter', type: 'Post Audit', platform: 'Twitter', script: 'audit-twitter.sh', logPrefix: 'audit-twitter-', plist: 'com.m13v.social-audit-twitter.plist' },
@@ -128,6 +129,7 @@ const REQUIRED_LOCKS = {
   'link-edit-moltbook.sh':          ['link-edit-moltbook'],
   'link-edit-github.sh':            ['link-edit-github'],
   'stats-reddit.sh':                ['reddit-browser'],
+  'stats-instagram.sh':             ['instagram-poster'],
   'audit-reddit.sh':                ['reddit-browser', 'audit-reddit'],
   'audit-twitter.sh':               ['twitter-browser', 'audit-twitter'],
   'audit-linkedin.sh':              ['linkedin-browser', 'audit-linkedin'],
@@ -5942,7 +5944,7 @@ async function handleApi(req, res) {
     const windowKey = Object.prototype.hasOwnProperty.call(WINDOW_HOURS, rawWindow) ? rawWindow : '7d';
     const windowHours = WINDOW_HOURS[windowKey];
     const rawPlatform = String(url.searchParams.get('platform') || '').toLowerCase().trim();
-    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook']);
+    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'instagram']);
     const platformFilter = ALLOWED_PLATFORMS.has(rawPlatform) ? rawPlatform : '';
     const rawKind = String(url.searchParams.get('kind') || 'all').toLowerCase().trim();
     const kindFilter = (rawKind === 'threads' || rawKind === 'comments') ? rawKind : 'all';
@@ -8741,7 +8743,7 @@ function fmtInterval(secs) {
 }
 
 let _initialized = false;
-const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub'];
+const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
 const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
 
 function renderToggle(label, loaded) {
