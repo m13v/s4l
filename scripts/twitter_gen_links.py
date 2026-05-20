@@ -7,7 +7,7 @@ matching landing-page (or falls back to the plain project URL) for each
 candidate, and writes the file back with a `link_url` field per candidate.
 
 The browser lock is NOT held while this runs. generate_page.py is pure HTTP +
-git + Cloud-Run-deploy work, no twitter-agent profile use, so other twitter
+git + Cloud-Run-deploy work, no twitter-harness browser use, so other twitter
 pipelines can use the browser during the 10-40 minute landing-page build.
 
 Plan file shape (in/out):
