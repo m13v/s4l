@@ -154,6 +154,38 @@ function json(res, obj, status = 200) {
   res.end(JSON.stringify(obj));
 }
 
+// Short-link code alphabet matches scripts/dm_short_links.py CODE_ALPHABET
+// so codes minted by either path are visually consistent. 32 chars (no 0/1/l/o
+// to avoid ambiguity in handwritten/printed contexts).
+const SHORT_LINK_ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789';
+
+function mintShortLinkCode(n = 8) {
+  let s = '';
+  const bytes = crypto.randomBytes(n);
+  for (let i = 0; i < n; i++) {
+    s += SHORT_LINK_ALPHABET[bytes[i] % SHORT_LINK_ALPHABET.length];
+  }
+  return s;
+}
+
+// Look up a project's wrapper host (where /r/<code> is served) by name from
+// config.json. Mirrors _project_short_links_host in scripts/dm_short_links.py.
+// Falls back to project.website. Returns null if the project is not configured.
+function getProjectWrapperHost(projectName) {
+  if (!projectName) return null;
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    const projects = Array.isArray(config.projects) ? config.projects : [];
+    const p = projects.find(x => x && x.name === projectName);
+    if (!p) return null;
+    const host = (p.short_links_host || p.website || '').trim().replace(/\/+$/, '');
+    return host || null;
+  } catch (e) {
+    console.error('[wrapper-host] config read failed:', e.message);
+    return null;
+  }
+}
+
 function isJobLoaded(label) {
   return driver.isLoaded(label);
 }
