@@ -311,91 +311,35 @@ def _fmt_date(s):
         return "unknown"
 
 
-def check_cross_pipeline_history(platform, author, post_id):
+def check_cross_pipeline_history(platform, author, post_id, reply_id=None):
     """Cross-pipeline check before posting a comment-reply.
 
-    Returns (same_post_disengage, prior_history_block). See module docstring
-    for the full semantics — unchanged from the previous direct-SQL
-    implementation. The /api/v1/dms GET supports `their_author`, `post_id`,
-    `exclude_post_id`, `interest_levels` (CSV), `conversation_statuses` (CSV),
-    `min_message_count`, `with_last_message`, and `order_by=last_message_at`,
-    which together replace the two SQL queries used previously.
+    Returns (same_post_disengage, prior_history_block). Delegates to the
+    shared counterparty_history module so Reddit and Twitter get symmetric
+    behavior — both lanes (DM cross-thread + public-reply history) are
+    surfaced into the prompt in one self-titled block.
+
+    2026-05-19 refactor: previously this lived as Reddit-only direct API
+    calls covering the DM lane only. Twitter's engage helper had nothing.
+    The shared module now exposes both lanes to both pipelines; this
+    function is a thin compat wrapper preserving the (same_post_disengage,
+    block_text) tuple shape build_prompt() consumes.
     """
-    if not author or not post_id:
+    if not author:
         return None, ""
     try:
-        same_resp = api_get(
-            "/api/v1/dms",
-            query={
-                "platform": platform,
-                "their_author": author,
-                "post_id": post_id,
-                # Server reads either an interest_level match OR a
-                # conversation_status='stale' match. Easiest is two calls or
-                # do it client-side. Single call: pull all dms for this
-                # (author, post_id) and filter.
-                "limit": 25,
-                "order_by": "last_message_at",
-            },
+        from counterparty_history import get_counterparty_history_block
+        return get_counterparty_history_block(
+            platform,
+            author,
+            current_post_id=post_id,
+            current_reply_id=reply_id,
         )
-        same_rows = ((same_resp or {}).get("data") or {}).get("dms") or []
-        same_post_disengage = None
-        for d in same_rows:
-            interest = d.get("interest_level")
-            convo_status = d.get("conversation_status")
-            if interest in ("declined", "not_our_prospect") or convo_status == "stale":
-                same_post_disengage = {
-                    "dm_id": d.get("id"),
-                    "interest_level": interest,
-                    "conversation_status": convo_status,
-                    "qualification_status": d.get("qualification_status"),
-                    "last_message_at": d.get("last_message_at"),
-                }
-                break
-
-        other_resp = api_get(
-            "/api/v1/dms",
-            query={
-                "platform": platform,
-                "their_author": author,
-                "exclude_post_id": post_id,
-                "min_message_count": 1,
-                "with_last_message": "true",
-                "order_by": "last_message_at",
-                "limit": 5,
-            },
-        )
-        other_rows = ((other_resp or {}).get("data") or {}).get("dms") or []
-        if not other_rows:
-            return same_post_disengage, ""
-
-        lines = []
-        for r in other_rows:
-            ts = _fmt_date(r.get("last_message_at"))
-            interest = r.get("interest_level") or "unset"
-            mode = r.get("mode") or "unset"
-            status = r.get("conversation_status") or "unset"
-            tier = r.get("tier") if r.get("tier") is not None else "?"
-            msgs = r.get("message_count") or 0
-            target = r.get("target_project") or "-"
-            last = (r.get("last_msg") or "").replace("\n", " ").strip()
-            lines.append(
-                f"- dm #{r.get('id')} on post #{r.get('post_id')} (last activity {ts}): "
-                f"interest={interest}, mode={mode}, status={status}, "
-                f"tier={tier}, messages={msgs}, target_project={target}\n"
-                f"    last: {last}"
-            )
-        block = (
-            "## Prior history with this person on OTHER threads\n"
-            "Soft context from the dms tracker (different post_id). "
-            "Use this to gauge tone, fit, and whether they have already "
-            "declined or pitched us elsewhere. Does NOT auto-block; you "
-            "still decide reply or skip based on the current thread.\n"
-            + "\n".join(lines)
-        )
-        return same_post_disengage, block
     except Exception as e:
-        print(f"[engage_reddit] cross-pipeline check failed for {platform}/@{author} post={post_id}: {e}")
+        print(
+            f"[engage_reddit] counterparty_history failed for "
+            f"{platform}/@{author} post={post_id}: {e}"
+        )
         return None, ""
 
 
@@ -720,7 +664,8 @@ def main():
         # / stale on THIS post. Soft-surface other-thread history into the
         # prompt so the LLM can adjust tone without being auto-blocked.
         same_post_disengage, prior_history_block = check_cross_pipeline_history(
-            reply["platform"], reply["their_author"], reply.get("post_id")
+            reply["platform"], reply["their_author"], reply.get("post_id"),
+            reply_id=reply.get("id"),
         )
         if same_post_disengage:
             reason = (
