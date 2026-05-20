@@ -60,6 +60,11 @@ LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 # a no-op constant in case downstream tooling reads it from the environment.
 sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
 from http_api import api_get, api_patch  # noqa: E402
+try:
+    from account_resolver import resolve as _resolve_account  # noqa: E402
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
@@ -164,10 +169,17 @@ def already_posted_to_thread(thread_url: str) -> tuple[bool, int | None]:
     that fires once per cycle. log_post.py's post-INSERT dedup is still
     the final backstop.
     """
+    # Scope per-account so the pre-post race guard only fires when THIS
+    # machine's handle already has a post in the thread. Otherwise the mk0r
+    # VM (@matt_diak) would skip every thread @m13v_ already touched.
+    dedupe_q = {"platform": "twitter", "thread_url": thread_url}
+    _twitter_handle = _resolve_account("twitter")
+    if _twitter_handle:
+        dedupe_q["our_account"] = _twitter_handle
     try:
         resp = api_get(
             "/api/v1/posts/lookup",
-            query={"platform": "twitter", "thread_url": thread_url},
+            query=dedupe_q,
             ok_on_404=True,
         )
     except SystemExit as e:
