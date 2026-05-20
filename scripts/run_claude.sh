@@ -109,9 +109,9 @@ fi
 # skips the cross-session check entirely.
 for arg in "$@"; do
     case "$arg" in
-        *linkedin-agent-mcp.json) export SA_PIPELINE_PLATFORM="linkedin"; export SA_PIPELINE_LOCKED=1 ;;
-        *twitter-agent-mcp.json)  export SA_PIPELINE_PLATFORM="twitter";  export SA_PIPELINE_LOCKED=1 ;;
-        *reddit-agent-mcp.json)   export SA_PIPELINE_PLATFORM="reddit";   export SA_PIPELINE_LOCKED=1 ;;
+        *linkedin-agent-mcp.json)  export SA_PIPELINE_PLATFORM="linkedin"; export SA_PIPELINE_LOCKED=1 ;;
+        *twitter-harness-mcp.json) export SA_PIPELINE_PLATFORM="twitter";  export SA_PIPELINE_LOCKED=1 ;;
+        *reddit-agent-mcp.json)    export SA_PIPELINE_PLATFORM="reddit";   export SA_PIPELINE_LOCKED=1 ;;
     esac
 done
 
