@@ -153,8 +153,6 @@ child processes each time Claude needs them.
 
 ```
 ~/.claude/browser-agent-configs/
-  twitter-agent.json        # profile path + viewport
-  twitter-agent-mcp.json    # MCP server stanza consumed by Claude
   reddit-agent.json
   reddit-agent-mcp.json
   linkedin-agent.json
@@ -166,25 +164,31 @@ Each `*-mcp.json` launches `npx @playwright/mcp@latest --config
 `userDataDir: ~/.claude/browser-profiles/<platform>` so cookies and
 logged-in state persist across invocations.
 
+Twitter is intentionally absent: as of 2026-05-19 the Twitter pipeline is
+driven exclusively by the browser-harness MCP (`twitter-harness-mcp.json`,
+profile `~/.claude/browser-profiles/browser-harness`), which is installed
+out-of-band as part of the browser-harness setup rather than by this
+installer.
+
 ### 6.2 Register the servers with Claude
 
-`init` and `update` auto-register the three servers (`twitter-agent`,
-`reddit-agent`, `linkedin-agent`) by shelling out to `claude mcp
-add-json ...` if the `claude` CLI is on `PATH`. Registration is
-idempotent: entries already present in `~/.claude.json` are left
-untouched.
+`init` and `update` auto-register the two servers (`reddit-agent`,
+`linkedin-agent`) by shelling out to `claude mcp add-json ...` if the
+`claude` CLI is on `PATH`. Registration is idempotent: entries already
+present in `~/.claude.json` are left untouched. The `twitter-harness`
+MCP must be registered separately as part of the browser-harness setup.
 
 Verify:
 
 ```bash
-claude mcp list | grep -E '(twitter|reddit|linkedin)-agent'
+claude mcp list | grep -E '(reddit|linkedin)-agent|twitter-harness'
 ```
 
 If the `claude` CLI was not on `PATH` when you ran `init`, the
 installer prints fallback commands. To register manually later:
 
 ```bash
-for agent in twitter reddit linkedin; do
+for agent in reddit linkedin; do
   claude mcp add-json "${agent}-agent" \
     "$(jq -c '.mcpServers["'${agent}'-agent"]' \
          ~/.claude/browser-agent-configs/${agent}-agent-mcp.json)"
