@@ -128,8 +128,8 @@ EXCLUSIONS — do NOT engage with these accounts (skip and mark as 'skipped' wit
 
 CRITICAL — Browser agent rule: Each platform MUST use its dedicated browser agent. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
 - Reddit: mcp__reddit-agent__* tools (e.g. mcp__reddit-agent__browser_navigate)
-- Twitter: mcp__twitter-agent__* tools (e.g. mcp__twitter-agent__browser_navigate)
 - LinkedIn: mcp__linkedin-agent__* tools (e.g. mcp__linkedin-agent__browser_navigate)
+(Twitter is driven exclusively by engage-twitter.sh + run-twitter-cycle.sh via the twitter-harness MCP; engage.sh itself never drives Twitter.)
 Each agent has its own browser lock. Using the wrong agent bypasses the lock and causes session conflicts.
 CRITICAL: If a browser agent tool call is blocked or times out, DO NOT fall back to any other browser tool (especially not macos-use). Wait 30 seconds and retry the same agent. Repeat up to 3 times.
 CRITICAL: TECHNICAL FAILURES ARE NOT TERMINAL. If after retries the action still failed for any technical reason (browser blocked, MCP timeout, page rendering issue, reddit/moltbook unreachable, CDP_ERROR, no_response), DO NOT call reply_db.py skipped. Leave the row in 'processing' status and move on to the next pending item. The next engage run's start-of-script cleanup resets stuck 'processing' rows back to 'pending' and retries automatically.
