@@ -6138,6 +6138,77 @@ async function handleApi(req, res) {
     return;
   }
 
+  // GET /api/funnel/stats/by_subreddit - Reddit-only post-engagement aggregated
+  // per subreddit. Mirrors the post-engagement columns of /api/funnel/stats
+  // (Posts, Upvotes, Comments, Views, Post Clicks) but the row identity is the
+  // subreddit slug (extracted from posts.thread_url) instead of project_name.
+  // Funnel cells (pageviews/CTAs/bookings) are NOT included because they are
+  // project-level signals from PostHog/Bookings DBs and can't be attributed to
+  // a subreddit. The `projects` array per row tells which projects posted
+  // there in the window so admins can see overlap.
+  if (p === '/api/funnel/stats/by_subreddit' && req.method === 'GET') {
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '7', 10) || 7));
+    const pc = auth.projectClause(req.user, 'project_name', url.searchParams.get('project'));
+    if (!pc.ok) return json(res, { days, subreddits: [] });
+    const pcClause = pc.clause || '';
+    const q = "WITH reddit_posts AS (" +
+                "SELECT " +
+                  "LOWER(SUBSTRING(thread_url FROM 'reddit\\.com/r/([^/]+)/')) AS subreddit, " +
+                  "project_name, id, " +
+                  // Reddit's own UI subtracts the auto-self-upvote; mirror what
+                  // /api/funnel/stats does for the Upvotes column.
+                  "GREATEST(0, COALESCE(upvotes, 0) - 1) AS upvotes, " +
+                  "COALESCE(comments_count, 0) AS comments, " +
+                  "COALESCE(views, 0) AS views " +
+                "FROM posts " +
+                "WHERE LOWER(platform) = 'reddit' " +
+                  "AND posted_at >= NOW() - INTERVAL '" + days + " days' " +
+                  "AND project_name IS NOT NULL " +
+                  "AND our_content <> '(mention - no original post)'" +
+                  pcClause +
+              ") " +
+              "SELECT " +
+                "rp.subreddit, " +
+                "array_agg(DISTINCT rp.project_name) AS projects, " +
+                "COUNT(*)::int AS posts, " +
+                "COALESCE(SUM(rp.upvotes), 0)::int AS upvotes, " +
+                "COALESCE(SUM(rp.comments), 0)::int AS comments, " +
+                "COALESCE(SUM(rp.views), 0)::int AS views, " +
+                "COALESCE(SUM(pl.total_clicks), 0)::int AS post_clicks " +
+              "FROM reddit_posts rp " +
+              "LEFT JOIN (" +
+                "SELECT post_id, SUM(clicks)::int AS total_clicks " +
+                "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id" +
+              ") pl ON pl.post_id = rp.id " +
+              "WHERE rp.subreddit IS NOT NULL AND rp.subreddit <> '' " +
+              "GROUP BY rp.subreddit " +
+              "ORDER BY upvotes DESC NULLS LAST, posts DESC " +
+              "LIMIT 500";
+    return (async () => {
+      try {
+        const rows = await pq(q);
+        if (rows === null) return json(res, { error: 'db_unavailable' }, 500);
+        const subreddits = rows.map(r => ({
+          name: r.subreddit,
+          projects: r.projects || [],
+          posts: Number(r.posts) || 0,
+          upvotes: Number(r.upvotes) || 0,
+          comments: Number(r.comments) || 0,
+          views: Number(r.views) || 0,
+          post_clicks: Number(r.post_clicks) || 0,
+        }));
+        return json(res, {
+          generated_at: new Date().toISOString(),
+          days,
+          subreddits,
+        });
+      } catch (e) {
+        return json(res, { error: String(e && e.message || e) }, 500);
+      }
+    })();
+  }
+
   // GET /api/dm/stats - per-project DM funnel (outreach, replies, interest tiers,
   // qualification, bookings, conversions). Window is "active in last N days"
   // (COALESCE(last_message_at, discovered_at)) to match /api/top/dms semantics.
@@ -7805,6 +7876,15 @@ const HTML = `<!DOCTYPE html>
       <span style="font-size:12px;color:var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
     </div>
     <div id="search-queries-stats-body">
+      <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="subreddit-stats" open>
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="subreddit-stats-heading">Per-Subreddit Stats (last 24 hours)</span><span class="stat-card-info" data-tooltip="Reddit posts only, grouped by subreddit. Same post-engagement columns as Project Funnel Stats above, but the row identity is the subreddit slug (extracted from posts.thread_url) instead of project_name. Funnel cells (pageviews / CTAs / bookings) are NOT shown here because they\u2019re project-level signals and can\u2019t be attributed to a subreddit. The Projects column lists which projects posted to that sub in the window.">i</span></span>
+      <span class="style-stats-total" id="subreddit-stats-total"></span>
+    </summary>
+    <div id="subreddit-stats-body">
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
@@ -10783,6 +10863,8 @@ async function reloadStatsTabSections() {
   if (dmEl && dmEl.open) pending.push(loadDmStats(true));
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) pending.push(loadSearchQueriesStats(true));
+  const subEl = document.getElementById('subreddit-stats');
+  if (subEl && subEl.open) pending.push(loadSubredditStats(true));
   try { await Promise.allSettled(pending); }
   finally { document.body.classList.remove('sa-stats-busy'); }
 }
@@ -10801,6 +10883,8 @@ function syncStatsHeadings() {
   if (dm) dm.textContent = 'DM Funnel Stats (' + win.labelLong + ')';
   const sq = document.getElementById('search-queries-stats-heading');
   if (sq) sq.textContent = 'Search Queries (' + win.labelLong + ')';
+  const sub = document.getElementById('subreddit-stats-heading');
+  if (sub) sub.textContent = 'Per-Subreddit Stats (' + win.labelLong + ')';
 }
 function syncStatusHeadings() {
   const win = currentStatusWindow();
@@ -13202,6 +13286,67 @@ function renderFunnelStats(payload) {
       'followed by <b>(period total)</b> in parens \u2014 the Trends-tab sum of engagement gained during the window ' +
       'across <i>all</i> posts, regardless of when each post was created.' +
     '</div>');
+}
+
+// Per-subreddit post-engagement stats. Reddit-only sibling of renderFunnelStats:
+// same Posts / Upvotes / Comments / Views / Post Clicks columns, but the row
+// identity is the subreddit slug. No funnel cells (pageviews / CTAs / bookings)
+// because those are project-level and can\u2019t be attributed to a subreddit.
+let _subredditStatsTableState = { sortField: 'upvotes', sortDir: 'desc', filters: {} };
+function renderSubredditStats(payload) {
+  const body = document.getElementById('subreddit-stats-body');
+  const totalEl = document.getElementById('subreddit-stats-total');
+  if (!body) return;
+  if (payload && payload.error) {
+    if (totalEl) totalEl.textContent = 'error';
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(payload.error) + '</div>';
+    return;
+  }
+  const rows = (payload && payload.subreddits) || [];
+  if (!rows.length) {
+    if (totalEl) totalEl.textContent = '0 subreddits';
+    body.innerHTML = '<div class="style-stats-empty">No Reddit posts in this window.</div>';
+    return;
+  }
+  if (totalEl) totalEl.textContent = rows.length + ' subreddit' + (rows.length === 1 ? '' : 's');
+  const fmt = n => (Number(n) || 0).toLocaleString();
+  const normalized = rows.map(r => ({
+    name:         r.name || '',
+    projects:     Array.isArray(r.projects) ? r.projects.join(', ') : '',
+    posts:        Number(r.posts) || 0,
+    upvotes:      Number(r.upvotes) || 0,
+    comments:     Number(r.comments) || 0,
+    views:        Number(r.views) || 0,
+    post_clicks:  Number(r.post_clicks) || 0,
+  }));
+  const fmtSubName = v => {
+    const slug = String(v || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+    if (!slug) return escapeHtml(v);
+    return '<a href="https://www.reddit.com/r/' + encodeURIComponent(slug) + '/" target="_blank" rel="noopener">r/' + escapeHtml(slug) + '</a>';
+  };
+  const fmtProjects = v => {
+    const s = String(v || '');
+    if (!s) return '\u2014';
+    return '<span style="color:var(--text-muted);font-size:12px;" title="' + escapeHtml(s) + '">' + escapeHtml(s) + '</span>';
+  };
+  mountSortableTable({
+    containerId: 'subreddit-stats-body',
+    state: _subredditStatsTableState,
+    storageKey: 'sa.subredditStatsTable.v1',
+    rows: normalized,
+    showTotals: true,
+    columns: [
+      { key: 'name',        label: 'Subreddit',   type: 'text',    align: 'left',  formatter: fmtSubName },
+      { key: 'projects',    label: 'Projects',    type: 'text',    align: 'left',  formatter: fmtProjects },
+      { key: 'posts',       label: 'Posts',       type: 'numeric', align: 'right', formatter: fmt },
+      { key: 'upvotes',     label: 'Upvotes',     type: 'numeric', align: 'right', formatter: fmt,
+        helpText: 'Sum of upvotes on Reddit posts created in the selected window, minus the auto-self-upvote per post (matches the Project Funnel Stats column).' },
+      { key: 'comments',    label: 'Comments',    type: 'numeric', align: 'right', formatter: fmt },
+      { key: 'views',       label: 'Views',       type: 'numeric', align: 'right', formatter: fmt },
+      { key: 'post_clicks', label: 'Post Clicks', type: 'numeric', align: 'right', formatter: fmt,
+        helpText: 'Clicks on /r/<code> short links minted for posts created in the selected window (no period-total here \u2014 this is a fast Reddit-only path).' },
+    ],
+  });
 }
 
 let _dmStatsTableState = { sortField: 'sent', sortDir: 'desc', filters: {} };
@@ -16389,6 +16534,34 @@ async function loadFunnelStats(force) {
     if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _funnelStatsLoading = false;
+  }
+}
+
+let _subredditStatsLoadedFor = null;
+let _subredditStatsLoading = false;
+async function loadSubredditStats(force) {
+  if (_subredditStatsLoading) return;
+  if (saAuthNotReady()) return;
+  const days = currentStatsWindow().days;
+  const proj = currentStatsProject();
+  const loadKey = days + '|' + proj;
+  if (_subredditStatsLoadedFor === loadKey && !force) return;
+  _subredditStatsLoading = true;
+  const totalEl = document.getElementById('subreddit-stats-total');
+  const body = document.getElementById('subreddit-stats-body');
+  if (totalEl) totalEl.textContent = 'loading\u2026';
+  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  try {
+    const params = ['days=' + days];
+    if (proj && proj !== 'all') params.push('project=' + encodeURIComponent(proj));
+    const res = await fetch('/api/funnel/stats/by_subreddit?' + params.join('&'));
+    const data = await res.json();
+    renderSubredditStats(data);
+    _subredditStatsLoadedFor = loadKey;
+  } catch (e) {
+    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+  } finally {
+    _subredditStatsLoading = false;
   }
 }
 
