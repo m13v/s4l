@@ -4707,8 +4707,12 @@ async function handleApi(req, res) {
     // and scripts/engagement_styles.py picker). clicks weighted ×10 because a
     // real human click outvalues 10 likes of vibes. Clicks come from a
     // bot-filtered subquery against post_link_clicks (matching the picker).
+    // NOTE: reference pl.total_clicks directly here, NOT the `clicks` alias.
+    // Postgres does not let one expression in a SELECT list reference another
+    // expression's alias from the same SELECT; doing so previously caused
+    // `column "clicks" does not exist` and silently returned 0 rows.
     const scoreExpr =
-      "(COALESCE(clicks, 0) * 10 + " +
+      "(COALESCE(pl.total_clicks, 0) * 10 + " +
         "COALESCE(comments_count,0) * 3 + " +
         "CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') " +
           "THEN GREATEST(0, COALESCE(upvotes,0) - 1) " +
