@@ -110,20 +110,59 @@ cleanup_harness_tabs() {
     python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
+_resolve_chrome_bin() {
+    # Auto-detect Chrome/Chromium so the same script launches the harness on
+    # macOS dev boxes AND Linux VMs. Override with BH_CHROME_BIN.
+    if [ -n "${BH_CHROME_BIN:-}" ] && [ -x "$BH_CHROME_BIN" ]; then
+        echo "$BH_CHROME_BIN"; return 0
+    fi
+    for _p in \
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+        "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable" \
+        "/usr/bin/chromium" "/usr/bin/chromium-browser" "/snap/bin/chromium"
+    do
+        if [ -x "$_p" ]; then echo "$_p"; return 0; fi
+    done
+    for _n in google-chrome google-chrome-stable chromium chromium-browser; do
+        _which=$(command -v "$_n" 2>/dev/null) && [ -n "$_which" ] && { echo "$_which"; return 0; }
+    done
+    echo ""; return 1
+}
+
 ensure_twitter_browser_for_backend() {
     # Probe + launch harness Chrome on port 9555 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
         echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
-        # Pass --window-position / --window-size on every launch. Mirrors the
-        # MCP server's ensure_chrome flags so the window lands at the same
-        # monitor regardless of which path spawned Chrome.
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        local _chrome_bin
+        _chrome_bin=$(_resolve_chrome_bin)
+        if [ -z "$_chrome_bin" ]; then
+            echo "[$(date +%H:%M:%S)] ERROR: no Chrome/Chromium binary found. Set BH_CHROME_BIN." >&2
+            return 1
+        fi
+        # On Linux + no display, run headless. On root, add --no-sandbox.
+        # Window-position/size only meaningful on macOS multi-monitor; skip
+        # elsewhere so we don't hide the window off-screen on single-display
+        # Linux VMs.
+        local _extra=()
+        case "$(uname -s)" in
+            Linux)
+                _extra+=(--no-sandbox --disable-dev-shm-usage)
+                if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+                    _extra+=(--headless=new --disable-gpu)
+                fi
+                ;;
+            Darwin)
+                _extra+=(--window-position="${BH_WINDOW_POS:-3042,-1032}")
+                _extra+=(--window-size="${BH_WINDOW_SIZE:-1024,1013}")
+                ;;
+        esac
+        "$_chrome_bin" \
             --remote-debugging-port=9555 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
             --no-first-run --no-default-browser-check \
             --disable-features=ChromeWhatsNewUI \
-            --window-position="${BH_WINDOW_POS:-3042,-1032}" \
-            --window-size="${BH_WINDOW_SIZE:-1024,1013}" \
+            "${_extra[@]}" \
             about:blank >/dev/null 2>&1 &
         disown
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
