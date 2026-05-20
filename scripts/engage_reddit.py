@@ -33,7 +33,14 @@ CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 REDDIT_MCP_CONFIG = os.path.expanduser("~/.claude/browser-agent-configs/reddit-agent-mcp.json")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 
-from engagement_styles import REPLY_STYLES as VALID_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns, validate_or_register
+from engagement_styles import (
+    REPLY_STYLES as VALID_STYLES,
+    get_styles_prompt,
+    get_content_rules,
+    get_anti_patterns,
+    validate_or_register,
+    pick_style_for_post,
+)
 
 
 def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
@@ -484,6 +491,15 @@ Apply this voice when drafting: follow `tone`, never violate any item in `never`
             f"on behalf of the user's account."
         )
 
+    # 2026-05-19: pre-pick the engagement style ONCE per reply so the
+    # picker's assignment threads into BOTH the assigned-style block AND
+    # the JSON output example. Without pinning the style name into the
+    # JSON example, the model treats the example as a menu hint and
+    # drifts (same drift vector that bit Reddit post-draft on this date).
+    style_platform = "reddit" if reply["platform"] != "moltbook" else "moltbook"
+    style_assignment = pick_style_for_post(style_platform, context="replying")
+    assigned_style = (style_assignment.get("style") or "your invented snake_case name")
+
     return f"""{framing}
 
 ## Reply data
@@ -497,7 +513,7 @@ Read ~/social-autoposter/config.json for project details and content_angle.
 - First person has TWO valid forms per the GROUNDING RULE below. Lane 1: open with a disclosure phrase ("hypothetically", "imagine someone running this", "scenario:") and then invent freely. Lane 2: stay first-person only when every specific is grounded in content_angle / voice / messaging in config.json, or drop the specific and pattern-frame ("the part that breaks down is..."). Never undisclosed first-person with invented numbers / places / programs.
 - Vary openings. Don't always start with credentials.
 
-{get_styles_prompt("reddit", context="replying")}
+{get_styles_prompt(style_platform, context="replying", assignment=style_assignment)}
 
 {get_anti_patterns()}
 
@@ -523,14 +539,11 @@ Read ~/social-autoposter/config.json for project details and content_angle.
    {{"action": "skip", "reason": "SHORT_REASON"}}
 
 3. If replying, draft 1-3 sentences following the rules above. Output ONLY this JSON:
-   {{"action": "reply", "text": "YOUR_REPLY_TEXT", "project": null, "engagement_style": "STYLE_NAME", "new_style": null}}
-   Set "engagement_style" to the style you used (one of: critic, storyteller, pattern_recognizer, curious_probe, contrarian, data_point_drop, snarky_oneliner, plus any candidate styles shown in the styles block above).
+   {{"action": "reply", "text": "YOUR_REPLY_TEXT", "project": null, "engagement_style": "{assigned_style}", "new_style": null}}
+   The assigned engagement style is "{assigned_style}" (see the assigned style block above). Use it. Do not pick a different one.
    If you recommended a project, set "project" to the project name.
 
-   If, and ONLY if, none of the listed styles fits, you may invent one. Set
-   "engagement_style" to your new snake_case name AND replace "new_style": null with:
-   {{"new_style": {{"description": "...", "example": "...", "note": "...", "why_existing_didnt_fit": "..."}}}}
-   Inventing should be rare. Prefer an existing style if it's even 80% right.
+   Inventing a new style is only valid when the picker explicitly assigns "invent" mode (the assigned style block above will say so). Otherwise leave "new_style" as null and use the assigned style verbatim.
 
 CRITICAL: Your ENTIRE output must be ONLY the JSON object above. No other text, no explanations, no markdown.
 The orchestrator script will handle posting via CDP and database updates automatically.
