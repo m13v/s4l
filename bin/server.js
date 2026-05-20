@@ -71,6 +71,8 @@ const JOBS = [
   { label: 'com.m13v.social-engage-reddit', name: 'Engage Reddit', type: 'Engage', platform: 'Reddit', script: 'engage-reddit.sh', logPrefix: 'engage-reddit-', plist: 'com.m13v.social-engage-reddit.plist' },
   { label: 'com.m13v.social-scan-moltbook-replies', name: 'MoltBook Scan', type: 'Other', platform: 'MoltBook', script: 'run-scan-moltbook-replies.sh', logPrefix: 'run-scan-moltbook-replies-', plist: 'com.m13v.social-scan-moltbook-replies.plist' },
   { label: 'com.m13v.social-scan-twitter-followups', name: 'Twitter Thread Follow-ups', type: 'Other', platform: 'Twitter', script: 'scan-twitter-followups.sh', logPrefix: 'scan-twitter-followups-', plist: 'com.m13v.social-scan-twitter-followups.plist' },
+  { label: 'com.m13v.social-scan-instagram-replies', name: 'Instagram Scan', type: 'Other', platform: 'Instagram', script: 'scan-instagram-replies.sh', logPrefix: 'scan-instagram-replies-', plist: 'com.m13v.social-scan-instagram-replies.plist' },
+  { label: 'com.m13v.social-refresh-instagram-tokens', name: 'IG Token Refresh', type: 'Other', platform: 'Instagram', script: 'refresh-instagram-tokens.sh', logPrefix: 'refresh-instagram-tokens-', plist: 'com.m13v.social-refresh-instagram-tokens.plist' },
   // DM Outreach row (initiate DMs to engaged users)
   { label: 'com.m13v.social-dm-outreach-reddit', name: 'DM Outreach Reddit', type: 'DM Outreach', platform: 'Reddit', script: 'dm-outreach-reddit.sh', logPrefix: 'dm-outreach-reddit-', plist: 'com.m13v.social-dm-outreach-reddit.plist' },
   { label: 'com.m13v.social-dm-outreach-twitter', name: 'DM Outreach Twitter', type: 'DM Outreach', platform: 'Twitter', script: 'dm-outreach-twitter.sh', logPrefix: 'dm-outreach-twitter-', plist: 'com.m13v.social-dm-outreach-twitter.plist' },
@@ -137,6 +139,8 @@ const REQUIRED_LOCKS = {
   'link-edit-github.sh':            ['link-edit-github'],
   'stats-reddit.sh':                ['reddit-browser'],
   'stats-instagram.sh':             ['instagram-poster'],
+  'scan-instagram-replies.sh':      ['instagram-poster'],
+  'refresh-instagram-tokens.sh':    ['instagram-poster'],
   'run-instagram-daily.sh':         ['instagram-poster'],
   'run-instagram-render.sh':        ['instagram-render'],
   'audit-reddit.sh':                ['reddit-browser', 'audit-reddit'],
