@@ -891,17 +891,16 @@ def build_content_angle(project, config):
 
 def build_discover_prompt(project, config, limit, top_report, recent_comments,
                           top_topics_report="", dud_queries_report="",
-                          omitted_topics_report="", style_assignment=None):
-    """DISCOVER phase: search and select threads only. No drafting.
+                          omitted_topics_report=""):
+    """DISCOVER phase: scan-only. Model picks search queries, runs them in
+    OPAQUE mode (never sees thread content), outputs DONE. No fetching, no
+    judging, no drafting. The dump_dir harvest converts raw search results
+    into candidates passed to ripen.
 
-    Claude outputs action=candidate JSON objects (thread_url, title, author,
-    search_topic, engagement_style — no text). Drafting is deferred until after
-    ripen filters the list so LLM spend only hits threads that passed the delta gate.
-
-    2026-05-19: `style_assignment` is the pick_style_for_post() result for
-    this cycle. When provided, the assigned-style block is embedded so the
-    discover model is told which style to attach to every candidate. When
-    omitted, get_styles_prompt() picks fresh internally (legacy callers).
+    Mirrors Twitter's scan phase: the only Claude work here is choosing
+    search queries. Style picking, top_performers filtering, and the
+    actual comment drafting all happen in the draft phase (the only
+    Claude call in this cycle that writes a comment).
     """
     content_angle = build_content_angle(project, config)
     topics_list = project.get("search_topics") or []
