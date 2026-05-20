@@ -19,8 +19,10 @@ Usage:
 
 Requires: pip install playwright && playwright install chromium
 
-Connects to the running twitter-agent MCP browser via CDP (Chrome DevTools Protocol)
-to reuse the existing logged-in session.
+Connects to the running twitter-harness MCP browser via CDP (Chrome DevTools
+Protocol, http://127.0.0.1:9555 by default; override via TWITTER_CDP_URL env
+var set by skill/lib/twitter-backend.sh) to reuse the existing logged-in
+session on the browser-harness profile.
 """
 
 import atexit
@@ -33,9 +35,8 @@ import sys
 import time
 
 
-PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/twitter")
-LOCK_FILE = os.path.expanduser("~/.claude/twitter-agent-lock.json")
-LOCK_EXPIRY = 300  # Must match twitter-agent-lock.sh
+LOCK_FILE = os.path.expanduser("~/.claude/twitter-browser-lock.json")
+LOCK_EXPIRY = 300  # process-level mutex TTL; refreshed during long ops
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
 VIEWPORT = {"width": 911, "height": 1016}
@@ -125,7 +126,13 @@ def _log_twitter_dm_outbound(dm_id, content, minted_codes=None):
 
 
 def find_twitter_cdp_port():
-    """Find the CDP port of the running twitter-agent MCP browser."""
+    """Find the CDP port of the running twitter-harness Chrome.
+
+    Scans all chrome/chromium processes for --remote-debugging-port=NNNN and
+    returns the first port whose /json index lists at least one x.com or
+    twitter.com tab (preferring logged-in tabs over login pages). Used only
+    as a fallback when TWITTER_CDP_URL isn't exported by the caller.
+    """
     try:
         ps_out = subprocess.check_output(
             ["ps", "aux"], text=True, stderr=subprocess.DEVNULL
@@ -199,12 +206,15 @@ atexit.register(_release_browser_lock)
 
 
 def _is_holder_alive(holder: str) -> bool:
-    """Mirror ~/.claude/hooks/twitter-agent-lock.sh is_holder_alive().
+    """Check whether a Claude session UUID lock holder is still running.
 
     A live Claude session puts its UUID on the cmdline as
     `claude --session-id <UUID>`. pgrep matches it; absence means the
     holder is dead and the lock is stale, even if its JSONL transcript
-    is still tail-flushing.
+    is still tail-flushing. Legacy semantics from the retired
+    twitter-agent-lock.sh PreToolUse hook; only python:PID holders are
+    written to the lock file today, so this code path is dormant unless
+    a Claude session still inherits an in-flight UUID lock.
     """
     if not holder:
         return False
@@ -226,11 +236,11 @@ def _acquire_browser_lock():
     """Check if another session holds the Twitter browser lock, then acquire it.
 
     Claude Code does not export session_id to subprocesses, so we can't directly
-    match our parent session. But the PreToolUse hook (twitter-agent-lock.sh)
-    enforces one Claude UUID owner at a time: any other Claude session would
-    have been blocked before it could reach this script via Bash. So if the
-    current lock is held by a UUID-style id, it must be our parent — inherit
-    it instead of failing. Only python:PID holders represent a real conflict.
+    match our parent session. Lock holders today are python:PID (from this
+    script's concurrent invocations); UUID-style holders are a legacy artifact
+    of the retired PreToolUse hook (twitter-agent-lock.sh). If a UUID lock is
+    still in flight, inherit it instead of failing; only python:PID holders
+    represent a real conflict.
     """
     global _LOCK_SESSION_ID, _LOCK_INHERITED
     deadline = time.time() + LOCK_WAIT_MAX
@@ -278,18 +288,22 @@ def _refresh_browser_lock():
 
 
 def get_browser_and_page(playwright):
-    """Connect to the twitter-agent MCP browser via CDP, or launch a new one.
+    """Connect to the running twitter-harness Chrome via CDP.
 
-    Returns (browser, page, is_cdp). When is_cdp=True, `page` is a reused
-    existing Twitter tab (navigate it, don't close it). When is_cdp=False,
-    it's a new headless page.
+    Returns (browser, page, is_cdp=True). `page` is a reused existing Twitter
+    tab when one is open; otherwise a freshly created page on the same
+    browser-harness context. Caller should navigate it, not close it.
 
-    TWITTER_CDP_URL env var (set unconditionally by lib/twitter-backend.sh
-    since the 2026-05-19 harness-only migration) routes directly to the
-    browser-harness Chrome (http://127.0.0.1:9555), skipping ps-based
-    discovery. The caller explicitly asked for this endpoint, so failure
-    here is fatal; silently falling back to launch_persistent_context()
-    would defeat the whole point.
+    Connection order:
+      1. TWITTER_CDP_URL env (set by lib/twitter-backend.sh) — direct attach.
+      2. find_twitter_cdp_port() — ps-based discovery of any Chrome serving
+         x.com/twitter.com (fallback when env not exported by the caller).
+
+    Both paths target the browser-harness Chrome since the legacy twitter-agent
+    profile + MCP wrapper were retired on 2026-05-19. There is no
+    launch_persistent_context fallback: if neither CDP attach succeeds the
+    caller (skill/lib/twitter-backend.sh:ensure_twitter_browser_for_backend)
+    is responsible for booting the harness Chrome first.
     """
     _acquire_browser_lock()
 
@@ -334,47 +348,25 @@ def get_browser_and_page(playwright):
                         return browser, pg, True
                 if context.pages:
                     return browser, context.pages[0], True
-        except Exception:
-            pass
-
-    # Fallback: launch persistent browser with saved profile.
-    # Retry on Chromium SingletonLock collisions (MCP holds the OS-level profile
-    # lock for its entire server lifetime; the JSON lock can expire while the
-    # OS lock is still held).
-    deadline = time.time() + LOCK_WAIT_MAX
-    while True:
-        try:
-            # IMPORTANT (2026-05-13): headless MUST be False. Twitter rolled out
-            # stricter headless-Chrome fingerprint detection around 2026-04-30
-            # that silently serves a stripped DM page: /i/chat never redirects
-            # to /i/chat/pin/recovery, the passcode prompt never appears, and
-            # the sidebar `main li` selector returns 0 results. We confirmed
-            # this empirically by running the same script with headless=True
-            # vs headless=False against the same persistent profile after a
-            # fresh login: True → empty list, False → passcode page appears
-            # and sidebar renders normally. This caused a 13-day inbound DM
-            # cliff (2026-05-01 .. 05-13) where ~50 inbound messages went
-            # uningested. Do NOT revert to headless=True without a working
-            # stealth/fingerprint patch — silent failure mode.
-            context = playwright.chromium.launch_persistent_context(
-                PROFILE_DIR,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport=VIEWPORT,
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            break
+                return browser, context.new_page(), True
         except Exception as e:
-            if time.time() >= deadline:
-                _release_browser_lock()
-                print(json.dumps({
-                    "success": False,
-                    "error": f"chromium profile locked by another process; waited {LOCK_WAIT_MAX}s: {e}"
-                }))
-                sys.exit(1)
-            time.sleep(LOCK_POLL_INTERVAL)
-    page = context.new_page()
-    return context, page, False
+            _release_browser_lock()
+            print(json.dumps({
+                "success": False,
+                "error": f"harness CDP attach failed (port {cdp_port}): {e}"
+            }))
+            sys.exit(1)
+
+    _release_browser_lock()
+    print(json.dumps({
+        "success": False,
+        "error": (
+            "No twitter-harness Chrome reachable. Set TWITTER_CDP_URL or boot "
+            "harness Chrome via skill/lib/twitter-backend.sh:ensure_twitter_"
+            "browser_for_backend before invoking twitter_browser.py."
+        )
+    }))
+    sys.exit(1)
 
 
 def _handle_dm_passcode(page):
