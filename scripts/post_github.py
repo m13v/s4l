@@ -43,6 +43,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 import pick_project
+from author_history_block import render as _render_author_history
 
 # ---------------------------------------------------------------------------
 # Run-summary safety net (atexit + SIGTERM/SIGHUP handlers).
@@ -397,6 +398,15 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
                 f"last_commenter: {c['last_commenter']} "
                 f"({c.get('last_comment_assoc') or 'NONE'})\n"
             )
+        history_block = ""
+        try:
+            _hb = _render_author_history(
+                "github", c.get("author") or "", days=30, limit=5
+            )
+            if _hb:
+                history_block = _hb + "\n"
+        except Exception:
+            pass
         cand_block.append(
             f"--- #{i} {c['repo']}#{c['number']} delta={c['delta_score']:.1f} "
             f"(cm {c['comment_count_t0']}->{c['comment_count_t1']}, "
@@ -407,6 +417,7 @@ def build_prompt(project, config, candidates, cap, top_report, recent_comments,
             f"author: {c['author']}\n"
             f"url: {c['url']}\n"
             f"body: {c['body']}\n"
+            f"{history_block}"
         )
     candidates_text = "\n".join(cand_block)
 
