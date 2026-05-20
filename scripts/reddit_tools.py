@@ -178,13 +178,22 @@ def _load_comment_blocked_subs(project_name=None):
     import / DB call fails for any reason, we fall back to the global list
     alone so the pipeline degrades gracefully.
 
-    config.json subreddit_bans entries gain optional .project semantics in the
-    same change: an entry with `"project": "studyly"` ONLY blocks for that
-    project; an entry with no .project (or .project=null) blocks globally.
-    Match is case-insensitive against the canonical config.json project name.
+    Scope model (2026-05-19 cleanup):
+      - subreddit_bans.comment_blocked entries are ALWAYS account-level.
+        The ONLY scope dimension is the entry's `account` field. An entry
+        tagged with a specific account applies only on machines posting
+        as that account; entries with account=null apply globally (back-
+        compat with pre-2026-05-15 data). The legacy `project` field on
+        these entries is IGNORED — the gate is account-level by nature
+        (sub automod strips the comment form for the account, not the
+        project). The originating project is preserved on the entry as
+        `noticed_by_project` for audit only.
+      - Project-specific relevance rejects (e.g. "studyly thinks
+        r/medicalschool is off-topic") live in project_search_excludes
+        (the per-project layer above), NOT in comment_blocked.
 
     Handles both ban-list shapes: bare-string entries (pre-2026-05-11) and
-    {"sub": ..., "added_at": ..., "reason": ..., "project": ...} audit dicts.
+    {"sub": ..., "added_at": ..., "reason": ..., "account": ...} audit dicts.
     """
     try:
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
@@ -204,21 +213,28 @@ def _load_comment_blocked_subs(project_name=None):
                 slug = _ban_entry_to_slug(entry)
                 if not slug:
                     continue
-                entry_project = None
                 entry_account = None
                 if isinstance(entry, dict):
-                    entry_project = entry.get("project") or None
                     entry_account = entry.get("account") or None
-                # Account filter first: if entry is tagged with a specific
-                # account and it's not the current one, this ban doesn't apply.
+                # Account filter is the ONLY scope dimension (2026-05-19
+                # cleanup). If entry is tagged with a specific account and
+                # it's not the current one, this ban doesn't apply on this
+                # machine — different accounts have different automod
+                # fingerprints. Entries with account=null are global
+                # (apply on every account; pre-2026-05-15 back-compat).
+                #
+                # The legacy `project` field is intentionally ignored:
+                # comment_blocked is an ACCOUNT-LEVEL gate by definition.
+                # If a sub silently strips this account's comment form,
+                # every project running this account hits the same gate.
+                # Project-specific relevance rejects live in
+                # project_search_excludes, not here. The writer now stores
+                # the originating project as `noticed_by_project` for
+                # audit only.
                 if (entry_account is not None and current_account is not None
                         and entry_account.lower() != current_account.lower()):
                     continue
-                if entry_project is None:
-                    blocked.add(slug)
-                elif project_name and entry_project.lower() == project_name.lower():
-                    blocked.add(slug)
-                # else: scoped to a different project, skip
+                blocked.add(slug)
         blocked.update(s.lower() for s in config.get("exclusions", {}).get("subreddits", []))
 
         # Per-project self-improving sub denylist (2026-05-11). Reads
