@@ -7,7 +7,7 @@
 #   2. Per-(project, topic_angle) floor window (default 2 days).
 #   3. Per-project inverse-share weighting (don't pile on one project).
 #
-# Then spawns a Claude session with twitter-agent to research, draft, and post
+# Then spawns a Claude session with the twitter-harness browser to research, draft, and post
 # ONE original thread (1-6 tweets, chained as a Twitter thread).
 #
 # Called by launchd. See com.m13v.social-twitter-threads.plist.
@@ -39,7 +39,8 @@ trap 'rc=$?; echo "SCRIPT DIED line=$LINENO cmd=\"$BASH_COMMAND\" exit=$rc" | te
 
 # Pipeline lock at top. Browser lock acquired later, just before the Claude/MCP step.
 source "$REPO_DIR/skill/lock.sh"
-# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+# Harness-only browser bootstrap (twitter-agent path fully removed 2026-05-19).
+# Sets MCP_CONFIG_FILE + BROWSER_INSTRUCTIONS for the Claude SDK call below.
 source "$REPO_DIR/skill/lib/twitter-backend.sh"
 acquire_lock "twitter-threads" 600
 
@@ -378,7 +379,7 @@ ${CAMPAIGN_BLOCK}
 
 1. RESEARCH (required): Read the product source paths listed in the context block. Pull 1-2 concrete, specific details from the source code or docs to anchor the thread. Generic threads get ignored.
 
-2. SCAN THE TIMELINE: Navigate to https://x.com/home using mcp__twitter-agent__browser_navigate to get a quick read on what is being said in our space today.
+2. SCAN THE TIMELINE: Navigate to https://x.com/home using the navigate tool from the BROWSER BACKEND block above to get a quick read on what is being said in our space today.
    - Read 5-10 recent tweets from accounts in adjacent topics (other indie devs, AI tooling, macOS automation, whatever fits the project).
    - Note the current vocabulary, hot takes, and any thread that is getting unusually high engagement.
    - Close the tab.
@@ -395,9 +396,9 @@ ${CAMPAIGN_BLOCK}
    - VARY YOUR CLOSER. Banned closers: 'curious if anyone', 'anyone else', 'thoughts?', 'has anyone'. Sometimes end with a statement, sometimes mid-thought, sometimes a specific question.
    - ${LINK_RULE}
 
-4. POST via mcp__twitter-agent__*:
+4. POST via the browser tools from the BROWSER BACKEND block above:
    - Navigate to https://x.com/compose/post.
-   - Fill the first tweet into the textarea selected by [data-testid='tweetTextarea_0']. If the contenteditable does not accept .value=, use mcp__twitter-agent__browser_type to type the text directly into the focused element.
+   - Fill the first tweet into the textarea selected by [data-testid='tweetTextarea_0']. If the contenteditable does not accept .value=, use the type tool from the BROWSER BACKEND block to type the text directly into the focused element.
    - For each subsequent tweet (if any): click the button with data-testid='addButton' (the small '+' that appends a new tweet to the chain), then fill its textarea. The new textarea will be data-testid='tweetTextarea_1', then 'tweetTextarea_2', etc.
    - When all tweets are filled, click the button with data-testid='tweetButton' (label varies between 'Post' and 'Post all'). Wait 4 seconds.
    - Capture the URL of the FIRST posted tweet:
@@ -411,7 +412,7 @@ ${CAMPAIGN_BLOCK}
 
 CRITICAL: NEVER use em dashes. Use commas, plain hyphens, or separate sentences.
 CRITICAL: Each tweet <=280 chars. The schema enforces this; do not exceed.
-CRITICAL: Use ONLY mcp__twitter-agent__* tools.
+CRITICAL: Use ONLY the browser tools listed in the BROWSER BACKEND block above (the Twitter-dedicated MCP for this run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
 CRITICAL: Close browser tabs after each navigation (browser_tabs action 'close').
 CRITICAL: If a browser call times out, wait 30s and retry up to 3 times." > "$CLAUDE_TMP" 2>&1
 CLAUDE_RC=$?
