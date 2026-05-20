@@ -85,7 +85,7 @@ SELECT
   ) AS their_first_reply
 FROM posts p
 WHERE p.platform = %s
-  AND LOWER(REGEXP_REPLACE(COALESCE(p.thread_author_handle, ''), '^[@/u]+/?', ''))
+  AND LOWER(REGEXP_REPLACE(COALESCE(p.thread_author_handle, ''), '^(@|u/)', ''))
         = %s
   AND p.status NOT IN ('deleted', 'removed', 'migrated')
   AND p.posted_at > NOW() - (%s || ' days')::interval
@@ -124,11 +124,18 @@ def format_block(rows, author, platform, days):
     if not rows:
         return ""
     plat = PLATFORM_ALIAS.get(str(platform).lower(), str(platform).lower())
-    handle_disp = _normalize(author)
+    norm = _normalize(author)
+    # Display: keep author's natural form on platforms where the handle IS the
+    # name (linkedin/moltbook). Use the canonical @/u/ prefix on platforms
+    # where users recognize it that way.
     if plat == "twitter":
-        handle_disp = "@" + handle_disp
+        handle_disp = "@" + norm
     elif plat == "reddit":
-        handle_disp = "u/" + handle_disp
+        handle_disp = "u/" + norm
+    elif plat == "linkedin":
+        handle_disp = str(author).strip()
+    else:
+        handle_disp = norm
 
     header = (
         f"PRIOR INTERACTIONS WITH {handle_disp} "
