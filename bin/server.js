@@ -16880,6 +16880,8 @@ _saInstallDeleteListener();
     if (funnelEl && funnelEl.open) loadFunnelStats(true);
     const dmEl = document.getElementById('dm-stats');
     if (dmEl && dmEl.open) loadDmStats(true);
+    const subEl = document.getElementById('subreddit-stats');
+    if (subEl && subEl.open) loadSubredditStats(true);
   });
   syncStatsHeadings();
 })();
@@ -16990,6 +16992,15 @@ _saInstallDeleteListener();
   }
 })();
 
+(function wireSubredditStats() {
+  const el = document.getElementById('subreddit-stats');
+  if (!el) return;
+  el.addEventListener('toggle', () => {
+    try { window.posthog && window.posthog.capture('section_toggle', { section: 'subreddit-stats', open: !!el.open }); } catch (er) {}
+    if (el.open) loadSubredditStats();
+  });
+})();
+
 (function wireCostStats() {
   const el = document.getElementById('cost-stats');
   if (!el) return;
@@ -17071,6 +17082,8 @@ function saStartApp() {
   if (dmEl && dmEl.open) loadDmStats();
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) loadSearchQueriesStats();
+  const subEl = document.getElementById('subreddit-stats');
+  if (subEl && subEl.open) loadSubredditStats();
   setInterval(loadActivityStats, 300000);
   setInterval(loadCohortStats, 300000);
   setInterval(loadStyleStats, 300000);
