@@ -18,6 +18,23 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from version import read_version as read_autoposter_version
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
+
+
+def _github_account_filter():
+    """Return (sql_fragment, params) for a github our_account scope.
+
+    Empty tuple of params means no scoping is applied (legacy behavior).
+    Used so the same query shape works with and without a configured handle.
+    """
+    h = _resolve_account("github")
+    if h:
+        return (" AND our_account = %s", [h])
+    return ("", [])
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
 
@@ -161,13 +178,18 @@ def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
     feature (Issues/Discussions) has been turned off on the repo are excluded
     from the count: owner restructured the project, not a hostility signal.
     Caller unions with static config exclusions before filtering candidates."""
+    # Dynamic owner blocklist is scoped per-account so the @matt_diak
+    # autoposter doesn't inherit @m13v_'s strike history (or vice versa).
+    # Falls back to unscoped when no handle is configured.
+    _acct_frag, _acct_params = _github_account_filter()
     try:
         cur = conn.execute(
             "SELECT thread_url FROM posts "
             "WHERE platform='github' "
             "  AND posted_at > NOW() - INTERVAL %s "
-            "  AND (status='deleted' OR COALESCE(deletion_detect_count, 0) > 0)",
-            [f"{int(days)} days"],
+            "  AND (status='deleted' OR COALESCE(deletion_detect_count, 0) > 0)"
+            + _acct_frag,
+            [f"{int(days)} days", *_acct_params],
         )
         rows = cur.fetchall()
     except Exception:
@@ -231,8 +253,12 @@ def cmd_search(args):
     dbmod.load_env()
     conn = dbmod.get_conn()
     excluded_repos = excluded_repos | _dynamic_owner_blocklist(conn)
+    # Per-account dedupe: only filter against threads THIS handle posted in.
+    _acct_frag, _acct_params = _github_account_filter()
     cur = conn.execute(
         "SELECT thread_url FROM posts WHERE platform='github' AND thread_url IS NOT NULL"
+        + _acct_frag,
+        _acct_params,
     )
     already_posted = {row[0] for row in cur.fetchall()}
     conn.close()
@@ -308,12 +334,18 @@ def cmd_view(args):
 
 
 def cmd_already_posted(args):
-    """Check if we already posted in a GitHub issue thread."""
+    """Check if we already posted in a GitHub issue thread.
+
+    Scoped per-account so multi-machine setups don't false-positive on
+    each other's posts. Falls back to unscoped when no handle is configured.
+    """
     dbmod.load_env()
     conn = dbmod.get_conn()
+    _acct_frag, _acct_params = _github_account_filter()
     cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s LIMIT 1",
-        [args.url],
+        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s"
+        + _acct_frag + " LIMIT 1",
+        [args.url, *_acct_params],
     )
     row = cur.fetchone()
     conn.close()
@@ -333,6 +365,11 @@ def cmd_log_post(args):
     dbmod.load_env()
     conn = dbmod.get_conn()
 
+    # our_url stays globally unique (it's a permalink to a specific comment,
+    # and two accounts can't physically produce the same one). thread_url
+    # dedup is scoped per-account so two handles can each comment once in
+    # the same upstream issue thread.
+    _acct_frag, _acct_params = _github_account_filter()
     if args.our_url:
         cur = conn.execute(
             "SELECT id FROM posts WHERE platform='github' AND our_url = %s LIMIT 1",
@@ -345,8 +382,9 @@ def cmd_log_post(args):
             return
 
     cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s LIMIT 1",
-        [args.thread_url],
+        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s"
+        + _acct_frag + " LIMIT 1",
+        [args.thread_url, *_acct_params],
     )
     existing = cur.fetchone()
     if existing:
