@@ -111,4 +111,13 @@ if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/mixer/post_to_ig.py" \
 fi
 
 log "=== finished post-${POST_NUMBER} (${POST_TYPE}) on ${TARGET_ACCOUNT} successfully ==="
+
+# Step 4: mirror the new media_posts row into the cross-platform `posts` table
+# so it surfaces in the dashboard (Trends, Top, Activity, Cohort, Stats by
+# Style) alongside Reddit/Twitter/LinkedIn rows. Idempotent.
+log "step 4: sync_ig_to_posts"
+if ! /opt/homebrew/bin/python3.11 "$REPO_DIR/scripts/sync_ig_to_posts.py" --quiet >>"$LOG_FILE" 2>&1; then
+    log "sync_ig_to_posts failed (post is already on IG; will retry on next stats fire)"
+fi
+
 exit 0
