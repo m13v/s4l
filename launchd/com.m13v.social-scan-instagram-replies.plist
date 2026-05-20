@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/matthewdi</string>
+		<key>PATH</key>
+		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>REPLY_DB_USE_HTTP</key>
+		<string>1</string>
+		<key>AUTOPOSTER_API_BASE</key>
+		<string>https://s4l.ai</string>
+	</dict>
+	<key>Label</key>
+	<string>com.m13v.social-scan-instagram-replies</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/matthewdi/social-autoposter/skill/scan-instagram-replies.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-scan-instagram-replies-stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-scan-instagram-replies-stdout.log</string>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+</dict>
+</plist>
