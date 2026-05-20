@@ -155,6 +155,12 @@ def cmd_pending_data(batch_size: int) -> int:
         with ThreadPoolExecutor(max_workers=8) as ex:
             for idx, block in enumerate(ex.map(_enrich, top_rows)):
                 history_blocks[idx] = block
+        non_empty = sum(1 for b in history_blocks if b)
+        print(
+            f"[engage_twitter_helper] counterparty_history enriched "
+            f"{len(top_rows)}/{len(rows)} rows ({non_empty} with non-empty block)",
+            file=sys.stderr,
+        )
     except Exception as e:
         print(
             f"[engage_twitter_helper] enrichment phase failed "
