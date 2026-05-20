@@ -49,6 +49,13 @@ const JOBS = [
   // Post Threads row (original threads/posts)
   { label: 'com.m13v.social-reddit-threads', name: 'Reddit Threads', type: 'Post Threads', platform: 'Reddit', script: 'run-reddit-threads.sh', logPrefix: 'run-reddit-threads-', plist: 'com.m13v.social-reddit-threads.plist' },
   { label: 'com.m13v.social-twitter-threads', name: 'Twitter Threads', type: 'Post Threads', platform: 'Twitter', script: 'run-twitter-threads.sh', logPrefix: 'run-twitter-threads-', plist: 'com.m13v.social-twitter-threads.plist' },
+  // Instagram per-account daily posters (5×/day each, FORCE_ACCOUNT pinned).
+  { label: 'com.m13v.social-instagram-daily-matt_diak', name: 'IG Daily (matt_diak)', type: 'Post Threads', platform: 'Instagram', script: 'run-instagram-daily.sh', logPrefix: 'instagram-daily-', plist: 'com.m13v.social-instagram-daily-matt_diak.plist' },
+  { label: 'com.m13v.social-instagram-daily-matthewheartful', name: 'IG Daily (matthewheartful)', type: 'Post Threads', platform: 'Instagram', script: 'run-instagram-daily.sh', logPrefix: 'instagram-daily-', plist: 'com.m13v.social-instagram-daily-matthewheartful.plist' },
+  // Instagram per-account render (upstream of daily-posters; produces the
+  // mp4 + caption draft that the daily-poster then uploads).
+  { label: 'com.m13v.social-instagram-render-matt_diak', name: 'IG Render (matt_diak)', type: 'Other', platform: 'Instagram', script: 'run-instagram-render.sh', logPrefix: 'instagram-render-', plist: 'com.m13v.social-instagram-render-matt_diak.plist' },
+  { label: 'com.m13v.social-instagram-render-matthewheartful', name: 'IG Render (matthewheartful)', type: 'Other', platform: 'Instagram', script: 'run-instagram-render.sh', logPrefix: 'instagram-render-', plist: 'com.m13v.social-instagram-render-matthewheartful.plist' },
   // Post Comments row (replies/comments on others' content)
   { label: 'com.m13v.social-reddit-search', name: 'Reddit', type: 'Post Comments', platform: 'Reddit', script: 'run-reddit-search.sh', logPrefix: 'run-reddit-search-', plist: 'com.m13v.social-reddit-search.plist' },
   { label: 'com.m13v.social-twitter-cycle', name: 'Twitter', type: 'Post Comments', platform: 'Twitter', script: 'run-twitter-cycle.sh', logPrefix: 'twitter-cycle-', plist: 'com.m13v.social-twitter-cycle.plist' },
@@ -130,6 +137,8 @@ const REQUIRED_LOCKS = {
   'link-edit-github.sh':            ['link-edit-github'],
   'stats-reddit.sh':                ['reddit-browser'],
   'stats-instagram.sh':             ['instagram-poster'],
+  'run-instagram-daily.sh':         ['instagram-poster'],
+  'run-instagram-render.sh':        ['instagram-render'],
   'audit-reddit.sh':                ['reddit-browser', 'audit-reddit'],
   'audit-twitter.sh':               ['twitter-browser', 'audit-twitter'],
   'audit-linkedin.sh':              ['linkedin-browser', 'audit-linkedin'],
