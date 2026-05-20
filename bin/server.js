@@ -5243,7 +5243,7 @@ async function handleApi(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const windowHours = Math.max(1, Math.min(720, parseInt(url.searchParams.get('hours') || '24', 10) || 24));
     const rawProject = (url.searchParams.get('project') || '').trim();
-    const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email']);
+    const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email', 'instagram']);
     let rawPlat = String(url.searchParams.get('platform') || '').toLowerCase().trim();
     if (rawPlat === 'x') rawPlat = 'twitter';
     const plat = ALLOWED_COST_PLATFORMS.has(rawPlat) ? rawPlat : '';
@@ -5385,7 +5385,7 @@ async function handleApi(req, res) {
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
-    const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email']);
+    const ALLOWED_COST_PLATFORMS = new Set(['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'email', 'instagram']);
     let rawPlat = String(url.searchParams.get('platform') || '').toLowerCase().trim();
     if (rawPlat === 'x') rawPlat = 'twitter';
     const plat = ALLOWED_COST_PLATFORMS.has(rawPlat) ? rawPlat : '';
@@ -6760,7 +6760,7 @@ async function handleApi(req, res) {
     const configuredProjects = Array.isArray(config.projects) ? config.projects : [];
     const weighted = configuredProjects.filter(p => (p.weight || 0) > 0);
     const totalWeight = weighted.reduce((a, p) => a + (p.weight || 0), 0) || 1;
-    const platforms = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github'];
+    const platforms = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'instagram'];
     // Per-platform eligibility: a project is eligible to be picked for a
     // platform only if it has the data that platform's picker needs. Mirrors
     // scripts/pick_project.py and scripts/pick_thread_target.py. Projects
@@ -8102,6 +8102,7 @@ const HTML = `<!DOCTYPE html>
           <th>LinkedIn</th>
           <th>MoltBook</th>
           <th>GitHub</th>
+          <th>Instagram</th>
         </tr>
       </thead>
       <tbody id="matrix-body"></tbody>
@@ -10583,8 +10584,8 @@ const EVENT_DESCRIPTIONS = {
   page_expired: 'SEO page deleted by the daily expire pipeline because it had zero clicks in the last 30 days. The on-disk source file was removed; Next.js now returns 404 for the URL. Logged for audit/revert in seo_expired_pages.',
   resurrected: 'Previously archived or unavailable item brought back into rotation (e.g., a removed post restored after reappearing).',
 };
-const ACTIVITY_PLATFORMS = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo'];
-const ACTIVITY_PLATFORM_LABELS = { reddit: 'Reddit', twitter: 'Twitter / X', linkedin: 'LinkedIn', moltbook: 'Moltbook', github: 'GitHub', seo: 'SEO' };
+const ACTIVITY_PLATFORMS = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'seo', 'instagram'];
+const ACTIVITY_PLATFORM_LABELS = { reddit: 'Reddit', twitter: 'Twitter / X', linkedin: 'LinkedIn', moltbook: 'Moltbook', github: 'GitHub', seo: 'SEO', instagram: 'Instagram' };
 const PROJECT_LABELS = { tenxats: '10xats' };
 const ACTIVITY_PROJECT_NONE = '(none)';
 const ACTIVITY_CAMPAIGN_ORGANIC = '(organic)';
@@ -16524,10 +16525,10 @@ async function loadDeployHealth() {
 // hours by platform against config.json weight targets. Each platform cell
 // shows the count plus that project's share of the platform's posts in
 // brackets, so operators can spot imbalance without a separate deficit field.
-const PROJECT_STATUS_PLATFORMS = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github'];
+const PROJECT_STATUS_PLATFORMS = ['reddit', 'twitter', 'linkedin', 'moltbook', 'github', 'instagram'];
 const PROJECT_STATUS_PLATFORM_LABELS = {
   reddit: 'Reddit', twitter: 'Twitter', linkedin: 'LinkedIn',
-  moltbook: 'MoltBook', github: 'GitHub',
+  moltbook: 'MoltBook', github: 'GitHub', instagram: 'Instagram',
 };
 let _projectStatusLoading = false;
 let _projectStatusData = null;
