@@ -1,54 +1,40 @@
 #!/bin/bash
-# twitter-backend.sh - Backend selector for the Twitter pipeline (2026-05-13).
+# twitter-backend.sh - Twitter pipeline browser bootstrap (harness-only since
+# 2026-05-19; the legacy twitter-agent Playwright MCP path was fully ripped out).
 #
 # Source this AFTER lock.sh, BEFORE any acquire_lock / browser pre-flight /
 # claude -p subprocess calls. Sets these for the caller:
 #
-#   TWITTER_BACKEND        - "agent" (default) or "harness"
-#   MCP_CONFIG_FILE        - claude -p --mcp-config path for the chosen backend
-#   BROWSER_INSTRUCTIONS   - prompt block describing the backend + tool translation
-#                            table (inject at the TOP of any prompt that mentions
-#                            browser_* tools)
+#   MCP_CONFIG_FILE        - claude -p --mcp-config path (twitter-harness MCP)
+#   BROWSER_INSTRUCTIONS   - prompt block describing the harness backend +
+#                            its bh_run tool surface (inject at the TOP of any
+#                            prompt that mentions browser_* tools)
 #
 # And exports (so Python subprocesses like twitter_browser.py inherit them):
 #
-#   TWITTER_CDP_URL        - http://127.0.0.1:9555 (harness only; unset for agent)
+#   TWITTER_CDP_URL        - http://127.0.0.1:9555 (forces direct CDP attach,
+#                            skipping ps-based agent-profile discovery)
 #
-# Provides these functions:
+# Provides these functions (names preserved for back-compat with existing
+# callers in engage-twitter.sh, run-twitter-cycle.sh, run-twitter-threads.sh,
+# dm-outreach-twitter.sh, scan-twitter-followups.sh):
 #
 #   ensure_twitter_browser_for_backend
-#     Call AFTER acquire_lock "twitter-browser". For agent: cleans singleton
-#     symlinks + ensure_browser_healthy. For harness: probes Chrome on port
-#     9555, launches it (idempotently) if down.
+#     Call AFTER acquire_lock "twitter-browser". Probes harness Chrome on
+#     port 9555 and launches it idempotently if down, then cleans leftover
+#     tabs from prior runs.
 #
 #   defer_if_foreign_for_backend [log_file]
-#     Returns 0 (defer) only when TWITTER_BACKEND=agent and a foreign
-#     twitter-agent MCP wrapper has a live Chrome under it. Harness CDP
-#     supports multiple concurrent clients on the same Chrome (no SingletonLock
-#     fight), so the harness path never defers.
+#     No-op. Harness CDP supports multiple concurrent clients on the same
+#     Chrome (no SingletonLock fight), so foreign MCP wrappers never block
+#     us. Kept as a function only so callers don't have to change.
 
-TWITTER_BACKEND="${TWITTER_BACKEND:-agent}"
-
-case "$TWITTER_BACKEND" in
-    agent)
-        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json"
-        unset TWITTER_CDP_URL
-        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_AGENT_EOF'
-BROWSER BACKEND: twitter-agent (Playwright MCP, headed Chromium at ~/.claude/browser-profiles/twitter).
-Tools available: mcp__twitter-agent__browser_navigate, browser_snapshot, browser_run_code,
-browser_click, browser_type, browser_take_screenshot, browser_wait_for, browser_press_key,
-browser_resize, browser_console_messages, browser_network_requests. The MCP holds the
-browser open across calls; tool calls are session-stateful.
-BROWSER_AGENT_EOF
-        )
-        ;;
-    harness)
-        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
-        # Tell twitter_browser.py (and any other Python helper that honors
-        # this env var) to skip ps-based discovery and connect directly to
-        # the harness Chrome on port 9555.
-        export TWITTER_CDP_URL="http://127.0.0.1:9555"
-        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
+MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
+# Tell twitter_browser.py (and any other Python helper that honors this env
+# var) to skip ps-based discovery and connect directly to the harness Chrome
+# on port 9555.
+export TWITTER_CDP_URL="http://127.0.0.1:9555"
+BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
 port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
 logged in as m13v_; cookies persist on disk.
@@ -83,7 +69,7 @@ following with bh_run instead:
   browser_take_screenshot         ->  bh_run('print(capture_screenshot())') then Read the path
   browser_press_key("Enter")      ->  bh_run('press_key("Enter")')
 
-EXAMPLE — click the reply submit button:
+EXAMPLE - click the reply submit button:
   bh_run('''
   pt = js("""
     const el = document.querySelector('[data-testid="tweetButtonInline"]');
@@ -96,16 +82,10 @@ EXAMPLE — click the reply submit button:
   # Then in a follow-up call (substituting the x/y from above):
   bh_run('click_at_xy(123, 456)')
 
-VERIFY AFTER EVERY MUTATION by capturing a screenshot and reading the PNG — coordinate
+VERIFY AFTER EVERY MUTATION by capturing a screenshot and reading the PNG, coordinate
 clicks can miss; visual verification is the only reliable confirmation that the action took.
 BROWSER_HARNESS_EOF
-        )
-        ;;
-    *)
-        echo "ERROR: unknown TWITTER_BACKEND='$TWITTER_BACKEND' (expected: agent, harness)" >&2
-        exit 2
-        ;;
-esac
+)
 
 cleanup_harness_tabs() {
     # Close every CDP "page" tab except one. Delegated to a standalone Python
@@ -131,47 +111,41 @@ cleanup_harness_tabs() {
 }
 
 ensure_twitter_browser_for_backend() {
-    if [ "$TWITTER_BACKEND" = "agent" ]; then
-        bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 || true
-        ensure_browser_healthy "twitter"
-    else
-        # harness path: probe + launch Chrome on port 9555 if needed.
+    # Probe + launch harness Chrome on port 9555 if needed.
+    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+        echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
+        # Pass --window-position / --window-size on every launch. Mirrors the
+        # MCP server's ensure_chrome flags so the window lands at the same
+        # monitor regardless of which path spawned Chrome.
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+            --remote-debugging-port=9555 \
+            --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
+            --no-first-run --no-default-browser-check \
+            --disable-features=ChromeWhatsNewUI \
+            --window-position="${BH_WINDOW_POS:-3042,-1032}" \
+            --window-size="${BH_WINDOW_SIZE:-1024,1013}" \
+            about:blank >/dev/null 2>&1 &
+        disown
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
+            sleep 1
+        done
         if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
-            # 2026-05-13: pass --window-position / --window-size on every launch.
-            # Mirrors the MCP server's ensure_chrome flags so the window lands
-            # at the twitter-agent monitor regardless of which path spawned Chrome.
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-                --remote-debugging-port=9555 \
-                --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
-                --no-first-run --no-default-browser-check \
-                --disable-features=ChromeWhatsNewUI \
-                --window-position="${BH_WINDOW_POS:-3042,-1032}" \
-                --window-size="${BH_WINDOW_SIZE:-1024,1013}" \
-                about:blank >/dev/null 2>&1 &
-            disown
-            for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-                curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
-                sleep 1
-            done
-            if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-                echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s" >&2
-                return 1
-            fi
-            echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
+            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s" >&2
+            return 1
         fi
-        # Always close leftover tabs from prior runs. Safe under acquire_lock
-        # "twitter-browser" serialization (every caller of this function holds
-        # that lock), so we will not race with another active twitter run.
-        cleanup_harness_tabs
+        echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
     fi
+    # Always close leftover tabs from prior runs. Safe under acquire_lock
+    # "twitter-browser" serialization (every caller of this function holds
+    # that lock), so we will not race with another active twitter run.
+    cleanup_harness_tabs
 }
 
 defer_if_foreign_for_backend() {
-    local log_file="${1:-}"
-    if [ "$TWITTER_BACKEND" = "agent" ]; then
-        defer_if_foreign_browser_mcp_active "twitter" "$log_file"
-    else
-        return 1  # harness never defers on foreign MCP processes
-    fi
+    # Harness Chrome accepts multiple concurrent CDP clients on the same
+    # browser-harness profile, so a foreign MCP wrapper (Fazm Dev / IDE)
+    # cannot cause the SingletonLock contention that historically blocked
+    # the twitter-agent profile. Always return 1 (do not defer).
+    return 1
 }
