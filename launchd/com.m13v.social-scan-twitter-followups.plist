@@ -30,12 +30,6 @@
 			<key>Minute</key>
 			<integer>14</integer>
 		</dict>
-		<dict>
-			<key>Hour</key>
-			<integer>13</integer>
-			<key>Minute</key>
-			<integer>14</integer>
-		</dict>
 	</array>
 </dict>
 </plist>
