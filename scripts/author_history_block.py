@@ -98,14 +98,21 @@ def fetch(platform, author, days=30, limit=5):
     """Return list of tuples matching SQL columns. Empty on bad input/no rows.
 
     Always emits one stderr line per call so pipeline logs show injection
-    activity. Grep `[author_history_block]` in skill/logs/* to verify.
+    activity. Status token (INJECTED / EMPTY / SKIPPED / ERROR) is the
+    leading word after the tag for fast grep.
+
+    Grep recipes (see latest log via `ls -t skill/logs/<platform>*.log | head -1`):
+      grep '\\[author_history_block\\] INJECTED' <log>    # confirmed wins
+      grep '\\[author_history_block\\] EMPTY'    <log>    # author has no prior history
+      grep '\\[author_history_block\\] SKIPPED'  <log>    # blank/unknown author field
+      grep '\\[author_history_block\\] ERROR'    <log>    # DB or query failure
     """
     plat = PLATFORM_ALIAS.get(str(platform).lower(), str(platform).lower())
     norm = _normalize(author)
     if not norm:
         print(
-            f"[author_history_block] platform={plat} author={author!r} "
-            f"rows=0 reason=empty_or_unknown_handle",
+            f"[author_history_block] SKIPPED platform={plat} "
+            f"author_input={author!r} reason=empty_or_unknown_handle",
             file=sys.stderr,
         )
         return []
@@ -115,16 +122,36 @@ def fetch(platform, author, days=30, limit=5):
         rows = cur.fetchall()
         cur.close()
         conn.close()
+        if not rows:
+            print(
+                f"[author_history_block] EMPTY platform={plat} "
+                f"author={norm} days={days} limit={limit}",
+                file=sys.stderr,
+            )
+            return rows
+        # Compute compact summary: latest + oldest date + project, total likes
+        # received on prior comments, count of prior threads that got a reply.
+        # These give a one-line "what got injected" preview without dumping
+        # the full block to the log.
+        latest = rows[0]
+        oldest = rows[-1]
+        latest_date = latest[1].date().isoformat() if latest[1] else "?"
+        oldest_date = oldest[1].date().isoformat() if oldest[1] else "?"
+        latest_proj = latest[2] or "?"
+        total_likes = sum((r[5] or 0) for r in rows)
+        n_with_their_reply = sum(1 for r in rows if r[8])
         print(
-            f"[author_history_block] platform={plat} author={norm} "
-            f"rows={len(rows)} days={days} limit={limit}",
+            f"[author_history_block] INJECTED platform={plat} "
+            f"author={norm} rows={len(rows)} days={days} "
+            f"latest={latest_date}({latest_proj}) oldest={oldest_date} "
+            f"likes_total={total_likes} they_replied={n_with_their_reply}",
             file=sys.stderr,
         )
         return rows
     except Exception as e:
         print(
-            f"[author_history_block] platform={plat} author={norm} "
-            f"ERROR={e}",
+            f"[author_history_block] ERROR platform={plat} author={norm} "
+            f"error={e!r}",
             file=sys.stderr,
         )
         return []
