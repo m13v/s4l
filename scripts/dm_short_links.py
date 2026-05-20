@@ -1122,8 +1122,8 @@ def cmd_wrap_post_text(args):
 def cmd_utm_text(args):
     """UTM-only wrap (no DB, no minting). Prints the wrapped text on stdout.
     Used by the Twitter engagement prompt where Claude types the reply through
-    mcp__twitter-agent__browser_type and there is no Python posting layer to
-    invoke wrap_text_for_post. The typed URL itself carries all attribution
+    the browser MCP (twitter-harness bh_run type_text) and there is no Python
+    posting layer to invoke wrap_text_for_post. The typed URL itself carries all attribution
     via utm_source=s4l + utm_term=<platform>; PostHog captures it on landing.
     """
     out = utm_only_text(text=args.text, platform=args.platform,
