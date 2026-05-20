@@ -1120,7 +1120,7 @@ PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items"
 PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" "${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
-  1. Read each thread you decide to reply to (browser, mcp__twitter-agent__* read-only).
+  1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY).
   2. Draft a reply for each.
   3. Persist each fresh draft via log_draft.py.
   4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
@@ -1146,7 +1146,7 @@ $STYLES_BLOCK
 There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
 
 For each chosen candidate:
-1. Navigate to CANDIDATE_URL via mcp__twitter-agent__browser_navigate (READ-ONLY).
+1. Navigate to CANDIDATE_URL using the navigate tool from the BROWSER BACKEND block above (READ-ONLY).
 2. Read the thread to understand context.
 3. DRAFT HANDLING (existing vs fresh):
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
@@ -1198,7 +1198,7 @@ CRITICAL:
 - DO NOT call twitter_browser.py.
 - DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
 - DO NOT call log_post.py or campaign_bump.py.
-- mcp__twitter-agent__* tools are READ-ONLY in this step.
+- Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step.
 - NEVER use em dashes. Use commas, periods, or regular dashes (-).
 - Reply in the SAME LANGUAGE as the parent tweet." 2>&1)
 
