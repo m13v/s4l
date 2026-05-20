@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
 from engagement_styles import validate_or_register
+from version import read_version as read_autoposter_version
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
@@ -321,9 +322,9 @@ def post_and_log(decisions, claude_session_id):
             INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
                 thread_title, thread_content, our_url, our_content, our_account,
                 source_summary, project_name, engagement_style, feedback_report_used,
-                language, status, posted_at, claude_session_id)
+                language, status, posted_at, claude_session_id, autoposter_version)
             VALUES ('moltbook', %s, %s, %s, %s, %s, %s, %s, 'matthew-autoposter',
-                'moltbook cycle comment', %s, %s, TRUE, %s, 'active', NOW(), %s::uuid)
+                'moltbook cycle comment', %s, %s, TRUE, %s, 'active', NOW(), %s::uuid, %s)
             """,
             [
                 p.get("thread_url", ""),
@@ -337,6 +338,7 @@ def post_and_log(decisions, claude_session_id):
                 validated_style or "",
                 p.get("language", "en"),
                 claude_session_id,
+                read_autoposter_version(),
             ],
         )
         posted += 1
