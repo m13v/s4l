@@ -3278,36 +3278,286 @@ async function handleApi(req, res) {
             RETURNING post_id, reply_id, platform, project_name,
                       target_url, kind`;
       const postRes = await pool.query(postSql, [code]);
-      if (!postRes.rows.length) {
+      if (postRes.rows.length) {
+        const prow = postRes.rows[0];
+        if (!prow.target_url) {
+          return json(res, { error: 'no_target_url', post_id: prow.post_id, reply_id: prow.reply_id }, 404);
+        }
+        // Per-click log for post rail (humans + bots).
+        try {
+          await pool.query(
+            `INSERT INTO post_link_clicks (code, ip_hash, user_agent, is_bot, referrer)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [code, ipHash, fwdUa, isBot, fwdRef]
+          );
+        } catch (e) {
+          console.error('[short-links] post_link_clicks insert failed (non-fatal):', e.message);
+        }
+        let pPlatform = (prow.platform || 'reddit').toLowerCase();
+        if (pPlatform === 'x') pPlatform = 'twitter';
+        return json(res, {
+          post_id: prow.post_id,
+          reply_id: prow.reply_id,
+          platform: pPlatform,
+          project: prow.project_name || null,
+          kind: prow.kind || null,
+          target_url: prow.target_url,
+        });
+      }
+
+      // Final fallback: newsletter_links rail. Outbound broadcast emails
+      // sent by ~/analytics (dash.m13v.com) mint per-recipient codes via
+      // POST /api/newsletter/mint; the resolver here closes the loop on
+      // click attribution. broadcast_product + broadcast_id let the
+      // analytics dashboard cross-reference back into the originating
+      // studyly_broadcast_log / fazm_broadcasts / etc. row. The customer
+      // /r/[code] handler (see ~/seo-components/src/lib/dm-short-link-redirect.ts)
+      // fires `newsletter_short_link_clicked` in PostHog when broadcast_id
+      // is set in the response, so signup attribution stitches via the
+      // same anonymous distinct_id session that landed on the page.
+      const newsSql = isBot
+        ? `SELECT broadcast_product, broadcast_id, recipient_email_hash,
+                  recipient_email, target_url, kind, project_name
+           FROM newsletter_links WHERE code = $1`
+        : `UPDATE newsletter_links SET
+              clicks = clicks + 1,
+              first_click_at = COALESCE(first_click_at, NOW()),
+              last_click_at = NOW()
+            WHERE code = $1
+            RETURNING broadcast_product, broadcast_id, recipient_email_hash,
+                      recipient_email, target_url, kind, project_name`;
+      const newsRes = await pool.query(newsSql, [code]);
+      if (!newsRes.rows.length) {
         return json(res, { error: 'not_found', code }, 404);
       }
-      const prow = postRes.rows[0];
-      if (!prow.target_url) {
-        return json(res, { error: 'no_target_url', post_id: prow.post_id, reply_id: prow.reply_id }, 404);
+      const nrow = newsRes.rows[0];
+      if (!nrow.target_url) {
+        return json(res, { error: 'no_target_url', broadcast_id: nrow.broadcast_id }, 404);
       }
-      // Per-click log for post rail (humans + bots).
+      // Per-click log for newsletter rail (humans + bots).
       try {
         await pool.query(
-          `INSERT INTO post_link_clicks (code, ip_hash, user_agent, is_bot, referrer)
+          `INSERT INTO newsletter_link_clicks (code, ip_hash, user_agent, is_bot, referrer)
            VALUES ($1, $2, $3, $4, $5)`,
           [code, ipHash, fwdUa, isBot, fwdRef]
         );
       } catch (e) {
-        console.error('[short-links] post_link_clicks insert failed (non-fatal):', e.message);
+        console.error('[short-links] newsletter_link_clicks insert failed (non-fatal):', e.message);
       }
-      let pPlatform = (prow.platform || 'reddit').toLowerCase();
-      if (pPlatform === 'x') pPlatform = 'twitter';
       return json(res, {
-        post_id: prow.post_id,
-        reply_id: prow.reply_id,
-        platform: pPlatform,
-        project: prow.project_name || null,
-        kind: prow.kind || null,
-        target_url: prow.target_url,
+        broadcast_id: Number(nrow.broadcast_id),
+        broadcast_product: nrow.broadcast_product,
+        recipient_email_hash: nrow.recipient_email_hash,
+        project: nrow.project_name || nrow.broadcast_product || null,
+        kind: nrow.kind || null,
+        target_url: nrow.target_url,
       });
     } catch (e) {
       console.error('[short-links] resolver db error:', e.message);
       return json(res, { error: 'resolver_failed', detail: String(e.message).slice(0, 500) }, 500);
+    }
+  }
+
+  // PUBLIC (shared-secret): newsletter rail mint endpoint.
+  //
+  // Called server-to-server by ~/analytics (dash.m13v.com) at broadcast
+  // send time. For every recipient x URL, mints a code and INSERTs a row
+  // in newsletter_links so /api/short-links/<code> can resolve it later.
+  // The caller passes raw target URLs (already UTM-stamped on its side
+  // per the canonical s4l UTM scheme), this endpoint just wraps them.
+  //
+  // Auth is a NEWSLETTER_API_SECRET shared between analytics + this server.
+  // Without it the endpoint 401s. We deliberately do NOT use the Firebase
+  // auth path because the caller is a Vercel serverless function with no
+  // Firebase ID token of its own.
+  //
+  // Request:  { product: "studyly", broadcast_id: 5,
+  //             recipient_email: "a@b.com",
+  //             urls: [{ target_url: "https://studyly.io/...", kind: "web" }, ...] }
+  // Response: { links: [{ target_url, code, short_url } | { target_url, error }, ...] }
+  if (p === '/api/newsletter/mint' && req.method === 'POST') {
+    const authz = (req.headers['authorization'] || '').toString();
+    const wantSecret = (process.env.NEWSLETTER_API_SECRET || '').trim();
+    if (!wantSecret || authz !== `Bearer ${wantSecret}`) {
+      return json(res, { error: 'unauthorized' }, 401);
+    }
+    let body;
+    try {
+      const raw = await readBody(req);
+      body = JSON.parse(raw || '{}');
+    } catch {
+      return json(res, { error: 'bad_json' }, 400);
+    }
+    const { product, broadcast_id, recipient_email, urls } = body || {};
+    if (typeof product !== 'string' || !product.trim()) {
+      return json(res, { error: 'product required' }, 400);
+    }
+    const broadcastId = Number(broadcast_id);
+    if (!Number.isFinite(broadcastId)) {
+      return json(res, { error: 'broadcast_id (numeric) required' }, 400);
+    }
+    if (typeof recipient_email !== 'string' || !recipient_email.includes('@')) {
+      return json(res, { error: 'recipient_email required' }, 400);
+    }
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return json(res, { error: 'urls (non-empty array) required' }, 400);
+    }
+    if (urls.length > 50) {
+      return json(res, { error: 'too many urls (max 50 per request)' }, 400);
+    }
+    const wrapperHost = getProjectWrapperHost(product);
+    if (!wrapperHost) {
+      return json(res, { error: `no wrapper host for project '${product}' (check config.json)` }, 400);
+    }
+    const pool = getPool();
+    if (!pool) return json(res, { error: 'no_db' }, 500);
+
+    const emailLower = recipient_email.trim().toLowerCase();
+    const emailHash = crypto.createHash('sha256').update(emailLower).digest('hex').slice(0, 16);
+
+    const out = [];
+    for (const u of urls) {
+      if (!u || typeof u !== 'object') {
+        out.push({ target_url: null, error: 'not_an_object' });
+        continue;
+      }
+      const targetUrl = String(u.target_url || '').trim();
+      const kind = String(u.kind || 'web').slice(0, 32);
+      if (!/^https?:\/\//i.test(targetUrl)) {
+        out.push({ target_url: targetUrl, error: 'invalid_url' });
+        continue;
+      }
+      // Mint with PK collision retry (8 chars x 32 alphabet = ~10^12 keyspace,
+      // collisions are astronomically rare but cheap to retry).
+      let code = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = mintShortLinkCode(8);
+        try {
+          await pool.query(
+            `INSERT INTO newsletter_links
+               (code, broadcast_product, broadcast_id, recipient_email_hash,
+                recipient_email, target_url, kind, project_name)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [candidate, product, broadcastId, emailHash, recipient_email,
+             targetUrl, kind, product]
+          );
+          code = candidate;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (!/duplicate key/i.test(e.message || '')) {
+            console.error('[newsletter/mint] insert failed:', e.message);
+            break;
+          }
+        }
+      }
+      if (!code) {
+        out.push({ target_url: targetUrl, error: lastErr ? lastErr.message.slice(0, 200) : 'mint_failed' });
+        continue;
+      }
+      out.push({
+        target_url: targetUrl,
+        code,
+        short_url: `${wrapperHost}/r/${code}`,
+      });
+    }
+    return json(res, {
+      product,
+      broadcast_id: broadcastId,
+      recipient_email,
+      recipient_email_hash: emailHash,
+      links: out,
+    });
+  }
+
+  // PUBLIC (shared-secret): newsletter rail aggregate stats.
+  //
+  // Returns click + recipient breakdown for a broadcast so the analytics
+  // dashboard and the social-autoposter dashboard can render the same
+  // numbers without either holding state about the other. Click counts
+  // live here (the canonical clicks store); signup attribution lives
+  // in PostHog and is computed analytics-side via HogQL against the
+  // utm_content this endpoint reports.
+  //
+  // Request:  GET /api/newsletter/stats?product=studyly&broadcast_id=5
+  // Response: { product, broadcast_id, total_links, total_recipients,
+  //             total_human_clicks, recipients_clicked, human_hits,
+  //             bot_hits, per_recipient: [...] }
+  if (p === '/api/newsletter/stats' && req.method === 'GET') {
+    const authz = (req.headers['authorization'] || '').toString();
+    const wantSecret = (process.env.NEWSLETTER_API_SECRET || '').trim();
+    if (!wantSecret || authz !== `Bearer ${wantSecret}`) {
+      return json(res, { error: 'unauthorized' }, 401);
+    }
+    const product = (url.searchParams.get('product') || '').trim();
+    const broadcastIdRaw = (url.searchParams.get('broadcast_id') || '').trim();
+    if (!product || !broadcastIdRaw) {
+      return json(res, { error: 'product and broadcast_id required' }, 400);
+    }
+    const broadcastId = Number(broadcastIdRaw);
+    if (!Number.isFinite(broadcastId)) {
+      return json(res, { error: 'broadcast_id must be numeric' }, 400);
+    }
+    const pool = getPool();
+    if (!pool) return json(res, { error: 'no_db' }, 500);
+
+    try {
+      const agg = await pool.query(
+        `SELECT
+           COUNT(*) AS total_links,
+           COUNT(DISTINCT recipient_email_hash) AS total_recipients,
+           COALESCE(SUM(clicks), 0) AS total_human_clicks,
+           COUNT(DISTINCT recipient_email_hash) FILTER (WHERE clicks > 0) AS recipients_clicked
+         FROM newsletter_links
+         WHERE broadcast_product = $1 AND broadcast_id = $2`,
+        [product, broadcastId]
+      );
+      const hitsRes = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE is_bot = false) AS human_hits,
+           COUNT(*) FILTER (WHERE is_bot = true)  AS bot_hits
+         FROM newsletter_link_clicks nlc
+         JOIN newsletter_links nl ON nl.code = nlc.code
+         WHERE nl.broadcast_product = $1 AND nl.broadcast_id = $2`,
+        [product, broadcastId]
+      );
+      const perRecipient = await pool.query(
+        `SELECT
+           recipient_email,
+           recipient_email_hash,
+           COUNT(*) AS link_count,
+           COALESCE(SUM(clicks), 0) AS clicks,
+           MAX(last_click_at) AS last_click_at
+         FROM newsletter_links
+         WHERE broadcast_product = $1 AND broadcast_id = $2
+         GROUP BY recipient_email, recipient_email_hash
+         ORDER BY clicks DESC, link_count DESC
+         LIMIT 1000`,
+        [product, broadcastId]
+      );
+      const row = agg.rows[0] || {};
+      const hitRow = hitsRes.rows[0] || {};
+      return json(res, {
+        product,
+        broadcast_id: broadcastId,
+        total_links: Number(row.total_links || 0),
+        total_recipients: Number(row.total_recipients || 0),
+        total_human_clicks: Number(row.total_human_clicks || 0),
+        recipients_clicked: Number(row.recipients_clicked || 0),
+        human_hits: Number(hitRow.human_hits || 0),
+        bot_hits: Number(hitRow.bot_hits || 0),
+        per_recipient: perRecipient.rows.map(r => ({
+          email: r.recipient_email,
+          email_hash: r.recipient_email_hash,
+          link_count: Number(r.link_count || 0),
+          clicks: Number(r.clicks || 0),
+          last_click_at: r.last_click_at,
+        })),
+      });
+    } catch (e) {
+      console.error('[newsletter/stats] db error:', e.message);
+      return json(res, { error: 'stats_failed', detail: String(e.message).slice(0, 500) }, 500);
     }
   }
 
