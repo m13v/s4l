@@ -498,6 +498,67 @@ def _collect_our_reply_links(page):
     }}"""))
 
 
+def _wait_for_reply_textbox(page, total_timeout_ms=45000):
+    """Wait for the reply composer textbox to mount. Returns a locator or None.
+
+    Polls multiple selectors because the React composer sometimes attaches late
+    on slow egress (E2B sandbox) and the aria-label has historically varied
+    ("Post text" / "Tweet your reply" / "Post your reply"). The data-testid
+    `tweetTextarea_0` has been stable for years and is the primary signal.
+    """
+    import time as _t
+    selectors = (
+        '[data-testid="tweetTextarea_0"]',
+        '[role="textbox"][aria-label="Post text"]',
+        '[role="textbox"][aria-label="Tweet your reply"]',
+        '[role="textbox"][aria-label="Post your reply"]',
+    )
+    deadline = _t.monotonic() + (total_timeout_ms / 1000.0)
+    while _t.monotonic() < deadline:
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    return loc
+            except Exception:
+                pass
+        page.wait_for_timeout(500)
+    return None
+
+
+def _dump_reply_failure_diag(page, tweet_url):
+    """Dump screenshot + DOM state on reply_box_not_found. Returns a diag dict."""
+    import time as _t
+    ts = int(_t.time())
+    diag = {"ts": ts, "tweet_url": tweet_url}
+    try:
+        diag["final_url"] = page.url
+    except Exception as _e:
+        diag["final_url_err"] = str(_e)
+    try:
+        png_path = f"/tmp/twitter_reply_failure_{ts}.png"
+        page.screenshot(path=png_path, full_page=False)
+        diag["screenshot"] = png_path
+    except Exception as _e:
+        diag["screenshot_err"] = str(_e)
+    try:
+        diag["dom"] = page.evaluate("""() => {
+            const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
+            return {
+                title: (document.title || '').slice(0, 120),
+                textbox_count: tbs.length,
+                textbox_labels: tbs.map(t => t.getAttribute('aria-label')),
+                has_tweetTextarea_0: !!document.querySelector('[data-testid="tweetTextarea_0"]'),
+                has_login_modal: !!document.querySelector('[data-testid="loginButton"]'),
+                has_age_gate: !!document.querySelector('[data-testid="sensitive-media-button"]'),
+                page_text_snippet: (document.body && document.body.innerText || '').slice(0, 300),
+            };
+        }""")
+    except Exception as _e:
+        diag["dom_err"] = str(_e)
+    return diag
+
+
 def reply_to_tweet(tweet_url, text, apply_campaigns=True):
     """Reply to a tweet.
 
@@ -627,39 +688,54 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 pass
 
-            try:
-                page.goto(tweet_url, wait_until="load", timeout=60000)
-            except Exception:
+            # Navigate + locate reply box. Composer mount is flaky on E2B
+            # sandbox egress (~1-in-5 misses on first attempt). Strategy:
+            # up to 2 navigation attempts; on miss, scroll-nudge once before
+            # re-navigating. On final miss, dump diagnostics for triage.
+            reply_box = None
+            tweet_not_found = False
+            for nav_attempt in (1, 2):
                 try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
+                    page.goto(tweet_url, wait_until="load", timeout=60000)
+                except Exception:
+                    try:
+                        page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
+                    except Exception:
+                        pass
+                page.wait_for_timeout(15000 if nav_attempt == 1 else 8000)
+
+                page_text = page.text_content("main") or ""
+                if "this page doesn't exist" in page_text.lower():
+                    tweet_not_found = True
+                    break
+
+                reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
+                if reply_box:
+                    break
+
+                # Nudge: small scroll + scroll back; sometimes coaxes the
+                # composer to attach when React stalled on the initial mount.
+                print(f"[reply_to_tweet] reply_box missing on nav_attempt={nav_attempt}; "
+                      f"nudging + re-navigating", file=sys.stderr)
+                try:
+                    page.evaluate("window.scrollBy(0, 400)")
+                    page.wait_for_timeout(1500)
+                    page.evaluate("window.scrollTo(0, 0)")
+                    page.wait_for_timeout(1500)
                 except Exception:
                     pass
-            page.wait_for_timeout(15000)
 
-            # Check if page exists
-            page_text = page.text_content("main") or ""
-            if "this page doesn't exist" in page_text.lower():
+            if tweet_not_found:
                 return {"ok": False, "error": "tweet_not_found"}
 
-            # Snapshot our reply links before posting (to detect the new one)
-            links_before = _collect_our_reply_links(page)
+            if not reply_box:
+                diag = _dump_reply_failure_diag(page, tweet_url)
+                print(f"[reply_to_tweet] reply_box_not_found diag: "
+                      f"{json.dumps(diag, default=str)}", file=sys.stderr)
+                return {"ok": False, "error": "reply_box_not_found", "diag": diag}
 
-            # Find the reply textbox. On slower egress (E2B sandbox VMs) x.com
-            # can need 20-30s to attach the React reply composer; do not lower
-            # these timeouts.
-            reply_box = None
-            try:
-                reply_box = page.get_by_role("textbox", name="Post text")
-                reply_box.wait_for(timeout=30000)
-            except Exception:
-                # Scroll down to find the reply box
-                page.evaluate("window.scrollBy(0, 500)")
-                page.wait_for_timeout(3000)
-                try:
-                    reply_box = page.get_by_role("textbox", name="Post text")
-                    reply_box.wait_for(timeout=15000)
-                except Exception:
-                    return {"ok": False, "error": "reply_box_not_found"}
+            # Snapshot our reply links right before posting (to detect the new one)
+            links_before = _collect_our_reply_links(page)
 
             # Click and type the reply
             reply_box.click()
