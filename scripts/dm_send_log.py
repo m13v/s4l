@@ -75,9 +75,16 @@ def main():
 
     load_env()
     import http_api
+    from version import read_version as read_autoposter_version
     patch_body: dict = {"status": "sent", "our_dm_content": args.message}
     if args.session_id:
         patch_body["claude_session_id"] = args.session_id
+    # autoposter_version: stamp on the 'sent' transition so DM engagement
+    # (replies / bookings) can be attributed to the release of the autoposter
+    # code that drafted the message.
+    autoposter_version = read_autoposter_version()
+    if autoposter_version:
+        patch_body["autoposter_version"] = autoposter_version
     http_api.api_patch(f"/api/v1/dms/{args.dm_id}", patch_body)
 
     subprocess.run(
