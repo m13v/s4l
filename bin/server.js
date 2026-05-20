@@ -1110,6 +1110,20 @@ function parseTwitterBatchIdMs(batchId) {
   return new Date(`${y}-${mo}-${d}T${hh}:${mm}:${ss}`).getTime();
 }
 
+// Parse a reddit cycle batch_id (`rdcycle-YYYYMMDD-HHMMSS`) into epoch ms.
+// Mirrors parseTwitterBatchIdMs. Used to attribute reddit_candidates +
+// posts back to the cycle that owns them, so styles_used / posted counts
+// reflect THIS run's work, not whatever concurrent reddit cycles posted
+// during the same wall-clock window (the prior window-based approach
+// double-counted styles on overlapping 22-min cycles).
+function parseRedditBatchIdMs(batchId) {
+  if (!batchId) return NaN;
+  const m = batchId.match(/^rdcycle-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return NaN;
+  const [, y, mo, d, hh, mm, ss] = m;
+  return new Date(`${y}-${mo}-${d}T${hh}:${mm}:${ss}`).getTime();
+}
+
 async function enrichPostCommentsTwitterRuns(runs) {
   const txRuns = runs.filter(r =>
     r.job_type === 'post-comments' && r.platform_key === 'twitter'
@@ -1523,7 +1537,8 @@ async function enrichPostCommentsRedditRuns(runs) {
   const since = new Date(oldestMs - 2 * 60 * 1000).toISOString();
   const candidateRows = await pq(
     "SELECT discovered_at, posted_at, last_attempt_at, t1_checked_at, drafted_at, " +
-    "       attempt_count, (draft_text IS NOT NULL) AS has_draft, status, batch_id " +
+    "       attempt_count, (draft_text IS NOT NULL) AS has_draft, status, batch_id, " +
+    "       post_id " +
     "FROM reddit_candidates " +
     "WHERE discovered_at >= $1::timestamp " +
     "   OR posted_at >= $1::timestamp " +
@@ -1550,8 +1565,11 @@ async function enrichPostCommentsRedditRuns(runs) {
   );
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
   // Bulk-fetch reddit posts in window to compute per-run style breakdown.
+  // posts.id is included so the enricher can scope styles to "posts whose id
+  // appears as reddit_candidates.post_id for this run's own batch_id",
+  // mirroring the Twitter batch-scoped style attribution.
   const redditPostRows = await pq(
-    "SELECT posted_at, engagement_style FROM posts " +
+    "SELECT id, posted_at, engagement_style FROM posts " +
     "WHERE platform = 'reddit' AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
     [since]
   ) || [];
@@ -1562,6 +1580,7 @@ async function enrichPostCommentsRedditRuns(runs) {
     return dt.getTime();
   };
   const redditPostNorm = redditPostRows.map(r => ({
+    id: r.id,
     postedMs: toMs(r.posted_at),
     style: r.engagement_style || '',
   }));
@@ -1594,6 +1613,7 @@ async function enrichPostCommentsRedditRuns(runs) {
       exitMs,
       status: r.status,
       batch_id: r.batch_id || '',
+      post_id: r.post_id || null,
     };
   });
   // Filename carries the run start: run-reddit-search-YYYY-MM-DD_HHMMSS.log
@@ -1902,10 +1922,53 @@ async function enrichPostCommentsRedditRuns(runs) {
                        + queueDrainedExpired + queueDrainedSkipped;
 
     const dropped = Math.max(0, raw - passed);
+    // Style counting: scope to the post_ids THIS batch posted, not the time
+    // window. Mirrors the Twitter fix (server.js ~line 1408). Window-based
+    // attribution double-counted styles during long-running cycles because
+    // reddit-search overlaps every 15 min and salvage/discover lanes from
+    // OTHER projects post inside the same wall-clock window.
+    //
+    // Derive ownBatchId by matching rdcycle-YYYYMMDD-HHMMSS to run.started_at
+    // within ±10s. Fall back to the cycle log header `Cycle batch_id=...`
+    // (emitted by run-reddit-search.sh:191) when no candidate batch matches,
+    // so cycles that scored 0 raw → 0 candidates still attribute their styles.
+    let ownBatchId = null;
+    let ownBatchDelta = Infinity;
+    for (const c of candNorm) {
+      if (!c.batch_id) continue;
+      const bms = parseRedditBatchIdMs(c.batch_id);
+      if (!Number.isFinite(bms)) continue;
+      const delta = Math.abs(bms - startMs);
+      if (delta > 10 * 1000) continue;
+      if (delta < ownBatchDelta) { ownBatchDelta = delta; ownBatchId = c.batch_id; }
+    }
+    if (!ownBatchId) {
+      const logHeader = body.match(/Cycle batch_id=(rdcycle-\d{8}-\d{6})/);
+      if (logHeader) ownBatchId = logHeader[1];
+    }
+    // Build a Set of posts.id values that THIS batch's reddit_candidates
+    // rows have stamped as their post_id (the posts row created by
+    // post_reddit.py when status flipped to 'posted').
+    const batchPostedIds = new Set();
+    for (const c of candNorm) {
+      if (ownBatchId && c.batch_id === ownBatchId
+          && c.status === 'posted' && c.post_id != null) {
+        batchPostedIds.add(c.post_id);
+      }
+    }
     const stylesMapRd = {};
     for (const p of redditPostNorm) {
-      if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+      if (p.id == null || !batchPostedIds.has(p.id)) continue;
       stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+    }
+    // Fall back to time-window when batch-scoped lookup found nothing AND we
+    // failed to identify ownBatchId (very old rows, or cycle log missing the
+    // header). Preserves visibility for runs with no batch correlation.
+    if (!Object.keys(stylesMapRd).length && !ownBatchId) {
+      for (const p of redditPostNorm) {
+        if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
+        stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+      }
     }
     const stylesUsedRd = Object.entries(stylesMapRd)
       .sort(function (a, b) { return b[1] - a[1]; })
@@ -1945,6 +2008,10 @@ async function enrichPostCommentsRedditRuns(runs) {
       // project(s) consumed the cycle (often 2 distinct: salvage lane + discover).
       projects_worked: projectsList,
       styles_used: stylesUsedRd,
+      // Exposed for parity with Twitter's enricher result; lets the dashboard
+      // (or `/api/...`) show which rdcycle batch this run "owns" for debugging
+      // batch-scoped attribution misses.
+      own_batch_id: ownBatchId,
       // Ripen phase (5-min delta gate, scripts/ripen_reddit_plan.py). Reflects
       // the per-run sum across all iterations that reached the ripen step.
       // ripen_iters counts iterations where the [ripen] summary marker fired
@@ -8945,6 +9012,13 @@ function renderResult(run) {
       (salvageableLive ? RDNL + RDNL + '**Salvageable in DB:** ' + salvageableLive : '');
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+        // 2026-05-19: salvaged pill leads, mirroring Twitter chronological
+        // pill order (server.js ~line 8723). Phase 0 salvage runs FIRST in
+        // every reddit cycle (run-reddit-search.sh:241), so it belongs at the
+        // start of the funnel, not buried after the posted pill. Twitter
+        // renderer comment says: pill order mirrors the tooltip story,
+        // salvaged (Phase 0 input) leads, then Phase 1 funnel, Phase 2b.
+        renderQueuePill() +
         pill('iterations', iterations, iterations > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
@@ -8958,7 +9032,6 @@ function renderResult(run) {
         renderRipenPills() +
         pill('drafted', drafted, drafted > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
-        renderQueuePill() +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
           ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
