@@ -149,7 +149,7 @@ def log_outbound(conn, dm_id, content, author=None, verified=False):
     # Bare-URL guard: real replies contain prose. A content string that is
     # nothing but a URL is almost always a scraper misattribution being
     # reconciled by the agent (see DM #1486 / session d986d23e where the
-    # twitter-agent surfaced a profile card URL as "is_from_us=true").
+    # twitter browser layer surfaced a profile card URL as "is_from_us=true").
     stripped = (content or "").strip()
     if re.match(r'^https?://\S+$', stripped):
         print(f"  BAREURL BLOCKED: DM #{dm_id} content is a lone URL with no prose ({stripped[:100]}).")
