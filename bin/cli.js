@@ -23,6 +23,7 @@ const COPY_TARGETS = [
   'skill',
   'setup',
   'browser-agent-configs',
+  'mcp-servers',
 ];
 
 const ENV_TEMPLATE = `# social-autoposter environment variables
@@ -42,18 +43,20 @@ DATABASE_URL=
 const USER_FILES = new Set(['config.json', '.env', 'SKILL.md']);
 
 // Browser agent config templates -> install path under ~/.claude/browser-agent-configs/
-// Twitter intentionally absent (2026-05-19): the Twitter pipeline is now driven
-// exclusively by the browser-harness MCP. Its config lives at
-// ~/.claude/browser-agent-configs/twitter-harness-mcp.json and is installed
-// out-of-band as part of the browser-harness setup, not by this installer.
+// twitter-harness replaces the retired twitter-agent (2026-05-19). The harness
+// runs a CDP-driven real Chrome on port 9555 backed by an MCP stdio server at
+// ~/.claude/mcp-servers/browser-harness/server.py. installBrowserHarness()
+// below provisions the supporting bits (uv, browser-harness CLI, mcp pkg).
 const BROWSER_AGENT_CONFIGS = [
   'reddit-agent-mcp.json',
   'reddit-agent.json',
   'linkedin-agent-mcp.json',
   'linkedin-agent.json',
+  'twitter-harness-mcp.json',
+  'all-agents-mcp.json',
 ];
 
-const BROWSER_PROFILES = ['reddit', 'linkedin'];
+const BROWSER_PROFILES = ['reddit', 'linkedin', 'browser-harness'];
 
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -73,8 +76,27 @@ function linkOrRelink(target, linkPath) {
   fs.symlinkSync(target, linkPath);
 }
 
+// Locate uv (Astral's Python launcher). The browser-harness MCP server is
+// shebanged through uv so it can pull `mcp` on first run without polluting
+// the system Python. Returns the absolute path if found, or empty string.
+function findUvBin() {
+  const candidates = [
+    path.join(HOME, '.local', 'bin', 'uv'),
+    '/opt/homebrew/bin/uv',
+    '/usr/local/bin/uv',
+    '/usr/bin/uv',
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  const which = spawnSync('command', ['-v', 'uv'], { shell: true, encoding: 'utf8' });
+  const found = (which.stdout || '').trim().split('\n')[0];
+  return found && fs.existsSync(found) ? found : '';
+}
+
 function installBrowserAgentConfigs() {
   const nodeBin = path.dirname(process.execPath);
+  const uvBin = findUvBin() || path.join(HOME, '.local', 'bin', 'uv');
   const srcDir = path.join(PKG_ROOT, 'browser-agent-configs');
   const destDir = path.join(HOME, '.claude', 'browser-agent-configs');
   fs.mkdirSync(destDir, { recursive: true });
@@ -92,7 +114,8 @@ function installBrowserAgentConfigs() {
     const tpl = fs.readFileSync(src, 'utf8');
     const out = tpl
       .replace(/__HOME__/g, HOME)
-      .replace(/__NODE_BIN__/g, nodeBin);
+      .replace(/__NODE_BIN__/g, nodeBin)
+      .replace(/__UV_BIN__/g, uvBin);
     fs.writeFileSync(dest, out);
     installed++;
   }
@@ -107,18 +130,92 @@ function installBrowserAgentConfigs() {
   console.log(`  browser profile dirs ready -> ${profilesDir}/{${BROWSER_PROFILES.join(',')}}`);
 }
 
+// Provision the browser-harness toolchain that backs the twitter-harness MCP:
+//   1. install uv (Astral) if missing
+//   2. git-clone browser-use/browser-harness
+//   3. uv tool install -e . (provides the `browser-harness` CLI)
+//   4. ensure `mcp` Python package is importable for server.py
+//   5. copy our shipped server.py into ~/.claude/mcp-servers/browser-harness/
+// All steps are idempotent.
+function installBrowserHarness() {
+  console.log('  setting up browser-harness (twitter-harness MCP backend)...');
+
+  // Step 1: uv. Try the official installer first; fall back to pip.
+  let uvBin = findUvBin();
+  if (!uvBin) {
+    console.log('    uv not found -> installing via Astral installer');
+    const sh = spawnSync('bash', ['-lc', 'curl -LsSf https://astral.sh/uv/install.sh | sh'], { stdio: 'inherit' });
+    if (sh.status !== 0) {
+      console.log('    Astral installer failed; falling back to pip3 install uv');
+      let pip = spawnSync('pip3', ['install', '-q', 'uv'], { stdio: 'inherit' });
+      if (pip.status !== 0) {
+        pip = spawnSync('pip3', ['install', '-q', 'uv', '--break-system-packages'], { stdio: 'inherit' });
+      }
+    }
+    uvBin = findUvBin();
+  }
+  if (!uvBin) {
+    console.warn('  WARNING: uv install failed; twitter-harness MCP server.py will not start.');
+    console.warn('    Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh');
+  } else {
+    console.log(`    uv -> ${uvBin}`);
+  }
+
+  // Step 2 + 3: clone + `uv tool install -e .` browser-harness.
+  const harnessDir = path.join(HOME, 'Developer', 'browser-harness');
+  if (!fs.existsSync(harnessDir)) {
+    fs.mkdirSync(path.dirname(harnessDir), { recursive: true });
+    console.log('    cloning browser-harness from GitHub...');
+    const clone = spawnSync('git', ['clone', '--depth', '1', 'https://github.com/browser-use/browser-harness', harnessDir], { stdio: 'inherit' });
+    if (clone.status !== 0) {
+      console.warn('    WARNING: git clone failed; twitter-harness will not work until you clone manually.');
+    }
+  } else {
+    console.log(`    browser-harness clone exists -> ${harnessDir}`);
+  }
+
+  if (uvBin && fs.existsSync(harnessDir)) {
+    console.log('    installing browser-harness CLI via uv tool...');
+    const install = spawnSync(uvBin, ['tool', 'install', '-e', harnessDir], { stdio: 'inherit' });
+    if (install.status !== 0) {
+      console.warn('    WARNING: `uv tool install -e .` failed; check the output above.');
+    }
+  }
+
+  // Step 4: ensure mcp Python package available (server.py uses `from mcp.server.fastmcp ...`).
+  // server.py is shebanged through `uv run --with mcp ...` so this is belt-and-suspenders;
+  // we install it into the system Python too so a plain `python3 server.py` also works.
+  console.log('    ensuring mcp>=1.0.0 Python package is importable...');
+  let pip = spawnSync('pip3', ['install', '-q', 'mcp>=1.0.0'], { stdio: 'inherit' });
+  if (pip.status !== 0) {
+    pip = spawnSync('pip3', ['install', '-q', 'mcp>=1.0.0', '--break-system-packages'], { stdio: 'inherit' });
+  }
+
+  // Step 5: copy our shipped server.py into the canonical install location.
+  const srcServer = path.join(PKG_ROOT, 'mcp-servers', 'browser-harness', 'server.py');
+  const destServer = path.join(HOME, '.claude', 'mcp-servers', 'browser-harness', 'server.py');
+  if (fs.existsSync(srcServer)) {
+    fs.mkdirSync(path.dirname(destServer), { recursive: true });
+    fs.copyFileSync(srcServer, destServer);
+    try { fs.chmodSync(destServer, 0o755); } catch {}
+    console.log(`    server.py -> ${destServer}`);
+  } else {
+    console.warn(`    WARNING: package missing mcp-servers/browser-harness/server.py (${srcServer})`);
+  }
+}
+
 // Register the three browser-agent MCP servers with Claude so they show up
 // under user scope (writes to ~/.claude.json). Idempotent: parses the output
 // of `claude mcp list` and only calls `add-json` for missing entries.
 // If the `claude` CLI is not on PATH, prints manual instructions and returns.
 function registerBrowserAgentMcpServers() {
   const configDir = path.join(HOME, '.claude', 'browser-agent-configs');
-  // Note (2026-05-19): twitter-agent is intentionally NOT registered. Twitter
-  // pipelines use the browser-harness MCP (twitter-harness-mcp.json), which is
-  // installed out-of-band as part of the browser-harness setup.
+  // twitter-agent retired 2026-05-19, replaced by twitter-harness (CDP-driven
+  // real Chrome on port 9555 via the browser-harness MCP server).
   const servers = [
     { name: 'reddit-agent', file: path.join(configDir, 'reddit-agent-mcp.json') },
     { name: 'linkedin-agent', file: path.join(configDir, 'linkedin-agent-mcp.json') },
+    { name: 'twitter-harness', file: path.join(configDir, 'twitter-harness-mcp.json') },
   ];
 
   const claudeBin = spawnSync('claude', ['--version'], { stdio: 'pipe' });
@@ -292,6 +389,9 @@ function init() {
     installSystemdUnits();
   }
 
+  // Provision the browser-harness toolchain BEFORE writing harness configs so
+  // findUvBin() picks up a freshly-installed uv on first run.
+  installBrowserHarness();
   // Install browser agent MCP configs + profile dirs (skips existing files)
   installBrowserAgentConfigs();
   // Register those MCP servers with Claude so they show up in `claude mcp list`.
@@ -373,6 +473,9 @@ function update() {
     installSystemdUnits();
   }
 
+  // Provision browser-harness (uv + clone + uv tool install + mcp pkg + server.py).
+  // Idempotent: skips steps that are already done.
+  installBrowserHarness();
   // Top up browser agent configs (won't overwrite user customizations)
   installBrowserAgentConfigs();
   // Register any newly added MCP servers with Claude (idempotent).
