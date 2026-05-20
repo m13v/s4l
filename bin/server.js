@@ -3388,7 +3388,7 @@ async function handleApi(req, res) {
     } catch {
       return json(res, { error: 'bad_json' }, 400);
     }
-    const { product, broadcast_id, recipient_email, urls } = body || {};
+    const { product, broadcast_id, recipient_email, urls, wrapper_host: wrapperHostInput } = body || {};
     if (typeof product !== 'string' || !product.trim()) {
       return json(res, { error: 'product required' }, 400);
     }
@@ -3405,9 +3405,18 @@ async function handleApi(req, res) {
     if (urls.length > 50) {
       return json(res, { error: 'too many urls (max 50 per request)' }, 400);
     }
-    const wrapperHost = getProjectWrapperHost(product);
+    // Wrapper host (where /r/<code> is served): caller can pass it directly,
+    // otherwise fall back to config.json lookup. The Cloud Run image does NOT
+    // bundle config.json (the local-operator dashboard does), so analytics
+    // always passes it explicitly. Local operator usage just works.
+    let wrapperHost = null;
+    if (typeof wrapperHostInput === 'string' && /^https?:\/\//i.test(wrapperHostInput)) {
+      wrapperHost = wrapperHostInput.trim().replace(/\/+$/, '');
+    } else {
+      wrapperHost = getProjectWrapperHost(product);
+    }
     if (!wrapperHost) {
-      return json(res, { error: `no wrapper host for project '${product}' (check config.json)` }, 400);
+      return json(res, { error: `no wrapper host for project '${product}' (pass wrapper_host in request body or set in config.json)` }, 400);
     }
     const pool = getPool();
     if (!pool) return json(res, { error: 'no_db' }, 500);
