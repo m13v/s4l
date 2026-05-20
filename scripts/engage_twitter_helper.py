@@ -112,8 +112,58 @@ def cmd_pending_data(batch_size: int) -> int:
         query={"platform": "x", "limit": batch_size},
     )
     rows = (resp.get("data") or {}).get("replies") or []
+
+    # Enrich each row with a per-counterparty history block (DM cross-thread
+    # + public-reply history) via the shared counterparty_history module.
+    # The block is self-titled ("## Prior history with @author") and lands
+    # inline in PENDING_DATA so the Phase B prompt picks it up without any
+    # change to the shell-side prompt template.
+    #
+    # Capped to ENRICH_TOP_N because the API list is priority-ordered
+    # (our_thread first, then discovered_at ASC) and the Phase B Claude
+    # session rarely processes more than ~50 items before gtimeout fires.
+    # Beyond the cap we leave counterparty_history_block empty; if a row
+    # falls past the cap and IS reached on a later cycle, it'll be in the
+    # top slot then and get enriched.
+    ENRICH_TOP_N = 60
+    history_blocks = [""] * len(rows)
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from counterparty_history import get_counterparty_history_block
+
+        def _enrich(r):
+            author = r.get("their_author")
+            if not author:
+                return ""
+            try:
+                _disengage, block = get_counterparty_history_block(
+                    platform="x",
+                    author=author,
+                    current_post_id=r.get("post_id"),
+                    current_reply_id=r.get("id"),
+                )
+                return block or ""
+            except Exception as e:
+                print(
+                    f"[engage_twitter_helper] counterparty_history failed "
+                    f"for @{author}: {e}",
+                    file=sys.stderr,
+                )
+                return ""
+
+        top_rows = rows[:ENRICH_TOP_N]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for idx, block in enumerate(ex.map(_enrich, top_rows)):
+                history_blocks[idx] = block
+    except Exception as e:
+        print(
+            f"[engage_twitter_helper] enrichment phase failed "
+            f"(continuing without history): {e}",
+            file=sys.stderr,
+        )
+
     out = []
-    for r in rows:
+    for r, history_block in zip(rows, history_blocks):
         out.append({
             "id": r.get("id"),
             "platform": r.get("platform"),
@@ -128,6 +178,7 @@ def cmd_pending_data(batch_size: int) -> int:
             "our_url": r.get("our_url"),
             "is_our_original_post": int(r.get("is_our_original_post") or 0),
             "project_name": r.get("project_name"),
+            "counterparty_history_block": history_block,
         })
     # json_agg(...) returns null when the array is empty; engage-twitter.sh's
     # downstream prompt-template expects an empty array instead, which is
