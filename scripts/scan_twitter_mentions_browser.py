@@ -28,6 +28,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+try:
+    from account_resolver import resolve as _resolve_account  # noqa: E402
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 MIN_WORDS = 3
@@ -243,10 +248,13 @@ def process_notifications(notifications, config):
             post_id = post_row.get("id")
             if not post_id:
                 # Fallback lookup if the upsert response is weirdly shaped.
-                lookup = api_get(
-                    "/api/v1/posts/lookup",
-                    query={"platform": "twitter", "thread_url": tweet_url},
-                )
+                # Scope per-account so we don't false-positive a row that
+                # another machine's account created on the same tweet.
+                lookup_q = {"platform": "twitter", "thread_url": tweet_url}
+                _twitter_handle = _resolve_account("twitter")
+                if _twitter_handle:
+                    lookup_q["our_account"] = _twitter_handle
+                lookup = api_get("/api/v1/posts/lookup", query=lookup_q)
                 post_id = ((lookup.get("data") or {}).get("post") or {}).get("id")
             if not post_id:
                 print(
