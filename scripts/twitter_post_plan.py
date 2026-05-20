@@ -14,8 +14,8 @@ twitter_gen_links.py), and for each candidate:
 
 Browser lock IS expected to be held by the caller (run-twitter-cycle.sh
 re-acquires twitter-browser before invoking this script). twitter_browser.py
-uses the twitter-agent persistent profile + CDP, so the exclusive lock
-matters.
+attaches to the twitter-harness Chrome via CDP on the browser-harness
+profile, so the exclusive lock matters.
 
 The script exits 0 unless it can't even load the plan; per-candidate failures
 are recorded in twitter_candidates.status (skipped|failed) and a JSON summary
