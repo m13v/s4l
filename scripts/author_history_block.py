@@ -95,20 +95,38 @@ LIMIT %s
 
 
 def fetch(platform, author, days=30, limit=5):
-    """Return list of tuples matching SQL columns. Empty on bad input/no rows."""
+    """Return list of tuples matching SQL columns. Empty on bad input/no rows.
+
+    Always emits one stderr line per call so pipeline logs show injection
+    activity. Grep `[author_history_block]` in skill/logs/* to verify.
+    """
+    plat = PLATFORM_ALIAS.get(str(platform).lower(), str(platform).lower())
     norm = _normalize(author)
     if not norm:
+        print(
+            f"[author_history_block] platform={plat} author={author!r} "
+            f"rows=0 reason=empty_or_unknown_handle",
+            file=sys.stderr,
+        )
         return []
-    plat = PLATFORM_ALIAS.get(str(platform).lower(), str(platform).lower())
     try:
         conn = dbmod.get_conn()
         cur = conn.execute(SQL, (plat, norm, int(days), int(limit)))
         rows = cur.fetchall()
         cur.close()
         conn.close()
+        print(
+            f"[author_history_block] platform={plat} author={norm} "
+            f"rows={len(rows)} days={days} limit={limit}",
+            file=sys.stderr,
+        )
         return rows
     except Exception as e:
-        print(f"[author_history_block] DB error: {e}", file=sys.stderr)
+        print(
+            f"[author_history_block] platform={plat} author={norm} "
+            f"ERROR={e}",
+            file=sys.stderr,
+        )
         return []
 
 
