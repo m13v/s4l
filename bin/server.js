@@ -14669,6 +14669,20 @@ function renderTopPosts(payload) {
         filterMode: 'none' },
     ],
   });
+  // Reconcile the top-level "Link sent" pill with the column filter that
+  // mountSortableTable just hydrated from localStorage. See
+  // syncTopLinkPillFromColumn for the full reasoning.
+  syncTopLinkPillFromColumn();
+  // Also live-sync the pill when the user changes the inline column dropdown
+  // directly. Without this, the pill would stay stale until the next render
+  // (project switch, window flip, etc.) and the user would see the same
+  // mismatch they just reported. mountSortableTable is generic and shouldn't
+  // know about specific columns, so wire this here at the call site.
+  const linkColDd = document.querySelector('select.activity-col-filter[data-filter-key="link_clicks"]');
+  if (linkColDd && !linkColDd._linkPillSyncWired) {
+    linkColDd.addEventListener('change', () => { syncTopLinkPillFromColumn(); });
+    linkColDd._linkPillSyncWired = true;
+  }
 }
 
 async function loadTopPosts(force) {
@@ -14699,6 +14713,39 @@ async function loadTopPosts(force) {
   } finally {
     _topLoading = false;
   }
+}
+
+// Two layers can set the "link sent" filter on the Top > Posts table:
+//   1. The top-level pill row (#top-dm-link-pills, persisted at sa.top.dmLink.v1)
+//   2. The inline column dropdown for the link_clicks column (persisted inside
+//      sa.topTable.v2.filters.link_clicks via mountSortableTable).
+// They hydrate from different localStorage keys, independently, on every page
+// load. Without reconciliation the table can be rendering with link_clicks=
+// 'has_link' (only link-sent rows visible) while the pill row reads "All",
+// leaving the user with no top-level indication that a filter is active.
+//
+// Source of truth = the column filter (it's what actually drives the visible
+// rows). After mountSortableTable hydrates, mirror its value into the pill so
+// the top-level UI never lies. has_clicks has no pill equivalent: surface it
+// as "All" on the pill but leave the column filter intact so the inline
+// dropdown still works for that advanced case.
+function syncTopLinkPillFromColumn() {
+  const linkRow = document.getElementById('top-dm-link-pills');
+  if (!linkRow) return;
+  const colVal = (_topTableState && _topTableState.filters && _topTableState.filters.link_clicks) || '';
+  const colToPill = { has_link: 'yes', no_link: 'no' };
+  const desired = colToPill[colVal] || 'all';
+  if (_topDmLink === desired) {
+    // Defensive: even if our in-memory _topDmLink is consistent, the visible
+    // active-class on the pill might still be stale from a prior render path
+    // (e.g. inline column dropdown change that bypassed the pill). Force the
+    // DOM to match.
+    setTopPillActive(linkRow, desired);
+    return;
+  }
+  _topDmLink = desired;
+  try { saSave('sa.top.dmLink.v1', _topDmLink); } catch {}
+  setTopPillActive(linkRow, desired);
 }
 
 function setTopPillActive(row, value) {
