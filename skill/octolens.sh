@@ -112,12 +112,12 @@ fi
 if [ -n "$PLATFORM" ]; then
     case "$PLATFORM" in
         reddit)   AGENT_HINT="Use ONLY mcp__reddit-agent__* tools for posting." ;;
-        twitter)  AGENT_HINT="Use ONLY mcp__twitter-agent__* tools for posting." ;;
+        twitter)  AGENT_HINT="Use ONLY the mcp__twitter-harness__bh_run tool for posting (CDP-driven real Chrome on port 9555). See lib/twitter-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table." ;;
         linkedin) AGENT_HINT="Use ONLY mcp__linkedin-agent__* tools for posting." ;;
     esac
     PLATFORM_GATE="IMPORTANT: This is the Octolens ${PLATFORM} engagement pipeline. All candidates are already filtered to ${PLATFORM}. ${AGENT_HINT} NEVER use any other browser agent."
 else
-    PLATFORM_GATE="IMPORTANT: This is the Octolens engagement pipeline. Use ONLY mcp__reddit-agent__* for Reddit, mcp__twitter-agent__* for Twitter, mcp__linkedin-agent__* for LinkedIn. NEVER use mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__*."
+    PLATFORM_GATE="IMPORTANT: This is the Octolens engagement pipeline. Use ONLY mcp__reddit-agent__* for Reddit, mcp__twitter-harness__bh_run for Twitter, mcp__linkedin-agent__* for LinkedIn. NEVER use mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__*."
 fi
 
 # Run Claude with the social-autoposter skill to engage
