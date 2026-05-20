@@ -467,6 +467,15 @@ def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
     can ignore this entry on other machines posting as a different account.
     Returns account=None if the config has no reddit_account, in which case
     the reader treats the entry as global (back-compat with pre-2026-05-15).
+
+    Project scope (2026-05-19 cleanup): subreddit_bans.comment_blocked entries
+    are ALWAYS account-level by definition: if a sub silently strips the
+    comment form (or other account-triggered automod gate) for our account,
+    that gate applies regardless of which project's pipeline noticed it.
+    Project-specific relevance rejects live in `project_search_excludes`,
+    NOT here. So we drop the `project` field semantically (kept as audit
+    breadcrumb `noticed_by_project` for forensics, but the reader ignores
+    it). Account is the only scope dimension.
     """
     from datetime import datetime, timezone
     account = None
@@ -479,7 +488,9 @@ def _make_ban_entry(sub: str, reason: str | None, project: str | None) -> dict:
         "sub": sub.strip().lower(),
         "added_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": reason or None,
-        "project": project or None,
+        # Kept for audit (who first hit this); reader ignores. Use `account`
+        # for actual scoping.
+        "noticed_by_project": project or None,
         "account": account,
     }
 
@@ -2320,7 +2331,10 @@ def _post_iteration(plan, reddit_username):
             failed += 1
             print(f"[post_reddit] CDP FAILED: {err}")
             if err == "account_blocked_in_sub":
-                mark_comment_blocked(thread_url, reason=err, project=project_name)
+                # project=None: account-level ban applies across ALL projects,
+                # not just the one currently posting. Backfill of 28 existing
+                # project-scoped entries applied 2026-05-19.
+                mark_comment_blocked(thread_url, reason=err, project=None)
             # Classify the CDP error for queue retry. Unknown errors default
             # to TRANSIENT so we don't permanently kill candidates on a new
             # error string we haven't classified yet; the MAX_ATTEMPTS cap
