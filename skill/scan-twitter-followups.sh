@@ -3,7 +3,12 @@
 # Revisits our recent X replies and captures depth-2+ public follow-ups
 # that the /notifications scraper misses (when @-tag is dropped in nested replies).
 # Companion to scan_twitter_mentions_browser.py (run via engage-twitter.sh).
-# Scheduled ~once per day by launchd; skip-if-locked so it yields to the engage loop.
+# Scheduled overnight by launchd (1:14 AM only). Waits up to 30min for the
+# twitter-browser lock to free, then yields. Single overnight firing chosen
+# because twitter-cycle parallel firings keep the lock busy during waking
+# hours; 13:14 PM firing was dropped 2026-05-19 after weeks of "skipping"
+# bails (acquire_lock timeout=0 was the original yield strategy, replaced
+# with a 1800s wait that lets the scan run when twitter-cycle is quieter).
 
 
 set -euo pipefail
@@ -20,7 +25,7 @@ source "$(dirname "$0")/lock.sh"
 # scan_twitter_thread_followups.py uses twitter_browser.py functions, which
 # honor TWITTER_CDP_URL exported by the lib.
 source "$(dirname "$0")/lib/twitter-backend.sh"
-acquire_lock "twitter-browser" 0
+acquire_lock "twitter-browser" 1800
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 acquire_lock "scan-twitter-followups" 0
 
