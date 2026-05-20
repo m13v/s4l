@@ -46,14 +46,34 @@ export SA_CYCLE_ID="$BATCH_ID"
 # below for multi-platform runs to prevent deadlock.
 source "$(dirname "$0")/lock.sh"
 
+# Twitter backend lib: sourced for ensure_twitter_browser_for_backend (probes
+# the harness Chrome on port 9555, launches it if down). Also exports
+# TWITTER_CDP_URL so the python helpers (scripts/twitter_browser.py) attach
+# directly to the harness Chrome instead of doing ps-based discovery. Sets
+# MCP_CONFIG_FILE + BROWSER_INSTRUCTIONS as side effects; this script uses
+# DM_MCP_CONFIG (different variable) so no conflict.
+source "$(dirname "$0")/lib/twitter-backend.sh"
+
 # Skip cleanly if a foreign playwright-mcp wrapper for THIS platform is alive
 # (interactive Fazm Dev / IDE / another cron). Avoids the Chrome SingletonLock
 # crash cascade — see dm-outreach-twitter.sh and engage-twitter.sh.
+# Twitter case routes through defer_if_foreign_for_backend (always returns 1
+# = proceed) since harness CDP supports multiple concurrent clients on the
+# browser-harness profile, so foreign MCP wrappers never block us.
 # LOG_FILE isn't set yet (line 78), so use ${LOG_FILE:-} to satisfy set -u.
 if [ -n "$PLATFORM" ]; then
-    if defer_if_foreign_browser_mcp_active "$PLATFORM" "${LOG_FILE:-}"; then
-        exit 0
-    fi
+    case "$PLATFORM" in
+        twitter|x)
+            if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
+                exit 0
+            fi
+            ;;
+        *)
+            if defer_if_foreign_browser_mcp_active "$PLATFORM" "${LOG_FILE:-}"; then
+                exit 0
+            fi
+            ;;
+    esac
 fi
 acquire_lock "$LOCK_NAME" 3600
 
@@ -1312,7 +1332,7 @@ case "${PLATFORM:-all}" in
         ensure_browser_healthy "reddit"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
-    twitter|x) acquire_lock "twitter-browser" 3600; ensure_browser_healthy "twitter" ;;
+    twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
     all)
         acquire_lock "linkedin-browser" 3600
         ensure_browser_healthy "linkedin"
@@ -1323,7 +1343,7 @@ case "${PLATFORM:-all}" in
         ensure_browser_healthy "reddit"
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
-        ensure_browser_healthy "twitter"
+        ensure_twitter_browser_for_backend
         ;;
 esac
 
