@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 
@@ -47,9 +52,27 @@ def fetch_json(url, headers=None, user_agent="social-autoposter/1.0"):
 
 
 def get_already_posted():
-    """Return set of thread URLs we've already posted in."""
+    """Return set of thread URLs we've already posted in.
+
+    Scoped per Reddit account when one is configured (this helper feeds the
+    Reddit branch of find_threads.py). Falls back to all-platform unscoped
+    on the legacy path so existing callers that haven't wired an account
+    keep the old behavior. Other platforms have their own scoped readers
+    (score_twitter_candidates.py, github_tools.py, score_linkedin_candidates.py).
+    """
     conn = dbmod.get_conn()
-    rows = conn.execute("SELECT thread_url FROM posts WHERE thread_url IS NOT NULL").fetchall()
+    acct = _resolve_account("reddit")
+    if acct:
+        rows = conn.execute(
+            "SELECT thread_url FROM posts "
+            "WHERE platform='reddit' AND thread_url IS NOT NULL "
+            "  AND our_account = %s",
+            [acct],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT thread_url FROM posts WHERE thread_url IS NOT NULL"
+        ).fetchall()
     conn.close()
     return {row[0] for row in rows}
 
