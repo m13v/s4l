@@ -65,6 +65,11 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 
 # Engagement weights. Comments worth more than reposts worth more than
@@ -221,12 +226,23 @@ def upsert_candidates(candidates, batch_id=None):
 
     # Dedupe against already-posted LinkedIn threads (the engaged-id check
     # in run-linkedin.sh covers URN-level dedup, but this catches URL-level
-    # dupes too in case someone hand-feeds candidates).
+    # dupes too in case someone hand-feeds candidates). Scoped per-account
+    # so multiple LinkedIn personas don't block each other; falls back to
+    # unscoped when no name is configured (legacy single-account behavior).
     posted_urls = set()
-    rows = conn.execute(
-        "SELECT thread_url FROM posts "
-        "WHERE platform='linkedin' AND thread_url IS NOT NULL"
-    ).fetchall()
+    _li_name = _resolve_account("linkedin")
+    if _li_name:
+        rows = conn.execute(
+            "SELECT thread_url FROM posts "
+            "WHERE platform='linkedin' AND thread_url IS NOT NULL "
+            "  AND our_account = %s",
+            [_li_name],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT thread_url FROM posts "
+            "WHERE platform='linkedin' AND thread_url IS NOT NULL"
+        ).fetchall()
     for row in rows:
         norm = _normalize_post_url(row[0])
         if norm:
