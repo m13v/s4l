@@ -579,6 +579,15 @@ def post_comment(thread_url, text):
             except Exception:
                 pass
 
+            # Capture the final URL. On a successful submit, old.reddit
+            # redirects to the new permalink (.../comments/<thread>/.../<comment_id>/),
+            # so a URL still equal to the thread URL is a strong signal the
+            # comment never landed (silent shadow-reject / anti-spam).
+            try:
+                final_url = page.url
+            except Exception:
+                final_url = ""
+
             # Try to find the permalink of our new comment
             permalink = page.evaluate("""(ourUsername) => {
                 // Find comments by our username, get the last one (most recent)
@@ -596,10 +605,61 @@ def post_comment(thread_url, text):
                 return null;
             }""", OUR_USERNAME)
 
+            if not permalink:
+                # Dump HTML + screenshot so we can post-mortem (silent shadow-reject
+                # vs slow render vs DOM selector miss). final_url tells us which.
+                try:
+                    debug_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "log",
+                    )
+                    os.makedirs(debug_dir, exist_ok=True)
+                    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+                    base = os.path.join(
+                        debug_dir,
+                        f"reddit_browser_post_fail_{stamp}_{os.getpid()}",
+                    )
+                    try:
+                        html = page.content()[:200000]
+                        with open(base + ".html", "w") as f:
+                            f.write(html)
+                    except Exception:
+                        pass
+                    try:
+                        page.screenshot(path=base + ".png", full_page=False)
+                    except Exception:
+                        pass
+                    print(
+                        f"[reddit_browser] post-comment no permalink; "
+                        f"final_url={final_url} thread_url={thread_url} "
+                        f"dump={base}",
+                        file=sys.stderr,
+                    )
+                except Exception:
+                    pass
+
+                # If the URL never redirected away from the thread page, the
+                # submit didn't take. Surface as an explicit error so callers
+                # can distinguish this from "submitted but slow render".
+                try:
+                    norm_old = _to_old_reddit(thread_url).rstrip("/")
+                    norm_final = (final_url or "").rstrip("/")
+                except Exception:
+                    norm_old = thread_url
+                    norm_final = final_url or ""
+                if norm_final == norm_old:
+                    return {
+                        "ok": False,
+                        "error": "no_redirect_after_submit",
+                        "thread_url": thread_url,
+                        "final_url": final_url,
+                    }
+
             return {
                 "ok": True,
                 "permalink": permalink,
                 "thread_url": thread_url,
+                "final_url": final_url,
             }
 
         finally:
@@ -2231,6 +2291,10 @@ def main():
             sys.exit(1)
         result = post_comment(sys.argv[2], sys.argv[3])
         print(json.dumps(result, indent=2))
+        try:
+            print(f"[reddit_browser] result={json.dumps(result)}", file=sys.stderr)
+        except Exception:
+            pass
 
     elif cmd == "reply":
         if len(sys.argv) < 4:
