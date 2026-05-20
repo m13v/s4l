@@ -21,6 +21,11 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 ENV_PATH = os.path.expanduser("~/social-autoposter/.env")
@@ -53,9 +58,34 @@ def load_config():
 
 
 def get_already_posted():
-    """Return set of thread URLs we've already posted in."""
+    """Return set of thread URLs we've already posted in.
+
+    Octolens fans out across Twitter + Reddit mentions, so the dedupe set
+    is the UNION of our threads on both platforms scoped to the configured
+    handles. Falls back to the legacy global SELECT when no handles are
+    resolvable, preserving single-account behavior for legacy callers.
+    """
+    twitter_acct = _resolve_account("twitter")
+    reddit_acct = _resolve_account("reddit")
     conn = dbmod.get_conn()
-    rows = conn.execute("SELECT thread_url FROM posts WHERE thread_url IS NOT NULL").fetchall()
+    if twitter_acct or reddit_acct:
+        clauses = []
+        params = []
+        if twitter_acct:
+            clauses.append("(platform='twitter' AND our_account = %s)")
+            params.append(twitter_acct)
+        if reddit_acct:
+            clauses.append("(platform='reddit'  AND our_account = %s)")
+            params.append(reddit_acct)
+        rows = conn.execute(
+            "SELECT thread_url FROM posts "
+            "WHERE thread_url IS NOT NULL AND (" + " OR ".join(clauses) + ")",
+            params,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT thread_url FROM posts WHERE thread_url IS NOT NULL"
+        ).fetchall()
     conn.close()
     return {row[0] for row in rows}
 
