@@ -103,18 +103,39 @@ def _load_comment_blocked_subs():
 
     Mirrors reddit_tools._load_comment_blocked_subs so the reply path can
     pre-flight without taking that import (and its db dependency).
-    Handles both ban-list shapes.
+
+    Scope model (2026-05-19 cleanup): comment_blocked entries are always
+    account-level. Filter by the entry's `account` field against the local
+    machine's reddit_account.username so this MacBook's bans don't suppress
+    subs on the sandbox VM (which posts as a different account). The
+    legacy `project` field on entries is IGNORED here too — comment_blocked
+    is account-scoped by nature; project-specific rejects live in
+    project_search_excludes.
+
+    Handles both ban-list shapes: bare-string entries (pre-2026-05-11) and
+    audit dicts {"sub": ..., "added_at": ..., "reason": ..., "account": ...}.
     """
     try:
         with open(_config_path) as f:
             cfg = json.load(f)
+        current_account = (cfg.get("reddit_account") or {}).get("username") or None
         blocked = set()
         bans = cfg.get("subreddit_bans") or {}
         if isinstance(bans, dict):
             for entry in bans.get("comment_blocked") or []:
                 slug = _ban_entry_to_slug(entry)
-                if slug:
-                    blocked.add(slug)
+                if not slug:
+                    continue
+                entry_account = None
+                if isinstance(entry, dict):
+                    entry_account = entry.get("account") or None
+                # account=null = global (apply on every account; back-compat).
+                # account=set + mismatch = skip; this entry belongs to a
+                # different machine's account.
+                if (entry_account is not None and current_account is not None
+                        and entry_account.lower() != current_account.lower()):
+                    continue
+                blocked.add(slug)
         for s in cfg.get("exclusions", {}).get("subreddits", []):
             blocked.add(s.lower())
         return blocked
