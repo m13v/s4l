@@ -693,7 +693,7 @@ STYLES_BLOCK=$(generate_styles_block linkedin posting)
 # Empty when we have no history with this person. Failure is silent.
 AUTHOR_HISTORY_BLOCK=""
 if [ -n "${PA_AUTHOR_NAME:-}" ]; then
-    AUTHOR_HISTORY_BLOCK=$(python3 "$REPO_DIR/scripts/author_history_block.py" --platform linkedin --author "$PA_AUTHOR_NAME" --days 30 --limit 5 2>/dev/null || true)
+    AUTHOR_HISTORY_BLOCK=$(python3 "$REPO_DIR/scripts/author_history_block.py" --platform linkedin --author "$PA_AUTHOR_NAME" --days 30 --limit 5 2>>"$LOG_FILE" || true)
 fi
 
 # Allow Chrome's profile lockfile to release between phases.
