@@ -41,6 +41,13 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS engagement_style TEXT;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS resurrected_at TIMESTAMP;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS model TEXT;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS campaign_id INTEGER REFERENCES campaigns(id);
+-- autoposter_version: package.json version of social-autoposter at the moment
+-- this row was written. Manually bumped per meaningful release (see bin/cli.js
+-- + package.json). Stamped by scripts/version.py.read_version() at write time
+-- via log_post.py / reply_db.py / dm_send_log.py. Older rows (pre-2026-05-19)
+-- stay NULL; correlate them by posted_at if you need to infer a version range.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS autoposter_version TEXT;
+CREATE INDEX IF NOT EXISTS idx_posts_autoposter_version ON posts(autoposter_version) WHERE autoposter_version IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_posts_platform ON posts(platform);
 CREATE INDEX IF NOT EXISTS idx_posts_resurrected_at ON posts(resurrected_at) WHERE resurrected_at IS NOT NULL;
@@ -116,6 +123,10 @@ CREATE TABLE IF NOT EXISTS replies (
 ALTER TABLE replies ADD COLUMN IF NOT EXISTS processing_at TIMESTAMP;
 ALTER TABLE replies ADD COLUMN IF NOT EXISTS engagement_style TEXT;
 ALTER TABLE replies ADD COLUMN IF NOT EXISTS model TEXT;
+-- autoposter_version: see posts.autoposter_version comment. Stamped on the
+-- replied transition (reply_db.py 'replied' command), NOT on pending insert.
+ALTER TABLE replies ADD COLUMN IF NOT EXISTS autoposter_version TEXT;
+CREATE INDEX IF NOT EXISTS idx_replies_autoposter_version ON replies(autoposter_version) WHERE autoposter_version IS NOT NULL;
 ALTER TABLE replies ADD CONSTRAINT IF NOT EXISTS replies_platform_comment_id_unique UNIQUE (platform, their_comment_id);
 
 -- Per-reply engagement stats. Mirror posts schema so dashboards can UNION
@@ -168,6 +179,11 @@ ALTER TABLE dms ADD COLUMN IF NOT EXISTS icp_matches JSONB NOT NULL DEFAULT '[]'
 CREATE INDEX IF NOT EXISTS idx_dms_icp_matches ON dms USING gin (icp_matches);
 ALTER TABLE dms ADD COLUMN IF NOT EXISTS prospect_id INTEGER;              -- FK added below after prospects table defined
 ALTER TABLE dms ADD COLUMN IF NOT EXISTS model TEXT;                       -- dominant Claude model for the outreach session
+-- autoposter_version: see posts.autoposter_version comment. Stamped on the
+-- 'sent' transition (dm_send_log.py / PATCH /api/v1/dms/[id]), NOT on initial
+-- pending insert.
+ALTER TABLE dms ADD COLUMN IF NOT EXISTS autoposter_version TEXT;
+CREATE INDEX IF NOT EXISTS idx_dms_autoposter_version ON dms(autoposter_version) WHERE autoposter_version IS NOT NULL;
 
 -- Per-DM short link for booking attribution. The link is hosted on the matched
 -- project's marketing site (e.g. https://aiphoneordering.com/r/<code>) and
