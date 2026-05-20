@@ -147,9 +147,9 @@ For each DM row, BEFORE you compose or send, do this in order:
 
 1. Look at the row's \`target_project\`. If it's NULL, set icp_precheck=unknown with notes="no_target_project" and proceed to step 4 — but still try to capture profile basics.
 
-2. Fetch the prospect's X/Twitter profile with mcp__twitter-agent__* tools:
+2. Fetch the prospect's X/Twitter profile using the browser tools from the BROWSER BACKEND block above:
    - Navigate to https://x.com/THEIR_AUTHOR (strip any leading @).
-   - browser_snapshot. Extract: display name, handle, bio text, follower count, pinned/top-of-feed recent tweet topic summary.
+   - Snapshot the page. Extract: display name, handle, bio text, follower count, pinned/top-of-feed recent tweet topic summary.
    - If the profile is suspended, protected, or empty, capture what you can and note "profile_limited" or "profile_inaccessible".
 
 3. Persist the profile fields:
@@ -176,7 +176,7 @@ For each DM row, BEFORE you compose or send, do this in order:
 
 5. If ANY entry in icp_matches has label=disqualified, skip the send: run \`python3 scripts/dm_conversation.py mark-skipped --dm-id DM_ID --reason "disqualified: PROJECT - SHORT_NOTES"\` and move on. \`icp_miss\` alone does NOT gate; send when every project scored miss. Only explicit \`disqualified\` blocks the opener.
 
-## How to send Twitter/X DMs (use mcp__twitter-agent__* tools):
+## How to send Twitter/X DMs (use the browser tools from the BROWSER BACKEND block):
 1. Navigate to https://x.com/messages
 2. **ENCRYPTED DM PASSCODE**: Twitter may show an "Enter your passcode" or "encrypted_dm_passcode_required" dialog before you can access DMs. If you see this dialog:
    a. Find the passcode input field in the snapshot
@@ -201,7 +201,7 @@ Inspect the send_dm tool's return value. There are exactly three outcomes:
   prior phantom-DM bugs (~700 rows in 4/2026) came from prose-driven
   status flips that ignored the verification result.
 
-  After the DM lands, capture the current page URL with mcp__twitter-agent__browser_evaluate (return window.location.href) and stamp it onto the DM row so the dashboard's "open chat" button works:
+  After the DM lands, capture the current page URL by evaluating window.location.href in the browser (use the JS-eval tool from the BROWSER BACKEND block) and stamp it onto the DM row so the dashboard's "open chat" button works:
   python3 $REPO_DIR/scripts/dm_conversation.py set-url --dm-id DM_ID --url "CHAT_URL"
   The validator only accepts /i/chat/<id> or /messages/<id>; if the URL is something else (you got bounced to a profile or inbox), skip this step.
 
@@ -214,14 +214,14 @@ Inspect the send_dm tool's return value. There are exactly three outcomes:
 DMs disabled (recipient setting, not a send failure):
   python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status skipped --skip-reason chat_disabled --claude-session-id "$CLAUDE_SESSION_ID"
 
-CRITICAL: ALL browser calls MUST use mcp__twitter-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a twitter-agent tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
+CRITICAL: ALL browser calls MUST use the tools listed in the BROWSER BACKEND block above (the Twitter-dedicated MCP for this run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a browser tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 
-## CRITICAL FAILURE MODE: mcp__twitter-agent__* tools not registered
-If at the START of this run you cannot see ANY mcp__twitter-agent__* tools available, OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged playwright-mcp wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the prospects in the queue.
+## CRITICAL FAILURE MODE: Twitter browser tools not registered
+If at the START of this run you cannot see ANY of the browser tools listed in the BROWSER BACKEND block above, OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the prospects in the queue.
 
 Do EXACTLY this:
 1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', or anything else.
-2. Print a single line to stdout: \`MCP_UNAVAILABLE: twitter-agent tools not registered; aborting with rows left at status=pending\`
+2. Print a single line to stdout: \`MCP_UNAVAILABLE: twitter browser tools not registered; aborting with rows left at status=pending\`
 3. Exit cleanly. The launchd schedule will retry on the next cycle, by which point the wedged profile holder will likely have timed out.
 
 Burning rows with skip_reason='twitter_agent_mcp_unavailable: ...' is a regression that on 2026-05-12 nuked 7 warm leads (efemjoba, gpuops, josesaezmerino, AIDailyGems, alkimiadev, RobertDMellish, kunaljeweller). The d.id IS NULL filter in scan_dm_candidates.py then permanently blocked them from re-discovery. Do not do this.
