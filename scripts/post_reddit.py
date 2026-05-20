@@ -1784,18 +1784,19 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         # Visibility-only path. Never fail discover because of it.
         print(f"[project_excludes] WARN: active-excludes log failed: {e}", file=sys.stderr)
 
-    # Pick the engagement style FIRST (2026-05-19 picker rollout). The
-    # picked style flows into two places: (1) --style filter for
-    # top_performers so exemplars match the assignment, (2) assignment
-    # arg into build_discover_prompt so the prompt embeds the same
-    # assignment via get_assigned_style_prompt. On invent mode the
-    # picker returns style=None and top_performers stays unfiltered so
-    # the model sees the full top-5 reference landscape.
-    style_assignment = pick_style_for_post("reddit", context="posting")
-    picked_style = style_assignment.get("style")
-    print(f"[post_reddit] discover style assigned: mode={style_assignment['mode']} "
-          f"style={picked_style or '(invent)'}")
-    top_report = get_top_performers(project_name, style=picked_style)
+    # 2026-05-19: discover is SCAN-ONLY (opaque mode: model picks queries,
+    # runs searches, never sees thread content, outputs DONE). No drafting
+    # happens here. The picker therefore does NOT fire in discover — it
+    # fires once at the start of the draft phase, where the only Claude
+    # call that actually writes a comment lives. This matches Twitter's
+    # shape: scan → ripen → engage (engage = single drafting call where
+    # the picker assigns the style and the prompt enforces it).
+    #
+    # top_performers is also unfiltered here on purpose. Discover doesn't
+    # consume per-style exemplars (no drafting); the report is shown to
+    # the search-query picker as light context for "what topics have
+    # historically converted". Style filtering moves to the draft call.
+    top_report = get_top_performers(project_name)
     recent_comments = get_recent_comments()
     top_topics_report = get_top_search_topics(project_name, platform="reddit")
     dud_queries_report = get_dud_reddit_queries(project_name)
@@ -1803,8 +1804,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     prompt = build_discover_prompt(project, config, args.limit, top_report, recent_comments,
                                    top_topics_report=top_topics_report,
                                    dud_queries_report=dud_queries_report,
-                                   omitted_topics_report=omitted_topics_report,
-                                   style_assignment=style_assignment)
+                                   omitted_topics_report=omitted_topics_report)
 
     if args.dry_run:
         print(f"=== DRY RUN discover (project={project_name}) ===")
@@ -1916,15 +1916,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
 
     return {"project_name": project_name, "decisions": candidates,
             "cost": usage["cost_usd"], "session_id": usage.get("session_id"),
-            "phase": "discover",
-            # 2026-05-19: pin the picker's assignment into the plan so the
-            # draft phase reads the SAME style instead of letting the model
-            # freely pick. Without this, discover assigns technical_detail
-            # but draft writes a pattern_recognizer-shaped comment and
-            # labels it as such — observed on 2026-05-19 Reddit runs
-            # (Runner / NightOwl) where the dashboard showed pattern_recognizer
-            # despite the discover log saying "style=technical_detail".
-            "style_assignment": style_assignment}
+            "phase": "discover"}
 
 
 def _draft_iteration(plan, config, reddit_username):
@@ -2029,16 +2021,19 @@ def _draft_iteration(plan, config, reddit_username):
         print(f"[post_reddit] WARNING: project '{project_name}' not found in config, drafting with generic context")
         project = {"name": project_name}
 
-    # 2026-05-19: read the style assignment the discover phase pinned into
-    # the plan. Filtering top_performers by the picked style aligns the
-    # few-shot exemplars with the assignment (same logic discover uses),
-    # so the model isn't shown winning examples of a DIFFERENT style and
-    # then asked to write in the assigned one.
-    style_assignment = plan.get("style_assignment")
-    picked_style = (style_assignment or {}).get("style")
-    if style_assignment:
-        print(f"[post_reddit] draft style assigned (from plan): "
-              f"mode={style_assignment.get('mode')} style={picked_style or '(invent)'}")
+    # 2026-05-19: pick the engagement style HERE — draft is the only
+    # Claude call in the Reddit cycle that actually writes a comment, so
+    # this is where the picker belongs. (Discover is scan-only opaque
+    # mode; it never sees thread content and never drafts text, so a
+    # picker there would just be useless decoration.)
+    # Mirrors the Twitter engage cycle: pick once → filter top_performers
+    # to the assigned style → embed the assignment block in the prompt →
+    # JSON example shows the literal assigned style name. End-to-end
+    # adherence comes from those three lined-up signals.
+    style_assignment = pick_style_for_post("reddit", context="posting")
+    picked_style = style_assignment.get("style")
+    print(f"[post_reddit] draft style assigned: mode={style_assignment['mode']} "
+          f"style={picked_style or '(invent)'}")
     top_report = get_top_performers(project_name, style=picked_style)
     recent_comments = get_recent_comments()
     # We don't have a Reddit equivalent of top_search_topics_report in
