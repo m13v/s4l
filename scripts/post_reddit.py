@@ -997,12 +997,19 @@ no candidate lines, no commentary about thread content (you don't see any).
 """
 
 
-def build_draft_prompt(project, config, candidates, top_report, recent_comments):
+def build_draft_prompt(project, config, candidates, top_report, recent_comments,
+                       style_assignment=None):
     """DRAFT phase: write comments only for ripen-survivors.
 
     `candidates` is the list of decisions that passed the delta gate, each
     annotated with ripen data (delta_up, delta_comments, composite). Claude
     fetches each thread, reads context, then writes the best comment.
+
+    2026-05-19: `style_assignment` is the pick_style_for_post() result the
+    discover phase already wrote into the plan JSON. Forwarding it here so
+    the draft phase enforces the SAME style instead of letting the model
+    free-pick (and overwhelmingly default to pattern_recognizer). When
+    omitted, get_styles_prompt() picks fresh internally (legacy callers).
     """
     content_angle = build_content_angle(project, config)
 
@@ -1092,9 +1099,11 @@ OMIT THESE (clear no-bridge cases only):
 ## Content rules
 {get_content_rules("reddit")}
 
+{get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
+
 ## OUTPUT FORMAT
 For each thread that PASSES the SELECTION GATE, output one JSON object per line:
-{{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "style_name", "search_topic": "the seed concept", "new_style": null}}
+{{"action": "post", "thread_url": "SAME_URL_AS_GIVEN", "reply_to_url": null, "text": "your comment here", "thread_author": "username", "thread_title": "thread title", "engagement_style": "{(style_assignment or {}).get('style') or 'style_name'}", "search_topic": "the seed concept", "new_style": null}}
 
 For threads that FAIL the gate, simply omit the post JSON above. The shell handles unhandled candidates correctly (Phase 0 salvage on the next cycle re-checks them, and one-strike ripen failure has already pruned dead threads).
 
@@ -1896,7 +1905,15 @@ def _discover_iteration(args, config, reddit_username, already_picked):
 
     return {"project_name": project_name, "decisions": candidates,
             "cost": usage["cost_usd"], "session_id": usage.get("session_id"),
-            "phase": "discover"}
+            "phase": "discover",
+            # 2026-05-19: pin the picker's assignment into the plan so the
+            # draft phase reads the SAME style instead of letting the model
+            # freely pick. Without this, discover assigns technical_detail
+            # but draft writes a pattern_recognizer-shaped comment and
+            # labels it as such — observed on 2026-05-19 Reddit runs
+            # (Runner / NightOwl) where the dashboard showed pattern_recognizer
+            # despite the discover log saying "style=technical_detail".
+            "style_assignment": style_assignment}
 
 
 def _draft_iteration(plan, config, reddit_username):
@@ -2001,13 +2018,24 @@ def _draft_iteration(plan, config, reddit_username):
         print(f"[post_reddit] WARNING: project '{project_name}' not found in config, drafting with generic context")
         project = {"name": project_name}
 
-    top_report = get_top_performers(project_name)
+    # 2026-05-19: read the style assignment the discover phase pinned into
+    # the plan. Filtering top_performers by the picked style aligns the
+    # few-shot exemplars with the assignment (same logic discover uses),
+    # so the model isn't shown winning examples of a DIFFERENT style and
+    # then asked to write in the assigned one.
+    style_assignment = plan.get("style_assignment")
+    picked_style = (style_assignment or {}).get("style")
+    if style_assignment:
+        print(f"[post_reddit] draft style assigned (from plan): "
+              f"mode={style_assignment.get('mode')} style={picked_style or '(invent)'}")
+    top_report = get_top_performers(project_name, style=picked_style)
     recent_comments = get_recent_comments()
     # We don't have a Reddit equivalent of top_search_topics_report in
     # the draft phase (the discover phase loads it for the search step).
     # Pass empty string; the trace audit still captures top_performers
     # and recent_comments, which is the bulk of the few-shot context.
-    prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments)
+    prompt = build_draft_prompt(project, config, candidates, top_report, recent_comments,
+                                style_assignment=style_assignment)
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
