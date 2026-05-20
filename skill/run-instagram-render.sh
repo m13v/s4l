@@ -45,7 +45,32 @@ fi
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
-cleanup() { rm -f "$PICK_FILE" "${UNPROVEN_JSON_FILE:-}"; }
+# Run accounting for dashboard Job History (Render · Instagram). Matches the
+# pattern in run-instagram-daily.sh / run-twitter-threads.sh / run-reddit-threads.sh:
+# each exit site updates POSTED_CT / SKIPPED_CT / FAILED_CT; the EXIT trap
+# always emits one log_run.py line so the run shows up under render_instagram.
+# "posted" here means "rendered a fresh draft"; "skipped" means buffer was
+# healthy (>=3 drafts) or the lock was already held; "failed" is any real
+# error path.
+RUN_START_EPOCH=$(date +%s)
+POSTED_CT=0
+SKIPPED_CT=0
+FAILED_CT=0
+
+cleanup() {
+  local rc=$?
+  rm -f "$PICK_FILE" "${UNPROVEN_JSON_FILE:-}"
+  if [ "$POSTED_CT" -eq 0 ] && [ "$SKIPPED_CT" -eq 0 ] && [ "$FAILED_CT" -eq 0 ]; then
+    if [ "$rc" -eq 0 ]; then SKIPPED_CT=1; else FAILED_CT=1; fi
+  fi
+  local elapsed=$(( $(date +%s) - RUN_START_EPOCH ))
+  local cost
+  cost=$(/usr/bin/python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-instagram-render" 2>/dev/null || echo "0.0000")
+  /usr/bin/python3 "$REPO_DIR/scripts/log_run.py" \
+      --script "render_instagram" \
+      --posted "$POSTED_CT" --skipped "$SKIPPED_CT" --failed "$FAILED_CT" \
+      --cost "$cost" --elapsed "$elapsed" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT INT TERM HUP
 
 log "=== instagram-render fire: $(date) ==="
@@ -68,6 +93,7 @@ else
 fi
 if [ -z "$TARGET_ACCOUNT" ]; then
   log "ERROR: pick_ig_account.py returned empty; no enabled accounts?"
+  FAILED_CT=1
   exit 1
 fi
 export TARGET_ACCOUNT
@@ -318,6 +344,7 @@ PY
 
 if [ ! -s "$PICK_FILE" ]; then
   log "ERROR: pick query produced no output"
+  FAILED_CT=1
   exit 1
 fi
 
@@ -333,6 +360,7 @@ log "target=$TARGET selected_project=${SELECTED_PROJECT:-<null/organic>} draft_c
 # Override with FORCE_RENDER=1 for manual / first-fire runs.
 if [ "${FORCE_RENDER:-0}" != "1" ] && [ "$DRAFT_COUNT" -ge 3 ]; then
   log "skipped: $DRAFT_COUNT drafts of $TARGET already in queue (>= 3 buffer); no render needed"
+  SKIPPED_CT=1
   exit 0
 fi
 
@@ -612,9 +640,11 @@ if ! "$REPO_DIR/scripts/run_claude.sh" "run-instagram-render" \
   rm -f "$PROMPT_FILE"
   if [ "$rc" -eq 79 ]; then
     log "claude blocked by quota stamp; will retry next cycle"
+    SKIPPED_CT=1
     exit 0
   fi
   log "render failed"
+  FAILED_CT=1
   exit 1
 fi
 rm -f "$PROMPT_FILE"
@@ -629,10 +659,12 @@ log "  expected: $OUT_CAP"
 
 if [ ! -f "$OUT_MP4" ]; then
   log "ERROR: $OUT_MP4 missing"
+  FAILED_CT=1
   exit 1
 fi
 if [ ! -f "$OUT_CAP" ]; then
   log "ERROR: $OUT_CAP missing"
+  FAILED_CT=1
   exit 1
 fi
 
@@ -662,7 +694,7 @@ PY
 
 case "$ROW_OK" in
   OK*) log "DB row OK: $ROW_OK" ;;
-  *)   log "ERROR: DB row check failed: $ROW_OK"; exit 1 ;;
+  *)   log "ERROR: DB row check failed: $ROW_OK"; FAILED_CT=1; exit 1 ;;
 esac
 
 VARIANT=$(echo "$ROW_OK" | sed 's/^OK variant=//')
@@ -754,6 +786,7 @@ PY
   if [ "$CAP_LEN" -gt "$CAP_LIMIT" ]; then
     log "ERROR: caption still over limit after 3 tighten attempts (final len=${CAP_LEN})"
     log "flipping media_posts row to status='caption_too_long' so picker skips it"
+    FAILED_CT=1
     /opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$CAP_LEN" 2>>"$LOG_FILE" <<'PY'
 import os, sys, psycopg2
 env = {}
