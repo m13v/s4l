@@ -542,7 +542,7 @@ const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*
 const PLATFORM_LABELS = {
   twitter: 'Twitter', reddit: 'Reddit', linkedin: 'LinkedIn',
   moltbook: 'MoltBook', github: 'GitHub', dev: 'Dev',
-  hackernews: 'HackerNews', youtube: 'YouTube',
+  hackernews: 'HackerNews', youtube: 'YouTube', instagram: 'Instagram',
 };
 
 // Standalone jobs with no platform axis. script_name -> display label.
@@ -624,6 +624,7 @@ function classifyScript(script) {
     match(/^link_edit_(\w+)$/, 'link-edit', 'Link Edit') ||
     match(/^thread_(\w+)$/, 'post', 'Post Threads') ||
     match(/^post_(\w+)$/, 'post-comments', 'Post Comments') ||
+    match(/^render_(\w+)$/, 'render', 'Render') ||
     match(/^engage_(\w+)$/, 'engage', 'Engage') ||
     match(/^dm_outreach_(\w+)$/, 'dm-outreach', 'DM Outreach') ||
     match(/^dm_replies_(\w+)$/, 'dm-replies', 'DM Replies') ||
