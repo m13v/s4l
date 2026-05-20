@@ -195,9 +195,10 @@ Re-running `npx social-autoposter update` also catches up on any
 missing registrations.
 
 The pipeline shell scripts reference these servers by their exact names
-(`mcp__twitter-agent__*`, `mcp__reddit-agent__*`,
-`mcp__linkedin-agent__*`). If you rename an MCP server here, the prompts
-inside `skill/run-*.sh` will not find it.
+(`mcp__reddit-agent__*`, `mcp__linkedin-agent__*`, and
+`mcp__twitter-harness__bh_run` for Twitter, registered separately as part
+of the browser-harness setup). If you rename an MCP server here, the
+prompts inside `skill/run-*.sh` will not find it.
 
 ### 6.3 Headless VMs: wrap Chromium under Xvfb
 
