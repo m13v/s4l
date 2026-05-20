@@ -1,6 +1,6 @@
 # Browser Script Design Guide
 
-Scripts that run inside platform browser agents (linkedin-agent, reddit-agent, twitter-agent) via `browser_run_code`. Each script bundles a multi-step browser interaction into a single call, replacing 5-10 Claude tool calls with 2.
+Scripts that run inside platform browser agents (linkedin-agent, reddit-agent) via `browser_run_code`, or the twitter-harness MCP via `bh_run`. Each script bundles a multi-step browser interaction into a single call, replacing 5-10 Claude tool calls with 2.
 
 ## Calling Convention
 
