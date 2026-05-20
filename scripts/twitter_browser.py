@@ -40,7 +40,24 @@ LOCK_EXPIRY = 300  # process-level mutex TTL; refreshed during long ops
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
 VIEWPORT = {"width": 911, "height": 1016}
-OUR_HANDLE = "m13v_"
+
+# Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
+# var (set by per-account launchd/systemd units) or config.json
+# accounts.twitter.handle. The "m13v_" fallback keeps the Mac default working
+# when neither source is set, but on the VMs the env var MUST be set so the
+# DOM scrape + CDP URL build target the right profile.
+_DEFAULT_HANDLE = "m13v_"
+
+def our_handle():
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import account_resolver
+        h = account_resolver.resolve("twitter")
+        if h:
+            return h
+    except Exception:
+        pass
+    return _DEFAULT_HANDLE
 
 # DM encryption passcode from .env
 DM_PASSCODE = os.environ.get("TWITTER_DM_PASSCODE", "")
@@ -468,12 +485,13 @@ def _rate_limit_response(reason, counter=None, url=None):
 
 
 def _collect_our_reply_links(page):
-    """Collect all /OUR_HANDLE/status/ links currently in the DOM."""
+    """Collect all /<our_handle>/status/ links currently in the DOM."""
+    handle = our_handle()
     return set(page.evaluate(f"""() => {{
         const links = new Set();
-        document.querySelectorAll('a[href*="/{OUR_HANDLE}/status/"]').forEach(a => {{
+        document.querySelectorAll('a[href*="/{handle}/status/"]').forEach(a => {{
             const href = a.getAttribute('href');
-            if (href && /\\/{OUR_HANDLE}\\/status\\/\\d+$/.test(href))
+            if (href && /\\/{handle}\\/status\\/\\d+$/.test(href))
                 links.add(href);
         }});
         return [...links];
@@ -684,7 +702,7 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
 
             # Method 1: CDP network interception (most reliable)
             if _created_tweet_ids:
-                reply_url = f"https://x.com/{OUR_HANDLE}/status/{_created_tweet_ids[-1]}"
+                reply_url = f"https://x.com/{our_handle()}/status/{_created_tweet_ids[-1]}"
                 print(f"[reply_url] captured via CDP+response-listener: {reply_url}", file=sys.stderr)
 
             # Method 2: DOM diff (check if new reply links appeared)
@@ -1185,7 +1203,7 @@ def read_conversation(thread_url, max_messages=20):
                     messages: recent,
                     total_found: messages.length,
                 };
-            }""", {"maxMessages": max_messages, "ourHandle": OUR_HANDLE})
+            }""", {"maxMessages": max_messages, "ourHandle": our_handle()})
 
             return result
 
