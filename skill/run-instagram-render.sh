@@ -830,4 +830,5 @@ PY
 fi
 
 log "=== rendered post-${NNN} (${TARGET}, variant=${VARIANT}) successfully ==="
+POSTED_CT=1
 exit 0
