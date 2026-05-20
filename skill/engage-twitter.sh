@@ -19,140 +19,15 @@ LOG_FILE="$LOG_DIR/engage-twitter-$(date +%Y-%m-%d_%H%M%S).log"
 BATCH_ID="entw-$(date +%Y%m%d-%H%M%S)-$$"
 export SA_CYCLE_ID="$BATCH_ID"
 
-# 2026-05-13 backend selector — switch between twitter-agent (Playwright MCP,
-# default) and twitter-harness (browser-harness MCP, CDP-driven real Chrome).
-# Both drive the SAME logical Twitter session via shared auth_token cookies,
-# so lock.sh's defer_if_foreign_browser_mcp_active treats them as mutually
-# exclusive. To pilot the harness path: TWITTER_BACKEND=harness bash engage-twitter.sh
-TWITTER_BACKEND="${TWITTER_BACKEND:-agent}"
-case "$TWITTER_BACKEND" in
-    agent)
-        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json"
-        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_AGENT_EOF'
-BROWSER BACKEND: twitter-agent (Playwright MCP, headed Chromium at ~/.claude/browser-profiles/twitter).
-Tools available: mcp__twitter-agent__browser_navigate, browser_snapshot, browser_run_code,
-browser_click, browser_type, browser_take_screenshot, browser_wait_for, browser_press_key,
-browser_resize, browser_console_messages, browser_network_requests. The MCP holds the
-browser open across calls; tool calls are session-stateful.
-BROWSER_AGENT_EOF
-        )
-        ;;
-    harness)
-        MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
-        # Route twitter_browser.py (Phase A) at the harness Chrome instead of the
-        # twitter-agent profile. twitter_browser.py:get_browser_and_page reads
-        # TWITTER_CDP_URL as a hard override (skips ps-based discovery).
-        export TWITTER_CDP_URL="http://127.0.0.1:9555"
-        BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
-BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
-port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
-logged in as m13v_; cookies persist on disk.
-
-You have ONE tool: mcp__twitter-harness__bh_run(script). It runs arbitrary Python with
-these helpers pre-imported:
-  new_tab(url), goto_url(url), wait_for_load(), page_info(),
-  capture_screenshot(),                     # returns path to PNG; Read it to see the page
-  click_at_xy(x, y),                        # coordinate click (viewport pixels)
-  js(expression),                           # page.evaluate-style; returns the result
-  type_text(text),                          # types into currently-focused element
-  press_key(key),                           # e.g. "Enter", "Tab", "Escape"
-  scroll(direction, amount), cdp(method, **params)
-
-TRANSLATION TABLE — wherever this prompt mentions a Playwright-style tool, do the
-following with bh_run instead:
-
-  browser_navigate(url)           ->  bh_run('new_tab("URL")') or bh_run('goto_url("URL"); wait_for_load()')
-  browser_snapshot                ->  bh_run('print(js("""..."""))') to read DOM as structured data,
-                                       OR bh_run('print(capture_screenshot())') + Read the PNG
-  browser_run_code(js)            ->  bh_run('print(js("""<the JS expression>"""))')
-  browser_click(ref=...)          ->  Find the element via selector, compute center coords from
-                                       getBoundingClientRect, then bh_run('click_at_xy(X, Y)')
-  browser_type(ref=..., text=...) ->  Click the textbox first (click_at_xy), then bh_run('type_text("TEXT")')
-  browser_take_screenshot         ->  bh_run('print(capture_screenshot())') then Read the path
-  browser_press_key("Enter")      ->  bh_run('press_key("Enter")')
-
-EXAMPLE — click the reply submit button:
-  bh_run('''
-  pt = js("""
-    const el = document.querySelector('[data-testid="tweetButtonInline"]');
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return {x: r.x + r.width/2, y: r.y + r.height/2};
-  """)
-  print(pt)
-  ''')
-  # Then in a follow-up call (substituting the x/y from above):
-  bh_run('click_at_xy(123, 456)')
-
-VERIFY AFTER EVERY MUTATION by capturing a screenshot and reading the PNG — coordinate
-clicks can miss; visual verification is the only reliable confirmation that the action took.
-BROWSER_HARNESS_EOF
-        )
-        ;;
-    *)
-        echo "ERROR: unknown TWITTER_BACKEND='$TWITTER_BACKEND' (expected: agent, harness)" >&2
-        exit 2
-        ;;
-esac
-
 # Browser-profile lock first (shared with other twitter pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
-
-# Skip cleanly if an interactive twitter-agent MCP session (Fazm Dev / IDE /
-# another cron) is alive on the same profile. Racing the foreign Chrome
-# triggers the "chromium profile locked by another process; waited 45s"
-# SIGTRAP cascade — observed live 2026-05-13 14:29 with the user's IDE
-# holding the profile via codex-acp.
-#
-# 2026-05-13: For TWITTER_BACKEND=harness we skip this check — the harness
-# Chrome is on a separate profile (~/.claude/browser-profiles/browser-harness)
-# and CDP supports multiple concurrent clients on the same Chrome, so foreign
-# harness MCP servers do NOT cause SingletonLock contention. We still rely on
-# the bash `twitter-browser` lock below for serializing Twitter operations
-# across pipelines.
-if [ "$TWITTER_BACKEND" = "agent" ]; then
-    if defer_if_foreign_browser_mcp_active "twitter" "$LOG_FILE"; then
-        exit 0
-    fi
-fi
+# Harness-only browser bootstrap (twitter-agent path fully removed 2026-05-19).
+# Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS, exports TWITTER_CDP_URL=9555.
+source "$(dirname "$0")/lib/twitter-backend.sh"
 
 acquire_lock "twitter-browser" 3600
-
-if [ "$TWITTER_BACKEND" = "agent" ]; then
-    # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
-    # exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
-    # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
-    # went wrong when opening your profile" 7x and the pipeline hangs. See
-    # scripts/clean_stale_singleton.sh — refuses to clean if PID is alive.
-    bash "$HOME/social-autoposter/scripts/clean_stale_singleton.sh" "$HOME/.claude/browser-profiles/twitter" 2>&1 | tee -a "$LOG_FILE" || true
-    ensure_browser_healthy "twitter"
-else
-    # Harness path: ensure the harness Chrome is alive on port 9555 before
-    # Phase A's twitter_browser.py call. The browser-harness MCP launches it
-    # lazily on first bh_run, but Phase A doesn't go through MCP — it connects
-    # via CDP directly. Cold start = ~3s. Idempotent: skips if already up.
-    if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-        echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." | tee -a "$LOG_FILE"
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"             --remote-debugging-port=9555             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness"             --no-first-run --no-default-browser-check             --disable-features=ChromeWhatsNewUI             about:blank >>"$LOG_FILE" 2>&1 &
-        disown
-        # Wait up to 12s for CDP to be ready.
-        for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
-            sleep 1
-        done
-        if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
-            echo "[$(date +%H:%M:%S)] ERROR: harness Chrome failed to start within 12s; aborting" | tee -a "$LOG_FILE"
-            exit 1
-        fi
-        echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" | tee -a "$LOG_FILE"
-    else
-        echo "[$(date +%H:%M:%S)] Harness Chrome already alive on port 9555" | tee -a "$LOG_FILE"
-    fi
-    # Close leftover tabs from prior twitter runs. Delegated to a standalone
-    # Python script because bash 3.2 (what launchd uses) cannot parse a nested
-    # heredoc inside another structure here.
-    python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null | tee -a "$LOG_FILE" || true
-fi
+# Probe + launch harness Chrome on port 9555 if needed, then sweep leftover tabs.
+ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 acquire_lock "twitter" 3600
 
 # Load secrets
