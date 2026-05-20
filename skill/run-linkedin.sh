@@ -688,6 +688,14 @@ TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2
 source "$REPO_DIR/skill/styles.sh"
 STYLES_BLOCK=$(generate_styles_block linkedin posting)
 
+# Prior-interactions context: surface our last 5 comments on threads by the
+# same author in the past 30 days (soft context — vary angle, don't repeat).
+# Empty when we have no history with this person. Failure is silent.
+AUTHOR_HISTORY_BLOCK=""
+if [ -n "${PA_AUTHOR_NAME:-}" ]; then
+    AUTHOR_HISTORY_BLOCK=$(python3 "$REPO_DIR/scripts/author_history_block.py" --platform linkedin --author "$PA_AUTHOR_NAME" --days 30 --limit 5 2>/dev/null || true)
+fi
+
 # Allow Chrome's profile lockfile to release between phases.
 sleep 3
 
@@ -711,6 +719,8 @@ Read $SKILL_FILE for tone and content rules.
 - Language: $PA_LANG
 - Velocity score: $PA_VELOCITY (Phase A picked this as the top candidate)
 - Search query that surfaced it: '$PA_QUERY'
+
+$AUTHOR_HISTORY_BLOCK
 
 ## Project config
 $PROJECT_FULL
