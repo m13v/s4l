@@ -7,7 +7,7 @@ Subcommands:
   link    - Link an existing dms row to a prospect by platform+author.
 
 The scraping itself is driven by Claude via the per-platform MCP browser
-agents (reddit-agent, twitter-agent, linkedin-agent). This script only
+agents (reddit-agent, twitter-harness, linkedin-agent). This script only
 handles DB persistence: Claude collects the fields and passes them in.
 
 Usage:
