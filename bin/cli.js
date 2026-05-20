@@ -42,16 +42,18 @@ DATABASE_URL=
 const USER_FILES = new Set(['config.json', '.env', 'SKILL.md']);
 
 // Browser agent config templates -> install path under ~/.claude/browser-agent-configs/
+// Twitter intentionally absent (2026-05-19): the Twitter pipeline is now driven
+// exclusively by the browser-harness MCP. Its config lives at
+// ~/.claude/browser-agent-configs/twitter-harness-mcp.json and is installed
+// out-of-band as part of the browser-harness setup, not by this installer.
 const BROWSER_AGENT_CONFIGS = [
-  'twitter-agent-mcp.json',
-  'twitter-agent.json',
   'reddit-agent-mcp.json',
   'reddit-agent.json',
   'linkedin-agent-mcp.json',
   'linkedin-agent.json',
 ];
 
-const BROWSER_PROFILES = ['twitter', 'reddit', 'linkedin'];
+const BROWSER_PROFILES = ['reddit', 'linkedin'];
 
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -111,8 +113,10 @@ function installBrowserAgentConfigs() {
 // If the `claude` CLI is not on PATH, prints manual instructions and returns.
 function registerBrowserAgentMcpServers() {
   const configDir = path.join(HOME, '.claude', 'browser-agent-configs');
+  // Note (2026-05-19): twitter-agent is intentionally NOT registered. Twitter
+  // pipelines use the browser-harness MCP (twitter-harness-mcp.json), which is
+  // installed out-of-band as part of the browser-harness setup.
   const servers = [
-    { name: 'twitter-agent', file: path.join(configDir, 'twitter-agent-mcp.json') },
     { name: 'reddit-agent', file: path.join(configDir, 'reddit-agent-mcp.json') },
     { name: 'linkedin-agent', file: path.join(configDir, 'linkedin-agent-mcp.json') },
   ];
