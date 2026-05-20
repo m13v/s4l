@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "reddit-agent": {
+      "type": "stdio",
+      "command": "/usr/bin/python3",
+      "args": [
+        "__HOME__/social-autoposter/scripts/mcp_lock_proxy.py",
+        "--lock-name", "reddit-browser",
+        "--ttl", "90",
+        "--",
+        "npx",
+        "@playwright/mcp@latest",
+        "--config",
+        "__HOME__/.claude/browser-agent-configs/reddit-agent.json"
+      ],
+      "env": {
+        "PATH": "__NODE_BIN__:/usr/bin:/bin",
+        "BROWSER_LOCK_NAME": "reddit-browser",
+        "BROWSER_LOCK_TTL": "90"
+      }
+    },
+    "linkedin-agent": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--config",
+        "__HOME__/.claude/browser-agent-configs/linkedin-agent.json"
+      ],
+      "env": {
+        "PATH": "__NODE_BIN__:/usr/bin:/bin"
+      }
+    },
+    "twitter-harness": {
+      "type": "stdio",
+      "command": "__UV_BIN__",
+      "args": [
+        "run",
+        "--quiet",
+        "--with",
+        "mcp",
+        "__HOME__/.claude/mcp-servers/browser-harness/server.py"
+      ],
+      "env": {
+        "PATH": "__HOME__/.local/bin:__NODE_BIN__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}
