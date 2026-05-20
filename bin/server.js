@@ -6200,15 +6200,49 @@ async function handleApi(req, res) {
       try {
         const rows = await pq(q);
         if (rows === null) return json(res, { error: 'db_unavailable' }, 500);
-        const subreddits = rows.map(r => ({
-          name: r.subreddit,
-          projects: r.projects || [],
-          posts: Number(r.posts) || 0,
-          upvotes: Number(r.upvotes) || 0,
-          comments: Number(r.comments) || 0,
-          views: Number(r.views) || 0,
-          post_clicks: Number(r.post_clicks) || 0,
-        }));
+        // Load subreddit_bans.comment_blocked from config.json and build a
+        // sub→[accounts] map so each row can surface which accounts are
+        // banned from that sub. We're moving toward account-agnostic posting
+        // (different machines can post the same project as different
+        // accounts), so a single sub may have multiple banned accounts over
+        // time. Each comment_blocked entry is {sub, added_at, reason,
+        // account, noticed_by_project} per the 2026-05-11 audit shape.
+        const bansBySub = new Map();
+        try {
+          const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const bans = (cfg && cfg.subreddit_bans) || {};
+          const list = Array.isArray(bans.comment_blocked) ? bans.comment_blocked : [];
+          for (const entry of list) {
+            if (!entry) continue;
+            let slug = null, account = null;
+            if (typeof entry === 'string') {
+              slug = entry;
+            } else if (typeof entry === 'object') {
+              slug = entry.sub || null;
+              account = entry.account || null;
+            }
+            if (!slug) continue;
+            const key = String(slug).toLowerCase();
+            if (!bansBySub.has(key)) bansBySub.set(key, new Set());
+            if (account) bansBySub.get(key).add(String(account));
+          }
+        } catch {}
+        const subreddits = rows.map(r => {
+          const slug = String(r.subreddit || '').toLowerCase();
+          const accounts = bansBySub.has(slug)
+            ? Array.from(bansBySub.get(slug)).sort()
+            : [];
+          return {
+            name: r.subreddit,
+            projects: r.projects || [],
+            banned_accounts: accounts,
+            posts: Number(r.posts) || 0,
+            upvotes: Number(r.upvotes) || 0,
+            comments: Number(r.comments) || 0,
+            views: Number(r.views) || 0,
+            post_clicks: Number(r.post_clicks) || 0,
+          };
+        });
         return json(res, {
           generated_at: new Date().toISOString(),
           days,
@@ -13324,6 +13358,7 @@ function renderSubredditStats(payload) {
   const normalized = rows.map(r => ({
     name:         r.name || '',
     projects:     Array.isArray(r.projects) ? r.projects.join(', ') : '',
+    banned:       Array.isArray(r.banned_accounts) ? r.banned_accounts.join(', ') : '',
     posts:        Number(r.posts) || 0,
     upvotes:      Number(r.upvotes) || 0,
     comments:     Number(r.comments) || 0,
@@ -13340,6 +13375,23 @@ function renderSubredditStats(payload) {
     if (!s) return '\u2014';
     return '<span style="color:var(--text-muted);font-size:12px;" title="' + escapeHtml(s) + '">' + escapeHtml(s) + '</span>';
   };
+  // Banned column: comma-separated list of Reddit handles whose
+  // subreddit_bans.comment_blocked entry matches this sub. Each handle
+  // links to the account's Reddit profile so an admin can verify the ban
+  // is real (e.g. confirm shadow-reject vs hard ban). Account-agnostic:
+  // multiple machines may post the same project under different accounts,
+  // so a sub can carry several bans (one per offending account).
+  const fmtBannedAccounts = v => {
+    const s = String(v || '').trim();
+    if (!s) return '<span style="color:var(--text-muted);">\u2014</span>';
+    const handles = s.split(',').map(x => x.trim()).filter(Boolean);
+    const parts = handles.map(h => {
+      const safe = h.replace(/[^a-zA-Z0-9_\-]/g, '');
+      if (!safe) return escapeHtml(h);
+      return '<a href="https://www.reddit.com/user/' + encodeURIComponent(safe) + '/" target="_blank" rel="noopener" style="color:var(--danger,#e74c3c);">u/' + escapeHtml(safe) + '</a>';
+    });
+    return parts.join(', ');
+  };
   mountSortableTable({
     containerId: 'subreddit-stats-body',
     state: _subredditStatsTableState,
@@ -13349,6 +13401,8 @@ function renderSubredditStats(payload) {
     columns: [
       { key: 'name',        label: 'Subreddit',   type: 'text',    align: 'left',  formatter: fmtSubName },
       { key: 'projects',    label: 'Projects',    type: 'text',    align: 'left',  formatter: fmtProjects },
+      { key: 'banned',      label: 'Banned',      type: 'text',    align: 'left',  formatter: fmtBannedAccounts,
+        helpText: 'Reddit accounts whose subreddit_bans.comment_blocked entry matches this sub. Multiple handles means multiple agent accounts have been banned from posting here. "\u2014" means no recorded ban for this sub. Source: config.json subreddit_bans.comment_blocked.' },
       { key: 'posts',       label: 'Posts',       type: 'numeric', align: 'right', formatter: fmt },
       { key: 'upvotes',     label: 'Upvotes',     type: 'numeric', align: 'right', formatter: fmt,
         helpText: 'Sum of upvotes on Reddit posts created in the selected window, minus the auto-self-upvote per post (matches the Project Funnel Stats column).' },
