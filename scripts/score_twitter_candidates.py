@@ -165,8 +165,15 @@ def upsert_candidates(tweets, config, batch_id=None):
       - freshness gate -> POST /api/v1/twitter-candidates/expire-stale
         (default 18h window; never deletes rows — status flip only)
     """
-    # Get already-posted thread URLs for dedup
-    posted_resp = api_get("/api/v1/posts/thread-urls", query={"platform": "twitter"})
+    # Get already-posted thread URLs for dedup. Scope per-account so the mk0r
+    # VM running as @matt_diak doesn't skip a tweet that @m13v_ posted on
+    # (or vice versa). Falls back to unscoped when the resolver can't pin a
+    # handle, which preserves the legacy single-machine behavior.
+    _twitter_handle = _resolve_twitter_handle()
+    _probe_query = {"platform": "twitter"}
+    if _twitter_handle:
+        _probe_query["our_account"] = _twitter_handle
+    posted_resp = api_get("/api/v1/posts/thread-urls", query=_probe_query)
     posted = set((posted_resp.get("data") or {}).get("thread_urls") or [])
 
     inserted = updated = skipped = 0
@@ -248,7 +255,7 @@ def upsert_candidates(tweets, config, batch_id=None):
             # account B out of the same tweet (ON CONFLICT preserved 'posted').
             # Defaults server-side to 'm13v_' if omitted; new callers should
             # always pass it explicitly.
-            "our_account": _resolve_twitter_handle() or "",
+            "our_account": _twitter_handle or "",
         }
         # T0 columns only stamped when this row was discovered inside a cycle
         # batch, mirroring the conditional in the original SQL.
