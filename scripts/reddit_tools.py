@@ -21,6 +21,11 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
 from version import read_version as read_autoposter_version
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
@@ -440,11 +445,16 @@ def cmd_search(args):
     time_filter = args.time
 
     # Load already-posted URLs for filtering via /api/v1/posts/thread-urls.
+    # Scope per-account so two machines running different Reddit identities
+    # (e.g. Deep_Ad1959 on Mac, Sea_Comparison_1799 on mk0r VM) don't skip
+    # threads on each other's behalf. Falls back to unscoped when the
+    # resolver can't pin a handle (legacy single-machine behavior).
+    _reddit_account = _resolve_account("reddit")
+    _probe_q = {"platform": "reddit"}
+    if _reddit_account:
+        _probe_q["our_account"] = _reddit_account
     try:
-        resp = api_get(
-            "/api/v1/posts/thread-urls",
-            query={"platform": "reddit"},
-        )
+        resp = api_get("/api/v1/posts/thread-urls", query=_probe_q)
         urls = ((resp or {}).get("data") or {}).get("thread_urls") or []
         already_posted = {u for u in urls if u}
     except Exception as e:
@@ -713,11 +723,18 @@ def cmd_check_locked(args):
 
 
 def cmd_already_posted(args):
-    """Check if we already posted in a thread via /api/v1/posts/lookup."""
-    resp = api_get(
-        "/api/v1/posts/lookup",
-        query={"platform": "reddit", "thread_url": args.url},
-    )
+    """Check if we already posted in a thread via /api/v1/posts/lookup.
+
+    Scoped per-account so multiple machines running different Reddit
+    identities (e.g. Deep_Ad1959 on Mac, Sea_Comparison_1799 on mk0r VM)
+    don't see each other's posts as their own. Falls back to unscoped
+    when no handle is configured (legacy single-machine behavior).
+    """
+    q = {"platform": "reddit", "thread_url": args.url}
+    acct = _resolve_account("reddit")
+    if acct:
+        q["our_account"] = acct
+    resp = api_get("/api/v1/posts/lookup", query=q)
     post = ((resp or {}).get("data") or {}).get("post")
     if post:
         print(json.dumps({
