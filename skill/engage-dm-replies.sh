@@ -314,7 +314,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 2. Navigate to \`public_target_url\` on the correct platform and post the public reply:
    - **Reddit** (mcp__reddit-agent__* tools): navigate, click reply on the target comment, type, submit. Capture the resulting comment URL.
    - **LinkedIn** (mcp__linkedin-agent__* tools): navigate to the post, expand to find the target comment, reply, capture URL.
-   - **X/Twitter** (mcp__twitter-agent__* tools): navigate to the tweet URL, click reply, type, post. Capture the resulting status URL.
+   - **X/Twitter** (mcp__twitter-harness__bh_run tool, CDP-driven real Chrome on port 9555): use bh_run('goto_url("TWEET_URL"); wait_for_load()') to navigate, then bh_run scripts to click the reply button, type, and post. See lib/twitter-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting status URL.
 3. Insert a fresh \`replies\` row capturing the public reply (use the \`their_comment_id\` from \`public_target_comment_id\` so the dedup index does not collide; if null, synthesize a unique id like \`hr_<REPLY_ID>_pub\`):
    \`\`\`bash
    psql "$DATABASE_URL" -t -A -c "INSERT INTO replies (post_id, platform, their_comment_id, their_author, their_content, their_comment_url, our_reply_content, our_reply_url, depth, status, replied_at) VALUES (PUBLIC_TARGET_POST_ID_OR_NULL, 'PLATFORM', 'COMMENT_ID', 'THEIR_AUTHOR', NULL, 'PUBLIC_TARGET_URL', 'CRAFTED_PUBLIC_REPLY', 'OUR_NEW_PUBLIC_REPLY_URL', 2, 'replied', NOW()) RETURNING id"
@@ -330,7 +330,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 2. Navigate to the conversation on the correct platform using \`chat_url\` (or find the conversation with their_author).
    - **Reddit Chat** (mcp__reddit-agent__* tools)
    - **LinkedIn Messages** (mcp__linkedin-agent__* tools)
-   - **X/Twitter DMs** (mcp__twitter-agent__* tools), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
+   - **X/Twitter DMs** (mcp__twitter-harness__bh_run tool), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
 3. Type and send the crafted DM.
 4. Log the outbound message (log what you ACTUALLY SENT, not the human's instructions). Pass --verified ONLY when the browser tool returned verified=true. If verification failed, log nothing and let the next cycle retry; never pass --verified speculatively:
    \`\`\`bash
@@ -653,7 +653,7 @@ If a script or tool call fails, wait 30 seconds and retry (up to 3 times).
 CRITICAL: Reply in the SAME LANGUAGE as the inbound message. Match the language exactly.
 
 ## CRITICAL FAILURE MODE: platform-agent MCP tools not registered
-If at the START of this run you cannot see ANY of the platform's mcp__<platform>-agent__* tools available (mcp__twitter-agent__*, mcp__reddit-agent__*, mcp__linkedin-agent__*), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged playwright-mcp wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
+If at the START of this run you cannot see ANY of the platform's browser tools available (mcp__twitter-harness__bh_run for Twitter, mcp__reddit-agent__* for Reddit, mcp__linkedin-agent__* for LinkedIn), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
 
 Do EXACTLY this:
 1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', 'failed', or anything else. Do NOT call log-outbound, mark-skipped, set-status, mark-inspected, increment-attempts, or any other status-mutating helper. Do NOT write skip_reason on any dms/dm_messages/human_dm_replies row.
@@ -1281,7 +1281,7 @@ if [ -n "$PLATFORM" ]; then
     case "$PLATFORM" in
         reddit)   DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" ;;
         linkedin) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" ;;
-        twitter|x) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json" ;;
+        twitter|x) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json" ;;
     esac
 fi
 
