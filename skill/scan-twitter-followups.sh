@@ -16,9 +16,9 @@ LOG_FILE="$LOG_DIR/scan-twitter-followups-$(date +%Y-%m-%d_%H%M%S).log"
 
 # Browser-profile lock shared with all twitter pipelines.
 source "$(dirname "$0")/lock.sh"
-# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. See run-twitter-cycle.sh.
+# Harness-only browser bootstrap (twitter-agent path fully removed 2026-05-19).
 # scan_twitter_thread_followups.py uses twitter_browser.py functions, which
-# honor TWITTER_CDP_URL set by the helper for harness backend.
+# honor TWITTER_CDP_URL exported by the lib.
 source "$(dirname "$0")/lib/twitter-backend.sh"
 acquire_lock "twitter-browser" 0
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
