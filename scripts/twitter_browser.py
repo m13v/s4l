@@ -284,12 +284,12 @@ def get_browser_and_page(playwright):
     existing Twitter tab (navigate it, don't close it). When is_cdp=False,
     it's a new headless page.
 
-    2026-05-13: TWITTER_CDP_URL env var (set by engage-twitter.sh when
-    TWITTER_BACKEND=harness) routes directly to the browser-harness Chrome
-    (http://127.0.0.1:9555), skipping the ps-based discovery. The caller
-    explicitly asked for this endpoint, so failure here is fatal — silently
-    falling back to launch_persistent_context(twitter profile) would defeat
-    the whole point of the backend switch.
+    TWITTER_CDP_URL env var (set unconditionally by lib/twitter-backend.sh
+    since the 2026-05-19 harness-only migration) routes directly to the
+    browser-harness Chrome (http://127.0.0.1:9555), skipping ps-based
+    discovery. The caller explicitly asked for this endpoint, so failure
+    here is fatal; silently falling back to launch_persistent_context()
+    would defeat the whole point.
     """
     _acquire_browser_lock()
 
