@@ -609,8 +609,14 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 pass
 
-            page.goto(tweet_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
+            try:
+                page.goto(tweet_url, wait_until="load", timeout=60000)
+            except Exception:
+                try:
+                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(15000)
 
             # Check if page exists
             page_text = page.text_content("main") or ""
@@ -620,18 +626,20 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             # Snapshot our reply links before posting (to detect the new one)
             links_before = _collect_our_reply_links(page)
 
-            # Find the reply textbox
+            # Find the reply textbox. On slower egress (E2B sandbox VMs) x.com
+            # can need 20-30s to attach the React reply composer; do not lower
+            # these timeouts.
             reply_box = None
             try:
                 reply_box = page.get_by_role("textbox", name="Post text")
-                reply_box.wait_for(timeout=10000)
+                reply_box.wait_for(timeout=30000)
             except Exception:
                 # Scroll down to find the reply box
                 page.evaluate("window.scrollBy(0, 500)")
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(3000)
                 try:
                     reply_box = page.get_by_role("textbox", name="Post text")
-                    reply_box.wait_for(timeout=5000)
+                    reply_box.wait_for(timeout=15000)
                 except Exception:
                     return {"ok": False, "error": "reply_box_not_found"}
 
