@@ -23,7 +23,10 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+
+
+def _use_legacy_neon() -> bool:
+    return os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1"
 
 PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 
@@ -483,6 +486,124 @@ def parse_transcript(path: str):
     }
 
 
+_BACKFILL_TABLES = (
+    "posts", "replies", "dms", "dm_messages",
+    "seo_escalations", "seo_keywords", "seo_page_improvements", "gsc_queries",
+)
+
+
+def _persist_via_api(args, parsed, started, ended, duration_ms, orch_cost, cycle_id):
+    """Upsert claude_sessions row + backfill model column via HTTP routes.
+
+    Two calls:
+      POST /api/v1/claude-sessions             -> upsert by session_id
+      POST /api/v1/claude-sessions/backfill-model -> stamp model on activity rows
+    """
+    from http_api import api_post
+    api_post(
+        "/api/v1/claude-sessions",
+        {
+            "session_id": args.session_id,
+            "script": args.script,
+            "started_at": started,
+            "ended_at": ended,
+            "duration_ms": duration_ms,
+            "total_cost_usd": round(parsed["total_cost_usd"], 6),
+            "orchestrator_cost_usd": orch_cost,
+            "input_tokens": parsed["totals"]["input"],
+            "output_tokens": parsed["totals"]["output"],
+            "cache_read_tokens": parsed["totals"]["cache_read"],
+            "cache_creation_tokens": parsed["totals"]["cache_creation"],
+            "model_breakdown": parsed["by_model"],
+            "model": parsed["primary_model"],
+            "cycle_id": cycle_id,
+            "task_call_count": parsed.get("task_call_count", 0),
+            "subagent_count": parsed.get("subagent_count", 0),
+            "subagent_cost_usd": parsed.get("subagent_cost_usd", 0.0),
+            "subagent_breakdown": parsed.get("subagent_breakdown") or None,
+        },
+    )
+
+    resp = api_post(
+        "/api/v1/claude-sessions/backfill-model",
+        {
+            "session_id": args.session_id,
+            "model": parsed["primary_model"],
+            "tables": list(_BACKFILL_TABLES),
+        },
+    )
+    data = (resp or {}).get("data") or {}
+    backfill_counts = data.get("backfilled") or {}
+    for t in _BACKFILL_TABLES:
+        backfill_counts.setdefault(t, 0)
+    return backfill_counts
+
+
+def _persist_via_neon(args, parsed, started, ended, duration_ms, orch_cost, cycle_id):
+    """Legacy path: direct psycopg2 to Neon. Gated by SOCIAL_AUTOPOSTER_LEGACY_NEON=1."""
+    import db as dbmod
+    dbmod.load_env()
+    conn = dbmod.get_conn()
+    subagent_breakdown_json = (
+        json.dumps(parsed["subagent_breakdown"]) if parsed.get("subagent_breakdown") else None
+    )
+    conn.execute(
+        """INSERT INTO claude_sessions (
+            session_id, script, started_at, ended_at, duration_ms,
+            total_cost_usd, orchestrator_cost_usd,
+            input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, model_breakdown, model,
+            cycle_id,
+            task_call_count, subagent_count, subagent_cost_usd, subagent_breakdown
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
+                  %s, %s, %s, %s::jsonb)
+        ON CONFLICT (session_id) DO UPDATE SET
+            ended_at = EXCLUDED.ended_at,
+            duration_ms = EXCLUDED.duration_ms,
+            total_cost_usd = EXCLUDED.total_cost_usd,
+            orchestrator_cost_usd = COALESCE(EXCLUDED.orchestrator_cost_usd,
+                                             claude_sessions.orchestrator_cost_usd),
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens,
+            cache_read_tokens = EXCLUDED.cache_read_tokens,
+            cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+            model_breakdown = EXCLUDED.model_breakdown,
+            model = EXCLUDED.model,
+            cycle_id = COALESCE(EXCLUDED.cycle_id, claude_sessions.cycle_id),
+            task_call_count = EXCLUDED.task_call_count,
+            subagent_count = EXCLUDED.subagent_count,
+            subagent_cost_usd = EXCLUDED.subagent_cost_usd,
+            subagent_breakdown = EXCLUDED.subagent_breakdown
+        """,
+        [
+            args.session_id, args.script, started, ended, duration_ms,
+            round(parsed["total_cost_usd"], 6),
+            orch_cost,
+            parsed["totals"]["input"], parsed["totals"]["output"],
+            parsed["totals"]["cache_read"], parsed["totals"]["cache_creation"],
+            json.dumps(parsed["by_model"]),
+            parsed["primary_model"],
+            cycle_id,
+            parsed.get("task_call_count", 0),
+            parsed.get("subagent_count", 0),
+            parsed.get("subagent_cost_usd", 0.0),
+            subagent_breakdown_json,
+        ],
+    )
+
+    backfill_counts = {}
+    for table in _BACKFILL_TABLES:
+        cur = conn.execute(
+            f"UPDATE {table} SET model = %s "
+            f"WHERE claude_session_id = %s AND model IS NULL",
+            [parsed["primary_model"], args.session_id],
+        )
+        backfill_counts[table] = cur.rowcount
+    conn.commit()
+    conn.close()
+    return backfill_counts
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session-id", required=True)
@@ -558,74 +679,12 @@ def main():
         else None
     )
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    subagent_breakdown_json = (
-        json.dumps(parsed["subagent_breakdown"]) if parsed.get("subagent_breakdown") else None
-    )
-    conn.execute(
-        """INSERT INTO claude_sessions (
-            session_id, script, started_at, ended_at, duration_ms,
-            total_cost_usd, orchestrator_cost_usd,
-            input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, model_breakdown, model,
-            cycle_id,
-            task_call_count, subagent_count, subagent_cost_usd, subagent_breakdown
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
-                  %s, %s, %s, %s::jsonb)
-        ON CONFLICT (session_id) DO UPDATE SET
-            ended_at = EXCLUDED.ended_at,
-            duration_ms = EXCLUDED.duration_ms,
-            total_cost_usd = EXCLUDED.total_cost_usd,
-            orchestrator_cost_usd = COALESCE(EXCLUDED.orchestrator_cost_usd,
-                                             claude_sessions.orchestrator_cost_usd),
-            input_tokens = EXCLUDED.input_tokens,
-            output_tokens = EXCLUDED.output_tokens,
-            cache_read_tokens = EXCLUDED.cache_read_tokens,
-            cache_creation_tokens = EXCLUDED.cache_creation_tokens,
-            model_breakdown = EXCLUDED.model_breakdown,
-            model = EXCLUDED.model,
-            cycle_id = COALESCE(EXCLUDED.cycle_id, claude_sessions.cycle_id),
-            task_call_count = EXCLUDED.task_call_count,
-            subagent_count = EXCLUDED.subagent_count,
-            subagent_cost_usd = EXCLUDED.subagent_cost_usd,
-            subagent_breakdown = EXCLUDED.subagent_breakdown
-        """,
-        [
-            args.session_id, args.script, started, ended, duration_ms,
-            round(parsed["total_cost_usd"], 6),
-            orch_cost,
-            parsed["totals"]["input"], parsed["totals"]["output"],
-            parsed["totals"]["cache_read"], parsed["totals"]["cache_creation"],
-            json.dumps(parsed["by_model"]),
-            parsed["primary_model"],
-            cycle_id,
-            parsed.get("task_call_count", 0),
-            parsed.get("subagent_count", 0),
-            parsed.get("subagent_cost_usd", 0.0),
-            subagent_breakdown_json,
-        ],
-    )
-
-    # Backfill dominant model onto any activity rows stamped with this session.
-    # Only overwrites rows where model IS NULL so re-runs of log_claude_session
-    # against the same session_id stay idempotent. Covers social tables
-    # (posts/replies/dms/dm_messages) plus SEO pipeline tables that stamp
-    # claude_session_id (seo_escalations, seo_keywords, seo_page_improvements,
-    # gsc_queries).
-    backfill_counts = {}
-    for table in (
-        "posts", "replies", "dms", "dm_messages",
-        "seo_escalations", "seo_keywords", "seo_page_improvements", "gsc_queries",
-    ):
-        cur = conn.execute(
-            f"UPDATE {table} SET model = %s "
-            f"WHERE claude_session_id = %s AND model IS NULL",
-            [parsed["primary_model"], args.session_id],
-        )
-        backfill_counts[table] = cur.rowcount
-    conn.commit()
-    conn.close()
+    if _use_legacy_neon():
+        backfill_counts = _persist_via_neon(args, parsed, started, ended, duration_ms,
+                                            orch_cost, cycle_id)
+    else:
+        backfill_counts = _persist_via_api(args, parsed, started, ended, duration_ms,
+                                           orch_cost, cycle_id)
 
     print(json.dumps({
         "logged": True,
