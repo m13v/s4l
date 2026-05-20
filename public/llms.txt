@@ -111,7 +111,7 @@ Per-platform shell scripts that Claude Code invokes:
 - `lock.sh`: Concurrency control for multi-agent operation
 
 ### Browser Automation
-Each platform has a dedicated Playwright browser agent (reddit-agent, twitter-agent, linkedin-agent) with isolated cookie sessions loaded from `browser-sessions.json`. Agents share the same cookie file. The system uses Playwright MCP for browser control, with accessibility tree element targeting (not screenshot coordinates).
+Reddit and LinkedIn use dedicated Playwright browser agents (reddit-agent, linkedin-agent) with isolated cookie sessions. Twitter uses the browser-harness MCP (CDP-driven real Chrome on port 9555, profile ~/.claude/browser-profiles/browser-harness). All three persist cookies on disk so logged-in state survives across invocations. Reddit and LinkedIn use Playwright MCP with accessibility-tree element targeting; the twitter-harness MCP uses bh_run scripts that combine coordinate clicks with screenshot verification.
 
 ### Scheduling (launchd)
 18 launchd plist files in `launchd/` provide fully automated scheduling:
