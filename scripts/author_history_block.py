@@ -49,6 +49,73 @@ PLATFORM_ALIAS = {
 }
 
 
+# Per-process cache for active campaign suffixes; populated lazily on first
+# format_block() call. None = not loaded yet; [] = loaded but empty.
+_ACTIVE_CAMPAIGN_SUFFIXES_CACHE = None
+
+
+def _load_active_campaign_suffixes():
+    """Best-effort: return a list of currently-active campaign suffix literals.
+
+    Mirrors the helper of the same name in scripts/top_performers.py. We
+    duplicate (rather than import) to keep this module's failure mode
+    independent of top_performers' larger dependency surface.
+
+    Used to strip the suffix from `our_content` before injecting prior
+    interactions into the draft prompt, so the LLM never learns to echo
+    the suffix in its drafts (which would then double-fire when the
+    tool-layer injection at twitter_browser.reply_to_tweet / reddit_browser
+    appends a second copy). See feedback_suffix_injection_gating.md for the
+    history; this closes the 4th leak path that the 2026-05-19 sweep missed.
+
+    On any failure returns []: missing strip is preferable to crashing the
+    prompt assembly path.
+    """
+    global _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
+    if _ACTIVE_CAMPAIGN_SUFFIXES_CACHE is not None:
+        return _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
+    suffixes = []
+    try:
+        from http_api import api_get  # noqa: E402
+        resp = api_get(
+            "/api/v1/campaigns",
+            query={"status": "active", "has_suffix": "true", "limit": 500},
+        )
+        rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+        for r in rows:
+            s = (r.get("suffix") or "").strip()
+            if s and s not in suffixes:
+                suffixes.append(s)
+    except Exception as e:
+        print(
+            f"[author_history_block] _load_active_campaign_suffixes failed: {e!r}",
+            file=sys.stderr,
+        )
+    _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = suffixes
+    return suffixes
+
+
+def _strip_active_campaign_suffixes(text, suffixes):
+    """Trailing-only, idempotent strip of any active-campaign suffix.
+
+    Identical contract to top_performers._strip_active_campaign_suffixes.
+    Idempotent loop also collapses an already-doubled historical suffix
+    (e.g. "... written with s4lai written with s4lai") to clean text.
+    Trailing-only so we never touch the body of the comment.
+    """
+    if not text or not suffixes:
+        return text
+    cleaned = text.rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for sfx in suffixes:
+            if sfx and cleaned.endswith(sfx):
+                cleaned = cleaned[: -len(sfx)].rstrip()
+                changed = True
+    return cleaned
+
+
 def _normalize(handle):
     """Lowercase + strip @, u/, / prefixes. Empty/'unknown' → empty string."""
     if not handle:
@@ -188,6 +255,12 @@ def format_block(rows, author, platform, days):
         f"window={days}d, latest first):"
     )
     lines = [header]
+    # Load active campaign suffixes ONCE per format_block call so we strip
+    # them off `our_content` BEFORE truncation. Short Twitter replies
+    # (≤140 chars total) would otherwise show the suffix verbatim in the
+    # exemplar, training the LLM to echo it; the tool layer then appends
+    # a second copy. See feedback_suffix_injection_gating.md.
+    suffix_strip_list = _load_active_campaign_suffixes()
     for row in rows:
         (
             _id,
@@ -202,7 +275,10 @@ def format_block(rows, author, platform, days):
         ) = row
         date = posted_at.date().isoformat() if posted_at else "?"
         proj = project or "?"
-        ours = _truncate(our_content, 140)
+        our_content_clean = _strip_active_campaign_suffixes(
+            our_content, suffix_strip_list
+        )
+        ours = _truncate(our_content_clean, 140)
         eng_bits = []
         if upvotes:
             eng_bits.append(f"likes={upvotes}")
