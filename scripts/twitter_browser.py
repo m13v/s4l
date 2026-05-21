@@ -817,19 +817,55 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             # and keep only the top one. Failures are swallowed: an empty
             # top_replies list is the correct downstream signal ("nothing
             # to track").
+            #
+            # Three-layer defense against X's "Discover more" /
+            # "More replies" suggested-content cards, which render as
+            # full article elements right alongside real replies and used to
+            # leak in as the "top" reply (e.g. @mntruell 1343 likes on a
+            # @zhenthebuilder thread, @OpenAIDevs 4050 likes on a @kr0der
+            # thread — both viral standalone tweets X surfaced as
+            # "discover more", neither was an actual reply). Layers:
+            #   (1) DOM-position boundary: stop iterating at the first
+            #       "Discover more" / "More replies" heading.
+            #   (2) Snowflake age: real replies must be POSTED AFTER the
+            #       thread, so reply_tweet_id > thread_tweet_id.
+            #   (3) Quoted-tweet embeds: skip articles nested inside
+            #       another article (rare but possible source of leaks).
             top_replies = []
             try:
                 self_handle = (our_handle() or "").lower().lstrip("@")
-                m_author = re.search(r"(?:x|twitter)\.com/([^/]+)/status", tweet_url)
+                m_author = re.search(r"(?:x|twitter)\.com/([^/]+)/status/(\d+)", tweet_url)
                 thread_author_handle = (m_author.group(1).lower() if m_author else "")
+                thread_tweet_id = (m_author.group(2) if m_author else "")
                 scrape_js = """
                 (() => {
+                  const headings = Array.from(document.querySelectorAll('div, h2, [role="heading"]'))
+                    .filter(el => {
+                      const t = (el.textContent || '').trim();
+                      return t === 'Discover more' || t === 'More replies' || t === 'Show more replies';
+                    });
                   const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-                  if (articles.length < 1) return JSON.stringify({replies: [], article_count: articles.length});
+                  if (articles.length < 1) return JSON.stringify({replies: [], article_count: articles.length, dropped_after_discover: 0, dropped_nested: 0});
+                  let dropped_after_discover = 0, dropped_nested = 0;
                   const replyArticles = articles.slice(1, 31);
                   const replies = [];
                   for (const art of replyArticles) {
                     try {
+                      // Layer 1: hard boundary at "Discover more" heading.
+                      // headings[0] is the FIRST such heading on the page;
+                      // any article after it is a suggested-content card.
+                      if (headings.length > 0) {
+                        const cmp = art.compareDocumentPosition(headings[0]);
+                        if (!(cmp & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                          dropped_after_discover += 1;
+                          continue;
+                        }
+                      }
+                      // Layer 3: skip quoted-tweet embeds (nested article).
+                      let p = art.parentElement, nested = false;
+                      while (p) { if (p.tagName === 'ARTICLE') { nested = true; break; } p = p.parentElement; }
+                      if (nested) { dropped_nested += 1; continue; }
+
                       const linkEls = art.querySelectorAll('a[href*="/status/"]');
                       let reply_url = null;
                       for (const a of linkEls) {
@@ -861,12 +897,13 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                       replies.push({reply_url, reply_tweet_id, reply_author_handle, reply_author, reply_content, likes, replies: replies_count, retweets, views});
                     } catch (e) {}
                   }
-                  return JSON.stringify({replies, article_count: articles.length});
+                  return JSON.stringify({replies, article_count: articles.length, dropped_after_discover, dropped_nested, headings_found: headings.length});
                 })()
                 """
                 raw = page.evaluate(scrape_js)
                 parsed = json.loads(raw) if isinstance(raw, str) else (raw or {})
                 all_replies = parsed.get("replies", []) or []
+                dropped_older = 0
                 filtered = []
                 for r in all_replies:
                     h = (r.get("reply_author_handle") or "").lower().lstrip("@")
@@ -876,10 +913,26 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         continue
                     if thread_author_handle and h == thread_author_handle:
                         continue
+                    # Layer 2: snowflake age. A real reply MUST have been
+                    # posted after the thread; older snowflakes are
+                    # quoted-tweet embeds or suggested-content leaks that
+                    # somehow made it past the DOM boundary.
+                    rtid = (r.get("reply_tweet_id") or "").strip()
+                    if thread_tweet_id and rtid:
+                        try:
+                            if int(rtid) <= int(thread_tweet_id):
+                                dropped_older += 1
+                                continue
+                        except ValueError:
+                            pass
                     filtered.append(r)
                 filtered.sort(key=lambda r: int(r.get("likes") or 0), reverse=True)
                 top_replies = filtered[:1]
-                print(f"[top_replies] scraped {len(all_replies)} articles, "
+                print(f"[top_replies] scraped {len(all_replies)} articles "
+                      f"(headings={parsed.get('headings_found', 0)}, "
+                      f"dropped_after_discover={parsed.get('dropped_after_discover', 0)}, "
+                      f"dropped_nested={parsed.get('dropped_nested', 0)}, "
+                      f"dropped_older={dropped_older}), "
                       f"kept top {len(top_replies)} after self+author filter",
                       file=sys.stderr)
             except Exception as e:
