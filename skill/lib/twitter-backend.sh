@@ -147,6 +147,19 @@ _resolve_chrome_bin() {
 }
 
 ensure_twitter_browser_for_backend() {
+    # AppMaker / BYO Chrome: TWITTER_CDP_URL points at something other than our
+    # default harness URL. Don't touch that browser; just probe it and bail.
+    # The AppMaker bootstrap (and any future BYO setup) is responsible for
+    # keeping the externally-managed Chrome alive.
+    if [ "${TWITTER_CDP_URL:-$_BH_DEFAULT_URL}" != "$_BH_DEFAULT_URL" ]; then
+        local _ext_url="${TWITTER_CDP_URL}"
+        if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
+            return 0
+        fi
+        echo "[$(date +%H:%M:%S)] ERROR: TWITTER_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host (AppMaker /opt/startup.sh, etc)." >&2
+        return 1
+    fi
     # Probe + launch harness Chrome on port 9555 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
         echo "[$(date +%H:%M:%S)] Harness Chrome down on port 9555, launching..." >&2
