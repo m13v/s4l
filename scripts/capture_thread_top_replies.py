@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import re
@@ -44,6 +45,92 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from db import get_conn  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Twitter browser lock (compat with scripts/twitter_browser.py:LOCK_FILE).
+# Defer if another active python:PID holder is mid-run — we don't want to
+# stomp on a concurrent posting cycle inside the same harness Chrome.
+# ---------------------------------------------------------------------------
+
+LOCK_FILE = os.path.expanduser("~/.claude/twitter-browser-lock.json")
+LOCK_EXPIRY_SEC = 600  # treat anything older than 10 min as stale
+_LOCK_SESSION_ID = f"python-capture:{os.getpid()}"
+_LOCK_HELD = False
+
+
+def _pid_alive(holder: str) -> bool:
+    """Holder format is `python[-tag]:<pid>`; check that PID is still alive."""
+    try:
+        pid_part = holder.split(":")[-1]
+        pid = int(pid_part)
+    except (ValueError, IndexError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def acquire_twitter_lock(timeout_sec: int = 0) -> bool:
+    """Try to acquire the twitter browser lock.
+
+    Returns True on success, False if a live holder still owns it. We do NOT
+    wait by default — better to skip a cron tick than to queue up behind a
+    long-running cycle and pile work.
+    """
+    global _LOCK_HELD
+    deadline = time.time() + timeout_sec
+    while True:
+        if os.path.exists(LOCK_FILE):
+            try:
+                with open(LOCK_FILE) as f:
+                    lock = json.load(f)
+                holder = lock.get("session_id", "") or ""
+                age = time.time() - lock.get("timestamp", 0)
+                # Stale by age or holder dead → take it.
+                if age >= LOCK_EXPIRY_SEC:
+                    break
+                # python:PID holder with dead PID → stale, take it.
+                if holder.startswith("python") and not _pid_alive(holder):
+                    break
+                # Live holder. Wait until deadline (default = 0 = don't wait).
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.5)
+                continue
+            except (json.JSONDecodeError, OSError):
+                # Corrupt lockfile — assume safe to take.
+                break
+        break
+    try:
+        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+        with open(LOCK_FILE, "w") as f:
+            json.dump({"session_id": _LOCK_SESSION_ID,
+                       "timestamp": int(time.time())}, f)
+        _LOCK_HELD = True
+        return True
+    except OSError:
+        return False
+
+
+def release_twitter_lock() -> None:
+    global _LOCK_HELD
+    if not _LOCK_HELD:
+        return
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE) as f:
+                lock = json.load(f)
+            if lock.get("session_id") == _LOCK_SESSION_ID:
+                os.remove(LOCK_FILE)
+    except (OSError, json.JSONDecodeError):
+        pass
+    _LOCK_HELD = False
+
+
+atexit.register(release_twitter_lock)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +486,14 @@ def main() -> int:
 
     log(f"[capture-top-replies] {len(pending)} post(s) to process")
 
+    # Acquire the twitter browser lock. We use our own page (not the cycle's
+    # foreground tab), but the lock is the established "don't run concurrent
+    # cycles in this harness" contract — respect it. If held by an active
+    # holder, defer to the next cron tick.
+    if not acquire_twitter_lock(timeout_sec=0):
+        log("[capture-top-replies] twitter browser lock held by another cycle; deferring")
+        return 0
+
     cdp_port = find_twitter_cdp_port()
     if not cdp_port:
         log("[capture-top-replies] no twitter-harness Chrome reachable; skipping run")
@@ -420,17 +515,9 @@ def main() -> int:
             return 4
 
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-        # Reuse a twitter tab if one exists; otherwise create a new one we will
-        # navigate ourselves. Avoid closing pages — twitter cycle owns the
-        # browser, we just borrow it briefly.
-        page = None
-        for pg in ctx.pages:
-            url = pg.url or ""
-            if ("x.com" in url or "twitter.com" in url) and "login" not in url:
-                page = pg
-                break
-        if page is None:
-            page = ctx.new_page()
+        # Always create our OWN page. The harness may have a foreground tab
+        # mid-post; we don't touch it. New tab gets closed before we return.
+        page = ctx.new_page()
 
         for post in pending:
             pid = post["id"]
@@ -482,6 +569,12 @@ def main() -> int:
 
             # tiny pacing so we don't hammer Twitter on a multi-post batch
             time.sleep(2.0)
+
+        # Close our scratch tab; leave the harness Chrome itself alone.
+        try:
+            page.close()
+        except Exception:
+            pass
 
     log(f"[capture-top-replies] done: {json.dumps(summary)}")
     return 0
