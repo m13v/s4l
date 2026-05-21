@@ -131,6 +131,100 @@ STYLES = {
         },
         "note": "NEVER in small/serious subs like r/vipassana. NEVER on LinkedIn.",
     },
+    # ── Instagram-native caption styles (2026-05-21) ──
+    # Distinct from the reply/comment styles above: these describe the
+    # structural ARCHETYPE of a long-form IG caption (1400-2150 chars) +
+    # the matching 4-5 card overlay. Manually classified from the first
+    # 50 posted reels; the defeat-flip arc owns the viral lane (4 of top 5
+    # all-time hits, 1.14M peak). Walkin/studyly are product-gated.
+    "ig_defeat_flip_arc": {
+        "description": (
+            "8-beat first-person caption: 'i was [role] for N years. i posted a "
+            "confident take. last [time], [agent/junior] did [my job] in [short "
+            "time]. i sat at the kitchen counter at midnight with a coffee that "
+            "had gone cold. i changed what i sell. the lesson is [skill] was "
+            "never the job. [skill] was the typing, typing is free now. stop "
+            "[old behavior]. start [new behavior].' Self-deprecating founder "
+            "voice; specific numbers (ages, dollar amounts, dates, view counts); "
+            "lowercase throughout. Top performer for organic IG posts."
+        ),
+        "example": (
+            "i was 33. nine years writing typescript. fast hands, faster "
+            "opinions. last tuesday a 26-year-old shipped my roadmap in 3 days "
+            "with claude code. i sat in my kitchen at 1am with a coffee that "
+            "had gone cold. ... the lesson is the typing was the job. typing is "
+            "free now. stop defending your seat. start running the review."
+        ),
+        "best_in": {
+            "instagram": ["matt_diak", "matthewheartful", "organic AI-lesson reels"],
+        },
+        "note": (
+            "Caption MUST be 1400-2150 chars; overlay is 4 hook-arc cards (2s "
+            "each, white bg, black text). Open 'here is a story.'; close with "
+            "lesson + 'stop X, start Y' imperative. NO product mention (no "
+            "Fazm/Mediar/AppMaker/mk0r/studyly): organic only."
+        ),
+    },
+    "ig_walkin_storefront_playbook": {
+        "description": (
+            "Door-to-door SMB story for mk0r: 'i was [working-class role]. i "
+            "drove past N businesses with no website every day. a friend told "
+            "me about mk0r. i walked in / sat at the counter. i opened mk0r.com, "
+            "typed one prompt, the site built itself while [owner] watched. "
+            "they paid me $[300-500] cash from a [coffee tin / register]. N "
+            "months later i've signed [N] of these = $[N]/mo recurring.' Ends "
+            "with the mk0r.com footer."
+        ),
+        "example": (
+            "i was 27. shipping clerk at a parts warehouse outside fresno for "
+            "4 years, $21 an hour. i drove past 14 auto shops on the way home "
+            "every night. ... i opened mk0r.com on his waiting room table and "
+            "turned it around. he paid me from the register drawer. ... 23 "
+            "auto shops signed since march. 🔗 mk0r.com"
+        ),
+        "best_in": {
+            "instagram": [
+                "matt_diak / mk0r product reels",
+                "spa", "auto shops", "hotel", "retail", "motel",
+            ],
+        },
+        "note": (
+            "Caption is the niche walk-in arc (working-class persona, drive-by "
+            "niche, first walk-in success, recurring revenue total). Overlay "
+            "is the 5-beat playbook (title card + 4 step cards). MUST include "
+            "'mk0r.com' in caption and the mk0r.com footer. project_name='mk0r' "
+            "on the row. Fires when TARGET=product AND selected_project=mk0r."
+        ),
+    },
+    "ig_studyly_failing_student_arc": {
+        "description": (
+            "Failing-student outcome arc for studyly: 'i was [age], [program]. "
+            "i [failed/scored low] on [exam]. i [reread/flashcards/highlights] "
+            "for weeks. nothing worked. a friend sent me studyly.io. i pasted "
+            "my [notes/chapter] in. it quizzed me until i could answer without "
+            "looking. i got [higher score].' Closes with rereading-is-theater "
+            "lesson + studyly.io footer."
+        ),
+        "example": (
+            "i was 19. premed track, third semester, organic chemistry. i "
+            "failed the first orgo exam. 47 out of 100. ... i pasted my notes "
+            "into studyly.io at 2am. ... i got 78 on the second exam. ... the "
+            "lesson is rereading is recognizing. close the book. let something "
+            "ask you. studyly.io"
+        ),
+        "best_in": {
+            "instagram": [
+                "matt_diak / matthewheartful studyly product reels",
+                "premed", "MCAT", "nursing pharm",
+            ],
+        },
+        "note": (
+            "Caption is shorter than mk0r (1400-1900 chars). 'here is a story.' "
+            "opener optional. MUST include 'studyly.io' footer. "
+            "project_name='studyly'. Lesson is always rereading-is-theater. "
+            "Fires when TARGET=product AND selected_project=studyly."
+        ),
+    },
 }
 
 # Valid tone styles. Same set for posting and replying: tone is a separate
@@ -370,6 +464,27 @@ PLATFORM_POLICY = {
         "never": [],
         "note": "Agent voice ('my human'). Conversational but substantive. 2-4 sentences.",
     },
+    "instagram": {
+        # Reply/comment styles don't apply to long-form IG captions.
+        # Product styles are project-gated and assigned by the render
+        # script directly (see skill/run-instagram-render.sh) so the
+        # picker can't accidentally roll a "walkin" style for an organic
+        # matt_diak post.
+        "never": [
+            "critic", "storyteller", "pattern_recognizer", "curious_probe",
+            "contrarian", "data_point_drop", "snarky_oneliner",
+            "ig_walkin_storefront_playbook",
+            "ig_studyly_failing_student_arc",
+        ],
+        "note": (
+            "IG captions are long-form ORIGINAL posts (1400-2150 chars), "
+            "lowercase, 8-beat story arc. Overlay is 4-5 short cards "
+            "(2s each, white bg, black text). Voice is self-deprecating "
+            "founder confession. NO em/en dashes. The picker only fires "
+            "on TARGET=organic; product posts assign style directly from "
+            "selected_project."
+        ),
+    },
 }
 
 # Minimum sample size before we trust a style's avg_upvotes.
@@ -514,30 +629,11 @@ def get_dynamic_tiers(platform, context="posting"):
 
 
 # ── Target distribution ─────────────────────────────────────────────
-
-def _last_picks(platform, limit=10):
-    """Return the last `limit` engagement_style picks on `platform`, newest first.
-
-    Used by the prompt to show recent pick history so the LLM can cool off a
-    style that's been over-used. Returns [] on any error.
-
-    Routes through the social-autoposter-website API (no direct Neon access)
-    so VMs / sandboxes without a DATABASE_URL still get the recent-pick list.
-    """
-    try:
-        import os
-        import sys as _sys
-        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from http_api import api_get
-        resp = api_get(
-            "/api/v1/engagement-styles/last-picks",
-            {"platform": platform, "limit": int(limit)},
-        )
-        data = (resp or {}).get("data") or {}
-        picks = data.get("picks") or []
-        return [str(p) for p in picks if p]
-    except Exception:
-        return []
+# (_last_picks helper removed 2026-05-19 alongside the legacy
+# "show all 9 styles" prompt block it served. The picker doesn't use
+# recent-pick history; it samples weighted-random from the top-N each
+# turn. The `/api/v1/engagement-styles/last-picks` endpoint is still
+# live for the dashboard's audit surface.)
 
 
 def compute_target_distribution(platform, context="posting"):
@@ -924,155 +1020,26 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
 # ── Prompt generators ───────────────────────────────────────────────
 
 def get_styles_prompt(platform, context="posting", assignment=None):
-    """Generate the engagement styles prompt block for a given platform.
+    """Generate the engagement-styles prompt block for a platform.
 
-    2026-05-19 picker rollout: this function now internally calls
-    pick_style_for_post() and returns the compact assigned-style prompt
-    (one style + description + example + note, or invent mode with top-N
-    references).
+    Always routes through the picker: one style is assigned (weighted by
+    live click-driven performance over the recent window) and the prompt
+    embeds that single style's description + example + note + grounding
+    rule. The model is told to use it, not to choose from a menu.
 
     Args:
         platform: "reddit", "twitter", "linkedin", "github", "moltbook"
         context: "posting" (new posts) or "replying" (engagement replies)
         assignment: an optional pre-computed pick_style_for_post() result.
                     Orchestrators that need to know the picked style (to
-                    filter top_performers, log drift, etc.) pick once,
-                    then pass the assignment in to avoid double-picking.
-                    Callers that don't care can omit it and get a fresh
-                    pick.
-
-    Legacy "show all styles, let the model pick" prompt is reachable via
-    SAPS_LEGACY_STYLES_PROMPT=1 for rollback / A/B comparison only. Not
-    used in normal operation.
+                    filter top_performers, pin the literal style name into
+                    their JSON output example, etc.) pick once, then pass
+                    the assignment in here to avoid double-picking. Callers
+                    that don't care can omit it and get a fresh pick.
     """
-    if os.environ.get("SAPS_LEGACY_STYLES_PROMPT") != "1":
-        if assignment is None:
-            assignment = pick_style_for_post(platform, context=context)
-        return get_assigned_style_prompt(platform, assignment, context=context)
-
-    policy = PLATFORM_POLICY.get(platform, PLATFORM_POLICY["reddit"])
-    never_styles = set(policy.get("never", []))
-
-    targets = compute_target_distribution(platform, context)
-    targets = [t for t in targets if t["style"] not in never_styles]
-    last_picks = _last_picks(platform, limit=10)
-
-    recent_counts = {t["style"]: 0 for t in targets}
-    for p in last_picks:
-        if p in recent_counts:
-            recent_counts[p] += 1
-    pick_n = max(1, len(last_picks))
-    under_represented = []
-    over_represented = []
-    for t in targets:
-        recent_pct = (recent_counts[t["style"]] / pick_n) * 100.0
-        if recent_pct < t["pct"] - 5.0:
-            under_represented.append(t["style"])
-        elif recent_pct > t["pct"] + 10.0:
-            over_represented.append(t["style"])
-
-    lines = []
-    lines.append("## Engagement styles (pick the one that fits — and that we're under-using)")
-    lines.append("")
-    lines.append(f"Match your style to the conversation. {policy['note']}")
-    lines.append("")
-    lines.append(
-        f"Target pick distribution on {platform} (derived from a live "
-        f"click-weighted score = clicks*{CLICK_WEIGHT:g} + comments*{COMMENT_WEIGHT:g} "
-        f"+ upvotes, sharpened by exponent {WEIGHT_EXPONENT:g} so the winner gets "
-        f"most traffic; {STYLE_FLOOR_PCT:g}% floor per style so every style keeps "
-        f"getting tested). A real human click is worth far more than a passive "
-        f"upvote, so click-driving styles rank highest:"
-    )
-    lines.append("")
-    for t in targets:
-        if t["trusted"]:
-            sample = (
-                f"score {t['score']:.2f} "
-                f"(clicks {t['avg_clicks']:.2f} · cm {t['avg_cm']:.2f} · "
-                f"up {t['avg_up']:.2f}) · n={t['n']}"
-            )
-        elif t.get("is_candidate"):
-            sample = f"n={t['n']} (candidate, model-invented; floor only)"
-        else:
-            sample = f"n={t['n']} (below trust threshold; floor only)"
-        tag = " [NEW]" if t.get("is_candidate") else ""
-        lines.append(f"- **{t['style']}**{tag}: {t['pct']:.0f}%  ({sample})")
-    lines.append("")
-    if last_picks:
-        lines.append(f"Your last {len(last_picks)} picks on {platform} (newest first): {', '.join(last_picks)}")
-    else:
-        lines.append(f"Your last picks on {platform}: (none yet)")
-    if under_represented:
-        lines.append(f"Under-used vs target right now (lean toward these): {', '.join(under_represented)}")
-    if over_represented:
-        lines.append(f"Over-used vs target right now (lean away): {', '.join(over_represented)}")
-    lines.append("")
-    lines.append("Rules:")
-    lines.append("- Prefer a style whose recent pick-rate is BELOW its target% unless another style clearly fits the thread better.")
-    lines.append("- The top style is the winner to reach for, not the default — pick it when it fits, not by habit.")
-    lines.append("- Every style in the list is allowed; there is no hard tier.")
-    if never_styles:
-        lines.append(f"- Never on {platform}: {', '.join(sorted(never_styles))}.")
-    lines.append("")
-
-    full_universe = get_all_styles()
-    for t in targets:
-        style = full_universe.get(t["style"])
-        if not style:
-            continue
-        best = style.get("best_in", {}).get(platform, [])
-        tag = " [NEW, model-invented candidate]" if t.get("is_candidate") else ""
-        lines.append(f"**{t['style']}**{tag}: {style['description']}")
-        lines.append(f'  "{style["example"]}"')
-        if best:
-            lines.append(f"  Best in: {', '.join(best)}.")
-        if style.get("note"):
-            lines.append(f"  {style['note']}")
-        if t.get("is_candidate") and style.get("why_existing_didnt_fit"):
-            lines.append(f"  Invented because: {style['why_existing_didnt_fit']}")
-        lines.append("")
-
-    lines.append(
-        "## Inventing a new style"
-    )
-    lines.append(
-        "If none of the styles above genuinely fit the thread, you may invent "
-        "a new one. To do so, set `engagement_style` to your new name and ALSO "
-        "include a `new_style` block in the same JSON object:"
-    )
-    lines.append("")
-    lines.append('  "new_style": {')
-    lines.append('    "description": "<what this style is, in one sentence>",')
-    lines.append('    "example": "<a short example utterance>",')
-    lines.append('    "note": "<when to use, when not to>",')
-    lines.append('    "why_existing_didnt_fit": "<why none of the styles above worked here>"')
-    lines.append('  }')
-    lines.append("")
-    lines.append(
-        "Use this sparingly. If an existing style is even 80% right, prefer "
-        "it. New styles are accepted as candidates and only graduate to full "
-        "weight after they prove out across multiple posts."
-    )
-    lines.append("")
-
-    if context == "replying":
-        lines.append(
-            "## Project recommendation (separate dimension from tone)"
-        )
-        lines.append(
-            "Tone and intent are independent. Pick one tone from the list above. "
-            "SEPARATELY, up to ~20% of replies should casually mention a project "
-            "from config (Tier 2 / Tier 3 of the link strategy). When you do, "
-            "pass --is-recommendation to reply_db.py so the DB reflects the intent. "
-            "Do NOT pick a tone called 'recommendation' — that field is tone, not intent."
-        )
-        lines.append("")
-
-    lines.append('AVOID the "pleaser/validator" style ("this is great", "had similar results", "100% agree"). It consistently gets the lowest engagement across all platforms.')
-    lines.append("")
-    lines.append(get_grounding_rule())
-    return "\n".join(lines)
+    if assignment is None:
+        assignment = pick_style_for_post(platform, context=context)
+    return get_assigned_style_prompt(platform, assignment, context=context)
 
 
 def get_grounding_rule():
