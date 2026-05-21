@@ -230,6 +230,12 @@ function installBrowserHarness() {
   if (onAppMaker) {
     console.log('  AppMaker VM detected -> installing harness toolchain (deps); MCP will be pointed at port 9222');
     writeAppMakerEnvFile();
+    // scripts/run_claude.sh uses `uuidgen` for session IDs on AUP-retry. The
+    // base image ships libuuid1 (shared lib) but not the CLI tool — the
+    // package is `uuid-runtime`. Without it, run_claude.sh's session_id
+    // generation falls back to empty string and claude --session-id breaks.
+    console.log('    installing uuid-runtime (uuidgen) for run_claude.sh...');
+    spawnSync('bash', ['-lc', 'command -v uuidgen >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uuid-runtime'], { stdio: 'inherit' });
   }
   console.log('  setting up browser-harness (twitter-harness MCP backend)...');
 
