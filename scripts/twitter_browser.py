@@ -810,6 +810,81 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                       "returning null — caller should skip without retry",
                       file=sys.stderr)
 
+            # Snapshot the top 3 best-performing human replies on this thread
+            # AT post-success time. The page is already on the candidate
+            # thread URL with replies visible (we just posted there). We
+            # filter out our own reply and the thread author, sort by likes,
+            # and keep the top 3. Failures are swallowed: an empty top_replies
+            # list is the correct downstream signal ("nothing to track").
+            top_replies = []
+            try:
+                self_handle = (our_handle() or "").lower().lstrip("@")
+                m_author = re.search(r"(?:x|twitter)\.com/([^/]+)/status", tweet_url)
+                thread_author_handle = (m_author.group(1).lower() if m_author else "")
+                scrape_js = """
+                (() => {
+                  const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+                  if (articles.length < 1) return JSON.stringify({replies: [], article_count: articles.length});
+                  const replyArticles = articles.slice(1, 31);
+                  const replies = [];
+                  for (const art of replyArticles) {
+                    try {
+                      const linkEls = art.querySelectorAll('a[href*="/status/"]');
+                      let reply_url = null;
+                      for (const a of linkEls) {
+                        const m = a.getAttribute('href').match(/^\\/[^/]+\\/status\\/\\d+$/);
+                        if (m) { reply_url = 'https://x.com' + a.getAttribute('href'); break; }
+                      }
+                      if (!reply_url) continue;
+                      const tid_m = reply_url.match(/\\/status\\/(\\d+)/);
+                      const reply_tweet_id = tid_m ? tid_m[1] : null;
+                      const handle_m = reply_url.match(/x\\.com\\/([^/]+)\\/status/);
+                      const reply_author_handle = handle_m ? handle_m[1] : null;
+                      const userName = art.querySelector('[data-testid="User-Name"]');
+                      const reply_author = userName ? (userName.textContent || '').trim().slice(0, 80) : null;
+                      const textEl = art.querySelector('[data-testid="tweetText"]');
+                      const reply_content = textEl ? (textEl.textContent || '').trim().slice(0, 500) : null;
+                      const groupEl = art.querySelector('[role="group"][aria-label]');
+                      let likes = 0, replies_count = 0, retweets = 0, views = 0;
+                      if (groupEl) {
+                        const label = groupEl.getAttribute('aria-label') || '';
+                        const lm = label.match(/(\\d[\\d,]*)\\s+(?:Like|Likes)/i);
+                        const rm = label.match(/(\\d[\\d,]*)\\s+(?:Reply|Replies)/i);
+                        const tm = label.match(/(\\d[\\d,]*)\\s+(?:Repost|Reposts)/i);
+                        const vm = label.match(/(\\d[\\d,]*)\\s+(?:View|Views)/i);
+                        likes = lm ? parseInt(lm[1].replace(/,/g, ''), 10) : 0;
+                        replies_count = rm ? parseInt(rm[1].replace(/,/g, ''), 10) : 0;
+                        retweets = tm ? parseInt(tm[1].replace(/,/g, ''), 10) : 0;
+                        views = vm ? parseInt(vm[1].replace(/,/g, ''), 10) : 0;
+                      }
+                      replies.push({reply_url, reply_tweet_id, reply_author_handle, reply_author, reply_content, likes, replies: replies_count, retweets, views});
+                    } catch (e) {}
+                  }
+                  return JSON.stringify({replies, article_count: articles.length});
+                })()
+                """
+                raw = page.evaluate(scrape_js)
+                parsed = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                all_replies = parsed.get("replies", []) or []
+                filtered = []
+                for r in all_replies:
+                    h = (r.get("reply_author_handle") or "").lower().lstrip("@")
+                    if not h:
+                        continue
+                    if self_handle and h == self_handle:
+                        continue
+                    if thread_author_handle and h == thread_author_handle:
+                        continue
+                    filtered.append(r)
+                filtered.sort(key=lambda r: int(r.get("likes") or 0), reverse=True)
+                top_replies = filtered[:3]
+                print(f"[top_replies] scraped {len(all_replies)} articles, "
+                      f"kept top {len(top_replies)} after self+author filter",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"[top_replies] scrape failed: {e}", file=sys.stderr)
+                top_replies = []
+
             return {
                 "ok": True,
                 "tweet_url": tweet_url,
@@ -817,6 +892,7 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 "verified": verified,
                 "applied_campaigns": applied_campaigns,
                 "final_text": text,
+                "top_replies": top_replies,
             }
 
         finally:
