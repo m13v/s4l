@@ -239,7 +239,9 @@ SCRAPE_JS = r"""
   }
   if (parentIdx < 0) parentIdx = 0;
 
-  const replies = articles.slice(parentIdx + 1, parentIdx + 4);
+  // Take all articles after the parent. Caller filters + sorts in Python.
+  // Caps at 30 to keep evaluate() payload tight.
+  const replies = articles.slice(parentIdx + 1, parentIdx + 1 + 30);
   if (replies.length === 0) return { ok: true, replies: [] };
 
   // Twitter uses aria-label on the action buttons in the form:
@@ -325,7 +327,8 @@ SCRAPE_JS = r"""
     }
 
     out.push({
-      rank: i + 1,
+      // raw_index = order Twitter showed them; we'll re-rank by likes in Python.
+      raw_index: i,
       reply_url: permalink,
       reply_tweet_id: replyId,
       reply_author: displayName,
@@ -339,11 +342,14 @@ SCRAPE_JS = r"""
 """
 
 
-def scrape_thread(page, thread_url: str, log_prefix: str = "") -> dict:
-    """Navigate to thread_url and return parsed top-3 replies.
+def scrape_thread(page, thread_url: str, our_handle: str | None,
+                  top_n: int = 3, log_prefix: str = "") -> dict:
+    """Navigate to thread_url, scroll to lazy-load replies, then return the
+    top N human replies sorted by like count.
 
-    Reuses the existing harness page. Waits up to 15s for at least one
-    reply article to render. Returns {"ok": bool, "replies": [...], "reason": str}.
+    Filters out: our own posting handle (we don't compete with ourselves),
+    pinned-context tweets (replied-to context shown above the parent), and
+    replies with no permalink (the embedded "Show more replies" rows).
     """
     # Normalize the URL so we hit x.com (the harness usually has x.com tabs).
     url = thread_url.replace("twitter.com", "x.com")
@@ -354,7 +360,6 @@ def scrape_thread(page, thread_url: str, log_prefix: str = "") -> dict:
         return {"ok": False, "reason": f"goto_failed: {e}"}
 
     # Wait for at least 2 articles to appear (parent + at least one reply).
-    # 15s ceiling — fresh threads with no replies still finish here.
     deadline = time.time() + 15
     while time.time() < deadline:
         try:
@@ -367,8 +372,25 @@ def scrape_thread(page, thread_url: str, log_prefix: str = "") -> dict:
             pass
         time.sleep(0.5)
 
-    # Give the engagement counts a beat to hydrate (they render lazily).
-    time.sleep(1.5)
+    # Scroll a few times to lazy-load more replies. Twitter only renders ~3-5
+    # in the initial viewport; scrolling pulls in the rest of the thread.
+    for _ in range(4):
+        try:
+            page.evaluate("() => window.scrollBy(0, window.innerHeight * 1.2)")
+        except Exception:
+            break
+        time.sleep(0.8)
+
+    # Scroll back up so the JS evaluator sees the parent tweet first (the
+    # parent-index lookup walks from the top of the article list).
+    try:
+        page.evaluate("() => window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    time.sleep(0.8)
+
+    # Give engagement counts a beat to hydrate (they render lazily).
+    time.sleep(1.2)
 
     try:
         result = page.evaluate(SCRAPE_JS)
@@ -378,10 +400,45 @@ def scrape_thread(page, thread_url: str, log_prefix: str = "") -> dict:
     if not isinstance(result, dict):
         return {"ok": False, "reason": "bad_result_shape"}
 
+    if not result.get("ok"):
+        return result
+
+    raw_replies = result.get("replies") or []
+
+    # ---- Filter and sort -------------------------------------------------
+    our_handle_lc = (our_handle or "").lower().lstrip("@")
+    filtered = []
+    seen_urls = set()
+    for r in raw_replies:
+        url_r = r.get("reply_url")
+        if not url_r:
+            continue
+        # De-dup by permalink (same reply can appear twice if the DOM mounted
+        # then re-mounted during our scroll).
+        if url_r in seen_urls:
+            continue
+        seen_urls.add(url_r)
+        handle = (r.get("reply_author_handle") or "").lower().lstrip("@")
+        if our_handle_lc and handle == our_handle_lc:
+            continue  # skip our own reply
+        filtered.append(r)
+
+    # Sort by likes desc, then views desc as tiebreaker. None coerced to -1
+    # so missing-stats replies sink to the bottom but don't crash compare.
+    def sort_key(r):
+        return (-(r.get("likes") or 0), -(r.get("views") or 0), r.get("raw_index", 999))
+    filtered.sort(key=sort_key)
+
+    top = filtered[:top_n]
+    # Re-rank 1..N based on sorted order (this is rank_at_capture in the DB).
+    for i, r in enumerate(top, start=1):
+        r["rank"] = i
+
     if log_prefix:
-        n = len(result.get("replies") or [])
-        print(f"{log_prefix} scraped {n} top replies from {url}", flush=True)
-    return result
+        print(f"{log_prefix} scraped {len(raw_replies)} replies, filtered → "
+              f"{len(filtered)} non-self, kept top {len(top)}", flush=True)
+    return {"ok": True, "replies": top, "raw_count": len(raw_replies),
+            "filtered_count": len(filtered)}
 
 
 # ---------------------------------------------------------------------------
@@ -524,8 +581,17 @@ def main() -> int:
             thread_url = post["thread_url"]
             prefix = f"[capture-top-replies post={pid}]"
 
+            # Extract our posting handle from our_url so we can skip our own reply.
+            our_url = post.get("our_url") or ""
+            our_handle_m = re.search(r"(?:x\.com|twitter\.com)/([^/]+)/status",
+                                     our_url)
+            our_handle = our_handle_m.group(1) if our_handle_m else None
+
             try:
-                result = scrape_thread(page, thread_url, log_prefix=prefix if not args.quiet else "")
+                result = scrape_thread(
+                    page, thread_url, our_handle=our_handle,
+                    log_prefix=prefix if not args.quiet else "",
+                )
             except Exception as e:
                 log(f"{prefix} scrape exception: {e}")
                 summary["errors"] += 1
