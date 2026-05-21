@@ -152,11 +152,17 @@ def match_project(tweet_text, search_topic, config):
     return None
 
 
-def upsert_candidates(tweets, config, batch_id=None):
+def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
     """Score and upsert tweet candidates into DB.
 
     If batch_id is provided, also populates T0 engagement columns and tags
     the row with batch_id so Phase 2 of the cycle can re-poll only this batch.
+
+    If attempts_map is provided (dict keyed by (query, project) -> attempt_id),
+    stamps twitter_candidates.search_attempt_id so dashboard per-query stats
+    can attribute each posted candidate to the exact discovering search,
+    rather than fanning out (batch_id, project_name) across every query the
+    batch ran for that project (2026-05-21 bug fix).
 
     Migrated 2026-05-18 to call the s4l.ai HTTP API:
       - dedup probe -> GET /api/v1/posts/thread-urls?platform=twitter
@@ -165,6 +171,7 @@ def upsert_candidates(tweets, config, batch_id=None):
       - freshness gate -> POST /api/v1/twitter-candidates/expire-stale
         (default 18h window; never deletes rows — status flip only)
     """
+    attempts_map = attempts_map or {}
     # Get already-posted thread URLs for dedup. Scope per-account so the mk0r
     # VM running as @matt_diak doesn't skip a tweet that @m13v_ posted on
     # (or vice versa). Falls back to unscoped when the resolver can't pin a
@@ -248,6 +255,18 @@ def upsert_candidates(tweets, config, batch_id=None):
             # always pass it explicitly.
             "our_account": _twitter_handle or "",
         }
+        # Stamp the exact discovering search_attempt when the scanner gave us
+        # the literal query that surfaced this tweet AND the log script wrote
+        # an attempts map. Dashboard SQL prefers this column over the legacy
+        # (batch_id, project_name) fanout, which credits dud queries with
+        # posts they never surfaced.
+        _q = (tweet.get("query") or "").strip()
+        if _q and attempts_map:
+            attempt_id = attempts_map.get((_q, project))
+            if attempt_id is None:
+                attempt_id = attempts_map.get((_q, None))
+            if attempt_id is not None:
+                body["search_attempt_id"] = int(attempt_id)
         # T0 columns only stamped when this row was discovered inside a cycle
         # batch, mirroring the conditional in the original SQL.
         if batch_id:
@@ -285,6 +304,13 @@ def main():
     parser.add_argument("--file", help="Read tweets from JSON file instead of stdin")
     parser.add_argument("--expire-only", action="store_true", help="Only expire stale pending rows (status flip; no row deletion)")
     parser.add_argument("--batch-id", help="Tag these candidates with a batch id and populate T0 columns")
+    parser.add_argument(
+        "--attempts",
+        help="Path to JSON list [{query, project, attempt_id}, ...] from "
+             "log_twitter_search_attempts.py --attempts-out. When provided, "
+             "stamps twitter_candidates.search_attempt_id per tweet so the "
+             "dashboard can attribute posts to the exact discovering query.",
+    )
     args = parser.parse_args()
 
     config_path = os.path.expanduser("~/social-autoposter/config.json")
@@ -314,7 +340,33 @@ def main():
     if not isinstance(tweets, list):
         tweets = [tweets]
 
-    upsert_candidates(tweets, config, batch_id=args.batch_id)
+    attempts_map = {}
+    if args.attempts and os.path.exists(args.attempts):
+        try:
+            with open(args.attempts) as f:
+                rows = json.load(f)
+            for r in rows or []:
+                if not isinstance(r, dict):
+                    continue
+                q = (r.get("query") or "").strip()
+                aid = r.get("attempt_id")
+                if not q or aid is None:
+                    continue
+                proj = r.get("project") or None
+                attempts_map[(q, proj)] = int(aid)
+            print(
+                f"score_twitter_candidates: loaded {len(attempts_map)} "
+                f"(query, project) -> attempt_id entries from {args.attempts}",
+                file=sys.stderr,
+            )
+        except (OSError, ValueError) as e:
+            print(
+                f"score_twitter_candidates: could not read attempts map "
+                f"{args.attempts}: {e}",
+                file=sys.stderr,
+            )
+
+    upsert_candidates(tweets, config, batch_id=args.batch_id, attempts_map=attempts_map)
 
 
 if __name__ == "__main__":
