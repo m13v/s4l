@@ -1678,7 +1678,14 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
     # only meaningful while the parent post is also being polled.
     ttr_total = ttr_updated = ttr_changed = ttr_deleted = ttr_errors = 0
     if not audit_mode:
-        ttr_rows = _http_list_twitter_top_replies_to_refresh(stale_hours=5)
+        # Freshness override for ad-hoc reruns. Cron uses the 5h default;
+        # setting SAPS_TTR_STALE_HOURS=0 forces every active row through this
+        # cycle (useful right after a capture cycle to watch the refresh loop).
+        try:
+            _ttr_stale = float(os.environ.get("SAPS_TTR_STALE_HOURS", "5"))
+        except ValueError:
+            _ttr_stale = 5.0
+        ttr_rows = _http_list_twitter_top_replies_to_refresh(stale_hours=_ttr_stale)
         for row in ttr_rows:
             ttr_total += 1
             ttr_id = row.get("id")
