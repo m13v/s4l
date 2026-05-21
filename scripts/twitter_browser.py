@@ -810,12 +810,13 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                       "returning null — caller should skip without retry",
                       file=sys.stderr)
 
-            # Snapshot the top 3 best-performing human replies on this thread
+            # Snapshot the single best-performing human reply on this thread
             # AT post-success time. The page is already on the candidate
             # thread URL with replies visible (we just posted there). We
             # filter out our own reply and the thread author, sort by likes,
-            # and keep the top 3. Failures are swallowed: an empty top_replies
-            # list is the correct downstream signal ("nothing to track").
+            # and keep only the top one. Failures are swallowed: an empty
+            # top_replies list is the correct downstream signal ("nothing
+            # to track").
             top_replies = []
             try:
                 self_handle = (our_handle() or "").lower().lstrip("@")
@@ -877,7 +878,7 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         continue
                     filtered.append(r)
                 filtered.sort(key=lambda r: int(r.get("likes") or 0), reverse=True)
-                top_replies = filtered[:3]
+                top_replies = filtered[:1]
                 print(f"[top_replies] scraped {len(all_replies)} articles, "
                       f"kept top {len(top_replies)} after self+author filter",
                       file=sys.stderr)
