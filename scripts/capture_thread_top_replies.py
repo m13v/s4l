@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""capture_thread_top_replies.py - snapshot top N existing replies on threads
+where we (recently) posted a comment, so we can benchmark our reply's
+engagement curve against the human top-reply curve over time.
+
+This script is intentionally DECOUPLED from the in-flow posting path
+(`scripts/twitter_post_plan.py` is locked; we don't edit it). Instead, it
+polls `posts` for fresh twitter comment-rows that don't yet have a top-reply
+snapshot, attaches to the running twitter-harness Chrome via CDP, navigates
+to each thread, scrapes the top 3 replies (Twitter default-sort = "Most
+relevant" ≈ likes-weighted), and INSERTs into `thread_top_replies` while
+stamping `posts.top_replies_captured_at` so the same row isn't reprocessed.
+
+Tradeoff: the snapshot lags posted_at by ~1-2 min (whatever the launchd
+cadence is). For threads older than ~10 min at our-post time, the top-reply
+set is essentially stationary, so the lag is acceptable. For very fresh
+threads (our post within minutes of the OP) the top-reply set is more
+volatile, so `likes_at_capture` is "near-post-time" not "exact-post-time".
+
+Driven by launchd `com.m13v.social-capture-twitter-top-replies` (~2 min).
+
+Usage:
+    python3 scripts/capture_thread_top_replies.py            # default cadence run
+    python3 scripts/capture_thread_top_replies.py --post-id N  # capture one specific post
+    python3 scripts/capture_thread_top_replies.py --window-hours 2 --limit 10
+    python3 scripts/capture_thread_top_replies.py --dry-run   # scrape but don't write
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+# Ensure scripts/ is on sys.path so `import db` works regardless of CWD.
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from db import get_conn  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# CDP discovery + Playwright attach (mirrors the pattern from
+# scripts/twitter_browser.py:find_twitter_cdp_port / get_browser_and_page,
+# kept inline so we don't import a locked module's side effects).
+# ---------------------------------------------------------------------------
+
+def find_twitter_cdp_port() -> int | None:
+    """Scan Chrome processes for --remote-debugging-port; return the first
+    one serving an x.com / twitter.com tab.
+    """
+    try:
+        ps_out = subprocess.check_output(["ps", "aux"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    import urllib.request
+    ports = set()
+    for line in ps_out.splitlines():
+        if "chromium" not in line.lower() and "chrome" not in line.lower():
+            continue
+        m = re.search(r"remote-debugging-port=(\d+)", line)
+        if m:
+            ports.add(int(m.group(1)))
+    best_port = None
+    for port in sorted(ports):
+        try:
+            resp = urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
+            pages = json.loads(resp.read())
+            twitter_pages = [
+                p for p in pages
+                if "x.com" in p.get("url", "") or "twitter.com" in p.get("url", "")
+            ]
+            if not twitter_pages:
+                continue
+            # Prefer ports with logged-in pages (home, status, notifications)
+            logged_in = any(
+                ("home" in p.get("url", "") or "status" in p.get("url", "") or
+                 "notifications" in p.get("url", "") or "chat" in p.get("url", ""))
+                and "login" not in p.get("url", "")
+                for p in twitter_pages
+            )
+            if logged_in:
+                return port
+            if best_port is None:
+                best_port = port
+        except Exception:
+            continue
+    return best_port
+
+
+# ---------------------------------------------------------------------------
+# Twitter count-parsing
+# ---------------------------------------------------------------------------
+
+_COUNT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*([KMB]?)", re.IGNORECASE)
+
+
+def parse_twitter_count(s: str | None) -> int | None:
+    """Parse '1.2K', '342', '5,123', '1M' into an integer.
+
+    Twitter aria-labels look like '143 likes' or '1.2K replies'; we strip
+    everything but the numeric prefix and the optional K/M/B suffix.
+    """
+    if not s:
+        return None
+    s = s.strip().replace(",", "")
+    m = _COUNT_RE.search(s)
+    if not m:
+        return None
+    num = float(m.group(1))
+    suf = (m.group(2) or "").upper()
+    mult = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[suf]
+    return int(num * mult)
+
+
+# ---------------------------------------------------------------------------
+# Page-side scraper. Runs inside the harness Chrome via page.evaluate().
+# Returns a list of {rank, reply_url, reply_tweet_id, reply_author,
+# reply_author_handle, reply_content, likes, replies, retweets, views}.
+# We take the first 3 article[data-testid="tweet"] elements AFTER the parent
+# tweet (the one whose status link matches the thread URL).
+# ---------------------------------------------------------------------------
+
+SCRAPE_JS = r"""
+() => {
+  const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  if (articles.length === 0) return { ok: false, reason: "no_articles" };
+
+  const threadId = (location.pathname.match(/\/status\/(\d+)/) || [])[1];
+  if (!threadId) return { ok: false, reason: "no_thread_id" };
+
+  // Find the parent tweet: first article that contains a time-anchored link
+  // to `/status/<threadId>`. If we can't find it, fall back to article[0].
+  let parentIdx = -1;
+  for (let i = 0; i < articles.length; i++) {
+    const timeLinks = articles[i].querySelectorAll('a[href*="/status/"]');
+    for (const a of timeLinks) {
+      const href = a.getAttribute('href') || '';
+      if (href.includes('/status/' + threadId) && a.querySelector('time')) {
+        parentIdx = i;
+        break;
+      }
+    }
+    if (parentIdx >= 0) break;
+  }
+  if (parentIdx < 0) parentIdx = 0;
+
+  const replies = articles.slice(parentIdx + 1, parentIdx + 4);
+  if (replies.length === 0) return { ok: true, replies: [] };
+
+  // Twitter uses aria-label on the action buttons in the form:
+  //   "143 replies, 12 reposts, 1.2K likes, 25 bookmarks, 5,432 views"
+  // The full label hangs off the group wrapper [role="group"][aria-label].
+  // Per-button aria-labels are more reliable for newer DOMs.
+  const parseCountLabel = (label) => {
+    if (!label) return null;
+    const m = label.match(/([\d.,]+)\s*([KMB]?)/i);
+    if (!m) return 0;
+    const num = parseFloat(m[1].replace(/,/g, ''));
+    const suf = (m[2] || '').toUpperCase();
+    const mult = { "": 1, K: 1e3, M: 1e6, B: 1e9 }[suf];
+    return Math.round(num * mult);
+  };
+
+  const out = [];
+  for (let i = 0; i < replies.length; i++) {
+    const art = replies[i];
+
+    // Permalink: prefer the link wrapping the <time> element.
+    let permalink = null;
+    const timeLinks = art.querySelectorAll('a[href*="/status/"]');
+    for (const a of timeLinks) {
+      if (a.querySelector('time')) { permalink = a.href; break; }
+    }
+    if (!permalink && timeLinks[0]) permalink = timeLinks[0].href;
+
+    const tweetIdMatch = permalink ? permalink.match(/\/status\/(\d+)/) : null;
+    const replyId = tweetIdMatch ? tweetIdMatch[1] : null;
+
+    // Author handle = the path segment before /status/.
+    let handle = null;
+    if (permalink) {
+      const u = new URL(permalink);
+      const m = u.pathname.match(/^\/([^/]+)\/status\//);
+      if (m) handle = m[1];
+    }
+
+    // Display name: first User-Name span text. data-testid="User-Name" wraps
+    // both display + handle; take the first span with a text node.
+    let displayName = null;
+    const nameEl = art.querySelector('[data-testid="User-Name"]');
+    if (nameEl) {
+      const span = nameEl.querySelector('span');
+      if (span) displayName = (span.innerText || '').trim() || null;
+    }
+
+    // Tweet text
+    const textEl = art.querySelector('[data-testid="tweetText"]');
+    const text = textEl ? (textEl.innerText || '').trim() : null;
+
+    // Engagement counts via per-action aria-label.
+    const btnLabel = (selector) => {
+      const el = art.querySelector(selector);
+      if (!el) return null;
+      return el.getAttribute('aria-label') || null;
+    };
+    const likes = parseCountLabel(btnLabel('[data-testid="like"]'));
+    const replyN = parseCountLabel(btnLabel('[data-testid="reply"]'));
+    const retweets = parseCountLabel(btnLabel('[data-testid="retweet"]'));
+
+    // Views: there's an anchor to /analytics with aria-label like "5,432 views".
+    let views = null;
+    const viewLinks = art.querySelectorAll('a[href$="/analytics"], a[aria-label*="View"]');
+    for (const a of viewLinks) {
+      const v = parseCountLabel(a.getAttribute('aria-label'));
+      if (v != null) { views = v; break; }
+    }
+    // Fallback: scrape the group wrapper.
+    if (views == null) {
+      const group = art.querySelector('[role="group"][aria-label]');
+      if (group) {
+        const lbl = group.getAttribute('aria-label') || '';
+        const vm = lbl.match(/([\d.,]+)\s*([KMB]?)\s*views?/i);
+        if (vm) {
+          const num = parseFloat(vm[1].replace(/,/g, ''));
+          const suf = (vm[2] || '').toUpperCase();
+          const mult = { "": 1, K: 1e3, M: 1e6, B: 1e9 }[suf];
+          views = Math.round(num * mult);
+        }
+      }
+    }
+
+    out.push({
+      rank: i + 1,
+      reply_url: permalink,
+      reply_tweet_id: replyId,
+      reply_author: displayName,
+      reply_author_handle: handle,
+      reply_content: text,
+      likes, replies: replyN, retweets, views,
+    });
+  }
+  return { ok: true, replies: out };
+}
+"""
+
+
+def scrape_thread(page, thread_url: str, log_prefix: str = "") -> dict:
+    """Navigate to thread_url and return parsed top-3 replies.
+
+    Reuses the existing harness page. Waits up to 15s for at least one
+    reply article to render. Returns {"ok": bool, "replies": [...], "reason": str}.
+    """
+    # Normalize the URL so we hit x.com (the harness usually has x.com tabs).
+    url = thread_url.replace("twitter.com", "x.com")
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+    except Exception as e:
+        return {"ok": False, "reason": f"goto_failed: {e}"}
+
+    # Wait for at least 2 articles to appear (parent + at least one reply).
+    # 15s ceiling — fresh threads with no replies still finish here.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            count = page.evaluate(
+                "() => document.querySelectorAll('article[data-testid=\"tweet\"]').length"
+            )
+            if (count or 0) >= 2:
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    # Give the engagement counts a beat to hydrate (they render lazily).
+    time.sleep(1.5)
+
+    try:
+        result = page.evaluate(SCRAPE_JS)
+    except Exception as e:
+        return {"ok": False, "reason": f"evaluate_failed: {e}"}
+
+    if not isinstance(result, dict):
+        return {"ok": False, "reason": "bad_result_shape"}
+
+    if log_prefix:
+        n = len(result.get("replies") or [])
+        print(f"{log_prefix} scraped {n} top replies from {url}", flush=True)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# DB layer
+# ---------------------------------------------------------------------------
+
+def fetch_pending_posts(db, window_hours: int, limit: int, post_id: int | None):
+    if post_id is not None:
+        cur = db.execute(
+            "SELECT id, thread_url, our_url, posted_at "
+            "FROM posts WHERE id = %s",
+            [post_id],
+        )
+        return [dict(r) for r in cur.fetchall()]
+    cur = db.execute(
+        "SELECT id, thread_url, our_url, posted_at "
+        "FROM posts "
+        "WHERE platform = 'twitter' "
+        "  AND top_replies_captured_at IS NULL "
+        "  AND posted_at > NOW() - INTERVAL '%s hours' "
+        "  AND thread_url IS NOT NULL "
+        "  AND thread_url <> our_url "  # only comment-rows, not own posts
+        "ORDER BY posted_at DESC "
+        "LIMIT %s",
+        [window_hours, limit],
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def insert_top_replies(db, post_id: int, thread_url: str, replies: list[dict]) -> int:
+    """INSERT one row per scraped reply, then stamp posts.top_replies_captured_at.
+
+    Wrapped in a single transaction so we either capture all 3 or none.
+    UNIQUE constraint on (post_id, rank_at_capture) makes this idempotent on retry.
+    """
+    inserted = 0
+    for r in replies:
+        if not r.get("reply_url"):
+            continue
+        db.execute(
+            "INSERT INTO thread_top_replies "
+            "  (post_id, platform, thread_url, rank_at_capture, reply_url, "
+            "   reply_tweet_id, reply_author, reply_author_handle, reply_content, "
+            "   likes_at_capture, replies_at_capture, retweets_at_capture, views_at_capture, "
+            "   likes, replies, retweets, views, engagement_updated_at) "
+            "VALUES (%s, 'twitter', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) "
+            "ON CONFLICT (post_id, rank_at_capture) DO NOTHING",
+            [
+                post_id, thread_url, r["rank"], r["reply_url"],
+                r.get("reply_tweet_id"), r.get("reply_author"),
+                r.get("reply_author_handle"), r.get("reply_content"),
+                r.get("likes"), r.get("replies"), r.get("retweets"), r.get("views"),
+                r.get("likes"), r.get("replies"), r.get("retweets"), r.get("views"),
+            ],
+        )
+        inserted += 1
+    db.execute(
+        "UPDATE posts SET top_replies_captured_at = NOW() WHERE id = %s",
+        [post_id],
+    )
+    db.commit()
+    return inserted
+
+
+def mark_captured_empty(db, post_id: int) -> None:
+    """Stamp capture timestamp even when there are zero replies on the
+    thread (so we don't keep re-trying every cron tick).
+    """
+    db.execute(
+        "UPDATE posts SET top_replies_captured_at = NOW() WHERE id = %s",
+        [post_id],
+    )
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--window-hours", type=int, default=2,
+                    help="Look back this many hours for uncaptured twitter posts")
+    ap.add_argument("--limit", type=int, default=5,
+                    help="Max posts to process per run (keeps single-tick cheap)")
+    ap.add_argument("--post-id", type=int, default=None,
+                    help="Capture a single specific post id (ignores window/limit)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Scrape but don't write to DB")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    log = (lambda *a, **kw: None) if args.quiet else (lambda *a, **kw: print(*a, **kw, flush=True))
+
+    db = get_conn()
+    pending = fetch_pending_posts(
+        db, window_hours=args.window_hours, limit=args.limit, post_id=args.post_id,
+    )
+    if not pending:
+        log("[capture-top-replies] nothing to do (no uncaptured twitter posts in window)")
+        return 0
+
+    log(f"[capture-top-replies] {len(pending)} post(s) to process")
+
+    cdp_port = find_twitter_cdp_port()
+    if not cdp_port:
+        log("[capture-top-replies] no twitter-harness Chrome reachable; skipping run")
+        return 2
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log("[capture-top-replies] playwright not installed; pip3 install playwright")
+        return 3
+
+    summary = {"scraped": 0, "replies_inserted": 0, "errors": 0, "empty": 0}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
+        except Exception as e:
+            log(f"[capture-top-replies] CDP attach failed (port {cdp_port}): {e}")
+            return 4
+
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        # Reuse a twitter tab if one exists; otherwise create a new one we will
+        # navigate ourselves. Avoid closing pages — twitter cycle owns the
+        # browser, we just borrow it briefly.
+        page = None
+        for pg in ctx.pages:
+            url = pg.url or ""
+            if ("x.com" in url or "twitter.com" in url) and "login" not in url:
+                page = pg
+                break
+        if page is None:
+            page = ctx.new_page()
+
+        for post in pending:
+            pid = post["id"]
+            thread_url = post["thread_url"]
+            prefix = f"[capture-top-replies post={pid}]"
+
+            try:
+                result = scrape_thread(page, thread_url, log_prefix=prefix if not args.quiet else "")
+            except Exception as e:
+                log(f"{prefix} scrape exception: {e}")
+                summary["errors"] += 1
+                continue
+
+            if not result.get("ok"):
+                log(f"{prefix} scrape failed: {result.get('reason')}")
+                summary["errors"] += 1
+                continue
+
+            replies = result.get("replies") or []
+            summary["scraped"] += 1
+
+            if not replies:
+                # Thread has 0 visible replies (besides our own, which would be
+                # scraped on a future run after Twitter sorts it in). Still
+                # stamp captured_at so we don't loop.
+                if not args.dry_run:
+                    mark_captured_empty(db, pid)
+                summary["empty"] += 1
+                log(f"{prefix} 0 top replies (thread empty); stamped captured_at")
+                continue
+
+            if args.dry_run:
+                log(f"{prefix} DRY RUN — would insert {len(replies)} replies:")
+                for r in replies:
+                    log(f"  rank={r['rank']} @{r.get('reply_author_handle')} "
+                        f"likes={r.get('likes')} views={r.get('views')} "
+                        f"text={(r.get('reply_content') or '')[:80]!r}")
+                continue
+
+            try:
+                inserted = insert_top_replies(db, pid, thread_url, replies)
+            except Exception as e:
+                log(f"{prefix} insert failed: {e}")
+                summary["errors"] += 1
+                continue
+
+            summary["replies_inserted"] += inserted
+            log(f"{prefix} inserted {inserted} top replies")
+
+            # tiny pacing so we don't hammer Twitter on a multi-post batch
+            time.sleep(2.0)
+
+    log(f"[capture-top-replies] done: {json.dumps(summary)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
