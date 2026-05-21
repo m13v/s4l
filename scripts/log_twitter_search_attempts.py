@@ -17,6 +17,16 @@ twitter_candidates table only has rows for tweets that were actually scraped,
 so duds were previously invisible. Pair with top_dud_twitter_queries.py.
 
     python3 scripts/log_twitter_search_attempts.py --batch-id <id> < queries.json
+    python3 scripts/log_twitter_search_attempts.py --batch-id <id> \
+        --attempts-out /tmp/attempts.json < queries.json
+
+When --attempts-out is provided, writes a JSON list of
+    [{"query": ..., "project": ..., "attempt_id": <int>}, ...]
+to that path so the downstream scorer can stamp twitter_candidates.search_
+attempt_id and the dashboard gets exact 1:1 query<->post attribution. Without
+this, the dashboard falls back to a (batch_id, project_name) fanout that
+credits every query in the batch — including dud ones — with every posted
+candidate (the bug user spotted 2026-05-21).
 
 Migrated 2026-05-18: writes now POST to /api/v1/twitter-search-attempts via
 scripts/http_api.py instead of opening a psycopg2 connection.
@@ -33,11 +43,22 @@ from http_api import api_post  # noqa: E402
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--batch-id", default=None)
+    p.add_argument(
+        "--attempts-out",
+        default=None,
+        help="Optional path; if set, write JSON list of "
+             "[{query, project, attempt_id}, ...] for the scorer to consume.",
+    )
     args = p.parse_args()
 
     raw = sys.stdin.read().strip()
     if not raw:
         print("log_twitter_search_attempts: empty stdin, nothing to log", file=sys.stderr)
+        if args.attempts_out:
+            # Write empty list so the caller can still pass --attempts to the
+            # scorer without a missing-file race.
+            with open(args.attempts_out, "w") as f:
+                json.dump([], f)
         return 0
 
     try:
@@ -48,9 +69,13 @@ def main():
 
     if not isinstance(rows, list) or not rows:
         print("log_twitter_search_attempts: not a list or empty list, nothing to log", file=sys.stderr)
+        if args.attempts_out:
+            with open(args.attempts_out, "w") as f:
+                json.dump([], f)
         return 0
 
     inserted = 0
+    attempts_map = []
     for r in rows:
         if not isinstance(r, dict):
             continue
@@ -64,7 +89,7 @@ def main():
         if not query:
             continue
         try:
-            api_post(
+            resp = api_post(
                 "/api/v1/twitter-search-attempts",
                 {
                     "query": query,
@@ -74,11 +99,27 @@ def main():
                 },
             )
             inserted += 1
+            attempt_id = ((resp.get("data") or {}).get("attempt") or {}).get("id")
+            if attempt_id is not None:
+                attempts_map.append({
+                    "query": query,
+                    "project": project,
+                    "attempt_id": int(attempt_id),
+                })
         except SystemExit as e:
             # http_api raises SystemExit on terminal failure. Log and keep
             # going so a single bad row doesn't drop the rest of the batch.
             print(f"log_twitter_search_attempts: API error for {query!r}: {e}", file=sys.stderr)
             continue
+
+    if args.attempts_out:
+        with open(args.attempts_out, "w") as f:
+            json.dump(attempts_map, f)
+        print(
+            f"log_twitter_search_attempts: wrote {len(attempts_map)} attempt-id "
+            f"entries to {args.attempts_out}",
+            file=sys.stderr,
+        )
 
     duds = sum(1 for r in rows if isinstance(r, dict) and not int(r.get("tweets_found") or 0))
     print(
