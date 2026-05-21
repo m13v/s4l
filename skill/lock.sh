@@ -159,6 +159,7 @@ acquire_lock() {
           [ "$_existing" != "$ticket_file" ] && _new_t+=("$_existing")
         done
         _SA_LOCK_TICKETS=(${_new_t[@]+"${_new_t[@]}"})
+        echo "[lock] acquired $name pid=$$ at $(date +%H:%M:%S) waited=${waited}s" >&2
         break
       fi
 
@@ -504,6 +505,7 @@ release_lock() {
   local name="$1"
   local lock_dir="/tmp/social-autoposter-${name}.lock"
   rm -rf "$lock_dir"
+  echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
   # Rebuild the lock stack without this entry so the EXIT trap doesn't try to
   # rm it again (harmless, but keeps the stack honest if release_lock is paired
   # with a later re-acquire of the same name).
