@@ -2006,7 +2006,19 @@ def main():
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
     dbmod.load_env()
-    db = dbmod.get_conn()
+    # Lazy DB acquisition: the Twitter branch (update_twitter, update_twitter_replies,
+    # get_aggregate_totals) is fully HTTP-migrated and never touches `db`. The Reddit /
+    # GitHub / Moltbook branches still use psycopg2 directly. Acquire a real connection
+    # only when one of the DB-bound branches will actually run; otherwise pass None so
+    # `--twitter-only` works on the VM (no DATABASE_URL).
+    _twitter_only_path = (
+        (args.twitter_only or args.twitter_audit)
+        or (args.replies_only and (args.twitter_only or args.twitter_audit))
+    )
+    if _twitter_only_path:
+        db = None
+    else:
+        db = dbmod.get_conn()
 
     reddit_stats = None
     reddit_resurrect_stats = None
@@ -2063,10 +2075,11 @@ def main():
             twitter_reply_stats = update_twitter_replies(db, quiet=args.quiet)
             github_reply_stats = update_github_replies(db, quiet=args.quiet)
 
-    # Gather aggregate totals across all platforms
+    # Gather aggregate totals across all platforms (HTTP-only, db ignored).
     totals = get_aggregate_totals(db)
 
-    db.close()
+    if db is not None:
+        db.close()
 
     output = {"totals": totals}
     if reddit_stats is not None:
