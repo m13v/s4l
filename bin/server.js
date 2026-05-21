@@ -6852,6 +6852,9 @@ async function handleApi(req, res) {
       linkedin: p => !isDisabled(p, 'linkedin') && hasSearchTopics(p),
       reddit:   p => !isDisabled(p, 'reddit'),
       moltbook: p => !isDisabled(p, 'moltbook'),
+      // Instagram doesn't use search_topics; posts come from prerendered mixer
+      // drafts. Projects can still opt out via platforms_disabled.
+      instagram: p => !isDisabled(p, 'instagram'),
     };
     const totalWeightByPlatform = {};
     for (const plat of platforms) {
