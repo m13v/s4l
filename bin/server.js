@@ -6165,7 +6165,7 @@ async function handleApi(req, res) {
     const windowKey = Object.prototype.hasOwnProperty.call(WINDOW_HOURS, rawWindow) ? rawWindow : '7d';
     const windowHours = WINDOW_HOURS[windowKey];
     const rawPlatform = String(url.searchParams.get('platform') || '').toLowerCase().trim();
-    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'github']);
+    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'github', 'instagram']);
     const platformFilter = ALLOWED_PLATFORMS.has(rawPlatform) ? rawPlatform : '';
     const pc = auth.projectClause(req.user, 'pl.project_name', url.searchParams.get('project'));
     if (!pc.ok) return json(res, { destinations: [], window: windowKey, platform: 'all' });
@@ -6291,7 +6291,7 @@ async function handleApi(req, res) {
     const windowKey = Object.prototype.hasOwnProperty.call(WINDOW_HOURS, rawWindow) ? rawWindow : '7d';
     const windowHours = WINDOW_HOURS[windowKey];
     const rawPlatform = String(url.searchParams.get('platform') || '').toLowerCase().trim();
-    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'github']);
+    const ALLOWED_PLATFORMS = new Set(['reddit', 'twitter', 'x', 'linkedin', 'moltbook', 'github', 'instagram']);
     const platformFilter = ALLOWED_PLATFORMS.has(rawPlatform) ? rawPlatform : '';
     const pc = auth.projectClause(req.user, 'pl.project_name', url.searchParams.get('project'));
     if (!pc.ok) return json(res, { links: [], window: windowKey, platform: 'all' });
@@ -16560,6 +16560,7 @@ const PROJECT_STATUS_SORT_FIELDS = {
   linkedin:     { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.linkedin) || 0 },
   moltbook:     { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.moltbook) || 0 },
   github:       { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.github) || 0 },
+  instagram:    { type: 'numeric', value: r => Number(r.by_platform && r.by_platform.instagram) || 0 },
 };
 function _sortProjectRows(rows) {
   const { field, dir } = _projectStatusSort;
