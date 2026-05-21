@@ -343,11 +343,14 @@ SCRAPE_JS = r"""
 
 
 def scrape_thread(page, thread_url: str, our_handle: str | None,
+                  thread_author_handle: str | None = None,
                   top_n: int = 3, log_prefix: str = "") -> dict:
     """Navigate to thread_url, scroll to lazy-load replies, then return the
     top N human replies sorted by like count.
 
     Filters out: our own posting handle (we don't compete with ourselves),
+    the thread author (their self-replies and quote-continuations don't
+    represent the human "best comment" benchmark we're measuring against),
     pinned-context tweets (replied-to context shown above the parent), and
     replies with no permalink (the embedded "Show more replies" rows).
     """
@@ -407,6 +410,7 @@ def scrape_thread(page, thread_url: str, our_handle: str | None,
 
     # ---- Filter and sort -------------------------------------------------
     our_handle_lc = (our_handle or "").lower().lstrip("@")
+    op_handle_lc = (thread_author_handle or "").lower().lstrip("@")
     filtered = []
     seen_urls = set()
     for r in raw_replies:
@@ -421,6 +425,8 @@ def scrape_thread(page, thread_url: str, our_handle: str | None,
         handle = (r.get("reply_author_handle") or "").lower().lstrip("@")
         if our_handle_lc and handle == our_handle_lc:
             continue  # skip our own reply
+        if op_handle_lc and handle == op_handle_lc:
+            continue  # skip OP self-replies / quote-continuations
         filtered.append(r)
 
     # Sort by likes desc, then views desc as tiebreaker. None coerced to -1
@@ -448,13 +454,13 @@ def scrape_thread(page, thread_url: str, our_handle: str | None,
 def fetch_pending_posts(db, window_hours: int, limit: int, post_id: int | None):
     if post_id is not None:
         cur = db.execute(
-            "SELECT id, thread_url, our_url, posted_at "
+            "SELECT id, thread_url, our_url, posted_at, thread_author_handle "
             "FROM posts WHERE id = %s",
             [post_id],
         )
         return [dict(r) for r in cur.fetchall()]
     cur = db.execute(
-        "SELECT id, thread_url, our_url, posted_at "
+        "SELECT id, thread_url, our_url, posted_at, thread_author_handle "
         "FROM posts "
         "WHERE platform = 'twitter' "
         "  AND top_replies_captured_at IS NULL "
@@ -589,7 +595,9 @@ def main() -> int:
 
             try:
                 result = scrape_thread(
-                    page, thread_url, our_handle=our_handle,
+                    page, thread_url,
+                    our_handle=our_handle,
+                    thread_author_handle=post.get("thread_author_handle"),
                     log_prefix=prefix if not args.quiet else "",
                 )
             except Exception as e:
@@ -606,13 +614,18 @@ def main() -> int:
             summary["scraped"] += 1
 
             if not replies:
-                # Thread has 0 visible replies (besides our own, which would be
-                # scraped on a future run after Twitter sorts it in). Still
-                # stamp captured_at so we don't loop.
+                # Thread has 0 visible non-self replies. Could be a genuinely
+                # empty thread, OR our reply is the only one + lazy load
+                # didn't fire. Stamp captured_at so we don't loop forever,
+                # unless this is a dry run.
+                raw_count = result.get("raw_count", 0)
                 if not args.dry_run:
                     mark_captured_empty(db, pid)
+                    stamp_msg = "stamped captured_at"
+                else:
+                    stamp_msg = "would stamp captured_at (dry-run)"
                 summary["empty"] += 1
-                log(f"{prefix} 0 top replies (thread empty); stamped captured_at")
+                log(f"{prefix} 0 top non-self replies (raw scraped={raw_count}); {stamp_msg}")
                 continue
 
             if args.dry_run:
