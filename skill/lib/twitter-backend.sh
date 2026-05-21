@@ -30,10 +30,26 @@
 #     us. Kept as a function only so callers don't have to change.
 
 MCP_CONFIG_FILE="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json"
+
+# Per-host env override (written by bin/cli.js when installing on an AppMaker
+# VM, where the canonical browser is Chromium on port 9222 behind the SOAX
+# residential proxy at 127.0.0.1:3003, NOT the harness Chrome on 9555). On a
+# Mac dev box this file does not exist, so the default below kicks in.
+if [ -f "$HOME/.social-autoposter-env" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.social-autoposter-env"
+fi
+
 # Tell twitter_browser.py (and any other Python helper that honors this env
-# var) to skip ps-based discovery and connect directly to the harness Chrome
-# on port 9555.
-export TWITTER_CDP_URL="http://127.0.0.1:9555"
+# var) to skip ps-based discovery and connect directly to the configured CDP
+# endpoint. Default 9555 (Mac harness Chrome). AppMaker VMs pre-set this to
+# http://127.0.0.1:9222 via ~/.social-autoposter-env above.
+export TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}"
+
+# Default harness URL — used by ensure_twitter_browser_for_backend +
+# cleanup_harness_tabs to decide whether we own this Chrome (and should
+# launch/clean it) or whether it is externally managed (AppMaker, BYO).
+_BH_DEFAULT_URL="http://127.0.0.1:9555"
 BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
 port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
