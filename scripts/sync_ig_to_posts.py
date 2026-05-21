@@ -45,7 +45,7 @@ def main():
     # JSONB `?` exists operator. Use ->'key' IS NOT NULL instead.
     sql = """
         SELECT id, post_number, target_account, project_name, caption_text,
-               posted_at, posted_urls
+               posted_at, posted_urls, metadata
         FROM media_posts
         WHERE status = 'posted'
           AND posted_urls -> 'instagram' IS NOT NULL
@@ -76,14 +76,21 @@ def main():
 
         # thread_url is NOT NULL; for original posts we self-reference
         # (established pattern, 2,124 rows across other platforms).
+        metadata = r["metadata"]
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        elif metadata is None:
+            metadata = {}
+        engagement_style = metadata.get("engagement_style") or metadata.get("caption_style")
         db.execute(
             """
             INSERT INTO posts (
                 platform, thread_url, our_url, our_content, our_account,
-                posted_at, project_name, status, autoposter_version
+                posted_at, project_name, status, autoposter_version,
+                engagement_style
             )
             VALUES (
-                'instagram', %s, %s, %s, %s, %s, %s, 'active', 'ig-sync-v1'
+                'instagram', %s, %s, %s, %s, %s, %s, 'active', 'ig-sync-v1', %s
             )
             """,
             (
@@ -93,6 +100,7 @@ def main():
                 r["target_account"] or "matt_diak",    # our_account
                 r["posted_at"],
                 r["project_name"],
+                engagement_style,
             ),
         )
         inserted += 1
