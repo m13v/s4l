@@ -9559,10 +9559,12 @@ function renderResult(run) {
   if (r.type === 'dm-outreach') {
     // Per-run DB-derived counts (see enrichDMOutreachRuns in server.js).
     // dm-outreach-*.sh hardcodes posted/skipped/failed=0 in log_run.py
-    // because per-DM outcomes go to `dms` via dm_db_update.py. Pills here
-    // come from joining dms -> claude_sessions on the run window. attempted
-    // is the total candidates the run actually resolved (sent + skipped +
-    // errored); the operator wants to see "we tried 7, sent 2" not "0".
+    // because per-DM outcomes go to the dms table via dm_db_update.py.
+    // Pills here come from joining dms -> claude_sessions on the run window.
+    // attempted is the total candidates the run actually resolved (sent +
+    // skipped + errored); the operator wants to see "we tried 7, sent 2"
+    // not "0". (No backticks in this comment block: renderResult lives
+    // inside an outer HTML template literal, see note at the engage branch.)
     const attempted = r.attempted || 0;
     const sent = r.sent || 0;
     const skipped = r.skipped || 0;
