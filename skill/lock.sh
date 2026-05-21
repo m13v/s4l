@@ -68,6 +68,10 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
     # The earlier if+for guard was insufficient because bash 3.2 treats even
     # ${#unset_arr[@]} as an "unbound variable" error in some exit-trap contexts.
     for d in ${_SA_LOCK_DIRS[@]+"${_SA_LOCK_DIRS[@]}"}; do
+      local _lname="${d##*/}"
+      _lname="${_lname#social-autoposter-}"
+      _lname="${_lname%.lock}"
+      echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
       rm -rf "$d"
     done
     for t in ${_SA_LOCK_TICKETS[@]+"${_SA_LOCK_TICKETS[@]}"}; do
