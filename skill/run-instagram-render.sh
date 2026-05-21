@@ -356,6 +356,41 @@ NNN=$(printf "%03d" "$NEXT_NUM")
 
 log "target=$TARGET selected_project=${SELECTED_PROJECT:-<null/organic>} draft_count_target=$DRAFT_COUNT next_post_number=$NEXT_NUM"
 
+# Step 1.6: engagement style assignment. Mirrors the twitter cycle pattern:
+# - Organic runs: roll via picker (95% top performer / 5% invent).
+# - Product runs: deterministic mapping from selected_project (the picker
+#   never sees walkin/studyly because they're in PLATFORM_POLICY.instagram.never).
+# The assignment is injected into the Claude prompt envelope below and Claude
+# stamps metadata.engagement_style on the media_posts row. sync_ig_to_posts.py
+# mirrors that field to posts.engagement_style for the dashboard A/B.
+source "$REPO_DIR/skill/styles.sh"
+STYLE_ASSIGN_FILE=$(mktemp -t saps_ig_style_XXXXXX.json)
+if [ "$TARGET" = "organic" ]; then
+  saps_pick_style instagram posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
+  PICKED_STYLE=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('style') or '')")
+  PICK_MODE=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('mode',''))")
+else
+  case "$SELECTED_PROJECT" in
+    mk0r)    PICKED_STYLE="ig_walkin_storefront_playbook" ;;
+    studyly) PICKED_STYLE="ig_studyly_failing_student_arc" ;;
+    *)       PICKED_STYLE="" ;;
+  esac
+  PICK_MODE="use"
+  /opt/homebrew/bin/python3.11 - "$STYLE_ASSIGN_FILE" "$PICKED_STYLE" "$PICK_MODE" <<'PY'
+import json, sys
+out, style, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(out, 'w') as f:
+    json.dump({
+        "mode": mode, "style": style or None,
+        "description": None, "example": None, "note": None,
+        "reference_styles": [], "distribution_snapshot": [],
+        "source": "project_gated",
+    }, f)
+PY
+fi
+STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" instagram posting)
+log "engagement_style: picked='${PICKED_STYLE}' mode='${PICK_MODE}' target=${TARGET} project=${SELECTED_PROJECT:-organic}"
+
 # Buffer guard: if 3+ drafts of target type already exist, skip.
 # Override with FORCE_RENDER=1 for manual / first-fire runs.
 if [ "${FORCE_RENDER:-0}" != "1" ] && [ "$DRAFT_COUNT" -ge 3 ]; then
@@ -556,9 +591,22 @@ EXCLUSIONS (read from request envelope above; honor strictly):
   track in. If the list is empty, FAIL the run; do not source from the network.
 - used_theme_angles_14d: pick a different angle. SKILL Section 3 lists 5
   acceptable AI angles; pick one not in the exclusion list.
-- used_variant_ids: for product runs, exclude these globally — even within
+- used_variant_ids: for product runs, exclude these globally; even within
   the selected project, prefer a variant not in this list. For TLH (organic),
   pick a variant_id not in this list.
+
+ENGAGEMENT STYLE ASSIGNMENT FOR THIS RUN: ${PICKED_STYLE} (mode=${PICK_MODE})
+
+${STYLES_BLOCK}
+
+You MUST stamp metadata.engagement_style='${PICKED_STYLE}' on the media_posts
+row you write (in addition to caption_style, theme_angle, theme_label, etc.).
+The dashboard A/B-tests on this label and the next picker round re-reads it as
+performance signal, so it MUST match the assigned style verbatim. If mode=invent
+(no style assigned above), invent a new ig_-prefixed snake_case style name that
+describes the structural archetype of your caption (not the topic), and stamp
+THAT on metadata.engagement_style. Do NOT use any non-ig_ prefixed style for
+Instagram captions.
 
 PRODUCT-PATH (post_type='product', project='${SELECTED_PROJECT}'):
 The Mixer registry lives in mixer/remotion/src/mixer/data.ts. Every variant
