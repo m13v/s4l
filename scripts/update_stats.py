@@ -163,6 +163,35 @@ def _http_list_twitter_replies_to_refresh():
     return ((resp or {}).get("data") or {}).get("replies") or []
 
 
+def _http_list_twitter_top_replies_to_refresh(stale_hours=5):
+    """thread_top_replies rows the Twitter stats job should refresh.
+
+    Scoped to the calling install via X-Installation header (route reads
+    resolveAuth().install_id; primary historical install also claims the
+    NULL-install_id rows). Same freshness gate (5h default) as posts so
+    the snapshot and benchmark curves stay aligned per cycle.
+    """
+    resp = api_get(
+        "/api/v1/thread-top-replies/active-for-stats",
+        query={"platform": "twitter",
+               "engagement_stale_after_hours": int(stale_hours)},
+    )
+    return ((resp or {}).get("data") or {}).get("thread_top_replies") or []
+
+
+def _http_patch_top_reply(ttr_id, body):
+    return api_patch(f"/api/v1/thread-top-replies/{int(ttr_id)}", body)
+
+
+def _http_detect_deletion_top_reply(ttr_id, kind, threshold=2):
+    resp = api_post(
+        f"/api/v1/thread-top-replies/{int(ttr_id)}/detect-deletion",
+        {"kind": kind, "threshold": int(threshold)},
+    )
+    data = (resp or {}).get("data") or {}
+    return int(data.get("detect_count") or 0), bool(data.get("status_set"))
+
+
 def _http_snapshot_post_views(post_id, views):
     """HTTP equivalent of dbmod.snapshot_post_views — UPSERT one row of
     post_views_daily for CURRENT_DATE. Errors swallowed so a transient
@@ -1640,9 +1669,100 @@ def update_twitter(db, config=None, quiet=False, audit_mode=False):
                   suspended=suspended, errors=errors, skipped=skipped)
     if skipped and not quiet:
         print(f"  Skipped {skipped} stable tweets (3+ scans unchanged, older than 5 days)")
+
+    # Second pass: refresh the human-top-reply snapshots we captured at our
+    # post-success time. Same fxtwitter cadence as posts (1 req/s), same
+    # 2-strike deletion guard, same install-scope filter. We only do this in
+    # hot mode; the cold audit doesn't poll the snapshot rows because the
+    # benchmark question ("how did the human top-reply grow vs ours?") is
+    # only meaningful while the parent post is also being polled.
+    ttr_total = ttr_updated = ttr_changed = ttr_deleted = ttr_errors = 0
+    if not audit_mode:
+        ttr_rows = _http_list_twitter_top_replies_to_refresh(stale_hours=5)
+        for row in ttr_rows:
+            ttr_total += 1
+            ttr_id = row.get("id")
+            reply_url = row.get("reply_url") or ""
+            reply_tweet_id = row.get("reply_tweet_id")
+            prev_likes = row.get("likes")
+            prev_views = row.get("views")
+            prev_replies = row.get("replies")
+
+            if not reply_tweet_id:
+                m = re.search(r"/status/(\d+)", reply_url)
+                reply_tweet_id = m.group(1) if m else None
+            if not reply_tweet_id:
+                ttr_errors += 1
+                continue
+            m_user = re.search(r"x\.com/([^/]+)/status", reply_url) or \
+                     re.search(r"twitter\.com/([^/]+)/status", reply_url)
+            username = m_user.group(1) if m_user else "i"
+
+            url = f"https://api.fxtwitter.com/{username}/status/{reply_tweet_id}"
+            try:
+                data = fetch_json(url)
+            except HttpNotFoundError:
+                data = {"code": 404, "tweet": None}
+            if not data:
+                time.sleep(2)
+                try:
+                    data = fetch_json(url)
+                except HttpNotFoundError:
+                    data = {"code": 404, "tweet": None}
+                if not data:
+                    ttr_errors += 1
+                    continue
+
+            code = data.get("code", 0)
+            tweet = data.get("tweet")
+            if code == 404 or tweet is None:
+                detect_count, status_set = _http_detect_deletion_top_reply(
+                    ttr_id, "deleted", threshold=2,
+                )
+                if status_set:
+                    ttr_deleted += 1
+                    if not quiet:
+                        print(f"  top_reply DELETED [{ttr_id}] "
+                              f"(confirmed after {detect_count} detections)")
+                continue
+
+            likes = tweet.get("likes") or 0
+            views = tweet.get("views") or 0
+            replies = tweet.get("replies") or 0
+            retweets = tweet.get("retweets") or 0
+            stayed_same = (likes == prev_likes and views == prev_views
+                           and replies == prev_replies)
+            patch_body = {
+                "likes": int(likes),
+                "views": int(views),
+                "replies": int(replies),
+                "retweets": int(retweets),
+                "stamp_engagement_now": True,
+                "stamp_status_checked_now": True,
+                "reset_deletion_detect_count": True,
+            }
+            if stayed_same:
+                patch_body["scan_no_change_delta"] = 1
+            else:
+                patch_body["scan_no_change_count"] = 0
+            _http_patch_top_reply(ttr_id, patch_body)
+            ttr_updated += 1
+            if not stayed_same:
+                ttr_changed += 1
+            time.sleep(1)
+
+        if not quiet and ttr_total:
+            print(f"  thread_top_replies: checked={ttr_total} updated={ttr_updated} "
+                  f"changed={ttr_changed} deleted={ttr_deleted} errors={ttr_errors}")
+
     return {"total": total, "updated": updated, "changed": changed,
             "deleted": deleted, "suspended": suspended,
-            "errors": errors, "skipped": skipped, "results": results}
+            "errors": errors, "skipped": skipped, "results": results,
+            "thread_top_replies": {
+                "total": ttr_total, "updated": ttr_updated,
+                "changed": ttr_changed, "deleted": ttr_deleted,
+                "errors": ttr_errors,
+            }}
 
 
 def update_reddit_replies(db, user_agent, quiet=False):
