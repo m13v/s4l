@@ -6782,6 +6782,21 @@ async function handleApi(req, res) {
           "AND p.posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND p.search_topic IS NOT NULL " +
       "), " +
+      // Clicks per post: sum real_clicks (PostHog backfill, post-2026-05-07
+      // truth) and legacy clicks (live /r/ redirect log) across all post_links
+      // rows for a given post. We take GREATEST(real, legacy) per post when
+      // aggregating so pre-2026-05-07 rows (real_clicks=0, legacy populated)
+      // and post-backfill rows (real_clicks populated, legacy may be stale)
+      // both contribute correctly. Matches the rollup logic in
+      // scripts/top_search_topics.py.
+      "clicks_per_post AS ( " +
+        "SELECT post_id, " +
+               "COALESCE(SUM(GREATEST(real_clicks, 0)), 0)::int AS real_clicks_sum, " +
+               "COALESCE(SUM(GREATEST(clicks, 0)), 0)::int      AS legacy_clicks_sum " +
+        "FROM post_links " +
+        "WHERE post_id IS NOT NULL " +
+        "GROUP BY post_id " +
+      "), " +
       "posts_per_query AS ( " +
         "SELECT cand.platform, cand.query, cand.project_name, " +
                "COUNT(*) FILTER (WHERE cand.post_id IS NOT NULL)::int AS posts_made, " +
@@ -6791,9 +6806,19 @@ async function handleApi(req, res) {
                // comes back null on linkedin rows. Frontend renders null as a
                // dash so it's clear the metric is N/A on that platform.
                "AVG(NULLIF(p.views, 0)) " +
-                 "FILTER (WHERE cand.post_id IS NOT NULL AND cand.platform = 'twitter') AS avg_views " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL AND cand.platform = 'twitter') AS avg_views, " +
+               // Clicks: per-post we already prefer GREATEST(real, legacy) in
+               // clicks_per_post. Here we average across all posted candidates
+               // (LEFT JOIN nulls -> 0 so posts with no post_links rows count
+               // as zero-click posts, not as missing data — search-query EV
+               // should include the duds).
+               "AVG(GREATEST(COALESCE(cpp.real_clicks_sum, 0), COALESCE(cpp.legacy_clicks_sum, 0))) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL) AS avg_clicks, " +
+               "SUM(GREATEST(COALESCE(cpp.real_clicks_sum, 0), COALESCE(cpp.legacy_clicks_sum, 0))) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL)::int AS clicks_total " +
         "FROM cand " +
         "LEFT JOIN posts p ON p.id = cand.post_id " +
+        "LEFT JOIN clicks_per_post cpp ON cpp.post_id = cand.post_id " +
         candPlatformFilter +
         "GROUP BY cand.platform, cand.query, cand.project_name " +
       ") " +
@@ -6806,7 +6831,9 @@ async function handleApi(req, res) {
              "MAX(a.ran_at) AS last_run, " +
              "COALESCE(MAX(ppq.posts_made), 0)::int AS posts_made, " +
              "MAX(ppq.avg_engagement)::float8 AS avg_engagement, " +
-             "MAX(ppq.avg_views)::float8 AS avg_views " +
+             "MAX(ppq.avg_views)::float8 AS avg_views, " +
+             "MAX(ppq.avg_clicks)::float8 AS avg_clicks, " +
+             "COALESCE(MAX(ppq.clicks_total), 0)::int AS clicks_total " +
       "FROM attempts a " +
       "LEFT JOIN posts_per_query ppq " +
         "ON ppq.platform = a.platform " +
@@ -13982,6 +14009,8 @@ function renderSearchQueriesStats(payload) {
       posts_made:         Number(r.posts_made) || 0,
       avg_engagement:     r.avg_engagement == null ? null : Number(r.avg_engagement),
       avg_views:          r.avg_views == null ? null : Number(r.avg_views),
+      avg_clicks:         r.avg_clicks == null ? null : Number(r.avg_clicks),
+      clicks_total:       Number(r.clicks_total) || 0,
       last_run:           r.last_run || null,
     };
   });
@@ -14040,6 +14069,21 @@ function renderSearchQueriesStats(payload) {
           const tip = '**Avg view count** on our Twitter reply' + String.fromCharCode(10) +
                       '(raw, not weighted into Avg Eng)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt(Math.round(v)) + '</span>';
+        } },
+      // Avg clicks per posted reply. Sums post_links.real_clicks (PostHog
+      // backfill) and post_links.clicks (legacy /r/ live log), taking
+      // GREATEST per post; LEFT JOIN nulls -> 0 so zero-click posts pull
+      // the average down (which is what we want for EV ranking).
+      { key: 'avg_clicks',  label: 'Avg Clicks', type: 'numeric', align: 'right', widthPct: 4,
+        formatter: (v, row) => {
+          if (v == null || !row.posts_made) return '<span style="color:var(--text-faint);">\u2014</span>';
+          const total = Number(row.clicks_total) || 0;
+          const tip = '**' + fmt(total) + '** total clicks across **' + (row.posts_made || 0) + '** posts' + String.fromCharCode(10) +
+                      'GREATEST(post_links.real_clicks, post_links.clicks) per post' + String.fromCharCode(10) +
+                      'real_clicks = PostHog $pageview backfill; clicks = live /r/ redirect log';
+          const n = Number(v) || 0;
+          const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
         } },
       { key: 'last_run',    label: 'Last Run',  type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
