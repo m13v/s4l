@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS thread_top_replies (
     status_checked_at TIMESTAMP,
     deletion_detect_count INTEGER DEFAULT 0,
     scan_no_change_count INTEGER DEFAULT 0,
+    install_id UUID,
     UNIQUE (post_id, rank_at_capture),
     UNIQUE (post_id, reply_url)
 );
