@@ -165,6 +165,13 @@ function writeAppMakerEnvFile() {
     '# 9222 is the one the user logs into via the AppMaker UI.',
     'export TWITTER_CDP_URL="http://127.0.0.1:9222"',
     '',
+    '# AppMaker VMs run as root and the appmaker template sets Claude defaultMode',
+    '# to bypassPermissions. Claude CLI refuses bypassPermissions under root for',
+    '# security reasons UNLESS IS_SANDBOX=1 is set. Without this, every `claude -p`',
+    '# call in the pipeline exits immediately with no output (cost=$0.00, 16s) and',
+    '# Phase 1 reports envelope parse error / phase1_no_tweets.',
+    'export IS_SANDBOX=1',
+    '',
   ].join('\n');
   fs.writeFileSync(envPath, body);
   console.log(`  AppMaker VM detected -> wrote ${envPath} (TWITTER_CDP_URL=http://127.0.0.1:9222)`);
