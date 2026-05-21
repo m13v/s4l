@@ -994,6 +994,74 @@ async function enrichEngageRuns(runs) {
   }
 }
 
+// dm_outreach_* runs: skill/dm-outreach-*.sh always calls log_run.py with
+// hardcoded --posted 0 --skipped 0 --failed 0 because per-DM outcomes go to
+// the `dms` table via dm_db_update.py, not the log summary. Without an
+// enricher the dashboard literally renders "posted 0 / skipped 0" even on
+// runs that sent multiple DMs (and the operator wrongly concludes the cron
+// is broken). Mirror enrichEngageRuns: derive attempted / sent / skipped /
+// errored from `dms` rows whose claude_session_id belongs to this run's
+// window. Cost is preserved as-is (get_run_cost.py already aggregates the
+// whole job, identical pattern to engage / post-comments runs).
+async function enrichDMOutreachRuns(runs) {
+  const dmRuns = runs.filter(r => r.job_type === 'dm-outreach' && r.platform_key);
+  if (!dmRuns.length) return;
+  let oldestMs = Infinity;
+  for (const r of dmRuns) {
+    const ms = new Date(r.started_at).getTime();
+    if (ms < oldestMs) oldestMs = ms;
+  }
+  // Slack window: the shell wrapper sets CLAUDE_SESSION_ID up front but
+  // claude_sessions row gets stamped when the headless run starts (a few
+  // seconds in); skip rows can fire >5 min before sent rows in the same
+  // session. 5 min slack matches what enrichRunsCostBreakdown uses.
+  const slackMs = 5 * 60 * 1000;
+  const since = new Date(oldestMs - slackMs).toISOString();
+  // Join dms -> claude_sessions so each dms row carries the session's
+  // started_at (used to assign it to the right run row when multiple
+  // dm-outreach runs land in the same query window).
+  const rows = await pq(
+    "SELECT d.platform, d.status, cs.started_at, cs.script " +
+    "FROM dms d JOIN claude_sessions cs ON cs.session_id = d.claude_session_id " +
+    "WHERE cs.started_at >= $1::timestamp AND cs.script LIKE 'dm-outreach-%'",
+    [since]
+  );
+  if (!rows) return;
+  const pendingByPlatform = {};
+  const pendingRows = await pq(
+    "SELECT platform, COUNT(*)::int AS n FROM dms WHERE status='pending' GROUP BY platform"
+  );
+  if (pendingRows) {
+    for (const r of pendingRows) pendingByPlatform[(r.platform || '').toLowerCase()] = r.n;
+  }
+  for (const run of dmRuns) {
+    const startMs = new Date(run.started_at).getTime();
+    const endMs = new Date(run.finished_at).getTime() + slackMs;
+    // dm_outreach_twitter run -> DB platform 'x'. Reddit/LinkedIn keep slug.
+    const dbPlatform = run.platform_key === 'twitter' ? 'x' : run.platform_key;
+    let sent = 0, skipped = 0, errored = 0, attempted = 0;
+    for (const p of rows) {
+      if ((p.platform || '').toLowerCase() !== dbPlatform) continue;
+      const sessTs = p.started_at instanceof Date ? p.started_at.getTime() : Date.parse(p.started_at);
+      if (sessTs < startMs - slackMs || sessTs > endMs) continue;
+      attempted++;
+      if (p.status === 'sent') sent++;
+      else if (p.status === 'skipped') skipped++;
+      else if (p.status === 'error') errored++;
+    }
+    const prior = run.result || {};
+    run.result = {
+      type: 'dm-outreach',
+      attempted,
+      sent,
+      skipped,
+      errored,
+      pending_now: pendingByPlatform[dbPlatform] || 0,
+      cost_usd: prior.cost_usd || 0,
+    };
+  }
+}
+
 // scan_*_replies / scan_*_followups / scan_*_mentions runs: the shell wrappers
 // log `posted=FOUND` where FOUND is grepped from stdout, which is fragile and
 // zero-by-default. Replace it with a direct count of rows inserted into the
@@ -4237,6 +4305,7 @@ async function handleApi(req, res) {
       }
       await enrichLinkEditRuns(runs);
       await enrichEngageRuns(runs);
+      await enrichDMOutreachRuns(runs);
       await enrichCheckRepliesRuns(runs);
       await enrichPostCommentsLinkedInRuns(runs);
       await enrichPostCommentsTwitterRuns(runs);
@@ -9485,6 +9554,28 @@ function renderResult(run) {
             + '</span></span>'
           : '') +
       '</span>'
+    );
+  }
+  if (r.type === 'dm-outreach') {
+    // Per-run DB-derived counts (see enrichDMOutreachRuns in server.js).
+    // dm-outreach-*.sh hardcodes posted/skipped/failed=0 in log_run.py
+    // because per-DM outcomes go to `dms` via dm_db_update.py. Pills here
+    // come from joining dms -> claude_sessions on the run window. attempted
+    // is the total candidates the run actually resolved (sent + skipped +
+    // errored); the operator wants to see "we tried 7, sent 2" not "0".
+    const attempted = r.attempted || 0;
+    const sent = r.sent || 0;
+    const skipped = r.skipped || 0;
+    const errored = r.errored || 0;
+    const pending = r.pending_now || 0;
+    const cost = r.cost_usd || 0;
+    return (
+      pill('attempted', attempted, attempted > 0 ? 'var(--text)' : 'var(--muted)') +
+      pill('sent', sent, sent > 0 ? '#22c55e' : 'var(--muted)') +
+      pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
+      pill('errored', errored, errored > 0 ? '#ef4444' : 'var(--muted)') +
+      pill('queue', pending, pending > 0 ? 'var(--text)' : 'var(--muted)') +
+      '<span style="font-size:12px;color:var(--muted);">$' + cost.toFixed(2) + '</span>'
     );
   }
   if (r.type === 'engage') {
