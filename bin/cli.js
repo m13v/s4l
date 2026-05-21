@@ -170,6 +170,41 @@ function writeAppMakerEnvFile() {
   console.log(`  AppMaker VM detected -> wrote ${envPath} (TWITTER_CDP_URL=http://127.0.0.1:9222)`);
 }
 
+// AppMaker VMs also need the twitter-harness MCP server (browser-harness/server.py)
+// to drive port 9222, not its default 9555. That's a SECOND path the env file alone
+// doesn't cover, because the MCP server is spawned by Claude as a subprocess with
+// an env block taken from the MCP config file (--strict-mcp-config replaces the
+// inherited env, so a parent BH_PORT export wouldn't reach it). So we patch the
+// MCP config in-place to bake BH_PORT=9222 into its env block.
+// Idempotent: parses the JSON, sets env.BH_PORT, rewrites. Safe to re-run.
+function applyAppMakerMcpConfigOverrides() {
+  const cfgPath = path.join(HOME, '.claude', 'browser-agent-configs', 'twitter-harness-mcp.json');
+  if (!fs.existsSync(cfgPath)) {
+    console.log(`  AppMaker MCP override: ${cfgPath} not found, skipping (will be picked up next run)`);
+    return;
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  } catch (e) {
+    console.warn(`  AppMaker MCP override: failed to parse ${cfgPath}: ${e.message}`);
+    return;
+  }
+  const srv = cfg?.mcpServers?.['twitter-harness'];
+  if (!srv) {
+    console.warn(`  AppMaker MCP override: ${cfgPath} has no mcpServers.twitter-harness entry`);
+    return;
+  }
+  if (!srv.env || typeof srv.env !== 'object') srv.env = {};
+  if (srv.env.BH_PORT === '9222') {
+    console.log(`  AppMaker MCP override: BH_PORT=9222 already set in ${cfgPath}`);
+    return;
+  }
+  srv.env.BH_PORT = '9222';
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
+  console.log(`  AppMaker MCP override: set BH_PORT=9222 in ${cfgPath}`);
+}
+
 // Provision the browser-harness toolchain that backs the twitter-harness MCP:
 //   1. install uv (Astral) if missing
 //   2. git-clone browser-use/browser-harness
@@ -440,6 +475,9 @@ function init() {
   installBrowserHarness();
   // Install browser agent MCP configs + profile dirs (skips existing files)
   installBrowserAgentConfigs();
+  // On AppMaker VMs, patch the twitter-harness MCP config so its server.py
+  // drives port 9222 (AppMaker Chromium) instead of the default 9555.
+  if (isAppMakerVm()) applyAppMakerMcpConfigOverrides();
   // Register those MCP servers with Claude so they show up in `claude mcp list`.
   registerBrowserAgentMcpServers();
 
@@ -524,6 +562,9 @@ function update() {
   installBrowserHarness();
   // Top up browser agent configs (won't overwrite user customizations)
   installBrowserAgentConfigs();
+  // On AppMaker VMs, patch the twitter-harness MCP config so its server.py
+  // drives port 9222 (AppMaker Chromium) instead of the default 9555.
+  if (isAppMakerVm()) applyAppMakerMcpConfigOverrides();
   // Register any newly added MCP servers with Claude (idempotent).
   registerBrowserAgentMcpServers();
 
