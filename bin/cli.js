@@ -211,13 +211,25 @@ function applyAppMakerMcpConfigOverrides() {
 //   3. uv tool install -e . (provides the `browser-harness` CLI)
 //   4. ensure `mcp` Python package is importable for server.py
 //   5. copy our shipped server.py into ~/.claude/mcp-servers/browser-harness/
-// All steps are idempotent. Skipped entirely on AppMaker VMs (the proxied
-// Chromium on 9222 replaces the harness).
+// All steps are idempotent.
+//
+// AppMaker VMs: the toolchain is STILL needed (the MCP server.py is what
+// Claude invokes during Phase 1's tweet scan, and it requires uv + mcp +
+// browser-harness CLI to run). The AppMaker-specific deltas are:
+//   (a) writeAppMakerEnvFile() points TWITTER_CDP_URL at 9222 for posting
+//   (b) applyAppMakerMcpConfigOverrides() injects BH_PORT=9222 so server.py
+//       drives the AppMaker Chromium instead of trying to launch its own
+//       Chrome on 9555. server.py's ensure_chrome() short-circuits when CDP
+//       is already alive on PORT, so no double-Chrome ever spawns.
+// Previously we early-returned here on AppMaker, which left the VM without
+// uv installed and broke Phase 1's Claude scan (the MCP server's `command:
+// /root/.local/bin/uv` resolved to ENOENT, Claude got no tools, returned an
+// empty envelope).
 function installBrowserHarness() {
-  if (isAppMakerVm()) {
-    console.log('  AppMaker VM detected -> skipping browser-harness install (Chromium on 9222 is canonical)');
+  const onAppMaker = isAppMakerVm();
+  if (onAppMaker) {
+    console.log('  AppMaker VM detected -> installing harness toolchain (deps); MCP will be pointed at port 9222');
     writeAppMakerEnvFile();
-    return;
   }
   console.log('  setting up browser-harness (twitter-harness MCP backend)...');
 
