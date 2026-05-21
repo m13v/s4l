@@ -49,8 +49,62 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS campaign_id INTEGER REFERENCES campai
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS autoposter_version TEXT;
 CREATE INDEX IF NOT EXISTS idx_posts_autoposter_version ON posts(autoposter_version) WHERE autoposter_version IS NOT NULL;
 
+-- thread_top_replies (2026-05-21): for each comment we post on someone else's
+-- thread, snapshot the top-N best-performing existing replies on that thread
+-- at post time, then track their engagement over time alongside our own post.
+-- Used to benchmark our comment's growth curve against the human top-reply
+-- growth curve for the same thread. Snapshot is captured shortly after our
+-- post lands (decoupled cron, not in the locked twitter_post_plan flow), so
+-- "captured_at" can lag posted_at by ~1-2 min; downstream analysis should
+-- treat captured_at as the snapshot reference, not posted_at.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS top_replies_captured_at TIMESTAMP;
+CREATE INDEX IF NOT EXISTS idx_posts_top_replies_capture_pending
+  ON posts(platform, posted_at)
+  WHERE platform = 'twitter'
+    AND top_replies_captured_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_posts_platform ON posts(platform);
 CREATE INDEX IF NOT EXISTS idx_posts_resurrected_at ON posts(resurrected_at) WHERE resurrected_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS thread_top_replies (
+    id SERIAL PRIMARY KEY,
+    -- FK to the post WE made on this thread. One post → up to N top replies.
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    thread_url TEXT NOT NULL,
+    -- Rank at capture time (1 = top, 2 = second, ...). NOT live, NOT updated.
+    rank_at_capture INTEGER NOT NULL,
+    -- The competitor reply's identifiers (tweet URL + author handle).
+    reply_url TEXT NOT NULL,
+    reply_tweet_id TEXT,
+    reply_author TEXT,
+    reply_author_handle TEXT,
+    reply_content TEXT,
+    -- Snapshot at capture time (immutable reference).
+    likes_at_capture INTEGER,
+    replies_at_capture INTEGER,
+    retweets_at_capture INTEGER,
+    views_at_capture INTEGER,
+    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Live stats (refreshed by the same fxtwitter cron that refreshes posts).
+    likes INTEGER,
+    replies INTEGER,
+    retweets INTEGER,
+    views INTEGER,
+    engagement_updated_at TIMESTAMP,
+    status TEXT DEFAULT 'active',  -- 'active' | 'deleted' | 'suspended'
+    status_checked_at TIMESTAMP,
+    deletion_detect_count INTEGER DEFAULT 0,
+    scan_no_change_count INTEGER DEFAULT 0,
+    UNIQUE (post_id, rank_at_capture),
+    UNIQUE (post_id, reply_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_top_replies_post ON thread_top_replies(post_id);
+CREATE INDEX IF NOT EXISTS idx_thread_top_replies_thread ON thread_top_replies(thread_url);
+CREATE INDEX IF NOT EXISTS idx_thread_top_replies_refresh
+  ON thread_top_replies(platform, status, engagement_updated_at)
+  WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS threads (
     id SERIAL PRIMARY KEY,
