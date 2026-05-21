@@ -211,15 +211,6 @@ def upsert_candidates(tweets, config, batch_id=None):
             posted_at = None
             age_hours = 24
 
-        # Skip tweets older than the cycle's Phase 0 freshness wall (6h, set by
-        # FRESHNESS_HOURS in skill/run-twitter-cycle.sh). Anything older than that
-        # gets hard-expired by the next cycle's Phase 0 before it can be posted,
-        # so admitting it just wastes a draft and a candidate row. Keep this
-        # value in sync with FRESHNESS_HOURS in run-twitter-cycle.sh.
-        if age_hours > 6:
-            skipped += 1
-            continue
-
         tweet["age_hours"] = age_hours
         tweet["author_followers"] = tweet.get("author_followers", 0)
 
@@ -285,7 +276,7 @@ def upsert_candidates(tweets, config, batch_id=None):
     # and engagement curves over time. Per user instruction (2026-05-08): never
     # add DELETE-by-age back here, regardless of retention window.
 
-    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted, too old, or fabricated ID: {skipped_fake_id})")
+    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id})")
     return inserted
 
 
