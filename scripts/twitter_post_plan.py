@@ -59,7 +59,7 @@ LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 # we no longer need the raw connection string at this layer. Kept around as
 # a no-op constant in case downstream tooling reads it from the environment.
 sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
-from http_api import api_get, api_patch  # noqa: E402
+from http_api import api_get, api_patch, api_post  # noqa: E402
 try:
     from account_resolver import resolve as _resolve_account  # noqa: E402
 except Exception:
@@ -355,6 +355,11 @@ def post_one(c: dict) -> tuple[str, str]:
     reply_url = parsed.get("reply_url") or ""
     final_text = parsed.get("final_text") or full_text
     applied_campaigns = parsed.get("applied_campaigns") or []
+    # Snapshot the top human replies on the thread at post-success time.
+    # twitter_browser.reply_to_tweet scrapes them while the page is still on
+    # the candidate URL with replies visible. List is already filtered (self
+    # + thread author removed), sorted by likes DESC, capped at 3.
+    top_replies = parsed.get("top_replies") or []
 
     if not reply_url or not REPLY_URL_RE.match(reply_url):
         # Reply was likely sent (browser action returned ok=True with verified)
@@ -474,6 +479,44 @@ def post_one(c: dict) -> tuple[str, str]:
     update_candidate_posted(cid, post_id)
     print(f"[post] candidate {cid} posted as {reply_url} (post_id={post_id})",
           flush=True)
+
+    # Persist the human-top-replies snapshot via the s4l.ai routes. We POST
+    # even when top_replies is empty so posts.top_replies_captured_at is
+    # stamped and the "did we attempt capture?" gate doesn't keep retrying
+    # threads that had genuinely zero competitor replies. Failure here is
+    # non-fatal: the reply IS posted and logged; missing snapshot only loses
+    # one row of benchmark data, not the run.
+    try:
+        ttr_payload = {
+            "post_id": post_id,
+            "platform": "twitter",
+            "thread_url": candidate_url,
+            "replies": [
+                {
+                    "rank": rank,
+                    "reply_url": r.get("reply_url"),
+                    "reply_tweet_id": r.get("reply_tweet_id"),
+                    "reply_author": r.get("reply_author"),
+                    "reply_author_handle": r.get("reply_author_handle"),
+                    "reply_content": r.get("reply_content"),
+                    "likes": r.get("likes"),
+                    "replies": r.get("replies"),
+                    "retweets": r.get("retweets"),
+                    "views": r.get("views"),
+                }
+                for rank, r in enumerate(top_replies, start=1)
+                if r.get("reply_url")
+            ],
+        }
+        ttr_res = api_post("/api/v1/thread-top-replies", ttr_payload)
+        print(f"[post] candidate {cid} thread_top_replies "
+              f"inserted={ttr_res.get('inserted_count')} "
+              f"requested={ttr_res.get('requested_count')}",
+              flush=True)
+    except Exception as e:
+        print(f"[post] candidate {cid} WARNING: thread_top_replies POST failed ({e})",
+              flush=True)
+
     return ("posted", "")
 
 
