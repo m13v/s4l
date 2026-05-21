@@ -6751,15 +6751,26 @@ async function handleApi(req, res) {
           "AND query IS NOT NULL AND length(trim(query)) > 0 " +
       "), " +
       "cand AS ( " +
-        // Twitter: c.search_topic is the SEED concept (e.g. "vibe coding") while
-        // twitter_search_attempts.query is the literal X advanced-search string
-        // (e.g. '("vibe coded" OR ...) min_faves:30 since:... -filter:replies').
-        // The two never line up textually, so we associate each candidate to
-        // its parent attempt via (batch_id, project_name) and project the
-        // attempt's `query` as the join key. When one project ran multiple
-        // queries in the same batch (~1.5% of cases), this attributes each
-        // candidate to all of them — known minor over-attribution, acceptable
-        // until we add a per-attempt seed column.
+        // Twitter EXACT branch (2026-05-21): when the scorer stamped the
+        // discovering search_attempt_id, join directly on it so each posted
+        // candidate is credited ONLY to the literal query that surfaced it.
+        // This replaces the legacy (batch_id, project_name) fanout for any
+        // row written after the pipeline changes shipped.
+        "SELECT 'twitter' AS platform, a.query, " +
+               "COALESCE(c.matched_project, '(none)') AS project_name, c.post_id " +
+        "FROM twitter_candidates c " +
+        "JOIN twitter_search_attempts a ON a.id = c.search_attempt_id " +
+        "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND c.search_attempt_id IS NOT NULL " +
+        "UNION ALL " +
+        // Twitter LEGACY branch: for older candidates with no search_attempt_id
+        // (pre-2026-05-21 rows), fall back to the (batch_id, project_name)
+        // fanout. Critically excludes dud attempts (tweets_found=0) so a query
+        // that returned zero tweets cannot be credited with a post the batch's
+        // sibling queries surfaced — that was the original bug the exact
+        // branch fixes for new rows. Sibling-query over-attribution among
+        // non-dud queries still exists here, but only for the historical
+        // backfill window; new cycles route through the exact branch.
         "SELECT 'twitter' AS platform, a.query, " +
                "COALESCE(c.matched_project, '(none)') AS project_name, c.post_id " +
         "FROM twitter_candidates c " +
@@ -6768,6 +6779,8 @@ async function handleApi(req, res) {
          "AND COALESCE(a.project_name, '(none)') = COALESCE(c.matched_project, '(none)') " +
         "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND c.batch_id IS NOT NULL " +
+          "AND c.search_attempt_id IS NULL " +
+          "AND COALESCE(a.tweets_found, 0) > 0 " +
         "UNION ALL " +
         "SELECT 'linkedin', c.search_query, COALESCE(c.matched_project, '(none)'), c.post_id " +
         "FROM linkedin_candidates c " +
