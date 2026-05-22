@@ -1119,7 +1119,14 @@ log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)...
 CLAUDE_SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 export CLAUDE_SESSION_ID
 
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+# PREP_SCHEMA — strict JSON schema for the prep envelope. Includes
+# optional `new_style` per candidate (an inner object) that the model
+# MUST populate when it chooses a brand-new engagement style name (i.e.
+# the picker set mode=invent and the model invented a snake_case name).
+# Fields mirror engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the
+# downstream validate_or_register call accepts the block without a
+# second schema layer.
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"}}},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
@@ -1156,7 +1163,11 @@ For each chosen candidate:
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
    - Otherwise: draft a reply using the best engagement style. 1-2 sentences. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.
 3a. PERSIST FRESH DRAFTS (skip for reused drafts):
-     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'YOUR_REPLY_TEXT' --style STYLE
+     python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'YOUR_REPLY_TEXT' --style STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
+   The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
+   If you are inventing a brand-new style this cycle (i.e. \$PICKED_MODE=invent and your STYLE is a new snake_case name not in the style block above), ALSO pass:
+     --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
+   with the same description/example/why_existing_didnt_fit you put in the 'new_style' field of your output JSON for this candidate.
    Failure here is non-fatal, log a warning and continue.
 4. EMIT one entry in the structured 'candidates' array with these fields:
    - candidate_id (int): from the candidate block
@@ -1165,7 +1176,8 @@ For each chosen candidate:
    - thread_text (string): the parent tweet's text, condensed to <=500 chars if needed
    - matched_project (string): the project name to attribute this post to
    - reply_text (string): the FINAL reply text WITHOUT any URL appended (the shell appends the URL later). Keep <=250 chars so a 23-char t.co link fits inside the 280-char Twitter cap.
-   - engagement_style (string): style name applied (or 'reused' for an unchanged stale draft)
+   - engagement_style (string): style name applied (or 'reused' for an unchanged stale draft). In USE mode ($PICKED_MODE=use) this MUST be the assigned style name '${PICKED_STYLE}' verbatim; the orchestrator silently coerces drift back. In INVENT mode ($PICKED_MODE=invent) this MUST be a NEW snake_case style name not in the curated style block.
+   - new_style (object, REQUIRED iff INVENT mode produced a new name; OMIT or set null otherwise): {description (string), example (string), why_existing_didnt_fit (string), note (string, optional)}. Same shape you passed to --new-style in step 3a. The post pipeline reads this and POSTs to /api/v1/engagement-styles/registry so the new style lands in engagement_styles_registry alongside Reddit/GitHub/Moltbook inventions.
    - language (string): ISO 639-1 code (en, ja, zh, es, ...)
    - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
    - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
@@ -1232,7 +1244,18 @@ if isinstance(so, str):
     except Exception: pass
 candidates = so.get('candidates', []) if isinstance(so, dict) else []
 rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
-json.dump({'candidates': candidates, 'session_id': '$CLAUDE_SESSION_ID'}, open('$PLAN_FILE', 'w'), indent=2)
+# The picker assignment travels through the plan envelope so
+# twitter_post_plan.py can call validate_or_register(...) with the
+# original (assigned_style, assigned_mode) and coerce USE-mode drift
+# back to the picker's choice (or accept the INVENT-mode invention +
+# POST it to /api/v1/engagement-styles/registry). Without this, the
+# post pipeline can't tell which style the picker actually assigned
+# vs. what the model picked. Empty string means INVENT mode (NULL
+# assigned_style in the registry-coercion contract).
+json.dump({'candidates': candidates,
+           'session_id': '$CLAUDE_SESSION_ID',
+           'assigned_style': '$PICKED_STYLE' or None,
+           'assigned_mode': '$PICKED_MODE' or 'use'}, open('$PLAN_FILE', 'w'), indent=2)
 json.dump({'skips': rejected}, open('$SKIP_FILE', 'w'), indent=2)
 print(f'prep: wrote {len(candidates)} candidates and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
 " <<< "$PREP_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
