@@ -2198,10 +2198,13 @@ def _post_iteration(plan, reddit_username):
         text = decision["text"]
         thread_author = decision.get("thread_author", "unknown")
         thread_title = decision.get("thread_title", "unknown")
-        # validate_or_register accepts known styles, registers well-formed
-        # new ones as candidates, and returns None for unknown-and-undocumented.
-        # source_post URL is the thread we're replying to; we don't have our
-        # own URL until after the post lands.
+        # validate_or_register: in USE mode, coerces any drifted style name
+        # back to the assigned one (so picker authority is preserved even if
+        # the drafter ignores the assignment). In INVENT mode (5% slot),
+        # registers the new style into engagement_styles_registry via
+        # /api/v1/engagement-styles/registry. assigned_style/assigned_mode
+        # come from pick_style_for_post() above; without them the picker's
+        # choice would be silently overridable by the model.
         engagement_style, _style_action = validate_or_register(
             decision,
             source_post={
@@ -2210,6 +2213,8 @@ def _post_iteration(plan, reddit_username):
                 "post_id": None,
                 "model": decision.get("model"),
             },
+            assigned_style=(style_assignment or {}).get("style"),
+            assigned_mode=(style_assignment or {}).get("mode"),
         )
         search_topic = decision.get("search_topic") or None
 
