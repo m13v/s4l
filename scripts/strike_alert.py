@@ -518,22 +518,20 @@ def _select_pending(db, post_id=None, limit=None):
             [post_id],
         )
         return cur.fetchall()
-    # Skip mention-stub rows. These are placeholder rows the Twitter mention
-    # scanner (scan_twitter_mentions_browser.py) inserts when someone tags us
-    # in a tweet. our_content == '(mention - no original post)' and our_url
-    # equals the OTHER user's tweet URL, so when fxtwitter 404s that URL
-    # (spammer's tweet/account got taken down), update_stats flips the stub
-    # to status='deleted'. That is not a moderation strike against US, just
-    # Twitter cleaning up someone else's spam. Filtering them out here so the
-    # alert email stays high-signal. See post #25869 (okoroei3 spam mention,
-    # 2026-05-15) for the canonical false-positive case.
+    # Mentions live in the dedicated `mentions` table now (2026-05-23 cutover);
+    # no posts-level filter needed. Previously this clause excluded placeholder
+    # `posts` rows where our_content = '(mention - no original post)' to avoid
+    # alerting on third-party tweets that fxtwitter 404'd (spammer accounts
+    # getting cleaned up). Those rows are gone after
+    # migrate_mentions_out_of_posts.py --commit-delete; the posts table now
+    # only contains content we authored, so every status='deleted' row IS a
+    # real moderation strike against us.
     sql = (
         "SELECT id, platform, status, project_name, our_account, posted_at, "
         "  status_checked_at, thread_url, our_url, thread_title, our_content, "
         "  engagement_style, deletion_detect_count, strike_email_sent_at "
         "FROM posts "
         "WHERE status IN ('deleted','removed') AND strike_email_sent_at IS NULL "
-        "  AND COALESCE(our_content, '') <> '(mention - no original post)' "
         "ORDER BY COALESCE(status_checked_at, posted_at) DESC"
     )
     if limit:
@@ -597,27 +595,6 @@ def main():
         # When --post-id is used, allow re-fire even if already sent.
         if args.post_id is None and r["strike_email_sent_at"] is not None:
             skipped += 1
-            continue
-
-        # Defense-in-depth mention-stub guard. _select_pending already
-        # has a WHERE clause that filters these out; this is a second
-        # layer in case anyone (Gemini, a future agent, a manual SQL
-        # tweak) drops the WHERE clause without touching this loop.
-        # Twitter mention scanner inserts placeholder rows with this
-        # exact string when someone tags us in a tweet; if fxtwitter
-        # later 404s that tweet (spammer banned), update_stats flips
-        # the stub to status='deleted'. Not a moderation strike against
-        # us. See post #25869 (okoroei3 spam, 2026-05-15) for the
-        # canonical false-positive.
-        if args.post_id is None and (r["our_content"] or "").strip() == "(mention - no original post)":
-            if not args.dry_run:
-                _mark_sent(db, r["id"])
-            filtered += 1
-            print(
-                f"[strike_alert] filtered id={r['id']} reason=mention-stub "
-                f"(marked sent, no email)",
-                flush=True,
-            )
             continue
 
         # Reddit live re-check (added 2026-05-16). update_stats.py uses a
