@@ -442,6 +442,7 @@ function getPool() {
   // 100 concurrent connections per project, so 25 is well within budget.
   _pool = new Pool({
     connectionString: dbUrl,
+    ssl: { rejectUnauthorized: false },
     max: 25,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 30000,
@@ -471,6 +472,7 @@ function getBookingsPool() {
   if (!dbUrl) return null;
   _bookingsPool = new Pool({
     connectionString: dbUrl,
+    ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 30000,
