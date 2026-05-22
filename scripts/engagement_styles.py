@@ -522,7 +522,7 @@ def _fetch_style_stats(platform, days=None):
     Recency: `days` overrides the module-level RECENCY_DAYS (default 30).
     Pass days=0 for lifetime aggregation.
 
-    Routes through the social-autoposter-website API (no direct Neon access)
+    Routes through the social-autoposter-website API (no direct DB access)
     so VMs / sandboxes without a DATABASE_URL still get live weights.
     """
     try:
