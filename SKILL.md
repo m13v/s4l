@@ -41,7 +41,7 @@ Key fields you'll use throughout every workflow:
 - `subreddits` — list of subreddits to monitor and post in
 - `content_angle` — the user's unique perspective for writing authentic comments
 - `projects` — products/repos to mention naturally when relevant (each has `name`, `description`, `website`, `github`, `topics`)
-- `database` — unused (DB is Neon Postgres via `DATABASE_URL` in `.env`)
+- `database` — unused (DB is Postgres via `DATABASE_URL` in `.env`)
 
 Use these values everywhere below instead of any hardcoded names or links.
 
@@ -132,7 +132,7 @@ Set `engagement_style` to the style you chose for this post (e.g., 'critic', 'st
 
 Use the account value from `config.json` for `our_account`.
 
-Posts are written directly to the Neon Postgres database. No separate post-sync step is required.
+Posts are written directly to the Postgres database. No separate post-sync step is required.
 
 ---
 
@@ -229,7 +229,7 @@ Daily-cadence original Reddit threads across all products, automated via launchd
 python3 ~/social-autoposter/scripts/update_stats.py
 ```
 
-After running, view updated stats at `https://s4l.ai/stats/[handle]`. Stats are read from the same Neon Postgres database used by the posting pipeline. Changes appear on the website within ~5 minutes.
+After running, view updated stats at `https://s4l.ai/stats/[handle]`. Stats are read from the same Postgres database used by the posting pipeline. Changes appear on the website within ~5 minutes.
 
 ---
 
