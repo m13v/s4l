@@ -66,19 +66,34 @@ def _current_url(send):
     return (r.get("result", {}).get("result", {}) or {}).get("value", "") or ""
 
 
+def _has_auth_cookie(send):
+    """The reliable logged-in signal: an auth_token cookie on x.com.
+    URL heuristics are unreliable — x.com/ (root) is the logged-OUT landing,
+    not a login URL, so a URL-only check false-positives."""
+    r = send("Network.getAllCookies")
+    cks = r.get("result", {}).get("cookies", []) or []
+    return any(
+        c.get("name") == "auth_token" and "x.com" in (c.get("domain") or "")
+        for c in cks
+    )
+
+
 def _logged_in(send):
+    send("Network.enable")
+    if _has_auth_cookie(send):
+        return True
+    # No auth cookie in the current store — navigate to force x.com to set/clear
+    # session cookies, then re-check.
     send("Page.enable")
     send("Page.navigate", {"url": "https://x.com/home"})
-    # poll for settle
-    for _ in range(20):
+    for _ in range(15):
         time.sleep(1)
-        u = _current_url(send)
-        if "/login" in u or "/i/flow/login" in u:
-            return False
-        if u.rstrip("/").endswith("x.com/home"):
+        if _has_auth_cookie(send):
             return True
-    # ambiguous; treat as logged-in only if not on a login URL
-    return "/login" not in _current_url(send)
+        u = _current_url(send)
+        if "/login" in u or "/i/flow/login" in u or u.rstrip("/") == "https://x.com":
+            return False
+    return _has_auth_cookie(send)
 
 
 def main():
