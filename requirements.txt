@@ -5,3 +5,7 @@
 
 psycopg2-binary
 playwright
+# CDP client used by scripts/restore_twitter_session.py and the cookie-grab/
+# CDP-driven helpers. Required on AppMaker VMs for the post-substitution
+# auto-restore flow (bootstrap-vm → restore_twitter_session.py → CDP inject).
+websocket-client
