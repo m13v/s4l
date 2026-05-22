@@ -177,6 +177,41 @@ function writeAppMakerEnvFile() {
   console.log(`  AppMaker VM detected -> wrote ${envPath} (TWITTER_CDP_URL=http://127.0.0.1:9222)`);
 }
 
+// AppMaker VMs: symlink /root/.chromium-profile → ~/.claude/browser-profiles/browser-harness
+// so the appmaker-managed Chrome on port 9222 (launched by /opt/startup.sh with
+// --user-data-dir=/root/.chromium-profile) actually opens the HARNESS profile,
+// which is where our @<handle> Twitter login lives. Without this symlink, the
+// appmaker Chrome opens a fresh empty profile and the pipeline talks to a
+// logged-out browser. Combined with ENABLE_ROOT_VOLUME=1 on the Cloud Run
+// host, the profile (and its cookies) now survives sandbox substitution.
+// Idempotent: if already symlinked correctly, no-op. If a real directory
+// exists, back it up (so any local-only browser cache isn't lost) and replace.
+function linkAppMakerHarnessProfile() {
+  const harnessProfile = path.join(HOME, '.claude', 'browser-profiles', 'browser-harness');
+  const appmakerProfile = '/root/.chromium-profile';
+  try {
+    fs.mkdirSync(harnessProfile, { recursive: true });
+    let stat = null;
+    try { stat = fs.lstatSync(appmakerProfile); } catch { /* not present */ }
+    if (stat && stat.isSymbolicLink()) {
+      const target = fs.readlinkSync(appmakerProfile);
+      if (target === harnessProfile) {
+        console.log(`    AppMaker profile already symlinked: ${appmakerProfile} -> ${harnessProfile}`);
+        return;
+      }
+      fs.unlinkSync(appmakerProfile);
+    } else if (stat && stat.isDirectory()) {
+      const backup = `${appmakerProfile}.replaced-by-symlink-${Date.now()}`;
+      fs.renameSync(appmakerProfile, backup);
+      console.log(`    backed up existing ${appmakerProfile} -> ${backup}`);
+    }
+    fs.symlinkSync(harnessProfile, appmakerProfile);
+    console.log(`    symlinked ${appmakerProfile} -> ${harnessProfile} (login persists across sandbox substitution)`);
+  } catch (e) {
+    console.warn(`    WARNING: failed to symlink AppMaker profile: ${e.message}`);
+  }
+}
+
 // AppMaker VMs also need the twitter-harness MCP server (browser-harness/server.py)
 // to drive port 9222, not its default 9555. That's a SECOND path the env file alone
 // doesn't cover, because the MCP server is spawned by Claude as a subprocess with
@@ -243,6 +278,7 @@ function installBrowserHarness() {
     // generation falls back to empty string and claude --session-id breaks.
     console.log('    installing uuid-runtime (uuidgen) for run_claude.sh...');
     spawnSync('bash', ['-lc', 'command -v uuidgen >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uuid-runtime'], { stdio: 'inherit' });
+    linkAppMakerHarnessProfile();
   }
   console.log('  setting up browser-harness (twitter-harness MCP backend)...');
 
