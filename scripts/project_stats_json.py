@@ -614,7 +614,7 @@ def _dm_short_link_stats(conn, name, days):
     touched in the window. Captures every DM click — booking, github, website,
     or kind=other — bumped at the resolver. Multi-link, multi-turn safe.
     """
-    if not name:
+    if not name or name == SYNTHETIC_NO_PROJECT_NAME:
         return 0
     try:
         cur = conn.execute(
@@ -641,7 +641,7 @@ def _dm_booking_count(conn, bookings_conn, name, days):
     parse the dm_id out of `dm_<n>`, then join against dms.target_project /
     project_name in the main DB to scope by project.
     """
-    if not bookings_conn or not name:
+    if not bookings_conn or not name or name == SYNTHETIC_NO_PROJECT_NAME:
         return 0
     try:
         cur = bookings_conn.cursor()
@@ -987,10 +987,54 @@ def _amplitude_signups(proj, days, env):
     return int(sum(int(x or 0) for x in series))
 
 
+def _post_stats_synthetic_null(conn, days):
+    """NULL-project sibling of ps.get_post_stats. Same shape, same upvote
+    discount logic; filters posts.project_name IS NULL instead of = name.
+
+    ps.get_post_stats lives in the chflags-locked project_stats.py, so the
+    synthetic '(no project)' bucket reuses this in build_project_entry
+    rather than passing a magic string into a function that would return
+    all-zeros for it.
+    """
+    cur = conn.execute(
+        "SELECT COUNT(*), "
+        "COUNT(*) FILTER (WHERE posted_at >= NOW() - INTERVAL '" + str(int(days)) + " days'), "
+        "COUNT(*) FILTER (WHERE status = 'active'), "
+        "COUNT(*) FILTER (WHERE status IN ('removed', 'deleted')), "
+        "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+        "  THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+        "  ELSE COALESCE(upvotes, 0) END), 0), "
+        "COALESCE(SUM(comments_count), 0), "
+        "COALESCE(SUM(views), 0) "
+        "FROM posts WHERE project_name IS NULL"
+    )
+    row = cur.fetchone()
+    if not row:
+        return {}
+    cols = ["total", "recent", "active", "removed", "total_upvotes", "total_comments", "total_views"]
+    return dict(zip(cols, row))
+
+
+def _platform_breakdown_synthetic_null(conn, days):
+    """NULL-project sibling of ps.get_platform_breakdown."""
+    cur = conn.execute(
+        "SELECT platform, COUNT(*) as cnt FROM posts "
+        "WHERE project_name IS NULL AND posted_at >= NOW() - INTERVAL '" + str(int(days)) + " days' "
+        "GROUP BY platform ORDER BY cnt DESC"
+    )
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, ph_results, platform=None):
     name = proj["name"]
-    post_stats = ps.get_post_stats(conn, name, days)
-    platforms = ps.get_platform_breakdown(conn, name, days)
+    if name == SYNTHETIC_NO_PROJECT_NAME:
+        # Bypass ps.* (locked) for the synthetic bucket; both helpers above
+        # query posts WHERE project_name IS NULL with the same shape.
+        post_stats = _post_stats_synthetic_null(conn, days)
+        platforms = _platform_breakdown_synthetic_null(conn, days)
+    else:
+        post_stats = ps.get_post_stats(conn, name, days)
+        platforms = ps.get_platform_breakdown(conn, name, days)
     eng_recent = _windowed_post_engagement(conn, name, days, platform=platform)
     eng_period_total = _period_total_engagement(conn, name, days, platform=platform)
     seo_pages_recent = _seo_pages_count(conn, name, days)
@@ -1394,8 +1438,125 @@ def main():
         )
         period_clicks = {r[0]: int(r[1]) for r in cur.fetchall()}
 
+        # Synthetic '(no project)' bucket: same shape as Queries 1-4 above,
+        # filtered to posts.project_name IS NULL instead of GROUP BY name.
+        # Keeps the funnel total aligned with /api/style/stats (which has no
+        # project filter) by surfacing un-tagged rows as their own row.
+        cur = conn.execute(
+            "SELECT "
+              "COUNT(*)::bigint, "
+              "COUNT(*) FILTER (WHERE posted_at >= NOW() - " + days_sql + plat_clause_bare + ")::bigint, "
+              "COUNT(*) FILTER (WHERE status = 'active')::bigint, "
+              "COUNT(*) FILTER (WHERE status IN ('removed', 'deleted'))::bigint, "
+              "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
+                "THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
+                "ELSE COALESCE(upvotes, 0) END), 0)::bigint, "
+              "COALESCE(SUM(comments_count), 0)::bigint, "
+              "COALESCE(SUM(views), 0)::bigint "
+            "FROM posts WHERE project_name IS NULL"
+        )
+        r = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0)
+        lifetime[SYNTHETIC_NO_PROJECT_NAME] = {
+            "total": int(r[0]), "recent": int(r[1]), "active": int(r[2]),
+            "removed": int(r[3]), "total_upvotes": int(r[4]),
+            "total_comments": int(r[5]), "total_views": int(r[6]),
+        }
+        cur = conn.execute(
+            "SELECT "
+              "COALESCE(SUM(CASE WHEN LOWER(p.platform) IN ('reddit', 'moltbook') "
+                "THEN GREATEST(0, COALESCE(p.upvotes, 0) - 1) "
+                "ELSE COALESCE(p.upvotes, 0) END), 0)::bigint, "
+              "COALESCE(SUM(p.comments_count), 0)::bigint, "
+              "COALESCE(SUM(p.views) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::bigint, "
+              "COUNT(*) FILTER (WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues'))::bigint, "
+              "COALESCE(SUM(pl.total_clicks), 0)::bigint "
+            "FROM posts p "
+            "LEFT JOIN ("
+              "SELECT post_id, SUM(clicks)::int AS total_clicks "
+              "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+            ") pl ON pl.post_id = p.id "
+            "WHERE p.project_name IS NULL "
+              "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p
+        )
+        r = cur.fetchone() or (0, 0, 0, 0, 0)
+        windowed[SYNTHETIC_NO_PROJECT_NAME] = {
+            "upvotes": int(r[0]), "comments": int(r[1]),
+            "views": int(r[2]), "views_posts": int(r[3]),
+            "post_clicks": int(r[4]),
+        }
+        # Period total (new_posts + old_posts) for the NULL bucket. Same
+        # branch logic as Query 3 above without the GROUP BY.
+        cur = conn.execute(
+            "WITH new_posts AS ("
+              "SELECT "
+                "COALESCE(SUM(p.upvotes), 0)::bigint AS upvotes, "
+                "COALESCE(SUM(p.comments_count), 0)::bigint AS comments, "
+                "COALESCE(SUM(p.views) FILTER (WHERE " + views_excl + "), 0)::bigint AS views "
+              "FROM posts p "
+              "WHERE p.project_name IS NULL "
+                "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p +
+            "), "
+            "old_post_daily AS ("
+              "SELECT pvd.post_id, p.platform, "
+                "pvd.upvotes,  LAG(pvd.upvotes)  OVER w AS prev_upvotes, "
+                "pvd.comments, LAG(pvd.comments) OVER w AS prev_comments, "
+                "pvd.views,    LAG(pvd.views)    OVER w AS prev_views "
+              "FROM post_views_daily pvd "
+              "JOIN posts p ON p.id = pvd.post_id "
+              "WHERE pvd.day >= CURRENT_DATE - " + days_sql + " "
+                "AND p.project_name IS NULL "
+                "AND p.posted_at < NOW() - " + days_sql + plat_clause_p + " "
+              "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
+            "), "
+            "old_posts AS ("
+              "SELECT "
+                "COALESCE(SUM(GREATEST(upvotes - prev_upvotes, 0)) "
+                  "FILTER (WHERE prev_upvotes IS NOT NULL AND upvotes IS NOT NULL), 0)::bigint AS upvotes, "
+                "COALESCE(SUM(GREATEST(comments - prev_comments, 0)) "
+                  "FILTER (WHERE prev_comments IS NOT NULL AND comments IS NOT NULL), 0)::bigint AS comments, "
+                "COALESCE(SUM(GREATEST(views - prev_views, 0)) "
+                  "FILTER (WHERE prev_views IS NOT NULL AND views IS NOT NULL "
+                    "AND LOWER(platform) NOT IN ('moltbook', 'github', 'github_issues')), 0)::bigint AS views "
+              "FROM old_post_daily"
+            ") "
+            "SELECT n.upvotes + o.upvotes, n.comments + o.comments, n.views + o.views "
+            "FROM new_posts n CROSS JOIN old_posts o"
+        )
+        r = cur.fetchone() or (0, 0, 0)
+        period[SYNTHETIC_NO_PROJECT_NAME] = {
+            "upvotes": int(r[0]), "comments": int(r[1]), "views": int(r[2]),
+        }
+        # Period-total post_clicks for the NULL bucket.
+        cur = conn.execute(
+            "WITH new_clicks AS ("
+              "SELECT COALESCE(SUM(pl.total_clicks), 0)::bigint AS clicks "
+              "FROM posts p "
+              "LEFT JOIN ("
+                "SELECT post_id, SUM(clicks)::int AS total_clicks "
+                "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
+              ") pl ON pl.post_id = p.id "
+              "WHERE p.project_name IS NULL "
+                "AND p.posted_at >= NOW() - " + days_sql + plat_clause_p +
+            "), "
+            "old_event_clicks AS ("
+              "SELECT COUNT(*)::bigint AS clicks "
+              "FROM post_link_clicks plc "
+              "JOIN post_links pl ON pl.code = plc.code "
+              "JOIN posts p ON p.id = pl.post_id "
+              "WHERE plc.ts >= NOW() - " + days_sql + " "
+                "AND plc.is_bot = FALSE "
+                "AND p.project_name IS NULL "
+                "AND p.posted_at < NOW() - " + days_sql + plat_clause_p +
+            ") "
+            "SELECT n.clicks + o.clicks FROM new_clicks n CROSS JOIN old_event_clicks o"
+        )
+        r = cur.fetchone() or (0,)
+        period_clicks[SYNTHETIC_NO_PROJECT_NAME] = int(r[0] or 0)
+
+        # Project list: real projects from config + the synthetic NULL bucket.
+        proj_list = list(config.get("projects", [])) + [{"name": SYNTHETIC_NO_PROJECT_NAME}]
         out_projects = []
-        for proj in config.get("projects", []):
+        for proj in proj_list:
             name = proj["name"]
             if args.project and args.project.lower() != name.lower():
                 continue
@@ -1453,6 +1614,15 @@ def main():
         if args.project and args.project.lower() != name.lower():
             continue
         selected_projects.append(proj)
+
+    # Synthetic '(no project)' bucket: surfaces posts.project_name IS NULL rows
+    # (e.g. IG drafts that landed without a project tag) so the funnel total
+    # lines up with /api/style/stats. No website/landing_pages/posthog block,
+    # so get_project_domains() returns [] -> PostHog/SEO/booking lookups all
+    # become no-ops; per-project SQL helpers route through _project_filter_sql
+    # to use `IS NULL` instead of `= name`.
+    if not args.project or args.project.lower() == SYNTHETIC_NO_PROJECT_NAME.lower():
+        selected_projects.append({"name": SYNTHETIC_NO_PROJECT_NAME})
 
     # Group domains by (api_key, project_id) so we issue one batched set of
     # HogQL calls per PostHog bucket instead of one-per-domain. Projects that
