@@ -119,7 +119,7 @@ _accumulate_cdp_reasons() {
 #     to catch SIGTERM/error paths. The flag makes either order a no-op
 #     after first emission.
 #   - On SIGTERM the get_run_cost.py call is wrapped in `timeout 10` so a
-#     hung Neon query doesn't wedge the trap; cost falls back to 0.0000.
+#     hung Postgres query doesn't wedge the trap; cost falls back to 0.0000.
 #
 # Trap chaining: lock.sh sourced above already installed `_sa_release_locks`
 # on EXIT INT TERM HUP. Bash trap REPLACES, not appends, so we re-set with
@@ -480,7 +480,7 @@ _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/de
 log "=== Run summary: posted=$TOTAL_POSTED failed=$TOTAL_FAILED skipped=$TOTAL_SKIPPED salvaged=$TOTAL_SALVAGED candidates=$TOTAL_CANDIDATES projects=[$EXCLUDE] cost=\$$_COST elapsed=${ELAPSED}s ==="
 
 # Hand the precomputed cost to the trap-installed emitter so the happy path
-# pays the (slow) Neon query once, without the 10s clamp the SIGTERM path
+# pays the (slow) Postgres query once, without the 10s clamp the SIGTERM path
 # uses. _sa_emit_run_summary_oneshot is idempotent; the EXIT trap will
 # no-op after this call.
 _SA_PRECOMPUTED_COST="$_COST"
