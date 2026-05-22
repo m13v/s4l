@@ -9,20 +9,27 @@ a single source of truth.
 Usage:
     from engagement_styles import VALID_STYLES, REPLY_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns
 
-Style universe (post 2026-05-22 cleanup):
+Style universe (post 2026-05-22 cleanup, second pass):
     The hardcoded STYLES dict is the curated baseline kept in-process so
     the picker still works on a cold-start machine with no DB access. The
     live "universe" is the union of STYLES + every row in the Postgres
-    table `engagement_styles_registry` (read via the s4l.ai API), plus
-    every active row in `engagement_styles_human_derived`.
+    table `engagement_styles_registry` (read via the s4l.ai API).
 
-    The model may INVENT new styles inline at decision time by emitting a
-    `new_style` block alongside an unknown `engagement_style` in its JSON.
-    Those go straight into engagement_styles_registry with status='active'
-    via POST /api/v1/engagement-styles/registry (no two-tier
-    candidate/active dance, no JSON sidecar). Every install sees every
-    install's registered styles. They compete on raw clicks-driven score
-    immediately, with sample-size shrinkage protecting against n=1 outliers.
+    The registry table now carries THREE flavors discriminated by a `kind`
+    column:
+      - 'seed'           : curated, ships with the repo
+      - 'model_invented' : created by register_style() when the orchestrator
+                           proposes a new style inline via `new_style` JSON
+      - 'human_derived'  : created once a day per platform by
+                           scripts/generate_daily_human_style.py, distilled
+                           from the top human replies in thread_top_replies
+
+    The picker bypasses score-based selection with HUMAN_DERIVED_RATE
+    probability per platform and asks the registry route for the latest
+    active human-derived row on that platform.
+
+    All reads/writes go through the s4l.ai /api/v1/engagement-styles/registry
+    route. We never touch the DB directly from this module.
 """
 
 import json
@@ -378,46 +385,43 @@ def get_all_styles():
 
 
 def _load_human_derived_styles():
-    """Map of {name: {description, example, note, best_in}} for every active
-    row in engagement_styles_human_derived. Best-effort; returns {} on any
-    failure so callers don't have to wrap in try/except."""
+    """Map of {name: {description, example, note, best_in}} for every
+    active human_derived row in engagement_styles_registry.
+
+    Reads via the /api/v1/engagement-styles/registry route filtered by
+    kind=human_derived. Best-effort; returns {} on any failure so callers
+    don't have to wrap in try/except. Defense-in-depth alongside
+    _fetch_registry_styles(): if the synthesizer ever names a row the same
+    as an existing seed, get_all_styles() will already have the seed and
+    skip the human_derived entry.
+    """
     try:
-        from db import get_conn  # type: ignore
-    except Exception:
-        return {}
-    try:
-        conn = get_conn()
-    except Exception:
-        return {}
-    try:
-        cur = conn.execute(
-            """
-            SELECT name, description, example, best_in, note
-            FROM engagement_styles_human_derived
-            WHERE status = 'active'
-            """
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/engagement-styles/registry",
+            {"status": "active", "kind": "human_derived"},
         )
-        rows = cur.fetchall()
+        data = (resp or {}).get("data") or {}
+        rows = data.get("styles") or []
     except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
         return {}
-    try:
-        conn.close()
-    except Exception:
-        pass
     out = {}
     for r in rows:
-        name = r[0]
-        best_in = r[3] if isinstance(r[3], dict) else (
-            json.loads(r[3]) if r[3] else {}
-        )
+        name = r.get("name")
+        if not name:
+            continue
+        best_in = r.get("best_in") or {}
+        if isinstance(best_in, str):
+            try:
+                best_in = json.loads(best_in)
+            except Exception:
+                best_in = {}
         out[name] = {
-            "description": r[1] or "",
-            "example": r[2] or "",
-            "note": r[4] or "",
+            "description": r.get("description") or "",
+            "example": r.get("example") or "",
+            "note": r.get("note") or "",
             "best_in": best_in,
         }
     return out
