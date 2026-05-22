@@ -120,8 +120,8 @@ Process ALL of them. For each post:
    Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
 6. Append the wrapped LINK_TEXT to our_content with a blank line separator.
 7. Navigate to the post URL via the linkedin-agent browser, find our comment, click the three-dot menu on it, click "Edit", append the wrapped link text to the existing content, save, verify.
-8. After each successful edit, update the DB and backfill short-link attribution:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
+8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_ab_skip vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py and the Reddit link-edit pipeline does) and backfill short-link attribution:
+   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
