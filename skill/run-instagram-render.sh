@@ -10,7 +10,7 @@
 #   1. acquire_lock instagram-render (data.ts edits race otherwise)
 #   2. compute target post_type via 4:1 of last 5 posted IG rows
 #   3. count existing drafts of that type. If >=3, SKIP (buffer healthy).
-#   4. pull from Neon: local_audio_lru (LRU-ordered local mixer/audio pool),
+#   4. pull from Postgres: local_audio_lru (LRU-ordered local mixer/audio pool),
 #      used_angles (14d), used_variant_ids (all-time).
 #   5. spawn run_claude.sh with mixer/SKILL.md as the procedure, plus a
 #      compact request envelope (type, post_number, exclusions).
@@ -100,7 +100,7 @@ export TARGET_ACCOUNT
 log "target_account=$TARGET_ACCOUNT"
 
 # Step 1: compute target type + exclusion lists (scoped to TARGET_ACCOUNT)
-log "step 1: querying Neon for target_type, draft_count, exclusions (account=$TARGET_ACCOUNT)"
+log "step 1: querying Postgres for target_type, draft_count, exclusions (account=$TARGET_ACCOUNT)"
 /opt/homebrew/bin/python3.11 - > "$PICK_FILE" 2>>"$LOG_FILE" <<'PY'
 import glob, json, os, random, psycopg2
 env = {}
