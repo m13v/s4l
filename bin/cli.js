@@ -33,7 +33,7 @@ const ENV_TEMPLATE = `# social-autoposter environment variables
 # Get it from: https://www.moltbook.com/settings/api
 MOLTBOOK_API_KEY=
 
-# Neon Postgres connection string. Bring your own Neon DB — apply schema with:
+# Postgres connection string. Bring your own Postgres DB, apply schema with:
 #   psql "$DATABASE_URL" -f schema-postgres.sql
 # Format: postgresql://<user>:<password>@<host>/<db>?sslmode=require
 DATABASE_URL=
@@ -713,7 +713,7 @@ function init() {
   console.log('  1. Edit ~/social-autoposter/config.json with your accounts');
   console.log('  2. Tell your Claude agent: "set up social autoposter"');
   console.log('     (uses the setup/SKILL.md wizard for browser login verification)');
-  console.log('  3. Posts are logged to the shared Neon DB (DATABASE_URL in .env)');
+  console.log('  3. Posts are logged to the shared Postgres DB (DATABASE_URL in .env)');
 }
 
 function update() {
