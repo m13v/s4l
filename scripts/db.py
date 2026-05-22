@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared Neon Postgres connection for social-autoposter.
+"""Shared Postgres connection for social-autoposter.
 
 Provides a thin psycopg2 wrapper with a sqlite3-compatible API so all
 scripts can use the same SQL without changes to query logic.
@@ -87,9 +87,10 @@ class PGConn:
         self._apply_session_defaults()
 
     def _apply_session_defaults(self):
-        # 5 min per-statement ceiling. Prevents silent hangs when Neon's
-        # pgbouncer drops an idle socket and psycopg2's recv stalls forever
-        # (observed 2026-04-23/24 on update_stats.py --github-only). Neon's
+        # 5 min per-statement ceiling. Prevents silent hangs when the
+        # pooler drops an idle socket and psycopg2's recv stalls forever
+        # (originally observed 2026-04-23/24 on Neon under update_stats.py
+        # --github-only; kept after Cloud SQL migration as defensive). The
         # pooler rejects libpq `options=` at connect time, so we set this via
         # SQL after connect. Reapplied after commit() because transaction-mode
         # pooling resets session state on COMMIT.
@@ -134,7 +135,7 @@ class PGConn:
         except psycopg2.OperationalError:
             self._reconnect()
             self._conn.commit()
-        # Neon's transaction-mode pooler resets session state on COMMIT, so
+        # The transaction-mode pooler resets session state on COMMIT, so
         # re-apply statement_timeout for the next transaction.
         self._apply_session_defaults()
 
@@ -186,7 +187,7 @@ def snapshot_post_views(db, post_id, views):
 
 
 def get_conn():
-    """Return a PGConn connected to the central Neon database."""
+    """Return a PGConn connected to the central Postgres database."""
     load_env()
     url = os.environ.get('DATABASE_URL')
     if not url:
