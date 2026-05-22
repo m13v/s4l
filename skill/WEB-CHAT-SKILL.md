@@ -92,7 +92,7 @@ node ~/analytics/scripts/send-email.js \
 (Use `--from` "Matt from Fazm <matt@fazm.ai>" + `--product fazm` only if
 PROJECT == fazm. For all other projects use `matt@mail.omi.me`.)
 
-To get `$THREAD_DB_ID`, query Neon:
+To get `$THREAD_DB_ID`, query Postgres:
 ```bash
 psql "$DATABASE_URL" -tAc "SELECT id FROM web_chat_threads WHERE thread_id='$THREAD_ID'"
 ```
