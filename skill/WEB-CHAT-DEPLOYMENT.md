@@ -11,7 +11,7 @@ End-to-end deploy steps for the cross-site founder-chat pipeline.
   ↓
 [ Next.js route on social-autoposter-website (Vercel) ]
   ↓ INSERT
-[ Neon Postgres web_chat_threads / web_chat_messages ]   ← SAME Neon as the rest of social-autoposter
+[ Postgres web_chat_threads / web_chat_messages ]   ← SAME Postgres as the rest of social-autoposter
   ↑ poll every 15s
 [ launchd com.m13v.web-chat → check-web-chats.sh → claude -p ... → send_web_chat_reply.py ]
                                                       │
@@ -24,7 +24,7 @@ End-to-end deploy steps for the cross-site founder-chat pipeline.
 ```
 
 **No Cloud Run. No new infra projects.** Just two new Vercel routes on the
-sibling repo + the same Neon DB you already use.
+sibling repo + the same Postgres DB you already use.
 
 ---
 
@@ -40,7 +40,7 @@ sibling repo + the same Neon DB you already use.
   src/lib/web-chat/rate-limit.ts                   5 msgs/min per IP
 
 ~/social-autoposter/                               (local)
-  scripts/web_chat_schema.sql                      Neon migration
+  scripts/web_chat_schema.sql                      Postgres migration
   scripts/check_unread_web_chats.py                step 1 (find unread)
   scripts/claim_web_chat.py                        cooldown lock
   scripts/unclaim_web_chat.py                      retry on Claude failure
@@ -63,7 +63,7 @@ sibling repo + the same Neon DB you already use.
 
 ---
 
-## Step 1: run the Neon migration
+## Step 1: run the Postgres migration
 
 The website routes and the local scripts both read/write the same two tables.
 
@@ -197,7 +197,7 @@ curl -X POST https://social-autoposter-website.vercel.app/api/web-chat/send \
   -d '{"project":"Mediar","visitorId":"web_smoketest1","text":"hey, smoke test","email":"i@m13v.com","pageUrl":"https://mediar.ai"}'
 # → {"threadId":"wc_...","messageId":N}
 
-# 2. Verify the row landed in Neon:
+# 2. Verify the row landed in Postgres:
 psql "$DATABASE_URL" -c "
   SELECT id, thread_id, project_name, visitor_email, last_message_text
     FROM web_chat_threads ORDER BY id DESC LIMIT 3;"
@@ -270,7 +270,7 @@ cd ~/social-autoposter-website && git add -A && git commit -m "enable web-chat f
 ## Pause / rollback
 
 ```bash
-# Pause the local agent (visitor messages still land in Neon, just not auto-replied).
+# Pause the local agent (visitor messages still land in Postgres, just not auto-replied).
 launchctl unload ~/Library/LaunchAgents/com.m13v.web-chat.plist
 launchctl unload ~/Library/LaunchAgents/com.m13v.web-chat-ingest.plist
 
