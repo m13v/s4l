@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# check-web-chats.sh — Poll Neon for unread web-chat messages and spawn one
+# check-web-chats.sh, poll Postgres for unread web-chat messages and spawn one
 # Claude session per visitor. Called by launchd every 15 seconds.
 #
 # Mirror of ~/fazm/inbox/skill/check-founder-chat.sh: same lock pattern, same
 # claim/cooldown/retry/rate-limit guardrails, same email-summary escalation.
-# The only difference is the data layer: Neon Postgres web_chat_threads /
+# The only difference is the data layer: Postgres web_chat_threads /
 # web_chat_messages instead of Firestore founder_chats.
 
 set -euo pipefail
@@ -17,7 +17,7 @@ export PATH="/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/opt/homebrew/bin:
 source "$(dirname "$0")/lock.sh"
 acquire_lock "check-web-chats" 60
 
-# Load social-autoposter env (Neon DATABASE_URL, RESEND_API_KEY).
+# Load social-autoposter env (Postgres DATABASE_URL, RESEND_API_KEY).
 ENV_FILE="$HOME/social-autoposter/.env"
 if [ -f "$ENV_FILE" ]; then
     export DATABASE_URL=$(grep '^DATABASE_URL=' "$ENV_FILE" | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"')
@@ -40,7 +40,7 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_DIR/web-chat.log"; }
 
-# Step 1: query Neon for unread threads.
+# Step 1: query Postgres for unread threads.
 CHATS=$("$PYTHON_BIN" "$SCRIPTS_DIR/check_unread_web_chats.py" 2>>"$LOG_DIR/web-chat.log")
 if [ "$CHATS" = "[]" ] || [ -z "$CHATS" ]; then
     exit 0
@@ -91,7 +91,7 @@ for i in $(seq 0 $((NUM - 1))); do
     "$PYTHON_BIN" "$SCRIPTS_DIR/claim_web_chat.py" "$THREAD_ID" 2>>"$LOG_DIR/web-chat.log" \
         || log "WARNING: claim failed for $THREAD_ID"
 
-    # Build prompt (history is dumped from Neon for freshness).
+    # Build prompt (history is dumped from Postgres for freshness).
     HISTORY_JSON=$("$PYTHON_BIN" "$SCRIPTS_DIR/dump_web_chat_history.py" --thread "$THREAD_ID")
 
     # Pull this project's config block to give Claude context.
@@ -116,7 +116,7 @@ UNREAD MESSAGES: $UNREAD
 $PROJECT_CFG
 \`\`\`
 
-## Full conversation history (from Neon)
+## Full conversation history (from Postgres)
 \`\`\`json
 $HISTORY_JSON
 \`\`\`
@@ -145,7 +145,7 @@ PROMPT_EOF
             # Detect persistent-error states that won't recover with quick retry:
             # rate limits, credit/billing, auth/quota, account-level issues.
             # All trip the same 1h pause; the next cycle re-tries automatically.
-            # Pending threads stay in Neon (unread_by_founder>0) so nothing is
+            # Pending threads stay in Postgres (unread_by_founder>0) so nothing is
             # ever lost; the launchd poller picks them up the moment the 1h
             # marker expires. No human notification — the log line is enough.
             PAUSE_PATTERNS='hit your limit|rate limit|rate.limited|too many requests|usage limit|weekly limit|5.hour limit|credit balance|out of credit|insufficient (credit|funds|balance)|payment required|billing|quota exceeded|api[- ]?key|unauthori[sz]ed|forbidden|account.{0,30}(suspend|disabled)|HTTP 401|HTTP 403|HTTP 429|invalid.*x.api.key'
