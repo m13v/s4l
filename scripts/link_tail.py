@@ -107,9 +107,8 @@ YOUR TASK:
 Rewrite the reply so the LAST sentence is a 1-sentence (≤ 22 words) bridge that:
   1. References the SINGLE strongest specific claim, mechanism, or detail from the existing reply (e.g. "rephrasing on revisit", "a 4-axis rubric", "200ms p95", "automatic distractor scoring") — pick ONE concrete thing, not a category.
   2. Names a CONCRETE PRODUCT MECHANISM that delivers it (verb + noun, inferred from the URL slug + project context). Do NOT say "a tool for this", "something that helps", "made this for it" — those are banned.
-  3. Frames the project as OUR OWN creation (first-person ownership: "we built", "I shipped", "we made"), NEVER as third-party ("I found", "there's a tool", "came across").
-  4. Ends with the URL exactly as given. No period after. No "click here", "check it out", "give it a try".
-  5. Reads in the voice of the reply (lowercase if reply is lowercase, casual if reply is casual).
+  3. Ends with the URL exactly as given. No period after. No "click here", "check it out", "give it a try".
+  4. Reads in the voice of the reply (lowercase if reply is lowercase, casual if reply is casual).
 
 REPLACEMENT RULE:
 - If the reply has a clear empathy/advice body, KEEP that body verbatim and append the bridge as a new sentence (separated by a single space).
@@ -193,8 +192,6 @@ PREAMBLE_RES = [
 ]
 BANNED_PHRASES = [
     "click here", "check it out", "give it a try",
-    "i found this", "there's a tool", "came across this",
-    "saw this manual", "found this guide",
     # Generic-verb-no-object failures.
     "a tool for exactly this", "made this for it",
 ]
