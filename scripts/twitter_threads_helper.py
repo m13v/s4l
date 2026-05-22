@@ -46,8 +46,12 @@ from http_api import api_get  # noqa: E402
 def _fetch_posts(project: str, days: int | None = None, limit: int = 500):
     """Pull recent twitter posts for a project via /api/v1/posts. The
     server-side WHERE handles platform/project/status/since; the
-    our_content NOT ILIKE '(mention%' + thread_url = our_url filters are
-    applied client-side so the route stays general-purpose."""
+    thread_url = our_url filter (= our original posts, not replies)
+    is applied client-side so the route stays general-purpose.
+
+    Post 2026-05-23, mentions live in the dedicated `mentions` table,
+    so we no longer need to filter '(mention%' placeholders client-side.
+    """
     query: dict = {
         "platform": "twitter",
         "project": project,
@@ -60,12 +64,8 @@ def _fetch_posts(project: str, days: int | None = None, limit: int = 500):
         query["since"] = since
     resp = api_get("/api/v1/posts", query=query)
     rows = (resp.get("data") or {}).get("posts") or []
-    # Apply the mention-placeholder + our-original filters here, matching
-    # the legacy SQL WHERE clauses byte-for-byte.
     out = []
     for r in rows:
-        if (r.get("our_content") or "").startswith("(mention"):
-            continue
         if r.get("thread_url") != r.get("our_url"):
             continue
         out.append(r)
