@@ -1,6 +1,8 @@
 # social-autoposter
 
-Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Ships as a Claude Code skill plus a set of standalone Python helpers and macOS launchd jobs.
+Open-source repo behind **[S4L (s4lai)](https://s4l.ai)**: an automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Ships as a Claude Code skill plus a set of standalone Python helpers and macOS launchd jobs.
+
+> The hosted managed version is **S4L** (written `s4lai`, domain `s4l.ai`): done-for-you Reddit and Twitter brand-awareness, $1/1K impressions, $50/1K site visits. See https://s4l.ai.
 
 Posts are written to a Neon Postgres database via `DATABASE_URL` in `~/social-autoposter/.env`. Bring your own Neon DB and apply `schema-postgres.sql` once. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
 
