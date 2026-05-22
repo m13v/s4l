@@ -5331,6 +5331,113 @@ async function handleApi(req, res) {
     return;
   }
 
+  // GET /api/experiments - currently-running A/B/C tests across the pipeline.
+  // First (and only, for now) experiment is the twitter-cycle variant test
+  // shipped 2026-05-22: variant A = ripen+6h (control), B = no-ripen+6h, C =
+  // no-ripen+1h. Variant assignment lives on twitter_candidates.cycle_variant
+  // (set by skill/run-twitter-cycle.sh from hash(BATCH_ID) % 3). This endpoint
+  // reads that column directly; no separate experiments table yet. When a
+  // second experiment ships we'll either add another block here or promote
+  // to a real table. Admin-only: experimentation state isn't client-facing.
+  if (p === '/api/experiments' && req.method === 'GET') {
+    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    (async () => {
+      try {
+        // One row per variant, joining candidates -> posts to derive the
+        // post-rate funnel and engagement-on-our-reply. Thread-age-at-discover
+        // p50 uses tweet_posted_at vs discovered_at (we have ~100% coverage on
+        // tweet_posted_at over the experiment window). Engagement is taken from
+        // twitter_candidates.{likes,replies,views} which the stats job refreshes
+        // to T-final values, not the t0/t1 snapshot columns.
+        const rows = await pq(`
+          WITH base AS (
+            SELECT tc.cycle_variant AS variant,
+                   tc.id,
+                   tc.batch_id,
+                   tc.status,
+                   tc.discovered_at,
+                   tc.tweet_posted_at,
+                   tc.posted_at,
+                   tc.post_id,
+                   EXTRACT(EPOCH FROM (tc.discovered_at - tc.tweet_posted_at)) / 60.0 AS thread_age_min,
+                   p.views AS our_views,
+                   p.upvotes AS our_likes,
+                   p.comments_count AS our_replies
+            FROM twitter_candidates tc
+            LEFT JOIN posts p ON p.id = tc.post_id
+            WHERE tc.cycle_variant IS NOT NULL
+              AND tc.cycle_variant IN ('A','B','C')
+              AND tc.discovered_at > NOW() - INTERVAL '30 days'
+          )
+          SELECT variant,
+                 COUNT(*) AS n_candidates,
+                 COUNT(DISTINCT batch_id) AS n_batches,
+                 COUNT(*) FILTER (WHERE status = 'posted') AS n_posted,
+                 COUNT(*) FILTER (WHERE status = 'skipped') AS n_skipped,
+                 COUNT(*) FILTER (WHERE status = 'expired') AS n_expired,
+                 COUNT(*) FILTER (WHERE status = 'pending') AS n_pending,
+                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY thread_age_min)
+                   FILTER (WHERE thread_age_min IS NOT NULL) AS thread_age_min_p50,
+                 AVG(our_views) FILTER (WHERE status = 'posted') AS avg_views,
+                 AVG(our_likes) FILTER (WHERE status = 'posted') AS avg_likes,
+                 AVG(our_replies) FILTER (WHERE status = 'posted') AS avg_replies,
+                 MIN(discovered_at) AS started_at
+          FROM base
+          GROUP BY variant
+          ORDER BY variant
+        `, []);
+        const variantDefs = {
+          A: { label: 'Control', desc: 'ripen + 6h freshness (legacy)' },
+          B: { label: 'No-ripen', desc: 'skip 20-min wait + 6h freshness' },
+          C: { label: 'No-ripen + tight', desc: 'skip 20-min wait + 1h freshness' },
+        };
+        const variants = ['A', 'B', 'C'].map(k => {
+          const row = (rows || []).find(r => r.variant === k) || {};
+          const n = Number(row.n_candidates || 0);
+          const posted = Number(row.n_posted || 0);
+          return {
+            key: k,
+            label: variantDefs[k].label,
+            desc: variantDefs[k].desc,
+            n_candidates: n,
+            n_batches: Number(row.n_batches || 0),
+            n_posted: posted,
+            n_skipped: Number(row.n_skipped || 0),
+            n_expired: Number(row.n_expired || 0),
+            n_pending: Number(row.n_pending || 0),
+            post_rate_pct: n > 0 ? (posted / n) * 100 : null,
+            thread_age_min_p50: row.thread_age_min_p50 != null ? Number(row.thread_age_min_p50) : null,
+            avg_views: row.avg_views != null ? Number(row.avg_views) : null,
+            avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
+            avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+            started_at: row.started_at || null,
+          };
+        });
+        const totals = variants.reduce((acc, v) => {
+          acc.n_candidates += v.n_candidates;
+          acc.n_posted += v.n_posted;
+          acc.n_batches += v.n_batches;
+          return acc;
+        }, { n_candidates: 0, n_posted: 0, n_batches: 0 });
+        const startedAt = variants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+        const experiments = [{
+          id: 'twitter-ripen-freshness-abc',
+          name: 'Twitter ripen + freshness (A/B/C)',
+          status: 'running',
+          started_at: startedAt,
+          hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate.',
+          primary_metric: 'thread_age_min_p50',
+          totals,
+          variants,
+        }];
+        json(res, { experiments });
+      } catch (e) {
+        json(res, { error: String(e && e.message || e) }, 500);
+      }
+    })();
+    return;
+  }
+
   // GET /api/cost/stats - per-activity-type count + total cost over a trailing
   // window. Types: thread (posts.posted_at), comment (replies.replied),
   // page (seo_keywords + gsc_queries), dm_thread (dms.sent_at). Per-row cost is
@@ -8180,6 +8287,7 @@ const HTML = `<!DOCTYPE html>
   <div class="tab" data-tab="trends">Trends</div>
   <div class="tab" data-tab="activity">Activity</div>
   <div class="tab" data-tab="top">Top</div>
+  <div class="tab sa-admin-only" data-tab="experiments">Experiments</div>
   <div class="tab sa-admin-only" data-tab="logs">Logs</div>
   <div class="tab sa-admin-only" data-tab="settings">Settings</div>
 </div>
@@ -8645,6 +8753,16 @@ const HTML = `<!DOCTYPE html>
     <div class="style-stats-empty">Loading\u2026</div>
   </div>
   <div id="top-links-container" class="hidden">
+    <div class="style-stats-empty">Loading\u2026</div>
+  </div>
+</div>
+
+<div class="content hidden" id="tab-experiments">
+  <div class="experiments-header">
+    <h2 class="experiments-title">Experiments</h2>
+    <div class="experiments-sub">A/B/C tests running across the pipeline. Read-only first cut; one card per active experiment, variants side-by-side.</div>
+  </div>
+  <div id="experiments-list">
     <div class="style-stats-empty">Loading\u2026</div>
   </div>
 </div>
@@ -10651,6 +10769,106 @@ function stopLogAutoRefresh() {
 }
 
 // Settings
+function fmtIntK(n) {
+  if (n == null) return '\u2014';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+
+function fmtMinHm(min) {
+  if (min == null || !isFinite(min)) return '\u2014';
+  if (min < 60) return Math.round(min) + 'm';
+  const h = Math.floor(min / 60);
+  const m = Math.round(min - h * 60);
+  return h + 'h ' + (m < 10 ? '0' + m : m) + 'm';
+}
+
+async function loadExperiments() {
+  const container = document.getElementById('experiments-list');
+  if (!container) return;
+  container.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  let payload;
+  try {
+    const res = await fetch('/api/experiments');
+    payload = await res.json();
+    if (!res.ok || payload.error) throw new Error(payload.error || ('HTTP ' + res.status));
+  } catch (e) {
+    container.innerHTML = '<div class="style-stats-empty">Failed to load: ' + (e.message || e) + '</div>';
+    return;
+  }
+  const experiments = payload.experiments || [];
+  if (!experiments.length) {
+    container.innerHTML = '<div class="style-stats-empty">No experiments running.</div>';
+    return;
+  }
+  // Top KPI band: count running/decided/shipped across all experiments.
+  const kpiCounts = { running: 0, decided: 0, shipped: 0 };
+  experiments.forEach(e => { if (kpiCounts[e.status] != null) kpiCounts[e.status]++; });
+  const kpiHtml = (
+    '<div class="exp-kpi-band">' +
+      '<div class="exp-kpi"><span class="exp-kpi-n">' + kpiCounts.running + '</span><span class="exp-kpi-label">running</span></div>' +
+      '<div class="exp-kpi"><span class="exp-kpi-n">' + kpiCounts.decided + '</span><span class="exp-kpi-label">decided</span></div>' +
+      '<div class="exp-kpi"><span class="exp-kpi-n">' + kpiCounts.shipped + '</span><span class="exp-kpi-label">shipped</span></div>' +
+    '</div>'
+  );
+  const cards = experiments.map(exp => {
+    const variants = exp.variants || [];
+    const variantRows = variants.map(v => {
+      const postRate = v.post_rate_pct != null ? v.post_rate_pct.toFixed(2) + '%' : '\u2014';
+      const threadAge = fmtMinHm(v.thread_age_min_p50);
+      const views = v.avg_views != null ? fmtIntK(v.avg_views) : '\u2014';
+      const likes = v.avg_likes != null ? fmtIntK(v.avg_likes) : '\u2014';
+      const replies = v.avg_replies != null ? fmtIntK(v.avg_replies) : '\u2014';
+      return (
+        '<tr>' +
+          '<td><span class="exp-variant-key">' + v.key + '</span> <span class="exp-variant-label">' + (v.label || '') + '</span><div class="exp-variant-desc">' + (v.desc || '') + '</div></td>' +
+          '<td class="num">' + fmtIntK(v.n_candidates) + '</td>' +
+          '<td class="num">' + fmtIntK(v.n_batches) + '</td>' +
+          '<td class="num">' + fmtIntK(v.n_posted) + '</td>' +
+          '<td class="num">' + postRate + '</td>' +
+          '<td class="num">' + threadAge + '</td>' +
+          '<td class="num">' + views + '</td>' +
+          '<td class="num">' + likes + '</td>' +
+          '<td class="num">' + replies + '</td>' +
+        '</tr>'
+      );
+    }).join('');
+    const startedTxt = exp.started_at ? new Date(exp.started_at).toLocaleString() : '\u2014';
+    return (
+      '<div class="exp-card">' +
+        '<div class="exp-card-head">' +
+          '<div>' +
+            '<div class="exp-card-title">' + (exp.name || exp.id) + '</div>' +
+            '<div class="exp-card-hypothesis">' + (exp.hypothesis || '') + '</div>' +
+          '</div>' +
+          '<div class="exp-card-meta">' +
+            '<span class="exp-status exp-status-' + exp.status + '">' + exp.status + '</span>' +
+            '<span class="exp-started">started ' + startedTxt + '</span>' +
+            '<span class="exp-totals">' + fmtIntK(exp.totals && exp.totals.n_candidates) + ' candidates / ' + fmtIntK(exp.totals && exp.totals.n_posted) + ' posted</span>' +
+            '<span class="exp-primary">primary: ' + (exp.primary_metric || '\u2014') + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<table class="exp-table">' +
+          '<thead><tr>' +
+            '<th>Variant</th>' +
+            '<th class="num">Cands</th>' +
+            '<th class="num">Batches</th>' +
+            '<th class="num">Posted</th>' +
+            '<th class="num">Post rate</th>' +
+            '<th class="num">Thread age @discover (p50)</th>' +
+            '<th class="num">Views/post</th>' +
+            '<th class="num">Likes/post</th>' +
+            '<th class="num">Replies/post</th>' +
+          '</tr></thead>' +
+          '<tbody>' + variantRows + '</tbody>' +
+        '</table>' +
+      '</div>'
+    );
+  }).join('');
+  container.innerHTML = kpiHtml + cards;
+}
+
 async function loadSettings() {
   try {
     const [configRes, envRes] = await Promise.all([fetch('/api/config'), fetch('/api/env')]);
@@ -17427,6 +17645,12 @@ function activateTab(name) {
     loadSettings();
     _tabLoaded.settings = true;
   }
+  if (name === 'experiments') {
+    // Always refetch: cycles fire every 15 min, so stale data is more painful
+    // than the cheap pq() roundtrip. Single endpoint, single SQL pass.
+    loadExperiments();
+    _tabLoaded.experiments = true;
+  }
   return true;
 }
 document.querySelectorAll('.tab').forEach(tab => {
@@ -17447,7 +17671,7 @@ _saInstallDeleteListener();
 // visible to the user (some tabs are admin-only).
 (function restoreActiveTab() {
   const saved = saLoad('sa.activeTab.v1', null);
-  const valid = ['status', 'stats', 'trends', 'activity', 'top', 'logs', 'settings'];
+  const valid = ['status', 'stats', 'trends', 'activity', 'top', 'experiments', 'logs', 'settings'];
   if (!saved || !valid.includes(saved) || saved === 'stats') return;
   // Defer a tick so admin-only visibility (driven by auth init) settles
   // before we try to switch.
