@@ -4845,6 +4845,55 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/tail-link/stats — A/B comparison: replies WITH a tail link vs WITHOUT.
+  // Experiment started 2026-05-22. Only posts where tail_link_variant IS NOT NULL are
+  // included, so pre-experiment rows don't dilute the arms. Default window: 168h (7d)
+  // so there are enough posts for statistical signal.
+  // Returns { windowHours, rows: [{ variant, posts, views, upvotes, comments, clicks, score }] }
+  if (p === '/api/tail-link/stats' && req.method === 'GET') {
+    const url = new URL(req.url, 'http://localhost');
+    const windowHours = Math.max(1, Math.min(720, parseInt(url.searchParams.get('hours') || '168', 10) || 168));
+    const rawProject = (url.searchParams.get('project') || '').trim();
+    const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
+    const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
+    if (!projectOk) return json(res, { error: 'invalid project' }, 400);
+    const tlPc = auth.projectClause(req.user, 'project_name', project || null);
+    if (!tlPc.ok) return json(res, { windowHours, rows: [] });
+    const projectFilter = tlPc.clause ? tlPc.clause + ' '
+      : (project ? "AND project_name = '" + project.replace(/'/g, "''") + "' " : '');
+    const q = "SELECT json_agg(row_to_json(r)) FROM (" +
+      "SELECT tail_link_variant AS variant, " +
+        "COUNT(*)::int AS posts, " +
+        "COALESCE(SUM(views), 0)::int AS views, " +
+        "COALESCE(SUM(GREATEST(0, COALESCE(upvotes,0) - 1)), 0)::int AS upvotes, " +
+        "COALESCE(SUM(comments_count), 0)::int AS comments, " +
+        "COALESCE(SUM(pl.total_clicks), 0)::int AS clicks " +
+      "FROM posts " +
+      "LEFT JOIN (" +
+        "SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks " +
+        "FROM post_links pl2 " +
+        "LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false " +
+        "WHERE pl2.post_id IS NOT NULL GROUP BY pl2.post_id" +
+      ") pl ON pl.post_id = posts.id " +
+      "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+      "AND our_content <> '(mention - no original post)' " +
+      "AND tail_link_variant IS NOT NULL " +
+      "AND LOWER(CASE WHEN LOWER(platform)='x' THEN 'twitter' ELSE platform END) = 'twitter' " +
+      projectFilter +
+      "GROUP BY tail_link_variant ORDER BY variant) r";
+    return pq(q).then(rows => {
+      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      // Compute score per variant (clicks*10 + comments*3 + upvotes) and per-post averages.
+      const enriched = value.map(r => ({
+        ...r,
+        views_per_post: r.posts ? Math.round(r.views / r.posts) : 0,
+        score_per_post: r.posts ? +((r.clicks * 10 + r.comments * 3 + r.upvotes) / r.posts).toFixed(2) : 0,
+        score_total: r.clicks * 10 + r.comments * 3 + r.upvotes,
+      }));
+      return json(res, { windowHours, rows: enriched });
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/cohort/stats - posts bucketed into 4 score cohorts over a trailing window.
   // Score formula matches top_performers.py SCORE_SQL and engagement_styles.py picker:
   //   score = clicks*10 + comments_count*3 + upvotes (Reddit/Moltbook: -1 to strip OP self-upvote)
@@ -8531,6 +8580,15 @@ const HTML = `<!DOCTYPE html>
     </summary>
     <div id="style-stats-body">
       <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="tail-link-stats">
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="tail-link-stats-heading">Tail Link A/B Test \u2014 Twitter (7d)</span><span class="stat-card-info" data-tooltip="Compares Twitter replies posted WITH a tail link (bridge sentence + URL) versus WITHOUT any link. Only rows where tail_link_variant is set are included (experiment started 2026-05-22). Arm split is 50/50 by default (TWITTER_TAIL_LINK_RATE=0.5). Score = clicks\u00D710 + comments\u00D73 + upvotes.">i</span></span>
+      <span class="style-stats-total" id="tail-link-stats-total"></span>
+    </summary>
+    <div id="tail-link-stats-body">
+      <div class="style-stats-empty">Click to load\u2026</div>
     </div>
   </details>
   <details class="style-stats-section" id="funnel-stats" open>
@@ -13849,6 +13907,115 @@ async function loadCohortStats() {
     if (body) body.classList.remove('is-loading');
   }
 }
+
+function renderTailLinkStats(payload) {
+  const body = document.getElementById('tail-link-stats-body');
+  const totalEl = document.getElementById('tail-link-stats-total');
+  if (!body) return;
+  if (!payload || payload.error) {
+    if (totalEl) totalEl.textContent = 'error';
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml((payload && payload.error) || 'Failed to load.') + '</div>';
+    return;
+  }
+  const rows = (payload.rows || []);
+  if (!rows.length) {
+    if (totalEl) totalEl.textContent = '0 posts';
+    body.innerHTML = '<div class="style-stats-empty">No experiment data yet. Rows appear once the pipeline posts with TWITTER_TAIL_LINK_RATE set.</div>';
+    return;
+  }
+  const totalPosts = rows.reduce((a, r) => a + (Number(r.posts) || 0), 0);
+  if (totalEl) totalEl.textContent = totalPosts.toLocaleString() + ' post' + (totalPosts === 1 ? '' : 's');
+  const fmt = n => (Number(n) || 0).toLocaleString();
+  const pct = (n, d) => d > 0 ? ((n / d) * 100).toFixed(1) + '%' : '\u2014';
+  // Label map — prettier display names for the two arms.
+  const variantLabel = { link: 'With link', no_link: 'No link' };
+  let html = '<div style="overflow-x:auto;"><table class="style-stats-table" style="width:100%;font-size:13px;border-collapse:collapse;">';
+  html += '<thead><tr style="border-bottom:1px solid var(--border);">';
+  const cols = [
+    { key: 'variant',        label: 'Arm',            tip: 'link = reply includes bridge sentence + URL; no_link = reply posted without any link tail.' },
+    { key: 'posts',          label: 'Posts',           tip: 'Number of replies posted in this arm during the window.' },
+    { key: 'views',          label: 'Views',           tip: 'Total Twitter impressions on these replies.' },
+    { key: 'views_per_post', label: 'Views / post',   tip: 'Average Twitter impressions per reply.' },
+    { key: 'clicks',         label: 'Clicks',          tip: 'Bot-filtered short-link clicks on the link arm. No-link arm will always be 0 (no link to click).' },
+    { key: 'upvotes',        label: 'Likes',           tip: 'Sum of likes (upvotes) on replies in this arm.' },
+    { key: 'comments',       label: 'Replies',         tip: 'Sum of replies received on our replies in this arm.' },
+    { key: 'score_per_post', label: 'Score / post',   tip: 'Composite score per post = (clicks\u00D710 + comments\u00D73 + upvotes) / posts. Same formula as top_performers.py.' },
+  ];
+  cols.forEach(c => {
+    html += '<th style="text-align:' + (c.key === 'variant' ? 'left' : 'right') + ';padding:8px 10px;color:var(--text-secondary);font-weight:600;">';
+    if (c.tip) html += '<span data-tooltip="' + escapeHtml(c.tip) + '" style="border-bottom:1px dotted var(--text-muted);cursor:help;">' + escapeHtml(c.label) + '</span>';
+    else        html += escapeHtml(c.label);
+    html += '</th>';
+  });
+  html += '</tr></thead><tbody>';
+  rows.forEach((r, i) => {
+    const label = variantLabel[r.variant] || r.variant;
+    const bg = i % 2 === 0 ? '' : 'background:var(--bg-alt,#f5f5f5);';
+    html += '<tr style="' + bg + '">';
+    html += '<td style="padding:8px 10px;font-weight:600;color:var(--text);">' + escapeHtml(label) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.posts) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.views) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.views_per_post) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.clicks) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.upvotes) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;">' + fmt(r.comments) + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;font-weight:600;">' + (r.score_per_post || 0).toFixed(2) + '</td>';
+    html += '</tr>';
+  });
+  // Delta row when both arms exist.
+  if (rows.length === 2) {
+    const [a, b] = rows; // sorted: link < no_link alphabetically
+    const linkRow   = rows.find(r => r.variant === 'link')    || {};
+    const noLinkRow = rows.find(r => r.variant === 'no_link') || {};
+    const sp1 = Number(linkRow.score_per_post)   || 0;
+    const sp2 = Number(noLinkRow.score_per_post) || 0;
+    const delta = sp1 - sp2;
+    const sign  = delta >= 0 ? '+' : '';
+    const color = Math.abs(delta) < 0.01 ? 'var(--text-muted)' : (delta > 0 ? 'var(--green,#16a34a)' : 'var(--red,#dc2626)');
+    html += '<tr style="border-top:2px solid var(--border);background:var(--bg-alt);">';
+    html += '<td style="padding:8px 10px;font-size:12px;color:var(--text-muted);">link vs no_link</td>';
+    html += '<td colspan="6" style="padding:8px 10px;font-size:12px;color:var(--text-muted);">score/post delta</td>';
+    html += '<td style="padding:8px 10px;text-align:right;font-weight:700;color:' + color + ';">' + sign + delta.toFixed(2) + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+  body.innerHTML = html;
+}
+
+async function loadTailLinkStats() {
+  const body = document.getElementById('tail-link-stats-body');
+  const totalEl = document.getElementById('tail-link-stats-total');
+  if (body) body.classList.add('is-loading');
+  if (totalEl) totalEl.textContent = 'loading\u2026';
+  try {
+    // Fixed 7-day window for the AB test — short enough to iterate, long enough
+    // to accumulate signal. Project pill follows the global style-stats filter.
+    const projectRow = document.getElementById('style-stats-project-pills');
+    const project = (projectRow && projectRow.dataset.selected) || 'all';
+    const params = ['hours=168'];
+    if (project && project !== 'all') params.push('project=' + encodeURIComponent(project));
+    const res = await fetch('/api/tail-link/stats?' + params.join('&'));
+    const data = await res.json();
+    renderTailLinkStats(data);
+  } catch (e) {
+    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load tail-link stats.</div>';
+  } finally {
+    if (body) body.classList.remove('is-loading');
+  }
+}
+
+// Wire up the tail-link section: load on first expand.
+(function() {
+  const details = document.getElementById('tail-link-stats');
+  if (!details) return;
+  let loaded = false;
+  details.addEventListener('toggle', function() {
+    if (details.open && !loaded) {
+      loaded = true;
+      loadTailLinkStats();
+    }
+  });
+})();
 
 let _funnelStatsTableState = { sortField: 'posts', sortDir: 'desc', filters: {} };
 function renderFunnelStats(payload) {
