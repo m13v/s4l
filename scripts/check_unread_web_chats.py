@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Check Neon for web-chat threads with unread visitor messages.
+"""Check Postgres for web-chat threads with unread visitor messages.
 
-Mirror of ~/fazm/inbox/scripts/check-unread-chats.js but reads/writes Neon
+Mirror of ~/fazm/inbox/scripts/check-unread-chats.js but reads/writes
 Postgres web_chat_threads / web_chat_messages tables instead of Firestore.
 
 Returns JSON array of:
