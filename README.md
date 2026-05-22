@@ -4,7 +4,7 @@ Open-source repo behind **[S4L (s4lai)](https://s4l.ai)**: an automated social p
 
 > The hosted managed version is **S4L** (written `s4lai`, domain `s4l.ai`): done-for-you Reddit and Twitter brand-awareness, $1/1K impressions, $50/1K site visits. See https://s4l.ai.
 
-Posts are written to a Neon Postgres database via `DATABASE_URL` in `~/social-autoposter/.env`. Bring your own Neon DB and apply `schema-postgres.sql` once. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
+Posts are written to a Postgres database via `DATABASE_URL` in `~/social-autoposter/.env`. Bring your own Postgres DB and apply `schema-postgres.sql` once. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ A new machine needs all of these before the pipeline can run end to end:
 - **Node.js 16+** (for `npx`, the installer, and `@playwright/mcp` at runtime)
 - **Python 3.9+** with `pip3` (helper scripts; `psycopg2-binary` is auto-installed by the installer)
 - **Claude Code CLI** on `PATH` (the cron scripts shell out to `claude -p` with a per-platform MCP config)
-- **`psql`** on `PATH` (a few scripts query Neon directly)
+- **`psql`** on `PATH` (a few scripts query Postgres directly)
 - One Chromium install per platform (created on first run by `@playwright/mcp` against the persistent profile dirs)
 
 Optional:
@@ -48,7 +48,7 @@ npx social-autoposter update
 
 Tell your Claude Code agent: **"set up social autoposter"**. The interactive wizard in `setup/SKILL.md` walks through:
 
-1. Verifying the Neon connection
+1. Verifying the Postgres connection
 2. Filling in `~/social-autoposter/config.json` with handles for Reddit, Twitter, LinkedIn, optional Moltbook
 3. A 5-question interview to draft your `content_angle`
 4. Capturing `projects` with `topics` (used by the tiered reply strategy)
@@ -68,7 +68,7 @@ launchd  ──▶  skill/run-{platform}.sh  ──▶  claude -p  --strict-mcp-
                        ├──▶  scripts/find_threads.py, top_twitter_queries.py  (no browser, API + DB dedup)
                        ├──▶  scripts/pick_project.py            (weighted project rotation)
                        ├──▶  scripts/top_performers.py          (feedback report from past stats)
-                       └──▶  Neon Postgres                      (DATABASE_URL in .env)
+                       └──▶  Postgres                           (DATABASE_URL in .env)
 ```
 
 Each `skill/run-*.sh`:
@@ -104,7 +104,7 @@ launchctl load ~/Library/LaunchAgents/com.m13v.social-twitter-cycle.plist
 | `/social-autoposter engage` | Scan and reply to responses on our posts |
 | `/social-autoposter audit` | Full browser audit of all posts |
 
-View live stats at `https://s4l.ai/stats/<your-handle>` once posts start landing in Neon.
+View live stats at `https://s4l.ai/stats/<your-handle>` once posts start landing in Postgres.
 
 ## Repo layout
 
@@ -114,7 +114,7 @@ social-autoposter/
 ├── bin/cli.js                installer + dashboard launcher
 ├── browser-agent-configs/    Playwright MCP templates (twitter/reddit/linkedin)
 ├── config.example.json       config template
-├── schema-postgres.sql       Neon schema
+├── schema-postgres.sql       Postgres schema
 ├── setup/SKILL.md            interactive setup wizard skill (locked)
 ├── scripts/                  Python and JS helpers (no browser, no LLM)
 ├── skill/                    shell wrappers invoked by launchd
