@@ -14,7 +14,6 @@
     "bin/",
     "scripts/*.py",
     "scripts/*.sh",
-    "scripts/engagement_styles_extra.json",
     "schema-postgres.sql",
     "config.example.json",
     "requirements.txt",
