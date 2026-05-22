@@ -56,6 +56,14 @@ CONFIG_PATH = os.path.join(REPO_DIR, 'config.json')
 CODE_ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789'
 CODE_LEN = 8
 
+# Default wrapper host used when a project's own /r/<code> redirector is NOT
+# live (config.json short_links_live=false) and the operator hasn't set an
+# explicit short_links_host. s4l.ai's resolver lives at
+# @m13v/seo-components -> app.s4l.ai/api/short-links/<code> and is the
+# social-autoposter-owned fallback. Routing through it keeps first-party click
+# logging in post_link_clicks instead of dropping to UTM-only.
+DEFAULT_FALLBACK_HOST = 'https://s4l.ai'
+
 # Match http(s) URLs AND bare-domain references with a path. The bare-domain
 # branch requires at least one path character so we don't match prose like
 # "i.e." or "S.F." or version numbers. Greedy on the path; trailing punctuation
@@ -295,31 +303,33 @@ def _project_short_links_live(projects: list, name: str) -> bool:
 
 
 def _project_short_links_host(projects: list, name: str) -> str | None:
-    """Optional wrapper-hostname override for /r/<code> links.
+    """Resolve the wrapper host where /r/<code> is served for this project.
 
-    Default None → wrapper uses the project's own `website` field (legacy
-    behavior; assumes the customer's domain has the seo-components /r/[code]
-    resolver deployed).
+    Resolution order (first match wins):
+      1. Explicit `short_links_host` in config.json (e.g. "https://s4l.ai").
+         Used to pin a project to a specific resolver-bearing host we operate.
+      2. DEFAULT_FALLBACK_HOST (= https://s4l.ai) when `short_links_live` is
+         explicitly false. Auto-applied so any project flagged as "customer
+         hasn't deployed the resolver yet" still gets a live /r/<code> through
+         the social-autoposter-owned resolver, instead of dropping to UTM-only.
+      3. None → caller falls back to project.website (the legacy/default path,
+         used when short_links_live is unset/true, meaning the customer's own
+         domain has the @m13v/seo-components /r/[code] handler shipped).
 
-    When set in config.json (e.g. "short_links_host": "https://s4l.ai"), every
-    minted post / DM link is wrapped as `<short_links_host>/r/<code>` instead
-    of `<project.website>/r/<code>`. The override host is presumed live (we
-    only set it for hosts we operate; s4l.ai already has /r/[code] wired via
-    @m13v/seo-components → app.s4l.ai/api/short-links/<code>), so this also
-    implicitly satisfies the `short_links_live` gate.
+    Callers should always do: `_project_short_links_host(p, name) or website`.
 
-    Used for projects where the customer hasn't deployed (and may never deploy)
-    a /r/<code> resolver on their own domain — historically those fell back to
-    bare UTM URLs with zero first-party click attribution. Routing through a
-    host we control restores `post_link_clicks` first-party logging.
-
-    The underlying `target_url` (where the resolver 302s) is unchanged — it
-    still points at the customer's site with full UTMs baked in at mint time.
+    The underlying target_url (where the resolver 302s) is unchanged in either
+    case — it still points at the customer's site with full UTMs baked in at
+    mint time. Only the wrapper host changes.
     """
     for p in projects:
         if p.get('name') == name:
             host = (p.get('short_links_host') or '').strip().rstrip('/')
-            return host or None
+            if host:
+                return host
+            if p.get('short_links_live') is False:
+                return DEFAULT_FALLBACK_HOST
+            return None
     return None
 
 
@@ -688,11 +698,11 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
             'fallback_reason': reason,
         }
 
-    # The short_links_live gate only applies when wrapping through the
-    # project's OWN domain. When host_override is set, we route through a host
-    # we operate (verified live), so the customer-domain status is irrelevant.
-    if not host_override and not _project_short_links_live(projects, project_name):
-        return _utm_fallback('short_links_not_live')
+    # Historically there was a UTM-fallback gate here for short_links_live=false
+    # projects, but _project_short_links_host now auto-returns DEFAULT_FALLBACK_HOST
+    # (s4l.ai) in that case, so we always have a live wrapper host and can mint.
+    # The remaining _utm_fallback paths below are runtime failures of the mint
+    # API / pool itself, where UTM is the genuine last resort.
 
     if project_cfg and project_cfg.get('external_short_links'):
         # Pool path. Atomically claim the oldest unclaimed pool row.
