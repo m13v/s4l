@@ -340,9 +340,12 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 #        phase0        ->  5 min  (just the salvage SQL)
 #        phase1        -> 20 min  (Claude scan + scrape)
 #        phase2a       -> 20 min  (5 min sleep + HTTP T1 poll)
-#        phase2b-prep  -> 30 min  (Claude reads threads + drafts; bumped 2026-05-15
-#                                  from 15 min after 17:15 cycle was wrongly salvaged
-#                                  while queued behind 17:30's 42-min lock-hold)
+#        phase2b-prep  -> 45 min  (Claude reads threads + drafts; bumped 2026-05-15
+#                                  15 -> 30 after 17:15 cycle was wrongly salvaged
+#                                  while queued behind 17:30's 42-min lock-hold;
+#                                  bumped 2026-05-22 30 -> 45 to leave more
+#                                  headroom for big-batch Claude reads after the
+#                                  Variant A wake re-stamp fix)
 #        phase2b-gen   -> 60 min  (SEO landing-page build, the slow phase)
 #        phase2b-post  -> 15 min  (browser reply + log)
 #      Pre-2026-05-01 the rule was a flat 20-min wall-clock cutoff against
@@ -1094,7 +1097,7 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 
 # --- Phase 2b-prep: pick + draft + plan -------------------------------------
 # Stamp phase2b-prep BEFORE the long-running Claude read/draft so peer cycles'
-# Phase 0 salvage SQL sees current_phase='phase2b-prep' (15-min budget) instead
+# Phase 0 salvage SQL sees current_phase='phase2b-prep' (45-min budget) instead
 # of stale phase2a (20-min budget). Without this stamp, mid-Phase-2b runs get
 # wrongly salvaged once 20 min elapse past phase2a's start, creating false
 # phase2b_silent run-monitor rows even when posts succeeded.
