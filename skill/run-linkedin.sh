@@ -68,7 +68,7 @@ source "$REPO_DIR/skill/lock.sh"
 #
 # Reads counters from globals the cycle accumulates (RUN_START_EPOCH,
 # PB_RC, LOG_FILE) and re-derives POSTED/SKIPPED/FAILED the same way the
-# inline block does. All shell-outs are wrapped in `timeout 10` so a Neon
+# inline block does. All shell-outs are wrapped in `timeout 10` so a Postgres
 # hang during shutdown can't wedge the trap.
 #
 # Early-exit failure paths (Phase A no-candidates, etc.) write their own
