@@ -596,6 +596,15 @@ const TWITTER_VARIANT_DEFS = {
   C: { label: 'No-ripen + tight',  desc: 'skip 20-min wait + 1h freshness' },
 };
 
+// twitter-tail-link variant defs (shipped 2026-05-22). Per-post coin flip in
+// twitter_post_plan.py gated by TWITTER_TAIL_LINK_RATE (default 0.5). Variant
+// is logged on posts.tail_link_variant for every Twitter post that has a
+// non-empty link_url at draft time. Keys match the DB values verbatim.
+const TAIL_LINK_VARIANT_DEFS = {
+  link:    { label: 'With link',  desc: 'reply ends with bridge sentence + URL' },
+  no_link: { label: 'No link',    desc: 'reply posted as-is, no URL appended' },
+};
+
 // Standalone jobs with no platform axis. script_name -> display label.
 const STANDALONE_JOBS = {
   serp_seo: { job_type: 'seo', job_label: 'SERP SEO' },
@@ -5533,6 +5542,83 @@ async function handleApi(req, res) {
           totals,
           variants,
         }];
+
+        // Second experiment: twitter-tail-link (shipped 2026-05-22).
+        // Per-post coin flip in twitter_post_plan.py; variant lives on
+        // posts.tail_link_variant. No candidate-funnel axis here (assignment
+        // happens at post time, not candidate time) so n_candidates / n_posted
+        // both equal the post count and the funnel columns render as "—".
+        // Click attribution joins post_links + post_link_clicks (is_bot=false)
+        // so the no_link arm correctly shows 0 clicks (no URL to click).
+        // 30-day window matches the cycle_variant query above.
+        try {
+          const tlRows = await pq(`
+            SELECT p.tail_link_variant AS variant,
+                   COUNT(*) AS n_posts,
+                   AVG(p.views) AS avg_views,
+                   AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
+                   AVG(p.comments_count) AS avg_replies,
+                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+                   MIN(p.posted_at) AS started_at
+            FROM posts p
+            LEFT JOIN (
+              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
+              FROM post_links pl2
+              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
+              WHERE pl2.post_id IS NOT NULL
+              GROUP BY pl2.post_id
+            ) pl ON pl.post_id = p.id
+            WHERE p.tail_link_variant IS NOT NULL
+              AND p.posted_at > NOW() - INTERVAL '30 days'
+              AND LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) = 'twitter'
+              AND p.our_content <> '(mention - no original post)'
+            GROUP BY p.tail_link_variant
+          `, []);
+          const tlDefs = TAIL_LINK_VARIANT_DEFS;
+          const tlVariants = ['link', 'no_link'].map(k => {
+            const row = (tlRows || []).find(r => r.variant === k) || {};
+            const n = Number(row.n_posts || 0);
+            return {
+              key: k,
+              label: tlDefs[k].label,
+              desc: tlDefs[k].desc,
+              n_candidates: n,
+              n_batches: null,
+              n_posted: n,
+              n_skipped: 0,
+              n_expired: 0,
+              n_pending: 0,
+              post_rate_pct: null,
+              thread_age_min_p50: null,
+              avg_views: row.avg_views != null ? Number(row.avg_views) : null,
+              avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
+              avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+              avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              started_at: row.started_at || null,
+            };
+          });
+          const tlTotals = tlVariants.reduce((acc, v) => {
+            acc.n_candidates += v.n_candidates;
+            acc.n_posted += v.n_posted;
+            return acc;
+          }, { n_candidates: 0, n_posted: 0, n_batches: null });
+          const tlStartedAt = tlVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          experiments.push({
+            id: 'twitter-tail-link',
+            name: 'Twitter tail link (with / without)',
+            status: 'running',
+            started_at: tlStartedAt,
+            hypothesis: 'Replies without a tail link (no CTA bridge + URL) earn more engagement (views, likes, replies) than replies with one. Click-through is the offsetting cost.',
+            primary_metric: 'avg_replies',
+            totals: tlTotals,
+            variants: tlVariants,
+          });
+        } catch (e2) {
+          // Log but don't break the whole response if the tail-link block
+          // fails; the first experiment is still useful on its own.
+          console.error('[api/experiments] tail-link block failed:', e2 && e2.message || e2);
+        }
+
         json(res, { experiments });
       } catch (e) {
         json(res, { error: String(e && e.message || e) }, 500);
@@ -10977,20 +11063,27 @@ async function loadExperiments() {
     const variantRows = variants.map(v => {
       const postRate = v.post_rate_pct != null ? v.post_rate_pct.toFixed(2) + '%' : '\u2014';
       const threadAge = fmtMinHm(v.thread_age_min_p50);
+      // For tail-link variants n_batches is null (no batch axis); render as
+      // em-dash instead of 0 so it doesn't look like a real zero.
+      const batches = v.n_batches != null ? fmtIntK(v.n_batches) : '\u2014';
       const views = v.avg_views != null ? fmtIntK(v.avg_views) : '\u2014';
       const likes = v.avg_likes != null ? fmtIntK(v.avg_likes) : '\u2014';
       const replies = v.avg_replies != null ? fmtIntK(v.avg_replies) : '\u2014';
+      // avg_clicks is populated only for the tail-link experiment; the
+      // cycle_variant rows don't compute it and show "—".
+      const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
       return (
         '<tr>' +
           '<td><span class="exp-variant-key">' + v.key + '</span> <span class="exp-variant-label">' + (v.label || '') + '</span><div class="exp-variant-desc">' + (v.desc || '') + '</div></td>' +
           '<td class="num">' + fmtIntK(v.n_candidates) + '</td>' +
-          '<td class="num">' + fmtIntK(v.n_batches) + '</td>' +
+          '<td class="num">' + batches + '</td>' +
           '<td class="num">' + fmtIntK(v.n_posted) + '</td>' +
           '<td class="num">' + postRate + '</td>' +
           '<td class="num">' + threadAge + '</td>' +
           '<td class="num">' + views + '</td>' +
           '<td class="num">' + likes + '</td>' +
           '<td class="num">' + replies + '</td>' +
+          '<td class="num">' + clicks + '</td>' +
         '</tr>'
       );
     }).join('');
@@ -11020,6 +11113,7 @@ async function loadExperiments() {
             '<th class="num">Views/post</th>' +
             '<th class="num">Likes/post</th>' +
             '<th class="num">Replies/post</th>' +
+            '<th class="num">Clicks/post</th>' +
           '</tr></thead>' +
           '<tbody>' + variantRows + '</tbody>' +
         '</table>' +
