@@ -39,9 +39,25 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 RUN_START=$(date +%s)
 log "=== LinkedIn Link Edit Run: $(date) ==="
 
+# A/B gate: per-post deterministic coin flip for the page-gen lane. Mirrors
+# scripts/twitter_gen_links.py's TWITTER_PAGE_GEN_RATE behavior and the
+# Reddit link-edit pipeline's LINK_EDIT_REDDIT_PAGE_GEN_RATE. 0.30 means
+# ~30% of eligible posts get a brand-new SEO landing page built inline via
+# Claude + git push; the other ~70% fall through to the project's homepage
+# with link_source='plain_url_ab_skip'. Per-post hash via Postgres
+# hashtext() so the same post stays in the same lane across cron retries.
+# Tunable via env var so cadence sweeps don't need code changes. 0.0
+# disables page-gen entirely (link insertion still happens with plain URL);
+# 1.0 restores 100% page-gen.
+LINK_EDIT_LINKEDIN_PAGE_GEN_RATE="${LINK_EDIT_LINKEDIN_PAGE_GEN_RATE:-0.30}"
+PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_LINKEDIN_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
+log "A/B gate: LINK_EDIT_LINKEDIN_PAGE_GEN_RATE=$LINK_EDIT_LINKEDIN_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
+
 EDITABLE=$(psql "$DATABASE_URL" -t -A -c "
     SELECT json_agg(q) FROM (
-        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name
+        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name,
+               CASE WHEN ((hashtext(id::text) % 100) + 100) % 100 < ${PAGE_GEN_RATE_PCT}
+                    THEN 'page_gen' ELSE 'ab_skip' END AS page_gen_lane
         FROM posts
         WHERE status='active'
           AND platform='linkedin'
@@ -76,7 +92,12 @@ $EDITABLE
 Process ALL of them. For each post:
 1. Read ~/social-autoposter/config.json to get the projects list.
 2. Pick the project whose topics are the CLOSEST match to thread_title + our_content. Check the project_name column first; if set, use that project directly. Otherwise match by topics. Be generous: if the thread touches agents, automation, desktop, memory, or anything related to the project descriptions, it's a match. If truly nothing fits, mark it skipped (see step 9) and move on. Frame it as recommending a cool tool you've come across, NOT as something you built.
-3. If the matched project has a landing_pages config (with repo, base_url):
+3. PAGE-GEN LANE GATE — read the post's \`page_gen_lane\` field (set deterministically by the pipeline; do NOT override).
+   - If \`page_gen_lane == "ab_skip"\`: SKIP the full SEO page generation entirely. Set LINK_URL = the matched project's homepage from config.json (the \`website\` field) and LINK_SOURCE="plain_url_ab_skip". Continue to step 4. The /r/<code> short-link wrap in step 5 still mints attribution on the project's own domain, so we get click data for this lane to compare against seo_page lane CTR.
+   - If \`page_gen_lane == "page_gen"\` AND the matched project has a landing_pages config: continue to step 3a below.
+   - If \`page_gen_lane == "page_gen"\` BUT the matched project has NO landing_pages config: skip page-gen, set LINK_URL = project homepage (website if available, otherwise github), LINK_SOURCE="plain_url_no_lp", continue to step 4.
+
+3a. If the matched project has a landing_pages config (with repo, base_url):
    a. Think about what SEO-optimized guide page would fit this specific thread naturally. Consider the thread's audience, their pain points, industry jargon, and what they'd actually find useful. The page should NOT feel like a landing page; it should feel like a genuine 1000-2000 word guide or resource.
    b. cd into the project repo (landing_pages.repo)
    c. Look at existing pages under src/app/t/ to understand the site's style, layout components (Navbar, Footer), and theme
@@ -89,8 +110,7 @@ Process ALL of them. For each post:
       - Naturally mention the product as ONE solution among the options discussed; don't make the whole page a sales pitch
    e. git add the new page && git commit -m "Add guide: SHORT_DESCRIPTION" && git push
    f. Wait ~35s for Vercel deploy, then curl -sI {base_url}/t/{slug} to verify HTTP 200
-   g. Use THAT page URL in the link edit. If deploy fails, fall back to the project's website URL.
-   If no landing_pages config: use website if available, otherwise github.
+   g. On success, set LINK_URL = the deployed page URL and LINK_SOURCE="seo_page". On deploy failure, fall back GRACEFULLY: set LINK_URL = the project's homepage from config.json (the \`website\` field), set LINK_SOURCE="plain_url_fallback:deploy_failed". Do NOT skip the post; continue to step 4.
 4. Write 1 sentence + project link (LinkedIn professional tone, claim ownership): "I've been building something for this, URL" or "we shipped a tool that does this, URL". ALWAYS frame as our own creation. NEVER write "I found this", "there's a tool", "came across this guide". We are the authors. Say so.
 5. URL-WRAP THE LINK TEXT for click attribution. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
