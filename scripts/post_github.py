@@ -941,8 +941,21 @@ def main():
     recent_comments = get_recent_comments()
     top_topics_report = get_top_search_topics(project_name, platform="github")
 
+    # 2026-05-22: pick the engagement style for this draft batch ONCE so
+    # validate_or_register can enforce the picker's choice on every post in
+    # the batch (USE mode coerces drift back; INVENT mode lets the model
+    # register a new style). GitHub batches share one assignment per cycle;
+    # cycles run frequently enough that the picker's distribution averages
+    # out across batches. Per-candidate assignment would require N picker
+    # calls + injected per-candidate blocks; deferred until the data shows
+    # it matters.
+    style_assignment = pick_style_for_post("github", context="posting")
+    log(f"Style assignment for this batch: mode={style_assignment.get('mode')} "
+        f"style={style_assignment.get('style') or '(invent)'}")
+
     prompt = build_prompt(project, config, top, cap, top_report,
-                          recent_comments, top_topics_report=top_topics_report)
+                          recent_comments, top_topics_report=top_topics_report,
+                          style_assignment=style_assignment)
 
     # Build the generation_trace audit blob: what Claude is about to see.
     # Captured BEFORE the Claude call so we never end up with a post row
@@ -1063,6 +1076,12 @@ def main():
         text = (decision.get("comment_text") or "").strip()
         thread_author = decision.get("thread_author", "unknown")
         thread_title = decision.get("thread_title", "")
+        # validate_or_register enforces the picker's batch-level assignment:
+        # in USE mode any drifted engagement_style label is silently coerced
+        # back to the assigned name; in INVENT mode the new_style block is
+        # registered into engagement_styles_registry via the s4l API. All
+        # posts in this batch share style_assignment by design (see picker
+        # call above).
         engagement_style, _style_action = validate_or_register(
             decision,
             source_post={
@@ -1071,6 +1090,8 @@ def main():
                 "post_id": None,
                 "model": decision.get("model"),
             },
+            assigned_style=(style_assignment or {}).get("style"),
+            assigned_mode=(style_assignment or {}).get("mode"),
         )
         language = (decision.get("language") or "en").strip().lower()[:5] or "en"
 
