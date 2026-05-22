@@ -386,7 +386,7 @@ Your last {len(recent_replies)} replies (vary your style, don't repeat the same 
 """
 
     if excluded_authors and reply["their_author"].lower() in {a.lower() for a in excluded_authors}:
-        return None  # will be skipped by caller
+        return None, None  # will be skipped by caller
 
     top_context = f"\n## FEEDBACK FROM PAST PERFORMANCE (use this to write better replies):\n{top_report}\n" if top_report else ""
     history_block = f"\n{prior_history_block}\n" if prior_history_block else ""
@@ -444,7 +444,7 @@ Apply this voice when drafting: follow `tone`, never violate any item in `never`
     style_assignment = pick_style_for_post(style_platform, context="replying")
     assigned_style = (style_assignment.get("style") or "your invented snake_case name")
 
-    return f"""{framing}
+    prompt_text = f"""{framing}
 
 ## Reply data
 {reply_json}
@@ -492,6 +492,12 @@ Read ~/social-autoposter/config.json for project details and content_angle.
 CRITICAL: Your ENTIRE output must be ONLY the JSON object above. No other text, no explanations, no markdown.
 The orchestrator script will handle posting via CDP and database updates automatically.
 """
+    # Return both the prompt and the picker's assignment so the caller can
+    # forward the assignment into validate_or_register's enforcement layer
+    # (USE mode coerces drift back; INVENT mode is the only path that lets
+    # the model register a new style). Without this, the picker's choice
+    # would be silently overridable downstream.
+    return prompt_text, style_assignment
 
 
 def ensure_mcp_config():
@@ -701,8 +707,11 @@ def main():
             recent = [strip_active_suffixes(r, _active_camps_for_strip) for r in recent]
             recent = [r for r in recent if r]
 
-        # Build prompt
-        prompt = build_prompt(reply, recent, config, excluded_authors,
+        # Build prompt. Returns (prompt_text, style_assignment) so the
+        # picker's assignment can be forwarded into validate_or_register
+        # below. style_assignment is None when the reply was filtered out
+        # (excluded author) and the caller treats it as a skip.
+        prompt, style_assignment = build_prompt(reply, recent, config, excluded_authors,
                               top_report=top_report,
                               prior_history_block=prior_history_block,
                               meta_callout=meta_callout)
@@ -851,12 +860,13 @@ def main():
             elif decision.get("action") == "reply":
                 reply_text = decision.get("text", "")
                 project = decision.get("project")
-                # validate_or_register accepts known styles, registers
-                # well-formed new ones as candidates, and returns None for
-                # unknown-and-undocumented (matches the prior clear-to-None
-                # behavior). source_post URL is the THEIR comment we're
-                # replying to, since we don't know our own URL until after
-                # the post lands.
+                # validate_or_register: in USE mode, coerces any drifted style
+                # name back to the assigned one. In INVENT mode (5% slot),
+                # registers the new style into engagement_styles_registry via
+                # the s4l API. Without assigned_style/assigned_mode, the
+                # picker's choice would be silently overridable by the model.
+                # source_post URL is THEIR comment we're replying to; we don't
+                # know our own URL until after the post lands.
                 engagement_style, _style_action = validate_or_register(
                     decision,
                     source_post={
@@ -865,6 +875,8 @@ def main():
                         "post_id": reply.get("id"),
                         "model": decision.get("model"),
                     },
+                    assigned_style=(style_assignment or {}).get("style"),
+                    assigned_mode=(style_assignment or {}).get("mode"),
                 )
                 if not reply_text:
                     failed += 1
