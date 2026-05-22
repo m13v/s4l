@@ -7,7 +7,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/matthewdi/social-autoposter/skill/run-twitter-cycle-launchd.sh</string>
+		<string>/Users/matthewdi/social-autoposter/skill/run-twitter-cycle-singleton.sh</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<array>
