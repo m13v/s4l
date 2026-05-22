@@ -836,7 +836,7 @@ log "Phase 1 complete. Batch has $BATCH_COUNT candidates with T0 snapshot."
 # ratio) can split by variant. Idempotent: same value would be written if the
 # batch is salvaged into a peer cycle (variant follows the discovering cycle).
 python3 -c "
-import os, psycopg
+import os, psycopg2 as psycopg
 with psycopg.connect(os.environ['DATABASE_URL']) as conn:
     with conn.cursor() as cur:
         cur.execute('UPDATE twitter_candidates SET cycle_variant=%s WHERE batch_id=%s AND cycle_variant IS NULL', (os.environ['TWITTER_CYCLE_VARIANT'], os.environ['BATCH_ID']))
