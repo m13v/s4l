@@ -185,7 +185,15 @@ function mintShortLinkCode(n = 8) {
 
 // Look up a project's wrapper host (where /r/<code> is served) by name from
 // config.json. Mirrors _project_short_links_host in scripts/dm_short_links.py.
-// Falls back to project.website. Returns null if the project is not configured.
+// Resolution order:
+//   1. Explicit short_links_host (e.g. "https://s4l.ai") if set.
+//   2. s4l.ai default when short_links_live === false (customer's own domain
+//      doesn't have a resolver yet, but we still want first-party /r/<code>
+//      tracking via the social-autoposter-owned resolver).
+//   3. project.website (legacy/default path; assumes the customer ships the
+//      @m13v/seo-components /r/[code] handler on their own domain).
+// Keep in sync with DEFAULT_FALLBACK_HOST in dm_short_links.py.
+const SHORT_LINK_FALLBACK_HOST = 'https://s4l.ai';
 function getProjectWrapperHost(projectName) {
   if (!projectName) return null;
   try {
@@ -193,8 +201,11 @@ function getProjectWrapperHost(projectName) {
     const projects = Array.isArray(config.projects) ? config.projects : [];
     const p = projects.find(x => x && x.name === projectName);
     if (!p) return null;
-    const host = (p.short_links_host || p.website || '').trim().replace(/\/+$/, '');
-    return host || null;
+    const explicit = (p.short_links_host || '').trim().replace(/\/+$/, '');
+    if (explicit) return explicit;
+    if (p.short_links_live === false) return SHORT_LINK_FALLBACK_HOST;
+    const website = (p.website || '').trim().replace(/\/+$/, '');
+    return website || null;
   } catch (e) {
     console.error('[wrapper-host] config read failed:', e.message);
     return null;
