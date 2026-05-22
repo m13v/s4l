@@ -18,6 +18,13 @@ psycopg2. Note: the route enforces (platform, their_comment_id) uniqueness
 server-side, so the "existing_ids" prefetch is now a soft local cache used
 to short-circuit the POST loop; we still rely on the API's ON CONFLICT path
 as the source of truth.
+
+Migrated 2026-05-23: third-party mentions now write to the dedicated
+`mentions` table via /api/v1/mentions instead of a placeholder row in
+`posts`. The associated reply row carries `mention_id` instead of
+`post_id`, enforced by the replies_post_or_mention_exclusive_check DB
+constraint. See migrations/2026-05-23-mentions-table.sql and
+scripts/migrate_mentions_out_of_posts.py for the cutover history.
 """
 
 import argparse
@@ -138,6 +145,10 @@ def most_recent_active_project():
     expose the parent tweet ID, so we can't identify *which* of our posts
     the mention is under. Recency is a much stronger signal than
     keyword-matching a 3-word reply body.
+
+    Post 2026-05-23 the "(mention - no original post)" placeholder rows no
+    longer exist in `posts` (they live in `mentions` now), so the SQL/
+    client-side filter that used to live here is gone.
     """
     resp = api_get(
         "/api/v1/posts",
@@ -148,14 +159,9 @@ def most_recent_active_project():
         },
     )
     rows = (resp.get("data") or {}).get("posts") or []
-    # Apply the same "(mention - no original post)" exclusion the SQL did, on
-    # the client side. The route returns rows in posted_at DESC order.
     for r in rows:
         proj = r.get("project_name")
         if not proj:
-            continue
-        oc = r.get("our_content") or ""
-        if oc == "(mention - no original post)":
             continue
         return proj
     return None
@@ -204,69 +210,52 @@ def process_notifications(notifications, config):
             stats["too_short"] += 1
             continue
 
-        # Try to match to one of our posts: replying_to field hints it's a
-        # reply under one of our tweets; otherwise fall back to stub post.
-        post_id = None
+        # Resolve project for the mention. Reply-to-us inherits the project
+        # of our most recent active post (short reply text is unreliable for
+        # keyword matching); other mentions fall back to keyword guess.
         is_reply_to_us = replying_to == OUR_HANDLE.lower() and bool(our_posts)
-        # Note: notifications don't expose conversation_id, so we can't link to
-        # the specific parent tweet. We still attribute project_name to the
-        # right project below by inheriting from our most recent active post.
+        if is_reply_to_us and recent_project:
+            project = recent_project
+        else:
+            project = guess_project(text, config)
+        # _ = our_posts  # currently unused for direct post_id linkage; notifications
+        # don't expose conversation_id, so we attribute via mentions table only.
 
-        if not post_id:
-            # Reply-to-us: short reply text is unreliable for keyword matching;
-            # inherit the project of our most recent active post instead.
-            # Other mentions: fall back to keyword-matching the mention text.
-            if is_reply_to_us and recent_project:
-                project = recent_project
-            else:
-                project = guess_project(text, config)
-
-            # Mention-placeholder post row. The route auto-dedups on
-            # (platform, thread_url) — if the row already exists we get back
-            # the existing post_id from the 409 body via ok_on_conflict.
-            post_body = {
-                "platform": "twitter",
-                "thread_url": tweet_url,
-                "thread_author": handle,
-                "thread_title": text,
-                "our_url": tweet_url,
-                "our_content": "(mention - no original post)",
-                "our_account": OUR_HANDLE,
-                "project": project,
-                "status": "active",
-            }
-            post_resp = api_post(
-                "/api/v1/posts", post_body, ok_on_conflict=True,
+        # Insert into /api/v1/mentions. Dedup on (platform, mentioning_url)
+        # — if the row already exists we get back existing_mention_id from
+        # the 409 body via ok_on_conflict.
+        mention_body = {
+            "platform": "twitter",
+            "mentioning_url": tweet_url,
+            "mentioning_handle": handle,
+            "mentioning_text": text,
+            "our_handle": OUR_HANDLE,
+            "project": project,
+            "status": "active",
+        }
+        mention_resp = api_post(
+            "/api/v1/mentions", mention_body, ok_on_conflict=True,
+        )
+        mention_data = mention_resp.get("data") or {}
+        mention_row = mention_data.get("mention") or {}
+        mention_id = mention_row.get("id")
+        if not mention_id and mention_resp.get("error"):
+            details = (mention_resp.get("error") or {}).get("details") or {}
+            mention_id = details.get("existing_mention_id")
+            if not mention_id:
+                inner = details.get("mention") or {}
+                mention_id = inner.get("id")
+        if not mention_id:
+            print(
+                f"  WARNING: could not resolve mention_id for {tweet_url!r}; skipping",
+                file=sys.stderr,
             )
-            post_data = post_resp.get("data") or {}
-            post_row = post_data.get("post") or {}
-            # Handle the 409 body shape too (route returns
-            # {error: duplicate_thread, details: {post: ...}} on 409).
-            if not post_row and post_resp.get("error"):
-                details = (post_resp.get("error") or {}).get("details") or {}
-                post_row = details.get("post") or {}
-            post_id = post_row.get("id")
-            if not post_id:
-                # Fallback lookup if the upsert response is weirdly shaped.
-                # Scope per-account so we don't false-positive a row that
-                # another machine's account created on the same tweet.
-                lookup_q = {"platform": "twitter", "thread_url": tweet_url}
-                _twitter_handle = _resolve_account("twitter")
-                if _twitter_handle:
-                    lookup_q["our_account"] = _twitter_handle
-                lookup = api_get("/api/v1/posts/lookup", query=lookup_q)
-                post_id = ((lookup.get("data") or {}).get("post") or {}).get("id")
-            if not post_id:
-                print(
-                    f"  WARNING: could not resolve post_id for {tweet_url!r}; skipping",
-                    file=sys.stderr,
-                )
-                continue
+            continue
 
         reply_resp = api_post(
             "/api/v1/replies",
             {
-                "post_id": post_id,
+                "mention_id": mention_id,
                 "platform": "x",
                 "their_comment_id": tweet_id,
                 "their_author": handle,
