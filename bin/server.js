@@ -427,6 +427,24 @@ function psql(query) {
   } catch { return null; }
 }
 
+// Strip `sslmode=...` from a postgres URL. Required after the Neon->Cloud SQL
+// migration (2026-05-21): `pg-connection-string` v2.12+ treats `sslmode=require`
+// as `verify-full`, which fails CA verification against Cloud SQL's
+// self-signed server cert and silently kills every pq query with
+// "unable to verify the first certificate". The Pool's explicit
+// `ssl: { rejectUnauthorized: false }` only wins if the URL doesn't already
+// dictate a stricter mode, so we drop the URL param and let the explicit
+// option take effect. Python consumers (psycopg2) keep using the Neon-style
+// `sslmode=require` directly from .env, so leaving the .env URL untouched
+// keeps both stacks happy.
+function stripSslMode(url) {
+  if (!url) return url;
+  return url
+    .replace(/[?&]sslmode=[^&]+/g, (m) => (m[0] === '?' ? '?' : ''))
+    .replace(/\?&/, '?')
+    .replace(/\?$/, '');
+}
+
 let _pool = null;
 function getPool() {
   if (_pool) return _pool;
@@ -441,7 +459,7 @@ function getPool() {
   // (blank Get Started card, empty per-project rows). Neon free tier allows
   // 100 concurrent connections per project, so 25 is well within budget.
   _pool = new Pool({
-    connectionString: dbUrl,
+    connectionString: stripSslMode(dbUrl),
     ssl: { rejectUnauthorized: false },
     max: 25,
     idleTimeoutMillis: 30000,
@@ -470,8 +488,9 @@ function getBookingsPool() {
   if (_bookingsPool) return _bookingsPool;
   const dbUrl = getBookingsDbUrl();
   if (!dbUrl) return null;
+  // See stripSslMode() comment on getPool(); same reasoning applies here.
   _bookingsPool = new Pool({
-    connectionString: dbUrl,
+    connectionString: stripSslMode(dbUrl),
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
