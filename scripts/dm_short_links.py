@@ -283,17 +283,20 @@ def _project_website(projects: list, name: str) -> str | None:
 
 
 def _project_short_links_live(projects: list, name: str) -> bool:
-    """True iff the project's /r/<code> redirector is actually serving.
+    """True iff the project's OWN domain serves /r/<code>.
 
     Default true (preserves behavior for fazm, mediar, assrt, cyrano-systems
-    and every other existing project). Set false in config.json for projects
-    where the customer owns the domain and hasn't shipped the resolver (or the
-    static CSV) yet, so we emit UTM-tagged URLs instead of broken /r/<code>.
+    and every other existing project where the customer's domain hosts the
+    @m13v/seo-components /r/[code] handler).
 
-    NOTE: this gate is BYPASSED when the project has `short_links_host` set in
-    config.json. That override points the wrapper at a host we control (e.g.
-    s4l.ai) which already has the resolver deployed, so the customer's own
-    domain status is irrelevant. See _project_short_links_host below.
+    Set false in config.json for projects where the customer owns the domain
+    but hasn't shipped the resolver (or the static CSV) yet. In that case the
+    wrapper auto-routes through DEFAULT_FALLBACK_HOST (s4l.ai), so mints still
+    produce a live /r/<code> with first-party click logging; we no longer drop
+    to UTM-only. See _project_short_links_host for the host-resolution order.
+
+    An explicit `short_links_host` in config.json (regardless of this flag)
+    always wins and is used verbatim.
     """
     for p in projects:
         if p.get('name') == name:
