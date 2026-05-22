@@ -69,7 +69,7 @@ def get_posts_today_by_project(platform=None):
     """Return dict of project_name -> post count for today.
 
     Routes through /api/v1/posts/counts-today-by-project by default.
-    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct Neon.
+    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct DB.
     """
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
         return _counts_via_neon(platform)
@@ -113,7 +113,7 @@ def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
     """Return {project_name: post count} over the last `days` days.
 
     Routes through /api/v1/posts/counts-by-project-window by default.
-    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct Neon. Feeds the
+    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct DB. Feeds the
     inverse-recent-share weighting in pick_projects(). HTTPS-only is
     required for e2b VM / sandbox installs that intentionally omit
     DATABASE_URL.
