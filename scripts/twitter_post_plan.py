@@ -385,6 +385,12 @@ def post_one(c: dict) -> tuple[str, str]:
             link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
         print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
               f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
+    elif link_url and not _add_tail_link:
+        # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
+        # no URL). Log the outcome so the dashboard can tally the arm.
+        link_tail_outcome = "ab_no_link"
+        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+              f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
 
     # URL-wrap the text BEFORE handing it to twitter_browser. The browser
     # script appends the campaign suffix internally; suffixes are plain
@@ -494,6 +500,8 @@ def post_one(c: dict) -> tuple[str, str]:
         log_args += ["--language", language]
     if link_source:
         log_args += ["--link-source", link_source]
+    if tail_link_variant:
+        log_args += ["--tail-link-variant", tail_link_variant]
     # Generation trace: run-twitter-cycle.sh writes a snapshot of the
     # cycle's few-shot context (top_performers, top_queries, supply
     # signal, dud queries) to a tempfile and exports the path via
