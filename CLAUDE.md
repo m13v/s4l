@@ -44,6 +44,10 @@ What IS allowed: status flips (e.g. `UPDATE ... SET status='expired' WHERE statu
 
 If a future agent (including the auto-commit agent) reintroduces a `DELETE ... FROM <table>_candidates` by-age, revert immediately and surface to the user.
 
+## After any DB migration: realign sequences
+
+After any `pg_dump`/`pg_restore` cutover (e.g. Neon -> Cloud SQL on 2026-05-21), run `python3 scripts/realign_sequences.py` once. Otherwise serial sequences lag behind restored row ids and every INSERT 500s with `duplicate key value violates unique constraint "*_pkey"` until natural collision-walk catches up.
+
 ## Testing /api/v1/* routes from this machine
 
 Base URL is `https://s4l.ai` (NOT `app.s4l.ai`); auth header is `X-Installation: $(/usr/bin/python3 ~/social-autoposter/scripts/identity.py header)`. A `Bearer` token (real or fake) returns 401 `missing_token`, not a real test.
