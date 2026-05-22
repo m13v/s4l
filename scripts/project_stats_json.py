@@ -44,27 +44,22 @@ def _platform_sql_clause(platform, table_alias=""):
     """Return an SQL fragment (string, no placeholders) that:
 
     1. Filters to the given platform when one is provided (empty = no filter).
-    2. Always excludes mention-only rows (our_content = '(mention - no original
-       post)'). This exclusion is unconditional so that all-platform queries
-       match the /api/style/stats filter and the two views show the same total.
-       Previously the exclusion was bundled inside the platform branch and was
-       silently skipped when no platform was selected, causing a gap of ~50k+
-       views between the "Posts by Engagement Style" and "Project Funnel Stats"
-       tables (the gap equals the views on mention rows in the window).
+
+    Mentions live in the dedicated `mentions` table now (2026-05-23 cutover);
+    no posts-level filter needed. Previously this clause excluded placeholder
+    `posts` rows where our_content = '(mention - no original post)', which is
+    no longer present after migrate_mentions_out_of_posts.py --commit-delete.
 
     Folds the 'x' -> 'twitter' alias inside the SQL so reddit/linkedin/twitter
     all just work. Caller is responsible for placement inside the WHERE.
     """
-    prefix = (table_alias + ".") if table_alias else ""
-    # Mention-row exclusion is always applied regardless of platform filter.
-    mention_excl = " AND " + prefix + "our_content <> '(mention - no original post)'"
     if not platform:
-        return mention_excl
+        return ""
+    prefix = (table_alias + ".") if table_alias else ""
     # Safe: platform has already passed the [a-z0-9_]{1,32} regex in the caller.
     return (
         " AND LOWER(CASE WHEN LOWER(" + prefix + "platform)='x' "
         "THEN 'twitter' ELSE " + prefix + "platform END) = '" + platform + "'"
-        + mention_excl
     )
 
 
