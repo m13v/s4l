@@ -1,5 +1,5 @@
 -- web_chat_schema.sql
--- Neon Postgres migration for web-based founder chat (mirror of Fazm Firestore schema)
+-- Postgres migration for web-based founder chat (mirror of Fazm Firestore schema)
 -- Run once: psql "$DATABASE_URL" -f scripts/web_chat_schema.sql
 --
 -- Two tables:
