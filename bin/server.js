@@ -427,14 +427,14 @@ function psql(query) {
   } catch { return null; }
 }
 
-// Strip `sslmode=...` from a postgres URL. Required after the Neon->Cloud SQL
-// migration (2026-05-21): `pg-connection-string` v2.12+ treats `sslmode=require`
+// Strip `sslmode=...` from a postgres URL. Required after the Postgres host
+// migration (Neon to Cloud SQL, 2026-05-21): `pg-connection-string` v2.12+ treats `sslmode=require`
 // as `verify-full`, which fails CA verification against Cloud SQL's
 // self-signed server cert and silently kills every pq query with
 // "unable to verify the first certificate". The Pool's explicit
 // `ssl: { rejectUnauthorized: false }` only wins if the URL doesn't already
 // dictate a stricter mode, so we drop the URL param and let the explicit
-// option take effect. Python consumers (psycopg2) keep using the Neon-style
+// option take effect. Python consumers (psycopg2) keep using the standard
 // `sslmode=require` directly from .env, so leaving the .env URL untouched
 // keeps both stacks happy.
 function stripSslMode(url) {
@@ -456,8 +456,8 @@ function getPool() {
   // on top of normal page load. max:5 caused ~219k connection timeouts in
   // skill/logs/launchd-dashboard-stderr.log on 2026-05-19 because every
   // pg-backed request started failing at the 10s connectionTimeoutMillis cap
-  // (blank Get Started card, empty per-project rows). Neon free tier allows
-  // 100 concurrent connections per project, so 25 is well within budget.
+  // (blank Get Started card, empty per-project rows). Cloud SQL allows
+  // 100+ concurrent connections, so 25 is well within budget.
   _pool = new Pool({
     connectionString: stripSslMode(dbUrl),
     ssl: { rejectUnauthorized: false },
@@ -3078,7 +3078,7 @@ const SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
 
 // In CLIENT_MODE the server runs on Cloud Run with no access to the
 // operator's disk. The precompute script mirrors every snapshot to the
-// Neon dashboard_cache table; we cache DB hits briefly per-cache_key so
+// Postgres dashboard_cache table; we cache DB hits briefly per-cache_key so
 // the same window served to many clients doesn't hammer Postgres.
 const _dbSnapshotCache = new Map();
 const DB_SNAPSHOT_CACHE_MS = 20 * 1000;
@@ -3126,7 +3126,7 @@ function readSnapshot(filename, maxAgeMs) {
 
 // CLIENT_MODE-aware snapshot read. Call sites that already have an
 // async context use this so a missing on-disk file still returns the
-// Neon-backed snapshot.
+// Postgres-backed snapshot.
 async function readSnapshotCached(filename, maxAgeMs) {
   const disk = readSnapshot(filename, maxAgeMs);
   if (disk) return disk;
@@ -5291,7 +5291,7 @@ async function handleApi(req, res) {
   }
 
   // GET /api/bookings/per-day?days=N - real Cal.com bookings per day from
-  // the separate BOOKINGS_DATABASE_URL Neon DB. Filters out test bookings
+  // the separate BOOKINGS_DATABASE_URL Postgres DB. Filters out test bookings
   // the same way project_stats_json.py does (attendee_email NOT ILIKE
   // '%test%'). Grouped by the local date of created_at. When project is
   // passed, filters by client_slug = <project>.
