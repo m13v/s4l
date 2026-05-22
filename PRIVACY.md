@@ -53,7 +53,7 @@ The server additionally records, at request time:
 - Browser cookies or OAuth tokens (those stay in your local browser
   profile)
 - The text of your scheduled posts beyond what already goes into your own
-  Neon database via `DATABASE_URL`
+  Postgres database via `DATABASE_URL`
 - Keystrokes, screen captures, or microphone input
 - Any analytics ping unless the pipeline is actively calling the API
 
