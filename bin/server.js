@@ -478,7 +478,12 @@ async function pq(query, params) {
     const r = await pool.query(query, params);
     return r.rows;
   } catch (e) {
-    console.error('[pq] query failed:', e.message);
+    // Include a short SQL snippet so post-mortems can identify which query
+    // failed (vs the silent null-return masking we saw in the 2026-05-22
+    // Cloud SQL SSL outage where every enricher zeroed out its run because
+    // every pq() returned null without context).
+    const snippet = (query || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+    console.error('[pq] query failed:', e.message, '| SQL:', snippet);
     return null;
   }
 }
@@ -509,7 +514,8 @@ async function pqBookings(query, params) {
     const r = await pool.query(query, params);
     return r.rows;
   } catch (e) {
-    console.error('[pqBookings] query failed:', e.message);
+    const snippet = (query || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+    console.error('[pqBookings] query failed:', e.message, '| SQL:', snippet);
     return null;
   }
 }
