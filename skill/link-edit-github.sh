@@ -88,7 +88,12 @@ $EDITABLE
 Process ALL of them. For each post:
 1. Read ~/social-autoposter/config.json to get the projects list.
 2. Pick the project whose topics are the CLOSEST match to thread_title + our_content. Check the project_name column first; if set, use that project directly. Otherwise match by topics. Be generous: if the thread touches agents, automation, desktop, memory, or anything related to the project descriptions, it's a match. If truly nothing fits, mark it skipped (see step 9) and move on. Frame it as recommending a cool tool you've come across, NOT as something you built.
-3. If the matched project has a landing_pages config (with repo, base_url):
+3. PAGE-GEN LANE GATE — read the post's \`page_gen_lane\` field (set deterministically by the pipeline; do NOT override).
+   - If \`page_gen_lane == "ab_skip"\`: SKIP the full SEO page generation entirely. Set LINK_URL = the matched project's homepage from config.json (the \`website\` field) and LINK_SOURCE="plain_url_ab_skip". Continue to step 4. The /r/<code> short-link wrap in step 5 still mints attribution on the project's own domain, so we get click data for this lane to compare against seo_page lane CTR.
+   - If \`page_gen_lane == "page_gen"\` AND the matched project has a landing_pages config: continue to step 3a below.
+   - If \`page_gen_lane == "page_gen"\` BUT the matched project has NO landing_pages config: skip page-gen, set LINK_URL = project homepage (website if available, otherwise github), LINK_SOURCE="plain_url_no_lp", continue to step 4.
+
+3a. If the matched project has a landing_pages config (with repo, base_url):
    a. Think about what SEO-optimized guide page would fit this specific thread naturally. Consider the thread's audience, their pain points, industry jargon, and what they'd actually find useful. The page should NOT feel like a landing page; it should feel like a genuine 1000-2000 word guide or resource.
    b. cd into the project repo (landing_pages.repo)
    c. Look at existing pages under src/app/t/ to understand the site's style, layout components (Navbar, Footer), and theme
@@ -101,8 +106,7 @@ Process ALL of them. For each post:
       - Naturally mention the product as ONE solution among the options discussed; don't make the whole page a sales pitch
    e. git add the new page && git commit -m "Add guide: SHORT_DESCRIPTION" && git push
    f. Wait ~35s for Vercel deploy, then curl -sI {base_url}/t/{slug} to verify HTTP 200
-   g. Use THAT page URL in the link edit. If deploy fails, fall back to the project's website URL.
-   If no landing_pages config: use website if available, otherwise github.
+   g. On success, set LINK_URL = the deployed page URL and LINK_SOURCE="seo_page". On deploy failure, fall back GRACEFULLY: set LINK_URL = the project's homepage from config.json (the \`website\` field), set LINK_SOURCE="plain_url_fallback:deploy_failed". Do NOT skip the post; continue to step 4.
 4. Write 1 sentence + project link (GitHub peer tone, claim ownership): "fwiw we built an implementation of this, URL" or "I shipped a tool that does this, URL". ALWAYS frame as our own creation, never as a third-party tool we just discovered. NEVER write "I found this", "there's a tool", "came across this implementation". We are the authors of this code. Say so.
 5. URL-WRAP THE LINK TEXT for click attribution. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
@@ -115,8 +119,8 @@ Process ALL of them. For each post:
    gh api repos/OWNER/REPO/issues/comments/COMMENT_ID -X PATCH -f body="EXISTING_CONTENT
 
    WRAPPED_LINK_TEXT"
-8. After each successful edit, update the DB and backfill short-link attribution:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
+8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_ab_skip vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py and the Reddit link-edit pipeline does) and backfill short-link attribution:
+   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
