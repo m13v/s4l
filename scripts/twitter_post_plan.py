@@ -198,6 +198,69 @@ def already_posted_to_thread(thread_url: str) -> tuple[bool, int | None]:
         return (True, None)
 
 
+def fetch_thread_engagement_snapshot(cid: int) -> str | None:
+    """Fetch the T0 engagement snapshot the discovery pipeline recorded for
+    this candidate, serialised as a compact JSON string ready for the
+    posts.thread_engagement TEXT column.
+
+    Reads from /api/v1/twitter-candidates/by-id?id=<cid>, which returns the
+    *_t0 columns score_twitter_candidates.py stamps at scrape time. No live
+    refresh, no fxtwitter call: this is the snapshot Twitter showed when the
+    candidate was first discovered.
+
+    Returns:
+      - JSON string like '{"likes":42,"retweets":3,"replies":12,"views":8100,"bookmarks":1,"source":"discovery_t0"}'
+        when at least one engagement field was present on the candidate row.
+      - None when the row is missing or every engagement field is NULL (no
+        signal worth storing; column stays NULL on posts).
+
+    Failure mode: any error logs a warning and returns None. We never block
+    the post on this; missing one row of snapshot data is preferable to
+    losing the post.
+    """
+    try:
+        resp = api_get(
+            "/api/v1/twitter-candidates/by-id",
+            query={"id": int(cid)},
+            ok_on_404=True,
+        )
+    except SystemExit as e:
+        print(f"[post] candidate {cid} thread_engagement fetch failed: {e}", flush=True)
+        return None
+    if resp.get("_not_found"):
+        return None
+    data = resp.get("data") or {}
+    cand = data.get("candidate") or {}
+    if not cand:
+        return None
+
+    def _pick(t0_key: str, live_key: str):
+        # Prefer the T0 snapshot (captured at discovery, the user's explicit
+        # requirement: scrape-time engagement, not live). Fall back to the
+        # live column only when T0 is missing AND live is present, which
+        # happens on very old candidate rows that pre-date the T0 backfill.
+        v0 = cand.get(t0_key)
+        if v0 is not None:
+            return v0
+        return cand.get(live_key)
+
+    snap = {
+        "likes": _pick("likes_t0", "likes"),
+        "retweets": _pick("retweets_t0", "retweets"),
+        "replies": _pick("replies_t0", "replies"),
+        "views": _pick("views_t0", "views"),
+        "bookmarks": _pick("bookmarks_t0", "bookmarks"),
+    }
+    # Skip when every field is NULL/missing — nothing worth recording.
+    if not any(v is not None for v in snap.values()):
+        return None
+    snap["source"] = "discovery_t0"
+    discovered = cand.get("discovered_at")
+    if discovered:
+        snap["snapshot_at"] = str(discovered)
+    return json.dumps(snap, separators=(",", ":"))
+
+
 def update_candidate_posted(cid: int, post_id: int) -> None:
     """Mark the candidate posted via /api/v1/twitter-candidates/by-id.
 
@@ -418,6 +481,21 @@ def post_one(c: dict) -> tuple[str, str]:
     trace_path = os.environ.get("SAPS_TWITTER_GEN_TRACE_PATH") or ""
     if trace_path and os.path.isfile(trace_path):
         log_args += ["--generation-trace", trace_path]
+
+    # T0 engagement of the original thread (captured at discovery, NOT live).
+    # Read from twitter_candidates via the by-id GET endpoint. No fxtwitter
+    # call, no extra page-load: whatever score_twitter_candidates.py stamped
+    # into *_t0 at scrape time is what we record. Stored as a JSON string
+    # in posts.thread_engagement (TEXT). Silently skip on any failure;
+    # losing one snapshot row is preferable to losing the post.
+    thread_engagement_json = fetch_thread_engagement_snapshot(cid)
+    if thread_engagement_json:
+        log_args += ["--thread-engagement", thread_engagement_json]
+        print(f"[post] candidate {cid} thread_engagement snapshot: "
+              f"{thread_engagement_json}", flush=True)
+    else:
+        print(f"[post] candidate {cid} thread_engagement snapshot: none "
+              f"(no T0 data on candidate row)", flush=True)
 
     rc, out, err = run_subprocess(log_args, timeout_sec=60)
     if err:
