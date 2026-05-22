@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a feedback report from top/bottom performing posts.
 
-Queries NeonDB for engagement data and outputs a factual report
+Queries Postgres for engagement data and outputs a factual report
 organized by project and platform. This is the self-improvement
 feedback loop — Claude reads this before drafting new comments.
 
@@ -203,7 +203,7 @@ def _load_active_campaign_suffixes(conn=None):
     On any failure returns []: missing strip is preferable to crashing
     the report pipeline.
 
-    Dual-path: when `conn` is given (legacy Neon path) reads directly;
+    Dual-path: when `conn` is given (legacy direct-DB path) reads directly;
     otherwise routes through the HTTP API (/api/v1/campaigns) like the
     rest of the codebase. main() typically calls with conn=None.
     """
@@ -933,7 +933,7 @@ def main():
         # few-shot context, copies the suffix into its draft, and the
         # tool-layer injection appends a SECOND suffix, producing
         # "written with s4lai written with s4lai" (Reddit 2026-05-18 incident).
-        # API path is preferred; legacy Neon path passes a conn instead.
+        # API path is preferred; legacy direct-DB path passes a conn instead.
         suffix_list = _load_active_campaign_suffixes()
         print(format_report(summary, top, bottom,
                             project=args.project, platform=args.platform,
