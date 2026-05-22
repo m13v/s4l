@@ -581,6 +581,14 @@ def post_one(c: dict) -> tuple[str, str]:
                     "replies": r.get("replies"),
                     "retweets": r.get("retweets"),
                     "views": r.get("views"),
+                    # Link metadata (2026-05-22). reply_link_url is the t.co
+                    # shortlink twitter wraps every external URL with;
+                    # reply_link_display is what the user sees in the tweet
+                    # (e.g. "deno.com/blog/agents"). Either may be null when
+                    # the reply contains no outbound link (the typical case
+                    # for rank=1; the typical NON-null case for rank=2).
+                    "reply_link_url": r.get("reply_link_url"),
+                    "reply_link_display": r.get("reply_link_display"),
                 }
                 for rank, r in enumerate(top_replies, start=1)
                 if r.get("reply_url")
