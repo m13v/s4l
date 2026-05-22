@@ -258,6 +258,12 @@ def main():
                              "plain_url_fallback:<reason> | empty[_*]. "
                              "Used to A/B compare engagement between the "
                              "page-gen and plain-URL lanes on Twitter.")
+    parser.add_argument("--tail-link-variant", default=None,
+                        help="Tail-link AB test arm for Twitter posts: "
+                             "'link' (reply includes bridge sentence + URL) or "
+                             "'no_link' (reply posted without any link tail). "
+                             "NULL for non-Twitter posts and rows pre-dating "
+                             "the experiment. Stored in posts.tail_link_variant.")
     parser.add_argument("--urns", default=None,
                         help="LinkedIn-only: comma- or whitespace-separated list "
                              "of 16-19 digit URN IDs that identify this post "
@@ -355,6 +361,8 @@ def main():
         body["urns"] = urn_ids
     if args.link_source:
         body["link_source"] = args.link_source
+    if args.tail_link_variant:
+        body["tail_link_variant"] = args.tail_link_variant
     if args.thread_engagement:
         body["thread_engagement"] = args.thread_engagement
     # autoposter_version: stamped on every write so we can attribute
