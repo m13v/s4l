@@ -40,8 +40,8 @@ npx social-autoposter init
 
 This copies all scripts, skill files, and config templates to `~/social-autoposter/`. It also:
 - Creates `config.json` from `config.example.json` (if missing)
-- Creates `.env` from `.env.example` (if missing) — includes pre-filled Neon `DATABASE_URL`
-- Installs `psycopg2-binary` (Python driver for Neon)
+- Creates `.env` from `.env.example` (if missing) — includes pre-filled `DATABASE_URL`
+- Installs `psycopg2-binary` (Python driver for Postgres)
 - Symlinks `~/.claude/skills/social-autoposter` → `~/social-autoposter/skill`
 
 To update scripts later without touching config/data:
@@ -51,7 +51,7 @@ npx social-autoposter update
 
 Set `SKILL_DIR=~/social-autoposter` for the rest of this wizard.
 
-### Step 2: Verify the Neon database connection
+### Step 2: Verify the Postgres database connection
 
 Load the env and test the connection:
 
@@ -245,7 +245,7 @@ Print a summary with real values substituted:
 Social Autoposter Setup Complete
 
   Installed:   ~/social-autoposter  (v1.0.9 via npm)
-  Database:    Neon Postgres (DATABASE_URL in .env)
+  Database:    Postgres (DATABASE_URL in .env)
   Config:      ~/social-autoposter/config.json
   Env:         ~/social-autoposter/.env
   Skill:       ~/.claude/skills/social-autoposter
@@ -268,4 +268,4 @@ Social Autoposter Setup Complete
   Update:      npx social-autoposter update
 ```
 
-Tell the user: "Your stats pages are ready — they'll show posts as soon as your first run completes and syncs to Neon (happens automatically after each post run). Bookmark the links above."
+Tell the user: "Your stats pages are ready — they'll show posts as soon as your first run completes and syncs to Postgres (happens automatically after each post run). Bookmark the links above."
