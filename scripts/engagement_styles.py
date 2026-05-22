@@ -9,16 +9,20 @@ a single source of truth.
 Usage:
     from engagement_styles import VALID_STYLES, REPLY_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns
 
-Style universe:
-    The hardcoded STYLES dict is the curated, "active" baseline. The model
-    may also INVENT new styles inline at decision time by emitting a
+Style universe (post 2026-05-22 cleanup):
+    The hardcoded STYLES dict is the curated baseline kept in-process so
+    the picker still works on a cold-start machine with no DB access. The
+    live "universe" is the union of STYLES + every row in the Postgres
+    table `engagement_styles_registry` (read via the s4l.ai API), plus
+    every active row in `engagement_styles_human_derived`.
+
+    The model may INVENT new styles inline at decision time by emitting a
     `new_style` block alongside an unknown `engagement_style` in its JSON.
-    Those land in scripts/engagement_styles_extra.json with status="candidate"
-    and merge back into the live universe via _load_extra_styles(). A nightly
-    promoter (scripts/promote_engagement_styles.py) graduates candidates to
-    "active" once they prove out. Until then candidates appear in prompts
-    but only receive STYLE_FLOOR_PCT weight in the picker, so a single weird
-    invention can't dominate.
+    Those go straight into engagement_styles_registry with status='active'
+    via POST /api/v1/engagement-styles/registry (no two-tier
+    candidate/active dance, no JSON sidecar). Every install sees every
+    install's registered styles. They compete on raw clicks-driven score
+    immediately, with sample-size shrinkage protecting against n=1 outliers.
 """
 
 import json
@@ -235,47 +239,43 @@ STYLES = {
 VALID_STYLES = set(STYLES.keys())
 REPLY_STYLES = VALID_STYLES
 
-# ── Sidecar: model-invented candidate styles ────────────────────────
+# ── Registry-backed style universe (DB, not JSON) ──────────────────
 #
-# scripts/engagement_styles_extra.json is the registry of styles the model
-# invented at decision time. It is read fresh on every get_all_styles()
-# call so a new candidate registered by another agent shows up without a
-# process restart. Writes are atomic (temp + rename) and serialized via
-# fcntl.flock so concurrent agents inventing the same name don't lose
-# each other's metadata.
+# Cleanup 2026-05-22: every model-invented style lands in the Postgres
+# table `engagement_styles_registry` via POST
+# /api/v1/engagement-styles/registry. The legacy file-based sidecar
+# (scripts/engagement_styles_extra.json) and the two-tier
+# candidate→active promoter are GONE. Every install sees every other
+# install's registered styles, and a new invention is live for the next
+# picker tick on every install (no JSON file to ship).
 #
-# Each entry shape:
+# DB registry row shape (engagement_styles_registry):
 #   {
-#     "status": "candidate" | "active" | "retired",
-#     "description": str,
-#     "example": str,
-#     "note": str,
-#     "why_existing_didnt_fit": str,           # rationale at invention
+#     "name": str (PK), "description": str, "example": str, "note": str,
+#     "best_in": dict,                          # {platform: hint|bool|[..]}
+#     "status": "active" | "retired",           # 'active' on every new row
+#     "why_existing_didnt_fit": str | None,
 #     "first_post_url": str | None,
 #     "first_post_id": int | None,
 #     "first_post_platform": str | None,
 #     "invented_by_model": str | None,
 #     "invented_at": ISO-8601 UTC,
-#     "promoted_at": ISO-8601 UTC | None,
-#     "best_in": {platform: [hint,...]},       # filled in by promoter
+#     "promoted_at": ISO-8601 UTC,              # set = invented_at on new rows
+#     "created_at" / "updated_at": ISO-8601 UTC,
 #   }
 #
-# Hardcoded STYLES are treated as status="active" implicitly.
-
-SIDECAR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "engagement_styles_extra.json")
+# The seeds in STYLES{} are kept in-process as a cold-start fallback so
+# the picker works on a machine with no DB access; they're also seeded
+# into the table via scripts/migrate_engagement_styles_to_db.py.
 
 _REQUIRED_NEW_STYLE_FIELDS = ("description", "example", "why_existing_didnt_fit")
 
-
-def _load_extra_styles():
-    """Read and parse the sidecar JSON. Returns {} on any error or missing file."""
-    try:
-        with open(SIDECAR_PATH, "r") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+# In-process cache for registry reads. ~5 min keeps the picker from
+# hammering the API on every pick (a Twitter cycle picks ~20 times per
+# 15-minute window) while still surfacing a newly-invented style from
+# another install within one window.
+_REGISTRY_CACHE = {"ts": 0.0, "rows": None}
+_REGISTRY_CACHE_TTL_SEC = 300
 
 
 def _normalize_entry(entry, default_status="active"):
@@ -289,31 +289,89 @@ def _normalize_entry(entry, default_status="active"):
     return out
 
 
-def get_all_styles():
-    """Merged universe: hardcoded STYLES (active) + sidecar candidates/actives
-    + active human-derived styles (from engagement_styles_human_derived).
+def _fetch_registry_styles(force_refresh=False):
+    """Pull every active row in engagement_styles_registry via the API.
 
-    Sidecar entries override hardcoded ones if they share a name (so the
-    promoter or a manual edit can adjust description/best_in without
-    modifying the locked module). Caller MUST treat the returned dict as
-    read-only.
+    Returns {name: {description, example, note, best_in, status, ...}}.
+    Cached for _REGISTRY_CACHE_TTL_SEC; pass force_refresh=True to bust.
 
-    Human-derived rows are merged last so validate_or_register accepts
-    their names when the picker hands one out via the human-derived
-    branch. They do NOT clobber hardcoded or sidecar entries that share a
-    name. DB failures are swallowed so this function never breaks the
-    picker on a network blip.
+    Best-effort: returns {} on any error (API unreachable, missing env,
+    cold start) so callers can fall back to the in-process STYLES dict.
     """
-    merged = {name: _normalize_entry(meta, "active") for name, meta in STYLES.items()}
-    for name, meta in _load_extra_styles().items():
+    import time as _time
+    now = _time.time()
+    if (
+        not force_refresh
+        and _REGISTRY_CACHE["rows"] is not None
+        and (now - _REGISTRY_CACHE["ts"]) < _REGISTRY_CACHE_TTL_SEC
+    ):
+        return _REGISTRY_CACHE["rows"]
+
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get
+        resp = api_get("/api/v1/engagement-styles/registry", {"status": "active"})
+        data = (resp or {}).get("data") or {}
+        rows = data.get("styles") or []
+    except Exception:
+        # Don't poison the cache with an empty on transient failure: if we
+        # had data before, keep serving it.
+        if _REGISTRY_CACHE["rows"] is not None:
+            return _REGISTRY_CACHE["rows"]
+        return {}
+
+    out = {}
+    for r in rows:
+        name = r.get("name")
+        if not name:
+            continue
+        best_in = r.get("best_in") or {}
+        if isinstance(best_in, str):
+            try:
+                best_in = json.loads(best_in)
+            except Exception:
+                best_in = {}
+        out[name] = {
+            "description": r.get("description") or "",
+            "example": r.get("example") or "",
+            "note": r.get("note") or "",
+            "best_in": best_in,
+            "status": r.get("status") or "active",
+        }
+    _REGISTRY_CACHE["rows"] = out
+    _REGISTRY_CACHE["ts"] = now
+    return out
+
+
+def get_all_styles():
+    """Merged universe: hardcoded STYLES + registry rows + human-derived rows.
+
+    Reads pull from the live Postgres registry (cached briefly), so a
+    style invented by any install is visible to every other install on
+    the next picker tick. STYLES{} is the cold-start fallback when the
+    API is unreachable.
+
+    Merge order (later wins on duplicate name):
+        1. Hardcoded STYLES (cold-start floor)
+        2. engagement_styles_registry rows (the live source of truth)
+        3. engagement_styles_human_derived rows (only for names not already
+           in 1/2; defense-in-depth against the synthesizer reusing a name)
+
+    Caller MUST treat the returned dict as read-only.
+    """
+    merged = {
+        name: _normalize_entry(meta, "active")
+        for name, meta in STYLES.items()
+    }
+    for name, meta in _fetch_registry_styles().items():
         if not isinstance(meta, dict):
             continue
-        merged[name] = _normalize_entry(meta, "candidate")
+        merged[name] = _normalize_entry(meta, "active")
     for name, meta in _load_human_derived_styles().items():
         if name in merged:
-            # Don't clobber a curated entry if the synthesizer happens to
-            # pick a colliding snake_case name (the synthesizer prompt
-            # explicitly forbids this, but defense in depth).
+            # Don't clobber a curated/registry entry if the synthesizer
+            # happens to pick a colliding snake_case name.
             continue
         merged[name] = _normalize_entry(meta, "human_derived")
     return merged
@@ -365,26 +423,16 @@ def _load_human_derived_styles():
     return out
 
 
-def _atomic_write_sidecar(data):
-    """Write the sidecar JSON atomically (temp + rename) and fsync."""
-    tmp = SIDECAR_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp, SIDECAR_PATH)
-
-
 def register_style(name, meta, source_post=None):
-    """Register a model-invented style into the sidecar.
+    """Register a model-invented style into engagement_styles_registry.
 
     Called when an orchestrator parses a decision JSON whose
     engagement_style is not in get_all_styles() and whose `new_style`
     block is well-formed.
+
+    POSTs to /api/v1/engagement-styles/registry; the server upserts the
+    row (ON CONFLICT DO NOTHING on name). Concurrency is handled at the
+    Postgres layer (PK uniqueness), so we don't need a file lock anymore.
 
     Args:
         name: the style name the model picked.
@@ -392,7 +440,8 @@ def register_style(name, meta, source_post=None):
               (and optionally note). Anything else is preserved verbatim.
         source_post: optional dict {platform, post_url, post_id, model}
               describing the post that birthed this style. Recorded only
-              the FIRST time a name is registered.
+              the FIRST time a name is registered (server-side ON CONFLICT
+              keeps the original values).
 
     Returns:
         (status_str, entry_dict): status in {"new", "existing", "rejected"}.
@@ -411,51 +460,58 @@ def register_style(name, meta, source_post=None):
         # block. Treat as "existing"; never overwrite the curated entry.
         return "existing", _normalize_entry(STYLES[name], "active")
 
+    # Cheap local short-circuit: if our cached registry already has this
+    # name, skip the network call and return existing immediately. The
+    # cache is shared across calls within the same process so this saves
+    # one HTTP round-trip per duplicate invention attempt.
+    cached = _fetch_registry_styles()
+    if name in cached:
+        return "existing", cached[name]
+
     src = source_post or {}
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
+    payload = {
+        "name": name,
+        "description": meta["description"].strip(),
+        "example": meta["example"].strip(),
+        "note": (meta.get("note") or "").strip(),
+        "why_existing_didnt_fit": meta["why_existing_didnt_fit"].strip(),
+        "first_post_url": src.get("post_url"),
+        "first_post_id": src.get("post_id"),
+        "first_post_platform": src.get("platform"),
+        "invented_by_model": src.get("model"),
+        "best_in": {},
+    }
     try:
-        import fcntl  # POSIX-only; this whole repo is macOS/Linux
-    except ImportError:
-        fcntl = None
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_post
+        resp = api_post("/api/v1/engagement-styles/registry", payload)
+    except SystemExit as e:
+        return "rejected", {"error": f"registry POST failed: {e}"}
+    except Exception as e:
+        return "rejected", {"error": f"registry POST raised: {e}"}
 
-    # Open-or-create a lock file alongside the sidecar so flock has a stable inode.
-    lock_path = SIDECAR_PATH + ".lock"
-    lock_fd = None
-    try:
-        lock_fd = open(lock_path, "a+")
-        if fcntl is not None:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+    data = (resp or {}).get("data") or {}
+    style_row = data.get("style") or {}
+    created = bool(data.get("created"))
 
-        existing = _load_extra_styles()
-        if name in existing:
-            return "existing", existing[name]
+    # Bust the local cache so the very next get_all_styles() includes this
+    # row (otherwise the picker's coerce-or-validate pass would still
+    # reject it for the next ~5 minutes).
+    _REGISTRY_CACHE["ts"] = 0.0
+    _REGISTRY_CACHE["rows"] = None
 
-        entry = {
-            "status": "candidate",
-            "description": meta["description"].strip(),
-            "example": meta["example"].strip(),
-            "note": (meta.get("note") or "").strip(),
-            "why_existing_didnt_fit": meta["why_existing_didnt_fit"].strip(),
-            "first_post_url": src.get("post_url"),
-            "first_post_id": src.get("post_id"),
-            "first_post_platform": src.get("platform"),
-            "invented_by_model": src.get("model"),
-            "invented_at": now_iso,
-            "promoted_at": None,
-            "best_in": {},
-        }
-        existing[name] = entry
-        _atomic_write_sidecar(existing)
-        return "new", entry
-    finally:
-        if lock_fd is not None:
-            if fcntl is not None:
-                try:
-                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-            lock_fd.close()
+    entry = _normalize_entry(
+        {
+            "description": style_row.get("description") or payload["description"],
+            "example": style_row.get("example") or payload["example"],
+            "note": style_row.get("note") or payload["note"],
+            "best_in": style_row.get("best_in") or {},
+            "status": style_row.get("status") or "active",
+        },
+        "active",
+    )
+    return ("new" if created else "existing"), entry
 
 
 def validate_or_register(decision, source_post=None, context="posting"):
