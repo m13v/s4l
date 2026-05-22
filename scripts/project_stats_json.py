@@ -1239,7 +1239,7 @@ def main():
     # platform pill changes (see /api/funnel/stats in bin/server.js). Runs
     # in ~1s instead of ~30s because there are no external HTTP calls AND
     # the per-project SQL is collapsed into 3 batched GROUP BY queries
-    # (the naive per-project loop pays N x ~180ms Neon round-trip).
+    # (the naive per-project loop pays N x ~180ms Postgres round-trip).
     if args.posts_only:
         conn = ps.dbmod.get_conn()
         days_sql = "INTERVAL '" + str(int(args.days)) + " days'"
