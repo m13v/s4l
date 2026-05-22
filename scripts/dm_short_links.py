@@ -631,7 +631,7 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     Routes DB ops through social-autoposter-website /api/v1/post-links/* so
     VMs / sandboxes without DATABASE_URL still mint successfully. The `conn`
     arg is accepted for backward compatibility but ignored. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to fall back to the direct-Neon path.
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to fall back to the direct-DB path.
     """
     target_url = _ensure_scheme((target_url or '').strip())
     if not target_url or target_url == 'https://':
@@ -836,8 +836,8 @@ def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
 
     minted_session = str(uuid.uuid4())
     projects = _load_projects()
-    # Conn is only opened for the legacy direct-Neon path (env-gated). The
-    # default API path doesn't need it; lazy-open avoids a wasted Neon
+    # Conn is only opened for the legacy direct-DB path (env-gated). The
+    # default API path doesn't need it; lazy-open avoids a wasted Postgres
     # connection on VMs that don't have DATABASE_URL.
     use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
     conn = dbmod.get_conn() if use_legacy else None
@@ -929,7 +929,7 @@ def backfill_post_id(*, minted_session: str, post_id: int) -> int:
     that case.
 
     Routes through /api/v1/post-links/backfill by default. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-Neon path.
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-DB path.
     """
     if not minted_session or post_id is None:
         return 0
