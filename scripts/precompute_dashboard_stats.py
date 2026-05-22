@@ -125,7 +125,7 @@ def precompute_activity(hours=24):
     q = (
         "SELECT json_agg(row_to_json(r)) FROM ("
         "SELECT type, " + norm + " AS platform, COUNT(*)::int AS count FROM ("
-        "SELECT CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform AS pl FROM posts WHERE posted_at >= NOW() - " + win + " AND our_content <> '(mention - no original post)' "
+        "SELECT CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform AS pl FROM posts WHERE posted_at >= NOW() - " + win + " "
         "UNION ALL SELECT 'replied', platform FROM replies WHERE status='replied' AND replied_at >= NOW() - " + win + " "
         "UNION ALL SELECT 'skipped', platform FROM replies WHERE status='skipped' AND COALESCE(processing_at, discovered_at) >= NOW() - " + win + " "
         "UNION ALL SELECT 'mention', platform FROM octolens_mentions WHERE COALESCE(source_timestamp, received_at) >= NOW() - " + win + " "
@@ -154,7 +154,7 @@ def precompute_activity(hours=24):
         "UNION ALL SELECT 'page_published_top_post', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='top_post' "
         "UNION ALL SELECT 'page_published_roundup', 'seo' FROM seo_keywords WHERE completed_at >= NOW() - " + win + " AND page_url IS NOT NULL AND source='roundup' "
         "UNION ALL SELECT 'page_improved', 'seo' FROM seo_page_improvements WHERE completed_at >= NOW() - " + win + " AND status='committed' "
-        "UNION ALL SELECT 'resurrected', platform FROM posts WHERE resurrected_at >= NOW() - " + win + " AND our_content <> '(mention - no original post)' " +
+        "UNION ALL SELECT 'resurrected', platform FROM posts WHERE resurrected_at >= NOW() - " + win + " " +
         ") u GROUP BY type, platform ORDER BY type, platform) r"
     )
     cur = conn.execute(q)
@@ -211,7 +211,6 @@ def precompute_style(hours=24):
         "    WHERE pl2.post_id IS NOT NULL "
         "    GROUP BY pl2.post_id"
         f"  ) pl ON pl.post_id = posts.id WHERE posted_at >= NOW() - {win} "
-        "  AND our_content <> '(mention - no original post)' "
         "  GROUP BY engagement_style"
         "), r AS ("
         "  SELECT COALESCE(engagement_style, '(none)') AS style, "
@@ -251,7 +250,6 @@ def precompute_style(hours=24):
         "SELECT DISTINCT project_name AS p FROM posts "
         f"WHERE posted_at >= NOW() - INTERVAL '{int(hours)} hours' "
         "AND project_name IS NOT NULL "
-        "AND our_content <> '(mention - no original post)' "
         "ORDER BY p) s"
     )
     def _one(q):
