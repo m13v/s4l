@@ -11,7 +11,7 @@ campaign's posts_made counter advances by one. Idempotent: if the row already
 references this campaign, no counter bump happens.
 
 Routes through /api/v1/campaigns/bump by default. Set
-SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to use direct Neon.
+SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to use direct DB.
 """
 
 import argparse
@@ -34,7 +34,7 @@ def _bump_via_api(table, row_id, campaign_id):
     return bumped
 
 
-def _bump_via_neon(table, row_id, campaign_id):
+def _bump_via_db(table, row_id, campaign_id):
     import db
     conn = db.get_conn()
     try:
@@ -65,7 +65,7 @@ def main():
     args = ap.parse_args()
 
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        bumped = _bump_via_neon(args.table, args.id, args.campaign_id)
+        bumped = _bump_via_db(args.table, args.id, args.campaign_id)
     else:
         bumped = _bump_via_api(args.table, args.id, args.campaign_id)
 
