@@ -4521,7 +4521,7 @@ async function handleApi(req, res) {
         "FROM claude_sessions cs JOIN session_counts sc ON sc.claude_session_id = cs.session_id" +
       ") " +
       "SELECT json_agg(row_to_json(r)) FROM (" +
-      "SELECT * FROM (SELECT posted_at AS occurred_at, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, engagement_style AS detail, our_url AS link, ('p' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c ON c.id = posts.campaign_id WHERE posted_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY posted_at DESC LIMIT 150) x1 " +
+      "SELECT * FROM (SELECT posted_at AS occurred_at, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, engagement_style AS detail, our_url AS link, ('p' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c ON c.id = posts.campaign_id WHERE posted_at IS NOT NULL ORDER BY posted_at DESC LIMIT 150) x1 " +
       "UNION ALL SELECT * FROM (SELECT r2.replied_at, 'replied', r2.platform, r2.their_author, COALESCE(LEFT(r2.our_reply_content, 280), LEFT(r2.their_content, 280)), CASE WHEN r2.is_recommendation THEN 'rec · ' || COALESCE(r2.engagement_style, '') ELSE r2.engagement_style END, r2.our_reply_url, ('r' || r2.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c2.name, p.thread_title, p.thread_url, NULL::text FROM replies r2 LEFT JOIN posts p ON p.id = r2.post_id LEFT JOIN session_cost sc ON sc.session_id = r2.claude_session_id LEFT JOIN campaigns c2 ON c2.id = r2.campaign_id WHERE r2.status='replied' AND r2.replied_at IS NOT NULL ORDER BY r2.replied_at DESC LIMIT 150) x2 " +
       "UNION ALL SELECT * FROM (SELECT COALESCE(r3.processing_at, r3.discovered_at), 'skipped', r3.platform, r3.their_author, LEFT(r3.their_content, 140), r3.skip_reason, r3.their_comment_url, ('s' || r3.id), p.project_name, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, c3.name, p.thread_title, p.thread_url, NULL::text FROM replies r3 LEFT JOIN posts p ON p.id = r3.post_id LEFT JOIN session_cost sc ON sc.session_id = r3.claude_session_id LEFT JOIN campaigns c3 ON c3.id = r3.campaign_id WHERE r3.status='skipped' ORDER BY COALESCE(r3.processing_at, r3.discovered_at) DESC LIMIT 150) x3 " +
       "UNION ALL SELECT * FROM (SELECT COALESCE(source_timestamp, received_at), 'mention', platform, author, COALESCE(title, LEFT(body, 140)), sentiment, url, ('m' || id), NULL::text, NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM octolens_mentions ORDER BY COALESCE(source_timestamp, received_at) DESC LIMIT 150) x4 " +
@@ -4536,7 +4536,7 @@ async function handleApi(req, res) {
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_published_roundup', 'seo', product, keyword, slug, page_url, ('kru' || sk4.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_keywords sk4 LEFT JOIN session_cost sc ON sc.session_id = sk4.claude_session_id WHERE completed_at IS NOT NULL AND page_url IS NOT NULL AND source = 'roundup' ORDER BY completed_at DESC LIMIT 150) x8r " +
       "UNION ALL SELECT * FROM (SELECT completed_at, 'page_improved', 'seo', product, LEFT(COALESCE(rationale, diff_summary, page_path), 140), page_path, page_url, ('pi' || spi.id), product, sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_page_improvements spi LEFT JOIN session_cost sc ON sc.session_id = spi.claude_session_id WHERE completed_at IS NOT NULL AND status = 'committed' ORDER BY completed_at DESC LIMIT 150) x8c " +
       "UNION ALL SELECT * FROM (SELECT expired_at, 'page_expired', 'seo', product, regexp_replace(source_path, '^.*/', ''), 'imp=' || impressions_30d || ' clicks=0 age=' || COALESCE(file_age_days::int, 0) || 'd ' || COALESCE(reason,''), page_url, ('xp' || sep.id), product, NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text, NULL::text, NULL::text, NULL::text FROM seo_expired_pages sep ORDER BY expired_at DESC LIMIT 150) x8d " +
-      "UNION ALL SELECT * FROM (SELECT resurrected_at AS occurred_at, 'resurrected' AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, NULL::text AS detail, our_url AS link, ('rr' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c9.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c9 ON c9.id = posts.campaign_id WHERE resurrected_at IS NOT NULL AND our_content <> '(mention - no original post)' ORDER BY resurrected_at DESC LIMIT 150) x9 " +
+      "UNION ALL SELECT * FROM (SELECT resurrected_at AS occurred_at, 'resurrected' AS type, platform, our_account AS actor, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN COALESCE(thread_title, LEFT(our_content, 280)) ELSE LEFT(our_content, 280) END AS summary, NULL::text AS detail, our_url AS link, ('rr' || posts.id) AS key, project_name AS project, sc.per_row_cost AS cost_usd, sc.per_row_cost_orchestrator AS cost_usd_orchestrator, sc.per_row_cost_estimated AS cost_usd_estimated, sc.per_row_cost_subagent AS cost_usd_subagent, c9.name AS campaign_name, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_title END AS context_title, CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) THEN NULL ELSE thread_url END AS context_url, LEFT(our_content, 3000) AS body FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id LEFT JOIN campaigns c9 ON c9.id = posts.campaign_id WHERE resurrected_at IS NOT NULL ORDER BY resurrected_at DESC LIMIT 150) x9 " +
       "ORDER BY 1 DESC LIMIT 500) r";
     return (async () => {
       const rows = await pq(q);
@@ -4821,7 +4821,6 @@ async function handleApi(req, res) {
         "GROUP BY pl2.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
-      "AND our_content <> '(mention - no original post)' " +
       platformFilter + projectFilter +
       "GROUP BY engagement_style ORDER BY posts DESC) r";
     // Return the full list of active platforms/projects in the window so the pill
@@ -4876,7 +4875,6 @@ async function handleApi(req, res) {
         "WHERE pl2.post_id IS NOT NULL GROUP BY pl2.post_id" +
       ") pl ON pl.post_id = posts.id " +
       "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
-      "AND our_content <> '(mention - no original post)' " +
       "AND tail_link_variant IS NOT NULL " +
       "AND LOWER(CASE WHEN LOWER(platform)='x' THEN 'twitter' ELSE platform END) = 'twitter' " +
       projectFilter +
@@ -4994,7 +4992,6 @@ async function handleApi(req, res) {
         ") pl ON pl.post_id = posts.id " +
         "WHERE posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND upvotes IS NOT NULL " +
-          "AND our_content <> '(mention - no original post)' " +
           platformFilter + projectFilter +
       ") s GROUP BY cohort ORDER BY CASE cohort " +
         "WHEN 'dead' THEN 1 WHEN 'low' THEN 2 WHEN 'mid' THEN 3 ELSE 4 END" +
@@ -6796,7 +6793,6 @@ async function handleApi(req, res) {
                 "WHERE LOWER(platform) = 'reddit' " +
                   "AND posted_at >= NOW() - INTERVAL '" + days + " days' " +
                   "AND project_name IS NOT NULL " +
-                  "AND our_content <> '(mention - no original post)'" +
                   pcClause +
               ") " +
               "SELECT " +
@@ -7147,7 +7143,6 @@ async function handleApi(req, res) {
       "LOWER(CASE WHEN LOWER(platform)='x' THEN 'twitter' ELSE platform END) AS platform, " +
       "COUNT(*)::int AS n " +
       "FROM posts WHERE posted_at >= NOW() - INTERVAL '" + hours + " hours' " +
-      "AND our_content <> '(mention - no original post)' " +
       "GROUP BY project_name, LOWER(CASE WHEN LOWER(platform)='x' THEN 'twitter' ELSE platform END)"
     ) || [];
     const byProject = {};
@@ -7256,8 +7251,7 @@ async function handleApi(req, res) {
         "SELECT COALESCE(posts.project_name, '(none)') AS project, " +
           "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM posts LEFT JOIN session_cost sc ON sc.session_id = posts.claude_session_id " +
-          "WHERE posts.posted_at >= NOW() - " + costWin + " " +
-          "AND posts.our_content <> '(mention - no original post)'",
+          "WHERE posts.posted_at >= NOW() - " + costWin,
         "SELECT COALESCE(replies.project_name, '(none)') AS project, " +
           "sc.per_row_cost, sc.per_row_cost_orchestrator, sc.per_row_cost_estimated, sc.per_row_cost_subagent " +
           "FROM replies LEFT JOIN session_cost sc ON sc.session_id = replies.claude_session_id " +
