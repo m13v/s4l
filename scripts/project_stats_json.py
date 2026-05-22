@@ -724,6 +724,7 @@ def _period_total_engagement(conn, name, days, platform=None):
     # function lines up with the /api/style/stats view that the dashboard
     # shows above the Project Final Stats table.
     plat_clause = _platform_sql_clause(platform, "p")
+    proj_clause, proj_params = _project_filter_sql(name, "p")
     cur = conn.execute(
         # Branch 1: posts CREATED in the window. Full live posts.* values
         # are credited as in-window gain. No -1 OP discount on upvotes, so
@@ -734,7 +735,7 @@ def _period_total_engagement(conn, name, days, platform=None):
             "COALESCE(SUM(p.comments_count), 0)::bigint AS comments, "
             "COALESCE(SUM(p.views) FILTER (WHERE " + views_excl + "), 0)::bigint AS views "
           "FROM posts p "
-          "WHERE p.project_name = %s "
+          "WHERE " + proj_clause + " "
             "AND p.posted_at >= NOW() - " + days_sql + plat_clause +
         "), "
         # Branch 2: posts created BEFORE the window. LAG over snapshots
@@ -751,7 +752,7 @@ def _period_total_engagement(conn, name, days, platform=None):
           "FROM post_views_daily pvd "
           "JOIN posts p ON p.id = pvd.post_id "
           "WHERE pvd.day >= CURRENT_DATE - " + days_sql + " "
-            "AND p.project_name = %s "
+            "AND " + proj_clause + " "
             "AND p.posted_at < NOW() - " + days_sql + plat_clause + " "
           "WINDOW w AS (PARTITION BY pvd.post_id ORDER BY pvd.day)"
         "), "
@@ -771,7 +772,7 @@ def _period_total_engagement(conn, name, days, platform=None):
           "n.comments + o.comments, "
           "n.views    + o.views "
         "FROM new_posts n CROSS JOIN old_posts o",
-        (name, name),
+        proj_params + proj_params,
     )
     row = cur.fetchone() or (0, 0, 0)
     upvotes_total = int(row[0] or 0)
@@ -791,7 +792,7 @@ def _period_total_engagement(conn, name, days, platform=None):
             "SELECT post_id, SUM(clicks)::int AS total_clicks "
             "FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
           ") pl ON pl.post_id = p.id "
-          "WHERE p.project_name = %s "
+          "WHERE " + proj_clause + " "
             "AND p.posted_at >= NOW() - " + days_sql + plat_clause +
         "), "
         "old_event_clicks AS ("
@@ -801,12 +802,12 @@ def _period_total_engagement(conn, name, days, platform=None):
           "JOIN posts p ON p.id = pl.post_id "
           "WHERE plc.ts >= NOW() - " + days_sql + " "
             "AND plc.is_bot = FALSE "
-            "AND p.project_name = %s "
+            "AND " + proj_clause + " "
             "AND p.posted_at < NOW() - " + days_sql + plat_clause +
         ") "
         "SELECT n.clicks + o.clicks "
         "FROM new_clicks n CROSS JOIN old_event_clicks o",
-        (name, name),
+        proj_params + proj_params,
     )
     row2 = cur2.fetchone() or (0,)
     post_clicks_total = int(row2[0] or 0)
@@ -842,6 +843,7 @@ def _windowed_post_engagement(conn, name, days, platform=None):
     # LinkedIn / GitHub have no equivalent auto-vote so they pass through.
     # Matches top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
     plat_clause = _platform_sql_clause(platform, "p")
+    proj_clause, proj_params = _project_filter_sql(name, "p")
     cur = conn.execute(
         "SELECT COALESCE(SUM(CASE WHEN LOWER(p.platform) IN ('reddit', 'moltbook') "
         "  THEN GREATEST(0, COALESCE(p.upvotes, 0) - 1) "
@@ -855,9 +857,9 @@ def _windowed_post_engagement(conn, name, days, platform=None):
         "  SELECT post_id, SUM(clicks)::int AS total_clicks "
         "  FROM post_links WHERE post_id IS NOT NULL GROUP BY post_id"
         ") pl ON pl.post_id = p.id "
-        "WHERE p.project_name = %s AND p.posted_at >= NOW() - INTERVAL '" + str(days) + " days'"
+        "WHERE " + proj_clause + " AND p.posted_at >= NOW() - INTERVAL '" + str(days) + " days'"
         + plat_clause,
-        (name,),
+        proj_params,
     )
     row = cur.fetchone() or (0, 0, 0, 0, 0)
     return {
@@ -1000,12 +1002,13 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
     # same vocabulary as Upvotes/Comments/Views.
     if platform:
         plat_clause = _platform_sql_clause(platform, "")
+        proj_clause, proj_params = _project_filter_sql(name, "")
         cur_pf = conn.execute(
             "SELECT COUNT(*) FROM posts "
-            "WHERE project_name = %s "
+            "WHERE " + proj_clause + " "
             "AND posted_at >= NOW() - INTERVAL '" + str(int(days)) + " days'"
             + plat_clause,
-            (name,),
+            proj_params,
         )
         post_stats["recent"] = int((cur_pf.fetchone() or (0,))[0])
 
