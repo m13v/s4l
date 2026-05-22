@@ -31,7 +31,7 @@ sudo apt install -y \
 
 Notes:
 - `coreutils` provides `timeout`; `lib/platform.sh` aliases it to `gtimeout`.
-- `postgresql-client` provides `psql` for the Neon DB writes in several scripts.
+- `postgresql-client` provides `psql` for the Postgres writes in several scripts.
 - `chromium-browser` satisfies Playwright's browser dependency for the MCP
   browser agents. On some distros the package is named `chromium`.
 - `xvfb` is only needed on headless VMs where the browser agents must run
@@ -98,7 +98,7 @@ $EDITOR .env                         # DATABASE_URL, API keys
 ```
 
 The schema lives at `~/social-autoposter/schema-postgres.sql`. Apply it
-against your Neon database once:
+against your Postgres database once:
 
 ```bash
 psql "$DATABASE_URL" -f schema-postgres.sql
