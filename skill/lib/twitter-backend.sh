@@ -155,6 +155,12 @@ ensure_twitter_browser_for_backend() {
         local _ext_url="${TWITTER_CDP_URL}"
         if curl -sf --max-time 2 -o /dev/null "${_ext_url}/json/version" 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] Using externally-managed Chrome at ${_ext_url} (skipping harness launch + tab cleanup)" >&2
+            # Restore the Twitter login if the sandbox was substituted. AppMaker
+            # Hobby-tier sandboxes have a 1h TTL; on substitution /root is reseeded
+            # from /etc/skel-root and the harness profile (cookies) is wiped. This
+            # re-injects the stored session from social_accounts via the HTTP API.
+            # No-op when already logged in. Never blocks the cycle on failure.
+            python3 "$HOME/social-autoposter/scripts/restore_twitter_session.py" 2>&1 | sed 's/^/[restore] /' >&2 || true
             return 0
         fi
         echo "[$(date +%H:%M:%S)] ERROR: TWITTER_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host (AppMaker /opt/startup.sh, etc)." >&2
