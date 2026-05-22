@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Poll Neon for new visitor messages on a thread, blocking until one arrives.
+"""Poll Postgres for new visitor messages on a thread, blocking until one arrives.
 
 Mirror of ~/fazm/inbox/scripts/poll-chat.js. The Claude session calls this
 after sending a reply so it stays in the conversation while the visitor is
