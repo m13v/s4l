@@ -275,6 +275,15 @@ def main():
                              "to keep argv short and avoid shell-escape pain. "
                              "Capped at 64 KB by the API. See "
                              "migrations/2026-05-12_generation_trace.sql.")
+    parser.add_argument("--thread-engagement", default=None,
+                        help="JSON string snapshot of the original thread's "
+                             "engagement at scrape time. Shape: "
+                             "{\"likes\":N,\"retweets\":N,\"replies\":N,"
+                             "\"views\":N,\"bookmarks\":N,\"snapshot_at\":\"...\"}. "
+                             "Stored verbatim in posts.thread_engagement (TEXT). "
+                             "No live refresh, no extra API calls; whatever the "
+                             "candidate row already had under *_t0 is what gets "
+                             "recorded. Capped at 2 KB by the API.")
     args = parser.parse_args()
 
     if args.mark_self_reply:
@@ -346,6 +355,8 @@ def main():
         body["urns"] = urn_ids
     if args.link_source:
         body["link_source"] = args.link_source
+    if args.thread_engagement:
+        body["thread_engagement"] = args.thread_engagement
     # autoposter_version: stamped on every write so we can attribute
     # engagement back to the release of the autoposter code that produced
     # this row. None when package.json + env are both missing.
