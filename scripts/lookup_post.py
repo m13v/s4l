@@ -56,7 +56,6 @@ def lookup(platform, post_id):
               AND status = 'active'
               AND our_url ~ %s
               AND posted_at > NOW() - INTERVAL '30 days'
-              AND our_content <> '(mention - no original post)'
             ORDER BY posted_at DESC
             LIMIT 1
             """,
