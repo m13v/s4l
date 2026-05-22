@@ -171,8 +171,10 @@ echo "---------------------" | tee -a "$LOG_FILE"
 
 # Prompt context loaders below all route through scripts/twitter_threads_helper.py
 # (HTTP /api/v1/posts) instead of three direct psql one-liners as of 2026-05-18.
-# Filters preserved byte-equivalent: thread_url = our_url, NOT ILIKE '(mention%',
-# project + window + status WHERE clauses.
+# Filters preserved byte-equivalent: thread_url = our_url, project + window +
+# status WHERE clauses. Post 2026-05-23, the '(mention - no original post)'
+# placeholder rows no longer live in `posts` (they moved to the dedicated
+# `mentions` table), so the legacy NOT ILIKE '(mention%' guard was dropped.
 
 # Recent originals by us in last 14 days for THIS project (avoid repeats).
 RECENT_POSTS=$(python3 "$REPO_DIR/scripts/twitter_threads_helper.py" \
