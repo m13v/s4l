@@ -142,6 +142,22 @@ CREATE INDEX IF NOT EXISTS idx_posts_platform_thread_posted_at
   ON posts (platform, thread_posted_at)
   WHERE thread_posted_at IS NOT NULL;
 
+-- 2026-05-22: link metadata on thread_top_replies (see
+-- migrations/2026-05-22-thread-top-replies-link-metadata.sql). The
+-- snapshot now captures min 1, max 2 replies per thread: rank=1 is
+-- top by likes regardless of link; rank=2 is the top link-bearing
+-- reply (if one exists and differs by URL). has_link is a derived
+-- convenience flag for analytics + partial indexes.
+ALTER TABLE thread_top_replies
+  ADD COLUMN IF NOT EXISTS reply_link_url TEXT,
+  ADD COLUMN IF NOT EXISTS reply_link_display TEXT;
+ALTER TABLE thread_top_replies
+  ADD COLUMN IF NOT EXISTS has_link BOOLEAN
+  GENERATED ALWAYS AS (reply_link_url IS NOT NULL) STORED;
+CREATE INDEX IF NOT EXISTS idx_thread_top_replies_has_link
+  ON thread_top_replies(post_id, has_link)
+  WHERE has_link = TRUE;
+
 CREATE TABLE IF NOT EXISTS threads (
     id SERIAL PRIMARY KEY,
     platform TEXT NOT NULL,
