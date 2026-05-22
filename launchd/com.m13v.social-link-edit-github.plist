@@ -8,6 +8,8 @@
 		<string>/Users/matthewdi</string>
 		<key>PATH</key>
 		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>LINK_EDIT_GITHUB_PAGE_GEN_RATE</key>
+		<string>0</string>
 	</dict>
 	<key>Label</key>
 	<string>com.m13v.social-link-edit-github</string>
