@@ -2,7 +2,7 @@
 # Continuous heartbeat to /api/v1/installations/heartbeat.
 #
 # Independent of any reply traffic: even when github-engage is quiet, this
-# proves the install lane (identity.py + Vercel + Neon) is round-tripping.
+# proves the install lane (identity.py + Vercel + Postgres) is round-tripping.
 # A gap in installations.last_seen_at on the server is a leading signal of
 # Vercel outage / DNS / cert / migration drift before any user-facing
 # pipeline notices.
