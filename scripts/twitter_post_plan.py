@@ -41,6 +41,7 @@ from __future__ import annotations  # PEP 604 unions (int | None) for Python 3.9
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -344,9 +345,21 @@ def post_one(c: dict) -> tuple[str, str]:
     # On any failure (timeout, model error, output fails sanity gate) the
     # script returns the mechanical concat as a fallback, so this code path
     # is always tolerant of model failure.
+    #
+    # AB TEST — tail link on/off:
+    # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
+    # of posts that receive a tail link. Setting it to 1.0 restores old
+    # behavior (always add link). Setting it to 0.0 disables links entirely.
+    # tail_link_variant is logged to posts.tail_link_variant so the dashboard
+    # can compare engagement across arms.
+    _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
+    _add_tail_link = link_url and (random.random() < _tail_link_rate)
+    tail_link_variant: str | None = None
+    if link_url:
+        tail_link_variant = "link" if _add_tail_link else "no_link"
     full_text = reply_text
     link_tail_outcome = "skipped_no_link"
-    if link_url:
+    if _add_tail_link:
         rc, out, err = run_subprocess(
             ["python3", LINK_TAIL,
              "--reply-text", reply_text,
