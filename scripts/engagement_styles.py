@@ -290,19 +290,79 @@ def _normalize_entry(entry, default_status="active"):
 
 
 def get_all_styles():
-    """Merged universe: hardcoded STYLES (active) + sidecar candidates/actives.
+    """Merged universe: hardcoded STYLES (active) + sidecar candidates/actives
+    + active human-derived styles (from engagement_styles_human_derived).
 
     Sidecar entries override hardcoded ones if they share a name (so the
     promoter or a manual edit can adjust description/best_in without
     modifying the locked module). Caller MUST treat the returned dict as
     read-only.
+
+    Human-derived rows are merged last so validate_or_register accepts
+    their names when the picker hands one out via the human-derived
+    branch. They do NOT clobber hardcoded or sidecar entries that share a
+    name. DB failures are swallowed so this function never breaks the
+    picker on a network blip.
     """
     merged = {name: _normalize_entry(meta, "active") for name, meta in STYLES.items()}
     for name, meta in _load_extra_styles().items():
         if not isinstance(meta, dict):
             continue
         merged[name] = _normalize_entry(meta, "candidate")
+    for name, meta in _load_human_derived_styles().items():
+        if name in merged:
+            # Don't clobber a curated entry if the synthesizer happens to
+            # pick a colliding snake_case name (the synthesizer prompt
+            # explicitly forbids this, but defense in depth).
+            continue
+        merged[name] = _normalize_entry(meta, "human_derived")
     return merged
+
+
+def _load_human_derived_styles():
+    """Map of {name: {description, example, note, best_in}} for every active
+    row in engagement_styles_human_derived. Best-effort; returns {} on any
+    failure so callers don't have to wrap in try/except."""
+    try:
+        from db import get_conn  # type: ignore
+    except Exception:
+        return {}
+    try:
+        conn = get_conn()
+    except Exception:
+        return {}
+    try:
+        cur = conn.execute(
+            """
+            SELECT name, description, example, best_in, note
+            FROM engagement_styles_human_derived
+            WHERE status = 'active'
+            """
+        )
+        rows = cur.fetchall()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return {}
+    try:
+        conn.close()
+    except Exception:
+        pass
+    out = {}
+    for r in rows:
+        name = r[0]
+        best_in = r[3] if isinstance(r[3], dict) else (
+            json.loads(r[3]) if r[3] else {}
+        )
+        out[name] = {
+            "description": r[1] or "",
+            "example": r[2] or "",
+            "note": r[4] or "",
+            "best_in": best_in,
+        }
+    return out
 
 
 def _atomic_write_sidecar(data):
@@ -743,6 +803,21 @@ def compute_target_distribution(platform, context="posting"):
 INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
 CURATED_TOP_N = 5   # the model only ever sees one of the top 5 by score
 
+# Additive 5% branch (2026-05-22): on Twitter, with this probability, the
+# picker bypasses score-based selection and assigns the most recently
+# synthesized "human-derived" style — distilled by
+# scripts/generate_daily_human_style.py from the previous 24h of
+# top-performing HUMAN Twitter replies in thread_top_replies. The goal is
+# to keep our voice continuously calibrated to whatever rhetorical move is
+# winning on the platform right now, without waiting for the historical
+# scoring window to accumulate enough samples to surface it naturally.
+#
+# Distribution: 5% human-derived + 5% invent + 90% scored-use.
+# Gated to platform='twitter' because (a) that's where the synthesizer
+# reads from and (b) the latest row may not have non-twitter best_in
+# context labels filled in.
+HUMAN_DERIVED_RATE = 0.05
+
 # Sample-size credibility floor for the picker. Below this, a style's score
 # is linearly shrunk toward 0 so a single viral comment with n=6 can't
 # dominate the use_pool. Once n >= MIN_SAMPLE_FULL_WEIGHT the style gets
@@ -779,6 +854,71 @@ def _picker_score(row):
     Keeps `_style_score` pure so top_performers / dashboard / other
     surfaces keep showing the raw composite. Only the picker shrinks."""
     return float(row.get("score", 0.0)) * _credibility_factor(row.get("n", 0))
+
+
+def _fetch_latest_human_derived(platform):
+    """Return the most recently synthesized active human-derived style for
+    `platform`, or None if the table is empty / DB unavailable / latest row
+    isn't applicable to this platform.
+
+    Source: engagement_styles_human_derived table (migration
+    2026-05-22_engagement_styles_human_derived.sql). One row per daily
+    synthesizer run. The latest row by `generated_at` wins.
+
+    Network failures and missing tables are swallowed silently and return
+    None so the picker can fall through to the normal scored path — this
+    branch is best-effort, never load-bearing.
+    """
+    try:
+        # Lazy import to avoid pulling psycopg2 into callers that don't need
+        # it (e.g. dashboard summaries on environments without DB access).
+        from db import get_conn  # type: ignore
+    except Exception:
+        return None
+    try:
+        conn = get_conn()
+    except Exception:
+        return None
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, name, description, example, best_in, note, generated_at
+            FROM engagement_styles_human_derived
+            WHERE status = 'active'
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        best_in = row[4] if isinstance(row[4], dict) else (
+            json.loads(row[4]) if row[4] else {}
+        )
+        # Only return if the latest synthesizer run produced a style
+        # whose best_in lists this platform. If not, the picker falls
+        # through to scored-use as if there were no human-derived row.
+        platforms_with_contexts = [
+            p for p, ctxs in (best_in or {}).items() if ctxs
+        ]
+        if platform not in platforms_with_contexts:
+            return None
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "example": row[3],
+            "best_in": best_in,
+            "note": row[5],
+            "generated_at": row[6],
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def pick_style_for_post(platform, context="posting",
@@ -826,6 +966,37 @@ def pick_style_for_post(platform, context="posting",
         }
     """
     rnd = rng or random
+
+    # Human-derived branch (2026-05-22): on Twitter, with HUMAN_DERIVED_RATE
+    # probability, bypass the score-based path entirely and assign the most
+    # recently synthesized style from engagement_styles_human_derived. This
+    # is ADDITIVE to the existing INVENT branch — both 5%s coexist, leaving
+    # ~90% for normal scored-use. Fails open: if the DB query returns no
+    # active row, we fall through to the normal flow as if this branch
+    # didn't exist.
+    if (
+        platform == "twitter"
+        and HUMAN_DERIVED_RATE > 0
+        and rnd.random() < HUMAN_DERIVED_RATE
+    ):
+        hd = _fetch_latest_human_derived(platform)
+        if hd:
+            return {
+                "mode": "use",
+                "style": hd["name"],
+                "description": hd["description"],
+                "example": hd["example"],
+                "note": hd["note"],
+                "source": "human_derived",
+                "human_derived_id": hd["id"],
+                "reference_styles": [],
+                "distribution_snapshot": [],
+                "picked_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+        # else fall through to normal scored path.
+
     never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
     rows = compute_target_distribution(platform, context=context)
     rows = [r for r in rows if r["style"] not in never]
