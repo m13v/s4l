@@ -28,7 +28,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
-from engagement_styles import validate_or_register
+from engagement_styles import validate_or_register, pick_style_for_post
 from version import read_version as read_autoposter_version
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
@@ -304,9 +304,12 @@ def post_and_log(decisions, claude_session_id):
                 except Exception:
                     continue
 
-        # Validate or register the engagement_style. Unknown style + a
-        # well-formed new_style block lands as a candidate in the sidecar;
-        # unknown style with no/invalid block is recorded as NULL.
+        # Validate or register the engagement_style. In USE mode any drifted
+        # style label is coerced back to style_assignment["style"]; in INVENT
+        # mode the new_style block is registered into
+        # engagement_styles_registry via the s4l API (replaces the legacy
+        # file-based sidecar). The picker's choice is set once for the whole
+        # batch above.
         validated_style, style_action = validate_or_register(
             p,
             source_post={
@@ -315,6 +318,8 @@ def post_and_log(decisions, claude_session_id):
                 "post_id": None,
                 "model": p.get("model"),
             },
+            assigned_style=(style_assignment or {}).get("style"),
+            assigned_mode=(style_assignment or {}).get("mode"),
         )
 
         conn.execute(
@@ -465,6 +470,16 @@ def main():
 
     claude_session_id = str(uuid.uuid4())
     os.environ["CLAUDE_SESSION_ID"] = claude_session_id
+    # 2026-05-22: pick the engagement style for this draft batch so
+    # validate_or_register can coerce any drifted engagement_style label
+    # back to the picker's choice. Moltbook batches share one assignment
+    # per cycle (same pattern as github batches; cycles run often enough
+    # that the picker's distribution averages out). The styles_block in
+    # the prompt still shows the legacy menu because the prompt is built
+    # by a shell helper; the enforcement happens at the validate step.
+    style_assignment = pick_style_for_post("moltbook", context="posting")
+    log(f"Style assignment for this batch: mode={style_assignment.get('mode')} "
+        f"style={style_assignment.get('style') or '(invent)'}")
     prompt = build_prompt(top, cap, history_block, styles_block, projects_json)
 
     log("Phase 2b: invoking Claude for drafting...")
