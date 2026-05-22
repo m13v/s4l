@@ -84,14 +84,17 @@ zero posts (social) / zero pages (SEO) in the 7d window is skipped. Both support
 `--sample`, `--dry-run`, `--only <email>`. Schedule: launchd `com.m13v.social-weekly-report`
 + `com.m13v.seo-weekly-report`, Monday 09:00.
 
-## URL wrapping: short_links_live + canonical UTM scheme (2026-05-14)
+## URL wrapping: short_links_live + canonical UTM scheme (2026-05-14, updated 2026-05-22)
 
-**Never post bare URLs.** Every URL in any post text goes through `dm_short_links.wrap_text_for_post`, which yields one of two trackable forms:
+**Never post bare URLs.** Every URL in any post text goes through `dm_short_links.wrap_text_for_post`, which always yields a `/r/<code>` short link (form 1) under normal operation; UTM-only (form 2) is now reserved for runtime failures of the mint API / pool only.
 
-1. `https://<host>/r/<code>` (short link) when the customer's redirector is live, OR
-2. `https://<host>?utm_source=s4l&utm_medium=post&utm_campaign=<slug>&utm_term=<platform>&utm_content=post_<session>` (UTM URL) as the universal fallback.
+1. `https://<host>/r/<code>` (short link). `<host>` is resolved per-project in this order:
+   - **Explicit** `short_links_host` from `config.json` (e.g. `"https://s4l.ai"`).
+   - **Auto fallback** `https://s4l.ai` when `short_links_live: false` and no explicit host is set. This is the social-autoposter-owned resolver (`@m13v/seo-components` -> `app.s4l.ai/api/short-links/<code>`), used whenever the customer has not deployed `/r/[code]` on their own domain yet.
+   - **Customer\'s own domain** (`project.website`) when `short_links_live` is unset/true.
+2. `https://<host>?utm_source=s4l&utm_medium=post&utm_campaign=<slug>&utm_term=<platform>&utm_content=post_<session>` (UTM URL). Now ONLY emitted on runtime failures of the mint pipeline (`pool_exhausted`, `api_unreachable`, `code_collision_after_8_tries`, `mint_api_error`). Never on policy.
 
-The form 1 vs form 2 decision is gated by `projects[].short_links_live` in `config.json` (default true). Set it `false` for any newly onboarded project until the customer either (a) ships our `@m13v/seo-components` `/r/[code]` dynamic resolver, or (b) deploys the static CSV from `mint_external_pool.py --export-csv`. As of 2026-05-14: Runner, Agora, Podlog, NightOwl all have `short_links_live: false`. Flip true once the customer confirms `/r/<some-pool-code>` returns a 302 to the baked-in target.
+**The 2026-05-22 change** (commit landing the same day): made `https://s4l.ai/r/<code>` the implicit default whenever `short_links_live: false`. Previously, `live=false` without an explicit `short_links_host` silently dropped to UTM-only and lost first-party `post_link_clicks` logging; that hole closed after the NightOwl regression on 2026-05-19. Onboarding a new customer where the resolver is not shipped yet now requires ONLY `short_links_live: false` in `config.json` (or no flag at all if you want the customer's own domain treated as live). The constants live at `scripts/dm_short_links.py::DEFAULT_FALLBACK_HOST` and `bin/server.js::SHORT_LINK_FALLBACK_HOST`; keep them in sync. Once a customer ships their own `@m13v/seo-components` `/r/[code]` resolver (or the static CSV from `mint_external_pool.py --export-csv`), flip `short_links_live` back to `true` (or remove the key) and remove any explicit `short_links_host` to route through their own domain.
 
 The UTM scheme is **canonical and global**, not per-project. All four URL builders (`dm_short_links._build_target_url`, `_build_target_url_for_post`, `mint_external_pool._build_target`, `mint_kent_pool._build_target`) emit:
 
