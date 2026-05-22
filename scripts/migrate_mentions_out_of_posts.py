@@ -88,7 +88,14 @@ def backfill(conn) -> dict[str, int]:
                     p.project_name,
                     COALESCE(p.status, 'active'),
                     COALESCE(p.posted_at, NOW()),
-                    p.install_id
+                    -- posts.install_id is TEXT (legacy); mentions.install_id is UUID.
+                    -- NULL out anything that doesn't parse as a UUID to avoid blowing up
+                    -- the backfill on a single garbled row.
+                    CASE
+                        WHEN p.install_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN p.install_id::uuid
+                        ELSE NULL
+                    END
                 FROM posts p
                 WHERE p.our_content = %s
                   AND p.thread_url IS NOT NULL
