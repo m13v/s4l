@@ -63,6 +63,27 @@ def _platform_sql_clause(platform, table_alias=""):
     )
 
 
+# Synthetic project name for rows in `posts` where project_name IS NULL.
+# Keeps off-config / un-tagged posts visible on the dashboard without
+# polluting real project rows. Chosen to be unambiguous and distinct from
+# any historical 'General' rows the table once had.
+SYNTHETIC_NO_PROJECT_NAME = "(no project)"
+
+
+def _project_filter_sql(proj_name, table_alias="p"):
+    """Return (clause, params) for a per-project WHERE filter.
+
+    Real projects -> "<alias>.project_name = %s" with (proj_name,).
+    Synthetic "(no project)" bucket -> "<alias>.project_name IS NULL" with ().
+    Centralizes the NULL-vs-equality choice so every per-project SQL site
+    handles the synthetic bucket the same way.
+    """
+    prefix = (table_alias + ".") if table_alias else ""
+    if proj_name == SYNTHETIC_NO_PROJECT_NAME:
+        return (prefix + "project_name IS NULL", ())
+    return (prefix + "project_name = %s", (proj_name,))
+
+
 def _bridge_per_project_posthog_keys_from_keychain(config, env):
     import subprocess
     seen = set()
