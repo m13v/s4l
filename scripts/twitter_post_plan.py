@@ -300,6 +300,18 @@ def post_one(c: dict) -> tuple[str, str]:
     project = c["matched_project"]
     thread_author = c.get("thread_author") or ""
     thread_text = c.get("thread_text") or ""
+    # Twitter's engagement-style enforcement happens at DRAFT time in the
+    # harness pipeline (`saps_pick_style` + `get_assigned_style_prompt`
+    # via skill/styles.sh), not here. By the time a candidate row reaches
+    # twitter_post_plan, the engagement_style has already been written
+    # into twitter_candidates by the draft phase. Post-time coercion would
+    # require persisting the picker's original assignment alongside the
+    # candidate so we could diff and re-coerce; the draft prompt's strong
+    # "the orchestrator silently coerces it back" language is currently
+    # the only adherence signal, plus the picker's distribution that we
+    # log per-candidate. If drift becomes a real problem on the Twitter
+    # rail, add an `assigned_style` column to twitter_candidates and call
+    # validate_or_register here before insert into posts.
     style = (c.get("engagement_style") or "").strip()
     language = (c.get("language") or "").strip()
     link_source = (c.get("link_source") or "").strip()
