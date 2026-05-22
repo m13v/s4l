@@ -67,6 +67,22 @@ except Exception:
     def _resolve_account(_platform):  # type: ignore[unused-arg]
         return None
 
+# Engagement-style enforcement (2026-05-22 cutover): the Twitter post path
+# now calls validate_or_register exactly like Reddit/GitHub/Moltbook so
+# (a) USE-mode drift gets coerced back to the picker's assigned style and
+# (b) INVENT-mode inventions land in engagement_styles_registry via the
+# /api/v1/engagement-styles/registry POST. The picker assignment is read
+# from the plan envelope (run-twitter-cycle.sh writes assigned_style +
+# assigned_mode into the same JSON file that already carries session_id).
+# The model's optional new_style block per candidate is read from the
+# candidate dict itself. Soft import so the post path still runs if the
+# module is unavailable for some reason (we fall back to the raw
+# engagement_style string from the model).
+try:
+    from engagement_styles import validate_or_register  # noqa: E402
+except Exception:
+    validate_or_register = None  # type: ignore[assignment]
+
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
 
@@ -288,11 +304,18 @@ def update_candidate_posted(cid: int, post_id: int) -> None:
         print(f"[post] candidate {cid} -> posted update failed: {e}", flush=True)
 
 
-def post_one(c: dict) -> tuple[str, str]:
+def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     """Post a single candidate. Returns (outcome, reason).
 
     outcome: 'posted' | 'skipped' | 'failed'
     reason:  short failure key when outcome != 'posted', else ''.
+
+    picker_assignment: optional {assigned_style, assigned_mode} dict
+        sourced from the plan envelope. When present, drives the
+        validate_or_register call below so USE-mode drift coerces back
+        and INVENT-mode new_style blocks land in
+        engagement_styles_registry. None means legacy behaviour
+        (uncoerced; whatever the model said is what gets logged).
     """
     cid = int(c["candidate_id"])
     candidate_url = c["candidate_url"]
@@ -301,19 +324,57 @@ def post_one(c: dict) -> tuple[str, str]:
     project = c["matched_project"]
     thread_author = c.get("thread_author") or ""
     thread_text = c.get("thread_text") or ""
-    # Twitter's engagement-style enforcement happens at DRAFT time in the
-    # harness pipeline (`saps_pick_style` + `get_assigned_style_prompt`
-    # via skill/styles.sh), not here. By the time a candidate row reaches
-    # twitter_post_plan, the engagement_style has already been written
-    # into twitter_candidates by the draft phase. Post-time coercion would
-    # require persisting the picker's original assignment alongside the
-    # candidate so we could diff and re-coerce; the draft prompt's strong
-    # "the orchestrator silently coerces it back" language is currently
-    # the only adherence signal, plus the picker's distribution that we
-    # log per-candidate. If drift becomes a real problem on the Twitter
-    # rail, add an `assigned_style` column to twitter_candidates and call
-    # validate_or_register here before insert into posts.
-    style = (c.get("engagement_style") or "").strip()
+    # Engagement-style enforcement (2026-05-22 cutover). Twitter is now
+    # symmetric with Reddit/GitHub/Moltbook: the draft phase pre-picks an
+    # assignment via saps_pick_style; the post phase calls
+    # validate_or_register(decision, assigned_style=..., assigned_mode=...)
+    # which coerces USE drift back to the assigned name OR registers
+    # INVENT inventions into engagement_styles_registry via
+    # POST /api/v1/engagement-styles/registry. The picker assignment flows
+    # in via the plan envelope (picker_assignment param); the model's
+    # optional new_style block flows in via the candidate dict itself.
+    raw_style = (c.get("engagement_style") or "").strip()
+    new_style_block = c.get("new_style") if isinstance(c.get("new_style"), dict) else None
+    if validate_or_register is not None and raw_style:
+        assigned_style = (picker_assignment or {}).get("assigned_style") or None
+        assigned_mode = (picker_assignment or {}).get("assigned_mode") or None
+        decision = {
+            "engagement_style": raw_style,
+            # Only attach new_style when the model actually shipped one;
+            # validate_or_register treats None as "no new_style block"
+            # and never registers anything in that case.
+            **({"new_style": new_style_block} if new_style_block else {}),
+        }
+        try:
+            coerced_style, action = validate_or_register(
+                decision,
+                source_post={
+                    "platform": "twitter",
+                    "post_url": candidate_url,
+                    "post_id": None,
+                    "model": None,
+                },
+                assigned_style=assigned_style,
+                assigned_mode=assigned_mode,
+            )
+        except Exception as e:
+            # Never let a registry/API hiccup block posting. Fall back to
+            # the raw model output; the post still lands, just without
+            # picker coercion for this one row.
+            print(f"[post] candidate {cid}: validate_or_register raised {e!r}; "
+                  f"falling back to raw style={raw_style!r}", flush=True)
+            coerced_style, action = raw_style, "rejected"
+        if action == "coerced" and coerced_style != raw_style:
+            print(f"[post] candidate {cid}: engagement_style coerced "
+                  f"{raw_style!r} -> {coerced_style!r} (assigned={assigned_style!r})",
+                  flush=True)
+        elif action == "registered":
+            print(f"[post] candidate {cid}: registered new engagement_style "
+                  f"{coerced_style!r} into engagement_styles_registry",
+                  flush=True)
+        style = (coerced_style or raw_style or "").strip()
+    else:
+        style = raw_style
     language = (c.get("language") or "").strip()
     link_source = (c.get("link_source") or "").strip()
 
@@ -666,6 +727,24 @@ def main() -> int:
     if plan_session_id:
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
+    # Pull the picker assignment from the plan envelope (written by
+    # run-twitter-cycle.sh after saps_pick_style). Shared across every
+    # candidate in the batch because the picker fires once per cycle.
+    # Falls back to None on legacy plans (pre-2026-05-22 envelopes that
+    # don't carry these keys); post_one then runs the legacy uncoerced
+    # path. Empty assigned_style + assigned_mode='invent' means the
+    # picker rolled INVENT this cycle; validate_or_register treats that
+    # as "register if the model produced a well-formed new_style block".
+    picker_assignment = {
+        "assigned_style": plan.get("assigned_style") or None,
+        "assigned_mode":  plan.get("assigned_mode")  or None,
+    }
+    if picker_assignment["assigned_mode"]:
+        print(f"[post] picker assignment for batch: "
+              f"mode={picker_assignment['assigned_mode']} "
+              f"style={picker_assignment['assigned_style'] or '(invent)'}",
+              flush=True)
+
     posted = skipped = failed = 0
     # Split skip vs fail reasons. The dashboard renders `failure_reasons` as
     # a "failed: <reason>" pill, so intentional skips (duplicate_thread_pre_post,
@@ -678,7 +757,7 @@ def main() -> int:
 
     for c in candidates:
         try:
-            outcome, reason = post_one(c)
+            outcome, reason = post_one(c, picker_assignment=picker_assignment)
         except Exception as e:
             print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
                   flush=True)
