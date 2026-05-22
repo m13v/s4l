@@ -605,6 +605,22 @@ const TAIL_LINK_VARIANT_DEFS = {
   no_link: { label: 'No link',    desc: 'reply posted as-is, no URL appended' },
 };
 
+// ai-disclosure-suffix variant defs (campaigns.id=3, "ai_disclosure_100",
+// suffix " written with s4lai", sample_rate=0.5, platforms=reddit,twitter,
+// active since 2026-04-15). Assignment is the per-post coin flip in
+// reddit_browser.reply / twitter_browser.reply_to_tweet against
+// _load_active_*_campaigns(). When the flip wins, posts.campaign_id is
+// stamped with the campaign id; when it loses, campaign_id stays NULL and
+// the suffix is never appended. So the experiment arms are derived from
+// posts.campaign_id, not a dedicated column. Keep the campaign id in sync
+// with the constant below; if a second non-empty-suffix campaign goes
+// active on the same platforms the arm split will need disambiguation.
+const AI_DISCLOSURE_CAMPAIGN_ID = 3;
+const AI_DISCLOSURE_VARIANT_DEFS = {
+  tagged:   { label: 'With AI label',   desc: 'reply ends with " written with s4lai"' },
+  untagged: { label: 'No AI label',     desc: 'reply posted as-is, no disclosure suffix' },
+};
+
 // Standalone jobs with no platform axis. script_name -> display label.
 const STANDALONE_JOBS = {
   serp_seo: { job_type: 'seo', job_label: 'SERP SEO' },
@@ -5617,6 +5633,86 @@ async function handleApi(req, res) {
           // Log but don't break the whole response if the tail-link block
           // fails; the first experiment is still useful on its own.
           console.error('[api/experiments] tail-link block failed:', e2 && e2.message || e2);
+        }
+
+        // Third experiment: ai-disclosure-suffix (campaigns.id=3,
+        // "ai_disclosure_100", suffix " written with s4lai", sample_rate=0.5,
+        // platforms=reddit,twitter, active since 2026-04-15). Arms derived
+        // from posts.campaign_id; see AI_DISCLOSURE_VARIANT_DEFS for the
+        // rationale. Window: campaign's created_at to now (NOT trailing 30d
+        // like the other two), so the full experiment history is visible.
+        // We restrict to twitter+reddit and exclude mention-only stubs so
+        // the denominator matches the campaign's actual surface area.
+        // The untagged arm is a slight overcount: a small fraction of
+        // twitter+reddit posts run through code paths that opt out of the
+        // campaign (e.g. self-reply follow-ups via apply_campaigns=False).
+        // Those posts are NOT subjects of the experiment but still appear
+        // in the untagged bucket. Volume is small enough (<5% of arm) that
+        // averages move by <1%, but keep this in mind when reading.
+        try {
+          const adRows = await pq(`
+            SELECT
+              CASE WHEN p.campaign_id = $1 THEN 'tagged' ELSE 'untagged' END AS variant,
+              COUNT(*) AS n_posts,
+              AVG(p.views) AS avg_views,
+              AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
+              AVG(p.comments_count) AS avg_replies,
+              COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+              MIN(p.posted_at) AS started_at
+            FROM posts p
+            LEFT JOIN (
+              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
+              FROM post_links pl2
+              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
+              WHERE pl2.post_id IS NOT NULL
+              GROUP BY pl2.post_id
+            ) pl ON pl.post_id = p.id
+            WHERE LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) IN ('twitter','reddit')
+              AND p.posted_at > '2026-04-15'::timestamptz
+              AND p.our_content <> '(mention - no original post)'
+            GROUP BY 1
+          `, [AI_DISCLOSURE_CAMPAIGN_ID]);
+          const adDefs = AI_DISCLOSURE_VARIANT_DEFS;
+          const adVariants = ['tagged', 'untagged'].map(k => {
+            const row = (adRows || []).find(r => r.variant === k) || {};
+            const n = Number(row.n_posts || 0);
+            return {
+              key: k,
+              label: adDefs[k].label,
+              desc: adDefs[k].desc,
+              n_candidates: n,
+              n_batches: null,
+              n_posted: n,
+              n_skipped: 0,
+              n_expired: 0,
+              n_pending: 0,
+              post_rate_pct: null,
+              thread_age_min_p50: null,
+              avg_views: row.avg_views != null ? Number(row.avg_views) : null,
+              avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
+              avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+              avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              started_at: row.started_at || null,
+            };
+          });
+          const adTotals = adVariants.reduce((acc, v) => {
+            acc.n_candidates += v.n_candidates;
+            acc.n_posted += v.n_posted;
+            return acc;
+          }, { n_candidates: 0, n_posted: 0, n_batches: null });
+          const adStartedAt = adVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          experiments.push({
+            id: 'ai-disclosure-suffix',
+            name: 'AI label suffix (Twitter + Reddit)',
+            status: 'running',
+            started_at: adStartedAt,
+            hypothesis: 'Appending " written with s4lai" to replies signals authenticity but may suppress engagement vs unlabeled replies. Comparing views, likes, and replies across the 50/50 coin flip on campaigns.id=3.',
+            primary_metric: 'avg_replies',
+            totals: adTotals,
+            variants: adVariants,
+          });
+        } catch (e3) {
+          console.error('[api/experiments] ai-disclosure block failed:', e3 && e3.message || e3);
         }
 
         json(res, { experiments });
