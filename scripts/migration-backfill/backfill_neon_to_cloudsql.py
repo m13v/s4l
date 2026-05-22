@@ -38,12 +38,15 @@ def _adapt(v):
 
 TABLES = [
     # (table_name, pk_column, timestamp_column_for_cutover_filter)
-    ("posts",               "id",          "posted_at"),
-    ("replies",             "id",          "discovered_at"),
-    ("twitter_candidates",  "id",          "posted_at"),
-    ("reddit_candidates",   "id",          "posted_at"),
+    # FK parents FIRST so children can reference them.
+    ("posts",                   "id",          "posted_at"),
+    ("twitter_search_attempts", "id",          "ran_at"),
+    ("reddit_search_attempts",  "id",          "ran_at"),
+    ("replies",                 "id",          "discovered_at"),
+    ("twitter_candidates",      "id",          "discovered_at"),
+    ("reddit_candidates",       "id",          "discovered_at"),
     # claude_sessions optional — see --include-sessions
-    ("claude_sessions",     "session_id",  "started_at"),
+    ("claude_sessions",         "session_id",  "started_at"),
 ]
 
 
