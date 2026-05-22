@@ -8156,6 +8156,33 @@ const HTML = `<!DOCTYPE html>
   .style-stats-table tfoot td { border-top: 2px solid var(--border-strong, var(--border)); border-bottom: none; background: var(--bg-subtle); font-weight: 600; color: var(--text); }
   .style-stats-table tfoot td:first-child { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: var(--text-secondary); }
   .style-stats-empty { padding: 16px 20px; color: var(--text-muted); font-size: 13px; border-top: 1px solid var(--border); }
+
+  /* Experiments tab: A/B/C cards.
+     Reuses base card chrome from .style-stats-table so it inherits the dashboard theme. */
+  .experiments-header { padding: 20px 20px 8px; }
+  .experiments-title { margin: 0; font-size: 18px; font-weight: 600; color: var(--text); }
+  .experiments-sub { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
+  .exp-kpi-band { display: flex; gap: 24px; padding: 12px 20px 20px; border-bottom: 1px solid var(--border); }
+  .exp-kpi { display: flex; flex-direction: column; gap: 2px; }
+  .exp-kpi-n { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1; }
+  .exp-kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .exp-card { margin: 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); overflow: hidden; }
+  .exp-card-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 16px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .exp-card-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .exp-card-hypothesis { margin-top: 4px; font-size: 12px; color: var(--text-secondary); max-width: 720px; line-height: 1.45; }
+  .exp-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 11px; color: var(--text-muted); }
+  .exp-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .exp-status-running { background: var(--accent-panel-bg); color: var(--text); border: 1px solid #3b82f6; }
+  .exp-status-decided { background: #6b21a8; color: #fff; }
+  .exp-status-shipped { background: #166534; color: #fff; }
+  .exp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .exp-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .exp-table th.num, .exp-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .exp-table td { padding: 12px; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top; }
+  .exp-table tbody tr:last-child td { border-bottom: none; }
+  .exp-variant-key { display: inline-block; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); font-weight: 700; margin-right: 6px; }
+  .exp-variant-label { font-weight: 600; }
+  .exp-variant-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
   .style-stats-controls { padding: 10px 20px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
   .style-stats-pill-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .style-stats-pill-row .label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; margin-right: 4px; }
