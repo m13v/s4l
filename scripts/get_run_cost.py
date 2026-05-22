@@ -72,7 +72,7 @@ def main():
     try:
         sys.path.insert(0, os.path.join(ROOT_DIR, 'scripts'))
         if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1':
-            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_neon(
+            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_db(
                 cycle_id=cycle_id, since=args.since, scripts=args.scripts,
             )
         else:
@@ -103,7 +103,7 @@ def _fetch_via_api(*, cycle_id, since, scripts):
     )
 
 
-def _fetch_via_neon(*, cycle_id, since, scripts):
+def _fetch_via_db(*, cycle_id, since, scripts):
     import psycopg2  # noqa: F401
     import db as dbmod
     conn = dbmod.get_conn()
