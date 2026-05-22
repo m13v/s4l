@@ -887,6 +887,19 @@ if [ "$TWITTER_CYCLE_VARIANT" = "A" ]; then
     log "Variant A: sleeping 1200s before T1 re-measurement..."
     sleep 1200
 
+    # Re-stamp phase2a the instant we wake. The 20-min phase2a budget was set
+    # BEFORE the 1200s sleep, so it has now expired; any peer cycle's Phase 0
+    # salvage that fires between wake and the phase2b-prep stamp below will
+    # steal this batch's pending rows. Re-stamping resets the budget clock so
+    # the short T1 poll + Phase 2b candidates query are protected.
+    # Incident reference: batch twcycle-20260522-113005 woke at 12:00:01, the
+    # 12:00 peer's Phase 0 salvaged 150 rows at 12:00:05, and this batch's
+    # pending query at 12:00:06 returned 0, triggering "No candidates with
+    # delta scores. Marking batch expired." even though 4 candidates had
+    # passed the Δ>=10 floor (jain_harshit Δ=35.3, sawyerhood Δ=33.6,
+    # laurasideral Δ=24.2, alessandro_a0 Δ=20.3).
+    python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2a 2>&1 | tee -a "$LOG_FILE" || true
+
     # --- Phase 2a: re-fetch T1 engagement -----------------------------------
     log "Phase 2a: re-polling fxtwitter for T1 engagement..."
     python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE"
