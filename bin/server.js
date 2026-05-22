@@ -1307,7 +1307,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   const candidateRows = await pq(
     "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
     "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id, " +
-    "       matched_project, tweet_url " +
+    "       matched_project, tweet_url, cycle_variant " +
     "FROM twitter_candidates " +
     "WHERE discovered_at >= $1::timestamp OR posted_at >= $1::timestamp OR t1_checked_at >= $1::timestamp OR status='pending'",
     [since]
@@ -1384,8 +1384,26 @@ async function enrichPostCommentsTwitterRuns(runs) {
       batch_id: r.batch_id || '',
       matched_project: r.matched_project || '',
       tweet_url: r.tweet_url || '',
+      cycle_variant: r.cycle_variant || null,
     };
   });
+
+  // Deterministic variant fallback: when a run has an ownBatchId but no
+  // candidate rows yet carry cycle_variant (e.g. Phase 1 aborted before
+  // upserting any row, or rows were rolled back), recompute it the same way
+  // skill/run-twitter-cycle.sh does: sha1(batch_id) % 3 -> 'ABC'. Keeps the
+  // job-history "experiment X" pill populated for scan-only / aborted cycles.
+  const variantFromBatchId = (batchId) => {
+    if (!batchId) return null;
+    try {
+      const hex = crypto.createHash('sha1').update(batchId).digest('hex');
+      // Mirror Python's int(hex,16) % 3 exactly. The 160-bit hash doesn't fit
+      // in a JS Number, so use BigInt for the full-width modulus; truncating
+      // hex digits would silently disagree with the shell-side variant.
+      const n = BigInt('0x' + hex);
+      return 'ABC'[Number(n % 3n)];
+    } catch { return null; }
+  };
 
   for (const run of txRuns) {
     const startMs = new Date(run.started_at).getTime();
@@ -1440,10 +1458,16 @@ async function enrichPostCommentsTwitterRuns(runs) {
         projectsList.push(proj);
       }
     };
+    // Experiment variant (A/B/C) for this run. Primary source: any candidate
+    // row tied to ownBatchId carries cycle_variant (Phase 1 stamps it after
+    // discovery). Fallback: recompute from sha1(ownBatchId) % 3 so scan-only
+    // / aborted cycles still surface the right bucket.
+    let runVariant = null;
     for (const c of candNorm) {
       if (!ownBatchId || c.batch_id !== ownBatchId) continue;
       candidatesPassed++;
       recordProject(c.matched_project);
+      if (!runVariant && c.cycle_variant) runVariant = c.cycle_variant;
       if (c.status === 'posted') {
         posted++;
         // Salvage signature: candidate's discovered_at predates this cycle's
@@ -1622,6 +1646,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
       // pill row so the operator can see at a glance which projects consumed
       // the cycle, even when posted=0. Mirrors enrichPostCommentsRedditRuns.
       projects_worked: projectsList,
+      // A/B/C experiment bucket for this run (twitter-ripen-freshness-abc,
+      // shipped 2026-05-22). Primary source is twitter_candidates.cycle_variant
+      // for any row tied to ownBatchId; falls back to sha1(ownBatchId) % 3 so
+      // scan-only / aborted cycles still surface the variant. Rendered next to
+      // `projects` in the job-history result row.
+      experiment_variant: runVariant || variantFromBatchId(ownBatchId),
       styles_used: stylesUsedTx,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
@@ -9523,6 +9553,13 @@ function renderResult(run) {
             + 'projects '
             + '<span style="color:var(--text);font-weight:600;">'
             + r.projects_worked.join(', ')
+            + '</span></span>'
+          : '') +
+        (r.experiment_variant
+          ? '<span title="twitter-ripen-freshness-abc bucket (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h)" style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+            + 'experiment '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.experiment_variant
             + '</span></span>'
           : '') +
         (Array.isArray(r.styles_used) && r.styles_used.length
