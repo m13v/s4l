@@ -51,7 +51,7 @@ def _get_active_via_api(platform):
     return out
 
 
-def _get_active_via_neon(platform):
+def _get_active_via_db(platform):
     import db
     conn = db.get_conn()
     try:
@@ -88,10 +88,10 @@ def get_active_campaigns(platform):
 
     Routes through /api/v1/campaigns by default so VMs without
     DATABASE_URL still get the active list. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-Neon path.
+    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-DB path.
     """
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _get_active_via_neon(platform)
+        return _get_active_via_db(platform)
     return _get_active_via_api(platform)
 
 
