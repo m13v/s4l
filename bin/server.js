@@ -1404,8 +1404,15 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // upserting any row, or rows were rolled back), recompute it the same way
   // skill/run-twitter-cycle.sh does: sha1(batch_id) % 3 -> 'ABC'. Keeps the
   // job-history "experiment X" pill populated for scan-only / aborted cycles.
+  // Ship date of twitter-ripen-freshness-abc. Before this, run-twitter-cycle.sh
+  // didn't compute TWITTER_CYCLE_VARIANT and every cycle ran legacy (=variant A
+  // by today's labels). We refuse to back-label those runs from the hash because
+  // it would mislabel them as B/C — they never actually ran those code paths.
+  const EXPERIMENT_SHIP_MS = new Date('2026-05-22T00:00:00').getTime();
   const variantFromBatchId = (batchId) => {
     if (!batchId) return null;
+    const batchMs = parseTwitterBatchIdMs(batchId);
+    if (!Number.isFinite(batchMs) || batchMs < EXPERIMENT_SHIP_MS) return null;
     try {
       const hex = crypto.createHash('sha1').update(batchId).digest('hex');
       // Mirror Python's int(hex,16) % 3 exactly. The 160-bit hash doesn't fit
@@ -9346,6 +9353,13 @@ function fmtElapsed(s) {
   const h = Math.floor(m / 60);
   return h + 'h ' + (m % 60) + 'm';
 }
+
+// twitter-ripen-freshness-abc variant defs, baked into the client from the
+// Node-side TWITTER_VARIANT_DEFS so the Experiments tab and the job-history
+// pill describe a variant the same way. JSON.stringify keeps it backslash-free
+// inside this HTML backtick template (any \\n / \\t in here would silently
+// blank the page per the documented HTML-template gotcha).
+const TWITTER_VARIANT_DEFS = ${JSON.stringify(TWITTER_VARIANT_DEFS)};
 
 function renderResult(run) {
   const r = run.result || {};
