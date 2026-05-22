@@ -43,7 +43,7 @@ def _counts_via_api(platform=None):
     return {k: int(v) for k, v in counts.items()}
 
 
-def _counts_via_neon(platform=None):
+def _counts_via_db(platform=None):
     import db as dbmod
     conn = dbmod.get_conn()
     try:
@@ -72,7 +72,7 @@ def get_posts_today_by_project(platform=None):
     Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct DB.
     """
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _counts_via_neon(platform)
+        return _counts_via_db(platform)
     return _counts_via_api(platform)
 
 
@@ -87,7 +87,7 @@ def _recent_counts_via_api(platform=None, days=RECENT_WINDOW_DAYS):
     return {k: int(v) for k, v in counts.items()}
 
 
-def _recent_counts_via_neon(platform=None, days=RECENT_WINDOW_DAYS):
+def _recent_counts_via_db(platform=None, days=RECENT_WINDOW_DAYS):
     import db as dbmod
 
     days = int(days)
@@ -119,7 +119,7 @@ def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
     DATABASE_URL.
     """
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _recent_counts_via_neon(platform, days)
+        return _recent_counts_via_db(platform, days)
     return _recent_counts_via_api(platform, days)
 
 
