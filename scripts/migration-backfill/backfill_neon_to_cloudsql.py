@@ -23,9 +23,17 @@ from datetime import datetime, timezone
 try:
     import psycopg2
     import psycopg2.extras
+    from psycopg2.extras import Json
 except ImportError:
     print("psycopg2 not installed — running via system python3? Try /opt/homebrew/bin/python3.11", file=sys.stderr)
     sys.exit(1)
+
+
+def _adapt(v):
+    """psycopg2 doesn't auto-adapt dict/list to jsonb — wrap them in Json()."""
+    if isinstance(v, (dict, list)):
+        return Json(v)
+    return v
 
 
 TABLES = [
@@ -103,8 +111,15 @@ def backfill_table(neon, gcp, table: str, pk: str, ts_col: str, cutover_epoch: i
     inserted = 0
     with gcp.cursor() as cur:
         for row in rows:
-            cur.execute(insert_sql, [row[c] for c in cols])
-            inserted += cur.rowcount
+            try:
+                cur.execute(insert_sql, [_adapt(row[c]) for c in cols])
+                inserted += cur.rowcount
+            except Exception as exc:
+                gcp.rollback()
+                pk_val = row[pk]
+                print(f"  ERROR on {pk}={pk_val}: {exc}")
+                # Re-open transaction by re-executing — psycopg2 needs a clean tx after error
+                continue
         gcp.commit()
     print(f"  inserted: {inserted}/{len(rows)}")
     return (len(rows), inserted)
