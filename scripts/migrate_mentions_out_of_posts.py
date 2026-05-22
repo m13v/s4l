@@ -204,8 +204,11 @@ def main():
     )
     args = parser.parse_args()
 
-    with _conn() as conn:
+    conn = _conn()
+    try:
         backfill_counts = backfill(conn)
+    finally:
+        conn.close()
     print("=== Backfill phase ===")
     for k, v in backfill_counts.items():
         print(f"  {k:38s} = {v}")
@@ -216,7 +219,8 @@ def main():
         return
 
     # Sanity gate: every placeholder must be mapped before we delete.
-    with _conn() as conn:
+    conn = _conn()
+    try:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -230,6 +234,8 @@ def main():
                 (PLACEHOLDER,),
             )
             unmapped = cur.fetchone()[0]
+    finally:
+        conn.close()
     if unmapped > 0:
         print(
             f"ABORT: {unmapped} placeholder rows have no mapping; "
@@ -237,8 +243,11 @@ def main():
         )
         sys.exit(2)
 
-    with _conn() as conn:
+    conn = _conn()
+    try:
         delete_counts = commit_delete(conn)
+    finally:
+        conn.close()
     print("\n=== Commit-delete phase ===")
     for k, v in delete_counts.items():
         print(f"  {k:38s} = {v}")
