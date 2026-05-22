@@ -824,7 +824,7 @@ def _fetch_report_via_api(*, platform, project, top, bottom):
             fallback_filtered, top_by_group, top_by_style)
 
 
-def _fetch_report_via_neon(*, platform, project, top, bottom):
+def _fetch_report_via_db(*, platform, project, top, bottom):
     conn = dbmod.get_conn()
     try:
         summary = get_project_platform_summary(conn, project=project, platform=platform)
@@ -898,7 +898,7 @@ def main():
     args = parser.parse_args()
 
     if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        fetch = _fetch_report_via_neon
+        fetch = _fetch_report_via_db
     else:
         fetch = _fetch_report_via_api
     (summary, style_perf, top, bottom, fallback_top,
