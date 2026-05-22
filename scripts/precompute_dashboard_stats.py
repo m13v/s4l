@@ -40,15 +40,15 @@ def _db():
     try:
         _DB_CONN = get_conn()
     except Exception as e:
-        print(f"  [db] get_conn failed, skipping Neon mirror: {e}", file=sys.stderr)
+        print(f"  [db] get_conn failed, skipping Postgres mirror: {e}", file=sys.stderr)
         _DB_CONN = False
     return _DB_CONN
 
 
 def upsert_cache(key, payload):
-    """Mirror a snapshot to Neon so Cloud Run (which has no access to the
+    """Mirror a snapshot to Postgres so Cloud Run (which has no access to the
     operator's filesystem) can serve it. Silent no-op if the DB connection
-    is unavailable — local disk is still the primary path for local use."""
+    is unavailable; local disk is still the primary path for local use."""
     conn = _db()
     if not conn:
         return
@@ -68,7 +68,7 @@ def upsert_cache(key, payload):
 
 def atomic_write_json(path, payload):
     """Write JSON to `path` atomically (temp file + rename). Also mirrors
-    to Neon dashboard_cache under the filename stem so hosted deploys can
+    to Postgres dashboard_cache under the filename stem so hosted deploys can
     read the same snapshot."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-", suffix=".json")
