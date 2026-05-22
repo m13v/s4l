@@ -514,21 +514,97 @@ def register_style(name, meta, source_post=None):
     return ("new" if created else "existing"), entry
 
 
-def validate_or_register(decision, source_post=None, context="posting"):
+def validate_or_register(decision, source_post=None, context="posting",
+                         assigned_style=None, assigned_mode=None):
     """One-shot helper for orchestrators that parse a decision JSON.
 
     Reads decision["engagement_style"] (and optional decision["new_style"]).
     Returns (style_or_None, action) where action is one of:
-        "valid"      → style was already in the universe, accept it
-        "registered" → unknown style + well-formed new_style → registered
-                       as candidate, accept it
-        "rejected"   → unknown style and no usable new_style → caller
-                       should drop the post or null the style column
+        "valid"      → style is in the universe, accept it
+        "coerced"    → USE-mode picker assigned a specific style and the
+                       model drifted to something else; we silently coerce
+                       back to the assigned style (drift-protection)
+        "registered" → INVENT-mode + well-formed new_style → registered
+                       in the DB registry, accept it
+        "rejected"   → unknown style and no usable new_style, OR drift in
+                       a context where the assigned style is known but the
+                       model neither used it nor shipped a valid new_style
+        "passthrough"→ no assignment context (legacy caller); same as
+                       valid/registered/rejected branches but logged
+                       distinctly
+
+    `assigned_style` / `assigned_mode` (added 2026-05-22): when the caller
+    used pick_style_for_post() it now passes the assignment back in. We
+    use it to (a) coerce drift in USE mode back to the assigned name
+    (eliminating the "model picks pattern_recognizer because it's
+    generic" bias), and (b) only allow invention when the picker
+    actually asked for it (INVENT mode). This closes the enforcement gap
+    where any rail could silently invent a style outside the assigned
+    path.
+
     Logs the action to stdout for the orchestrator's run log.
     """
     style = decision.get("engagement_style") if isinstance(decision, dict) else None
     new_style = decision.get("new_style") if isinstance(decision, dict) else None
 
+    # USE-mode drift protection: picker assigned a style, model picked
+    # something else. Don't trust the model's "improvement" — coerce
+    # back. Inventions in USE mode are not allowed; the assigned style
+    # already exists, so any new_style block here is the model
+    # over-reaching.
+    if assigned_mode == "use" and assigned_style:
+        if style == assigned_style:
+            return style, "valid"
+        universe = get_all_styles()
+        if style and style in universe and style != assigned_style:
+            print(
+                f"[engagement_styles] DRIFT in USE mode: model returned "
+                f"{style!r} but picker assigned {assigned_style!r}; "
+                f"coercing back."
+            )
+            return assigned_style, "coerced"
+        # Unknown style or no style — also coerce back to assigned. The
+        # assigned style is guaranteed to be in the universe (picker
+        # built it from get_all_styles()).
+        print(
+            f"[engagement_styles] DRIFT in USE mode: model returned "
+            f"{style!r} (not in universe); coercing to assigned "
+            f"{assigned_style!r}."
+        )
+        return assigned_style, "coerced"
+
+    # INVENT-mode: picker explicitly asked for a new style. Require a
+    # well-formed new_style block; if model returned an existing style
+    # name, accept it as if INVENT had landed on something already in
+    # the registry (rare but harmless).
+    if assigned_mode == "invent":
+        if style and style in get_all_styles() and not isinstance(new_style, dict):
+            return style, "valid"
+        if not style or not isinstance(new_style, dict):
+            print(
+                f"[engagement_styles] INVENT mode but model returned "
+                f"style={style!r} new_style_block={bool(new_style)}; "
+                f"rejecting."
+            )
+            return None, "rejected"
+        status, entry = register_style(style, new_style, source_post)
+        if status == "rejected":
+            print(
+                f"[engagement_styles] new_style for {style!r} rejected: "
+                f"{entry.get('error')}"
+            )
+            return None, "rejected"
+        if status == "new":
+            src_url = (source_post or {}).get("post_url", "?")
+            print(
+                f"[engagement_styles] REGISTERED new style {style!r} "
+                f"from {src_url}"
+            )
+        return style, "registered"
+
+    # Legacy callers (no assignment context): behave as before, with the
+    # caveat that any silent invention will create an `active` registry
+    # row instead of a `candidate` sidecar entry.
     if style and style in get_all_styles():
         return style, "valid"
 
@@ -545,7 +621,7 @@ def validate_or_register(decision, source_post=None, context="posting"):
         return None, "rejected"
     if status == "new":
         src_url = (source_post or {}).get("post_url", "?")
-        print(f"[engagement_styles] REGISTERED candidate style {style!r} from {src_url}")
+        print(f"[engagement_styles] REGISTERED new style {style!r} from {src_url}")
     return style, "registered"
 
 
@@ -716,10 +792,12 @@ def get_dynamic_tiers(platform, context="posting"):
 
     for style in candidate_styles:
         s = stats.get(style)
-        # Sidecar `candidate` styles never enter the trusted bucket; they
-        # only get floor-weight exploration until the promoter graduates them.
-        is_candidate = universe[style].get("status") == "candidate"
-        if s and s["n"] >= MIN_SAMPLE_SIZE and not is_candidate:
+        # Every style with N >= MIN_SAMPLE_SIZE can be trusted. The legacy
+        # two-tier candidate→active gate was removed 2026-05-22: invented
+        # styles now compete on raw clicks-driven score from day one,
+        # protected only by the sample-size shrinkage in the picker
+        # (_credibility_factor).
+        if s and s["n"] >= MIN_SAMPLE_SIZE:
             trusted.append((style, s["avg_up"]))
         else:
             explore.append(style)
@@ -788,11 +866,11 @@ def compute_target_distribution(platform, context="posting"):
         avg_cm = float(s.get("avg_cm", 0.0)) if s else 0.0
         avg_clicks = float(s.get("avg_clicks", 0.0)) if s else 0.0
         score = _style_score(s) if s else 0.0
-        # Sidecar candidates never count as trusted; they get floor weight only
-        # until promoted, regardless of their sample count.
-        is_candidate_status = universe[style].get("status") == "candidate"
-        trusted = (s is not None and n >= MIN_SAMPLE_SIZE
-                   and not is_candidate_status)
+        # Every style with N >= MIN_SAMPLE_SIZE is trusted; the two-tier
+        # candidate/active gate was removed 2026-05-22. Sample-size
+        # shrinkage (_credibility_factor) keeps n=1 outliers from
+        # dominating the use_pool.
+        trusted = (s is not None and n >= MIN_SAMPLE_SIZE)
         weight = (score ** WEIGHT_EXPONENT) if trusted else 0.0
         if trusted:
             trusted_total += weight
@@ -800,7 +878,7 @@ def compute_target_distribution(platform, context="posting"):
                      "avg_cm": avg_cm, "avg_clicks": avg_clicks,
                      "score": score, "trusted": trusted,
                      "weight": weight, "pct": 0.0,
-                     "is_candidate": is_candidate_status})
+                     "is_candidate": False})
 
     if not rows:
         return []
@@ -1186,17 +1264,14 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
             lines.append(f"  Note: {assignment['note']}")
         lines.append("")
         lines.append(
-            'In your output JSON, set "engagement_style" to '
-            f'"{assignment["style"]}" and leave "new_style" as null.'
-        )
-        lines.append("")
-        lines.append(
-            "Escape hatch: if and only if this assigned style genuinely "
-            "cannot fit the thread (rare), you may instead invent a new "
-            "style by setting `engagement_style` to your snake_case name "
-            "AND replacing `\"new_style\": null` with a full new_style "
-            "block (description / example / note / why_existing_didnt_fit). "
-            "Do not silently substitute a different listed style."
+            'In your output JSON, set "engagement_style" to exactly '
+            f'"{assignment["style"]}" and leave "new_style" as null. '
+            'Do not substitute a different style. The picker has already '
+            'made the choice based on live performance data; your job is '
+            'to author a great comment in that style, not to second-guess '
+            'the assignment. If you return any other style name, the '
+            'orchestrator silently coerces it back to '
+            f'"{assignment["style"]}" before logging.'
         )
     else:
         lines.append("## Invent a new engagement style for this post")
