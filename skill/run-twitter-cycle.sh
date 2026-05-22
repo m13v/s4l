@@ -5,7 +5,7 @@
 #   - select 8 projects via the shared inverse-recent-share picker
 #     (scripts/pick_project.py, same logic as github/reddit)
 #   - LLM drafts one search query per project (style from past top queries)
-#   - scrape tweets via twitter-agent, enrich via fxtwitter -> T0 snapshot
+#   - scrape tweets via twitter-harness, enrich via fxtwitter -> T0 snapshot
 #   - store all candidates with batch_id and search_topic
 #
 # Sleep 300s.
@@ -53,25 +53,46 @@ export SA_CYCLE_ID="$BATCH_ID"
 LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
 QUERIES_FILE="/tmp/twitter_cycle_queries_$(date +%s).json"
+# log_twitter_search_attempts.py writes [{query, project, attempt_id}, ...]
+# here so score_twitter_candidates.py can stamp the exact discovering
+# attempt_id onto each twitter_candidates row (2026-05-21).
+ATTEMPTS_FILE="/tmp/twitter_cycle_attempts_$(date +%s).json"
 RUN_START=$(date +%s)
 
 # ----------------------------------------------------------------------------
-# Browser: Playwright MCP attached to Chrome twitter-agent profile at
-# ~/.claude/browser-profiles/twitter. (Camoufox/Firefox engine was carved out
-# 2026-05-13; only Chrome is supported now.)
-#
-# Vars are kept (TW_MCP_CONFIG, TW_BROWSER_PROFILE, TW_ENGINE_PREFIX) so the
-# downstream Claude SDK calls and singleton-cleanup hooks need no edits.
-# TW_ENGINE_PREFIX is empty by design; it used to prepend engine-specific
-# instructions to the scan/prep prompts.
+# Browser: CDP-driven real Google Chrome on port 9555 via the twitter-harness
+# MCP. Profile lives at ~/.claude/browser-profiles/browser-harness.
+# TW_MCP_CONFIG / TW_ENGINE_PREFIX are placeholders, the real values get set
+# below when lib/twitter-backend.sh is sourced (overwriting both).
 # ----------------------------------------------------------------------------
-TW_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-agent-mcp.json"
-TW_BROWSER_PROFILE="$HOME/.claude/browser-profiles/twitter"
+TW_MCP_CONFIG=""
 TW_ENGINE_PREFIX=""
 # Tweets older than this are no longer worth replying to. Pending rows older
 # than this are hard-expired by Phase 0; younger pending rows are salvaged
 # from prior cycles into this batch.
 FRESHNESS_HOURS=6
+
+# ----------------------------------------------------------------------------
+# A/B/C variant assignment (2026-05-22). Deterministic per BATCH_ID so that
+# every step of one cycle (search, scoring, drafting, posting, salvage) sees
+# the same variant. Variants:
+#   A (control)      = current logic: 20-min ripen wait + 6h freshness window
+#   B (no-ripen)     = skip the sleep 1200 + fetch_twitter_t1 step (saves
+#                      ~20 min thread->post latency). 6h freshness unchanged.
+#   C (no-ripen+1h)  = skip ripening AND tighten the Phase 1 freshness window
+#                      to 1h (since_time epoch passed to scan model + hook).
+# Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling)
+# so peer cycles don't accidentally expire each other's still-pending rows.
+# Only FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) varies.
+TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%3; print('ABC'[h])" "$BATCH_ID" 2>/dev/null || echo "A")
+FRESHNESS_HOURS_DISCOVER=$FRESHNESS_HOURS
+if [ "$TWITTER_CYCLE_VARIANT" = "C" ]; then
+    FRESHNESS_HOURS_DISCOVER=1
+fi
+export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER
+# Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
+# uses it in place of its hardcoded 6h default when present.
+export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
 
 # `set -a` auto-exports every variable assigned by `source .env`, so DATABASE_URL
 # and friends propagate to subprocess env (python3 scripts use os.environ at
@@ -87,6 +108,7 @@ fi
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
+log "Variant=$TWITTER_CYCLE_VARIANT (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
 # Three early-exit gates BEFORE we open the DB, set up traps, or touch the
@@ -131,12 +153,12 @@ preflight_acquire_slot_or_skip "twitter-cycle" 4
 # peer cycles' Phase 2b-post under parallel-cycle contention.
 source "$REPO_DIR/skill/lock.sh"
 
-# 2026-05-13 backend selector — TWITTER_BACKEND={agent,harness}. Default agent
-# = unchanged cron behavior. harness routes to browser-harness Chrome (port 9555)
-# for both Phase 1 scan and Phase 2b-prep/post. Phase 2b-post's twitter_post_plan.py
-# shells out to twitter_browser.py, which honors TWITTER_CDP_URL exported below.
+# Harness-only browser bootstrap (twitter-agent path fully removed 2026-05-19).
+# Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS, exports TWITTER_CDP_URL=9555.
+# Phase 2b-post's twitter_post_plan.py shells out to twitter_browser.py, which
+# honors TWITTER_CDP_URL exported by this lib.
 source "$REPO_DIR/skill/lib/twitter-backend.sh"
-TW_MCP_CONFIG="$MCP_CONFIG_FILE"                 # backend-aware: agent vs harness MCP
+TW_MCP_CONFIG="$MCP_CONFIG_FILE"
 TW_ENGINE_PREFIX="${BROWSER_INSTRUCTIONS}"$'\n\n' # inject backend + translation table at top of every prompt
 
 # --- Phase tracking: start the twitter_batches row + chain into lock.sh trap -
@@ -341,7 +363,7 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 # (same TZ as batch_id) and do a string comparison in SQL — sidesteps the
 # Postgres session-TZ trap that would otherwise mis-interpret batch_id.
 LEGACY_SALVAGE_CUTOFF_MIN=20
-LEGACY_SALVAGE_CUTOFF_BATCH_ID="twcycle-$(date -v-${LEGACY_SALVAGE_CUTOFF_MIN}M +%Y%m%d-%H%M%S)"
+LEGACY_SALVAGE_CUTOFF_BATCH_ID="twcycle-$(python3 -c "import datetime; print((datetime.datetime.now() - datetime.timedelta(minutes=${LEGACY_SALVAGE_CUTOFF_MIN})).strftime('%Y%m%d-%H%M%S'))")"
 # Single-transaction Phase 0 salvage now lives server-side at
 # /api/v1/twitter-candidates/phase0-salvage. Same advisory lock (7472346),
 # same expire + salvage CTE, same phase-aware budget table. The helper
@@ -463,19 +485,14 @@ ENGAGED_TWEET_IDS=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" engaged-
 ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
 
-# --- Hook-notice block: only meaningful on the harness backend --------------
-# The PreToolUse hook ~/.claude/hooks/twitter-search-since-rewrite.py only
-# matches `mcp__twitter-harness__bh_run`, so on the agent backend nothing
-# gets rewritten and the notice would be misleading. Surface it only when
-# the rewrite actually applies. Single-quoted assignment because the body
-# contains literal backticks the model needs to see verbatim.
-HOOK_NOTICE=''
-if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
-    HOOK_NOTICE='HOOK NOTICE — date operators in your search queries are auto-rewritten by a PreToolUse hook on every `mcp__twitter-harness__bh_run` call to enforce a strict 6-hour freshness window. The hook does three things BEFORE your script executes: (a) every `since:YYYY-MM-DD` you write is rewritten to `since_time:<6h-ago-epoch>`, (b) every stale `since_time:<old-epoch>` is re-stamped to <6h-ago-epoch>, and (c) any search-query string containing `-filter:replies` but NO date operator gets `since_time:<6h-ago-epoch>` injected. This is INTENTIONAL — downstream scoring drops every tweet older than 6h, so older results are wasted budget. The rewrite is OUR pipeline, NOT X misbehavior. Do NOT try to work around it (closer dates, dropping the operator, URL-encoding to bypass, retrying with a different draft, or interpreting the smaller result set as a bug) — your queries WILL be filtered to the last 6 hours regardless. Accept the smaller fresh result set; if a query honestly returns 0, drop the min_faves floor per the zero-result rule below and re-run that one query.'
-    log "Hook notice block appended to scan prompt (harness backend; rewrite is active)"
-fi
+# --- Hook-notice block (harness is the only backend now) --------------------
+# The PreToolUse hook ~/.claude/hooks/twitter-search-since-rewrite.py matches
+# `mcp__twitter-harness__bh_run` and enforces a strict 6-hour freshness window.
+# Single-quoted assignment because the body contains literal backticks the
+# model needs to see verbatim.
+HOOK_NOTICE='HOOK NOTICE — date operators in your search queries are auto-rewritten by a PreToolUse hook on every `mcp__twitter-harness__bh_run` call to enforce a strict 6-hour freshness window. The hook does three things BEFORE your script executes: (a) every `since:YYYY-MM-DD` you write is rewritten to `since_time:<6h-ago-epoch>`, (b) every stale `since_time:<old-epoch>` is re-stamped to <6h-ago-epoch>, and (c) any search-query string containing `-filter:replies` but NO date operator gets `since_time:<6h-ago-epoch>` injected. This is INTENTIONAL — downstream scoring drops every tweet older than 6h, so older results are wasted budget. The rewrite is OUR pipeline, NOT X misbehavior. Do NOT try to work around it (closer dates, dropping the operator, URL-encoding to bypass, retrying with a different draft, or interpreting the smaller result set as a bug) — your queries WILL be filtered to the last 6 hours regardless. Accept the smaller fresh result set; if a query honestly returns 0, drop the min_faves floor per the zero-result rule below and re-run that one query.'
 
-# --- Anti-debug rule (always on, both backends) -----------------------------
+# --- Anti-debug rule --------------------------------------------------------
 # Phase 1 is a STRAIGHT-LINE scrape, not an exploration. The 17:15 cycle on
 # 2026-05-15 ran 42 minutes with num_turns=37 because Claude saw a 0-result
 # query, assumed X was misbehaving, and spent 30 minutes reverse-engineering
@@ -486,22 +503,21 @@ fi
 # finish the job" as an explicit rule the model can quote back to itself.
 ANTI_DEBUG_RULE='ANTI-DEBUG RULE — Phase 1 is a STRAIGHT-LINE scrape with a HARD 15-minute total budget. You have AT MOST 2 bh_run calls per project (1 for the search, 1 only if the first crashed with a Python error — NOT for retries on empty results). You MUST NOT: investigate X search-operator behavior even if results look surprising; investigate why your `since:` operators got rewritten (see HOOK NOTICE above); try alternate URL forms (top vs latest, with/without -filter:replies, &src= variants, etc.); scroll the page, click anything, or take screenshots to "verify" state; "improve" or rewrite the bh_run script body; re-try a query that returned 0 tweets. If your bh_run returns an empty list, that means no fresh supply exists in the 6h window — that is the CORRECT, EXPECTED outcome for thin queries. Log `tweets_found:0` in queries_used and move on to the next project. Finishing all projects in 8 minutes with several 0-result entries is the SUCCESS state. Spending 30 minutes "debugging" one project is a FAILURE — empty results are the diagnostic, not a bug to fix.'
 
-# --- Backend-aware Step 2 block ---------------------------------------------
-# Give Claude the LITERAL script to run for its backend, not a Playwright
-# template + a translation table. The mental-translation step costs turns and
-# invites detours: every cycle the model has to re-derive the bh_run idiom
+# --- Step 2 block (harness, hardcoded bh_run script) ------------------------
+# Give Claude the LITERAL script to run, not a Playwright template + a
+# translation table. The mental-translation step costs turns and invites
+# detours: every cycle the model would have to re-derive the bh_run idiom
 # (new_tab vs goto_url, js() triple-quote, tab hygiene) from the translation
-# table. Hardcoding the script per-backend collapses that to zero turns of
-# decision-making.
-if [ "${TWITTER_BACKEND:-agent}" = "harness" ]; then
-    # `read -r -d ''` rather than `$(cat <<EOF)` because macOS bash 3.2 has a
-    # parsing bug: inside `$(...)` it tries to balance parens/quotes in the
-    # heredoc body, even with a single-quoted delimiter. The JS arrow-function
-    # syntax `(() => {...})()` and apostrophes in prose body would trigger
-    # spurious "unexpected EOF" errors. `read -d ''` reads the heredoc directly
-    # into the variable with no command substitution, sidestepping the bug.
-    # `|| true` because read returns 1 when it hits EOF without the delimiter.
-    IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
+# table. Hardcoding the script collapses that to zero turns of decision-making.
+#
+# `read -r -d ''` rather than `$(cat <<EOF)` because macOS bash 3.2 has a
+# parsing bug: inside `$(...)` it tries to balance parens/quotes in the
+# heredoc body, even with a single-quoted delimiter. The JS arrow-function
+# syntax `(() => {...})()` and apostrophes in prose body would trigger
+# spurious "unexpected EOF" errors. `read -d ''` reads the heredoc directly
+# into the variable with no command substitution, sidestepping the bug.
+# `|| true` because read returns 1 when it hits EOF without the delimiter.
+IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
 ## Step 2: Search and extract — RUN THIS EXACT SCRIPT, NO IMPROVEMENTS
 
 For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the values of `query`, `search_topic`, and `matched_project`; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
@@ -560,12 +576,17 @@ tweets = js("""
   return results;
 })()
 """)
-# Bake project/topic into each tweet object IN PYTHON, before printing — so the
-# model has zero degrees of freedom on these fields. The model only concatenates
-# the per-project arrays; it does not regenerate any value.
+# Bake project/topic/query into each tweet object IN PYTHON, before printing —
+# so the model has zero degrees of freedom on these fields. The model only
+# concatenates the per-project arrays; it does not regenerate any value.
+# `query` is the LITERAL X advanced-search string this bh_run call used; the
+# scorer joins on it against twitter_search_attempts so each candidate gets
+# stamped with the exact discovering attempt_id (2026-05-21 bug fix: dashboard
+# was crediting dud queries with posts from sibling queries in the same batch).
 for t in tweets:
     t['search_topic'] = search_topic
     t['matched_project'] = matched_project
+    t['query'] = query
 print('###TWEETS_BEGIN###')
 print(json.dumps(tweets))
 print('###TWEETS_END###')
@@ -573,7 +594,7 @@ print('###TWEETS_END###')
 
 Output rules — READ CAREFULLY, this part has historically been buggy.
 
-1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH — every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`) is already correct.
+1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH — every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`, `query`) is already correct.
 
 2. When you assemble the final structured `tweets` array, you MUST copy each tweet object byte-for-byte from the JSON output. You MUST NOT:
    - Regenerate, beautify, summarize, infer, round, or otherwise modify any field.
@@ -585,79 +606,15 @@ Output rules — READ CAREFULLY, this part has historically been buggy.
 
 4. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
 HARNESS_STEP2_EOF
-else
-    IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'AGENT_STEP2_EOF' || true
-## Step 2: Search and extract
-
-For EACH project's query you drafted:
-1. Navigate to: https://x.com/search?q={your_query} -filter:replies&f=live
-   Use mcp__twitter-agent__browser_navigate
-2. Wait 4 seconds, then run this JavaScript via mcp__twitter-agent__browser_run_code to extract tweets:
-
-async (page) => {
-  await page.waitForTimeout(3000);
-  const tweets = await page.evaluate(() => {
-    const results = [];
-    for (const article of [...document.querySelectorAll('article[data-testid="tweet"]')].slice(0, 8)) {
-      try {
-        let handle = '';
-        for (const link of article.querySelectorAll('a[role="link"]')) {
-          const href = link.getAttribute('href');
-          if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/search') && href.length > 1 && href.split('/').length === 2) {
-            handle = href.replace('/', ''); break;
-          }
-        }
-        const tweetText = article.querySelector('[data-testid="tweetText"]');
-        const text = tweetText ? tweetText.textContent : '';
-        const timeEl = article.querySelector('time');
-        const timeParent = timeEl ? timeEl.closest('a') : null;
-        const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
-        const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
-        let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
-        for (const btn of article.querySelectorAll('[role="group"] button')) {
-          const al = btn.getAttribute('aria-label') || '';
-          let m;
-          if (m=al.match(/([\d,]+)\s*repl/i)) replies=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*repost/i)) retweets=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*like/i)) likes=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
-          if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
-        }
-        results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
-      } catch(e) {}
-    }
-    return results;
-  });
-  return JSON.stringify(tweets);
-}
-
-3. After scanning all projects, return EVERY extracted tweet via the structured 'tweets' field. Each tweet object MUST include 'search_topic' (the query that found it) and 'matched_project' (the project name whose query found it).
-
-4. ALSO return the structured 'queries_used' array with ONE entry per project (length must equal the number of projects), each with:
-   - 'query': the exact final query string you searched on x.com (without the leading 'q=' or url-encoding)
-   - 'project': the project name
-   - 'tweets_found': integer count of tweets you extracted for that query (0 if X showed 'No results' or the page was empty)
-   This list is logged to twitter_search_attempts so future cycles can avoid redrafting dead phrasings. Emit it even when tweets_found is 0 — the zero rows are the whole point of this list.
-
-CRITICAL RULES:
-- Use ONLY mcp__twitter-agent__* tools for scraping
-- Do NOT post, reply, like, or interact with any tweet
-- Do NOT generate any reply content
-AGENT_STEP2_EOF
-fi
 
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
 # where the scanner summarized instead of dumping the JSON array.
-SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"text":{"type":"string"},"tweetUrl":{"type":"string"},"datetime":{"type":"string"},"replies":{"type":"integer"},"retweets":{"type":"integer"},"likes":{"type":"integer"},"views":{"type":"integer"},"bookmarks":{"type":"integer"},"search_topic":{"type":"string"},"matched_project":{"type":"string"}},"required":["handle","text","tweetUrl","datetime","replies","retweets","likes","views","bookmarks","search_topic","matched_project"]}},"queries_used":{"type":"array","items":{"type":"object","properties":{"query":{"type":"string"},"project":{"type":"string"},"tweets_found":{"type":"integer"}},"required":["query","project","tweets_found"]}}},"required":["tweets","queries_used"]}'
+SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"text":{"type":"string"},"tweetUrl":{"type":"string"},"datetime":{"type":"string"},"replies":{"type":"integer"},"retweets":{"type":"integer"},"likes":{"type":"integer"},"views":{"type":"integer"},"bookmarks":{"type":"integer"},"search_topic":{"type":"string"},"matched_project":{"type":"string"},"query":{"type":"string"}},"required":["handle","text","tweetUrl","datetime","replies","retweets","likes","views","bookmarks","search_topic","matched_project","query"]}},"queries_used":{"type":"array","items":{"type":"object","properties":{"query":{"type":"string"},"project":{"type":"string"},"tweets_found":{"type":"integer"}},"required":["query","project","tweets_found"]}}},"required":["tweets","queries_used"]}'
 
 log "Acquiring twitter-browser lock for Phase 1 Claude scan..."
-# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
-# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
-    exit 0
-fi
-acquire_lock "twitter-browser" 3600
+acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+log "twitter-browser lock held (pid=$$) Phase 1"
 # Drop stale Chrome singleton symlinks before launch. Background ungraceful-
 # exits (SIGKILL, jetsam, force quit) leave Singleton{Lock,Cookie,Socket}
 # pointing at dead PIDs / vanished sockets; without this, Chrome pops "Something
@@ -710,7 +667,7 @@ $HOOK_NOTICE
 $ANTI_DEBUG_RULE
 
 Query guidelines:
-- MANDATORY: every query MUST end with the operator \`since_time:$(date -u -v-${FRESHNESS_HOURS}H +%s)\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate, reformat, or round it, just paste it verbatim into every single query. It restricts X to tweets posted in the last ${FRESHNESS_HOURS} hours, which is the cycle's freshness wall: tweets older than that are dropped at scoring and the whole search is wasted. Do NOT use the day-granular \`since:YYYY-MM-DD\` operator: it admits tweets up to ~45h old that the scorer then discards. Even if some past top-performing queries shown below still use \`since:\`, you MUST use \`since_time:\` instead; those examples predate this rule.
+- MANDATORY: every query MUST end with the operator \`since_time:$(( $(date +%s) - FRESHNESS_HOURS_DISCOVER * 3600 ))\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate, reformat, or round it, just paste it verbatim into every single query. It restricts X to tweets posted in the last ${FRESHNESS_HOURS_DISCOVER} hours, which is the cycle's freshness wall: tweets older than that are dropped at scoring and the whole search is wasted. Do NOT use the day-granular \`since:YYYY-MM-DD\` operator: it admits tweets up to ~45h old that the scorer then discards. Even if some past top-performing queries shown below still use \`since:\`, you MUST use \`since_time:\` instead; those examples predate this rule.
 - MANDATORY EVEN IF YOUR QUERY KEYWORDS DO NOT NAME THE EXCLUDED TOPIC. If a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EVERY listed term to that project's query, verbatim, with NO EXCEPTIONS. The exclusion is project-wide and persistent — it is a safety rail against ALL future false positives for that project, not a query-keyword-conditional rule. Do NOT reason "my search keywords are about meditation/local AI/vibe coding so the cricket/crypto/Bolt excludes are unnecessary" — that reasoning defeats the rail. The terms passed the >=2-batch activation gate; they have ALREADY survived a one-off filter. Your job here is purely mechanical concatenation, not editorial judgment. Concrete examples of what MUST happen: if Vipassana has \`excludes_for_search: ["cricket","ipl","kohli","lsg","pant","csk","inglis","suvendu","tmc","bjp"]\`, your Vipassana query MUST end with \` -cricket -ipl -kohli -lsg -pant -csk -inglis -suvendu -tmc -bjp\` even when the query searches for "meditation" or "vipassana" with no mention of Goenka. If fazm has \`excludes_for_search: ["memecoin","okx","onchain"]\`, every fazm query gets \` -memecoin -okx -onchain\` appended whether searching "local AI", "RPA", or anything else. If mk0r has \`excludes_for_search: ["usain"]\`, every mk0r query gets \` -usain\`. Skipping these in any query is a bug.
 - MANDATORY: pick \`min_faves:N\` per the PER-PROJECT SUPPLY SIGNAL above. If the project has no entry in the supply table (new project or first cycle), use min_faves:20 as a starting point; the next cycle will see your attempt and self-tune. Never hardcode min_faves:50 for a project whose supply table shows zero results at that tier.
 - Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways
@@ -806,6 +763,7 @@ fi
 # so dud queries actually accumulate in the negative-signal table.
 if [ -f "$QUERIES_FILE" ]; then
     python3 "$REPO_DIR/scripts/log_twitter_search_attempts.py" --batch-id "$BATCH_ID" \
+        --attempts-out "$ATTEMPTS_FILE" \
         < "$QUERIES_FILE" 2>&1 | tee -a "$LOG_FILE"
     rm -f "$QUERIES_FILE"
 fi
@@ -866,11 +824,24 @@ log "Enriching via fxtwitter + scoring with T0 snapshot (batch=$BATCH_ID)..."
 cat "$RAW_FILE" \
     | python3 "$REPO_DIR/scripts/enrich_twitter_candidates.py" \
     | python3 "$REPO_DIR/scripts/score_twitter_candidates.py" --batch-id "$BATCH_ID" \
+        ${ATTEMPTS_FILE:+--attempts "$ATTEMPTS_FILE"} \
     2>&1 | tee -a "$LOG_FILE"
-rm -f "$RAW_FILE"
+rm -f "$RAW_FILE" "$ATTEMPTS_FILE"
 
 BATCH_COUNT=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" batch-count --batch-id "$BATCH_ID" 2>/dev/null || echo 0)
 log "Phase 1 complete. Batch has $BATCH_COUNT candidates with T0 snapshot."
+
+# Stamp the A/B/C variant onto every candidate in this batch so downstream
+# analytics (post-rate, thread-age-at-discover, lag-after-thread, top-reply
+# ratio) can split by variant. Idempotent: same value would be written if the
+# batch is salvaged into a peer cycle (variant follows the discovering cycle).
+python3 -c "
+import os, psycopg
+with psycopg.connect(os.environ['DATABASE_URL']) as conn:
+    with conn.cursor() as cur:
+        cur.execute('UPDATE twitter_candidates SET cycle_variant=%s WHERE batch_id=%s AND cycle_variant IS NULL', (os.environ['TWITTER_CYCLE_VARIANT'], os.environ['BATCH_ID']))
+        conn.commit()
+" 2>>"$LOG_FILE" || log "Phase 1: cycle_variant stamp failed (non-fatal)"
 
 if [ "$BATCH_COUNT" = "0" ]; then
     log "Empty batch. Nothing to re-score. Exiting."
@@ -899,19 +870,29 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 # to finish. We re-acquire just before Phase 2b posts, blocking up to the
 # acquire_lock timeout if another pipeline is mid-run.
 log "Releasing twitter-browser lock for the T1 wait window (5min sleep + HTTP fxtwitter poll)..."
-release_lock "twitter-browser"
-# Defense-in-depth: clear the hook-layer lockfile so the next cycle's
-# PreToolUse never sees a stale entry from us. run_claude.sh's exit trap
+release_lock "twitter-browser" 2>>"$LOG_FILE"
+# Defense-in-depth: clear the twitter_browser.py process lockfile so the next
+# cycle's writer never sees a stale entry from us. run_claude.sh's exit trap
 # already does this; explicit repeat covers SIGKILL of the wrapper.
-rm -f "$HOME/.claude/twitter-agent-lock.json"
+rm -f "$HOME/.claude/twitter-browser-lock.json"
 
 # --- Sleep 20 min before T1 measurement -------------------------------------
-log "Sleeping 1200s before T1 re-measurement..."
-sleep 1200
+# Variants B and C skip ripening entirely (2026-05-22 A/B/C test). The 20-min
+# wait + t1 re-fetch was originally a velocity gate; the gate floor was
+# removed 2026-05-15 so the wait only feeds delta_score into the LLM prompt
+# now. Variants B/C test whether eliminating that ~20 min thread->post lag
+# meaningfully improves engagement vs. the marginal informational value of
+# delta_score in the draft prompt.
+if [ "$TWITTER_CYCLE_VARIANT" = "A" ]; then
+    log "Variant A: sleeping 1200s before T1 re-measurement..."
+    sleep 1200
 
-# --- Phase 2a: re-fetch T1 engagement ---------------------------------------
-log "Phase 2a: re-polling fxtwitter for T1 engagement..."
-python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE"
+    # --- Phase 2a: re-fetch T1 engagement -----------------------------------
+    log "Phase 2a: re-polling fxtwitter for T1 engagement..."
+    python3 "$REPO_DIR/scripts/fetch_twitter_t1.py" --batch-id "$BATCH_ID" 2>&1 | tee -a "$LOG_FILE"
+else
+    log "Variant $TWITTER_CYCLE_VARIANT: skipping ripening wait and T1 fetch (no sleep, delta_score stays at T0 value)"
+fi
 
 # --- Phase 2b: top 25 by hybrid score (delta + product-discussion intent boost), no post cap ---------------------
 # Hybrid sort: keep raw growth (delta_score) as the dominant signal, but add a +5 boost
@@ -973,6 +954,17 @@ while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clike
         DRAFT_LINE="
 EXISTING DRAFT (style=$cdraftstyle, age=${DRAFT_MIN}m): $cdraft"
     fi
+    # Per-candidate prior-interaction context: surface our last 5 comments to
+    # this author in the past 30 days (soft context only — vary angle, don't
+    # repeat phrasing). Empty when we have no history. Failure is silent.
+    AUTHOR_HISTORY_LINE=""
+    if [ -n "$cauthor" ]; then
+        _AH=$(python3 "$REPO_DIR/scripts/author_history_block.py" --platform twitter --author "$cauthor" --days 30 --limit 5 2>>"$LOG_FILE" || true)
+        if [ -n "$_AH" ]; then
+            AUTHOR_HISTORY_LINE="
+$_AH"
+        fi
+    fi
     CANDIDATE_BLOCK="${CANDIDATE_BLOCK}
 ---
 Candidate ID: $cid
@@ -981,7 +973,7 @@ Author: @$cauthor (${cfollowers} followers)
 Text: $ctext
 Score: $cscore | Delta (5min): $cdelta | Likes: $clikes | RTs: $crts | Replies: $creplies | Views: $cviews | Age: ${cage}h
 Search query: $ctopic
-Project match: $cproject${DRAFT_LINE}
+Project match: $cproject${DRAFT_LINE}${AUTHOR_HISTORY_LINE}
 "
 done <<< "$CANDIDATES"
 
@@ -1095,12 +1087,8 @@ SKIP_FILE="/tmp/twitter_cycle_skips_${BATCH_ID}.json"
 # phase2b_silent run-monitor rows even when posts succeeded.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-prep 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-prep (read+draft only)..."
-# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
-# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
-    exit 0
-fi
-acquire_lock "twitter-browser" 3600
+acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+log "twitter-browser lock held (pid=$$) Phase 2b-prep"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
@@ -1117,7 +1105,7 @@ export CLAUDE_SESSION_ID
 
 PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
-PREP_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" "${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
+PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
   1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY).
@@ -1200,7 +1188,13 @@ CRITICAL:
 - DO NOT call log_post.py or campaign_bump.py.
 - Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step.
 - NEVER use em dashes. Use commas, periods, or regular dashes (-).
-- Reply in the SAME LANGUAGE as the parent tweet." 2>&1)
+- Reply in the SAME LANGUAGE as the parent tweet."
+
+# Pipe the prep prompt via stdin instead of passing as a shell argument.
+# On Linux ARG_MAX is 2MB; the assembled prompt (config.json + top_report +
+# styles + schema + candidates) busts that on the VM, dying with E2BIG
+# "Argument list too long". stdin has no such cap.
+PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
 
@@ -1253,9 +1247,9 @@ log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
 # Always release the lock now: gen step is lock-free, and even on the empty
 # path we don't want to hold the browser lock through the early-exit cleanup.
 log "Releasing twitter-browser lock (gen step is lock-free)..."
-release_lock "twitter-browser"
-# Defense-in-depth: clear the hook-layer lockfile; see Phase 1 note.
-rm -f "$HOME/.claude/twitter-agent-lock.json"
+release_lock "twitter-browser" 2>>"$LOG_FILE"
+# Defense-in-depth: clear the twitter_browser.py process lockfile; see Phase 1 note.
+rm -f "$HOME/.claude/twitter-browser-lock.json"
 
 if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
@@ -1299,12 +1293,8 @@ fi
 # already be tripping if we left the row at phase2a.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
 log "Re-acquiring twitter-browser lock for Phase 2b-post..."
-# Defer if a foreign twitter-agent MCP wrapper (Fazm Dev / IDE / other cron) owns
-# the profile. Avoids killing the user's interactive Chrome session. Added 2026-05-13.
-if defer_if_foreign_for_backend "${LOG_FILE:-}"; then
-    exit 0
-fi
-acquire_lock "twitter-browser" 3600
+acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+log "twitter-browser lock held (pid=$$) Phase 2b-post"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
