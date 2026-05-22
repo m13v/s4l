@@ -894,7 +894,30 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         retweets = tm ? parseInt(tm[1].replace(/,/g, ''), 10) : 0;
                         views = vm ? parseInt(vm[1].replace(/,/g, ''), 10) : 0;
                       }
-                      replies.push({reply_url, reply_tweet_id, reply_author_handle, reply_author, reply_content, likes, replies: replies_count, retweets, views});
+                      // Link detection. Twitter exclusively shortens external
+                      // links through t.co, so any <a href="https://t.co/..."]>
+                      // inside the article (excluding any nested article like
+                      // a quoted tweet) means the reply author posted an
+                      // outbound link. Pick the first matching anchor whose
+                      // nearest ancestor article IS this article (rules out
+                      // links embedded inside a quoted-tweet block).
+                      let reply_link_url = null;
+                      let reply_link_display = null;
+                      const tcoAnchors = art.querySelectorAll('a[href^="https://t.co/"]');
+                      for (const a of tcoAnchors) {
+                        let q = a.parentElement, owner = null;
+                        while (q) { if (q.tagName === 'ARTICLE') { owner = q; break; } q = q.parentElement; }
+                        if (owner === art) {
+                          reply_link_url = a.getAttribute('href');
+                          // The anchor's textContent is the unrolled display
+                          // URL twitter shows the reader (e.g. "deno.com/blog
+                          // /agents-deploy"). Strip whitespace + Unicode
+                          // ellipsis that x.com inserts on long display URLs.
+                          reply_link_display = ((a.textContent || '').trim()).slice(0, 500) || null;
+                          break;
+                        }
+                      }
+                      replies.push({reply_url, reply_tweet_id, reply_author_handle, reply_author, reply_content, likes, replies: replies_count, retweets, views, reply_link_url, reply_link_display});
                     } catch (e) {}
                   }
                   return JSON.stringify({replies, article_count: articles.length, dropped_after_discover, dropped_nested, headings_found: headings.length});
@@ -927,13 +950,34 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                             pass
                     filtered.append(r)
                 filtered.sort(key=lambda r: int(r.get("likes") or 0), reverse=True)
-                top_replies = filtered[:1]
+                # Two-row snapshot strategy (2026-05-22):
+                #   rank=1 = top reply by likes regardless of link presence
+                #            (the existing "what's winning here?" benchmark).
+                #   rank=2 = top *link-bearing* reply, if one exists and is
+                #            distinct from rank=1. This gives us an
+                #            apples-to-apples comparison against our own
+                #            link-bearing posts. ~96% of top replies don't
+                #            include a link, so without this second row the
+                #            benchmark population was too small.
+                # If rank=1 already has a link, the rank=2 candidate is the
+                # same row and we skip it to honor UNIQUE(post_id, reply_url).
+                top_replies = []
+                if filtered:
+                    primary = filtered[0]
+                    top_replies.append(primary)
+                    primary_url = primary.get("reply_url")
+                    if not primary.get("reply_link_url"):
+                        for cand in filtered[1:]:
+                            if cand.get("reply_link_url") and cand.get("reply_url") != primary_url:
+                                top_replies.append(cand)
+                                break
                 print(f"[top_replies] scraped {len(all_replies)} articles "
                       f"(headings={parsed.get('headings_found', 0)}, "
                       f"dropped_after_discover={parsed.get('dropped_after_discover', 0)}, "
                       f"dropped_nested={parsed.get('dropped_nested', 0)}, "
                       f"dropped_older={dropped_older}), "
-                      f"kept top {len(top_replies)} after self+author filter",
+                      f"kept top {len(top_replies)} after self+author filter "
+                      f"(rank2_has_link={'yes' if len(top_replies) > 1 else 'no'})",
                       file=sys.stderr)
             except Exception as e:
                 print(f"[top_replies] scrape failed: {e}", file=sys.stderr)
