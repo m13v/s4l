@@ -124,7 +124,7 @@ if __name__ == "__main__" or os.environ.get("POST_GITHUB_INSTALL_TRAPS") == "1":
 
 from engagement_styles import (
     VALID_STYLES, get_styles_prompt, get_content_rules, get_anti_patterns,
-    validate_or_register,
+    validate_or_register, pick_style_for_post,
 )
 # Audience-page routing: tells Claude which curated landing pages exist for the
 # project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
@@ -384,10 +384,29 @@ def parse_issue_url(url):
 # ---------- Prompt -----------------------------------------------------------
 
 def build_prompt(project, config, candidates, cap, top_report, recent_comments,
-                 top_topics_report=""):
+                 top_topics_report="", style_assignment=None):
     content_angle = build_content_angle(project, config)
     excluded_repos = config.get("exclusions", {}).get("github_repos", [])
     excluded_authors = config.get("exclusions", {}).get("authors", [])
+    # Style enforcement: when style_assignment is provided the JSON example
+    # pins the assigned style name into engagement_style so the model cannot
+    # silently substitute a different label. INVENT mode (style=None) still
+    # leaves engagement_style up to the model but it's expected to fill
+    # new_style with the registration block. Without an assignment the
+    # legacy menu wording is preserved for backward compatibility.
+    _assigned_style_name = (style_assignment or {}).get("style")
+    _assigned_mode = (style_assignment or {}).get("mode")
+    if _assigned_style_name:
+        # USE mode: pin literal name.
+        _style_field_example = _assigned_style_name
+    elif _assigned_mode == "invent":
+        # INVENT mode: the model writes a new snake_case name and fills new_style.
+        _style_field_example = "<your invented snake_case name>"
+    else:
+        # No assignment: legacy menu mode.
+        _style_field_example = (
+            f"<one of {', '.join(sorted(VALID_STYLES))}, or your invented snake_case name>"
+        )
 
     cand_block = []
     for i, c in enumerate(candidates, 1):
@@ -493,7 +512,7 @@ shown is the search_topic that surfaced the issue, echo it back verbatim in
 
 {candidates_text}
 {recent_ctx}{top_ctx}{top_topics_ctx}
-{get_styles_prompt("github", context="posting")}
+{get_styles_prompt("github", context="posting", assignment=style_assignment)}
 
 ## Targeting
 - Best topics: Agents, Accessibility, Voice/ASR, Tool Use. Prioritize when present.
@@ -577,7 +596,7 @@ Return ONLY a single JSON object. No prose, no markdown fencing, no Bash calls:
       "thread_title": "<issue title>",
       "thread_author": "<issue author>",
       "matched_project": "{project_name}",
-      "engagement_style": "<one of {', '.join(sorted(VALID_STYLES))}, or your invented snake_case name>",
+      "engagement_style": "{_style_field_example}",
       "new_style": null,
       "search_topic": "<the seed from the candidate block, copied verbatim>",
       "language": "<ISO 639-1 code matching the issue language: en, ja, zh, es, ...>",
