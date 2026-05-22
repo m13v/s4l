@@ -11,13 +11,26 @@
 # singleton semantics on 2026-05-22.
 #
 # How this wrapper works:
-#   1. mkdir-based atomic singleton claim at /tmp/sa-twitter-cycle-singleton.lock
+#   1. EXTERNAL CYCLE DETECT (post 2026-05-22 hardening): pgrep for any
+#      run-twitter-cycle.sh that is NOT a descendant of this wrapper. Covers:
+#        a) orphans from the pre-singleton launchd config (PPID=1 after parent
+#           setsid wrapper exited), and
+#        b) any manual / out-of-band cycle invocations.
+#      If any external cycle is alive, log "skipped: external" and exit 0
+#      WITHOUT killing anything. The next launchd fire (15 min later) re-runs
+#      this check, so we naturally converge to one-at-a-time once the orphan
+#      finishes its work on its own.
+#   2. mkdir-based atomic singleton claim at /tmp/sa-twitter-cycle-singleton.lock
 #      - If lock dir holds a live PID, log "skipped" and exit 0 (launchd is happy).
 #      - If lock dir holds a dead PID, clear it and proceed.
-#   2. Run run-twitter-cycle.sh in the FOREGROUND. The wrapper stays alive for
+#   3. Run run-twitter-cycle.sh in the FOREGROUND. The wrapper stays alive for
 #      the full cycle duration (60-90 min), which also engages launchd's built-in
 #      "don't fire while same Label is running" behavior. Belt + suspenders.
-#   3. Trap EXIT to release the singleton lock on any exit path.
+#   4. Trap EXIT to release the singleton lock on any exit path.
+#
+# NEVER KILL: this wrapper does not SIGTERM/SIGKILL any process. Per user
+# instruction 2026-05-22 "I don't want to kill anything, going forward".
+# Convergence to one-at-a-time is via skip-on-detect, not preemption.
 #
 # Logs:
 #   - /Users/matthewdi/social-autoposter/skill/logs/twitter-cycle-singleton.log
@@ -37,6 +50,18 @@ mkdir -p "$LOG_DIR"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*" >> "$SINGLETON_LOG"; }
+
+# --- Phase 0: external-cycle detect (skip, never kill) -----------------------
+# pgrep -f matches against the full cmdline. The cycle script is invoked as
+# `/bin/bash <repo>/skill/run-twitter-cycle.sh` with no args, so its cmdline
+# ends with `run-twitter-cycle.sh`. The wrapper's own cmdline ends with
+# `run-twitter-cycle-singleton.sh`, so anchoring the pattern with `\.sh$`
+# excludes us. Filter $$ as well as a belt-and-suspenders guard.
+EXTERNAL_CYCLE_PIDS=$(pgrep -f 'skill/run-twitter-cycle\.sh$' 2>/dev/null | grep -v "^$$\$" | tr '\n' ' ' | sed 's/ *$//')
+if [ -n "$EXTERNAL_CYCLE_PIDS" ]; then
+  log "[singleton] skipped: external run-twitter-cycle.sh alive pids=[$EXTERNAL_CYCLE_PIDS] (self=$$, never killing per user instruction)"
+  exit 0
+fi
 
 # Try to atomically claim the singleton slot.
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
