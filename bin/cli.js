@@ -379,6 +379,12 @@ function bootstrapVm() {
   // symlinks the profile, and patches the MCP config — call it directly.
   installBrowserHarness();
 
+  // Install Python deps from requirements.txt. installBrowserHarness only
+  // installs uv + mcp; it does NOT read requirements.txt, so without this the
+  // VM is missing websocket-client (restore_twitter_session.py aborts on
+  // import) plus psycopg2-binary/playwright that the cycle scripts need.
+  installPythonDeps();
+
   // Restore the Twitter login if we have stored cookies and the Chrome is
   // up. No-op when Chrome isn't reachable yet (startup ordering); the cycle
   // preflight will run restore_twitter_session.py on its next tick.
