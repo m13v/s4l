@@ -130,3 +130,4 @@ skill/logs-archive/
 
 # Customer onboarding playbook + drafts (private)
 /onboarding/
+.vercel
