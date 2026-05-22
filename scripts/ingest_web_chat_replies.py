@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ingest human (Matt) replies to web-chat escalation emails from Gmail into Neon.
+"""Ingest human (Matt) replies to web-chat escalation emails from Gmail into Postgres.
 
 Mirror of scripts/ingest_human_dm_replies.py for the web-chat rail.
 
