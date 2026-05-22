@@ -107,6 +107,41 @@ CREATE INDEX IF NOT EXISTS idx_thread_top_replies_refresh
   ON thread_top_replies(platform, status, engagement_updated_at)
   WHERE status = 'active';
 
+-- 2026-05-22: snowflake-derived posted_at on both rails (see
+-- migrations/2026-05-22-snowflake-derived-posted-at.sql for the full
+-- rationale). Twitter snowflake IDs encode their creation timestamp:
+-- ts_ms = (id >> 22) + 1288834974657. We already store reply_tweet_id
+-- on thread_top_replies and the thread tweet ID lives in
+-- posts.thread_url, so both columns are derivable arithmetically. Using
+-- GENERATED STORED so the routes never need to know.
+ALTER TABLE thread_top_replies
+  ADD COLUMN IF NOT EXISTS reply_posted_at TIMESTAMPTZ
+  GENERATED ALWAYS AS (
+    CASE
+      WHEN reply_tweet_id ~ '^\d+$'
+      THEN to_timestamp(
+        ((reply_tweet_id::bigint) >> 22) / 1000.0 + 1288834974.657
+      )
+      ELSE NULL
+    END
+  ) STORED;
+
+ALTER TABLE posts
+  ADD COLUMN IF NOT EXISTS thread_posted_at TIMESTAMPTZ
+  GENERATED ALWAYS AS (
+    CASE
+      WHEN thread_url ~ '/status/\d+'
+      THEN to_timestamp(
+        ((substring(thread_url FROM '/status/(\d+)')::bigint) >> 22) / 1000.0 + 1288834974.657
+      )
+      ELSE NULL
+    END
+  ) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_posts_platform_thread_posted_at
+  ON posts (platform, thread_posted_at)
+  WHERE thread_posted_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS threads (
     id SERIAL PRIMARY KEY,
     platform TEXT NOT NULL,
