@@ -694,7 +694,7 @@ function init() {
   }
 
   installPythonDeps();
-  installEngagementStylesSidecar();
+  removeLegacyEngagementStylesSidecar();
 
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
@@ -764,7 +764,7 @@ function update() {
   // Refresh Python deps every update so version-bumps land on existing installs
   // and the candidate-style sidecar gets merged (preserves VM-side candidates).
   installPythonDeps();
-  installEngagementStylesSidecar();
+  removeLegacyEngagementStylesSidecar();
 
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
@@ -818,35 +818,27 @@ function installPythonDeps() {
   }
 }
 
-// Copy the candidate-style sidecar JSON into ~/social-autoposter/scripts/
-// if missing; merge if present so VM-side invented candidates survive
-// across updates. Promoted (status=active) entries from the shipped baseline
-// always win.
-function installEngagementStylesSidecar() {
-  const src = path.join(PKG_ROOT, 'scripts', 'engagement_styles_extra.json');
-  const dest = path.join(DEST, 'scripts', 'engagement_styles_extra.json');
-  if (!fs.existsSync(src)) return;
-
-  if (!fs.existsSync(dest)) {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(src, dest);
-    console.log('  installed scripts/engagement_styles_extra.json');
-    return;
+// Sweep the legacy candidate-style sidecar JSON + lock file off every install.
+// The taxonomy lives in Postgres `engagement_styles_registry` now (single
+// source of truth for all installs, no per-machine JSON drift); see
+// scripts/migrate_engagement_styles_to_db.py for the cutover. We keep this
+// helper around for a release or two so existing installs auto-clean the
+// dead files on next `init` / `update`, then it can go.
+function removeLegacyEngagementStylesSidecar() {
+  const targets = [
+    path.join(DEST, 'scripts', 'engagement_styles_extra.json'),
+    path.join(DEST, 'scripts', 'engagement_styles_extra.json.lock'),
+  ];
+  for (const p of targets) {
+    if (fs.existsSync(p)) {
+      try {
+        fs.rmSync(p, { force: true });
+        console.log(`  removed legacy ${path.relative(DEST, p)} (registry is now in Postgres)`);
+      } catch (e) {
+        console.warn(`  WARNING: could not remove ${p}: ${e.message}`);
+      }
+    }
   }
-
-  let shipped = {};
-  let local = {};
-  try { shipped = JSON.parse(fs.readFileSync(src, 'utf8')) || {}; } catch {}
-  try { local = JSON.parse(fs.readFileSync(dest, 'utf8')) || {}; } catch {}
-
-  // Start from local (preserves VM-only candidates), overlay shipped active
-  // entries so newly promoted styles always land. Shipped wins on conflict.
-  const merged = { ...local };
-  for (const [name, entry] of Object.entries(shipped)) {
-    merged[name] = entry;
-  }
-  fs.writeFileSync(dest, JSON.stringify(merged, null, 2) + '\n');
-  console.log('  merged scripts/engagement_styles_extra.json (shipped wins on conflict)');
 }
 
 const cmd = process.argv[2];
