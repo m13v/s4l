@@ -210,7 +210,7 @@ _sa_combined_exit() {
 # twitter_candidates table directly so a SIGTERM mid-Phase-2b still gets
 # accurate counts (the row was committed inside twitter_post_plan.py before
 # the kill). All psql / get_run_cost.py calls are wrapped in `timeout 10`
-# so a Neon hang during shutdown can't wedge the trap.
+# so a Postgres hang during shutdown can't wedge the trap.
 #
 # Early-exit failure paths (Phase 1 abort, empty batch, etc.) write their
 # own dedicated log_run.py line with custom failure_reasons and then set
