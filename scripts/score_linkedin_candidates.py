@@ -350,8 +350,14 @@ def upsert_candidates(candidates, batch_id=None):
                     search_query       = COALESCE(EXCLUDED.search_query, linkedin_candidates.search_query),
                     matched_project    = COALESCE(EXCLUDED.matched_project, linkedin_candidates.matched_project),
                     language           = COALESCE(EXCLUDED.language, linkedin_candidates.language),
+                    -- 'posted' and 'skipped' are terminal decisions and must NOT
+                    -- be reset on re-discovery. Mirrors the twitter_candidates fix
+                    -- shipped 2026-05-22 for the zombie-pending bug: re-discovery
+                    -- within the freshness window otherwise clobbers a Claude skip
+                    -- decision back to 'pending', so Phase 0 salvage keeps re-pulling
+                    -- the same row every cycle until hard-expire mercy-kills it.
                     status             = CASE
-                                            WHEN linkedin_candidates.status = 'posted' THEN 'posted'
+                                            WHEN linkedin_candidates.status IN ('posted', 'skipped') THEN linkedin_candidates.status
                                             ELSE 'pending'
                                          END,
                     batch_id           = COALESCE(EXCLUDED.batch_id, linkedin_candidates.batch_id)
