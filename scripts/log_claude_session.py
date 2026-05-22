@@ -25,7 +25,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def _use_legacy_neon() -> bool:
+def _use_legacy_db() -> bool:
     return os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1"
 
 PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
@@ -539,8 +539,8 @@ def _persist_via_api(args, parsed, started, ended, duration_ms, orch_cost, cycle
     return backfill_counts
 
 
-def _persist_via_neon(args, parsed, started, ended, duration_ms, orch_cost, cycle_id):
-    """Legacy path: direct psycopg2 to Neon. Gated by SOCIAL_AUTOPOSTER_LEGACY_NEON=1."""
+def _persist_via_db(args, parsed, started, ended, duration_ms, orch_cost, cycle_id):
+    """Legacy path: direct psycopg2 to Postgres. Gated by SOCIAL_AUTOPOSTER_LEGACY_NEON=1."""
     import db as dbmod
     dbmod.load_env()
     conn = dbmod.get_conn()
@@ -679,8 +679,8 @@ def main():
         else None
     )
 
-    if _use_legacy_neon():
-        backfill_counts = _persist_via_neon(args, parsed, started, ended, duration_ms,
+    if _use_legacy_db():
+        backfill_counts = _persist_via_db(args, parsed, started, ended, duration_ms,
                                             orch_cost, cycle_id)
     else:
         backfill_counts = _persist_via_api(args, parsed, started, ended, duration_ms,
