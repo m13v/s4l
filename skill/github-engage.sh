@@ -50,7 +50,7 @@ python3 "$REPO_DIR/scripts/scan_github_replies.py" 2>&1 | tee -a "$LOG_FILE"
 # the count is forwarded to a stats_github row in the dashboard Jobs table.
 # ═══════════════════════════════════════════════════════
 log "Phase A.5: Updating github engagement stats (reactions + reply counts)..."
-# Best-effort: stats failures (Neon disconnects, gh rate limits) must not block
+# Best-effort: stats failures (Postgres disconnects, gh rate limits) must not block
 # Phase B reply handling. Subshell scopes the set-flags, `|| true` absorbs rc.
 PHASE_A5_START=$(date +%s)
 GH_REPLY_SUMMARY=$(mktemp -t fazm-gh-reply-summary.XXXXXX)
