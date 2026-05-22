@@ -1,4 +1,4 @@
--- schema-postgres.sql — Neon Postgres schema (primary database)
+-- schema-postgres.sql, Postgres schema (primary database)
 -- Run once: psql "$DATABASE_URL" -f schema-postgres.sql
 
 CREATE TABLE IF NOT EXISTS posts (
