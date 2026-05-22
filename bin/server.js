@@ -572,6 +572,17 @@ const PLATFORM_LABELS = {
   hackernews: 'HackerNews', youtube: 'YouTube', instagram: 'Instagram',
 };
 
+// twitter-ripen-freshness-abc variant defs (shipped 2026-05-22). Shared between
+// the /api/experiments endpoint (Experiments tab) and the post-comments-twitter
+// row in the job-history pill render so both surfaces describe a variant the
+// same way. When the experiment ends, drop the desc but keep the keys so old
+// history rows still resolve to something readable.
+const TWITTER_VARIANT_DEFS = {
+  A: { label: 'Control',           desc: 'ripen + 6h freshness (legacy)' },
+  B: { label: 'No-ripen',          desc: 'skip 20-min wait + 6h freshness' },
+  C: { label: 'No-ripen + tight',  desc: 'skip 20-min wait + 1h freshness' },
+};
+
 // Standalone jobs with no platform axis. script_name -> display label.
 const STANDALONE_JOBS = {
   serp_seo: { job_type: 'seo', job_label: 'SERP SEO' },
@@ -5416,11 +5427,7 @@ async function handleApi(req, res) {
           GROUP BY variant
           ORDER BY variant
         `, []);
-        const variantDefs = {
-          A: { label: 'Control', desc: 'ripen + 6h freshness (legacy)' },
-          B: { label: 'No-ripen', desc: 'skip 20-min wait + 6h freshness' },
-          C: { label: 'No-ripen + tight', desc: 'skip 20-min wait + 1h freshness' },
-        };
+        const variantDefs = TWITTER_VARIANT_DEFS;
         const variants = ['A', 'B', 'C'].map(k => {
           const row = (rows || []).find(r => r.variant === k) || {};
           const n = Number(row.n_candidates || 0);
@@ -9556,11 +9563,21 @@ function renderResult(run) {
             + '</span></span>'
           : '') +
         (r.experiment_variant
-          ? '<span title="twitter-ripen-freshness-abc bucket (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h)" style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
-            + 'experiment '
-            + '<span style="color:var(--text);font-weight:600;">'
-            + r.experiment_variant
-            + '</span></span>'
+          ? (function () {
+              const v = r.experiment_variant;
+              const def = TWITTER_VARIANT_DEFS[v] || null;
+              const desc = def ? def.desc : '';
+              const label = def ? def.label : '';
+              const tooltip = 'twitter-ripen-freshness-abc'
+                + (label ? ' — ' + v + ' ' + label : '')
+                + (desc ? ': ' + desc : '');
+              return '<span title="' + tooltip.replace(/"/g, '&quot;')
+                + '" style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+                + 'experiment '
+                + '<span style="color:var(--text);font-weight:600;">'
+                + v + (desc ? ': ' + desc : '')
+                + '</span></span>';
+            })()
           : '') +
         (Array.isArray(r.styles_used) && r.styles_used.length
           ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
