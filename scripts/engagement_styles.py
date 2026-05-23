@@ -285,7 +285,7 @@ _REGISTRY_CACHE = {"ts": 0.0, "rows": None}
 _REGISTRY_CACHE_TTL_SEC = 300
 
 
-def _normalize_entry(entry, default_status="active"):
+def _normalize_entry(entry, default_status="active", default_kind="seed"):
     """Ensure a STYLES-style dict has the fields callers expect."""
     out = dict(entry) if isinstance(entry, dict) else {}
     out.setdefault("status", default_status)
@@ -293,6 +293,11 @@ def _normalize_entry(entry, default_status="active"):
     out.setdefault("example", "")
     out.setdefault("note", "")
     out.setdefault("best_in", {})
+    # kind discriminates origin: 'seed' (hardcoded/top-performer), 'model_invented'
+    # (Claude proposed during a posting run), 'human_derived' (synthesized from
+    # the daily human-reply digest). Surfaced in the dashboard as a bracket
+    # next to the style name.
+    out.setdefault("kind", default_kind)
     return out
 
 
@@ -339,12 +344,23 @@ def _fetch_registry_styles(force_refresh=False):
                 best_in = json.loads(best_in)
             except Exception:
                 best_in = {}
+        # Default kind for legacy rows pre-consolidation is 'seed'; the
+        # 2026-05-22 migration backfilled invented_by_model<>null rows to
+        # 'model_invented' and the human_derived migration inserted those
+        # explicitly. Trust the column.
         out[name] = {
             "description": r.get("description") or "",
             "example": r.get("example") or "",
             "note": r.get("note") or "",
             "best_in": best_in,
             "status": r.get("status") or "active",
+            "kind": r.get("kind") or "seed",
+            "invented_by_model": r.get("invented_by_model"),
+            "invented_at": r.get("invented_at"),
+            "promoted_at": r.get("promoted_at"),
+            "first_post_url": r.get("first_post_url"),
+            "first_post_platform": r.get("first_post_platform"),
+            "why_existing_didnt_fit": r.get("why_existing_didnt_fit") or "",
         }
     _REGISTRY_CACHE["rows"] = out
     _REGISTRY_CACHE["ts"] = now
@@ -372,19 +388,20 @@ def get_all_styles():
     Caller MUST treat the returned dict as read-only.
     """
     merged = {
-        name: _normalize_entry(meta, "active")
+        name: _normalize_entry(meta, "active", "seed")
         for name, meta in STYLES.items()
     }
     for name, meta in _fetch_registry_styles().items():
         if not isinstance(meta, dict):
             continue
-        merged[name] = _normalize_entry(meta, "active")
+        # Trust the kind column the registry already set; fall back to 'seed'.
+        merged[name] = _normalize_entry(meta, "active", meta.get("kind") or "seed")
     for name, meta in _load_human_derived_styles().items():
         if name in merged:
             # Don't clobber a curated/registry entry if the synthesizer
             # happens to pick a colliding snake_case name.
             continue
-        merged[name] = _normalize_entry(meta, "human_derived")
+        merged[name] = _normalize_entry(meta, "active", "human_derived")
     return merged
 
 
