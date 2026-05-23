@@ -1,49 +1,70 @@
 #!/usr/bin/env python3
-"""Daily synthesizer: distill ONE engagement style from the top human Twitter
-replies captured in the last 24h.
+"""Daily synthesizer: per platform, distill ONE engagement style from the
+top human replies captured in the last 24h on that platform.
 
-Pipeline
---------
-1. Pull every `thread_top_replies` row from the last 24h on platform='twitter'
+Pipeline (per platform)
+-----------------------
+1. Pull every `thread_top_replies` row from the last 24h on the platform
    with `has_link = false` (human replies, not link-tail spam).
 2. Score by likes (the only reliable proxy in the window, since `views` is
    missing for most rows). Take the top REPLY_POOL_SIZE.
 3. Build a Claude prompt that lists each reply with its like-count + thread
    URL and asks the model to synthesize ONE new engagement style following
    the seed-style schema (name / description / example / best_in / note).
-4. Parse the JSON, INSERT a new row into `engagement_styles_human_derived`
-   (status='active'), and emit the chosen name + style id to stdout.
+4. Parse the JSON, POST to /api/v1/engagement-styles/registry with
+   kind="human_derived" and platform="<platform>" so it lands in the
+   single source-of-truth table alongside seeds and model-invented styles.
 
-The picker (scripts/engagement_styles.py) reads the most recent active row
-from this table on a 5% chance per Twitter reply. See the migration file
-2026-05-22_engagement_styles_human_derived.sql for the table schema and
-the why.
+The picker (scripts/engagement_styles.py) reads the most recent active
+row of kind='human_derived' for the calling platform via the same route
+with HUMAN_DERIVED_RATE_BY_PLATFORM[platform] probability per call. See
+migrations/2026-05-22_consolidate_engagement_styles_human_derived.sql for
+the table shape and the table-consolidation rationale.
 
 Run manually: python3 scripts/generate_daily_human_style.py
+              python3 scripts/generate_daily_human_style.py --platform twitter
+              python3 scripts/generate_daily_human_style.py --dry-run
+
 Cron entry  : skill/run-generate-daily-style.sh (wraps this via run_claude.sh).
 """
+import argparse
 import json
 import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
 
 from db import get_conn  # noqa: E402
+from http_api import api_post  # noqa: E402
+
+# Platforms we attempt synthesis for. Each platform that has >= MIN_REPLIES
+# human replies in the window gets its own row in engagement_styles_registry
+# (kind='human_derived'). Platforms with fewer rows are skipped silently —
+# next run will try again.
+PLATFORMS = ["twitter", "reddit", "github", "moltbook", "linkedin"]
 
 REPLY_POOL_SIZE = 10            # top N human replies fed to Claude
 WINDOW_HOURS = 24
 MIN_LIKES = 5                   # exclude noise-floor replies
+MIN_REPLIES = 3                 # skip platform if <3 qualifying rows
 CLAUDE_MODEL_DEFAULT = None     # inherit from settings.json
 RUN_CLAUDE_PATH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 SCRIPT_TAG = "daily-human-style"
 
 
-def fetch_top_human_replies(conn, limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
-    """Top human Twitter replies from the last <hours>, ordered by likes."""
+def fetch_top_human_replies(conn, platform,
+                            limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
+    """Top human replies on `platform` from the last <hours>, ordered by likes.
+
+    `likes` is the only engagement column populated across all platforms
+    in thread_top_replies (views/comments/retweets are platform-shaped),
+    so we lean on it as the ranking key. has_link=false filters out
+    link-tail spam so the synthesizer only learns from organic moves.
+    """
     cur = conn.execute(
         """
         SELECT
@@ -57,7 +78,7 @@ def fetch_top_human_replies(conn, limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
             COALESCE(ttr.retweets, 0) AS retweets,
             ttr.captured_at
         FROM thread_top_replies ttr
-        WHERE ttr.platform = 'twitter'
+        WHERE ttr.platform = %s
           AND COALESCE(ttr.has_link, false) = false
           AND ttr.captured_at >= NOW() - (%s || ' hours')::INTERVAL
           AND COALESCE(ttr.likes, 0) >= %s
@@ -67,7 +88,7 @@ def fetch_top_human_replies(conn, limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
                  COALESCE(ttr.replies, 0) DESC
         LIMIT %s
         """,
-        (str(hours), MIN_LIKES, limit),
+        (platform, str(hours), MIN_LIKES, limit),
     )
     rows = cur.fetchall()
     cols = [
@@ -79,28 +100,31 @@ def fetch_top_human_replies(conn, limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
 
 
 def load_existing_style_names(conn):
-    """Names already taken in the hardcoded registry or the human-derived
-    table, so the model doesn't propose a collision."""
+    """Every active style name already in the registry (any kind), so the
+    model doesn't propose a collision. Falls back to the in-process STYLES
+    dict if the registry can't be reached.
+
+    Reads via the same route the picker uses, not via direct DB access.
+    """
     names = set()
     try:
         from engagement_styles import get_all_styles  # noqa: WPS433
         names.update(get_all_styles().keys())
     except Exception:
         pass
-    cur = conn.execute(
-        "SELECT name FROM engagement_styles_human_derived WHERE status='active'"
-    )
-    for r in cur.fetchall():
-        names.add(r[0])
+    # No DB fallback for the registry table — get_all_styles() already
+    # consults the route, and the in-memory STYLES dict is the cold-start
+    # floor it merges in. We don't want to bypass the route for an extra
+    # DB read here.
     return names
 
 
-def build_prompt(replies, reserved_names):
+def build_prompt(platform, replies, reserved_names):
     lines = []
     lines.append(
-        "You are analyzing the top-performing human Twitter replies from the "
-        f"last {WINDOW_HOURS} hours and distilling ONE new engagement style "
-        "we can use for our own replies."
+        f"You are analyzing the top-performing human {platform} replies from "
+        f"the last {WINDOW_HOURS} hours and distilling ONE new engagement "
+        "style we can use for our own replies on that platform."
     )
     lines.append("")
     lines.append("## What you're looking for")
@@ -118,17 +142,18 @@ def build_prompt(replies, reserved_names):
         "small account) could imitate and have a chance of replicating."
     )
     lines.append("")
-    lines.append(f"## Top {len(replies)} human replies (by likes)")
+    lines.append(
+        f"## Top {len(replies)} human {platform} replies (by likes)"
+    )
     lines.append("")
     for i, r in enumerate(replies, 1):
-        # Pull the OP tweet text from the URL? We don't have it. Show the
-        # thread URL so the model can infer context from the reply alone.
         lines.append(
             f"### #{i} (likes={r['likes']}, replies={r['replies_count']}, "
             f"rt={r['retweets']})"
         )
         lines.append(f"Thread: {r['thread_url']}")
-        lines.append(f"Reply by @{r['reply_author_handle']}:")
+        handle = r.get("reply_author_handle") or "(unknown)"
+        lines.append(f"Reply by @{handle}:")
         lines.append(f"> {r['reply_content']}")
         lines.append("")
 
@@ -146,9 +171,12 @@ def build_prompt(replies, reserved_names):
     lines.append('  "description": "<one to three sentences describing the style>",')
     lines.append('  "example": "<one short OP + reply pair demonstrating the style>",')
     lines.append('  "best_in": {')
-    lines.append('    "twitter": ["<short context label>", ...],')
-    lines.append('    "reddit":  [],')
-    lines.append('    "linkedin": []')
+    lines.append(f'    "{platform}": ["<short context label>", ...],')
+    # Encourage the model to fill cross-platform `best_in` opportunistically
+    # when the move generalizes; leave as [] if not.
+    for other in PLATFORMS:
+        if other != platform:
+            lines.append(f'    "{other}":  [],')
     lines.append("  },")
     lines.append('  "note": "<one to two sentences: when to use, when not to>"')
     lines.append("}")
@@ -173,8 +201,9 @@ def build_prompt(replies, reserved_names):
         "verbatim from the inputs."
     )
     lines.append(
-        "5. best_in.twitter is required (at least one context label). reddit "
-        "and linkedin can be empty arrays if the style is Twitter-specific."
+        f"5. best_in.{platform} is required (at least one context label). "
+        "Other platforms can stay empty arrays if the style is "
+        f"{platform}-specific."
     )
     lines.append(
         "6. NEVER propose a style about including a product, a URL, or a "
@@ -195,7 +224,6 @@ def call_claude(prompt):
             f"stderr: {result.stderr[:2000]}\n"
         )
         raise RuntimeError(f"claude wrapper failed: rc={result.returncode}")
-    # --output-format json: stdout is a single JSON envelope with `result` text.
     envelope = json.loads(result.stdout)
     return envelope.get("result", "") or ""
 
@@ -214,8 +242,8 @@ def extract_json(text):
     return json.loads(m.group(0))
 
 
-def validate_style(style, reserved_names):
-    """Sanity-check the model output before we INSERT."""
+def validate_style(style, platform, reserved_names):
+    """Sanity-check the model output before we POST."""
     required = {"name", "description", "example", "best_in", "note"}
     missing = required - set(style.keys())
     if missing:
@@ -230,84 +258,163 @@ def validate_style(style, reserved_names):
     best_in = style["best_in"]
     if not isinstance(best_in, dict):
         raise ValueError("best_in must be object")
-    for platform in ("twitter", "reddit", "linkedin"):
-        if platform not in best_in or not isinstance(best_in[platform], list):
-            raise ValueError(f"best_in.{platform} must be a list")
-    if not best_in["twitter"]:
-        raise ValueError("best_in.twitter cannot be empty (source platform)")
+    # We require the calling platform key to be a non-empty list. Other
+    # platforms may be missing or empty — the route accepts them as long
+    # as the JSON shape is sane.
+    pf = best_in.get(platform)
+    if not isinstance(pf, list) or not pf:
+        raise ValueError(
+            f"best_in.{platform} must be a non-empty list (source platform)"
+        )
 
     for field in ("description", "example", "note"):
         if not isinstance(style[field], str) or not style[field].strip():
             raise ValueError(f"{field} must be non-empty string")
 
 
-def insert_style(conn, style, replies, prompt_chars):
+def post_style(style, platform, replies, prompt_chars):
+    """POST the synthesized style to the registry route. The route writes
+    to engagement_styles_registry with kind='human_derived' and platform=
+    <platform> (the picker filters on those two for the latest row).
+    Returns the parsed response (with style + created keys).
+    """
     source_post_ids = [r["id"] for r in replies]
     window_end = datetime.now(timezone.utc)
-    window_start_sql = "NOW() - INTERVAL '%s hours'" % WINDOW_HOURS
+    window_start = window_end - timedelta(hours=WINDOW_HOURS)
     gen_log = (
         f"Synthesized {window_end.isoformat(timespec='seconds')} from "
-        f"top {len(replies)} human twitter replies in last {WINDOW_HOURS}h. "
-        f"Prompt size: {prompt_chars} chars. "
+        f"top {len(replies)} human {platform} replies in last "
+        f"{WINDOW_HOURS}h. Prompt size: {prompt_chars} chars. "
         f"Reply id range: {min(source_post_ids)}-{max(source_post_ids)}."
     )
 
-    cur = conn.execute(
-        f"""
-        INSERT INTO engagement_styles_human_derived
-            (name, description, example, best_in, note,
-             source_window_start, source_window_end,
-             source_post_ids, generation_log, status)
-        VALUES (%s, %s, %s, %s, %s,
-                {window_start_sql}, NOW(),
-                %s, %s, 'active')
-        RETURNING id, name, generated_at
-        """,
-        (
-            style["name"], style["description"], style["example"],
-            json.dumps(style["best_in"]), style["note"],
-            source_post_ids, gen_log,
-        ),
+    payload = {
+        "name": style["name"],
+        "description": style["description"],
+        "example": style["example"],
+        "note": style["note"],
+        "best_in": style["best_in"],
+        "kind": "human_derived",
+        "platform": platform,
+        "first_post_platform": platform,
+        "invented_by_model": "daily-human-style-synthesizer",
+        "source_window_start": window_start.isoformat(timespec="seconds"),
+        "source_window_end": window_end.isoformat(timespec="seconds"),
+        "source_post_ids": source_post_ids,
+        "generation_log": gen_log,
+        "generated_at": window_end.isoformat(timespec="seconds"),
+    }
+    return api_post(
+        "/api/v1/engagement-styles/registry", payload, ok_on_conflict=True,
     )
-    row = cur.fetchone()
-    conn.commit()
-    return {"id": row[0], "name": row[1], "generated_at": row[2]}
+
+
+def synthesize_for_platform(conn, platform, reserved, dry_run=False):
+    """Run the synthesizer for ONE platform. Returns a result dict for
+    summary logging; raises only on genuinely fatal errors (e.g. Claude
+    wrapper crash). Insufficient-data is a soft skip.
+    """
+    replies = fetch_top_human_replies(conn, platform)
+    if len(replies) < MIN_REPLIES:
+        sys.stderr.write(
+            f"[generate_daily_human_style] platform={platform} only "
+            f"{len(replies)} replies in last {WINDOW_HOURS}h (need "
+            f">={MIN_REPLIES}). Skipping.\n"
+        )
+        return {
+            "platform": platform,
+            "status": "skipped_insufficient_data",
+            "source_count": len(replies),
+        }
+    prompt = build_prompt(platform, replies, reserved)
+    sys.stderr.write(
+        f"[generate_daily_human_style] platform={platform} prompt "
+        f"{len(prompt)} chars, {len(replies)} replies, "
+        f"reserved={len(reserved)} names\n"
+    )
+    if dry_run:
+        return {
+            "platform": platform,
+            "status": "dry_run",
+            "source_count": len(replies),
+            "prompt_chars": len(prompt),
+            "source_likes_top": replies[0]["likes"],
+            "source_likes_bottom": replies[-1]["likes"],
+        }
+
+    text = call_claude(prompt)
+    if not text.strip():
+        sys.stderr.write(
+            f"[generate_daily_human_style] platform={platform} empty claude "
+            "output\n"
+        )
+        return {"platform": platform, "status": "empty_claude_output"}
+    style = extract_json(text)
+    validate_style(style, platform, reserved)
+    resp = post_style(style, platform, replies, len(prompt))
+    data = (resp or {}).get("data") or {}
+    created = bool(data.get("created"))
+    inserted = data.get("style") or {}
+    # Add the name to the live reserved set so the NEXT platform in the
+    # same run can't propose the same name.
+    if inserted.get("name"):
+        reserved.add(inserted["name"])
+    return {
+        "platform": platform,
+        "status": "ok" if created else "duplicate",
+        "name": inserted.get("name") or style["name"],
+        "kind": inserted.get("kind", "human_derived"),
+        "source_count": len(replies),
+        "source_likes_top": replies[0]["likes"],
+        "source_likes_bottom": replies[-1]["likes"],
+        "created": created,
+    }
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--platform",
+        action="append",
+        choices=PLATFORMS,
+        help="Limit to one or more platforms (repeatable). Default: all.",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build prompts and report counts; don't call Claude or POST.",
+    )
+    args = ap.parse_args()
+    platforms = args.platform or PLATFORMS
+
     conn = get_conn()
+    summary = []
     try:
-        replies = fetch_top_human_replies(conn)
-        if len(replies) < 3:
-            sys.stderr.write(
-                f"[generate_daily_human_style] only {len(replies)} replies "
-                f"in last {WINDOW_HOURS}h; need >=3. Skipping.\n"
-            )
-            return 0
         reserved = load_existing_style_names(conn)
-        prompt = build_prompt(replies, reserved)
-        sys.stderr.write(
-            f"[generate_daily_human_style] prompt {len(prompt)} chars, "
-            f"{len(replies)} replies, reserved={len(reserved)} names\n"
-        )
-        text = call_claude(prompt)
-        if not text.strip():
-            sys.stderr.write("[generate_daily_human_style] empty claude output\n")
-            return 1
-        style = extract_json(text)
-        validate_style(style, reserved)
-        inserted = insert_style(conn, style, replies, len(prompt))
-        print(json.dumps({
-            "status": "ok",
-            "inserted": {**inserted,
-                         "generated_at": inserted["generated_at"].isoformat()},
-            "source_count": len(replies),
-            "source_likes_top": replies[0]["likes"],
-            "source_likes_bottom": replies[-1]["likes"],
-        }, indent=2))
-        return 0
+        for platform in platforms:
+            try:
+                result = synthesize_for_platform(
+                    conn, platform, reserved, dry_run=args.dry_run,
+                )
+            except Exception as e:
+                sys.stderr.write(
+                    f"[generate_daily_human_style] platform={platform} "
+                    f"failed: {e}\n"
+                )
+                result = {
+                    "platform": platform,
+                    "status": "error",
+                    "error": str(e),
+                }
+            summary.append(result)
     finally:
         conn.close()
+
+    print(json.dumps({"runs": summary}, indent=2, default=str))
+    # Exit non-zero if every platform errored — soft skips don't count.
+    if summary and all(r.get("status") == "error" for r in summary):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
