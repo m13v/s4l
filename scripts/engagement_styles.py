@@ -361,9 +361,13 @@ def get_all_styles():
 
     Merge order (later wins on duplicate name):
         1. Hardcoded STYLES (cold-start floor)
-        2. engagement_styles_registry rows (the live source of truth)
-        3. engagement_styles_human_derived rows (only for names not already
-           in 1/2; defense-in-depth against the synthesizer reusing a name)
+        2. engagement_styles_registry rows (the live source of truth,
+           includes kind in {'seed','model_invented','human_derived'})
+        3. Same registry filtered to kind='human_derived' (only for names
+           not already in 1/2; pure defense-in-depth — under normal
+           operation step 2 already returned every row, so step 3 is a
+           no-op. Kept for the case where _fetch_registry_styles failed
+           but _load_human_derived_styles succeeded.)
 
     Caller MUST treat the returned dict as read-only.
     """
@@ -941,20 +945,37 @@ def compute_target_distribution(platform, context="posting"):
 INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
 CURATED_TOP_N = 5   # the model only ever sees one of the top 5 by score
 
-# Additive 5% branch (2026-05-22): on Twitter, with this probability, the
-# picker bypasses score-based selection and assigns the most recently
-# synthesized "human-derived" style — distilled by
-# scripts/generate_daily_human_style.py from the previous 24h of
-# top-performing HUMAN Twitter replies in thread_top_replies. The goal is
-# to keep our voice continuously calibrated to whatever rhetorical move is
-# winning on the platform right now, without waiting for the historical
-# scoring window to accumulate enough samples to surface it naturally.
+# Additive ~5% branch per platform (2026-05-22, second pass): with this
+# probability, the picker bypasses score-based selection and assigns the
+# most recently synthesized "human-derived" style on the calling platform.
+# Those rows are distilled by scripts/generate_daily_human_style.py from
+# the previous 24h of top-performing HUMAN replies in thread_top_replies
+# and live in engagement_styles_registry with kind='human_derived' (one
+# row per platform per day). Goal: keep our voice continuously calibrated
+# to whatever rhetorical move is winning on each platform right now,
+# without waiting for the historical scoring window to accumulate enough
+# samples to surface it naturally.
 #
-# Distribution: 5% human-derived + 5% invent + 90% scored-use.
-# Gated to platform='twitter' because (a) that's where the synthesizer
-# reads from and (b) the latest row may not have non-twitter best_in
-# context labels filled in.
-HUMAN_DERIVED_RATE = 0.05
+# Distribution per platform: HUMAN_DERIVED_RATE_BY_PLATFORM[platform] +
+# INVENT_RATE + scored-use (defaults: 5% + 5% + 90%).
+#
+# Rate is a per-platform dict so we can tune individually. A platform
+# missing from the dict defaults to HUMAN_DERIVED_RATE_DEFAULT. Set the
+# entry to 0 to disable the branch for one platform (e.g. while the
+# synthesizer is bootstrapping data for that platform).
+HUMAN_DERIVED_RATE_DEFAULT = 0.05
+HUMAN_DERIVED_RATE_BY_PLATFORM = {
+    "twitter": 0.05,
+    "reddit": 0.05,
+    "github": 0.05,
+    "moltbook": 0.05,
+    "linkedin": 0.05,
+}
+
+
+def _human_derived_rate(platform):
+    """Per-platform rate; falls back to HUMAN_DERIVED_RATE_DEFAULT."""
+    return HUMAN_DERIVED_RATE_BY_PLATFORM.get(platform, HUMAN_DERIVED_RATE_DEFAULT)
 
 # Sample-size credibility floor for the picker. Below this, a style's score
 # is linearly shrunk toward 0 so a single viral comment with n=6 can't
@@ -996,67 +1017,56 @@ def _picker_score(row):
 
 def _fetch_latest_human_derived(platform):
     """Return the most recently synthesized active human-derived style for
-    `platform`, or None if the table is empty / DB unavailable / latest row
-    isn't applicable to this platform.
+    `platform`, or None if the registry has none for that platform / the
+    API is unreachable.
 
-    Source: engagement_styles_human_derived table (migration
-    2026-05-22_engagement_styles_human_derived.sql). One row per daily
-    synthesizer run. The latest row by `generated_at` wins.
+    Reads via /api/v1/engagement-styles/registry?kind=human_derived
+    &platform=<platform>&latest=1. The route returns 0 or 1 rows ordered
+    by generated_at DESC.
 
-    Network failures and missing tables are swallowed silently and return
-    None so the picker can fall through to the normal scored path — this
-    branch is best-effort, never load-bearing.
+    Network failures are swallowed silently and return None so the picker
+    falls through to the normal scored path. This branch is best-effort,
+    never load-bearing.
     """
     try:
-        # Lazy import to avoid pulling psycopg2 into callers that don't need
-        # it (e.g. dashboard summaries on environments without DB access).
-        from db import get_conn  # type: ignore
-    except Exception:
-        return None
-    try:
-        conn = get_conn()
-    except Exception:
-        return None
-    try:
-        cur = conn.execute(
-            """
-            SELECT id, name, description, example, best_in, note, generated_at
-            FROM engagement_styles_human_derived
-            WHERE status = 'active'
-            ORDER BY generated_at DESC
-            LIMIT 1
-            """
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/engagement-styles/registry",
+            {
+                "status": "active",
+                "kind": "human_derived",
+                "platform": platform,
+                "latest": "1",
+            },
         )
-        row = cur.fetchone()
-        if not row:
-            return None
-        best_in = row[4] if isinstance(row[4], dict) else (
-            json.loads(row[4]) if row[4] else {}
-        )
-        # Only return if the latest synthesizer run produced a style
-        # whose best_in lists this platform. If not, the picker falls
-        # through to scored-use as if there were no human-derived row.
-        platforms_with_contexts = [
-            p for p, ctxs in (best_in or {}).items() if ctxs
-        ]
-        if platform not in platforms_with_contexts:
-            return None
-        return {
-            "id": row[0],
-            "name": row[1],
-            "description": row[2],
-            "example": row[3],
-            "best_in": best_in,
-            "note": row[5],
-            "generated_at": row[6],
-        }
+        data = (resp or {}).get("data") or {}
+        rows = data.get("styles") or []
     except Exception:
         return None
-    finally:
+    if not rows:
+        return None
+    row = rows[0]
+    best_in = row.get("best_in") or {}
+    if isinstance(best_in, str):
         try:
-            conn.close()
+            best_in = json.loads(best_in)
         except Exception:
-            pass
+            best_in = {}
+    return {
+        # Registry rows use `name` as the primary key, so there's no
+        # standalone numeric id; expose name as the stable identifier.
+        # Callers used to expect `human_derived_id` for log attribution.
+        "id": row.get("name"),
+        "name": row.get("name"),
+        "description": row.get("description") or "",
+        "example": row.get("example") or "",
+        "best_in": best_in,
+        "note": row.get("note") or "",
+        "generated_at": row.get("generated_at"),
+        "platform": row.get("platform"),
+    }
 
 
 def pick_style_for_post(platform, context="posting",
@@ -1105,18 +1115,19 @@ def pick_style_for_post(platform, context="posting",
     """
     rnd = rng or random
 
-    # Human-derived branch (2026-05-22): on Twitter, with HUMAN_DERIVED_RATE
-    # probability, bypass the score-based path entirely and assign the most
-    # recently synthesized style from engagement_styles_human_derived. This
-    # is ADDITIVE to the existing INVENT branch — both 5%s coexist, leaving
-    # ~90% for normal scored-use. Fails open: if the DB query returns no
-    # active row, we fall through to the normal flow as if this branch
+    # Human-derived branch (2026-05-22, second pass): on every platform,
+    # with HUMAN_DERIVED_RATE_BY_PLATFORM[platform] probability, bypass the
+    # score-based path entirely and assign the most recently synthesized
+    # human_derived style for that platform from engagement_styles_registry
+    # (read via the s4l.ai /api/v1/engagement-styles/registry route).
+    #
+    # ADDITIVE to the existing INVENT branch — both rates coexist on a
+    # platform-by-platform basis, leaving the remainder for normal
+    # scored-use. Fails open: if the route returns no active row for this
+    # platform, we fall through to the normal flow as if this branch
     # didn't exist.
-    if (
-        platform == "twitter"
-        and HUMAN_DERIVED_RATE > 0
-        and rnd.random() < HUMAN_DERIVED_RATE
-    ):
+    _hd_rate = _human_derived_rate(platform)
+    if _hd_rate > 0 and rnd.random() < _hd_rate:
         hd = _fetch_latest_human_derived(platform)
         if hd:
             return {
