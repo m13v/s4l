@@ -5045,12 +5045,40 @@ async function handleApi(req, res) {
       if (_stylesMetaCache.value && Date.now() - _stylesMetaCache.at < 3600000) {
         return json(res, { meta: _stylesMetaCache.value, cachedAt: _stylesMetaCache.at });
       }
-      // Cloud Run has no python runtime; the engagement_styles import will
-      // always fail. The frontend already tolerates an empty meta map (style
-      // table just renders without hover tooltips), so short-circuit here
-      // instead of throwing 500.
+      // Cloud Run has no python runtime so the engagement_styles import would
+      // fail. Pull a minimal meta map (name -> kind + description/note/status)
+      // straight from Postgres so the dashboard can still render the origin
+      // bracket ([invented]/[top performer]/[human-derived]) and the hover
+      // tooltip on every row of the by-engagement-style table.
       if (auth.CLIENT_MODE) {
-        return json(res, { meta: {}, error: 'unavailable_in_client_mode' });
+        try {
+          const rows = await pq(
+            "SELECT name, kind, status, description, note, why_existing_didnt_fit, " +
+              "invented_by_model, invented_at, promoted_at, first_post_url, first_post_platform " +
+            "FROM engagement_styles_registry"
+          );
+          const meta = {};
+          for (const r of (rows || [])) {
+            if (!r || !r.name) continue;
+            meta[r.name] = {
+              description: r.description || '',
+              example: '',
+              note: r.note || '',
+              status: r.status || 'active',
+              kind: r.kind || 'seed',
+              why_existing_didnt_fit: r.why_existing_didnt_fit || '',
+              first_post_url: r.first_post_url || null,
+              first_post_platform: r.first_post_platform || null,
+              invented_by_model: r.invented_by_model || null,
+              invented_at: r.invented_at || null,
+              promoted_at: r.promoted_at || null,
+            };
+          }
+          _stylesMetaCache = { at: Date.now(), value: meta };
+          return json(res, { meta });
+        } catch (e) {
+          return json(res, { meta: {}, error: 'client_mode_query_failed: ' + (e && e.message || e) });
+        }
       }
       const code =
         "import json,sys; sys.path.insert(0,'scripts'); " +
@@ -5060,6 +5088,7 @@ async function handleApi(req, res) {
           "'example': v.get('example','') or ''," +
           "'note': v.get('note','') or ''," +
           "'status': v.get('status','active') or 'active'," +
+          "'kind': v.get('kind','seed') or 'seed'," +
           "'why_existing_didnt_fit': v.get('why_existing_didnt_fit','') or ''," +
           "'first_post_url': v.get('first_post_url')," +
           "'first_post_platform': v.get('first_post_platform')," +
@@ -13899,10 +13928,27 @@ function renderStyleStatsPills(containerId, values, selected, labelAll, onChange
 // NOTE: backslashes inside this HTML/JS template get eaten by the outer
 // backtick template, so embedded newline escapes must be double-escaped
 // (double-backslash-n becomes single-backslash-n in the served JS).
+// Origin bracket suffix appended to style names in the "Posts by Engagement Style"
+// table. Sourced from engagement_styles_registry.kind via /api/styles/meta:
+//   seed           -> "[top performer]"  (curated/hardcoded; the original seed set)
+//   model_invented -> "[invented]"       (Claude proposed it during a posting run)
+//   human_derived  -> "[human-derived]"  (daily synthesizer from top human replies)
+// Style names not yet in the registry (cold-start, deleted rows) render with no
+// bracket. The bracket is muted so the style name itself stays the primary read.
+function styleKindBracket(kind) {
+  if (kind === 'model_invented') return 'invented';
+  if (kind === 'human_derived')  return 'human-derived';
+  if (kind === 'seed')           return 'top performer';
+  return '';
+}
 function formatStyleCell(name, metaMap) {
   const safeName = escapeHtml(name == null ? '' : String(name));
   const m = (metaMap && metaMap[name]) || null;
   if (!m || name === '(none)') return safeName;
+  const bracketLabel = styleKindBracket(m.kind);
+  const bracketHtml = bracketLabel
+    ? ' <span style="color:var(--text-muted);font-size:0.85em;">[' + escapeHtml(bracketLabel) + ']</span>'
+    : '';
   const lines = [];
   // Bold the style name as the tooltip header.
   lines.push('**' + name + '**');
@@ -13920,6 +13966,7 @@ function formatStyleCell(name, metaMap) {
   }
   const status = m.status || 'active';
   const provenance = [];
+  if (m.kind) provenance.push('kind=' + m.kind);
   if (status && status !== 'active') provenance.push('status=' + status);
   if (m.invented_at) provenance.push('invented ' + String(m.invented_at).slice(0, 10));
   if (m.first_post_platform) provenance.push('first on ' + m.first_post_platform);
@@ -13928,9 +13975,9 @@ function formatStyleCell(name, metaMap) {
     lines.push('');
     lines.push(provenance.join(' · '));
   }
-  if (lines.length <= 1) return safeName;
+  if (lines.length <= 1) return safeName + bracketHtml;
   const tip = lines.join('\\n');
-  return '<span data-tooltip="' + escapeHtml(tip) + '" style="cursor: help; border-bottom: 1px dotted var(--text-muted);">' + safeName + '</span>';
+  return '<span data-tooltip="' + escapeHtml(tip) + '" style="cursor: help; border-bottom: 1px dotted var(--text-muted);">' + safeName + '</span>' + bracketHtml;
 }
 
 function renderStyleStats(payload, meta) {
