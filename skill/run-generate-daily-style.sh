@@ -1,14 +1,19 @@
 #!/bin/bash
-# run-generate-daily-style.sh — Synthesize one new human-derived engagement
-# style per fire from the last 24h of top human Twitter replies.
+# run-generate-daily-style.sh — Synthesize ONE new human-derived
+# engagement style per platform per fire, from the last 24h of top
+# human replies on each platform.
 #
-# Cadence (launchd, com.m13v.social-daily-human-style.plist): once per day at
-# 08:00 local time.
+# Cadence (launchd, com.m13v.social-daily-human-style.plist): once per day
+# at 08:00 local time.
 #
 # Wraps scripts/generate_daily_human_style.py — which queries
-# thread_top_replies, calls Claude via run_claude.sh, and inserts one row
-# into engagement_styles_human_derived. The engagement_styles picker reads
-# the latest active row on a 5% probability per Twitter reply.
+# thread_top_replies per platform, calls Claude via run_claude.sh, and
+# POSTs each synthesized style to the s4l.ai API route
+# /api/v1/engagement-styles/registry with kind='human_derived' and
+# platform=<platform>. Rows land in engagement_styles_registry alongside
+# seeds and model-invented styles. The engagement_styles picker reads
+# the latest active row per platform with HUMAN_DERIVED_RATE_BY_PLATFORM
+# probability on each pick.
 #
 # Exit codes:
 #   0 — style inserted, OR insufficient input (< 3 replies, logged + skipped)
