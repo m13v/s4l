@@ -17,7 +17,12 @@ const { Pool } = pg;
 // engagement_updated_at, status_checked_at, etc. render with the correct
 // relative-time on the dashboard. See investigation 2026-04-27 (Cyrano post
 // id=20555 displaying "19m ago" for a 7-hour-old post).
-pg.types.setTypeParser(1114, str => str === null ? null : new Date(str + 'Z'));
+// Normalize the Postgres space separator to ISO 'T' so V8 takes its fast ISO
+// date-parse path. Without the 'T', "2026-05-22 16:47:28Z" is a non-standard
+// string that drops into V8's slow legacy parser, which calls ICU
+// LocalTimeOffset per row — the single hottest function under dashboard polling
+// (profiled 2026-05-22). Same UTC semantics, just the fast path.
+pg.types.setTypeParser(1114, str => str === null ? null : new Date(str.replace(' ', 'T') + 'Z'));
 const platform = require('./platform');
 const scheduler = require('./scheduler');
 const auth = require('./auth');
@@ -5548,6 +5553,10 @@ async function handleApi(req, res) {
           return acc;
         }, { n_candidates: 0, n_posted: 0, n_batches: 0 });
         const startedAt = variants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+        // Assignment weights: skill/run-twitter-cycle.sh uses hash(BATCH_ID) % 3,
+        // so each variant gets ~33.3% of batches over time. No fixed cap on
+        // total batches; experiment ends when we decide.
+        variants.forEach(v => { v.weight_pct = 33.33; });
         const experiments = [{
           id: 'twitter-ripen-freshness-abc',
           name: 'Twitter ripen + freshness (A/B/C)',
@@ -5555,6 +5564,7 @@ async function handleApi(req, res) {
           started_at: startedAt,
           hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate.',
           primary_metric: 'thread_age_min_p50',
+          progress: null,  // no fixed target
           totals,
           variants,
         }];
@@ -5618,6 +5628,14 @@ async function handleApi(req, res) {
             acc.n_posted += v.n_posted;
             return acc;
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
+          // Assignment weights: TWITTER_TAIL_LINK_RATE (default 0.5) is the
+          // fraction assigned to the 'link' arm; rest go to 'no_link'. The
+          // env var isn't surfaced live to the dashboard, so we bake the
+          // default here; if the rate is ever changed in production update
+          // the values below to match.
+          tlVariants.forEach(v => {
+            v.weight_pct = v.key === 'link' ? 50 : 50;
+          });
           const tlStartedAt = tlVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
           experiments.push({
             id: 'twitter-tail-link',
@@ -5626,6 +5644,7 @@ async function handleApi(req, res) {
             started_at: tlStartedAt,
             hypothesis: 'Replies without a tail link (no CTA bridge + URL) earn more engagement (views, likes, replies) than replies with one. Click-through is the offsetting cost.',
             primary_metric: 'avg_replies',
+            progress: null,  // no fixed target
             totals: tlTotals,
             variants: tlVariants,
           });
@@ -5701,13 +5720,46 @@ async function handleApi(req, res) {
             return acc;
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
           const adStartedAt = adVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          // Live progress + weight from the campaigns row so the dashboard
+          // always reflects the actual cap and counter. sample_rate is the
+          // fraction routed to the tagged arm; the rest go to untagged.
+          let adProgress = null;
+          let adWeightTagged = 50, adWeightUntagged = 50;
+          let adStatus = 'running';
+          try {
+            const camp = (await pq(
+              `SELECT status, sample_rate, posts_made, max_posts_total
+               FROM campaigns WHERE id = $1`,
+              [AI_DISCLOSURE_CAMPAIGN_ID]
+            ))[0];
+            if (camp) {
+              const rate = Number(camp.sample_rate || 0.5);
+              adWeightTagged = Math.round(rate * 1000) / 10;       // 50.0
+              adWeightUntagged = Math.round((1 - rate) * 1000) / 10;
+              const made = Number(camp.posts_made || 0);
+              const total = camp.max_posts_total != null ? Number(camp.max_posts_total) : null;
+              adProgress = {
+                completed: made,
+                target: total,
+                pct: (total && total > 0) ? (made / total) * 100 : null,
+                source: 'campaigns.posts_made / max_posts_total',
+              };
+              if (camp.status && camp.status !== 'active') adStatus = camp.status;
+            }
+          } catch (e4) {
+            console.error('[api/experiments] ai-disclosure progress lookup failed:', e4 && e4.message || e4);
+          }
+          adVariants.forEach(v => {
+            v.weight_pct = v.key === 'tagged' ? adWeightTagged : adWeightUntagged;
+          });
           experiments.push({
             id: 'ai-disclosure-suffix',
             name: 'AI label suffix (Twitter + Reddit)',
-            status: 'running',
+            status: adStatus,
             started_at: adStartedAt,
             hypothesis: 'Appending " written with s4lai" to replies signals authenticity but may suppress engagement vs unlabeled replies. Comparing views, likes, and replies across the 50/50 coin flip on campaigns.id=3.',
             primary_metric: 'avg_replies',
+            progress: adProgress,
             totals: adTotals,
             variants: adVariants,
           });
@@ -8465,6 +8517,24 @@ const HTML = `<!DOCTYPE html>
   .exp-variant-key { display: inline-block; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); font-weight: 700; margin-right: 6px; }
   .exp-variant-label { font-weight: 600; }
   .exp-variant-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  /* Progress block: lives between the card head and the variant table.
+     Shows either a 0-100% bar (fixed-cap experiments) or a textual
+     "open-ended" line. Kept visually quiet so it doesn't compete with
+     the variant table. */
+  .exp-progress { padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .exp-progress-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .exp-progress-label { font-weight: 600; }
+  .exp-progress-nums { color: var(--text-secondary); text-transform: none; letter-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .exp-progress-bar { margin-top: 6px; height: 6px; background: var(--bg-subtle); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
+  .exp-progress-bar-fill { height: 100%; background: #3b82f6; transition: width 0.3s ease; }
+  /* Actual-share row: shown right above the variant table. Each pill is
+     one variant with its real share of n_posted, so eye can compare
+     against the configured weight in the Weight column below. */
+  .exp-share-row { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); font-size: 12px; flex-wrap: wrap; }
+  .exp-share-label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; font-weight: 600; }
+  .exp-share-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .exp-share-key { font-weight: 700; }
+  .exp-share-n { color: var(--text-muted); font-size: 11px; }
   .style-stats-controls { padding: 10px 20px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
   .style-stats-pill-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .style-stats-pill-row .label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; margin-right: 4px; }
@@ -11168,9 +11238,14 @@ async function loadExperiments() {
       // avg_clicks is populated only for the tail-link experiment; the
       // cycle_variant rows don't compute it and show "—".
       const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
+      // weight_pct is the configured assignment share (33.33 for ripen
+      // ABC, 50 for the two coin-flip experiments). Shown next to the
+      // actual share row above the table so operators can spot drift.
+      const expectedWeight = v.weight_pct != null ? v.weight_pct.toFixed(1) + '%' : '\u2014';
       return (
         '<tr>' +
           '<td><span class="exp-variant-key">' + v.key + '</span> <span class="exp-variant-label">' + (v.label || '') + '</span><div class="exp-variant-desc">' + (v.desc || '') + '</div></td>' +
+          '<td class="num">' + expectedWeight + '</td>' +
           '<td class="num">' + fmtIntK(v.n_candidates) + '</td>' +
           '<td class="num">' + batches + '</td>' +
           '<td class="num">' + fmtIntK(v.n_posted) + '</td>' +
@@ -11184,6 +11259,51 @@ async function loadExperiments() {
       );
     }).join('');
     const startedTxt = exp.started_at ? new Date(exp.started_at).toLocaleString() : '\u2014';
+    // Actual-share row: n_posted per variant divided by total n_posted,
+    // shown above the variant table so any drift between configured
+    // weight and real traffic is visible at a glance.
+    const totalPosted = variants.reduce((s, v) => s + Number(v.n_posted || 0), 0);
+    const actualShareHtml = totalPosted > 0
+      ? ('<div class="exp-share-row">' +
+          '<span class="exp-share-label">Actual share:</span> ' +
+          variants.map(v => {
+            const pct = (Number(v.n_posted || 0) / totalPosted) * 100;
+            return '<span class="exp-share-pill"><span class="exp-share-key">' + v.key + '</span> ' +
+                   pct.toFixed(1) + '% <span class="exp-share-n">(' + fmtIntK(v.n_posted) + ')</span></span>';
+          }).join('') +
+        '</div>')
+      : '';
+    // Progress bar: renders only when the experiment has a fixed target
+    // (e.g. AI-disclosure has campaigns.max_posts_total=5000). Open-ended
+    // experiments render an "ongoing" pill so operators can tell at a
+    // glance which experiments have a natural end vs which run until a
+    // human decides.
+    let progressHtml = '';
+    if (exp.progress && exp.progress.target != null && exp.progress.target > 0) {
+      const completed = Number(exp.progress.completed || 0);
+      const target = Number(exp.progress.target);
+      const pct = Math.min(100, Math.max(0, (completed / target) * 100));
+      const remaining = Math.max(0, target - completed);
+      progressHtml = (
+        '<div class="exp-progress">' +
+          '<div class="exp-progress-head">' +
+            '<span class="exp-progress-label">Progress to cap</span>' +
+            '<span class="exp-progress-nums">' + fmtIntK(completed) + ' / ' + fmtIntK(target) +
+              ' (' + pct.toFixed(1) + '%, ' + fmtIntK(remaining) + ' to go)</span>' +
+          '</div>' +
+          '<div class="exp-progress-bar"><div class="exp-progress-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
+        '</div>'
+      );
+    } else {
+      progressHtml = (
+        '<div class="exp-progress">' +
+          '<div class="exp-progress-head">' +
+            '<span class="exp-progress-label">Progress to cap</span>' +
+            '<span class="exp-progress-nums">No fixed target. Open-ended; ends when decided.</span>' +
+          '</div>' +
+        '</div>'
+      );
+    }
     return (
       '<div class="exp-card">' +
         '<div class="exp-card-head">' +
@@ -11198,9 +11318,12 @@ async function loadExperiments() {
             '<span class="exp-primary">primary: ' + (exp.primary_metric || '\u2014') + '</span>' +
           '</div>' +
         '</div>' +
+        progressHtml +
+        actualShareHtml +
         '<table class="exp-table">' +
           '<thead><tr>' +
             '<th>Variant</th>' +
+            '<th class="num">Weight</th>' +
             '<th class="num">Cands</th>' +
             '<th class="num">Batches</th>' +
             '<th class="num">Posted</th>' +
@@ -18036,7 +18159,7 @@ async function loadActivity() {
 function startActivityAutoRefresh() {
   if (_activityTimer) return;
   loadActivity();
-  _activityTimer = setInterval(loadActivity, 5000);
+  _activityTimer = setInterval(loadActivity, 15000);
 }
 function stopActivityAutoRefresh() {
   if (_activityTimer) { clearInterval(_activityTimer); _activityTimer = null; }
@@ -18343,7 +18466,7 @@ function saStartApp() {
   // scoped clients.
   if (!isCloud) {
     loadStatus();
-    setInterval(loadStatus, 5000);
+    setInterval(loadStatus, 15000);
   }
   loadActivityStats();
   loadCohortStats();
