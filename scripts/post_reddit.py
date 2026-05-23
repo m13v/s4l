@@ -2156,6 +2156,10 @@ def _draft_iteration(plan, config, reddit_username):
     plan["draft_cost"] = usage["cost_usd"]
     plan["draft_session_id"] = usage.get("session_id")
     plan["phase"] = "draft"
+    # Stash the picker assignment so _post_iteration (which runs in a
+    # separate process via JSON-serialized plan) can pass it to
+    # validate_or_register for USE-mode drift coercion + INVENT-mode gating.
+    plan["style_assignment"] = style_assignment
     return plan
 
 
@@ -2163,6 +2167,11 @@ def _post_iteration(plan, reddit_username):
     """Execute browser CDP posts for the decisions in plan. Returns (posted, failed)."""
     project_name = plan["project_name"]
     decisions = plan.get("decisions") or []
+    # Picker assignment was stamped by _draft_iteration; survives JSON
+    # serialization across the draft→post process boundary. Used below
+    # in validate_or_register for USE-mode drift coercion + INVENT-mode
+    # gating. Fallback to {} for plans drafted before this field landed.
+    style_assignment = plan.get("style_assignment") or {}
 
     if not decisions:
         return 0, 0
