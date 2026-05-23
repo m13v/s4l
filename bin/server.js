@@ -901,15 +901,25 @@ function getRunningPipelines() {
     if (!Number.isFinite(startedMs)) continue;
     matches.push({ pid, ppid, pgid, scriptDashed, startedMs });
   }
-  // Dedupe: per (scriptDashed, pgid), keep the leader (lowest PID, which is
-  // also the oldest process in the group). Concurrent runs of the same script
-  // come from launchd's double-fork wrapper and have distinct pgids, so they
-  // are preserved as separate rows.
+  // Dedupe: per (scriptDashed, pgid), keep the entry with the EARLIEST
+  // startedMs (the actual group leader). We previously keyed off "lowest PID,
+  // which is also the oldest process in the group" — that assumption breaks
+  // when macOS recycles PIDs: a long-running cycle (e.g. run-twitter-cycle
+  // PID 34471 started 17:45) can fork a child later (PID 26680 started 18:24)
+  // whose PID is numerically lower than the leader's, and the lower-PID
+  // dedupe then mis-stamps the row with the child's start time. Ties on
+  // startedMs fall back to lowest PID for stability.
+  // Concurrent runs of the same script come from launchd's double-fork
+  // wrapper and have distinct pgids, so they remain separate rows.
   const byKey = new Map();
   for (const e of matches) {
     const key = `${e.scriptDashed}\t${e.pgid}`;
     const prev = byKey.get(key);
-    if (!prev || e.pid < prev.pid) byKey.set(key, e);
+    if (!prev
+        || e.startedMs < prev.startedMs
+        || (e.startedMs === prev.startedMs && e.pid < prev.pid)) {
+      byKey.set(key, e);
+    }
   }
   const result = [];
   for (const e of byKey.values()) {
