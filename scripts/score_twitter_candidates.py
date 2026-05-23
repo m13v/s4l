@@ -247,6 +247,8 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
             "search_topic": tweet.get("search_topic", ""),
             "matched_project": project,
             "batch_id": batch_id,
+            "discovery_batch_id": batch_id,
+            "cycle_variant": os.environ.get("TWITTER_CYCLE_VARIANT") or None,
             # Stamp the machine's Twitter handle so the (tweet_url, our_account)
             # composite unique gives each account its own candidate row.
             # Without this, account A's 'posted' status on tweet X would lock
@@ -279,6 +281,29 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
         try:
             api_post("/api/v1/twitter-candidates", body)
             inserted += 1
+            try:
+                _tweet_iso = body.get("tweet_posted_at") or body.get("tweet_created_at") or ""
+                _disc_iso = body.get("discovered_at") or body.get("created_at") or ""
+                _url = body.get("tweet_url") or body.get("url") or ""
+                _age_h = ""
+                if _tweet_iso and _disc_iso:
+                    from datetime import datetime as _dt
+                    try:
+                        _t = _dt.fromisoformat(_tweet_iso.replace("Z", "+00:00"))
+                        _d = _dt.fromisoformat(_disc_iso.replace("Z", "+00:00"))
+                        _age_h = f"{(_d.timestamp() - _t.timestamp()) / 3600:.2f}"
+                    except Exception:
+                        _age_h = ""
+                print(
+                    f"[twitter_discovery] batch_id={batch_id} "
+                    f"discovery_batch_id={batch_id} "
+                    f"cycle_variant={os.environ.get('TWITTER_CYCLE_VARIANT') or ''} "
+                    f"tweet_age_hours={_age_h} discovered_at={_disc_iso} url={_url}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                pass
         except SystemExit as e:
             # http_api raises SystemExit on terminal failure. Keep iterating;
             # the cycle should not die because one URL hit a 4xx validation
