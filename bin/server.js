@@ -3899,76 +3899,8 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
-  // (HTML surface route lives in the outer router; only /api/* routes here.)
-  if (false && p === '/twitterapi-early-replies' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<!doctype html>
-<html><head><meta charset="utf-8"><title>twitterapi.io early replies</title>
-<style>
-  body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #0b0b0b; color: #e7e7e7; }
-  h1 { font-size: 18px; margin: 0 0 12px; }
-  .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { padding: 6px 8px; border-bottom: 1px solid #222; vertical-align: top; text-align: left; }
-  th { background: #161616; font-weight: 600; color: #aaa; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-  tr:hover { background: #131313; }
-  a { color: #6cb9ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .handle { color: #ffb84c; font-weight: 600; }
-  .text { max-width: 480px; color: #ccc; }
-  .stat { font-variant-numeric: tabular-nums; color: #999; }
-  .empty { color: #888; padding: 24px; text-align: center; }
-  .status-observed { color: #6cb9ff; font-size: 11px; }
-</style>
-</head><body>
-<h1>twitterapi.io early replies (Fazm, TEST MODE)</h1>
-<div class="meta">Observe-only. Webhook fires from filter rules at twitterapi.io insert rows here as <code>status='observed'</code>. No auto-drafting. <a href="/api/webhooks/twitterapi-io/recent">JSON feed</a></div>
-<div id="root" class="empty">Loading\u2026</div>
-<script>
-  function fmtTime(s) {
-    if (!s) return '';
-    const d = new Date(s);
-    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  }
-  async function load() {
-    const root = document.getElementById('root');
-    try {
-      const r = await fetch('/api/webhooks/twitterapi-io/recent?limit=200');
-      const data = await r.json();
-      if (!data.rows || !data.rows.length) {
-        root.innerHTML = '<div class="empty">No events yet. Waiting for first webhook fire from twitterapi.io.</div>';
-        return;
-      }
-      let html = '<table><thead><tr>'
-        + '<th>received</th><th>monitored</th><th>author</th>'
-        + '<th>tweet</th><th>replies</th><th>likes</th><th>views</th>'
-        + '<th>posted_at</th><th>status</th>'
-        + '</tr></thead><tbody>';
-      for (const row of data.rows) {
-        html += '<tr>'
-          + '<td class="stat">' + fmtTime(row.received_at) + '</td>'
-          + '<td class="handle">@' + (row.monitored_handle || '') + '</td>'
-          + '<td>@' + (row.author_handle || '') + '</td>'
-          + '<td class="text"><a href="' + (row.tweet_url || '#') + '" target="_blank">' + (row.tweet_text || '').replace(/</g, '&lt;') + '</a></td>'
-          + '<td class="stat">' + (row.reply_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + (row.like_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + (row.view_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + fmtTime(row.tweet_posted_at) + '</td>'
-          + '<td class="status-observed">' + (row.status || '') + '</td>'
-          + '</tr>';
-      }
-      html += '</tbody></table>';
-      root.innerHTML = html;
-    } catch (e) {
-      root.innerHTML = '<div class="empty" style="color:#ef4444;">Failed to load: ' + e.message + '</div>';
-    }
-  }
-  load();
-  setInterval(load, 30000);
-</script>
-</body></html>`);
-    return;
-  }
+  // (HTML surface route /twitterapi-early-replies is in the outer router
+  // below since handleApi() only handles /api/* paths.)
 
   // Auth: no-op when CLIENT_MODE is unset (local operator use).
   // When CLIENT_MODE=1, require a Firebase Bearer token and enforce admin/project claims.
@@ -18969,6 +18901,79 @@ function renderHtml() {
     .replace('__SA_POSTHOG_CONFIG_PLACEHOLDER__', JSON.stringify(posthogWebConfig()));
 }
 
+// Tiny standalone HTML surface for the twitterapi.io early-reply test mode.
+// TEST MODE = observe-only; user inspects rows landing here before we wire
+// any actions. Read-only feed; the JSON endpoint backing it is also public
+// since this is dev-grade visibility. Restrict via Cloud Run IAM or a header
+// gate before any auto-action is layered on top.
+function renderTwitterapiEarlyRepliesPage() {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>twitterapi.io early replies</title>
+<style>
+  body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #0b0b0b; color: #e7e7e7; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #222; vertical-align: top; text-align: left; }
+  th { background: #161616; font-weight: 600; color: #aaa; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:hover { background: #131313; }
+  a { color: #6cb9ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .handle { color: #ffb84c; font-weight: 600; }
+  .text { max-width: 480px; color: #ccc; }
+  .stat { font-variant-numeric: tabular-nums; color: #999; }
+  .empty { color: #888; padding: 24px; text-align: center; }
+  .status-observed { color: #6cb9ff; font-size: 11px; }
+</style>
+</head><body>
+<h1>twitterapi.io early replies (Fazm, TEST MODE)</h1>
+<div class="meta">Observe-only. Webhook fires from filter rules at twitterapi.io insert rows here as <code>status='observed'</code>. No auto-drafting. <a href="/api/webhooks/twitterapi-io/recent">JSON feed</a></div>
+<div id="root" class="empty">Loading\u2026</div>
+<script>
+  function fmtTime(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  }
+  async function load() {
+    const root = document.getElementById('root');
+    try {
+      const r = await fetch('/api/webhooks/twitterapi-io/recent?limit=200');
+      const data = await r.json();
+      if (!data.rows || !data.rows.length) {
+        root.innerHTML = '<div class="empty">No events yet. Waiting for first webhook fire from twitterapi.io.</div>';
+        return;
+      }
+      let html = '<table><thead><tr>'
+        + '<th>received</th><th>monitored</th><th>author</th>'
+        + '<th>tweet</th><th>replies</th><th>likes</th><th>views</th>'
+        + '<th>posted_at</th><th>status</th>'
+        + '</tr></thead><tbody>';
+      for (const row of data.rows) {
+        html += '<tr>'
+          + '<td class="stat">' + fmtTime(row.received_at) + '</td>'
+          + '<td class="handle">@' + (row.monitored_handle || '') + '</td>'
+          + '<td>@' + (row.author_handle || '') + '</td>'
+          + '<td class="text"><a href="' + (row.tweet_url || '#') + '" target="_blank">' + (row.tweet_text || '').replace(/</g, '&lt;') + '</a></td>'
+          + '<td class="stat">' + (row.reply_count_at_arrival ?? '') + '</td>'
+          + '<td class="stat">' + (row.like_count_at_arrival ?? '') + '</td>'
+          + '<td class="stat">' + (row.view_count_at_arrival ?? '') + '</td>'
+          + '<td class="stat">' + fmtTime(row.tweet_posted_at) + '</td>'
+          + '<td class="status-observed">' + (row.status || '') + '</td>'
+          + '</tr>';
+      }
+      html += '</tbody></table>';
+      root.innerHTML = html;
+    } catch (e) {
+      root.innerHTML = '<div class="empty" style="color:#ef4444;">Failed to load: ' + e.message + '</div>';
+    }
+  }
+  load();
+  setInterval(load, 30000);
+</script>
+</body></html>`;
+}
+
 function renderTikTokOauthCallback(rawUrl) {
   const u = new URL(rawUrl, 'http://localhost');
   const code = u.searchParams.get('code') || '';
@@ -19013,6 +19018,9 @@ const server = http.createServer((req, res) => {
     Promise.resolve(handleApi(req, res)).catch(e => {
       try { json(res, { error: e.message || String(e) }, 500); } catch {}
     });
+  } else if (pathname === '/twitterapi-early-replies') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(renderTwitterapiEarlyRepliesPage());
   } else if (pathname === '/oauth/tiktok/callback') {
     // Minimal TikTok OAuth landing page. We do not exchange the code here
     // because the dashboard Cloud Run service does not carry the TikTok
