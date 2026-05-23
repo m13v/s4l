@@ -103,6 +103,20 @@ def cmd_phase0_salvage(batch_id: str, freshness_hours: int, legacy_cutoff: str) 
     d = resp.get("data") or {}
     expired = int(d.get("expired_count") or 0)
     salvaged = int(d.get("salvaged_count") or 0)
+    try:
+        _salvaged = int(d.get("salvaged_count", 0) or 0)
+        _expired = int(d.get("expired_count", 0) or 0)
+        _sources = d.get("salvaged_from_batches") or []
+        if _salvaged > 0:
+            _src_str = ",".join(str(s) for s in _sources) if _sources else "unknown"
+            print(
+                f"[twitter_salvage] batch={batch_id} salvaged_count={_salvaged} "
+                f"expired_count={_expired} salvaged_from_batches={_src_str}",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception:
+        pass
     sys.stdout.write(f"{expired}|{salvaged}\n")
     return 0
 
