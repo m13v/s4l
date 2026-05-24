@@ -418,6 +418,11 @@ if res.returncode == 0 and res.stdout.strip():
     except Exception:
         picked = []
 
+# pick_project.py returns a single dict when --count=1, a list when --count>1.
+# Normalize to a list so the rest of the heredoc works either way.
+if isinstance(picked, dict):
+    picked = [picked]
+
 chosen = []
 for p in picked:
     try:
