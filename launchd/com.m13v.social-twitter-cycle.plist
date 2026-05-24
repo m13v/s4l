@@ -12,9 +12,17 @@
 	<key>StartCalendarInterval</key>
 	<array>
 		<dict><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Minute</key><integer>5</integer></dict>
+		<dict><key>Minute</key><integer>10</integer></dict>
 		<dict><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Minute</key><integer>20</integer></dict>
+		<dict><key>Minute</key><integer>25</integer></dict>
 		<dict><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Minute</key><integer>35</integer></dict>
+		<dict><key>Minute</key><integer>40</integer></dict>
 		<dict><key>Minute</key><integer>45</integer></dict>
+		<dict><key>Minute</key><integer>50</integer></dict>
+		<dict><key>Minute</key><integer>55</integer></dict>
 	</array>
 	<key>StandardOutPath</key>
 	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-twitter-cycle-stdout.log</string>
