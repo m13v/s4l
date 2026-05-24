@@ -408,7 +408,7 @@ import project_excludes as pe
 
 res = subprocess.run(
     ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
-     '--platform', 'twitter', '--count', '3', '--json'],
+     '--platform', 'twitter', '--count', '1', '--json'],
     capture_output=True, text=True, timeout=30,
 )
 picked = []
