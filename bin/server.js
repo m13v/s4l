@@ -9625,29 +9625,6 @@ function formatIntervalSecs(secs) {
   return secs + 's';
 }
 
-function renderFreqCell(jobType, interval, jobs) {
-  // If the plist's real interval isn't in the canonical list (e.g. 15 min /
-  // 900s calendar jobs), synthesize an option so the select displays the
-  // true cadence instead of silently falling back to the first option.
-  const hasCanonical = INTERVALS.some(i => i.value === interval);
-  const extra = (interval != null && !hasCanonical)
-    ? '<option value="' + interval + '" selected>' + formatIntervalSecs(interval) + '</option>'
-    : '';
-  const intervalOptions = INTERVALS.map(i =>
-    '<option value="' + i.value + '"' + (i.value === interval ? ' selected' : '') + '>' + i.label + '</option>'
-  ).join('');
-  // Find the most recent lastRun across all jobs in this phase
-  const rowJobs = jobs.filter(j => j.type === jobType);
-  let latestRun = null;
-  for (const j of rowJobs) {
-    if (j.lastRun && (!latestRun || new Date(j.lastRun) > new Date(latestRun))) latestRun = j.lastRun;
-  }
-  return '<td class="freq-cell" data-freq="' + jobType + '">' +
-    '<div class="cell-info" data-field="freq-lastrun">' + nextRunTime(latestRun, interval) + '</div>' +
-    '<select onchange="setPhaseInterval(\\'' + jobType + '\\', this.value)">' + extra + intervalOptions + '</select>' +
-  '</td>';
-}
-
 function buildMatrix(jobs) {
   const map = {};
   jobs.forEach(j => { map[j.type + ':' + j.platform] = j; });
@@ -9762,34 +9739,6 @@ function updateOtherJobsInPlace(jobs) {
     }
   }
   return true;
-}
-
-function updateFreqCells(jobs) {
-  for (const jobType of JOB_TYPES) {
-    const td = document.querySelector('[data-freq="' + jobType + '"]');
-    if (!td) continue;
-    const rowJobs = jobs.filter(j => j.type === jobType);
-    let latestRun = null;
-    for (const j of rowJobs) {
-      if (j.lastRun && (!latestRun || new Date(j.lastRun) > new Date(latestRun))) latestRun = j.lastRun;
-    }
-    const interval = phaseInterval(rowJobs);
-    const el = td.querySelector('[data-field="freq-lastrun"]');
-    if (el) el.textContent = nextRunTime(latestRun, interval);
-    const sel = td.querySelector('select');
-    if (sel && interval != null) {
-      // If the real interval isn't in the canonical INTERVALS list, make sure
-      // the select has a matching option so sel.value assignment sticks.
-      const hasOpt = Array.from(sel.options).some(o => Number(o.value) === interval);
-      if (!hasOpt) {
-        const opt = document.createElement('option');
-        opt.value = String(interval);
-        opt.textContent = formatIntervalSecs(interval);
-        sel.insertBefore(opt, sel.firstChild);
-      }
-      if (String(sel.value) !== String(interval)) sel.value = String(interval);
-    }
-  }
 }
 
 // Job history state ---------------------------------------------------------
