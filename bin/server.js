@@ -9605,18 +9605,6 @@ function renderCell(job) {
   '</div></td>';
 }
 
-function phaseInterval(rowJobs) {
-  const vals = rowJobs.map(j => j.interval).filter(v => typeof v === 'number' && v > 0);
-  if (!vals.length) return null;
-  const counts = new Map();
-  for (const v of vals) counts.set(v, (counts.get(v) || 0) + 1);
-  let best = null;
-  for (const [v, c] of counts) {
-    if (!best || c > best.c || (c === best.c && v < best.v)) best = { v, c };
-  }
-  return best.v;
-}
-
 function formatIntervalSecs(secs) {
   if (!Number.isFinite(secs) || secs <= 0) return secs + 's';
   if (secs % 86400 === 0) { const d = secs / 86400; return d + (d === 1 ? ' day' : ' days'); }
