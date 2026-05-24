@@ -7933,9 +7933,6 @@ const HTML = `<!DOCTYPE html>
   .matrix-table { width: 100%; border-collapse: collapse; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .matrix-table th { text-align: center; padding: 12px 16px; font-size: 12px; font-weight: 500; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); background: var(--bg-subtle); }
   .matrix-table th.row-header { width: 90px; }
-  .matrix-table th.freq-header { width: 90px; }
-  .freq-cell { text-align: center; vertical-align: middle; background: var(--bg-subtle); }
-  .freq-cell select { font-size: 12px; padding: 4px 6px; }
   .matrix-table td { padding: 10px 8px; font-size: 13px; border-bottom: 1px solid var(--divider); vertical-align: middle; text-align: center; }
   .matrix-table td.row-label { text-align: left; padding-left: 16px; font-weight: 600; font-size: 14px; color: var(--text); background: var(--bg-subtle); width: 100px; }
   .matrix-table tr:last-child td { border-bottom: none; }
@@ -7945,6 +7942,8 @@ const HTML = `<!DOCTYPE html>
   .matrix-cell .cell-info { font-size: 11px; color: var(--text); }
   .matrix-cell .cell-actions { display: flex; gap: 4px; margin-top: 2px; }
   .matrix-cell .cell-actions .btn { padding: 3px 8px; font-size: 11px; }
+  .matrix-cell .cell-freq { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+  .matrix-cell .cell-freq:empty { display: none; }
   .matrix-cell-empty { color: var(--text-very-faint); font-size: 20px; }
   .matrix-cell-span { text-align: center; }
   .job-name { font-weight: 600; }
@@ -8886,7 +8885,6 @@ const HTML = `<!DOCTYPE html>
       <thead>
         <tr>
           <th class="row-header"></th>
-          <th class="freq-header">Freq</th>
           <th>Reddit</th>
           <th>Twitter</th>
           <th>LinkedIn</th>
@@ -9588,6 +9586,11 @@ function renderLiveLink(job) {
     '</span>';
 }
 
+function renderCellFreqLine(job) {
+  if (!job || !job.interval) return '';
+  return formatIntervalSecs(job.interval) + ' · ' + nextRunTime(job.lastRun, job.interval);
+}
+
 function renderCell(job) {
   if (!job) return '<td><span class="matrix-cell-empty">-</span></td>';
   const statusLabel = job.status === 'running' ? 'Running' : job.status === 'blocked' ? 'Blocked' : job.status === 'scheduled' ? 'Scheduled' : 'Stopped';
@@ -9598,6 +9601,7 @@ function renderCell(job) {
   return '<td data-job="' + job.label + '"><div class="matrix-cell">' +
     '<span class="badge ' + job.status + '" data-field="status">' + statusLabel + '</span>' +
     '<div class="cell-actions">' + renderToggle(job.label, job.loaded) + runStopBtn + renderLiveLink(job) + '</div>' +
+    '<div class="cell-freq" data-field="freq">' + renderCellFreqLine(job) + '</div>' +
   '</div></td>';
 }
 
@@ -9650,12 +9654,7 @@ function buildMatrix(jobs) {
 
   let html = '';
   for (const jobType of JOB_TYPES) {
-    const rowJobs = jobs.filter(j => j.type === jobType);
-    const interval = phaseInterval(rowJobs);
-
     html += '<tr><td class="row-label">' + jobType + '</td>';
-    html += renderFreqCell(jobType, interval, jobs);
-
     for (const plat of PLATFORMS) {
       html += renderCell(map[jobType + ':' + plat] || null);
     }
@@ -9681,6 +9680,8 @@ function updateCell(td, job) {
     const liveSlot = actions.querySelector('[data-field="live"]');
     if (liveSlot) liveSlot.outerHTML = renderLiveLink(job);
   }
+  const freq = td.querySelector('[data-field="freq"]');
+  if (freq) freq.textContent = renderCellFreqLine(job);
 }
 
 function renderOtherJobRow(job) {
@@ -11113,7 +11114,6 @@ async function loadStatus() {
         const td = container.querySelector('[data-job="' + job.label + '"]');
         if (td) updateCell(td, job);
       });
-      updateFreqCells(data.jobs);
       // If rowset changed (new/removed jobs), rebuild the table. Otherwise
       // update rows in place to avoid flicker.
       const existingRows = otherSection.querySelectorAll('[data-other-job]').length;
