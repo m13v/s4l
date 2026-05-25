@@ -1,0 +1,828 @@
+===URL=== https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/
+{
+  "thread": {
+    "title": "I want to automatically scrape my news, podcasts and youtube in the morning. What kind of tools do you use for similar uses?",
+    "author": "ExactFun",
+    "selftext": "So, I am currently using ChannelTube to do a daily scrape of Youtube to download the latest vids from channels I like. These get downloaded directly into a special Jellyfin library and Jellyfin gets ping to sync when the downloads are done.\n\nWhat I would like to achieve is a globally automated set of scrapers to get different news, videos, podcasts and maybe even social media feeds, all so I can avoid using websites that are assaulting me with content and navigating my attention into things I'm not actively interested in.\n\nWhat kind of tools and software do you use to control your media consumption? Any ideas on best practices to avoid these services getting flagged as bots? I frequently have to update the cookies on ChannelTube to avoid the client getting rejected. I could probably script something to ensure this gets regularly updated.\n\nAnyone use RSS feeds? Are they still relevant in current year?\n\nAny recommendations for dashboards? I use Glance atm which likely has widgets I could use to filter my news and new videos.\n\nI'm open to scripting my own things but I'm curious what exists out there to scrape websites and download media on a schedule. Anything useful to organize playlists or cues? Would love to sync it to my smart speaker or smart screens, have a little good morning news feed.\n\nNot particularly interested in agents. I don't trust them to be exhaustive or make the right choices, not yet anyways. I'd trust them even less to not accidentally DDOS smaller websites.\n\nBrainstorm with me. \ud83d\ude04\n\nTL;DR: I want to download my news, podcasts and youtube so I don't go on websites that assault my senses and make me forget what I was looking for.",
+    "score": 61,
+    "num_comments": 52,
+    "subreddit": "r/selfhosted",
+    "url": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/"
+  },
+  "comments": [
+    {
+      "id": "t1_oluhw5m",
+      "author": "asimovs-auditor",
+      "body": "Expand the replies to this comment to learn how AI was used in this post/project.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/oluhw5m/"
+    },
+    {
+      "id": "t1_olujbhw",
+      "author": "shimoheihei2",
+      "body": "I've been using FreshRSS for years, still have tons of feeds in there.",
+      "score": 32,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olujbhw/"
+    },
+    {
+      "id": "t1_olujj6w",
+      "author": "ConfusionHumble3061",
+      "body": "I'm currently having a n8n workflow for it. I gather rss from tech, news, hacker news, github repo weekly into a mail newsletter that my own @mail sending to itself.",
+      "score": 12,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olujj6w/"
+    },
+    {
+      "id": "t1_oluitmy",
+      "author": "pinetree_beachboy",
+      "body": "This has given me the idea to scrape the videos I like! I\u2019m a starter in this sub and thanks for the tip!",
+      "score": 10,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/oluitmy/"
+    },
+    {
+      "id": "t1_olum6e6",
+      "author": "The1TrueSteb",
+      "body": "I heavily use rss feeds. \n\nI use Glance (the homepage) and it has excellent feeds. RSS feeds, Youtube feeds, reddit feeds (I clicked on this post because it showed up on my rss feed). \n\nI have the same goal/interest as you. I don't care about 'downloading' my content, I focus more on 'aggregating' it. I find that to be more reliable and stable. \n\nFreshRSS (have not personally used it) and Kill the Newsletter is probably what you want. FreshRSS for all your rss feeds, and Kill the Newsletter to turn newsletters (federal/local news for me) into rss feeds. \n\nRSS feeds are definitely not mainstream anymore, but it can be done. Kill the Newsletter has been a game changer for me. You can get almost anything in a newsletter, so converting them into RSS feeds is awesome.\n\nInstead of setting up a different RSS feed for every newsletter, I created one RSS/email and then forward all my newsletter to than mailbox that then converts them into RSS feeds. I personally find that easier to manage instead of having a billion different burner RSS feeds. Especially since some newsletters won't accept non mainstream email accounts. ",
+      "score": 8,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olum6e6/"
+    },
+    {
+      "id": "t1_olux7ho",
+      "author": "KandevDev",
+      "body": "rss-bridge or freshrss for the news, podverse for podcast aggregation, channeltube for youtube (which you already have). running them all under one docker compose with traefik in front lets you have one URL (\"morning brief\") with everything. the missing piece is usually summarization, but you can pipe to claude/ollama for that downstream.",
+      "score": 4,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olux7ho/"
+    },
+    {
+      "id": "t1_olunx9d",
+      "author": "igmyeongui",
+      "body": "It would be awesome to be able to scrape news site in a local app that shows you every sources combined together without all the crap and ads. ",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olunx9d/"
+    },
+    {
+      "id": "t1_olums88",
+      "author": "snake785",
+      "body": "RSS might be your best bet. Hopefully your news sites still offer RSS feeds because I've noticed more of them removing RSS feeds.\u00a0 But enough of the sources I read still offer them.\u00a0\n\n\nI think there was a way to get RSS feeds for YouTube channels that you can add to your RSS reader.\n\n\nI would think most podcasts also offer RSS feeds\n\n\nAs for a reader, I use Miniflux which is pretty good if you want a more lightweight and minimal interface, or if you use a reader that supports the Fever or Google Reader API's, I use Capy Reader on Android and it works well for me for reading my feeds.\u00a0\n\n\nSomeone else suggested FreshRSS which is another good option as well.\u00a0",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olums88/"
+    },
+    {
+      "id": "t1_oluplo8",
+      "author": "poro_8015",
+      "body": "freshrss plus a podcast downloader like podgrab covers most of this",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/oluplo8/"
+    },
+    {
+      "id": "t1_oluvyrn",
+      "author": "coderstephen",
+      "body": "I use RSS whenever I can, been using RSS for a very long time. I use n8n otherwise when RSS is not available.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/oluvyrn/"
+    },
+    {
+      "id": "t1_olv0mzu",
+      "author": "emorockstar",
+      "body": "I\u2019d recommend PigeonPod for your YouTube and podcast options. Doesn\u2019t help for written news though.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olv0mzu/"
+    },
+    {
+      "id": "t1_olvr6t2",
+      "author": "criss006",
+      "body": "RSS still feels like the cleanest core for this, especially once you stop chasing platforms and just aggregate sources.\n\nFreshRSS + a couple custom feeds (YouTube, podcasts) gets surprisingly close to that morning dashboard idea.\n\nEverything else ends up being glue scripts around RSS anyway.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olvr6t2/"
+    },
+    {
+      "id": "t1_olvwmce",
+      "author": "Agrrajag",
+      "body": "You can RSS most major news sources\nYou can pull YouTube transcripts for your videos\nYou might be able to pull your podcasts and have Whisper transcribe them\nYou can pull in ATOM feeds and current weather observations fron the NWS\n\nYou can set up n8n to run that pull every x hours\nYou can have an LLM read it and assign a keyword to it\nYou can have it go to a database like postgres and deduce on the url\nYou can then query the last 24 hours by x amount of top keywords and send it through openai or a local Gemma model to summarize and turn it into your own 90 second podcast script\nYou can then have it message you on Discord or Telegram with the news from the day\n\nKeywording and compiling all of those headlines and snippets per keyword then running that podcast style summary prompt has made my news intake seem a lot more center lined and less fluff or seemingly bias.\n\nGood luck ;)",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olvwmce/"
+    },
+    {
+      "id": "t1_olw41gp",
+      "author": "eco9898",
+      "body": "What's your workflow for scraping new YouTube videos from channels. I would be interested in that, my GF watches a lot of YouTube and this could be useful since she rewatched the same videos from the same people.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tddgg7/i_want_to_automatically_scrape_my_news_podcasts/olw41gp/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/
+{
+  "thread": {
+    "title": "Thoughts on the rise of AI generated podcasts",
+    "author": "FitEdition",
+    "selftext": "My friend played me a cult documentary podcast in the car over the weekend and asked what I thought. After I said it was pretty good, she told me it was AI generated. \n\nI was taken aback because the voices did sound pretty real. Listening harder it was possible to pick up there were signs the voices were just a bit off, uncanny, small word pronunciation issues.\n\nAnyway, this sent me down a rabbithole where I discovered creators and companies are  creating podcast farms about all kinds of niche topics using AI - its called \"vibecasting\" - basically just prompting to the AI to generate entire podcasts and spamming us with slop.\n\nI do feel like podcasting feels very human - we come to our favorite shows for the hosts and their personalities. So I hope AI slop doesn't ruin podcasts too. ",
+    "score": 58,
+    "num_comments": 73,
+    "subreddit": "r/podcasting",
+    "url": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/"
+  },
+  "comments": [
+    {
+      "id": "t1_ohawn4g",
+      "author": "VarkingRunesong",
+      "body": "I hate it so I won't sub to anything that is AI generated. ",
+      "score": 114,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohawn4g/"
+    },
+    {
+      "id": "t1_ohawofx",
+      "author": "TheVoicesOfBrian",
+      "body": "We get posts on here like once a week with someone looking to make some AI slop podcast for \"passive income\". They never work. People bail on them but it takes up space and cheapens podcasts as a whole.\n\nI can't wait for the bubble to burst so these lazy passive income sloths can move onto something else.",
+      "score": 80,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohawofx/"
+    },
+    {
+      "id": "t1_ohbk5vz",
+      "author": "aSingleHelix",
+      "body": "If you can't be bothered creating it, I won't bother to listen.",
+      "score": 52,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohbk5vz/"
+    },
+    {
+      "id": "t1_ohavcka",
+      "author": "evoterra",
+      "body": "Lots of AI slop in podcasting. Here\u2019s a 24-hour report from the Podcast Index that illustrates it. Sharply.\n\nhttps://public.podcastindex.org/24hourFeedReport.html",
+      "score": 28,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohavcka/"
+    },
+    {
+      "id": "t1_ohazptv",
+      "author": "Kapitano72",
+      "body": "Yeah, these podcasts are all anodyne and low-information. They're a dull and highly inefficient way to repackage written articles.",
+      "score": 15,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohazptv/"
+    },
+    {
+      "id": "t1_ohbbtmh",
+      "author": "turboiv",
+      "body": "I wanted to listen to an audiobook of Animal Farm because I'd never read it before. I went to Spotify since it's a short book and I had premium. I played the top one of about thirty options and started listening. At first it was pretty good. Then I started noticing weird pronunciations and deliveries. Looked into it, and it was AI. Then I scrolled looking for one read by a human. There weren't any. I was truly appalled. Still haven't listened to it as a result. Cancelled Spotify even. It's leaning so far into AI, including music. They won't ever get my ears again. But please subscribe to my podcast on there lmao. At least I'm human.\u00a0",
+      "score": 11,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohbbtmh/"
+    },
+    {
+      "id": "t1_ohbbljw",
+      "author": "DarkLanternZBT",
+      "body": "It's gross, and there's significant money pushing it and relatively low consequences / risks / costs to make it, so until regulation comes along we're going to have to wade through it.\n\nI was at a conference last year where a high-level podcaster and researcher in podcasting was touting that podcasting will move into curation of AI-generated podcasts instead of creating new human-driven podcasts, and I damn near walked out so I could take a shower. So gross.",
+      "score": 12,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohbbljw/"
+    },
+    {
+      "id": "t1_ohawpht",
+      "author": "whoisgarypiano",
+      "body": "What was the podcast? I can usually tell within a few seconds if a voice is AI generated. And if that\u2019s not a give away, the script usually has red flags within a few minutes. ",
+      "score": 10,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohawpht/"
+    },
+    {
+      "id": "t1_ohbyakb",
+      "author": "caesarromanus",
+      "body": "If you can make an AI podcast, anyone can make an AI podcast. Whatever advantage there might be is temporary. This isn't a long-term business. \n\nMost of these podcasts only get about 10-20 downloads per episode, which is about the number of bot downloads each podcast gets. \n\nIts bots downloading bots. Advertisers aren't going to pay for this in the long run.",
+      "score": 9,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohbyakb/"
+    },
+    {
+      "id": "t1_ohdtdh3",
+      "author": "Tall-Plane-4477",
+      "body": "The moment I suspect a podcast or video is AI, I turn it off, hit the thumbs down \ud83d\udc4e button and report the channel if the podcast isn\u2019t clearly identified as being AI generated. ",
+      "score": 7,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohdtdh3/"
+    },
+    {
+      "id": "t1_ohbhgbs",
+      "author": "thejamhole",
+      "body": "It's wack.\n\nAlmost as wack as saying you have a podcast yet it's merely a YouTube channel. Being a YouTuber does not a podcaster make!",
+      "score": 7,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohbhgbs/"
+    },
+    {
+      "id": "t1_ohb6p8a",
+      "author": "previous_poster",
+      "body": "Keep podcasting human! ",
+      "score": 4,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohb6p8a/"
+    },
+    {
+      "id": "t1_ohc3164",
+      "author": "ManufacturedOlympus",
+      "body": "All ai content needs to come with a disclaimer.\u00a0\n\nImagine ordering something for full price only to find out that it\u2019s a Temu knockoff\n",
+      "score": 5,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohc3164/"
+    },
+    {
+      "id": "t1_ohb20cz",
+      "author": "SharkWeekJunkie",
+      "body": "It's horrible. The fact that you said it was \"pretty good\" says more about you than the \"creator\". \n\nTell your friend to stop peddling that garbage. I'd honestly be offended that they wasted my time like that. ",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/podcasting/comments/1sqx0hy/thoughts_on_the_rise_of_ai_generated_podcasts/ohb20cz/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/
+Rate limit near zero, waiting 22s...
+{
+  "thread": {
+    "title": "At what point did web development start feeling more like managing tools than building websites?",
+    "author": "Afsheen_dev",
+    "selftext": "Sometimes I look at modern web stacks and feel like half the work is just configuring frameworks, fixing dependencies, dealing with build tools, and keeping up with ecosystem changes. Meanwhile, the actual building part feels smaller than it used to. Don\u2019t get me wrong, as modern tooling solved a lot of problems too. But I\u2019m curious if other developers feel the same shift. Do you think web development genuinely became better overall, or just more complicated?",
+    "score": 16,
+    "num_comments": 55,
+    "subreddit": "r/webdev",
+    "url": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/"
+  },
+  "comments": [
+    {
+      "id": "t1_olperxc",
+      "author": "mq2thez",
+      "body": "You don\u2019t need any of that. You choose to use it because you like the tradeoffs.",
+      "score": 29,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olperxc/"
+    },
+    {
+      "id": "t1_olpbt6w",
+      "author": "Overall_Low_9448",
+      "body": "Cloud era",
+      "score": 21,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpbt6w/"
+    },
+    {
+      "id": "t1_olpc4fc",
+      "author": "EMike93309",
+      "body": "I've got to admit, I feel more like a salesperson and customer service manager who develops in his downtime. Granted, I'm really just doing small business websites, but my Astro component library is big, and almost nobody I'm working with needs anything that couldn't be done with a LAMP stack, so development has turned into the smallest part of the job.\n\nI'm not complaining, I'm so lucky to have the opportunities and clients to do sales and service nearly full time. It's just funny how much more I use my sales manager background more than the coding skills I spent the last few years learning.",
+      "score": 7,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpc4fc/"
+    },
+    {
+      "id": "t1_olpdd3y",
+      "author": "SampleUpbeat8538",
+      "body": "literally spend half the day fighting npm conflicts and configuring build tools before even writing a single div. modern stacks are crazy powerful but the config fatigue i feel is is so real. kinda miss when u could just drop a script tag and actually build something lol.",
+      "score": 5,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpdd3y/"
+    },
+    {
+      "id": "t1_olplnm2",
+      "author": "KandevDev",
+      "body": "it started around 2014-2015 when \"use the right tool for the job\" got replaced by \"use the framework everyone is using\". before that, you picked a stack and built. now you pick a stack, configure 6 dev dependencies, configure 4 build dependencies, configure CI, and THEN you can build. the build part has not gotten easier in 10 years, the toolchain around it grew.",
+      "score": 6,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olplnm2/"
+    },
+    {
+      "id": "t1_olpe7n3",
+      "author": "GOATONY_BETIS",
+      "body": "Half of modern web dev is convincing 14 tools to cooperate long enough for the app to compile.",
+      "score": 4,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpe7n3/"
+    },
+    {
+      "id": "t1_olpefyc",
+      "author": "benny-powers",
+      "body": "React and npm are to blame",
+      "score": 5,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpefyc/"
+    },
+    {
+      "id": "t1_olpm4z4",
+      "author": "eltron",
+      "body": "IMHO you may be doing it wrong. Or working on a big team. \n\nIt\u2019s your toolbox. You don\u2019t need to keep updating to the latest and greatest. If your stack is working on last gen release, still supported, and working then don\u2019t update it. It\u2019s the \u201cit\u2019s working, don\u2019t touch it!\u201d motto. \n\nA prime example is Tailwind. Between version 3 and 4 tailwind totally changed how theme config works and most aren\u2019t on board. NPM downloads shows tailwind v3 (23million) vs v4 (4 million). \n\nAutomated CI tools that do this should be filtered only to critical patches. Then this can be made a reoccurring task that\u2019s scheduled at some tick;  monthly, quarterly task to update deps.\n\nThe latest npm supply chain vulnerabilities are pushing me to update less frequently and run trusted older code versus latest unknown code.",
+      "score": 4,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpm4z4/"
+    },
+    {
+      "id": "t1_olpli4b",
+      "author": "snipextt",
+      "body": "this feels like an ongoing problem with most of engineering  \nwe build simple reliable tools to solve problem  \nthen some genius tech bros build complicated and abstract protocols on top of them tools  \nthen people make tools to manage those unnecessary protocols   \nthen somebody goes like \"wtf is this\" and goes back to step 1 building that simple tools and the cycle continues ",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpli4b/"
+    },
+    {
+      "id": "t1_olpeza6",
+      "author": "rogue780",
+      "body": "Sometime soon after Web 2.0",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpeza6/"
+    },
+    {
+      "id": "t1_olpfwl9",
+      "author": "Otherwise_Economy576",
+      "body": "i think the shift is real but it's not really about the building. you used to drop a script tag and ship. now the same site has to load fast on a phone with bad connection, get indexed, survive an api version bump. the build tools exist because of those downstream expectations stacking up. for new projects i can usually skip most of the tooling pile honestly, just depends what 'done' means.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpfwl9/"
+    },
+    {
+      "id": "t1_olqcvll",
+      "author": "ImportantTree7632",
+      "body": "Both, honestly. The ceiling got higher but so did the floor.\n\nYou can ship things in a weekend that would have taken months 10 years ago. But you now need to understand 5 layers of abstraction before you write a single line of business logic.\n\nThe real issue is the ecosystem moves faster than most teams can absorb. So you end up maintaining configurations nobody fully understands anymore.\n\nBetter tools, higher cognitive overhead. Not sure we've fully figured out the tradeoff yet.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olqcvll/"
+    },
+    {
+      "id": "t1_olr17ui",
+      "author": "ElectronicCat8568",
+      "body": "For me it seemed like around the time Grunt came out.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olr17ui/"
+    },
+    {
+      "id": "t1_olpdh4l",
+      "author": "TranquilDev",
+      "body": "Haven't had that problem with modern tools. I support some legacy systems that took the original devs weeks to build out what modern tools do in minutes. It takes me longer to make changes in them than it does to spin up a new app and build that feature with the new change in a new app. I've worked with legacy jsp and Spring boot, legacy PHP and Symfony. I'll take modern tools all day long. ",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/webdev/comments/1tcnil0/at_what_point_did_web_development_start_feeling/olpdh4l/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/
+{
+  "thread": {
+    "title": "Anyone enjoying using AI to manage your homelab?",
+    "author": "zshleon",
+    "selftext": "I started to know about proxmox few years back, and because of no technical background, and non native english speaker, I could only pick up very slowly, following some youtube tutorials and learn how to play with linux, start to create docker compose files, create lxc from the pve helper scripts, config api around different services, create widgets and cards in homepage or homeassistant, it took plenty of time, but meanwhile it was very fun. but also there are times that super frustrating, long documents and difficult logics to understand, endless changes if you touch 1 place then everything is broken, system failures with no reason, I tried to switch my router around openwrt/pfsense/opnsense, but there are many times that I screwed it up. For no reason adguardhome in openwrt always breaks my cleaning robot and work PC network. I gave up several times and sold my little N100/N305 server and went back to normal router without any servers. \n\n  \nBut recently things have been changing, AI came, it first came as a chatbot that I can send screenshots and  get answers, this solves tons of questions for me. It gave command lines or even scripts for me to run, that saved a lot of time for me to figure things out by myself. I can send it the configs so it can help me to correct the formats or potential issues, I felt so happy that the selfhost word had become so much larger.\n\n\n\nThen not so long after that, AI coding came, it did not only came as desktop applications like google antigravity, where I can ask it to help to generate files and interact with my servers, it could even be installed inside the server itself as a command line tool!!  Then I could build a docker container and finish the setup by just talking to the AI in CLI. I had subscription of Google One but it seems gemini cli was not so smart comparing to claude and codex.\n\n  \nI finally subscribed to codex pro yesterday and it's now helping me to manage my entire network, I have two N150 servers with bunch of containers and services, and main router is now opnsense. As I'm typing this post, it's helping me to re-organize my homepage by adding few stuff and making it prettier. \n\nThis is really a good time for anyone who enjoys selfhosting especially with no sound technical background, the open source word is soooo big like an endless ocean, I'm so glad AI is here and we can now dive into it and really enjoy everything,    \n",
+    "score": 0,
+    "num_comments": 29,
+    "subreddit": "r/selfhosted",
+    "url": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/"
+  },
+  "comments": [
+    {
+      "id": "t1_om2lbak",
+      "author": "asimovs-auditor",
+      "body": "Expand the replies to this comment to learn how AI was used in this post/project.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2lbak/"
+    },
+    {
+      "id": "t1_om2m64r",
+      "author": "Historical_Tale3499",
+      "body": "But how reliable is it. I feel like it's answers are often limited and it doesn't understand the software in detail, i.e. gives generic instructions.",
+      "score": 8,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2m64r/"
+    },
+    {
+      "id": "t1_om2rc0e",
+      "author": "EmberQuill",
+      "body": "Unfortunately, the main reason why I started self-hosting was to save money, so subscribing to a $100+ per month AI plan to assist with self-hosting is completely out of the question.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2rc0e/"
+    },
+    {
+      "id": "t1_om3ci6k",
+      "author": "AnomalyNexus",
+      "body": "Yes, though I don't give it direct access to the virtualization host etc. That just seems like a disaster waiting to happen",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om3ci6k/"
+    },
+    {
+      "id": "t1_om2opab",
+      "author": "1_________________11",
+      "body": "I enjoy it. Was able to document my existing lab state then draw up plans to migrate and upgrade services. Wrote step by step guides talked through settings and configs and planning and it was pretty impressive.\u00a0 Did a full cut over to new machines and everything and improved the function of things. I dont let it do the actions itself I only let it manage the documentation and git commits. Sometimes its stupid and wipes old files or it makes mistakes thus ive got my own personal git running to track bad edits and changes. So far so good.\u00a0\n\n\n\n\n\n",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2opab/"
+    },
+    {
+      "id": "t1_om2p4sh",
+      "author": "denmalley",
+      "body": "I've been very slowly building out a terraform/ansible deployment using AI assistance.  Right now I'm just spinning up new services alongside what's already running.  I spent about two months just using AI to help me gather all the facts about my homelab as well as future plans for where I want it to be.  That lives in one repo as my reference documentation, alongside a second one that has the actual deployment infrastructure.\n\nSo far its been working pretty well.  I have two proxmox servers that run the bulk of my stuff (alongside a Synology NAS that was like the services epicenter for years) and a third that is housing all these new deployments. Once I feel more comfortable with the setup, I will start to do some migrations and load balancing among the three.\n\nWith every session the AI will write a bunch of the code and I'll pause to read through what was created and challenge things (of course there are mistakes or misinterpretations along the way) or make edits on my own.  Eventually we make it to the state I want and ready to deploy.  As errors pop up I can just paste the error messages into the chat to help figure out what is wrong.\n\nBut yeah, having the AI assistance is great, I feel like its getting me farther along than just digging through repo documentation on my own.  Some nights when I have a few hours to put in, I'll just start a session like \"ok, let's build an observability VM.  Check my documentation repo on what our goals are here and let's get to work.  I want to use these tools (links to repos) etc\"",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2p4sh/"
+    },
+    {
+      "id": "t1_om2p5r8",
+      "author": "ReachingForVega",
+      "body": "I've been effectively jailbreaking random gadgets from AliExpress using Claude code which has been fun, mostly cameras to add to my security system.\n\n\nI did have AI write a dashboard I have locked behind nginx with auth and personally wrote some monitoring agents that push data to it so I can see how my hosts and containers are doing at a glance.\u00a0",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2p5r8/"
+    },
+    {
+      "id": "t1_om2plb6",
+      "author": "auzzlow",
+      "body": "It's great. Claude helps me think through architecture for all kinds of things, but I usually put the pieces together because that's what I find most fun about it. Some people just want it done, but I'd also like to know how my environment works.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2plb6/"
+    },
+    {
+      "id": "t1_om2sehl",
+      "author": "FlashyAverage26",
+      "body": "fr AI lowered the intimidation barrier for homelabs so much \ud83d\ude2d  \nbefore you needed hours of docs and trial/error just to fix one broken config tbh",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2sehl/"
+    },
+    {
+      "id": "t1_om4ulrm",
+      "author": "kazimcavus",
+      "body": "It manages not just the house, it manages everything; I use it.  \n\n\nhttps://preview.redd.it/xrfegthkbi1h1.png?width=2526&amp;format=png&amp;auto=webp&amp;s=a5c880293a2aae26968aa9c93feade330a455a25\n\n",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om4ulrm/"
+    },
+    {
+      "id": "t1_om4xvp3",
+      "author": "JcorpTech",
+      "body": "So like... I have AI on my server in a VM, but it nukes itself wayyyy to often to go near any of my googies lmao. Mostly just use it as a voice calendar \ud83d\ude02.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om4xvp3/"
+    },
+    {
+      "id": "t1_om7f0rq",
+      "author": "dhrandy",
+      "body": "I use it to help create my docker compose file or to diagnose an issue. It has been awesome, saves so much Googling. I'm not using any paid version. I don't think I'd want one to manage anything; I prefer copy and paste with it answering.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om7f0rq/"
+    },
+    {
+      "id": "t1_omagjp9",
+      "author": "Spiritual_Region1827",
+      "body": "I am not sysadmin. Zero experience before november last year. never touched vps, never deployed anything.\nNow - set up several vps servers, built 3 apps from scratch, all with claude. it basically held my hand through everything.\nThis month switched to codex for actual coding.\nWhy?\nlatest claude versions started doing weird things, going in circles, breaking stuff that worked before. codex feels more focused for code tasks.\nbut for homelab setup questions, configs, debugging - ai is just game changer if you not coming from technical background",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/omagjp9/"
+    },
+    {
+      "id": "t1_om2n7fs",
+      "author": "Hungry-Manner-9479",
+      "body": "I totally get what you mean about AI making everything more accessible now. Before I would spend hours in proxmox documentation trying to figure out why my containers kept crashing, now I can just screenshot the error and get actual helpful commands instead of generic forum replies from 2019.\n\n  \nThe CLI integration is game changer too - being able to troubleshoot docker issues directly from terminal without switching between browser tabs makes the whole workflow so much smoother. My english isn't perfect either so having AI explain complex networking concepts in simple terms has been huge help for me.\n\n  \nglad you found something that works with your setup, those N150s are solid little machines for homelab stuff",
+      "score": 0,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1teic8d/anyone_enjoying_using_ai_to_manage_your_homelab/om2n7fs/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/
+{
+  "thread": {
+    "title": "services with actually generous free tiers for open-source projects. my list, what would you add?",
+    "author": "lazycodewiz",
+    "selftext": "Been in the weeds shipping an OSS side project for the past few weeks (social media publishing API). Real launch post is coming, this isn't that. Along the way I kept a list of services that actually have usable free tiers for OSS, not the \"free trial\" kind. Sharing in case it helps. Happy to be told what's missing.\n\n**Docs**\n\nMintlify is the obvious one. Point at a public repo and it works. Their default theme is already better than what most teams ship paying for, which is mildly annoying.\n\nGitBook has a Community plan. Haven't used it personally, plenty of OSS projects do.\n\nAlgolia DocSearch is free for OSS, no asterisks. That Cmd-K search you see on every framework's docs page is them.\n\n**Hosting**\n\nCloudflare Pages. Static hosting, unlimited bandwidth, unlimited builds. Nothing else matches it. Workers free tier is also a lot if you don't need a VM.\n\nVercel Hobby works for most OSS. They also run a \"Vercel for Open Source\" program that upgrades select projects to Pro.\n\nFly.io still has a free tier for small VMs. Sponsorship for some maintainers if you ask.\n\nRender: free static + small Web Service tier. Always lagging the others on features.\n\n**Databases**\n\nNeon: Postgres with scale-to-zero. The free tier is real, not a 7-day countdown.\n\nSupabase: Postgres + auth + storage + edge functions on free. Heavier than Neon if you only want a DB.\n\nTurso: SQLite at the edge. Free tier is generous, takes getting used to.\n\nUpstash: serverless Redis, free covers most hobby use.\n\n**Auth**\n\nClerk: 10k MAUs free, OSS-friendly. They sponsor select projects too.\n\nWorkOS: 1M MAU free for SSO/AuthKit. The catch is the product is enterprise-shaped, so only useful if you're chasing those customers.\n\nBetter-Auth or Auth.js if you'd rather skip the vendor.\n\n**Email**\n\nResend: 3k emails/mo, nicest API in the space.\n\nPostmark: small free dev tier, reliable if you outgrow Resend.\n\n**Monitoring**\n\nSentry: decent free tier and they have an OSS sponsorship program if you write to them.\n\nPostHog: 1M events/mo free. OSS itself so worst case you self-host.\n\nBetterStack: uptime + log management on free.\n\n**CI**\n\nGitHub Actions: unlimited for public repos. You already knew.\n\nCircleCI: also free for OSS if you prefer.\n\n**Misc**\n\nLinear: free for small teams. Not strictly OSS-targeted but a 1-3 person project doesn't hit limits.\n\nCloudflare in general. Workers, R2, DNS, SSL. All generous. Almost not fair.\n\nThings I'm not sure about, would love opinions on:\n\n* Object storage. I'm on R2. Anyone got a better story?\n* Background queues. Trigger.dev and Inngest both have free tiers. Anyone tried Hatchet?\n* Feature flags. PostHog technically does it but it feels like a tax on something that should be a freebie. Anything cleaner?\n\nWhat would you swap?\n\n**EDIT: solid suggestion from the comments, adding here to make it more accessible. thanks to everyone who contributed**\n\n**Networking**\n\nTailscale - 6 users, unlimited devices on free. Effectively unlimited for a self-hosted setup. Pangolin - self-hosted reverse proxy / tunnel. Enterprise license is free for homelabbers; you just swap the docker image tag.\n\n**Hosting (extra)**\n\nOracle Cloud Always Free - 4 ARM (Ampere A1) vCPUs, 24 GiB RAM, 200 GB SSD. Caveat: trial accounts get capacity-blocked these days; you may have to flip to pay-as-you-go (still $0 if you stay within Always Free). Orkestr - EU-focused, free tier includes Postgres or Redis bundled.\n\n**Git hosting**\n\nCodeberg - Forgejo-based, OSS-friendly alternative to GitHub.\n\n**Object storage**\n\nBackblaze B2 + Cloudflare - they're in the Bandwidth Alliance, so egress through Cloudflare is free. Cheaper than R2 once you're past hobby scale. DO Spaces - not free, but $5/mo for 250 GB + 1 TB outbound is the cheapest no-surprise option if you outgrow R2's free.\n\n**Security**\n\nSnyk Open Source - free + unlimited for public repos. GitGuardian - free secrets monitoring for public repos.\n\n**Auth**\n\nLogTo - OSS-friendly auth, recommended over Clerk by someone in the thread.\n\n**Email**\n\nSMTP2GO - need your own domain. Brevo - transactional email API.\n\n**Docs &amp; translation**\n\nWeblate - 160k translatable keys free for OSS projects.\n\n**Monitoring**\n\nWebGazer.io - pro bono uptime monitoring for free/open source projects.\n\n**ML / AI compute**\n\nHugging Face Spaces - free hardware for ML demos. Google Colab - free GPU/TPU notebooks if you can work within their session model.\n\n**Customer feedback / support**\n\nFeatureOS - free OSS plan for product feedback management. SupportWire - free mid-tier OSS plan for live chat.\n\n**Curated lists**\n\n* [free-for-dev](https://github.com/ripienaar/free-for-dev) (or [web view](https://free-for.dev/)) - the canonical free-tier-for-dev list. \\~1000+ entries.\n* [Awesome-Web-Hosting-2026](https://github.com/iSoumyaDey/Awesome-Web-Hosting-2026)\n* [free-llm-api-resources](https://github.com/cheahjs/free-llm-api-resources) - LLM API free tiers specifically.",
+    "score": 255,
+    "num_comments": 89,
+    "subreddit": "r/selfhosted",
+    "url": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/"
+  },
+  "comments": [
+    {
+      "id": "t1_olr4e26",
+      "author": "asimovs-auditor",
+      "body": "Expand the replies to this comment to learn how AI was used in this post/project.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olr4e26/"
+    },
+    {
+      "id": "t1_olrirjl",
+      "author": "hakodate00",
+      "body": "&gt; Neon: Postgres with scale-to-zero. The free tier is real, not a 7-day countdown.\n\nI will bet my left nut this was written by claude",
+      "score": 207,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olrirjl/"
+    },
+    {
+      "id": "t1_olrli1n",
+      "author": "gpago",
+      "body": "Tailscale's free tier should be included.  \n6 users and unlimited devices is pretty good.",
+      "score": 79,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olrli1n/"
+    },
+    {
+      "id": "t1_olrgyi3",
+      "author": "alex2003super",
+      "body": "Oracle Cloud Infrastructure gives you a compute instance with 4 ARM (Ampere A1) vCPUs, 24 GiB memory, 200 GB SSD in the \"Always Free\" tier. You might need to upgrade to pay-as-you-go billing to spin up that instance because DC capacity is limited for Trial accounts, but you can otherwise pay zero/mo if you stay within Always Free limits.\n\nFor transactional SMTP email I also use Brevo. I'm currently working on an API adapter to support generic SMTP email (or third-party protocols, such as Brevo API) services with apps that only support the Sinch Mailgun API, in particular Ghost.",
+      "score": 30,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olrgyi3/"
+    },
+    {
+      "id": "t1_olrnpkl",
+      "author": "swatlord",
+      "body": "SMTP2GO. Just need to have your own domain.\n\n&gt; Cloudflare in general. Workers, R2, DNS, SSL. All generous. Almost not fair.\n\nI like Cloudflare for what it offers, but remember the saying: \"when something is offered for free, *you* are the product\"",
+      "score": 20,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olrnpkl/"
+    },
+    {
+      "id": "t1_olraalu",
+      "author": "_daniel_graf_",
+      "body": "You could add weblate to the list for translation management. Works really nice and they offer 160k translatable keys for OSS projects. ",
+      "score": 12,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olraalu/"
+    },
+    {
+      "id": "t1_olrtbcn",
+      "author": "Iyagovos",
+      "body": "Portainer - gives you a free license of the business suite for up to three users.",
+      "score": 12,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olrtbcn/"
+    },
+    {
+      "id": "t1_ols1mms",
+      "author": "webnestify",
+      "body": "Surprised security didn't make the list. Snyk Open Source is free and unlimited for public repos. GitGuardian's free for monitoring accidentally-pushed secrets in public repos (caught me once, embarrassingly).\n\nObject storage: Backblaze B2 behind Cloudflare. They're in the Bandwidth Alliance so egress through Cloudflare is free, no caps. Cheaper than R2 once you're past hobby traffic.",
+      "score": 11,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/ols1mms/"
+    },
+    {
+      "id": "t1_oltan98",
+      "author": "GoofyGills",
+      "body": "Pangolin offers their enterprise solution for free to homelabbers. ",
+      "score": 9,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/oltan98/"
+    },
+    {
+      "id": "t1_olsf2zk",
+      "author": "JimmyRecard",
+      "body": "Codeberg",
+      "score": 7,
+      "permalink": "https://old.reddit.com/r/selfhosted/comments/1tcxb1b/services_with_actually_generous_free_tiers_for/olsf2zk/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/
+{
+  "thread": {
+    "title": "i contributed to open source for the first time last month and the maintainers were shockingly\nnice",
+    "author": "ScaryAd2555",
+    "selftext": "been using open source forever but never contributed. imposter syndrome, not knowing where to start. last month i\n\nfinally decided to change that\n\nwas using Spectrum for a project\u201e its an open source typescript sdk from Photon connecting AI agents to imessage\n\nand whatsapp and discord. ran into small issue where typescript types for attachment handling were slightly wrong\n\nin specific edge case\n\ninstead of working around it i actually opened an issue. one maintainer responded within hours. didnt just tell me\n\nto fix it\u201e walked me through the codebase structure so i could understand where to make the change. submitted\n\nPR, one round of review, merged\n\nwhat surprised me: seeing up close how commercial open source project operates. they have paid tier for dedicated\n\nimessage lines and enterprise features. that revenue funds the open source core. classic open core model but seeing\n\nit actually work was different from reading about it\n\nsince then made 2 more small contributions. feel like i actually understand open source as participant not just\n\nconsumer\n\nTL;DR: first open source contribution to Spectrum (messaging SDK), maintainer walked me through codebase,\n\ndiscovered open core model actually works in practice, now a regular contributor",
+    "score": 144,
+    "num_comments": 27,
+    "subreddit": "r/opensource",
+    "url": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/"
+  },
+  "comments": [
+    {
+      "id": "t1_okooi7h",
+      "author": "Loud-Section-3397",
+      "body": "yeah usually oss devs are just cool people who want some help on their codebase!",
+      "score": 37,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okooi7h/"
+    },
+    {
+      "id": "t1_okptpiz",
+      "author": "0xMassii",
+      "body": "yeah the oss community is kinda nice, but usually depends also from the repo where u are working on \ud83d\ude04  \n",
+      "score": 12,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okptpiz/"
+    },
+    {
+      "id": "t1_okpn9bp",
+      "author": "cyb3rofficial",
+      "body": "Depends on the crowd. Some repos are tightnit and others are as long as your PR is solid and makes sense they will openly welcome changes.\n\nFor me at least, any pr is welcomed as long as it's a PR that actually makes sense and not some micro spelling error thing then open an issue.",
+      "score": 10,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okpn9bp/"
+    },
+    {
+      "id": "t1_okssp8m",
+      "author": "demchaav",
+      "body": "I am still very new to the maintainer side, so my experience is basically one contributor and a lot of guessing \ud83d\ude05\n\nBut even from that, I already understand one thing: a PR is not only about whether the code works.\n\nSometimes it can be technically fine, but still slightly break the original concept or direction of the project.\n\nSo the hard part is probably to stay welcoming, but also explain the idea behind the project clearly.\n\nOpen source is more human than I expected.",
+      "score": 5,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okssp8m/"
+    },
+    {
+      "id": "t1_okv80nv",
+      "author": "3uba",
+      "body": "\"participant not just consumer\" is the whole shift. once you make that flip you start reading source instead of stackoverflow",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okv80nv/"
+    },
+    {
+      "id": "t1_olbatam",
+      "author": "best_codes",
+      "body": "I love nice OSS maintainers \ud83e\udd70",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/olbatam/"
+    },
+    {
+      "id": "t1_olkz5dg",
+      "author": "Obvious-Treat-4905",
+      "body": "this is honestly how most people start contributing tbh, one tiny fix turns into wait\u2026 this is actually approachable. also huge props to maintainers who guide first time contributors instead of gatekeeping",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/olkz5dg/"
+    },
+    {
+      "id": "t1_okydxi1",
+      "author": "Leop0Id",
+      "body": "Most maintainers are nice but you get the occasional jerk like the guy behind Calibre and Kitty.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/okydxi1/"
+    },
+    {
+      "id": "t1_ol1tex5",
+      "author": "realm9389",
+      "body": "Had a similar experience when I ran into an issue when using taiga-ui. The lad was so kind and literally guided me through how to solve my issue. Made me start hunting for issues on OSS projects I use and see if I can fix any.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/ol1tex5/"
+    },
+    {
+      "id": "t1_olaixs1",
+      "author": "PlusLoquat1482",
+      "body": "This is honestly one of the best parts of open source when it works well.\n\nA small edge-case fix does not feel glamorous, but it is often the perfect first contribution because you already understand the user-facing bug. The maintainer understands the internals. When both sides meet in the middle, the project gets better and someone new learns how to contribute.\n\nAlso huge credit to the maintainer here. Walking someone through the codebase instead of just saying \u201cPR welcome\u201d is how you turn drive-by users into repeat contributors.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t7fx4d/i_contributed_to_open_source_for_the_first_time/olaixs1/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/
+{
+  "thread": {
+    "title": "How do I start contributing to open source DevOps or sysadmin projects?",
+    "author": "broken_py",
+    "selftext": "\nI\u2019ve been working as a Linux sysadmin for a while now .I want to start contributing to open source projects\u2014but not just through application code. I\u2019m especially interested in contributing from a sysadmin/DevOps perspective.\n\nI\u2019d love to hear from others who are already doing this:\n\n-  How did you get started contributing as a sysadmin/DevOps engineer?\n\n- Are there specific types of projects that are more open to infra/ops contributions?\n\n- How do you identify repos that actually belong DevOps/sysadmin domain?\n\nAny tips for making meaningful contributions without deep involvement in the core codebase?\n\nAlso, if you maintain or contribute to any projects that welcome DevOps/sysadmin contributions, I\u2019d really appreciate recommendations.\n\n",
+    "score": 9,
+    "num_comments": 17,
+    "subreddit": "r/opensource",
+    "url": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/"
+  },
+  "comments": [
+    {
+      "id": "t1_ok9z3oo",
+      "author": "Obvious-Treat-4905",
+      "body": "honestly a lot of projects need ops help more than code, start with repos you already use, look at their docker, ci or cd, docs, infra setup, there\u2019s always stuff to improve, good entry points are fixing deploy scripts, adding monitoring, cleaning up configs or docs, you don\u2019t need deep code knowledge, just pick small practical issues and build from there",
+      "score": 5,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/ok9z3oo/"
+    },
+    {
+      "id": "t1_ok9zf4y",
+      "author": "ElaborateCantaloupe",
+      "body": "Look for projects supporting local or docker installations and help extend support for more enterprise style installations via something like Kubernetes, AWS EKS, k8s helm charts, etc. \n\nLess hypothetical, private me if you\u2019re looking for exactly that. :) ",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/ok9zf4y/"
+    },
+    {
+      "id": "t1_okh3295",
+      "author": "Emergency-Rough-6372",
+      "body": "i have been working one a project its a new open source one \"  \nits a earlier version   \nif its something that gets ur intreste you can contribute   \n[https://github.com/0-Shimanshu/ADIUVARE](https://github.com/0-Shimanshu/ADIUVARE)\n\n",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/okh3295/"
+    },
+    {
+      "id": "t1_okao9b3",
+      "author": "linuxpaul",
+      "body": "At WolfStack ( [https://wolfstack.org](https://wolfstack.org) ) we have people on our discord who help contribute with testing on weird and wonderful setups we'd love to have you.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/okao9b3/"
+    },
+    {
+      "id": "t1_okbgu9c",
+      "author": "SpartanDavie",
+      "body": "[Podman](https://github.com/containers/podman) has 927 issues. Sure you could find something there",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/okbgu9c/"
+    },
+    {
+      "id": "t1_okdlng6",
+      "author": "kchandank",
+      "body": "Pick any project that project that you like and it aligned with your goal. Please note, in very mature projects your PR may not get approved due to high QA and complexity.\n\nYou can pickup some simple project which leverages AI, some devops and start building on top. Eg Db-agent , it\u2019s great starter project to learn and explore fundamentals usecase of Coded AI agent in enterprise environment. \n\nI would take db-agent, fork it create a working interrelation with some DB or simply add DevOps pipeline ( GitHub actions ) to do code security scan.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/okdlng6/"
+    },
+    {
+      "id": "t1_okeg2ft",
+      "author": "FarToe1",
+      "body": "For me, I find stuff I like using and help with that. Could be documentation, bug reporting, suggestions, even answering a question on a forum.\n\nPersonal example: I did a printable project recently (3d printed fish feeder) where the creator had used a specific type of software that I don't use. I figured out how to make their model work with my choice (esphome) and asked if they accepted contributions to their github repo for the project. They did and gave me push access to the repo, so I wrote down the process, added a couple of pictures, and added it. Took an hour, probably won't be used by many people, but it all helps.\n\nAlso, your employer might allow you to spend time helping projects you use at work. Mine did, and I was able to help them with bugs and documentation during the quieter work hours. Company got improved software and knowledge about that software, I got experience, project got some help. Triple-win.",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1t5h3j6/how_do_i_start_contributing_to_open_source_devops/okeg2ft/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/opensource/comments/1tfm90j/condenseit_selfhosted_ai_news_digest_mit_licensed/
+{
+  "thread": {
+    "title": "CondenseIt - self-hosted AI news digest, MIT licensed, looking for contributors",
+    "author": "gumbokonkarne",
+    "selftext": "I built CondenseIt: a self-hosted news digest server that pulls from RSS/Atom, YouTube transcripts, Reddit, Hacker News, GitHub Releases, Google News, and watched web pages, summarises articles with a local or cloud LLM, and re-ranks them using a scoring engine that learns from your reading behavior.\n\nIt's MIT licensed, Python 3.11 on the backend, React/TypeScript on the frontend. Local dev setup is documented. There's a working test suite and the project uses ruff for linting.\n\nI'm the author and I'm looking for contributors. Areas where help would be most useful:\n\n* New data collectors\n* Frontend and accessibility improvements\n* Test coverage\n* Packaging and distribution\n* Docs\n\nRepo:\u00a0[https://github.com/wildlifechorus/condenseit](https://github.com/wildlifechorus/condenseit)\n\nIf you want to claim an issue before starting work, just comment on it or post here.",
+    "score": 0,
+    "num_comments": 7,
+    "subreddit": "r/opensource",
+    "url": "https://old.reddit.com/r/opensource/comments/1tfm90j/condenseit_selfhosted_ai_news_digest_mit_licensed/"
+  },
+  "comments": [
+    {
+      "id": "t1_omas6uq",
+      "author": "vdorru",
+      "body": "I immediately starred the repo - keep this up, it is a useful project.",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1tfm90j/condenseit_selfhosted_ai_news_digest_mit_licensed/omas6uq/"
+    },
+    {
+      "id": "t1_omac4lb",
+      "author": "Separate_Active219",
+      "body": "solid work",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/opensource/comments/1tfm90j/condenseit_selfhosted_ai_news_digest_mit_licensed/omac4lb/"
+    }
+  ]
+}
+===URL=== https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/
+{
+  "thread": {
+    "title": "How do you decide between code and marketing in your project?",
+    "author": "Neat_Conclusion_1548",
+    "selftext": "So, I was making this project which has been completed due to help from many individuals from this community. And thanks to them, I launched my tool recently. And now I have been trying to get my first user. The problem is, I can't find any. \n\nThen I found another tool which was like my tool but addressed the part which my tool missed along with having users. And it's UI was better and it got a good impression from me. I realised it just now that its UI actually reduced friction.\n\nSo I am thinking of improving my UI to recreate this feeling with visitors on my website. (The tool's directly available on the website without any wall between it so there's no friction. Rather, I am talking about my header, footer or other elements which are just below average in looks.) I am also thinking of adding other features which my potential users are complaining about. \n\nI just don't know if I should get some users first, or make one or two features to make my tool more attractive. \n\nHave you been in this situation? What did you do?",
+    "score": 31,
+    "num_comments": 119,
+    "subreddit": "r/Entrepreneur",
+    "url": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/"
+  },
+  "comments": [
+    {
+      "id": "t1_oht4ya5",
+      "author": "AutoModerator",
+      "body": "Welcome to /r/Entrepreneur and thank you for the post, /u/Neat_Conclusion_1548! Please make sure you read our [community rules](https://www.reddit.com/r/Entrepreneur/about/rules/) before participating here. As a quick refresher:  \n\n* Promotion of products and services is not allowed here. This includes dropping URLs, asking users to DM you, check your profile, job-seeking, and investor-seeking. *Unsanctioned promotion of any kind will lead to a permanent ban for all of your accounts.* \n* AI and GPT-generated posts and comments are unprofessional, and will be treated as spam, including a permanent ban for that account.   \n* If you have free offerings, please comment in our weekly Thursday stickied thread.\n* If you need feedback, please comment in our weekly Friday stickied thread. \n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/Entrepreneur) if you have any questions or concerns.*",
+      "score": 1,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/oht4ya5/"
+    },
+    {
+      "id": "t1_oht6aun",
+      "author": "ahnex",
+      "body": "Put yourself in the shoes of the user, is the competitor's tool soo good that if user discovers their tool user would leave your tool.  \nif yes then you should improve the tool before you get the first user. Because if you get your first user with mediocre product with better alternatives available in market then your churn rate will be through the roof.",
+      "score": 4,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/oht6aun/"
+    },
+    {
+      "id": "t1_oht6b3f",
+      "author": "ramdonghost",
+      "body": "Always address current users first. There's nothing that will make them engage more than to notice they're being taken into account. That's top tier user experience, and those are more likely to bring new users than the money you can spare on mkt. Once you have dealt your users expand tool's capability. ",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/oht6b3f/"
+    },
+    {
+      "id": "t1_ohu07vz",
+      "author": "Dependent_Acadia1772",
+      "body": "If nobody is using it, adding features won\u2019t tell you much unless you already know they\u2019re blocking adoption. Same with UI polish. Nice UI helps, but it won\u2019t fix unclear value or lack of distribution.\n\nRight now the biggest risk is optimizing the wrong thing.",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohu07vz/"
+    },
+    {
+      "id": "t1_ohymqgh",
+      "author": "Rohanv69",
+      "body": "idk man, i feel like u might b overthinking the ui part. unless the site looks like a total scam, most users don't care about a footer lol.\n\nhere\u2019s what i\u2019d do if i were u:\n\n1. fix that header real quick (literally just make it look clean, dont spend all day on it).\n2. build that one feature people are actually asking for. if u can ship it in a day, just do it. it gives u a legit reason to talk to people.\n3. stop the 'marketing' and start dming. find those people who had the pain point and tell them u built a fix. 10 direct convos &gt; 1000 random visitors.\n\nbasically, make it 'good enough' to not look broken, then go find ur first 5 users. don't get stuck in a coding loop b/c that's just procrastination in disguise haha.",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohymqgh/"
+    },
+    {
+      "id": "t1_ohywbdj",
+      "author": "G-Above-Treeline",
+      "body": "Be careful about the conclusion you're drawing. You're seeing a competitor that has users AND better UI, and attributing the user count to the UI. It might be that, but it might also be distribution, timing, SEO, community, or just that they launched 18 months before you. UI is the thing you noticed, not necessarily the thing that matters.\n\nBefore you rebuild anything, go talk to 20 people who'd be in the market for a tool like yours. Don't ask \"why would you choose my tool vs theirs,\" ask \"what are you currently doing about this problem and why.\" If they say \"I didn't know tools like this existed\" it's a distribution problem. If they say \"I don't really have this problem\" it's a demand problem. If they say \"I tried yours but the UI confused me\" then yes, rebuild the UI.\n\nOn your actual question (code vs marketing): for 95% of early-stage solo projects the answer is marketing. First-time founders massively overestimate how much product polish matters and underestimate how much distribution matters. \"Build it and they will come\" is the default failure mode for technical founders. Unless your tool is literally broken or the problem doesn't exist, every hour you spend coding right now is probably an hour you should spend talking to potential users.\n\nMy own version of this: spent a year on a B2C product convinced the next UI tweak would unlock adoption. The actual problem was nobody had a reason to show up. No amount of UI polish fixes that.",
+      "score": 3,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohywbdj/"
+    },
+    {
+      "id": "t1_oht9mru",
+      "author": "[deleted]",
+      "body": "[removed]",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/oht9mru/"
+    },
+    {
+      "id": "t1_oht9o8y",
+      "author": "joylessspectator",
+      "body": "I think you should do the latter, why? Because thats what your potential users are asking you. When you are giving ppl what they want, you are RETAINING them. Once you\u2019ve retained them, you can focus on other stuff.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/oht9o8y/"
+    },
+    {
+      "id": "t1_ohtacda",
+      "author": "TradieTomAU",
+      "body": "Sounds like you're just overthinking at this point. If your site looks like a dog's breakfast, it doesn't matter how good the tech is, blokes will see your dodgy header and leave before they even try the tool. Give it a quick update so it looks up to standard, then stop coding and go knock on some digital doors to find five real users. Don't waste time building fancy features for people who haven't even signed a contract yet; get the runs on the board first, then worry about the extra bells and whistles once the phone is actually ringing.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtacda/"
+    },
+    {
+      "id": "t1_ohtbf7n",
+      "author": "booksvalsi",
+      "body": "Marketing. Always marketing!\n\nAt zero users, you're guessing what to build. Distribution puts the tool in front of real people, and those people tell you what's actually broken. Every UI tweak before that is meaningless IMO.\n\nPick 2-3 places your users hang out (subreddits, niche Discords) and naturally fit your product there.... If after 50 real conversations everyone says \"the header is ugly\", then fine, fix it. I'd bet money they say something else entirely.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtbf7n/"
+    },
+    {
+      "id": "t1_ohtdlru",
+      "author": "Thayer_Systems",
+      "body": "At this stage, the move is usually fix the obvious friction first, then get back to user acquisition. If people are already telling you which features feel missing and the product looks below the level of nearby alternatives, a small round of UX cleanup and one or two high-impact fixes will probably help marketing work better instead of sending more people into a weak first impression. But after that, the priority should shift fast toward getting real users and conversations, because most early traction comes from direct outreach and repeated testing, not endless polishing",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtdlru/"
+    },
+    {
+      "id": "t1_ohtehyy",
+      "author": "lexibuildsmvps",
+      "body": "I think you're just overthinking the order. Ship a small ui and then get in front of users. and watch. If people request to add / build anything additional... only then do it.\n\n",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtehyy/"
+    },
+    {
+      "id": "t1_ohtfln6",
+      "author": "kepteasy",
+      "body": "What youre actually talking about is marketing  lol\n\nHeader, footer removing friction for potential users, UI, all of that is essentially marketing\n\nYou need to do both simultaneously\n\nIm in the same situation, a lot of similar type solutions and while mine is differentiated with different USPs, and positioned differently, im later to the party so to speak. So many have more features, more integrations, more Ai.\n\nIm pushing ahead and not stopping all so I can add more features. \n\nThats an arms race, the best funded likely wins, and while the lesser funded can stay alive in such a war, competing only on features isnt a smart strategy. \n\nIf I were you Id get users and allow them to submit fix requests and feature desires, while at the same time cleaning up the UI.\n\nBecause in a ego game, someone always has a bigger boat, a bigger penis, a bigger house.  Its an unfulfilling journey that way.",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtfln6/"
+    },
+    {
+      "id": "t1_ohtji1n",
+      "author": "EchoesofFinance",
+      "body": "For me, the rule is: make it good enough that you feel genuinely confident sending people to it, and then market it",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtji1n/"
+    },
+    {
+      "id": "t1_ohtjmc7",
+      "author": "TikTasker",
+      "body": "Define your MVP. Build it and stop, start distribution. If you can't get users then don't waste additional time. The validation u need should be on the core value of ur product, not additional features. ",
+      "score": 2,
+      "permalink": "https://old.reddit.com/r/Entrepreneur/comments/1sthfgz/how_do_you_decide_between_code_and_marketing_in/ohtjmc7/"
+    }
+  ]
+}
+===DONE===
