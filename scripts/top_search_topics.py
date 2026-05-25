@@ -149,6 +149,77 @@ def _query_reddit(conn, project, window_days, limit):
     ]
 
 
+def _query_twitter(conn, project, window_days, limit):
+    """Twitter-specific path: joins twitter_candidates, splits posted vs skipped.
+
+    Mirrors _query_reddit: reads search_topic from twitter_candidates (NOT
+    posts), because posts.search_topic is currently NULL on every Twitter
+    post — the candidate->post path in twitter_post_plan.py / log_post.py
+    drops the field. Aggregating from candidates is the same pattern Reddit
+    uses and recovers full topic-level attribution.
+
+    Quality split uses virality_score (set on every candidate at discovery
+    by score_twitter_candidates.py) rather than delta_score. delta_score is
+    only set if t1_checked_at fired, so it's NULL on a large fraction of
+    skipped/expired rows, which would bias the avg toward posted-only.
+    virality_score is set unconditionally at discovery.
+    """
+    where_proj = ""
+    params = [str(window_days)]
+    if project:
+        where_proj = "AND LOWER(c.matched_project) = LOWER(%s)"
+        params.append(project)
+    params.append(int(limit))
+
+    sql = f"""
+        SELECT c.search_topic AS search_topic,
+               c.matched_project AS project_name,
+               COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
+               COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
+               COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
+               AVG(c.virality_score) FILTER (WHERE c.status='posted')                            AS avg_virality_posted,
+               AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped','expired','failed'))   AS avg_virality_skipped,
+               COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) AS views_total,
+               COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0) AS likes_total,
+               COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
+               (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
+                + COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0)
+                + COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) * 0.001) AS composite_score,
+               MAX(c.posted_at) AS last_posted
+        FROM twitter_candidates c
+        LEFT JOIN posts            p   ON p.id = c.post_id
+        LEFT JOIN post_links       pl  ON pl.post_id = c.post_id
+        LEFT JOIN post_link_clicks plc ON plc.code = pl.code
+        WHERE c.discovered_at > NOW() - (%s || ' days')::interval
+          AND c.search_topic IS NOT NULL
+          AND c.search_topic <> ''
+          {where_proj}
+        GROUP BY c.search_topic, c.matched_project
+        HAVING COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') > 0
+            OR COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) > 0
+        ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_posted DESC NULLS LAST
+        LIMIT %s
+    """
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "search_topic": r[0],
+            "project": r[1],
+            "posts": int(r[2] or 0),
+            "posted_n": int(r[3] or 0),
+            "skipped_n": int(r[4] or 0),
+            "avg_virality_posted": round(float(r[5] or 0), 2),
+            "avg_virality_skipped": round(float(r[6] or 0), 2),
+            "views_total": int(r[7] or 0),
+            "likes_total": int(r[8] or 0),
+            "clicks_total": int(r[9] or 0),
+            "composite_score": round(float(r[10] or 0), 2),
+            "last_used": r[11].isoformat() if r[11] else None,
+        }
+        for r in rows
+    ]
+
+
 def _query_posts(conn, project, platform, window_days, limit):
     """Non-reddit path (github + fallback): posts-based, posts.platform filter.
 
