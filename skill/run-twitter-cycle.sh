@@ -73,20 +73,32 @@ TW_ENGINE_PREFIX=""
 FRESHNESS_HOURS=6
 
 # ----------------------------------------------------------------------------
-# A/B/C variant assignment (2026-05-22). Deterministic per BATCH_ID so that
-# every step of one cycle (search, scoring, drafting, posting, salvage) sees
-# the same variant. Variants:
-#   A (control)      = current logic: 20-min ripen wait + 6h freshness window
-#   B (no-ripen)     = skip the sleep 1200 + fetch_twitter_t1 step (saves
-#                      ~20 min thread->post latency). 6h freshness unchanged.
-#   C (no-ripen+1h)  = skip ripening AND tighten the Phase 1 freshness window
-#                      to 1h (since_time epoch passed to scan model + hook).
+# A/B/C/D variant assignment. Deterministic per BATCH_ID so that every step
+# of one cycle (search, scoring, drafting, posting, salvage) sees the same
+# variant. Variants:
+#   A (control, 2026-05-22)      = current logic: 20-min ripen wait + 6h
+#                                  freshness window.
+#   B (no-ripen, 2026-05-22)     = skip the sleep 1200 + fetch_twitter_t1
+#                                  step (saves ~20 min thread->post latency).
+#                                  6h freshness unchanged.
+#   C (no-ripen+1h, 2026-05-22)  = skip ripening AND tighten the Phase 1
+#                                  freshness window to 1h (since_time epoch
+#                                  passed to scan model + hook).
+#   D (C + 2k view cap, 2026-05-25) = same as C, plus score_twitter_candidates
+#                                  drops any tweet with views > 2000 at
+#                                  discovery T0. Tests the hypothesis that
+#                                  high-view threads starve our reply of
+#                                  audience: bucket data shows view-share
+#                                  collapses from 4% on <2k threads to 0.1%
+#                                  on >10k threads. Filter is enforced in
+#                                  scripts/score_twitter_candidates.py by
+#                                  reading TWITTER_CYCLE_VARIANT from env.
 # Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling)
 # so peer cycles don't accidentally expire each other's still-pending rows.
 # Only FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) varies.
-TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%3; print('ABC'[h])" "$BATCH_ID" 2>/dev/null || echo "A")
+TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%4; print('ABCD'[h])" "$BATCH_ID" 2>/dev/null || echo "A")
 FRESHNESS_HOURS_DISCOVER=$FRESHNESS_HOURS
-if [ "$TWITTER_CYCLE_VARIANT" = "C" ]; then
+if [ "$TWITTER_CYCLE_VARIANT" = "C" ] || [ "$TWITTER_CYCLE_VARIANT" = "D" ]; then
     FRESHNESS_HOURS_DISCOVER=1
 fi
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER
@@ -108,7 +120,7 @@ fi
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
-log "Variant=$TWITTER_CYCLE_VARIANT (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
+log "Variant=$TWITTER_CYCLE_VARIANT (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h, D=no-ripen+1h+2k_view_cap); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
 # Three early-exit gates BEFORE we open the DB, set up traps, or touch the
@@ -927,10 +939,11 @@ release_lock "twitter-browser" 2>>"$LOG_FILE"
 rm -f "$HOME/.claude/twitter-browser-lock.json"
 
 # --- Sleep 20 min before T1 measurement -------------------------------------
-# Variants B and C skip ripening entirely (2026-05-22 A/B/C test). The 20-min
-# wait + t1 re-fetch was originally a velocity gate; the gate floor was
-# removed 2026-05-15 so the wait only feeds delta_score into the LLM prompt
-# now. Variants B/C test whether eliminating that ~20 min thread->post lag
+# Variants B, C, and D skip ripening entirely (2026-05-22 A/B/C test,
+# extended 2026-05-25 with D = C + 2k view cap). The 20-min wait + t1
+# re-fetch was originally a velocity gate; the gate floor was removed
+# 2026-05-15 so the wait only feeds delta_score into the LLM prompt now.
+# Variants B/C/D test whether eliminating that ~20 min thread->post lag
 # meaningfully improves engagement vs. the marginal informational value of
 # delta_score in the draft prompt.
 if [ "$TWITTER_CYCLE_VARIANT" = "A" ]; then
