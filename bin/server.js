@@ -6770,6 +6770,17 @@ async function handleApi(req, res) {
         "COALESCE(pl.backfill_real, 0)::int AS link_backfill_real, " +
         "COALESCE(pl.link_count, 0)::int AS link_count, " +
         "pl.first_code AS link_code, " +
+        // Thread context columns (2026-05-25): surface the parent tweet's
+        // engagement snapshot (posts.thread_engagement JSON, captured at
+        // discovery T0) and the best-performing human reply in the same
+        // thread (thread_top_replies, live-refreshed by stats.sh). Both
+        // are Twitter-first today; other platforms get NULLs.
+        "posts.thread_engagement, " +
+        "ttr.likes AS top_reply_likes, " +
+        "ttr.replies AS top_reply_replies, " +
+        "ttr.retweets AS top_reply_retweets, " +
+        "ttr.views AS top_reply_views, " +
+        "ttr.reply_author_handle AS top_reply_author, " +
         "'post'::text AS row_kind " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
       // pl rollup: legacy `total_clicks` reads the post_links.clicks integer
@@ -6797,6 +6808,17 @@ async function handleApi(req, res) {
         ") plc ON plc.code = pl0.code " +
         "GROUP BY pl0.post_id" +
       ") pl ON pl.post_id = posts.id " +
+      // 2026-05-25: Pick the single best human reply in the same thread
+      // (by live likes, falling back to capture-time likes for rows the
+      // refresh cron hasn't touched yet, then rank_at_capture). Status
+      // filter drops competitor replies the author deleted.
+      "LEFT JOIN LATERAL (" +
+        "SELECT likes, replies, retweets, views, reply_author_handle " +
+        "FROM thread_top_replies " +
+        "WHERE post_id = posts.id AND status = 'active' " +
+        "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
+        "LIMIT 1" +
+      ") ttr ON true " +
       "WHERE " + whereParts.join(' AND ') + " " +
       "ORDER BY upvotes DESC NULLS LAST, comments_count DESC NULLS LAST, views DESC NULLS LAST " +
       "LIMIT " + limit;
@@ -6834,10 +6856,28 @@ async function handleApi(req, res) {
         "0::int AS link_clicks, 0::int AS link_real_clicks, " +
         "0::int AS link_bot_clicks, 0::int AS link_backfill_real, " +
         "0::int AS link_count, NULL::text AS link_code, " +
+        // 2026-05-25: same thread context as the posts branch, but read
+        // from the PARENT post (the original comment we made on the OG
+        // thread; this reply is a reply-to-reply living in that same
+        // thread). thread_top_replies.post_id always points at the post
+        // we made, so the lookup keys on parent.id.
+        "parent.thread_engagement, " +
+        "ttr2.likes AS top_reply_likes, " +
+        "ttr2.replies AS top_reply_replies, " +
+        "ttr2.retweets AS top_reply_retweets, " +
+        "ttr2.views AS top_reply_views, " +
+        "ttr2.reply_author_handle AS top_reply_author, " +
         "'reply'::text AS row_kind " +
       "FROM replies r2 " +
       "LEFT JOIN posts parent ON parent.id = r2.post_id " +
       "LEFT JOIN campaigns cr ON cr.id = r2.campaign_id " +
+      "LEFT JOIN LATERAL (" +
+        "SELECT likes, replies, retweets, views, reply_author_handle " +
+        "FROM thread_top_replies " +
+        "WHERE post_id = parent.id AND status = 'active' " +
+        "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
+        "LIMIT 1" +
+      ") ttr2 ON true " +
       "WHERE " + repliesWhere.join(' AND ') + " " +
       "ORDER BY r2.upvotes DESC NULLS LAST, r2.comments_count DESC NULLS LAST, r2.views DESC NULLS LAST " +
       "LIMIT " + limit;
@@ -15542,6 +15582,22 @@ function renderTopPosts(payload) {
       link_ctr:      _ctr,
       link_count:    Number(p.link_count)  || 0,
       link_code:     p.link_code || '',
+      // 2026-05-25 thread + top human reply context. thread_engagement is
+      // a JSON-as-text snapshot of the parent tweet's stats at discovery
+      // T0 ({likes, retweets, replies, views, bookmarks, source}); parse
+      // once here so the column formatter stays cheap. top_reply_* come
+      // from the live thread_top_replies row picked by the SQL LATERAL.
+      thread_engagement: (() => {
+        const raw = p.thread_engagement;
+        if (!raw) return null;
+        if (typeof raw === 'object') return raw;
+        try { return JSON.parse(String(raw)); } catch (_e) { return null; }
+      })(),
+      top_reply_likes:    p.top_reply_likes    == null ? null : Number(p.top_reply_likes),
+      top_reply_replies:  p.top_reply_replies  == null ? null : Number(p.top_reply_replies),
+      top_reply_retweets: p.top_reply_retweets == null ? null : Number(p.top_reply_retweets),
+      top_reply_views:    p.top_reply_views    == null ? null : Number(p.top_reply_views),
+      top_reply_author:   p.top_reply_author || '',
     };
   });
   _topTableHandle = mountSortableTable({
