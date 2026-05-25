@@ -281,8 +281,11 @@ def query(project=None, platform=None, window_days=30, limit=10):
     dbmod.load_env()
     conn = dbmod.get_conn()
     try:
-        if platform and platform.lower() == "reddit":
+        plat = (platform or "").lower()
+        if plat == "reddit":
             results = _query_reddit(conn, project, window_days, limit)
+        elif plat == "twitter":
+            results = _query_twitter(conn, project, window_days, limit)
         else:
             results = _query_posts(conn, project, platform, window_days, limit)
     finally:
@@ -291,7 +294,9 @@ def query(project=None, platform=None, window_days=30, limit=10):
 
 
 def format_text(results, project=None, platform=None, window_days=30):
-    is_reddit = (platform or "").lower() == "reddit"
+    plat = (platform or "").lower()
+    is_reddit = plat == "reddit"
+    is_twitter = plat == "twitter"
     if not results:
         return (
             f"(no search_topic data yet in the last {window_days}d"
@@ -306,6 +311,8 @@ def format_text(results, project=None, platform=None, window_days=30):
         header += f", platform={platform}"
     if is_reddit:
         header += ", ranked by clicks_total DESC then composite (clicks×100 + comments + upvotes))"
+    elif is_twitter:
+        header += ", ranked by clicks_total DESC then composite (clicks×100 + likes + views×0.001))"
     else:
         header += ", ranked by clicks_total DESC then composite (clicks×100 + comments×3 + upvotes))"
     lines = [header]
@@ -326,6 +333,24 @@ def format_text(results, project=None, platform=None, window_days=30):
             "Δskip = avg ripen delta_score on skipped/expired/failed rows. "
             "High Δskip + few posts = query is on-rank but off-topic — reword. "
             "Low Δskip + few posts = dead supply, drop the seed.)"
+        )
+    elif is_twitter:
+        lines.append(
+            f"  {'clicks':>6} {'views':>7} {'likes':>5} "
+            f"{'posts':>5} {'pN':>3} {'sN':>3} "
+            f"{'Vpost':>6} {'Vskip':>6}  topic"
+        )
+        for r in results:
+            lines.append(
+                f"  {r['clicks_total']:>6} {r['views_total']:>7} {r['likes_total']:>5} "
+                f"{r['posts']:>5} {r['posted_n']:>3} {r['skipped_n']:>3} "
+                f"{r['avg_virality_posted']:>6.1f} {r['avg_virality_skipped']:>6.1f}  {r['search_topic']}"
+            )
+        lines.append(
+            "  (Vpost = avg virality_score on posted rows; "
+            "Vskip = avg virality_score on skipped/expired/failed rows. "
+            "High Vskip + few posts = topic finds viral noise we keep skipping — reword. "
+            "Low Vskip + few posts = dead supply, drop the seed.)"
         )
     else:
         lines.append(
