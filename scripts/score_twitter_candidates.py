@@ -221,6 +221,29 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
         tweet["age_hours"] = age_hours
         tweet["author_followers"] = tweet.get("author_followers", 0)
 
+        # Variant D (2026-05-25): 2k-view ceiling cap on parent thread.
+        # Bucket analysis on 250+ mature posts showed view-share collapses
+        # from ~4% on 500-2k-view threads to ~0.1% on >10k-view threads —
+        # our reply is invisible to the audience of large threads. D drops
+        # any candidate whose T0 views exceed 2000; A/B/C let everything
+        # through unchanged. Comparing posted-quality (views/likes per
+        # surviving candidate) between D and C isolates the ceiling effect.
+        # No DB row written for rejects: the dashboard already groups by
+        # cycle_variant and the stderr marker below captures opportunity
+        # cost for later log-based analysis.
+        _ceiling_variant = os.environ.get("TWITTER_CYCLE_VARIANT") or ""
+        _ceiling_views = tweet.get("views", 0) or 0
+        if _ceiling_variant == "D" and _ceiling_views > 2000:
+            skipped += 1
+            print(
+                f"[ceiling_d_skip] views_t0={_ceiling_views} "
+                f"likes={tweet.get('likes', 0)} replies={tweet.get('replies', 0)} "
+                f"age_hours={age_hours:.2f} url={url}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+
         score, velocity, rt_ratio = calculate_virality_score(tweet)
 
         # Use LLM-assigned project if available, fall back to keyword matching
