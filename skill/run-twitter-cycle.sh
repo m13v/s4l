@@ -457,6 +457,21 @@ TOP_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_twitter_queries.py" --limit 20
 TOP_COUNT=$(echo "$TOP_QUERIES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Top past queries loaded: $TOP_COUNT (composite-scored)"
 
+# --- Top performing search topics (topic-universe evolution, 2026-05-25) ----
+# Sibling signal to TOP_QUERIES_JSON, one level up the funnel: where queries
+# are the literal X search strings, search_topics are the conceptual seeds
+# they were drafted from (e.g. "MCP client desktop", "AI agent that takes
+# actions"). top_search_topics.py reads twitter_candidates (sidesteps
+# posts.search_topic which was 0% covered for Twitter until this cycle) and
+# returns, per topic: posted vs skipped count, avg virality posted vs
+# skipped, total clicks/likes/views, composite_score. The model uses this to
+# evolve the TOPIC UNIVERSE itself (drop topics with high skipped/posted
+# ratio, mimic topics with non-zero clicks, invent variants of winning
+# topics) rather than just rephrasing within the same fixed set of topics.
+TOP_TOPICS_JSON=$(python3 "$REPO_DIR/scripts/top_search_topics.py" --platform twitter --limit 20 --window-days 14 --json 2>/dev/null || echo "[]")
+TOP_TOPICS_COUNT=$(echo "$TOP_TOPICS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+log "Top search topics loaded: $TOP_TOPICS_COUNT (Twitter, 14d window)"
+
 # --- Dud queries: phrasings that returned 0 tweets in the last 48h ----------
 # Fed into the prompt as a negative-signal anti-list so the LLM stops
 # redrafting the same flat queries every 20-min cycle. Source is
@@ -660,6 +675,14 @@ Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so y
 
 Use these as STYLE inspiration for phrasing, operators, and the min_faves tier that worked. Do NOT copy keywords literally; adapt them to each project's domain.
 $TOP_QUERIES_JSON
+
+TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — one level above queries. Where queries are the literal X strings, topics are the conceptual seeds they were drafted from. The pipeline writes \`search_topic\` onto every twitter_candidates row at discovery, so this list aggregates per topic across all the different queries that surfaced it. Use this to evolve the TOPIC UNIVERSE itself, not just to reword queries:
+  - \`posts\` / \`skipped_n\`: how often a topic surfaces threads we post to versus skip. A topic with high skipped vs low posted is ON-TOPIC but the queries that surface it find off-fit threads — REWORD the queries for that topic, do not drop the topic.
+  - \`clicks_total\`: the ultimate signal. Topics with non-zero clicks have proven they convert; bias new query drafts toward them and INVENT close-variant topics (e.g. "AI agent that takes actions" winning -> try "agent that completes tasks", "autonomous agent loop").
+  - \`avg_virality_posted\` vs \`avg_virality_skipped\`: if posted virality is high AND clicks are non-zero, this topic is a winner — keep drafting fresh queries for it. If both viralities are low, the topic is dead supply; let it cycle out by not drafting for it this run.
+  - \`composite_score\`: clicks×100 + likes + views×0.001, descending. Top of the list is where the marginal effort pays off.
+Treat the topic list as ground truth for which CONCEPT SEEDS to keep working, separate from the QUERY-string feedback below. New invented topics are encouraged when an existing winner suggests an adjacent angle; the per-project search_topics list in config.json is the seed pool, not a hard ceiling.
+$TOP_TOPICS_JSON
 
 DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt; \`min_faves\` is the floor that produced zero supply (look for patterns: if EVERY dud for a project uses the same min_faves tier, the floor is too high for that project's audience and you should DROP it). Pick a different angle, different operators, or different keyword cluster:
 $DUD_QUERIES_JSON
@@ -1055,9 +1078,9 @@ import json, sys
 payload = {
     'platform': 'twitter',
     'project_name': 'all',
-    'prompt_chars': len(sys.argv[1]) + len(sys.argv[2]) + len(sys.argv[3]) + len(sys.argv[4]),
+    'prompt_chars': len(sys.argv[1]) + len(sys.argv[2]) + len(sys.argv[3]) + len(sys.argv[4]) + len(sys.argv[7]),
     'top_performers_text': sys.argv[1],
-    'top_search_topics_text': '',
+    'top_search_topics_text': sys.argv[7],
     'recent_comment_ids': [],
     'extras': {
         'top_queries': json.loads(sys.argv[2] or '[]'),
@@ -1065,11 +1088,12 @@ payload = {
         'dud_queries': json.loads(sys.argv[4] or '[]'),
         'auto_picked_style': sys.argv[5] or None,
         'auto_picked_mode': sys.argv[6] or 'use',
+        'top_search_topics': json.loads(sys.argv[7] or '[]'),
     },
     'min_score_floor': 5,
 }
 print(json.dumps(payload))
-" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" 2>/dev/null || echo '{}')
+" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" "$TOP_TOPICS_JSON" 2>/dev/null || echo '{}')
 SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
 export SAPS_TWITTER_GEN_TRACE_PATH
 if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
@@ -1131,7 +1155,7 @@ export CLAUDE_SESSION_ID
 # Fields mirror engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS so the
 # downstream validate_or_register call accepts the block without a
 # second schema layer.
-PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"}}},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
+PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"}}},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
@@ -1187,6 +1211,7 @@ For each chosen candidate:
    - has_landing_pages (bool): true iff the matched project has BOTH landing_pages.repo AND landing_pages.base_url set in config.json. Otherwise false.
    - link_keyword (string, REQUIRED when has_landing_pages=true; OMIT otherwise): a SHORT 3-6 word phrase that captures the ESSENCE OF YOUR REPLY (not just the thread topic). Think: what would a reader search to find a useful page about what you just said?
    - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
+   - search_topic (string, REQUIRED): the EXACT 'Search query' value from this candidate's block above. Copy verbatim. Do not paraphrase, normalise, or trim. The shell stamps this onto posts.search_topic so the next cycle's Phase 1 can rank which topics convert (clicks per post) and evolve the universe accordingly.
 
 5. ACCOUNT FOR EVERY PRE-SCORED CANDIDATE: every Candidate ID listed in the PRE-SCORED CANDIDATES section above MUST appear in EXACTLY ONE of the two output arrays this cycle:
    - 'candidates' (every on-brand pick, no cap) per step 4 above, OR
