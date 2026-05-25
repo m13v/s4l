@@ -15625,7 +15625,7 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: distinctOptions(normalized, 'project_name', 'All'),
         filterPredicate: filterPredicateExact },
-      { key: 'score',          label: 'Stats',    type: 'numeric', align: 'left',  widthPct: 18,
+      { key: 'score',          label: 'Ours',     type: 'numeric', align: 'left',  widthPct: 14,
         formatter: (_v, r) => {
           // engagement_ts === 0 means engagement_updated_at IS NULL: the
           // post landed in the DB but the engagement scrape (stats.sh)
@@ -15653,6 +15653,64 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: numericThresholdOptions(normalized, 'score'),
         filterPredicate: filterPredicateGte },
+      // 2026-05-25: thread + top-human-reply context columns. Both are
+      // Twitter-first today (posts.thread_engagement is captured at
+      // discovery T0 only for the Twitter pipeline; thread_top_replies
+      // is also Twitter-only). Non-twitter rows render em-dashes so the
+      // column structure stays consistent across the cross-platform feed.
+      // Sort accessor returns the thread-views integer so a "highest
+      // thread views" ordering is one column click away (useful to find
+      // our biggest replies-into-huge-threads).
+      { key: 'thread_views',   label: 'Thread',   type: 'numeric', align: 'left',  widthPct: 8,
+        accessor: r => {
+          const te = r.thread_engagement;
+          if (!te || typeof te !== 'object') return 0;
+          return Number(te.views) || 0;
+        },
+        formatter: (_v, r) => {
+          const isTw = r.platform === 'twitter' || r.platform === 'x';
+          const te = r.thread_engagement;
+          if (!isTw || !te || typeof te !== 'object') {
+            return '<div class="top-stats-cell"><span class="top-stats-bit"><span class="top-stats-k">\u2014</span></span></div>';
+          }
+          const likes    = te.likes    == null ? '\u2014' : fmt(te.likes);
+          const replies  = te.replies  == null ? '\u2014' : fmt(te.replies);
+          const views    = te.views    == null ? '\u2014' : fmt(te.views);
+          // T0 snapshot tooltip: be explicit that this is frozen at
+          // discovery time, not live, so the operator doesn't read it
+          // as "the parent grew to X" when it's just the moment we found
+          // the thread.
+          const tip = 'Parent tweet stats snapshot at discovery time (not live-refreshed)';
+          const parts = [
+            '<span class="top-stats-bit" title="' + escapeHtml(tip) + '"><span class="top-stats-k">likes</span>' + likes + '</span>',
+            '<span class="top-stats-bit"><span class="top-stats-k">replies</span>' + replies + '</span>',
+            '<span class="top-stats-bit"><span class="top-stats-k">views</span>' + views + '</span>',
+          ];
+          return '<div class="top-stats-cell">' + parts.join('') + '</div>';
+        },
+        filterMode: 'none' },
+      { key: 'top_reply_views', label: 'Top reply', type: 'numeric', align: 'left', widthPct: 8,
+        accessor: r => Number(r.top_reply_views) || 0,
+        formatter: (_v, r) => {
+          const isTw = r.platform === 'twitter' || r.platform === 'x';
+          if (!isTw || r.top_reply_likes == null && r.top_reply_views == null && r.top_reply_replies == null) {
+            return '<div class="top-stats-cell"><span class="top-stats-bit"><span class="top-stats-k">\u2014</span></span></div>';
+          }
+          const likes   = r.top_reply_likes   == null ? '\u2014' : fmt(r.top_reply_likes);
+          const replies = r.top_reply_replies == null ? '\u2014' : fmt(r.top_reply_replies);
+          const views   = r.top_reply_views   == null ? '\u2014' : fmt(r.top_reply_views);
+          const author  = r.top_reply_author ? ('@' + r.top_reply_author) : '';
+          const tip = author
+            ? 'Best-performing human reply in the same thread ' + author + ' (live)'
+            : 'Best-performing human reply in the same thread (live)';
+          const parts = [
+            '<span class="top-stats-bit" title="' + escapeHtml(tip) + '"><span class="top-stats-k">likes</span>' + likes + '</span>',
+            '<span class="top-stats-bit"><span class="top-stats-k">replies</span>' + replies + '</span>',
+            '<span class="top-stats-bit"><span class="top-stats-k">views</span>' + views + '</span>',
+          ];
+          return '<div class="top-stats-cell">' + parts.join('') + '</div>';
+        },
+        filterMode: 'none' },
       { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
         // Sort by what the cell ACTUALLY displays. Display priority:
         //   1. per-click log present (real/bot split) -> sort by real (humans only)
@@ -15819,7 +15877,7 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: ageThresholdOptions(),
         filterPredicate: filterPredicateAge },
-      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 46,
+      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 34,
         formatter: renderTopContentCell,
         filterMode: 'none' },
       { key: 'id',             label: '',         type: 'text',    align: 'center', widthPct: 2,
