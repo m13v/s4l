@@ -3784,9 +3784,14 @@ async function handleApi(req, res) {
 
   // PUBLIC: twitterapi.io webhook POST. Bypasses Firebase auth because the
   // sender (twitterapi.io) has no concept of Firebase tokens; auth is the
-  // shared X-API-Key header validated against TWITTERAPI_IO_WEBHOOK_SECRET
-  // inside the handler. TEST MODE = observe-only INSERTs, no actions taken.
+  // shared X-API-Key header validated against TWITTERAPI_IO_WEBHOOK_SECRET.
   // Must live ABOVE the Firebase auth gate, like /api/short-links/<code>.
+  //
+  // Inserts directly into twitter_candidates so webhook tweets flow through
+  // the same discover -> score -> ripen -> draft -> post pipeline as
+  // search-discovered candidates. Trace markers (search_topic prefix
+  // 'twitterapi_webhook:<handle>', discovery_batch_id 'webhook-<handle>-<id>')
+  // let downstream analytics distinguish webhook-sourced rows.
   if (p === '/api/webhooks/twitterapi-io' && req.method === 'POST') {
     return readBody(req).then(async body => {
       const expected = (process.env.TWITTERAPI_IO_WEBHOOK_SECRET || '').trim();
@@ -3805,12 +3810,11 @@ async function handleApi(req, res) {
       catch (e) { return json(res, { error: 'invalid_json' }, 400); }
 
       const tweets = Array.isArray(payload) ? payload : (payload.tweets || payload.data || []);
-      const ruleId = payload.rule_id || null;
       const ruleTag = payload.rule_tag || null;
 
       const logFile = path.join(LOG_DIR, `twitterapi-io-webhook-${new Date().toISOString().slice(0, 10)}.log`);
       try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
-      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] received rule_tag=${ruleTag} rule_id=${ruleId} tweets=${tweets.length}\n`); } catch {}
+      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] received rule_tag=${ruleTag} tweets=${tweets.length}\n`); } catch {}
 
       if (!tweets.length) {
         return json(res, { received: 0, inserted: 0, skipped: 0, note: 'no_tweets_in_payload' });
@@ -3818,51 +3822,66 @@ async function handleApi(req, res) {
 
       let inserted = 0;
       let skipped = 0;
+      let filteredReply = 0;
+      let filteredRetweet = 0;
       const errors = [];
       for (const t of tweets) {
         try {
+          // Skip replies and retweets at ingest: the normal pipeline only
+          // ever drafts replies to top-level tweets, not reply chains or RTs.
+          if (t.isReply || t.inReplyToId) { filteredReply++; skipped++; continue; }
+          if (t.isRetweet || (t.retweetedStatus && t.retweetedStatus.id)) { filteredRetweet++; skipped++; continue; }
+
           const monitoredHandle = (ruleTag || (t.author && t.author.userName) || '').toLowerCase();
           const authorHandle = (t.author && t.author.userName) || null;
           const authorFollowers = (t.author && (t.author.followers || t.author.followersCount)) || null;
           const tweetId = String(t.id || t.id_str || '').trim();
           if (!tweetId) { skipped++; continue; }
+          const tweetUrl = t.url || t.twitterUrl
+            || (authorHandle && `https://x.com/${authorHandle}/status/${tweetId}`)
+            || null;
+          if (!tweetUrl) { skipped++; continue; }
           let postedAt = null;
           if (t.createdAt) {
             const parsed = new Date(t.createdAt);
             if (!isNaN(parsed.getTime())) postedAt = parsed.toISOString();
           }
 
+          const likes = t.likeCount || 0;
+          const retweets = t.retweetCount || 0;
+          const replies = t.replyCount || 0;
+          const views = t.viewCount || 0;
+          const bookmarks = t.bookmarkCount || 0;
+
+          const searchTopic = `twitterapi_webhook:${monitoredHandle || 'unknown'}`;
+          const discoveryBatchId = `webhook-${monitoredHandle || 'unknown'}-${tweetId}`;
+
           const q = `
-            INSERT INTO early_reply_candidates (
-              source, rule_id, rule_tag, monitored_handle,
-              tweet_id, tweet_url, author_handle, author_followers,
-              tweet_text, tweet_posted_at, is_reply, in_reply_to_id,
-              conversation_id, language,
-              reply_count_at_arrival, like_count_at_arrival,
-              retweet_count_at_arrival, view_count_at_arrival,
-              quote_count_at_arrival, bookmark_count_at_arrival,
-              project, status, raw_payload
+            INSERT INTO twitter_candidates (
+              tweet_url, author_handle, author_followers,
+              tweet_text, tweet_posted_at,
+              likes, retweets, replies, views, bookmarks,
+              likes_t0, retweets_t0, replies_t0, views_t0, bookmarks_t0,
+              language,
+              search_topic, discovery_batch_id, batch_id,
+              our_account, status
             ) VALUES (
-              'twitterapi_webhook_early_reply', $1, $2, $3,
-              $4, $5, $6, $7,
-              $8, $9, $10, $11,
-              $12, $13,
-              $14, $15,
-              $16, $17,
-              $18, $19,
-              'fazm', 'observed', $20::jsonb
+              $1, $2, $3,
+              $4, $5,
+              $6, $7, $8, $9, $10,
+              $6, $7, $8, $9, $10,
+              $11,
+              $12, $13, $13,
+              'm13v_', 'pending'
             )
-            ON CONFLICT (tweet_id, monitored_handle) DO NOTHING
+            ON CONFLICT (tweet_url, our_account) DO NOTHING
             RETURNING id`;
           const params = [
-            ruleId, ruleTag, monitoredHandle,
-            tweetId, t.url || t.twitterUrl || null, authorHandle, authorFollowers,
-            t.text || null, postedAt, !!t.isReply, t.inReplyToId || null,
-            t.conversationId || null, t.lang || null,
-            t.replyCount || 0, t.likeCount || 0,
-            t.retweetCount || 0, t.viewCount || 0,
-            t.quoteCount || 0, t.bookmarkCount || 0,
-            JSON.stringify(t)
+            tweetUrl, authorHandle, authorFollowers,
+            t.text || null, postedAt,
+            likes, retweets, replies, views, bookmarks,
+            t.lang || null,
+            searchTopic, discoveryBatchId
           ];
           const rows = await pq(q, params);
           if (rows && rows.length) inserted++;
@@ -3872,35 +3891,20 @@ async function handleApi(req, res) {
         }
       }
 
-      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] processed inserted=${inserted} skipped=${skipped} errors=${errors.length}\n`); } catch {}
+      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] processed inserted=${inserted} skipped=${skipped} filtered_reply=${filteredReply} filtered_retweet=${filteredRetweet} errors=${errors.length}\n`); } catch {}
       if (errors.length) console.error('[twitterapi-io] insert errors:', errors.slice(0, 5));
-      return json(res, { received: tweets.length, inserted, skipped, errors: errors.length });
+      return json(res, {
+        received: tweets.length,
+        inserted, skipped,
+        filtered_reply: filteredReply,
+        filtered_retweet: filteredRetweet,
+        errors: errors.length
+      });
     }).catch(e => {
       console.error('[twitterapi-io] handler error:', e.message);
       return json(res, { error: e.message }, 400);
     });
   }
-
-  // PUBLIC read: twitterapi.io recent events JSON feed and HTML surface.
-  // TEST MODE convenience: lets the user verify events are landing without
-  // signing into the Firebase-gated dashboard. Read-only, no row mutation,
-  // no PII beyond public tweet metadata.
-  if (p === '/api/webhooks/twitterapi-io/recent' && req.method === 'GET') {
-    return (async () => {
-      const u = new URL(req.url, 'http://localhost');
-      const limit = Math.min(parseInt(u.searchParams.get('limit')) || 100, 500);
-      const q = "SELECT id, received_at, monitored_handle, rule_tag, tweet_id, tweet_url, " +
-        "author_handle, author_followers, LEFT(tweet_text, 280) AS tweet_text, " +
-        "tweet_posted_at, reply_count_at_arrival, like_count_at_arrival, " +
-        "view_count_at_arrival, is_reply, status, project " +
-        "FROM early_reply_candidates ORDER BY received_at DESC LIMIT $1";
-      const rows = await pq(q, [limit]);
-      return json(res, { count: (rows || []).length, rows: rows || [] });
-    })().catch(e => json(res, { error: e.message }, 500));
-  }
-
-  // (HTML surface route /twitterapi-early-replies is in the outer router
-  // below since handleApi() only handles /api/* paths.)
 
   // Auth: no-op when CLIENT_MODE is unset (local operator use).
   // When CLIENT_MODE=1, require a Firebase Bearer token and enforce admin/project claims.
@@ -18838,79 +18842,6 @@ function renderHtml() {
     .replace('__SA_POSTHOG_CONFIG_PLACEHOLDER__', JSON.stringify(posthogWebConfig()));
 }
 
-// Tiny standalone HTML surface for the twitterapi.io early-reply test mode.
-// TEST MODE = observe-only; user inspects rows landing here before we wire
-// any actions. Read-only feed; the JSON endpoint backing it is also public
-// since this is dev-grade visibility. Restrict via Cloud Run IAM or a header
-// gate before any auto-action is layered on top.
-function renderTwitterapiEarlyRepliesPage() {
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>twitterapi.io early replies</title>
-<style>
-  body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #0b0b0b; color: #e7e7e7; }
-  h1 { font-size: 18px; margin: 0 0 12px; }
-  .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { padding: 6px 8px; border-bottom: 1px solid #222; vertical-align: top; text-align: left; }
-  th { background: #161616; font-weight: 600; color: #aaa; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-  tr:hover { background: #131313; }
-  a { color: #6cb9ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .handle { color: #ffb84c; font-weight: 600; }
-  .text { max-width: 480px; color: #ccc; }
-  .stat { font-variant-numeric: tabular-nums; color: #999; }
-  .empty { color: #888; padding: 24px; text-align: center; }
-  .status-observed { color: #6cb9ff; font-size: 11px; }
-</style>
-</head><body>
-<h1>twitterapi.io early replies (Fazm, TEST MODE)</h1>
-<div class="meta">Observe-only. Webhook fires from filter rules at twitterapi.io insert rows here as <code>status='observed'</code>. No auto-drafting. <a href="/api/webhooks/twitterapi-io/recent">JSON feed</a></div>
-<div id="root" class="empty">Loading\u2026</div>
-<script>
-  function fmtTime(s) {
-    if (!s) return '';
-    const d = new Date(s);
-    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  }
-  async function load() {
-    const root = document.getElementById('root');
-    try {
-      const r = await fetch('/api/webhooks/twitterapi-io/recent?limit=200');
-      const data = await r.json();
-      if (!data.rows || !data.rows.length) {
-        root.innerHTML = '<div class="empty">No events yet. Waiting for first webhook fire from twitterapi.io.</div>';
-        return;
-      }
-      let html = '<table><thead><tr>'
-        + '<th>received</th><th>monitored</th><th>author</th>'
-        + '<th>tweet</th><th>replies</th><th>likes</th><th>views</th>'
-        + '<th>posted_at</th><th>status</th>'
-        + '</tr></thead><tbody>';
-      for (const row of data.rows) {
-        html += '<tr>'
-          + '<td class="stat">' + fmtTime(row.received_at) + '</td>'
-          + '<td class="handle">@' + (row.monitored_handle || '') + '</td>'
-          + '<td>@' + (row.author_handle || '') + '</td>'
-          + '<td class="text"><a href="' + (row.tweet_url || '#') + '" target="_blank">' + (row.tweet_text || '').replace(/</g, '&lt;') + '</a></td>'
-          + '<td class="stat">' + (row.reply_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + (row.like_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + (row.view_count_at_arrival ?? '') + '</td>'
-          + '<td class="stat">' + fmtTime(row.tweet_posted_at) + '</td>'
-          + '<td class="status-observed">' + (row.status || '') + '</td>'
-          + '</tr>';
-      }
-      html += '</tbody></table>';
-      root.innerHTML = html;
-    } catch (e) {
-      root.innerHTML = '<div class="empty" style="color:#ef4444;">Failed to load: ' + e.message + '</div>';
-    }
-  }
-  load();
-  setInterval(load, 30000);
-</script>
-</body></html>`;
-}
-
 function renderTikTokOauthCallback(rawUrl) {
   const u = new URL(rawUrl, 'http://localhost');
   const code = u.searchParams.get('code') || '';
@@ -18955,9 +18886,6 @@ const server = http.createServer((req, res) => {
     Promise.resolve(handleApi(req, res)).catch(e => {
       try { json(res, { error: e.message || String(e) }, 500); } catch {}
     });
-  } else if (pathname === '/twitterapi-early-replies') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(renderTwitterapiEarlyRepliesPage());
   } else if (pathname === '/oauth/tiktok/callback') {
     // Minimal TikTok OAuth landing page. We do not exchange the code here
     // because the dashboard Cloud Run service does not carry the TikTok
