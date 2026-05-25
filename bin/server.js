@@ -11374,8 +11374,8 @@ async function loadExperiments() {
       const batches = v.n_batches != null ? fmtIntK(v.n_batches) : '\u2014';
       // Views are usually large (tens to thousands), so fmtIntK is fine.
       // Likes/replies per post on most platforms (Twitter especially) are
-      // legitimately sub-1 averages — fmtIntK rounded those to "0" which
-      // looked like missing data. Use 2 decimal places, same as `clicks` below.
+      // legitimately sub-1 averages; fmtIntK rounded those to 0 which looked
+      // like missing data. Use 2 decimal places, same as the clicks row below.
       const views = v.avg_views != null ? fmtIntK(v.avg_views) : '\u2014';
       const likes = v.avg_likes != null ? Number(v.avg_likes).toFixed(2) : '\u2014';
       const replies = v.avg_replies != null ? Number(v.avg_replies).toFixed(2) : '\u2014';
