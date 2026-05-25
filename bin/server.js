@@ -11372,9 +11372,13 @@ async function loadExperiments() {
       // For tail-link variants n_batches is null (no batch axis); render as
       // em-dash instead of 0 so it doesn't look like a real zero.
       const batches = v.n_batches != null ? fmtIntK(v.n_batches) : '\u2014';
+      // Views are usually large (tens to thousands), so fmtIntK is fine.
+      // Likes/replies per post on most platforms (Twitter especially) are
+      // legitimately sub-1 averages — fmtIntK rounded those to "0" which
+      // looked like missing data. Use 2 decimal places, same as `clicks` below.
       const views = v.avg_views != null ? fmtIntK(v.avg_views) : '\u2014';
-      const likes = v.avg_likes != null ? fmtIntK(v.avg_likes) : '\u2014';
-      const replies = v.avg_replies != null ? fmtIntK(v.avg_replies) : '\u2014';
+      const likes = v.avg_likes != null ? Number(v.avg_likes).toFixed(2) : '\u2014';
+      const replies = v.avg_replies != null ? Number(v.avg_replies).toFixed(2) : '\u2014';
       // avg_clicks is populated only for the tail-link experiment; the
       // cycle_variant rows don't compute it and show "—".
       const clicks = v.avg_clicks != null ? (v.avg_clicks).toFixed(2) : '\u2014';
