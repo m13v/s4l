@@ -5662,9 +5662,17 @@ async function handleApi(req, res) {
                    EXTRACT(EPOCH FROM (tc.discovered_at - tc.tweet_posted_at)) / 60.0 AS thread_age_min,
                    p.views AS our_views,
                    p.upvotes AS our_likes,
-                   p.comments_count AS our_replies
+                   p.comments_count AS our_replies,
+                   COALESCE(pl.total_clicks, 0) AS our_clicks
             FROM twitter_candidates tc
             LEFT JOIN posts p ON p.id = tc.post_id
+            LEFT JOIN (
+              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
+              FROM post_links pl2
+              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
+              WHERE pl2.post_id IS NOT NULL
+              GROUP BY pl2.post_id
+            ) pl ON pl.post_id = tc.post_id
             WHERE tc.cycle_variant IS NOT NULL
               AND tc.cycle_variant IN ('A','B','C')
               AND tc.discovered_at > NOW() - INTERVAL '30 days'
@@ -5681,6 +5689,7 @@ async function handleApi(req, res) {
                  AVG(our_views) FILTER (WHERE status = 'posted') AS avg_views,
                  AVG(our_likes) FILTER (WHERE status = 'posted') AS avg_likes,
                  AVG(our_replies) FILTER (WHERE status = 'posted') AS avg_replies,
+                 AVG(our_clicks) FILTER (WHERE status = 'posted') AS avg_clicks,
                  MIN(discovered_at) AS started_at
           FROM base
           GROUP BY variant
@@ -5706,6 +5715,7 @@ async function handleApi(req, res) {
             avg_views: row.avg_views != null ? Number(row.avg_views) : null,
             avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
             avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+            avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
             started_at: row.started_at || null,
           };
         });
