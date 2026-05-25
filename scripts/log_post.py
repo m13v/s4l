@@ -177,6 +177,8 @@ def log_rejected(args):
     }
     if args.engagement_style:
         body["engagement_style"] = args.engagement_style
+    if args.search_topic:
+        body["search_topic"] = args.search_topic
     if args.language:
         body["language"] = args.language
     if claude_session_id:
@@ -246,6 +248,15 @@ def main():
     parser.add_argument("--engagement-style", default=None,
                         help="Tone style (e.g. critic, storyteller). Separate from "
                              "--is-recommendation, which is intent.")
+    parser.add_argument("--search-topic", default=None,
+                        help="Topic seed from the project's search_topics list "
+                             "(or a model-invented variant) that surfaced this "
+                             "thread. Stamped on posts.search_topic so "
+                             "top_search_topics.py can aggregate per-topic "
+                             "conversion. For Twitter this should be copied "
+                             "from twitter_candidates.search_topic; Reddit and "
+                             "GitHub already populate this field via their own "
+                             "log-post wrappers.")
     parser.add_argument("--is-recommendation", action="store_true",
                         help="Mark this post as a project mention/recommendation. "
                              "Composes with --engagement-style; tone and intent are "
@@ -353,6 +364,8 @@ def main():
     }
     if args.engagement_style:
         body["engagement_style"] = args.engagement_style
+    if args.search_topic:
+        body["search_topic"] = args.search_topic
     if args.language:
         body["language"] = args.language
     if claude_session_id:
