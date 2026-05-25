@@ -483,6 +483,19 @@ DUD_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_dud_twitter_queries.py" --limi
 DUD_COUNT=$(echo "$DUD_QUERIES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Dud queries loaded: $DUD_COUNT (last 48h, 0-result, with min_faves parsed)"
 
+# --- Dud topics: CONCEPT SEEDS that find viral but off-fit candidates -------
+# One level up from dud queries. DUD_QUERIES_JSON says "this exact phrasing
+# returns 0 tweets, do not reuse it"; DUD_TOPICS_JSON says "this CONCEPT
+# SEED finds viral tweets but Phase 2b keeps skipping them — the seed is
+# mismatched to your buyers; reword the queries narrower or drop the seed".
+# Surfaces sample_skip_reasons so the model can see WHY (audience mismatch,
+# competitor launch, spam-flagged author, etc.) rather than just numeric
+# skip counts. 7d window so we accumulate enough skips for action thresholds
+# without dragging in stale topics.
+DUD_TOPICS_JSON=$(python3 "$REPO_DIR/scripts/top_dud_twitter_topics.py" --limit 12 --window-hours 168 --min-skips 5 2>/dev/null || echo "[]")
+DUD_TOPICS_COUNT=$(echo "$DUD_TOPICS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+log "Dud topics loaded: $DUD_TOPICS_COUNT (7d window, min_skips=5)"
+
 # --- Per-project supply signal: what min_faves tier returns tweets? ----------
 # Replaces the old flat "broad=50 / narrow=20" rule. For each project the
 # model is currently drafting for, this table shows the median tweets_found
@@ -686,6 +699,12 @@ $TOP_TOPICS_JSON
 
 DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt; \`min_faves\` is the floor that produced zero supply (look for patterns: if EVERY dud for a project uses the same min_faves tier, the floor is too high for that project's audience and you should DROP it). Pick a different angle, different operators, or different keyword cluster:
 $DUD_QUERIES_JSON
+
+DUD CONCEPT SEEDS — one level up from DUD QUERIES. These search_topic seeds pulled in tweets that Phase 2b's draft gate kept skipping (or that expired un-drafted) over the last 7d. They are off-fit at the CONCEPT level, not the query level. Per entry: \`posted_n\` is candidates from this seed that actually got replied to, \`skipped_n\` is candidates rejected at the draft gate or expired, \`omit_rate\` = skipped_n / (posted_n + skipped_n), \`avg_virality_skipped\` is how viral the OFF-FIT tweets were (high values mean the seed finds noise, not buyers), and \`sample_skip_reasons\` is the top-5 most-common reject reasons from Phase 2b. Action rules:
+  - If omit_rate >= 0.6 AND skipped_n >= 5: REWORD the queries narrower for that project (cite the dud topic you are replacing in the queries_used note), OR drop the seed this cycle and pick a different config.json seed for that project.
+  - Read sample_skip_reasons BEFORE rewriting. If the pattern is audience mismatch ("Arabic-language students" for a dev tool, "TV news" for a podcast tool), add domain anchors to the query. If it is "competitor launch" or "vendor squabble" or "author threatened spam report", drop the seed for this cycle.
+  - A seed appearing here does NOT mean delete from config.json; it means THIS cycle's queries are pulling the wrong slice. Future cycles can revisit the seed with sharper queries once the dud signal cools.
+$DUD_TOPICS_JSON
 
 PER-PROJECT SUPPLY SIGNAL — for each project, the historical median tweets_found at each \`min_faves:N\` tier you've drafted for them in the last 14d. This REPLACES the old flat "broad=50 / narrow=20" rule. Pick the LOWEST min_faves tier where \`median_tweets_found\` >= 3 for the project you're drafting for; if every tier is below 3, drop one tier lower than the lowest you've tried. Niche audiences (med students, meditators) cluster at min_faves:5–15; tech audiences (devs, AI) cluster at min_faves:20–50. Trust this table over your priors:
 $SUPPLY_SIGNAL_JSON
