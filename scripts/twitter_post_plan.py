@@ -377,6 +377,13 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         style = raw_style
     language = (c.get("language") or "").strip()
     link_source = (c.get("link_source") or "").strip()
+    # search_topic flows from twitter_candidates -> Phase 2b prompt
+    # ("Search query: <topic>") -> prep envelope -> here. Stamped on
+    # posts.search_topic so top_search_topics.py can aggregate per-topic
+    # conversion (clicks / likes / views) and feed the next cycle's Phase 1
+    # which topics to favour or drop. Reddit/GitHub already populate this;
+    # Twitter was a coverage gap (0/3,280 rows) until the 2026-05-25 wiring.
+    search_topic = (c.get("search_topic") or "").strip()
 
     if not reply_text:
         print(f"[post] candidate {cid}: empty reply_text; skipping", flush=True)
@@ -561,6 +568,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         log_args += ["--language", language]
     if link_source:
         log_args += ["--link-source", link_source]
+    if search_topic:
+        log_args += ["--search-topic", search_topic]
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
     # Generation trace: run-twitter-cycle.sh writes a snapshot of the
