@@ -704,9 +704,13 @@ PLATFORM_POLICY = {
     },
 }
 
-# Minimum sample size before we trust a style's avg_upvotes.
-# Below this, the style is "explore" and gets the STYLE_FLOOR_PCT only.
-MIN_SAMPLE_SIZE = 5
+# Minimum sample size to count a style as trusted. n=1 means "at least one
+# real post in the 30-day window". 2026-05-25: lowered from 5 → 1 so an
+# invented style that produced even a single post (small batch, partial-batch
+# failure, etc.) competes on per-post score from day one. The 30-day recency
+# window is the only freshness gate; ghost styles (n=0 registry rows) stay
+# excluded from the use_pool by this floor.
+MIN_SAMPLE_SIZE = 1
 
 # Target-distribution tuning knobs (used by compute_target_distribution).
 # WEIGHT_EXPONENT > 1 sharpens the distribution toward the winner.
@@ -821,8 +825,8 @@ def get_dynamic_tiers(platform, context="posting"):
         # two-tier candidate→active gate was removed 2026-05-22 and the
         # picker's sample-size shrinkage was removed 2026-05-25: invented
         # styles now compete on raw per-post score from day one, protected
-        # only by the MIN_SAMPLE_SIZE=5 existence floor and the 30-day
-        # recency window.
+        # only by the MIN_SAMPLE_SIZE=1 existence floor (excludes n=0 ghost
+        # styles) and the 30-day recency window.
         if s and s["n"] >= MIN_SAMPLE_SIZE:
             trusted.append((style, s["avg_up"]))
         else:
@@ -894,8 +898,9 @@ def compute_target_distribution(platform, context="posting"):
         score = _style_score(s) if s else 0.0
         # Every style with N >= MIN_SAMPLE_SIZE is trusted; the two-tier
         # candidate/active gate was removed 2026-05-22 and picker shrinkage
-        # was removed 2026-05-25. The MIN_SAMPLE_SIZE=5 floor below is the
-        # only barrier keeping n=1 outliers out of the use_pool.
+        # was removed 2026-05-25. The MIN_SAMPLE_SIZE=1 floor below excludes
+        # only n=0 ghost styles (registry rows with no posts in the 30d
+        # window); single-post inventions count.
         trusted = (s is not None and n >= MIN_SAMPLE_SIZE)
         weight = (score ** WEIGHT_EXPONENT) if trusted else 0.0
         if trusted:
@@ -997,19 +1002,18 @@ def _human_derived_rate(platform):
 
 # Credibility shrinkage was removed 2026-05-25 (per user instruction): we
 # don't favor or penalize styles by post-count, only by per-post performance.
-# Existence floor stays at MIN_SAMPLE_SIZE=5 so n<5 styles are filtered out
-# entirely (avoids n=1 single-post flukes). Recency window RECENCY_DAYS=30
-# remains the only freshness gate — a style that hasn't earned ≥5 posts in
-# the last 30 days simply isn't trusted, regardless of historical totals.
+# Existence floor is MIN_SAMPLE_SIZE=1 (defined above): n=0 ghost registry
+# rows are excluded, single-post inventions count. RECENCY_DAYS=30 remains
+# the only freshness gate.
 
 
 def _picker_score(row):
     """Picker score = raw composite score (clicks*10 + comments*3 + upvotes).
 
-    No sample-size shrinkage. A style with n=11 averaging 5 clicks/post
+    No sample-size shrinkage. A style with n=1 averaging 50 clicks/post
     competes head-to-head with a style at n=400 averaging 5 clicks/post,
-    and a genuinely better per-post style wins the slot. The MIN_SAMPLE_SIZE=5
-    floor inside compute_target_distribution already filters n<5 flukes."""
+    and the better per-post style wins the slot. The MIN_SAMPLE_SIZE=1
+    floor inside compute_target_distribution only excludes n=0 ghosts."""
     return float(row.get("score", 0.0))
 
 
@@ -1148,14 +1152,14 @@ def pick_style_for_post(platform, context="posting",
     rows = compute_target_distribution(platform, context=context)
     rows = [r for r in rows if r["style"] not in never]
 
-    # Trust-filter first so n<MIN_SAMPLE_SIZE outliers (e.g. snarky_oneliner
-    # with a single lucky 12-upvote post) can't claim a top reference slot.
-    # They stay in distribution_snapshot for audit but not in use_pool or
-    # reference_pool.
+    # Trust-filter first so n=0 ghost registry rows can't claim a top
+    # reference slot. They stay in distribution_snapshot for audit but not
+    # in use_pool or reference_pool. (MIN_SAMPLE_SIZE=1 since 2026-05-25;
+    # single-post inventions are trusted from day one.)
     #
     # Ranking uses raw `score` (clicks*10 + comments*3 + upvotes) with no
     # sample-size shrinkage — a genuinely better per-post style outranks
-    # established ones from its first batch.
+    # established ones from its first post.
     trusted_rows = [r for r in rows if r.get("trusted")]
     trusted_sorted = sorted(trusted_rows, key=_picker_score, reverse=True)
     use_pool = trusted_sorted[:top_n]
@@ -1206,7 +1210,7 @@ def pick_style_for_post(platform, context="posting",
         }
 
     # Use path: weighted random sample by raw score. The top N is already a
-    # curated head (filtered by MIN_SAMPLE_SIZE=5 and 30-day recency), so raw
+    # curated head (filtered by MIN_SAMPLE_SIZE=1 and 30-day recency), so raw
     # score is the right knob — each style competes on per-post performance.
     weights = [max(_picker_score(r), 0.01) for r in use_pool]
     total = sum(weights) or 1.0
