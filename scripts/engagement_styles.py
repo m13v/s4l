@@ -818,10 +818,11 @@ def get_dynamic_tiers(platform, context="posting"):
     for style in candidate_styles:
         s = stats.get(style)
         # Every style with N >= MIN_SAMPLE_SIZE can be trusted. The legacy
-        # two-tier candidate→active gate was removed 2026-05-22: invented
-        # styles now compete on raw clicks-driven score from day one,
-        # protected only by the sample-size shrinkage in the picker
-        # (_credibility_factor).
+        # two-tier candidate→active gate was removed 2026-05-22 and the
+        # picker's sample-size shrinkage was removed 2026-05-25: invented
+        # styles now compete on raw per-post score from day one, protected
+        # only by the MIN_SAMPLE_SIZE=5 existence floor and the 30-day
+        # recency window.
         if s and s["n"] >= MIN_SAMPLE_SIZE:
             trusted.append((style, s["avg_up"]))
         else:
@@ -994,42 +995,22 @@ def _human_derived_rate(platform):
     """Per-platform rate; falls back to HUMAN_DERIVED_RATE_DEFAULT."""
     return HUMAN_DERIVED_RATE_BY_PLATFORM.get(platform, HUMAN_DERIVED_RATE_DEFAULT)
 
-# Sample-size credibility floor for the picker. Below this, a style's score
-# is linearly shrunk toward 0 so a single viral comment with n=6 can't
-# dominate the use_pool. Once n >= MIN_SAMPLE_FULL_WEIGHT the style gets
-# its full raw score weight.
-#
-# Why: LinkedIn 2026-05-19 had data_point_drop n=6 with avg_cm=81 (one
-# viral comment) producing score=290 — 10x the next style. The picker was
-# returning data_point_drop 67% of the time on a near-non-existent
-# evidence base. Shrinkage of `score * min(1.0, n / 20)` brings n=6 →
-# credibility 0.30, knocking 290 down to ~87 and letting n=18 styles
-# (agree_and_extend, etc.) compete fairly. Existence floor stays at
-# MIN_SAMPLE_SIZE=5 so n=2 outliers still get filtered entirely.
-MIN_SAMPLE_FULL_WEIGHT = 20
-
-
-def _credibility_factor(n):
-    """Sample-size shrinkage factor in [0, 1] for the picker.
-
-    n >= MIN_SAMPLE_FULL_WEIGHT → 1.0 (full trust)
-    n <  MIN_SAMPLE_FULL_WEIGHT → n / MIN_SAMPLE_FULL_WEIGHT (linear ramp)
-    n <= 0                       → 0.0
-    """
-    if not n or n <= 0:
-        return 0.0
-    if n >= MIN_SAMPLE_FULL_WEIGHT:
-        return 1.0
-    return float(n) / float(MIN_SAMPLE_FULL_WEIGHT)
+# Credibility shrinkage was removed 2026-05-25 (per user instruction): we
+# don't favor or penalize styles by post-count, only by per-post performance.
+# Existence floor stays at MIN_SAMPLE_SIZE=5 so n<5 styles are filtered out
+# entirely (avoids n=1 single-post flukes). Recency window RECENCY_DAYS=30
+# remains the only freshness gate — a style that hasn't earned ≥5 posts in
+# the last 30 days simply isn't trusted, regardless of historical totals.
 
 
 def _picker_score(row):
-    """Picker-only credibility-adjusted score used to (a) rank into the
-    top-N use_pool and (b) weight the random draw inside that pool.
+    """Picker score = raw composite score (clicks*10 + comments*3 + upvotes).
 
-    Keeps `_style_score` pure so top_performers / dashboard / other
-    surfaces keep showing the raw composite. Only the picker shrinks."""
-    return float(row.get("score", 0.0)) * _credibility_factor(row.get("n", 0))
+    No sample-size shrinkage. A style with n=11 averaging 5 clicks/post
+    competes head-to-head with a style at n=400 averaging 5 clicks/post,
+    and a genuinely better per-post style wins the slot. The MIN_SAMPLE_SIZE=5
+    floor inside compute_target_distribution already filters n<5 flukes."""
+    return float(row.get("score", 0.0))
 
 
 def _fetch_latest_human_derived(platform):
