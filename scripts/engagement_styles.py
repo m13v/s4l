@@ -893,9 +893,9 @@ def compute_target_distribution(platform, context="posting"):
         avg_clicks = float(s.get("avg_clicks", 0.0)) if s else 0.0
         score = _style_score(s) if s else 0.0
         # Every style with N >= MIN_SAMPLE_SIZE is trusted; the two-tier
-        # candidate/active gate was removed 2026-05-22. Sample-size
-        # shrinkage (_credibility_factor) keeps n=1 outliers from
-        # dominating the use_pool.
+        # candidate/active gate was removed 2026-05-22 and picker shrinkage
+        # was removed 2026-05-25. The MIN_SAMPLE_SIZE=5 floor below is the
+        # only barrier keeping n=1 outliers out of the use_pool.
         trusted = (s is not None and n >= MIN_SAMPLE_SIZE)
         weight = (score ** WEIGHT_EXPONENT) if trusted else 0.0
         if trusted:
@@ -1148,15 +1148,14 @@ def pick_style_for_post(platform, context="posting",
     rows = compute_target_distribution(platform, context=context)
     rows = [r for r in rows if r["style"] not in never]
 
-    # Trust-filter first so n=1 outliers (e.g. snarky_oneliner with a single
-    # lucky 12-upvote post) can't claim a top reference slot. They stay in
-    # distribution_snapshot for audit but not in use_pool or reference_pool.
+    # Trust-filter first so n<MIN_SAMPLE_SIZE outliers (e.g. snarky_oneliner
+    # with a single lucky 12-upvote post) can't claim a top reference slot.
+    # They stay in distribution_snapshot for audit but not in use_pool or
+    # reference_pool.
     #
-    # Ranking uses `_picker_score` (raw score shrunk by sample-size
-    # credibility) instead of raw `score`. Without this, a style with n=6 and
-    # one viral comment can leapfrog n=400 styles into the use_pool. With
-    # shrinkage, n=6 only contributes ~30% of its raw score weight, so it
-    # competes fairly with the wider-sample alternatives.
+    # Ranking uses raw `score` (clicks*10 + comments*3 + upvotes) with no
+    # sample-size shrinkage — a genuinely better per-post style outranks
+    # established ones from its first batch.
     trusted_rows = [r for r in rows if r.get("trusted")]
     trusted_sorted = sorted(trusted_rows, key=_picker_score, reverse=True)
     use_pool = trusted_sorted[:top_n]
@@ -1206,13 +1205,9 @@ def pick_style_for_post(platform, context="posting",
             "picked_at": picked_at,
         }
 
-    # Use path: weighted random sample by credibility-shrunk score. Raw score
-    # (not score ** WEIGHT_EXPONENT) keeps the distribution smoother across
-    # the top — the cap+floor logic that lives in compute_target_distribution
-    # is what the picker historically used to give a winner most weight;
-    # here, the top N is already a curated head, so raw score is the right
-    # knob, with the credibility shrink (`_picker_score`) preventing small-n
-    # outliers from dominating the draw.
+    # Use path: weighted random sample by raw score. The top N is already a
+    # curated head (filtered by MIN_SAMPLE_SIZE=5 and 30-day recency), so raw
+    # score is the right knob — each style competes on per-post performance.
     weights = [max(_picker_score(r), 0.01) for r in use_pool]
     total = sum(weights) or 1.0
     pick = rnd.uniform(0.0, total)
