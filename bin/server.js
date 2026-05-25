@@ -6776,11 +6776,11 @@ async function handleApi(req, res) {
         // thread (thread_top_replies, live-refreshed by stats.sh). Both
         // are Twitter-first today; other platforms get NULLs.
         "posts.thread_engagement, " +
-        "ttr.likes AS top_reply_likes, " +
-        "ttr.replies AS top_reply_replies, " +
-        "ttr.retweets AS top_reply_retweets, " +
-        "ttr.views AS top_reply_views, " +
-        "ttr.reply_author_handle AS top_reply_author, " +
+        "ttr.tr_likes AS top_reply_likes, " +
+        "ttr.tr_replies AS top_reply_replies, " +
+        "ttr.tr_retweets AS top_reply_retweets, " +
+        "ttr.tr_views AS top_reply_views, " +
+        "ttr.tr_author AS top_reply_author, " +
         "'post'::text AS row_kind " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
       // pl rollup: legacy `total_clicks` reads the post_links.clicks integer
@@ -6813,7 +6813,7 @@ async function handleApi(req, res) {
       // refresh cron hasn't touched yet, then rank_at_capture). Status
       // filter drops competitor replies the author deleted.
       "LEFT JOIN LATERAL (" +
-        "SELECT likes, replies, retweets, views, reply_author_handle " +
+        "SELECT likes AS tr_likes, replies AS tr_replies, retweets AS tr_retweets, views AS tr_views, reply_author_handle AS tr_author " +
         "FROM thread_top_replies " +
         "WHERE post_id = posts.id AND status = 'active' " +
         "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
@@ -6862,17 +6862,17 @@ async function handleApi(req, res) {
         // thread). thread_top_replies.post_id always points at the post
         // we made, so the lookup keys on parent.id.
         "parent.thread_engagement, " +
-        "ttr2.likes AS top_reply_likes, " +
-        "ttr2.replies AS top_reply_replies, " +
-        "ttr2.retweets AS top_reply_retweets, " +
-        "ttr2.views AS top_reply_views, " +
-        "ttr2.reply_author_handle AS top_reply_author, " +
+        "ttr2.tr_likes AS top_reply_likes, " +
+        "ttr2.tr_replies AS top_reply_replies, " +
+        "ttr2.tr_retweets AS top_reply_retweets, " +
+        "ttr2.tr_views AS top_reply_views, " +
+        "ttr2.tr_author AS top_reply_author, " +
         "'reply'::text AS row_kind " +
       "FROM replies r2 " +
       "LEFT JOIN posts parent ON parent.id = r2.post_id " +
       "LEFT JOIN campaigns cr ON cr.id = r2.campaign_id " +
       "LEFT JOIN LATERAL (" +
-        "SELECT likes, replies, retweets, views, reply_author_handle " +
+        "SELECT likes AS tr_likes, replies AS tr_replies, retweets AS tr_retweets, views AS tr_views, reply_author_handle AS tr_author " +
         "FROM thread_top_replies " +
         "WHERE post_id = parent.id AND status = 'active' " +
         "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
