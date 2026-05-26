@@ -2035,14 +2035,29 @@ def refresh_twitter_threads(db, config=None, quiet=False,
         # capture point at this timestamp (the dashboard surfaces the
         # frequency of polls as a freshness signal), but increment the
         # no_change counter so the stats summary makes the cost clear.
-        prev_views = t.get("last_views")
-        prev_likes = t.get("last_likes")
-        prev_replies = t.get("last_replies")
-        prev_retweets = t.get("last_retweets")
-        prev_bookmarks = t.get("last_bookmarks")
-        if (prev_views == views and prev_likes == likes and
-                prev_replies == replies_count and prev_retweets == retweets and
-                prev_bookmarks == bookmarks):
+        # Postgres BIGINTs come back as JSON strings, so coerce both
+        # sides through int() (None stays None) before comparing.
+        def _as_int(v):
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        prev_views = _as_int(t.get("last_views"))
+        prev_likes = _as_int(t.get("last_likes"))
+        prev_replies = _as_int(t.get("last_replies"))
+        prev_retweets = _as_int(t.get("last_retweets"))
+        prev_bookmarks = _as_int(t.get("last_bookmarks"))
+        cur_views = _as_int(views)
+        cur_likes = _as_int(likes)
+        cur_replies = _as_int(replies_count)
+        cur_retweets = _as_int(retweets)
+        cur_bookmarks = _as_int(bookmarks)
+        if (t.get("last_captured_at") is not None
+                and prev_views == cur_views and prev_likes == cur_likes
+                and prev_replies == cur_replies and prev_retweets == cur_retweets
+                and prev_bookmarks == cur_bookmarks):
             no_change += 1
 
         snap_id = _http_insert_thread_snapshot(
