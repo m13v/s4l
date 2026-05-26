@@ -1758,6 +1758,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
       const delta = Math.abs(ts - startMs);
       if (delta < chosenLogDelta) { chosenLogDelta = delta; chosenLog = f; }
     }
+    let phaseDurations = null;
     if (chosenLog) {
       try {
         const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
@@ -1776,6 +1777,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
             }
           }
         }
+        // Phase-level duration breakdown — surfaced as a hover tooltip on the
+        // job-history elapsed cell so an opaque "30m 12s" splits into "Phase 1
+        // scan 5m, ripen sleep 20m (intentional), Phase 2b-post 46s, lock wait
+        // 64s". Lets the operator see at a glance whether the cycle was bottle-
+        // necked on compute, intentional sleep, or contention with a peer cycle.
+        phaseDurations = parseTwitterCyclePhaseTimings(body, chosenLog);
       } catch { /* empty */ }
     }
     // Per-run queue delta. ADD = candidates whose discovered_at fell in this
@@ -1919,6 +1926,9 @@ async function enrichPostCommentsTwitterRuns(runs) {
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
+      // Phase-level breakdown for the elapsed-cell tooltip. Null when the cycle
+      // log was rotated or the cycle aborted before Phase 1 emitted markers.
+      phase_durations: phaseDurations,
     };
   }
 }
