@@ -14274,6 +14274,24 @@ function mountSortableTable(opts) {
         if (bMissing) return -1;
         return (na - nb) * dir;
       }
+      if (sortCol.type === 'date') {
+        // Values are typically ISO strings (Postgres timestamps over JSON) or
+        // millisecond epochs. Parse to a finite timestamp; treat null/empty/
+        // unparseable as missing so they always sink to the bottom regardless
+        // of sort direction (same convention as the numeric branch).
+        const parse = v => {
+          if (v == null || v === '') return NaN;
+          if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+          const t = Date.parse(String(v));
+          return Number.isFinite(t) ? t : NaN;
+        };
+        const ta = parse(va); const tb = parse(vb);
+        const aMissing = !Number.isFinite(ta); const bMissing = !Number.isFinite(tb);
+        if (aMissing && bMissing) return 0;
+        if (aMissing) return 1;
+        if (bMissing) return -1;
+        return (ta - tb) * dir;
+      }
       return String(va == null ? '' : va).localeCompare(String(vb == null ? '' : vb)) * dir;
     });
     tbody.innerHTML = sorted.map(r => {
@@ -15364,7 +15382,7 @@ function renderSearchTopicsStats(payload) {
           const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
         } },
-      { key: 'last_run',    label: 'Last Run',  type: 'numeric', align: 'right', widthPct: 5,
+      { key: 'last_run',    label: 'Last Run',  type: 'date',    align: 'right', widthPct: 5,
         formatter: v => {
           if (!v) return '<span style="color:var(--text-faint);">\u2014</span>';
           const abs = new Date(v).toLocaleString();
@@ -15492,7 +15510,7 @@ function renderSearchQueriesStats(payload) {
           const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
         } },
-      { key: 'last_run',    label: 'Last Run',  type: 'numeric', align: 'right', widthPct: 4,
+      { key: 'last_run',    label: 'Last Run',  type: 'date',    align: 'right', widthPct: 4,
         formatter: v => {
           if (!v) return '<span style="color:var(--text-faint);">\u2014</span>';
           const abs = new Date(v).toLocaleString();
