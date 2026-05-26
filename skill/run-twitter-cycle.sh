@@ -435,17 +435,48 @@ if res.returncode == 0 and res.stdout.strip():
 if isinstance(picked, dict):
     picked = [picked]
 
+try:
+    from pick_search_topic import pick_topic_for_project
+except Exception:
+    pick_topic_for_project = None
+
 chosen = []
 for p in picked:
     try:
         excludes = pe.active_excludes('twitter', p.get('name'))
     except Exception:
         excludes = []
+    # 2026-05-26: force-pick ONE search_topic per project via the Python
+    # picker so end-to-end attribution (topic -> query -> candidate ->
+    # post -> click) is clean. Mirrors the engagement_styles flow. The
+    # picker's three branches (use ~95% / explore ~5% / cold_start
+    # fallback) all return a single string; Claude no longer chooses.
+    # See scripts/pick_search_topic.py.
+    topic_pick = None
+    if pick_topic_for_project is not None:
+        try:
+            topic_pick = pick_topic_for_project(p.get('name'), platform='twitter')
+        except Exception:
+            topic_pick = None
+    if topic_pick and topic_pick.get('search_topic'):
+        picked_topic = topic_pick['search_topic']
+        picked_mode = topic_pick.get('mode', 'use')
+    else:
+        # Picker unavailable or project has no search_topics[] in
+        # config.json. Fall back to the first legacy entry so the
+        # pipeline degrades gracefully instead of erroring.
+        legacy = p.get('search_topics') or []
+        picked_topic = legacy[0] if legacy else ''
+        picked_mode = 'fallback'
     chosen.append({
         'name': p.get('name'),
         'description': p.get('description', ''),
-        # Unified search_topics (post 2026-04-30 legacy field cleanup).
-        'search_topics': p.get('search_topics') or [],
+        # Force-picked single topic (2026-05-26). Replaces the legacy
+        # `search_topics: [...]` array. Claude draws its query from THIS
+        # topic and must echo it verbatim on every tweet object via the
+        # bh_run scrape script's `search_topic` Python variable.
+        'search_topic': picked_topic,
+        'topic_picked_mode': picked_mode,
         # Self-improving exclusion list (2026-05-09): MUST be appended
         # as `-term` to every query drafted for this project.
         'excludes_for_search': excludes,
@@ -570,10 +601,12 @@ IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
 
 For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the values of `query`, `search_topic`, and `matched_project`; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
 
+CRITICAL — `search_topic` is the assigned topic from the project's JSON entry under the `search_topic` field, NOT the query string. The picker has already chosen one canonical topic per project; you MUST paste that exact string verbatim into the `search_topic` Python variable. End-to-end attribution (topic → query → candidate → click) joins on this string match, so any drift breaks the analytics. Do NOT set `search_topic = query`, do NOT paraphrase the topic, do NOT lowercase or strip operators from it.
+
 ```python
 import json, urllib.parse, time
 query = "YOUR DRAFTED QUERY HERE WITH OPERATORS"
-search_topic = "EXACT QUERY STRING, UNENCODED"      # same value as query
+search_topic = "PASTE THE PROJECT'S ASSIGNED search_topic FIELD VERBATIM"  # NOT the query string
 matched_project = "PROJECT_NAME"                     # e.g. studyly, Podlog, S4L
 url = "https://x.com/search?q=" + urllib.parse.quote(query) + "&f=live"
 goto_url(url)  # FIRST call of the cycle only: replace with new_tab(url)
@@ -676,7 +709,9 @@ SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --stric
 
 ## Step 1: Draft one search query per project
 
-You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's topic space.
+You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
+
+Each project has ONE \`search_topic\` field already chosen by the Python picker (weighted ~95% by live click-driven composite score + ~5% explore branch over cold topics from the project's config.json seed pool, with a cold_start fallback for projects with no posted history yet). Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if you think a sibling topic would convert better. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics. The TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for query phrasing and operator selection only, NOT a menu to pick a different topic from.
 
 Projects:
 $PROJECTS_JSON
