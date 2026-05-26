@@ -7,7 +7,7 @@ Prior to 2026-05-23, scripts/scan_twitter_mentions_browser.py inserted
 a row into `posts` for every third-party tweet that mentioned us, with
   our_content = '(mention - no original post)'
   our_url    = <third-party tweet URL>
-That URL then got scraped by update_stats.py which wrote *the other
+That URL then got scraped by stats.py which wrote *the other
 person's* view count into posts.views, polluting every dashboard metric.
 
 This script:
