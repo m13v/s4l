@@ -1380,7 +1380,7 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   let ripenSleepSec = 0;
   let phase2aStartMs = null;
   let phase2bPrepStartMs = null, phase2bPrepEndMs = null;
-  let phase2bGenStartMs = null;
+  let phase2bGenStartMs = null, phase2bGenEndMs = null;
   let phase2bPostStartMs = null;
   const lockWaits = [];
   // Patterns. Each compute-style marker is captured ONCE (first occurrence).
@@ -1395,6 +1395,15 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   const RE_PHASE2B_PREP  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep: Claude reading/;
   const RE_PHASE2B_PREP_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep complete/;
   const RE_PHASE2B_GEN   = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-gen:/;
+  // End-of-gen marker. The script logs this immediately after the gen step
+  // returns and BEFORE it sits in mkdir/ticket-queue waiting for the browser
+  // lock to re-acquire for posting. Using `Phase 2b-post: posting` as the gen
+  // end would lump the lock re-acquire wait (typically 30-90s under cycle
+  // overlap, see lockWaits[last].waitedS) into the gen bucket — that mislabel
+  // surfaced on 2026-05-26 when an 08:45 cycle with TWITTER_PAGE_GEN_RATE=0
+  // (gen truly ran in <1s) showed "Phase 2b-gen: 1m 11s" because 69s of lock
+  // re-acquire wait was attributed to gen instead of to lock wait (pre-post).
+  const RE_PHASE2B_GEN_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Re-acquiring twitter-browser lock for Phase 2b-post/;
   const RE_PHASE2B_POST  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-post: posting/;
   const RE_CYCLE_END     = /^\[(\d{2}):(\d{2}):(\d{2})\] === Cycle complete/;
   let m;
@@ -1408,6 +1417,7 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
     else if (phase2bPrepStartMs == null && (m = line.match(RE_PHASE2B_PREP))) phase2bPrepStartMs = tsToMs(m[1], m[2], m[3]);
     else if (phase2bPrepEndMs == null && (m = line.match(RE_PHASE2B_PREP_END))) phase2bPrepEndMs = tsToMs(m[1], m[2], m[3]);
     else if (phase2bGenStartMs == null && (m = line.match(RE_PHASE2B_GEN))) phase2bGenStartMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase2bGenEndMs == null && (m = line.match(RE_PHASE2B_GEN_END))) phase2bGenEndMs = tsToMs(m[1], m[2], m[3]);
     else if (phase2bPostStartMs == null && (m = line.match(RE_PHASE2B_POST))) phase2bPostStartMs = tsToMs(m[1], m[2], m[3]);
     else if (cycleEndMs == null && (m = line.match(RE_CYCLE_END))) cycleEndMs = tsToMs(m[1], m[2], m[3]);
   }
@@ -1435,8 +1445,11 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   }
   // Phase 2b-gen is usually <1s when TWITTER_PAGE_GEN_RATE=0; only surface
   // when it actually did meaningful work (>=2s) so the tooltip stays compact.
-  if (phase2bGenStartMs != null && phase2bPostStartMs != null) {
-    const genSec = secOf(phase2bPostStartMs - phase2bGenStartMs);
+  // End marker MUST be the "Re-acquiring twitter-browser lock for Phase 2b-post"
+  // line, not the post-start marker — the lock re-acquire wait happens BETWEEN
+  // gen-end and post-start and belongs in the lock-wait bucket, not gen.
+  if (phase2bGenStartMs != null && phase2bGenEndMs != null) {
+    const genSec = secOf(phase2bGenEndMs - phase2bGenStartMs);
     if (genSec >= 2) items.push({ label: 'Phase 2b-gen SEO page', sec: genSec, kind: 'compute' });
   }
   // Lock wait pre-post: the LAST acquire's waitedS (the re-acquire before
