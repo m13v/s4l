@@ -157,7 +157,7 @@ print(f\"scraped {data.get('total', 0)} urls, {data.get('with_views', 0)} with v
 else
     log "Step 1: SKIPPED, no Reddit username in config.json"
 fi
-# Release the reddit-browser lock NOW. Step 2 (update_stats.py --reddit-only)
+# Release the reddit-browser lock NOW. Step 2 (stats.py --reddit-only)
 # is pure unauthenticated HTTPS to old.reddit.com/api/info.json: no Playwright,
 # no logged-in session, different rate-limit bucket from reddit-agent. Holding
 # the lock through Step 2's paced API loop (~100 req / 10 min) starves the
@@ -175,7 +175,7 @@ fi
 # row Step 1 couldn't cover. Rows refreshed by Step 1 within the last 4h
 # are skipped via the engagement_updated_at freshness window.
 # ═══════════════════════════════════════════════════════
-# Sidecar JSON written by update_stats.py --reply-summary so we can forward
+# Sidecar JSON written by stats.py --reply-summary so we can forward
 # the per-platform reply-refresh count to log_run.py at the end of the run.
 # The Python side writes {reddit, twitter, github} integers (zeros if a
 # platform's reply pass didn't run).
@@ -204,7 +204,7 @@ if [ "$RUN_STEP2" -eq 1 ]; then
     esac
 
     log "Step 2: API stats (Python) ${STEP2_ARGS[*]:-}"
-    python3 "$REPO_DIR/scripts/update_stats.py" "${STEP2_ARGS[@]}" >> "$LOGFILE" 2>&1
+    python3 "$REPO_DIR/scripts/stats.py" "${STEP2_ARGS[@]}" >> "$LOGFILE" 2>&1
     STEP2_EXIT=$?
     if [ "$STEP2_EXIT" -ne 0 ]; then
         log "Step 2: FAILED (exit $STEP2_EXIT), continuing to next step"
@@ -222,7 +222,7 @@ if [ "$RUN_STEP3" -eq 1 ]; then
     log "Step 3: X/Twitter stats (API via fxtwitter)"
     STEP3_ARGS=("--twitter-only" "--reply-summary" "$REPLY_SUMMARY_FILE")
     [ "$QUIET" = "--quiet" ] && STEP3_ARGS+=("--quiet")
-    python3 "$REPO_DIR/scripts/update_stats.py" "${STEP3_ARGS[@]}" >> "$LOGFILE" 2>&1
+    python3 "$REPO_DIR/scripts/stats.py" "${STEP3_ARGS[@]}" >> "$LOGFILE" 2>&1
     STEP3_EXIT=$?
     if [ "$STEP3_EXIT" -ne 0 ]; then
         log "Step 3: FAILED (exit $STEP3_EXIT)"
@@ -412,7 +412,7 @@ if [ -n "$REDDIT_VIEWS_LINE" ]; then
     }')
 fi
 
-# 2026-05-18 relabel pass. update_stats.py's structured stdout lines now
+# 2026-05-18 relabel pass. stats.py's structured stdout lines now
 # emit five cleanly-separated fields per platform: total / skipped /
 # checked / changed / errors. Map them to the new dashboard pills:
 #   REDDIT_SCANNED          -> 'scanned' pill (total considered)
@@ -420,7 +420,7 @@ fi
 #   REDDIT_CHECKED          -> 'checked' pill (rows actually hit the API)
 #   REDDIT_CHANGED          -> 'changed' pill (metric-moved subset)
 #   REDDIT_VIEWS_UPDATED    -> 'views' pill (Step 1 scrape leg, separate)
-# `updated` is the legacy field name; if update_stats.py is mid-deploy and
+# `updated` is the legacy field name; if stats.py is mid-deploy and
 # the new `changed` field is missing on the line, fall back to `updated`.
 REDDIT_SCANNED=$(extract_field "$REDDIT_DETAIL_LINE" "total")
 REDDIT_CHECKED=$(extract_field "$REDDIT_DETAIL_LINE" "checked")
