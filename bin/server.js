@@ -1445,11 +1445,15 @@ function parseTwitterCyclePhaseTimings(body, logFileName) {
   }
   // Phase 2b-gen is usually <1s when TWITTER_PAGE_GEN_RATE=0; only surface
   // when it actually did meaningful work (>=2s) so the tooltip stays compact.
-  // End marker MUST be the "Re-acquiring twitter-browser lock for Phase 2b-post"
-  // line, not the post-start marker — the lock re-acquire wait happens BETWEEN
-  // gen-end and post-start and belongs in the lock-wait bucket, not gen.
-  if (phase2bGenStartMs != null && phase2bGenEndMs != null) {
-    const genSec = secOf(phase2bGenEndMs - phase2bGenStartMs);
+  // Preferred end marker is "Re-acquiring twitter-browser lock for Phase 2b-post"
+  // (lock re-acquire wait happens BETWEEN gen-end and post-start and belongs in
+  // the lock-wait bucket, not gen). When TWITTER_PAGE_GEN_RATE=0 the script
+  // skips the release+re-acquire dance entirely and keeps the lock through gen,
+  // so that marker is absent and we fall back to phase2b-post-start — safe
+  // because no lock wait happens between gen and post in that path.
+  const genEndMs = phase2bGenEndMs != null ? phase2bGenEndMs : phase2bPostStartMs;
+  if (phase2bGenStartMs != null && genEndMs != null) {
+    const genSec = secOf(genEndMs - phase2bGenStartMs);
     if (genSec >= 2) items.push({ label: 'Phase 2b-gen SEO page', sec: genSec, kind: 'compute' });
   }
   // Lock wait pre-post: the LAST acquire's waitedS (the re-acquire before
