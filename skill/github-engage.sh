@@ -61,7 +61,7 @@ GH_REPLY_SUMMARY=$(mktemp -t fazm-gh-reply-summary.XXXXXX)
 # watchdog SIGTERM also frees the lock.
 trap 'rm -f "$GH_REPLY_SUMMARY"; _sa_release_locks' EXIT INT TERM HUP
 ( set +e +o pipefail
-  python3 "$REPO_DIR/scripts/update_stats.py" --github-only --reply-summary "$GH_REPLY_SUMMARY" 2>&1 | tee -a "$LOG_FILE"
+  python3 "$REPO_DIR/scripts/stats.py" --github-only --reply-summary "$GH_REPLY_SUMMARY" 2>&1 | tee -a "$LOG_FILE"
 ) || true
 PHASE_A5_ELAPSED=$(( $(date +%s) - PHASE_A5_START ))
 
