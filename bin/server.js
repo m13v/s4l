@@ -1606,10 +1606,15 @@ async function enrichPostCommentsTwitterRuns(runs) {
     "  )"
   );
   const salvageableNow = (salvageableRow && salvageableRow[0]) ? salvageableRow[0].n : 0;
-  // Bulk-fetch twitter/x posts in window to compute per-run style breakdown.
+  // Bulk-fetch twitter/x posts in window to compute per-run style + topic
+  // breakdown. search_topic is stamped by scripts/log_post.py from the
+  // pick_search_topic.py force-pick (use mode) or the model's invented topic
+  // (explore_invent mode). Aggregated below into result.topics_used the same
+  // way engagement_style flows into result.styles_used.
   const twitterPostRows = await pq(
-    "SELECT posted_at, thread_url, engagement_style FROM posts " +
-    "WHERE platform IN ('twitter', 'x') AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
+    "SELECT posted_at, thread_url, engagement_style, search_topic FROM posts " +
+    "WHERE platform IN ('twitter', 'x') AND posted_at >= $1::timestamp " +
+    "AND (engagement_style IS NOT NULL OR search_topic IS NOT NULL)",
     [since]
   ) || [];
 
@@ -1622,6 +1627,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
     postedMs: toMs(r.posted_at),
     threadUrl: r.thread_url || '',
     style: r.engagement_style || '',
+    topic: r.search_topic || '',
   }));
   const searchNorm = searchRows.map(r => ({
     ms: toMs(r.ran_at),
@@ -1880,19 +1886,25 @@ async function enrichPostCommentsTwitterRuns(runs) {
       }
     }
     const stylesMapTx = {};
+    const topicsMapTx = {};
     for (const p of twitterPostNorm) {
       if (!p.threadUrl || !batchPostedUrls.has(p.threadUrl)) continue;
-      stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+      if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+      if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
     }
     // Fall back to time-window if batch URL matching found nothing (e.g. old
     // rows before tweet_url was added to the SELECT, or cycle with no ownBatchId).
-    if (!Object.keys(stylesMapTx).length && !ownBatchId) {
+    if (!Object.keys(stylesMapTx).length && !Object.keys(topicsMapTx).length && !ownBatchId) {
       for (const p of twitterPostNorm) {
         if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
-        stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+        if (p.style) stylesMapTx[p.style] = (stylesMapTx[p.style] || 0) + 1;
+        if (p.topic) topicsMapTx[p.topic] = (topicsMapTx[p.topic] || 0) + 1;
       }
     }
     const stylesUsedTx = Object.entries(stylesMapTx)
+      .sort(function (a, b) { return b[1] - a[1]; })
+      .map(function (e) { return e[0] + '(' + e[1] + ')'; });
+    const topicsUsedTx = Object.entries(topicsMapTx)
       .sort(function (a, b) { return b[1] - a[1]; })
       .map(function (e) { return e[0] + '(' + e[1] + ')'; });
     const prior = run.result || {};
@@ -1940,6 +1952,11 @@ async function enrichPostCommentsTwitterRuns(runs) {
       // `projects` in the job-history result row.
       experiment_variant: runVariant || variantFromBatchId(ownBatchId),
       styles_used: stylesUsedTx,
+      // Force-picked search_topic per project per cycle, set by the Python
+      // picker (scripts/pick_search_topic.py) and stamped on
+      // posts.search_topic when the candidate is posted. Aggregated here as
+      // `topic(count)` strings, sorted desc, parallel to styles_used.
+      topics_used: topicsUsedTx,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -2032,8 +2049,9 @@ async function enrichPostCommentsRedditRuns(runs) {
   // appears as reddit_candidates.post_id for this run's own batch_id",
   // mirroring the Twitter batch-scoped style attribution.
   const redditPostRows = await pq(
-    "SELECT id, posted_at, engagement_style FROM posts " +
-    "WHERE platform = 'reddit' AND posted_at >= $1::timestamp AND engagement_style IS NOT NULL",
+    "SELECT id, posted_at, engagement_style, search_topic FROM posts " +
+    "WHERE platform = 'reddit' AND posted_at >= $1::timestamp " +
+    "AND (engagement_style IS NOT NULL OR search_topic IS NOT NULL)",
     [since]
   ) || [];
 
@@ -2046,6 +2064,7 @@ async function enrichPostCommentsRedditRuns(runs) {
     id: r.id,
     postedMs: toMs(r.posted_at),
     style: r.engagement_style || '',
+    topic: r.search_topic || '',
   }));
   // exitMs = the moment the row left 'pending'. Null for rows still pending.
   // posted  -> posted_at
@@ -2420,20 +2439,26 @@ async function enrichPostCommentsRedditRuns(runs) {
       }
     }
     const stylesMapRd = {};
+    const topicsMapRd = {};
     for (const p of redditPostNorm) {
       if (p.id == null || !batchPostedIds.has(p.id)) continue;
-      stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+      if (p.style) stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+      if (p.topic) topicsMapRd[p.topic] = (topicsMapRd[p.topic] || 0) + 1;
     }
     // Fall back to time-window when batch-scoped lookup found nothing AND we
     // failed to identify ownBatchId (very old rows, or cycle log missing the
     // header). Preserves visibility for runs with no batch correlation.
-    if (!Object.keys(stylesMapRd).length && !ownBatchId) {
+    if (!Object.keys(stylesMapRd).length && !Object.keys(topicsMapRd).length && !ownBatchId) {
       for (const p of redditPostNorm) {
         if (p.postedMs == null || p.postedMs < startMs || p.postedMs > endMs) continue;
-        stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+        if (p.style) stylesMapRd[p.style] = (stylesMapRd[p.style] || 0) + 1;
+        if (p.topic) topicsMapRd[p.topic] = (topicsMapRd[p.topic] || 0) + 1;
       }
     }
     const stylesUsedRd = Object.entries(stylesMapRd)
+      .sort(function (a, b) { return b[1] - a[1]; })
+      .map(function (e) { return e[0] + '(' + e[1] + ')'; });
+    const topicsUsedRd = Object.entries(topicsMapRd)
       .sort(function (a, b) { return b[1] - a[1]; })
       .map(function (e) { return e[0] + '(' + e[1] + ')'; });
     const prior = run.result || {};
@@ -2471,6 +2496,11 @@ async function enrichPostCommentsRedditRuns(runs) {
       // project(s) consumed the cycle (often 2 distinct: salvage lane + discover).
       projects_worked: projectsList,
       styles_used: stylesUsedRd,
+      // Force-picked search_topic per project per cycle (Reddit picker is the
+      // same module as Twitter — scripts/pick_search_topic.py with
+      // platform='reddit' eligibility — and stamps posts.search_topic via
+      // log_post.py). Aggregated as `topic(count)` strings, sorted desc.
+      topics_used: topicsUsedRd,
       // Exposed for parity with Twitter's enricher result; lets the dashboard
       // (or `/api/...`) show which rdcycle batch this run "owns" for debugging
       // batch-scoped attribution misses.
