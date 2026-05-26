@@ -741,7 +741,7 @@ TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — one level above 
   - \`clicks_total\`: the ultimate signal. Topics with non-zero clicks have proven they convert; bias new query drafts toward them and INVENT close-variant topics (e.g. "AI agent that takes actions" winning -> try "agent that completes tasks", "autonomous agent loop").
   - \`avg_virality_posted\` vs \`avg_virality_skipped\`: if posted virality is high AND clicks are non-zero, this topic is a winner — keep drafting fresh queries for it. If both viralities are low, the topic is dead supply; let it cycle out by not drafting for it this run.
   - \`composite_score\`: clicks×100 + likes + views×0.001, descending. Top of the list is where the marginal effort pays off.
-Treat the topic list as ground truth for which CONCEPT SEEDS to keep working, separate from the QUERY-string feedback below. New invented topics are encouraged when an existing winner suggests an adjacent angle; the per-project search_topics list in config.json is the seed pool, not a hard ceiling.
+Treat the topic list as CONTEXT for query phrasing and operator selection, NOT a menu to pick from. As of 2026-05-26 the picker chooses ONE topic per project before this prompt fires; you draft a query for THAT topic only. The TOP_TOPICS list shows you which topics have converted historically so you can model the operator/keyword density of winning queries — it does NOT authorize you to swap the assigned topic for a higher-ranked one. New-topic invention is now an offline concern handled by the picker's explore branch (5% of cycles), not an inline decision.
 $TOP_TOPICS_JSON
 
 DUD QUERIES — DO NOT REUSE these phrasings or close variants. They returned ZERO tweets in the last 48h, so redrafting them wastes the budget. \`attempts\` is how many cycles already wasted on each one; \`last_ran_h_ago\` is hours since the most recent attempt; \`min_faves\` is the floor that produced zero supply (look for patterns: if EVERY dud for a project uses the same min_faves tier, the floor is too high for that project's audience and you should DROP it). Pick a different angle, different operators, or different keyword cluster:
@@ -770,7 +770,8 @@ Query guidelines:
 - Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways
 - Pick a query likely to surface tweets RELEVANT to that project's actual domain
 - Mix it up each run, don't always use the same query for the same project
-- Use the projects' search_topics/description as grounding (search_topics is a shared concept seed list across platforms — some phrases are tuned for Reddit or GitHub, so rephrase into natural Twitter search terms with hashtag-adjacent vernacular)
+- Use the project's ASSIGNED \`search_topic\` plus its \`description\` as grounding for query phrasing (the topic is a shared concept seed across platforms — some phrases are tuned for Reddit or GitHub, so rephrase into natural Twitter search terms with hashtag-adjacent vernacular). The assigned topic is the SUBJECT of the query; the description is the project's voice. Do not invent off-topic queries.
+- In the bh_run scrape script you run for each project, the \`search_topic\` Python variable MUST be the project's assigned \`search_topic\` field pasted verbatim (NOT the query string, NOT a paraphrase). The scoring pipeline stamps \`twitter_candidates.search_topic\` from this value and joins it against the picker's assignment for end-to-end attribution.
 
 $STEP2_INSTRUCTIONS" 2>&1)
 
