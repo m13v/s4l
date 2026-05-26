@@ -20,7 +20,7 @@ LOG_RUN_PY = REPO / "scripts" / "log_run.py"
 SKILL_PATH_MARKER = "/social-autoposter/skill/"
 MAX_AGE_SEC = 45 * 60
 # Per-script cap overrides for pipelines that legitimately run longer than
-# the 45 min global (update_stats.py over ~4-5k posts + rate-limit sleeps).
+# the 45 min global (stats.py over ~4-5k posts + rate-limit sleeps).
 # Key is (script_file, platform_or_None). Lookup order: (script, platform),
 # (script, None), then global MAX_AGE_SEC. Raised 2026-04-24 after the global
 # 45 min cap was killing stats.sh reddit at ~90% and github-engage every 2h.
