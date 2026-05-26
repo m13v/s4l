@@ -3,7 +3,7 @@
 
 Pre-2026-04-24 we had no per-post engagement snapshots, so
 `post_views_daily` is empty for historical days. The audit pipeline
-(skill/audit-*.sh → update_stats.py) happens to print one "Posts/Views/
+(skill/audit-*.sh → stats.py) happens to print one "Posts/Views/
 Upvotes/Comments" cumulative-totals line at the end of each run. Parsing
 7+ days of those logs and diffing consecutive days reconstructs the
 aggregate daily gains for views/upvotes/comments across ALL platforms.
