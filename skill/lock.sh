@@ -44,14 +44,14 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
           # Top-level Chromes on this profile (skip --type= subprocesses).
           local chrome_pids
           chrome_pids=$(ps -A -o pid=,command= 2>/dev/null             | awk -v p="user-data-dir=$profile_dir" '
-                index($0,p)>0 && index($0,"--type=")==0 {print $1}'             || true)
+                index($0,p)>0 && index($0,"--type=")==0 && index($0,"awk ")==0 {print $1}'             || true)
           if [ -n "$chrome_pids" ]; then
             # SIGTERM first for graceful close, brief pause, then SIGKILL stragglers.
             echo "$chrome_pids" | xargs kill -TERM 2>/dev/null || true
             sleep 1
             local still_alive
             still_alive=$(ps -A -o pid=,command= 2>/dev/null               | awk -v p="user-data-dir=$profile_dir" '
-                  index($0,p)>0 && index($0,"--type=")==0 {print $1}'               || true)
+                  index($0,p)>0 && index($0,"--type=")==0 && index($0,"awk ")==0 {print $1}'               || true)
             if [ -n "$still_alive" ]; then
               echo "$still_alive" | xargs kill -KILL 2>/dev/null || true
             fi
@@ -306,7 +306,7 @@ ensure_browser_healthy() {
   local cdp_port
   cdp_port=$(ps -A -o command= 2>/dev/null \
     | awk -v p="user-data-dir=$profile_dir" '
-        index($0,p)>0 && index($0,"--type=")==0 {
+        index($0,p)>0 && index($0,"--type=")==0 && index($0,"awk ")==0 {
           if (match($0, /remote-debugging-port=[0-9]+/)) {
             print substr($0, RSTART+22, RLENGTH-22); exit
           }
@@ -336,7 +336,7 @@ ensure_browser_healthy() {
   local has_chrome
   has_chrome=$(ps -A -o command= 2>/dev/null \
     | awk -v p="user-data-dir=$profile_dir" '
-        index($0,p)>0 && index($0,"--type=")==0 {found=1; exit}
+        index($0,p)>0 && index($0,"--type=")==0 && index($0,"awk ")==0 {found=1; exit}
         END {print (found ? "yes" : "no")}' \
     || echo "no")
 
@@ -349,7 +349,7 @@ ensure_browser_healthy() {
       waited=$((waited + 5))
       has_chrome=$(ps -A -o command= 2>/dev/null \
         | awk -v p="user-data-dir=$profile_dir" '
-            index($0,p)>0 && index($0,"--type=")==0 {found=1; exit}
+            index($0,p)>0 && index($0,"--type=")==0 && index($0,"awk ")==0 {found=1; exit}
             END {print (found ? "yes" : "no")}' \
         || echo "no")
       if [ "$has_chrome" = "no" ]; then
