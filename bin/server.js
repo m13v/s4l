@@ -12667,6 +12667,8 @@ async function reloadStatsTabSections() {
   }
   const dmEl = document.getElementById('dm-stats');
   if (dmEl && dmEl.open) pending.push(loadDmStats(true));
+  const stEl = document.getElementById('search-topics-stats');
+  if (stEl && stEl.open) pending.push(loadSearchTopicsStats(true));
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) pending.push(loadSearchQueriesStats(true));
   const subEl = document.getElementById('subreddit-stats');
@@ -12687,6 +12689,8 @@ function syncStatsHeadings() {
   if (funnel) funnel.textContent = 'Project Funnel Stats (' + win.labelLong + ')';
   const dm = document.getElementById('dm-stats-heading');
   if (dm) dm.textContent = 'DM Funnel Stats (' + win.labelLong + ')';
+  const st = document.getElementById('search-topics-stats-heading');
+  if (st) st.textContent = 'Search Topics (' + win.labelLong + ')';
   const sq = document.getElementById('search-queries-stats-heading');
   if (sq) sq.textContent = 'Search Queries (' + win.labelLong + ')';
   const sub = document.getElementById('subreddit-stats-heading');
@@ -15420,6 +15424,122 @@ function renderDmStats(payload) {
 // the search_attempts tables; posts_made and avg_engagement are joined back
 // through *_candidates -> posts. Reddit + GitHub aren't represented because
 // those pickers don't track discovery queries today.
+// Search Topics: per-topic intelligence at the layer ABOVE search queries.
+// Twitter rows come from twitter_search_attempts.search_topic (set by
+// pick_search_topic.py since 2026-05-26 + backfilled from candidates).
+// Reddit rows come from reddit_search_attempts.seed. LinkedIn + GitHub don\u2019t
+// have a topic concept at the attempt layer; the endpoint returns
+// platform_supported=false when those are pinned in the filter pill.
+let _searchTopicsStatsTableState = { sortField: 'posts_made', sortDir: 'desc', filters: {} };
+function renderSearchTopicsStats(payload) {
+  const body = document.getElementById('search-topics-stats-body');
+  const totalEl = document.getElementById('search-topics-stats-total');
+  if (!body) return;
+  if (payload && payload.error) {
+    if (totalEl) totalEl.textContent = 'error';
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(payload.error) + '</div>';
+    return;
+  }
+  if (payload && payload.platform_supported === false) {
+    if (totalEl) totalEl.textContent = 'n/a';
+    body.innerHTML = '<div class="style-stats-empty">This platform doesn\u2019t track topics at the attempt layer (Twitter and Reddit do).</div>';
+    return;
+  }
+  const rows = (payload && payload.rows) || [];
+  if (!rows.length) {
+    if (totalEl) totalEl.textContent = '0 topics';
+    body.innerHTML = '<div class="style-stats-empty">No search topics in this window.</div>';
+    return;
+  }
+  if (totalEl) totalEl.textContent = rows.length + ' topic' + (rows.length === 1 ? '' : 's');
+  const fmt = n => (Number(n) || 0).toLocaleString();
+  const fmt1 = n => (Number(n) || 0).toFixed(1);
+  const pct = v => (Number(v) * 100).toFixed(0) + '%';
+  const normalized = rows.map(r => {
+    const attempts = Number(r.attempts) || 0;
+    const duds = Number(r.dud_attempts) || 0;
+    return {
+      platform:           String(r.platform || '').toLowerCase(),
+      topic:              String(r.topic || ''),
+      project_name:       r.project_name || '(none)',
+      attempts:           attempts,
+      candidates_found:   Number(r.candidates_found) || 0,
+      dud_rate:           attempts > 0 ? duds / attempts : 0,
+      dud_attempts:       duds,
+      posts_made:         Number(r.posts_made) || 0,
+      avg_engagement:     r.avg_engagement == null ? null : Number(r.avg_engagement),
+      avg_views:          r.avg_views == null ? null : Number(r.avg_views),
+      avg_clicks:         r.avg_clicks == null ? null : Number(r.avg_clicks),
+      clicks_total:       Number(r.clicks_total) || 0,
+      last_run:           r.last_run || null,
+    };
+  });
+  mountSortableTable({
+    containerId: 'search-topics-stats-body',
+    rows: normalized,
+    state: _searchTopicsStatsTableState,
+    storageKey: 'sa.searchTopicsStatsTable.v1',
+    showTotals: false,
+    columns: [
+      { key: 'topic',       label: 'Topic',     type: 'text',    align: 'left', widthPct: 32,
+        formatter: v => {
+          const s = String(v || '');
+          return '<span data-tooltip="' + escapeHtml(s) + '" style="display:block;white-space:normal;overflow-wrap:anywhere;word-break:break-word;font-size:12px;line-height:1.35;">' + escapeHtml(s) + '</span>';
+        } },
+      { key: 'platform',    label: 'Platform',  type: 'text',    align: 'center', widthPct: 4,
+        formatter: v => '<span data-tooltip="' + escapeHtml(String(v || '')) + '" style="text-transform:capitalize;">' + platformIconHtml(v) + '</span>' },
+      { key: 'project_name', label: 'Project',  type: 'text',    align: 'left', widthPct: 9,
+        formatter: v => escapeHtml((typeof PROJECT_LABELS !== 'undefined' && PROJECT_LABELS[v]) || v) },
+      { key: 'attempts',    label: 'Attempts',  type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
+      { key: 'candidates_found', label: 'Found', type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
+      { key: 'dud_rate',    label: 'Dud %',     type: 'numeric', align: 'right', widthPct: 5,
+        formatter: (v, row) => {
+          const n = Number(v) || 0;
+          const tip = '**' + (row.dud_attempts || 0) + '** of **' + (row.attempts || 0) + '** attempts returned 0';
+          const color = n >= 0.5 ? 'var(--danger,#dc2626)' : (n >= 0.25 ? 'var(--warn,#d97706)' : 'var(--text-secondary)');
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
+        } },
+      { key: 'posts_made',  label: 'Posts',     type: 'numeric', align: 'right', widthPct: 5,
+        formatter: v => {
+          const n = Number(v) || 0;
+          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
+          return '<span style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+        } },
+      { key: 'avg_engagement', label: 'Avg Eng', type: 'numeric', align: 'right', widthPct: 5,
+        formatter: v => {
+          if (v == null) return '<span style="color:var(--text-faint);">\u2014</span>';
+          const tip = '**Formula:** comments\u00D73 + upvotes on our reply' + String.fromCharCode(10) +
+                      '(same as top_performers.py)';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt1(v) + '</span>';
+        } },
+      { key: 'avg_views',   label: 'Avg Views', type: 'numeric', align: 'right', widthPct: 5,
+        formatter: (v, row) => {
+          if (v == null) return '<span data-tooltip="Reddit views aren\u2019t aggregated at the topic level here" style="color:var(--text-faint);">\u2014</span>';
+          const tip = '**Avg view count** on Twitter replies driven by this topic' + String.fromCharCode(10) +
+                      '(raw, not weighted into Avg Eng)';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt(Math.round(v)) + '</span>';
+        } },
+      { key: 'avg_clicks',  label: 'Avg Clicks', type: 'numeric', align: 'right', widthPct: 5,
+        formatter: (v, row) => {
+          if (v == null || !row.posts_made) return '<span style="color:var(--text-faint);">\u2014</span>';
+          const total = Number(row.clicks_total) || 0;
+          const tip = '**' + fmt(total) + '** total clicks across **' + (row.posts_made || 0) + '** posts' + String.fromCharCode(10) +
+                      'GREATEST(post_links.real_clicks, post_links.clicks) per post' + String.fromCharCode(10) +
+                      'real_clicks = PostHog $pageview backfill; clicks = live /r/ redirect log';
+          const n = Number(v) || 0;
+          const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
+        } },
+      { key: 'last_run',    label: 'Last Run',  type: 'numeric', align: 'right', widthPct: 5,
+        formatter: v => {
+          if (!v) return '<span style="color:var(--text-faint);">\u2014</span>';
+          const abs = new Date(v).toLocaleString();
+          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color:var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
+        } },
+    ],
+  });
+}
+
 let _searchQueriesStatsTableState = { sortField: 'posts_made', sortDir: 'desc', filters: {} };
 function renderSearchQueriesStats(payload) {
   const body = document.getElementById('search-queries-stats-body');
@@ -18560,6 +18680,7 @@ async function refreshAllData() {
   loadCohortStats();
   loadStyleStats();
   loadDmStats(true);
+  loadSearchTopicsStats(true);
   loadSearchQueriesStats(true);
   loadAllPerDayCharts();
   loadFunnelStats(true);
@@ -18684,6 +18805,40 @@ async function loadDmStats(force) {
     if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _dmStatsLoading = false;
+  }
+}
+
+let _searchTopicsStatsLoadedFor = null;
+let _searchTopicsStatsLoading = false;
+async function loadSearchTopicsStats(force) {
+  if (_searchTopicsStatsLoading) return;
+  if (saAuthNotReady()) return;
+  const days = currentStatsWindow().days;
+  const plat = currentStatsPlatform();
+  const proj = currentStatsProject();
+  const dudsOnlyEl = document.getElementById('search-topics-stats-duds-only');
+  const dudsOnly = !!(dudsOnlyEl && dudsOnlyEl.checked);
+  const key  = days + '|' + plat + '|' + proj + '|' + (dudsOnly ? '1' : '0');
+  if (_searchTopicsStatsLoadedFor === key && !force) return;
+  _searchTopicsStatsLoading = true;
+  const totalEl = document.getElementById('search-topics-stats-total');
+  const body = document.getElementById('search-topics-stats-body');
+  if (totalEl) totalEl.textContent = 'loading\u2026';
+  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  try {
+    const params = ['days=' + days];
+    if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
+    if (proj && proj !== 'all') params.push('project='  + encodeURIComponent(proj));
+    if (dudsOnly) params.push('duds_only=1');
+    params.push('limit=5000');
+    const res = await fetch('/api/search-topics/stats?' + params.join('&'));
+    const data = await res.json();
+    renderSearchTopicsStats(data);
+    _searchTopicsStatsLoadedFor = key;
+  } catch (e) {
+    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+  } finally {
+    _searchTopicsStatsLoading = false;
   }
 }
 
@@ -19074,6 +19229,22 @@ _saInstallDeleteListener();
   });
 })();
 
+(function wireSearchTopicsStats() {
+  const el = document.getElementById('search-topics-stats');
+  if (!el) return;
+  el.addEventListener('toggle', () => {
+    try { window.posthog && window.posthog.capture('section_toggle', { section: 'search-topics-stats', open: !!el.open }); } catch (er) {}
+    if (el.open) loadSearchTopicsStats();
+  });
+  const duds = document.getElementById('search-topics-stats-duds-only');
+  if (duds) {
+    duds.addEventListener('change', () => {
+      try { window.posthog && window.posthog.capture('search_topics_duds_toggle', { on: !!duds.checked }); } catch (er) {}
+      if (el.open) loadSearchTopicsStats(true);
+    });
+  }
+})();
+
 (function wireSearchQueriesStats() {
   const el = document.getElementById('search-queries-stats');
   if (!el) return;
@@ -19178,6 +19349,8 @@ function saStartApp() {
   if (funnelEl && funnelEl.open) loadFunnelStats();
   const dmEl = document.getElementById('dm-stats');
   if (dmEl && dmEl.open) loadDmStats();
+  const stTopEl = document.getElementById('search-topics-stats');
+  if (stTopEl && stTopEl.open) loadSearchTopicsStats();
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) loadSearchQueriesStats();
   const subEl = document.getElementById('subreddit-stats');
