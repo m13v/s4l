@@ -51,7 +51,7 @@ Behavior:
   - Unmatched feed rows are logged but NOT errors (the same feed JSON
     is consumed by the replies-table updater immediately after this
     script, so a row unmatched here might match there).
-  - scan_no_change_count IS maintained, matching update_stats.py's
+  - scan_no_change_count IS maintained, matching stats.py's
     Twitter behavior so dashboard sorting / freshness gates work the
     same way across platforms.
 
@@ -184,7 +184,7 @@ def apply_one(db, db_row: dict, feed: dict, dry_run: bool, quiet: bool) -> str:
     )
 
     if not dry_run:
-        # Mirror update_stats.py's Twitter behavior: write stats + always
+        # Mirror stats.py's Twitter behavior: write stats + always
         # advance engagement_updated_at + maintain scan_no_change_count.
         db.execute(
             "UPDATE posts SET "
