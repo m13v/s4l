@@ -27,7 +27,7 @@ Usage:
 
 Patterned after seo/escalate.py: same Gmail token, same dash-scrubbing,
 same recipient default (NOTIFICATION_EMAIL env override). Independent
-from update_stats.py so a Python error in the sweeper cannot break the
+from stats.py so a Python error in the sweeper cannot break the
 stats refresh.
 """
 
@@ -246,7 +246,7 @@ def _reddit_live_recheck(our_url, our_account, user_agent):
     """Pre-send Reddit live re-check (added 2026-05-16).
 
     Before firing a strike email, fetch the comment URL one more time. If
-    the comment body is real content (not [deleted]/[removed]), update_stats
+    the comment body is real content (not [deleted]/[removed]), stats.py
     false-flagged it (transient parse error, rate-limit miss, etc.) and the
     strike is bogus. Return one of:
 
@@ -564,7 +564,7 @@ def main():
     dbmod.load_env()
     db = dbmod.get_conn()
 
-    # Reddit user-agent for the live re-check. Mirrors update_stats.py:1924
+    # Reddit user-agent for the live re-check. Mirrors stats.py:1924
     # so the pre-send re-check uses the same UA Reddit already saw on the
     # ingest side.
     try:
@@ -597,7 +597,7 @@ def main():
             skipped += 1
             continue
 
-        # Reddit live re-check (added 2026-05-16). update_stats.py uses a
+        # Reddit live re-check (added 2026-05-16). stats.py uses a
         # 2-detection threshold which is brittle to transient scrape failures
         # and rate-limit misses. Confirmed false positives on 2026-05-07
         # (post 23005 /r/PAstudent/Active recall with Anki, post 23223 /r/
