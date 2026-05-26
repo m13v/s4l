@@ -206,6 +206,67 @@ def _http_snapshot_post_views(post_id, views):
         pass
 
 
+# --- HTTP wrappers for the parent-thread snapshot lane (2026-05-26) ----------
+# refresh_twitter_threads() polls the *parent* tweet of every active comment
+# we made and appends one row to thread_snapshots per poll. Two helpers:
+#   - list: returns deduped parent threads to poll right now, scoped by
+#     our_account and gated by staleness (skip threads polled within the
+#     window).
+#   - insert: appends one snapshot row, attributable to the caller's
+#     install_id via the auth header.
+
+def _http_list_twitter_parent_threads(our_account, stale_hours=5,
+                                      max_age_days=30):
+    """Parent threads the twitter stats job should refresh.
+
+    Returns a list of dicts with: post_id, thread_url, thread_author_handle,
+    posted_at, last_captured_at (NULL if never polled), plus the previous
+    snapshot's counters so the writer can short-circuit "nothing changed".
+    """
+    resp = api_get(
+        "/api/v1/thread-snapshots/active-for-stats",
+        query={
+            "platform": "twitter",
+            "our_account": our_account,
+            "stale_hours": int(stale_hours),
+            "max_age_days": int(max_age_days),
+        },
+    )
+    return ((resp or {}).get("data") or {}).get("threads") or []
+
+
+def _http_insert_thread_snapshot(platform, thread_url, *,
+                                 thread_external_id=None,
+                                 thread_author_handle=None,
+                                 views=None, likes=None, replies=None,
+                                 retweets=None, bookmarks=None, quotes=None,
+                                 is_deleted=False, error=None):
+    """Append one snapshot row. Returns the inserted row id or None on error.
+
+    Errors are swallowed so a single bad row doesn't abort the whole refresh
+    pass; the caller logs and continues."""
+    body = {
+        "platform": platform,
+        "thread_url": thread_url,
+        "thread_external_id": thread_external_id,
+        "thread_author_handle": thread_author_handle,
+        "views": views,
+        "likes": likes,
+        "replies": replies,
+        "retweets": retweets,
+        "bookmarks": bookmarks,
+        "quotes": quotes,
+        "is_deleted": bool(is_deleted),
+        "error": error,
+    }
+    try:
+        resp = api_post("/api/v1/thread-snapshots", body)
+        data = (resp or {}).get("data") or {}
+        return data.get("id")
+    except Exception:
+        return None
+
+
 import progress
 from moltbook_tools import (
     fetch_moltbook_json,
@@ -1857,6 +1918,145 @@ def refresh_reddit_replies(db, user_agent, quiet=False):
               f"{errors} errors, {skipped_fresh} fresh", flush=True)
     return {"total": total, "updated": updated, "errors": errors,
             "skipped_fresh": skipped_fresh}
+
+
+def refresh_twitter_threads(db, config=None, quiet=False):
+    """Poll fxtwitter for parent threads we've commented on and append one
+    row to thread_snapshots per successful poll.
+
+    Background: posts.thread_engagement captures one T0 snapshot at
+    discovery time, twitter_candidates carries T0+T1 inside the candidate
+    lifecycle, but neither covers what happens to the parent thread AFTER
+    we post a comment on it. This function closes that gap: it scans every
+    active twitter comment whose parent != our_url, dedupes by parent URL,
+    polls fxtwitter once per second, and appends a thread_snapshots row.
+
+    Cadence:
+      - Hot tier (default): polled every 6h via stats.sh Step 3.5. Threads
+        whose latest snapshot is < 5h old are skipped server-side via the
+        active-for-stats endpoint.
+      - Long tail (default cap): threads where our newest comment is older
+        than 30 days are dropped from the candidate set; not worth the
+        fxtwitter quota.
+
+    Multi-account safety: read scoped to our_account so two machines
+    (@m13v_ and @matt_diak) only refresh the parents of THEIR comments.
+
+    Output to stats.sh log via stdout: "thread_snapshots: X scanned, Y
+    written, Z deleted, W errors". DB writes go through HTTP; same lane
+    as the rest of the twitter pipeline."""
+    from twitter_account import resolve_handle as _resolve_twitter_handle
+    config = config or {}
+
+    handle = _resolve_twitter_handle()
+    if not handle:
+        if not quiet:
+            print("  thread_snapshots: no handle configured; skipping", flush=True)
+        return {"scanned": 0, "written": 0, "deleted": 0, "errors": 0,
+                "no_change": 0}
+
+    threads = _http_list_twitter_parent_threads(
+        our_account=handle, stale_hours=5, max_age_days=30,
+    )
+
+    scanned = written = deleted_count = errors = no_change = 0
+    rate_limit_sleep = 1.0  # fxtwitter etiquette: 1 req/sec
+
+    for t in threads:
+        scanned += 1
+        thread_url = t.get("thread_url") or ""
+        # Extract tweet_id + username from the URL. Twitter URLs come in
+        # both x.com/<user>/status/<id> and twitter.com/<user>/status/<id>
+        # shapes; fxtwitter accepts either, but we need the id either way
+        # for the thread_external_id column.
+        m_id = re.search(r"/status/(\d+)", thread_url)
+        m_user = re.search(r"(?:x|twitter)\.com/([^/]+)/status", thread_url)
+        if not m_id or not m_user:
+            errors += 1
+            continue
+        tweet_id = m_id.group(1)
+        username = m_user.group(1)
+
+        api_url = f"https://api.fxtwitter.com/{username}/status/{tweet_id}"
+        try:
+            data = fetch_json(api_url)
+        except HttpNotFoundError:
+            data = {"code": 404, "tweet": None}
+        if not data:
+            # Single retry, matches refresh_twitter()'s pattern
+            time.sleep(2)
+            try:
+                data = fetch_json(api_url)
+            except HttpNotFoundError:
+                data = {"code": 404, "tweet": None}
+
+        code = (data or {}).get("code", 0)
+        tweet = (data or {}).get("tweet")
+
+        if code == 404 or tweet is None:
+            # Parent thread is deleted/suspended/blocked. Record the fact
+            # (so the curve has a terminal point) but don't double-poll
+            # next cycle — the server-side staleness gate will see the
+            # row and skip.
+            _http_insert_thread_snapshot(
+                "twitter", thread_url,
+                thread_external_id=tweet_id,
+                is_deleted=True,
+                error=f"fxtwitter_code_{code}",
+            )
+            deleted_count += 1
+            time.sleep(rate_limit_sleep)
+            continue
+
+        views = (tweet.get("views") or 0) or None
+        likes = (tweet.get("likes") or 0) or None
+        replies_count = (tweet.get("replies") or 0) or None
+        retweets = (tweet.get("retweets") or 0) or None
+        bookmarks = (tweet.get("bookmarks") or 0) or None
+        # fxtwitter exposes quotes on some tweets and not others; coerce.
+        quotes = tweet.get("quotes")
+        if quotes is not None:
+            try:
+                quotes = int(quotes)
+            except (TypeError, ValueError):
+                quotes = None
+        author = (tweet.get("author") or {}).get("screen_name") or t.get("thread_author_handle")
+
+        # Cheap no-change short-circuit: if every counter matches the
+        # previous snapshot, still insert a row so the curve has a
+        # capture point at this timestamp (the dashboard surfaces the
+        # frequency of polls as a freshness signal), but increment the
+        # no_change counter so the stats summary makes the cost clear.
+        prev_views = t.get("last_views")
+        prev_likes = t.get("last_likes")
+        prev_replies = t.get("last_replies")
+        prev_retweets = t.get("last_retweets")
+        prev_bookmarks = t.get("last_bookmarks")
+        if (prev_views == views and prev_likes == likes and
+                prev_replies == replies_count and prev_retweets == retweets and
+                prev_bookmarks == bookmarks):
+            no_change += 1
+
+        snap_id = _http_insert_thread_snapshot(
+            "twitter", thread_url,
+            thread_external_id=tweet_id,
+            thread_author_handle=author,
+            views=views, likes=likes, replies=replies_count,
+            retweets=retweets, bookmarks=bookmarks, quotes=quotes,
+        )
+        if snap_id is None:
+            errors += 1
+        else:
+            written += 1
+
+        time.sleep(rate_limit_sleep)
+
+    if not quiet:
+        print(f"  thread_snapshots: {scanned} scanned, {written} written, "
+              f"{deleted_count} deleted, {errors} errors, "
+              f"{no_change} unchanged", flush=True)
+    return {"scanned": scanned, "written": written, "deleted": deleted_count,
+            "errors": errors, "no_change": no_change}
 
 
 def refresh_twitter_replies(db, quiet=False):
