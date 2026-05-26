@@ -506,6 +506,44 @@ async function pq(query, params) {
   }
 }
 
+// Project matcher mirroring scripts/score_twitter_candidates.py:match_project.
+// Used by the twitterapi.io webhook handler to stamp matched_project at
+// ingest so webhook rows can flow through the normal twitter-cycle salvage
+// -> ripen -> draft -> post pipeline. Cloud Run doesn't bundle config.json,
+// so we read projects out of the project_config Postgres table instead.
+// 60s in-memory cache: project_config changes rarely; webhook bursts arrive
+// in clusters where a per-request DB roundtrip would be wasteful.
+let _projectsCache = null;
+let _projectsCacheAt = 0;
+async function loadProjectsForMatching() {
+  const now = Date.now();
+  if (_projectsCache && (now - _projectsCacheAt) < 60_000) return _projectsCache;
+  const rows = await pq(
+    `SELECT name, blob->'search_topics' AS topics FROM project_config WHERE blob ? 'search_topics'`,
+    [],
+  );
+  const projects = (rows || []).map(r => ({
+    name: r.name,
+    topics: Array.isArray(r.topics) ? r.topics.map(t => String(t).toLowerCase()) : [],
+  }));
+  _projectsCache = projects;
+  _projectsCacheAt = now;
+  return projects;
+}
+
+function matchProject(tweetText, searchTopic, projects) {
+  const topicLower = (searchTopic || '').toLowerCase();
+  const textLower = (tweetText || '').toLowerCase();
+  for (const proj of projects) {
+    for (const t of proj.topics) {
+      if (t && (topicLower.includes(t) || textLower.includes(t))) {
+        return proj.name;
+      }
+    }
+  }
+  return null;
+}
+
 let _bookingsPool = null;
 function getBookingsPool() {
   if (_bookingsPool) return _bookingsPool;
