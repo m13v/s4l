@@ -11095,13 +11095,23 @@ function _buildJobHistoryRowGroup(r, idx) {
     );
   }
   const rowClass = hasDetails ? 'sa-job-row sa-job-row-expandable' : 'sa-job-row';
+  // Per-phase duration breakdown (Twitter post-comments cycles only for now):
+  // the elapsed span gets a data-tooltip so "30m 12s" can be unpacked into
+  // "Phase 1 scan 5m + ripen sleep 20m (intentional) + Phase 2b-post 46s +
+  // lock wait 64s (blocked by another cycle)". A dotted underline + help
+  // cursor signal that the cell is hoverable. Falls through silently when no
+  // breakdown is available (other job types, rotated logs, aborted cycles).
+  const phaseTip = (r.result && r.result.phase_durations && r.result.phase_durations.tooltip) || '';
+  const elapsedSpan = phaseTip
+    ? '<span style="color:var(--muted);font-size:11px;cursor:help;border-bottom:1px dotted var(--muted);" data-tooltip="' + escapeHtml(phaseTip) + '">(' + fmtElapsed(r.elapsed_s) + ')</span>'
+    : '<span style="color:var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span>';
   const main = (
     '<tr class="' + rowClass + '" data-run-idx="' + idx + '" data-row-key="' + rowKey + '" data-row-sig="' + rowSig + '"' +
       (hasDetails ? ' style="cursor:pointer;"' : '') + '>' +
       '<td style="text-align:left;padding-left:16px;">' + caret + (r.job_label || r.script) + '</td>' +
       '<td>' + (r.platform || '<span style="color:var(--muted);">—</span>') + '</td>' +
       '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
-      '<td style="text-align:left;">' + fmtLocalTime(r.finished_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span></td>' +
+      '<td style="text-align:left;">' + fmtLocalTime(r.finished_at) + ' ' + elapsedSpan + '</td>' +
       '<td style="text-align:left;">' + renderResult(r) + '</td>' +
       '<td style="color:var(--muted);font-size:12px;">' + costCell + '</td>' +
     '</tr>'
