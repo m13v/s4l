@@ -1342,6 +1342,151 @@ async function enrichPostCommentsLinkedInRuns(runs) {
 //   posted    = COUNT(*) twitter_candidates status='posted' in window
 //   pending   = global COUNT(*) status='pending' (small for Twitter; each cycle
 //                self-expires its own batch)
+// Parse phase boundaries out of a twitter-cycle log body into a breakdown that
+// the duration cell can hover-render. Without this, "Twitter Post Comments
+// 30m 12s" reads like a hung run when in practice the lion's share is
+// usually the intentional Variant A T1 ripen sleep (1200s), not compute.
+// Source markers (stable, emitted by skill/run-twitter-cycle.sh + skill/lock.sh):
+//   [HH:MM:SS] === Twitter Cycle (...)               cycle start
+//   [HH:MM:SS] Phase 1: drafting queries...          Phase 1 begin
+//   [HH:MM:SS] Phase 1 complete. ...                 Phase 1 end
+//   [HH:MM:SS] Variant A: sleeping 1200s before T1   ripen sleep (variant A only)
+//   [HH:MM:SS] Phase 2a: re-polling fxtwitter ...    Phase 2a begin
+//   [HH:MM:SS] Phase 2b-prep: Claude reading ...     Phase 2b-prep begin
+//   [HH:MM:SS] Phase 2b-prep complete. ...           Phase 2b-prep end
+//   [HH:MM:SS] Phase 2b-gen: generating SEO ...      Phase 2b-gen begin
+//   [HH:MM:SS] Phase 2b-post: posting ...            Phase 2b-post begin
+//   [HH:MM:SS] === Cycle complete: ...               cycle end
+//   [lock] acquired twitter-browser pid=X at HH:MM:SS waited=Ns  per-acquire wait
+// Returns null when the cycle aborted before Phase 1 (no markers to parse).
+function parseTwitterCyclePhaseTimings(body, logFileName) {
+  const fm = logFileName.match(/^twitter-cycle-(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.log$/);
+  if (!fm) return null;
+  const day = fm[1];
+  // Day-rollover tracking: anchor at the file's start hour and bump by 24h
+  // whenever a parsed HH appears much earlier than the previous one.
+  // (Cycles usually finish in <30min but variant A + lock contention can drag
+  // a midnight start past 00:00.)
+  let lastHour = parseInt(fm[2], 10);
+  let dayOffset = 0;
+  const tsToMs = (hh, mm, ss) => {
+    const h = parseInt(hh, 10);
+    if (h < lastHour - 12) dayOffset += 24 * 3600 * 1000;
+    lastHour = h;
+    return new Date(day + 'T' + hh + ':' + mm + ':' + ss).getTime() + dayOffset;
+  };
+  let cycleStartMs = null, cycleEndMs = null;
+  let phase1StartMs = null, phase1EndMs = null;
+  let ripenSleepSec = 0;
+  let phase2aStartMs = null;
+  let phase2bPrepStartMs = null, phase2bPrepEndMs = null;
+  let phase2bGenStartMs = null;
+  let phase2bPostStartMs = null;
+  const lockWaits = [];
+  // Patterns. Each compute-style marker is captured ONCE (first occurrence).
+  // Lock acquires accumulate so we can sum waits across the 2-3 acquire/release
+  // dances in a single cycle (Phase 1 → release → Phase 2b-post → release).
+  const RE_CYCLE_START   = /^\[(\d{2}):(\d{2}):(\d{2})\] === Twitter Cycle/;
+  const RE_LOCK_ACQ      = /^\[lock\] acquired twitter-browser pid=\d+ at (\d{2}):(\d{2}):(\d{2}) waited=(\d+)s/;
+  const RE_PHASE1_START  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1: drafting/;
+  const RE_PHASE1_END    = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 1 complete/;
+  const RE_RIPEN_SLEEP   = /^\[(\d{2}):(\d{2}):(\d{2})\] Variant \w: sleeping (\d+)s before T1/;
+  const RE_PHASE2A       = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2a: re-polling/;
+  const RE_PHASE2B_PREP  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep: Claude reading/;
+  const RE_PHASE2B_PREP_END = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-prep complete/;
+  const RE_PHASE2B_GEN   = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-gen:/;
+  const RE_PHASE2B_POST  = /^\[(\d{2}):(\d{2}):(\d{2})\] Phase 2b-post: posting/;
+  const RE_CYCLE_END     = /^\[(\d{2}):(\d{2}):(\d{2})\] === Cycle complete/;
+  let m;
+  for (const line of body.split('\n')) {
+    if (cycleStartMs == null && (m = line.match(RE_CYCLE_START))) cycleStartMs = tsToMs(m[1], m[2], m[3]);
+    else if ((m = line.match(RE_LOCK_ACQ))) lockWaits.push({ acquiredMs: tsToMs(m[1], m[2], m[3]), waitedS: parseInt(m[4], 10) });
+    else if (phase1StartMs == null && (m = line.match(RE_PHASE1_START))) phase1StartMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase1EndMs == null && (m = line.match(RE_PHASE1_END))) phase1EndMs = tsToMs(m[1], m[2], m[3]);
+    else if (ripenSleepSec === 0 && (m = line.match(RE_RIPEN_SLEEP))) ripenSleepSec = parseInt(m[4], 10);
+    else if (phase2aStartMs == null && (m = line.match(RE_PHASE2A))) phase2aStartMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase2bPrepStartMs == null && (m = line.match(RE_PHASE2B_PREP))) phase2bPrepStartMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase2bPrepEndMs == null && (m = line.match(RE_PHASE2B_PREP_END))) phase2bPrepEndMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase2bGenStartMs == null && (m = line.match(RE_PHASE2B_GEN))) phase2bGenStartMs = tsToMs(m[1], m[2], m[3]);
+    else if (phase2bPostStartMs == null && (m = line.match(RE_PHASE2B_POST))) phase2bPostStartMs = tsToMs(m[1], m[2], m[3]);
+    else if (cycleEndMs == null && (m = line.match(RE_CYCLE_END))) cycleEndMs = tsToMs(m[1], m[2], m[3]);
+  }
+  if (cycleStartMs == null) return null;
+  // Build the ordered breakdown. Skip phases the log doesn't carry (e.g. a
+  // variant B/C/D run has no ripen sleep; an aborted Phase 1 has no 2b-post).
+  const items = [];
+  const secOf = (ms) => Math.max(0, Math.round(ms / 1000));
+  // Lock wait #1: before Phase 1. lockWaits[0].waitedS already encodes the
+  // wait — don't double-count by deriving from acquire timestamps.
+  if (lockWaits.length >= 1 && lockWaits[0].waitedS > 0) {
+    items.push({ label: 'lock wait (pre-scan)', sec: lockWaits[0].waitedS, kind: 'lock_wait' });
+  }
+  if (phase1StartMs != null && phase1EndMs != null) {
+    items.push({ label: 'Phase 1 scan (Claude)', sec: secOf(phase1EndMs - phase1StartMs), kind: 'compute' });
+  }
+  if (ripenSleepSec > 0) {
+    items.push({ label: 'ripen sleep (Variant A)', sec: ripenSleepSec, kind: 'sleep' });
+  }
+  if (phase2aStartMs != null && phase2bPrepStartMs != null) {
+    items.push({ label: 'Phase 2a re-poll + style', sec: secOf(phase2bPrepStartMs - phase2aStartMs), kind: 'compute' });
+  }
+  if (phase2bPrepStartMs != null && phase2bPrepEndMs != null) {
+    items.push({ label: 'Phase 2b-prep draft (Claude)', sec: secOf(phase2bPrepEndMs - phase2bPrepStartMs), kind: 'compute' });
+  }
+  // Phase 2b-gen is usually <1s when TWITTER_PAGE_GEN_RATE=0; only surface
+  // when it actually did meaningful work (>=2s) so the tooltip stays compact.
+  if (phase2bGenStartMs != null && phase2bPostStartMs != null) {
+    const genSec = secOf(phase2bPostStartMs - phase2bGenStartMs);
+    if (genSec >= 2) items.push({ label: 'Phase 2b-gen SEO page', sec: genSec, kind: 'compute' });
+  }
+  // Lock wait pre-post: the LAST acquire's waitedS (the re-acquire before
+  // Phase 2b-post). Skip if we only had one acquire (cycle never reached post).
+  if (lockWaits.length >= 2 && lockWaits[lockWaits.length - 1].waitedS > 0) {
+    items.push({ label: 'lock wait (pre-post)', sec: lockWaits[lockWaits.length - 1].waitedS, kind: 'lock_wait' });
+  }
+  if (phase2bPostStartMs != null && cycleEndMs != null) {
+    items.push({ label: 'Phase 2b-post', sec: secOf(cycleEndMs - phase2bPostStartMs), kind: 'compute' });
+  }
+  if (!items.length) return null;
+  // Format helper duplicated locally rather than reaching into fmtElapsed
+  // (client-only) so this stays usable for the cell-render tooltip too.
+  const fmtSec = (s) => {
+    if (s < 60) return s + 's';
+    const mm = Math.floor(s / 60);
+    const rs = s % 60;
+    return mm + 'm' + (rs ? ' ' + rs + 's' : '');
+  };
+  let computeSec = 0, sleepSec = 0, lockSec = 0;
+  for (const it of items) {
+    if (it.kind === 'compute')   computeSec += it.sec;
+    else if (it.kind === 'sleep')      sleepSec   += it.sec;
+    else if (it.kind === 'lock_wait')  lockSec    += it.sec;
+  }
+  // Tooltip is grouped first as a chronological breakdown, then totals so the
+  // operator can immediately tell whether the run was bottlenecked on compute,
+  // intentional sleep, or lock contention with a peer cycle. NL pattern matches
+  // the rest of server.js (feedback_server_js_template_regex gotcha).
+  const NL = String.fromCharCode(10);
+  let tooltip = '**Duration breakdown**' + NL;
+  for (const it of items) {
+    const tag = it.kind === 'sleep'     ? ' (intentional)'
+              : it.kind === 'lock_wait' ? ' (blocked by another cycle)'
+              : '';
+    tooltip += '• ' + it.label + ': **' + fmtSec(it.sec) + '**' + tag + NL;
+  }
+  tooltip += NL + '**Totals**' + NL;
+  tooltip += '• compute: ' + fmtSec(computeSec) + NL;
+  if (sleepSec > 0) tooltip += '• sleep: ' + fmtSec(sleepSec) + NL;
+  if (lockSec  > 0) tooltip += '• lock wait: ' + fmtSec(lockSec);
+  return {
+    items,
+    compute_sec: computeSec,
+    sleep_sec: sleepSec,
+    lock_wait_sec: lockSec,
+    tooltip,
+  };
+}
+
 // Parse a twitter cycle batch_id (`twcycle-YYYYMMDD-HHMMSS`) into epoch ms.
 // Used to map each candidate/search row back to the cycle that owns it, so a
 // long-running cycle's posts aren't also attributed to the next cycle's run
