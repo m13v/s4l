@@ -45,7 +45,7 @@ CANDIDATES=$(psql "$DATABASE_URL" -t -A -c "
 
 log "Candidates: $CANDIDATES posts marked deleted/removed in last 60 days"
 
-python3 "$REPO_DIR/scripts/update_stats.py" --reddit-resurrect --resurrect-days 60 >> "$LOG_FILE" 2>&1
+python3 "$REPO_DIR/scripts/stats.py" --reddit-resurrect --resurrect-days 60 >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
 if [ "$EXIT_CODE" -ne 0 ]; then
