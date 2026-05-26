@@ -2,9 +2,9 @@
 # audit.sh — Post audit pipeline.
 #
 # Per-platform mode (preferred, driven by launchd via per-platform wrappers):
-#   --platform reddit    Reddit API audit via update_stats.py --reddit-only
-#   --platform moltbook  Moltbook API audit via update_stats.py --moltbook-only
-#   --platform twitter   Twitter API audit via update_stats.py --twitter-audit
+#   --platform reddit    Reddit API audit via stats.py --reddit-only
+#   --platform moltbook  Moltbook API audit via stats.py --moltbook-only
+#   --platform twitter   Twitter API audit via stats.py --twitter-audit
 #   --platform linkedin  Retired 2026-04-17 (flagged CDP pattern). Engagement
 #                        stats now collected via stats.sh Step 4 (linkedin-agent
 #                        MCP, headed Chrome). Branch kept as no-op so the
@@ -113,13 +113,13 @@ STEP3_EXIT=0
 # Reddit API audit
 # ═══════════════════════════════════════════════════════
 if [ "$RUN_REDDIT" -eq 1 ]; then
-    log "Reddit: API audit (update_stats.py --reddit-only)"
+    log "Reddit: API audit (stats.py --reddit-only)"
     if [ -z "$PLATFORM" ]; then
         # Legacy all-platform path uses the combined default pass which also
         # covers Moltbook + Twitter, so we don't duplicate them below.
-        python3 "$REPO_DIR/scripts/update_stats.py" >> "$LOG_FILE" 2>&1
+        python3 "$REPO_DIR/scripts/stats.py" >> "$LOG_FILE" 2>&1
     else
-        python3 "$REPO_DIR/scripts/update_stats.py" --reddit-only >> "$LOG_FILE" 2>&1
+        python3 "$REPO_DIR/scripts/stats.py" --reddit-only >> "$LOG_FILE" 2>&1
     fi
     STEP1_EXIT=$?
     if [ "$STEP1_EXIT" -ne 0 ]; then
@@ -134,8 +134,8 @@ fi
 # ═══════════════════════════════════════════════════════
 # Skip in legacy mode — already covered by the combined pass above.
 if [ "$RUN_MOLTBOOK" -eq 1 ] && [ -n "$PLATFORM" ]; then
-    log "Moltbook: API audit (update_stats.py --moltbook-only)"
-    python3 "$REPO_DIR/scripts/update_stats.py" --moltbook-only >> "$LOG_FILE" 2>&1
+    log "Moltbook: API audit (stats.py --moltbook-only)"
+    python3 "$REPO_DIR/scripts/stats.py" --moltbook-only >> "$LOG_FILE" 2>&1
     MOLTBOOK_EXIT=$?
     if [ "$MOLTBOOK_EXIT" -ne 0 ]; then
         log "Moltbook: FAILED (exit $MOLTBOOK_EXIT)"
@@ -154,7 +154,7 @@ if [ "$RUN_TWITTER" -eq 1 ]; then
 
     if [ "$TWITTER_COUNT" -gt 0 ]; then
         log "Twitter: API audit — $TWITTER_COUNT active tweets"
-        python3 "$REPO_DIR/scripts/update_stats.py" --twitter-audit >> "$LOG_FILE" 2>&1
+        python3 "$REPO_DIR/scripts/stats.py" --twitter-audit >> "$LOG_FILE" 2>&1
         STEP2_EXIT=$?
         if [ "$STEP2_EXIT" -ne 0 ]; then
             log "Twitter: FAILED (exit $STEP2_EXIT)"
