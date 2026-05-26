@@ -448,9 +448,16 @@ for p in picked:
         excludes = []
     # 2026-05-26: force-pick ONE search_topic per project via the Python
     # picker so end-to-end attribution (topic -> query -> candidate ->
-    # post -> click) is clean. Mirrors the engagement_styles flow. The
-    # picker's three branches (use ~90% / explore ~10% / cold_start
-    # fallback) all return a single string; Claude no longer chooses.
+    # post -> click) is clean. Mirrors the engagement_styles flow.
+    # Two branches:
+    #   - use (~90%): picker returns search_topic=<string>, weighted-random
+    #     over the FULL universe with log-smoothed weights (top ~20-30%,
+    #     cold ~0.5-1%). Claude must use the assigned topic verbatim.
+    #   - explore_invent (~10%): picker returns search_topic=None, Claude
+    #     INVENTS a new topic for this cycle given the per-project pool
+    #     stats (reference_topics). The invention is captured in
+    #     twitter_candidates.search_topic for analytics; promotion into
+    #     config.json is a manual human-review step.
     # See scripts/pick_search_topic.py.
     topic_pick = None
     if pick_topic_for_project is not None:
@@ -458,9 +465,11 @@ for p in picked:
             topic_pick = pick_topic_for_project(p.get('name'), platform='twitter')
         except Exception:
             topic_pick = None
-    if topic_pick and topic_pick.get('search_topic'):
-        picked_topic = topic_pick['search_topic']
+    if topic_pick is not None:
+        picked_topic = topic_pick.get('search_topic')  # may be None on explore_invent
         picked_mode = topic_pick.get('mode', 'use')
+        reference_topics = topic_pick.get('reference_topics') or []
+        picked_weight_pct = topic_pick.get('picked_weight_pct')
     else:
         # Picker unavailable or project has no search_topics[] in
         # config.json. Fall back to the first legacy entry so the
@@ -468,6 +477,8 @@ for p in picked:
         legacy = p.get('search_topics') or []
         picked_topic = legacy[0] if legacy else ''
         picked_mode = 'fallback'
+        reference_topics = []
+        picked_weight_pct = None
     chosen.append({
         'name': p.get('name'),
         'description': p.get('description', ''),
@@ -475,8 +486,15 @@ for p in picked:
         # `search_topics: [...]` array. Claude draws its query from THIS
         # topic and must echo it verbatim on every tweet object via the
         # bh_run scrape script's `search_topic` Python variable.
+        # NULL when topic_picked_mode == 'explore_invent' — Claude must
+        # invent a new topic given the reference_topics stats below.
         'search_topic': picked_topic,
         'topic_picked_mode': picked_mode,
+        'picked_weight_pct': picked_weight_pct,
+        # Per-project pool stats (top by composite_score). Surfaced so
+        # Claude can see what's working / saturated when inventing on
+        # the explore_invent branch, and as context in use mode.
+        'reference_topics': reference_topics,
         # Self-improving exclusion list (2026-05-09): MUST be appended
         # as `-term` to every query drafted for this project.
         'excludes_for_search': excludes,
@@ -711,7 +729,15 @@ SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --stric
 
 You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
 
-Each project has ONE \`search_topic\` field already chosen by the Python picker (weighted ~90% by live click-driven composite score + ~10% explore branch over cold topics from the project's config.json seed pool, with a cold_start fallback for projects with no posted history yet). Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if you think a sibling topic would convert better. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics. The TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for query phrasing and operator selection only, NOT a menu to pick a different topic from.
+Each project entry carries TWO fields that drive your behavior: \`topic_picked_mode\` (either \`use\` or \`explore_invent\`) and \`search_topic\` (a string in \`use\` mode, NULL in \`explore_invent\` mode).
+
+USE mode (~90% of cycles, indicated by \`topic_picked_mode: "use"\` and a non-null \`search_topic\`):
+The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe in config.json. Weights are log-smoothed so the top performer takes about 20-30% and every cold topic still has a small but real chance (around 0.5-1%). The chosen topic's share of the weight is in \`picked_weight_pct\` for transparency. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if a sibling topic looks more attractive. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics.
+
+EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: "explore_invent"\` and \`search_topic: null\`):
+The picker is asking you to INVENT a brand-new search_topic for this project. Look at the project's own \`reference_topics\` array (per-project pool stats with weight, score, posts, clicks, posted_n, skipped_n) to see what's already working, what's saturated, and where the gaps are. Propose ONE new topic concept that does NOT appear in reference_topics and is NOT a paraphrase of anything in reference_topics. The invention should be in the project's domain (see \`description\`) but probe a gap the current list does not cover — adjacent verticals, longer-tail phrasings, fresh angles on the value prop. It must be plausible as something real users tweet about. Use your invented topic for the query AND stamp it on every tweet's \`search_topic\` field in the bh_run output (one consistent string for every tweet you return from this project's query).
+
+Each project's \`reference_topics\` is the project-scoped pool the picker drew from (or that you're inventing around). Use it to ground your query phrasing in either mode. The global TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for operator selection only, NOT a menu to pick a different topic from.
 
 Projects:
 $PROJECTS_JSON
@@ -1381,12 +1407,30 @@ if [ "$PREP_PARSE_EXIT" -eq 0 ] && [ -f "$PLAN_FILE" ]; then
 fi
 log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
 
-# Always release the lock now: gen step is lock-free, and even on the empty
-# path we don't want to hold the browser lock through the early-exit cleanup.
-log "Releasing twitter-browser lock (gen step is lock-free)..."
-release_lock "twitter-browser" 2>>"$LOG_FILE"
-# Defense-in-depth: clear the twitter_browser.py process lockfile; see Phase 1 note.
-rm -f "$HOME/.claude/twitter-browser-lock.json"
+# Determine if Phase 2b-gen will be a no-op. When TWITTER_PAGE_GEN_RATE=0
+# globally, scripts/twitter_gen_links.py rewrites the plan with plain URLs in
+# <1s. In that case the release-now + re-acquire-after-gen dance is pure waste:
+# under cycle overlap the re-acquire can sit in the FIFO ticket queue for
+# 30-90s behind the very `engage-twitter` / next `run-twitter-cycle` we just
+# handed the lock to. We keep the lock through 2b-gen instead and skip the
+# dance entirely.
+GEN_RATE_RAW="${TWITTER_PAGE_GEN_RATE:-0.30}"
+GEN_IS_NOOP=false
+case "$GEN_RATE_RAW" in
+  0|0.0|0.00|0.000|"") GEN_IS_NOOP=true ;;
+esac
+
+# Release the lock unless (a) plan is non-empty AND (b) gen is a no-op. The
+# empty-plan early-exit below still needs the release for a clean handoff, so
+# we cannot just skip when GEN_IS_NOOP=true unconditionally.
+if [ "${PLAN_COUNT:-0}" = "0" ] || ! $GEN_IS_NOOP; then
+    log "Releasing twitter-browser lock (gen step is lock-free)..."
+    release_lock "twitter-browser" 2>>"$LOG_FILE"
+    # Defense-in-depth: clear the twitter_browser.py process lockfile; see Phase 1 note.
+    rm -f "$HOME/.claude/twitter-browser-lock.json"
+else
+    log "Keeping twitter-browser lock through Phase 2b-gen (TWITTER_PAGE_GEN_RATE=$GEN_RATE_RAW, gen is a no-op; skipping release/re-acquire dance)"
+fi
 
 if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
@@ -1429,8 +1473,12 @@ fi
 # 2b-gen's potentially long run, peer cycles' 20-min phase2a fallback would
 # already be tripping if we left the row at phase2a.
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2b-post 2>&1 | tee -a "$LOG_FILE" || true
-log "Re-acquiring twitter-browser lock for Phase 2b-post..."
-acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+# Re-acquire only if we actually released for gen (see GEN_IS_NOOP above).
+# When the lock was kept through 2b-gen there's nothing to re-acquire.
+if ! $GEN_IS_NOOP; then
+    log "Re-acquiring twitter-browser lock for Phase 2b-post..."
+    acquire_lock "twitter-browser" 3600 2>>"$LOG_FILE"
+fi
 log "twitter-browser lock held (pid=$$) Phase 2b-post"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1 / 2b-prep).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
