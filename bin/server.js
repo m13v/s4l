@@ -596,9 +596,10 @@ const PLATFORM_LABELS = {
 // same way. When the experiment ends, drop the desc but keep the keys so old
 // history rows still resolve to something readable.
 const TWITTER_VARIANT_DEFS = {
-  A: { label: 'Control',           desc: 'ripen + 6h freshness (legacy)' },
-  B: { label: 'No-ripen',          desc: 'skip 20-min wait + 6h freshness' },
-  C: { label: 'No-ripen + tight',  desc: 'skip 20-min wait + 1h freshness' },
+  A: { label: 'Control',                desc: 'ripen + 6h freshness (legacy)' },
+  B: { label: 'No-ripen',               desc: 'skip 20-min wait + 6h freshness' },
+  C: { label: 'No-ripen + tight',       desc: 'skip 20-min wait + 1h freshness' },
+  D: { label: 'No-ripen + tight + cap', desc: 'C + drop parent threads with T0 views > 2000' },
 };
 
 // twitter-tail-link variant defs (shipped 2026-05-22). Per-post coin flip in
