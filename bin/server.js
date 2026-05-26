@@ -3867,10 +3867,27 @@ async function handleApi(req, res) {
         return json(res, { received: 0, inserted: 0, skipped: 0, note: 'no_tweets_in_payload' });
       }
 
+      // Load projects (search_topics) once per request from project_config so
+      // matched_project can be stamped at ingest. Without this, webhook rows
+      // land with matched_project=NULL and twitter_post_plan.py never routes
+      // them. 60s cache inside loadProjectsForMatching.
+      const projects = await loadProjectsForMatching();
+
+      // batch_id must match the LIKE 'twcycle-%' filter that phase0-salvage
+      // (src/app/api/v1/twitter-candidates/phase0-salvage/route.ts) uses to
+      // claim orphan pending rows into the next cycle. Anything else (like
+      // the legacy 'webhook-<handle>-<id>' prefix) is invisible to salvage
+      // and sits at status='pending' forever. discovery_batch_id keeps the
+      // provenance marker so analytics can still split webhook-sourced from
+      // search-sourced.
+      const cycleBatchId = `twcycle-webhook-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
+
       let inserted = 0;
       let skipped = 0;
       let filteredReply = 0;
       let filteredRetweet = 0;
+      let projectMatched = 0;
+      let projectUnmatched = 0;
       const errors = [];
       for (const t of tweets) {
         try {
@@ -3902,6 +3919,8 @@ async function handleApi(req, res) {
 
           const searchTopic = `twitterapi_webhook:${monitoredHandle || 'unknown'}`;
           const discoveryBatchId = `webhook-${monitoredHandle || 'unknown'}-${tweetId}`;
+          const matchedProject = matchProject(t.text || '', searchTopic, projects);
+          if (matchedProject) projectMatched++; else projectUnmatched++;
 
           const q = `
             INSERT INTO twitter_candidates (
@@ -3911,6 +3930,7 @@ async function handleApi(req, res) {
               likes_t0, retweets_t0, replies_t0, views_t0, bookmarks_t0,
               language,
               search_topic, discovery_batch_id, batch_id,
+              matched_project,
               our_account, status
             ) VALUES (
               $1, $2, $3,
@@ -3918,7 +3938,8 @@ async function handleApi(req, res) {
               $6, $7, $8, $9, $10,
               $6, $7, $8, $9, $10,
               $11,
-              $12, $13, $13,
+              $12, $13, $14,
+              $15,
               'm13v_', 'pending'
             )
             ON CONFLICT (tweet_url, our_account) DO NOTHING
@@ -3928,7 +3949,8 @@ async function handleApi(req, res) {
             t.text || null, postedAt,
             likes, retweets, replies, views, bookmarks,
             t.lang || null,
-            searchTopic, discoveryBatchId
+            searchTopic, discoveryBatchId, cycleBatchId,
+            matchedProject,
           ];
           const rows = await pq(q, params);
           if (rows && rows.length) inserted++;
@@ -3938,7 +3960,8 @@ async function handleApi(req, res) {
         }
       }
 
-      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] processed inserted=${inserted} skipped=${skipped} filtered_reply=${filteredReply} filtered_retweet=${filteredRetweet} errors=${errors.length}\n`); } catch {}
+      try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] processed inserted=${inserted} skipped=${skipped} filtered_reply=${filteredReply} filtered_retweet=${filteredRetweet} project_matched=${projectMatched} project_unmatched=${projectUnmatched} errors=${errors.length}\n`); } catch {}
+      console.error(`[twitterapi-io] rule_tag=${ruleTag || ''} received=${tweets.length} inserted=${inserted} skipped=${skipped} filtered_reply=${filteredReply} filtered_retweet=${filteredRetweet} project_matched=${projectMatched} project_unmatched=${projectUnmatched} errors=${errors.length} batch_id=${cycleBatchId}`);
       if (errors.length) console.error('[twitterapi-io] insert errors:', errors.slice(0, 5));
       return json(res, {
         received: tweets.length,
