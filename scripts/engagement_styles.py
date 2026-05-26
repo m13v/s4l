@@ -494,8 +494,19 @@ def register_style(name, meta, source_post=None):
         return "existing", cached[name]
 
     src = source_post or {}
+    # 2026-05-25: explicitly stamp kind='model_invented' on the payload.
+    # The server route (social-autoposter-website/src/app/api/v1/engagement-styles/
+    # registry/route.ts:220-234) defaults kind to 'seed' when invented_by_model
+    # is empty, and to 'model_invented' otherwise. Most callers above don't
+    # populate source_post["model"] (it's optional), so the server fallback
+    # silently buries every invention under kind='seed' — making the
+    # model_invented bucket forever empty. Sending kind explicitly bypasses
+    # the heuristic entirely; register_style() is ONLY called from the
+    # invent path (see validate_or_register at line ~542), so the label is
+    # always correct here.
     payload = {
         "name": name,
+        "kind": "model_invented",
         "description": meta["description"].strip(),
         "example": meta["example"].strip(),
         "note": (meta.get("note") or "").strip(),
