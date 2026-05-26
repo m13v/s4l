@@ -87,6 +87,12 @@ acquire_lock() {
   local lock_dir="/tmp/social-autoposter-${name}.lock"
   local queue_dir="${lock_dir}.queue"
   local waited=0
+  # logged_holder: per-acquire flag so we surface "who is holding this lock"
+  # exactly once when we start waiting, not on every 2s poll. Added 2026-05-26
+  # so the operator can answer "why did Twitter cycle 90245 wait 60s for the
+  # browser lock?" by grepping the cycle log for `[lock] waiting for
+  # twitter-browser` instead of cross-correlating launchd start times.
+  local logged_holder=false
 
   # Platform-browser locks still get the orphan-Chrome sweep on acquire (after
   # the lock is taken). Peers do NOT force-kill each other: a long-running
@@ -201,6 +207,24 @@ acquire_lock() {
       echo "Previous $name run still active after $((timeout/60))min, skipping"
       rm -f "$ticket_file"
       exit 0
+    fi
+    # Holder identity: log who is holding the lock the first time we sleep.
+    # Read pid file, confirm liveness, then best-effort extract the .sh script
+    # name from `ps -o args=`. Without this we only knew lock waits happened
+    # (the `waited=Ns` at acquire time); we never knew which peer cycle caused
+    # them, which made cross-cycle contention impossible to attribute. We log
+    # at most once per acquire_lock call to avoid flooding the cycle log on
+    # long waits (a 60s wait would otherwise produce 30 identical lines).
+    if ! $logged_holder && [ -d "$lock_dir" ] && [ -f "$lock_dir/pid" ]; then
+      local hpid hcmd hscript
+      hpid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+      if [ -n "$hpid" ] && kill -0 "$hpid" 2>/dev/null; then
+        hcmd=$(ps -o args= -p "$hpid" 2>/dev/null | head -c 240)
+        hscript=$(echo "$hcmd" | grep -oE '[^ /]+\.sh' | head -1)
+        [ -z "$hscript" ] && hscript='(non-shell)'
+        echo "[lock] waiting for $name pid=$$ held_by=$hpid script=$hscript cmd='${hcmd}'" >&2
+        logged_holder=true
+      fi
     fi
     # 2s poll keeps head-of-queue snappy after release without burning CPU.
     # Pre-FIFO this was 10s, but FIFO means only the head actually contends —
