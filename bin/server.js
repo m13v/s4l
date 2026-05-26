@@ -7655,6 +7655,133 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/search-topics/stats - per-topic intelligence across Twitter +
+  // Reddit (the two platforms that today carry a higher-level topic on each
+  // search attempt: twitter_search_attempts.search_topic, populated by the
+  // 2026-05-26 pick_search_topic.py picker + backfilled from candidates; and
+  // reddit_search_attempts.seed, populated since the seed-rollout). LinkedIn
+  // currently has no topic-level field on its attempts table; rows fall under
+  // "(no topic)" with attempts_with_topic=0 so the section still renders.
+  //
+  // Same shape as /api/search-queries/stats but the grain is search_topic
+  // instead of literal query. One row per (platform, topic, project).
+  if (p === '/api/search-topics/stats' && req.method === 'GET') {
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '7', 10) || 7));
+    const windowHours = days * 24;
+    const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
+    const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
+                     (rawPlatform === 'x' ? 'twitter' : rawPlatform);
+    if (platform && platform !== 'twitter' && platform !== 'reddit') {
+      // LinkedIn + github etc don't have a topic concept on their attempts side
+      // today. Return empty rather than error so the section renders cleanly.
+      return json(res, { days, rows: [], platform_supported: false });
+    }
+    const limit = Math.max(1, Math.min(5000, parseInt(url.searchParams.get('limit') || '5000', 10) || 5000));
+    const dudsOnly = url.searchParams.get('duds_only') === '1';
+    const stPc = auth.projectClause(req.user, "COALESCE(a.project_name, '(none)')", url.searchParams.get('project'));
+    if (!stPc.ok) return json(res, { days, rows: [], platform_supported: true });
+    const whereParts = ["a.search_topic IS NOT NULL AND length(trim(a.search_topic)) > 0"];
+    if (platform) whereParts.push("a.platform = '" + platform + "'");
+    if (stPc.clause) whereParts.push(stPc.clause.replace(/^\s*AND\s+/, ''));
+    const whereSql = 'WHERE ' + whereParts.join(' AND ') + ' ';
+    const havingSql = dudsOnly ? "HAVING COALESCE(SUM(a.candidates_found), 0) = 0 " : '';
+    const candPlatformFilter = platform ? ("WHERE cand.platform = '" + platform + "' ") : '';
+    const q =
+      "WITH attempts AS ( " +
+        // Twitter: search_topic was added to twitter_search_attempts on
+        // 2026-05-26 + backfilled from twitter_candidates. Older rows where
+        // backfill couldn't recover a topic (fully-dud cycles pre-rollout)
+        // are excluded by the WHERE search_topic IS NOT NULL filter above.
+        "SELECT 'twitter'  AS platform, search_topic, project_name, " +
+               "tweets_found AS candidates_found, NULL::float8 AS serp_quality_score, ran_at " +
+        "FROM twitter_search_attempts " +
+        "WHERE ran_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND search_topic IS NOT NULL AND length(trim(search_topic)) > 0 " +
+        "UNION ALL " +
+        // Reddit: seed = the higher-level topic concept that drove the query.
+        "SELECT 'reddit', seed, project_name, " +
+               "candidates_post_filter AS candidates_found, NULL::float8, ran_at " +
+        "FROM reddit_search_attempts " +
+        "WHERE ran_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND seed IS NOT NULL AND length(trim(seed)) > 0 " +
+      "), " +
+      "cand AS ( " +
+        // Twitter: candidates carry search_topic directly (stamped at scoring
+        // time by score_twitter_candidates.py since the picker rollout).
+        "SELECT 'twitter' AS platform, c.search_topic AS topic, " +
+               "COALESCE(c.matched_project, '(none)') AS project_name, c.post_id " +
+        "FROM twitter_candidates c " +
+        "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND c.search_topic IS NOT NULL AND length(trim(c.search_topic)) > 0 " +
+        "UNION ALL " +
+        // Reddit: posts.search_topic is the seed concept (matches
+        // reddit_search_attempts.seed). Mirrors the search-queries endpoint.
+        "SELECT 'reddit', p.search_topic, COALESCE(p.project_name, '(none)'), p.id " +
+        "FROM posts p " +
+        "WHERE p.platform = 'reddit' " +
+          "AND p.posted_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND p.search_topic IS NOT NULL " +
+      "), " +
+      // Same clicks_per_post CTE as the search-queries endpoint: prefer the
+      // PostHog-backfilled real_clicks but fall back to legacy /r/ redirect
+      // log clicks for pre-2026-05-07 posts.
+      "clicks_per_post AS ( " +
+        "SELECT post_id, " +
+               "COALESCE(SUM(GREATEST(real_clicks, 0)), 0)::int AS real_clicks_sum, " +
+               "COALESCE(SUM(GREATEST(clicks, 0)), 0)::int      AS legacy_clicks_sum " +
+        "FROM post_links " +
+        "WHERE post_id IS NOT NULL " +
+        "GROUP BY post_id " +
+      "), " +
+      "posts_per_topic AS ( " +
+        "SELECT cand.platform, cand.topic, cand.project_name, " +
+               "COUNT(*) FILTER (WHERE cand.post_id IS NOT NULL)::int AS posts_made, " +
+               "AVG(COALESCE(p.upvotes, 0) + COALESCE(p.comments_count, 0) * 3) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL) AS avg_engagement, " +
+               // Twitter-only views; reddit views live in posts.views too but
+               // the search-queries endpoint scopes avg_views to twitter only,
+               // so mirror that behavior here for consistency.
+               "AVG(NULLIF(p.views, 0)) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL AND cand.platform = 'twitter') AS avg_views, " +
+               "AVG(GREATEST(COALESCE(cpp.real_clicks_sum, 0), COALESCE(cpp.legacy_clicks_sum, 0))) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL) AS avg_clicks, " +
+               "SUM(GREATEST(COALESCE(cpp.real_clicks_sum, 0), COALESCE(cpp.legacy_clicks_sum, 0))) " +
+                 "FILTER (WHERE cand.post_id IS NOT NULL)::int AS clicks_total " +
+        "FROM cand " +
+        "LEFT JOIN posts p ON p.id = cand.post_id " +
+        "LEFT JOIN clicks_per_post cpp ON cpp.post_id = cand.post_id " +
+        candPlatformFilter +
+        "GROUP BY cand.platform, cand.topic, cand.project_name " +
+      ") " +
+      "SELECT a.platform, a.search_topic AS topic, " +
+             "COALESCE(a.project_name, '(none)') AS project_name, " +
+             "COUNT(*)::int AS attempts, " +
+             "COALESCE(SUM(a.candidates_found), 0)::int AS candidates_found, " +
+             "COUNT(*) FILTER (WHERE COALESCE(a.candidates_found, 0) = 0)::int AS dud_attempts, " +
+             "AVG(a.serp_quality_score)::float8 AS serp_quality_avg, " +
+             "MAX(a.ran_at) AS last_run, " +
+             "COALESCE(MAX(ppt.posts_made), 0)::int AS posts_made, " +
+             "MAX(ppt.avg_engagement)::float8 AS avg_engagement, " +
+             "MAX(ppt.avg_views)::float8 AS avg_views, " +
+             "MAX(ppt.avg_clicks)::float8 AS avg_clicks, " +
+             "COALESCE(MAX(ppt.clicks_total), 0)::int AS clicks_total " +
+      "FROM attempts a " +
+      "LEFT JOIN posts_per_topic ppt " +
+        "ON ppt.platform = a.platform " +
+       "AND ppt.topic    = a.search_topic " +
+       "AND ppt.project_name = COALESCE(a.project_name, '(none)') " +
+      whereSql +
+      "GROUP BY a.platform, a.search_topic, a.project_name " +
+      havingSql +
+      "ORDER BY posts_made DESC, attempts DESC " +
+      "LIMIT " + limit;
+    return (async () => {
+      const rows = await pq(q);
+      return json(res, { days, rows: rows || [], platform_supported: true });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/search-queries/stats - per-query intelligence across Twitter +
   // LinkedIn (the two platforms that log discovery queries to *_search_attempts).
   // Joins each query back to its candidates table to count posts that came from
@@ -9337,6 +9464,22 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-total" id="dm-stats-total"></span>
     </summary>
     <div id="dm-stats-body">
+      <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+  </details>
+  <details class="style-stats-section" id="search-topics-stats">
+    <summary>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-topics-stats-heading">Search Topics (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-topic stats across Twitter (twitter_search_attempts.search_topic, set by pick_search_topic.py) + Reddit (reddit_search_attempts.seed). LinkedIn + GitHub don\u2019t track a topic concept at the attempt layer. Topic is the higher-level theme the LLM drafts queries from (e.g. \u2018AI phone agent\u2019 \u2192 many literal queries). attempts = times any query from this topic was drafted. candidates_found = total tweets/posts those searches returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this topic that we actually posted to. avg_engagement = comments\u00D73 + upvotes on resulting posts. Honors Window/Platform/Project filters above. Drill into \u2018Search Queries\u2019 below for the literal-phrase granularity within each topic.">i</span></span>
+      <span class="style-stats-total" id="search-topics-stats-total"></span>
+    </summary>
+    <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+        <input type="checkbox" id="search-topics-stats-duds-only" style="cursor:pointer;">
+        Show duds only (0 candidates)
+      </label>
+      <span style="font-size:12px;color:var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
+    </div>
+    <div id="search-topics-stats-body">
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
