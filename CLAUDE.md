@@ -146,7 +146,7 @@ Locked files (do NOT unlock or edit without explicit user instruction):
 - `scripts/_li_discover_pending.py`, `scripts/li_discover_insert.py` (LinkedIn DM discovery, hardcoded EXCLUDED_AUTHORS guardrail)
 - `scripts/reddit_chat_sync.py` (Reddit Chat IndexedDB reader, brittle external coupling)
 - `scripts/reddit_tools.py` (Reddit search/fetch CLI; carries per-project sub-denylist merge from project_search_excludes — see Reddit project-scoped excludes section below)
-- `scripts/update_stats.py` (central stats engine; flips `posts.status='deleted'`; GraphQL isMinimized pre-pass for github)
+- `scripts/stats.py` (central stats engine; flips `posts.status='deleted'`; GraphQL isMinimized pre-pass for github)
 - `scripts/strike_alert.py`, `skill/strike-alert.sh` (strike escalation rail; emails i@m13v.com on every newly-detected `status='deleted'` or `'removed'` post)
 - `scripts/watchdog_hung_runs.py`, `skill/stats.sh`
 - `skill/stats-linkedin.sh`, `scripts/scrape_linkedin_comment_stats.py`, `scripts/update_linkedin_stats_from_feed.py` (unified LinkedIn stats pipeline 2026-05-11: one scrape of `/in/me/recent-activity/comments/` via CDP-attach to the linkedin-agent MCP Chrome, single writer into `posts` table. Replaces the deprecated `scrape_linkedin_stats_browser.py` and the retired `stats-linkedin-comments.sh` + `update_linkedin_comment_stats_from_feed.py` pair. Do NOT re-introduce a per-permalink scrape, a second Chrome launch, or any Voyager-API path.)
