@@ -30,7 +30,7 @@ This queries three data sources in one shot:
 |--------|------|-----------|
 | Posts DB (`DATABASE_URL`) | Social post counts, engagement, platform breakdown | `~/social-autoposter/.env` |
 | PostHog API (`POSTHOG_PERSONAL_API_KEY`) | Pageviews, CTA clicks by domain | Project 330744 |
-| Bookings DB (`BOOKINGS_DATABASE_URL`) | Cal.com bookings by client | Separate Neon DB |
+| Bookings DB (`BOOKINGS_DATABASE_URL`) | Cal.com bookings by client | Separate Postgres database (same Cloud SQL instance) |
 
 ## Product-to-Domain Mapping
 
