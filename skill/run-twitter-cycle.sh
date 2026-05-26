@@ -449,7 +449,7 @@ for p in picked:
     # 2026-05-26: force-pick ONE search_topic per project via the Python
     # picker so end-to-end attribution (topic -> query -> candidate ->
     # post -> click) is clean. Mirrors the engagement_styles flow. The
-    # picker's three branches (use ~95% / explore ~5% / cold_start
+    # picker's three branches (use ~90% / explore ~10% / cold_start
     # fallback) all return a single string; Claude no longer chooses.
     # See scripts/pick_search_topic.py.
     topic_pick = None
@@ -711,7 +711,7 @@ SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --stric
 
 You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
 
-Each project has ONE \`search_topic\` field already chosen by the Python picker (weighted ~95% by live click-driven composite score + ~5% explore branch over cold topics from the project's config.json seed pool, with a cold_start fallback for projects with no posted history yet). Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if you think a sibling topic would convert better. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics. The TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for query phrasing and operator selection only, NOT a menu to pick a different topic from.
+Each project has ONE \`search_topic\` field already chosen by the Python picker (weighted ~90% by live click-driven composite score + ~10% explore branch over cold topics from the project's config.json seed pool, with a cold_start fallback for projects with no posted history yet). Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if you think a sibling topic would convert better. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics. The TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for query phrasing and operator selection only, NOT a menu to pick a different topic from.
 
 Projects:
 $PROJECTS_JSON
