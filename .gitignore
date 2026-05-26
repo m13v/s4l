@@ -76,12 +76,26 @@ mixer/
 
 # Scratch / tmp / backup directories under scripts/
 scripts/_tmp/
+scripts/.tmp/
 scripts/backups/
 scripts/tmp/
 scripts/scratch/
+scripts/_browser_use_test/.venv/
+scripts/_browser_use_test/storage_state.json.bak
+scripts/multilogin_test/
+scripts/neon-migration/
 
 # Pre-cleanup config snapshots
 scripts/config.json.before-*.json
+config.json.backup-*
+config.json.bak-*
+config.json.pre-rename-*
+
+# Pre-migration env snapshots (kept locally, never tracked)
+.env.pre-*
+
+# npm pack output
+*.tgz
 
 # Lock files and stray scratch markdown
 scripts/*.lock
