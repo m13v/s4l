@@ -619,10 +619,22 @@ For mk0r: 4 niche variants (spa/autoshop/hotel/mk0r-retail) with the niche
 walk-in story arc ("find a business with no website -> go to mk0r.com ->
 prompt -> publish") and the 🔗 mk0r.com line in the caption.
 
-For studyly: 8 generated variants (studyly-i{1,2}-r{1,2,3,4}) with NO step
-overlays and NO title card. The caption arc is a study-outcome story
-(struggling student moment -> opens studyly.io -> result/grade improvement
--> the lesson). The caption should reference studyly.io as the product.
+For studyly: 8 generated variants (studyly-i{1,2}-r{1,2,3,4}). Each render
+MUST generate fresh overlay text that fits the caption story arc. Before
+running npx remotion render, edit mixer/remotion/src/mixer/data.ts and update
+STUDYLY_OVERLAY_TEXT["<picked-variant-id>"] with five model-generated values:
+  - headline: 2-3 short lines, with __ACCENT__ marking the accented word/phrase
+    on its own line (e.g. "stop wasting\n__ACCENT__\nbefore exams")
+  - accentText: 1-4 words shown in accent color (e.g. "the night before")
+  - tagline: 3-7 word subtitle under the headline (e.g. "the smarter study method")
+  - stepOverlay: action text shown during the guide clip, ~40 chars max
+    (e.g. "drop your notes into studyly.io")
+  - finaleOverlay: payoff text shown during the result clip, ~40 chars max
+    (e.g. "and actually remember it this time")
+All five values MUST vary from the current defaults and from each other across
+runs. Only edit the picked variant's entry; leave the other 7 untouched.
+The caption arc is: struggling student moment -> opens studyly.io -> result/
+grade improvement -> the lesson. Reference studyly.io as the product.
 Studyly variants are intentionally simpler/shorter (15-25s vs mk0r's 26-28s).
 
 Pick the variant within the selected project that is least-recently-rendered
