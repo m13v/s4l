@@ -10,25 +10,18 @@ Per-query fields, structured so the model can see the FULL conversion
 funnel AND distinguish "queries that find threads worth posting to" from
 "queries that find viral noise we keep skipping":
 
-    query                  — the literal X search string (with min_faves:N etc.)
-    project                — project the query was drafted for (matched_project)
-    tweets_found_avg       — SUPPLY: avg tweets X returned per attempt
-    posts                  — QUALITY: distinct candidates we replied to (status='posted')
-    posted_n               — count of candidates with status='posted'
-    skipped_n              — count of candidates with status IN ('skipped','expired')
-    avg_virality_posted    — avg source-thread virality_score for the threads
-                             we DID post to. High = the query surfaces threads
-                             that are both viral AND on-topic enough to engage.
-    avg_virality_skipped   — avg source-thread virality_score for the threads
-                             we DID NOT post to (skipped by Claude or aged out).
-                             High avg_virality_skipped + low posts = the query
-                             keeps finding viral NOISE (off-topic loud threads),
-                             so the keyword cluster is mismatched even though
-                             the engagement floor is fine.
-    views_total            — sum of views on OUR replies (downstream surface)
-    likes_total            — sum of likes on OUR replies
-    clicks_total           — sum of real_clicks attributed to our replies (CTA tracking)
-    composite_score        — clicks*100 + likes + views*0.001  (clicks dominate)
+    query                  , the literal X search string (with min_faves:N etc.)
+    project                , project the query was drafted for (matched_project)
+    tweets_found_avg       , SUPPLY: avg tweets X returned per attempt
+    posted_n               , count of candidates with status='posted'
+    skipped_n              , count of candidates with status IN ('skipped','expired')
+    post_rate              , posted_n / (posted_n + skipped_n); draft-gate acceptance ratio
+    avg_virality_posted    , avg source-thread virality_score for posted candidates
+    avg_virality_skipped   , avg source-thread virality_score for skipped/expired
+    views_total            , sum of views on OUR replies (downstream surface)
+    likes_total            , sum of likes on OUR replies
+    clicks_total           , sum of real_clicks attributed to our replies (CTA tracking)
+    composite_score        , clicks*100 + likes + views*0.001  (clicks dominate)
 
 The two virality fields together let the model diagnose query failure
 modes that pure conversion data misses:
@@ -45,14 +38,6 @@ with 6h half-life decay). It's set on EVERY candidate at discovery time
 regardless of posted/skipped/expired status, which is why we can split
 the average by status group.
 
-Note on the join shape: posts.search_topic is NOT populated for twitter
-(reddit-only). The reliable chain is:
-    twitter_candidates (search_topic = literal X query, post_id, matched_project,
-                        virality_score, status)
-        -> posts via post_id (views, upvotes)            [posted only]
-        -> post_links via post_id (real_clicks)          [posted only]
-        -> twitter_search_attempts via query == search_topic (tweets_found)
-
 Usage:
 
     python3 scripts/top_twitter_queries.py [--limit 20] [--window-days 14] [--project NAME]
@@ -60,6 +45,11 @@ Usage:
 The optional --project filter is what enables per-project surfacing in the
 Phase 1 scanner prompt: each cycle, the scanner can fetch the top queries
 specifically for the project it's currently drafting for.
+
+Migrated 2026-05-18: reads now go through /api/v1/twitter-search-attempts/
+top-queries via scripts/http_api.py instead of a direct psycopg2 query.
+The SQL composite-score join (cand_agg + supply_agg, click_total tiebreaker)
+runs server-side; this script just shapes the response into the legacy JSON.
 """
 import argparse
 import json
@@ -67,7 +57,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get  # noqa: E402
 
 
 def main():
@@ -78,119 +68,47 @@ def main():
                    help="If set, only return top queries for this project (matched_project).")
     args = p.parse_args()
 
-    # Param order must match SQL placeholder order:
-    #   1) cand_agg interval   (%s for window_days)
-    #   2) optional where_proj (%s for project)        ← only when --project set
-    #   3) supply_agg interval (%s for window_days)
-    #   4) LIMIT (%s)
-    where_proj = ""
-    params = [str(args.window_days)]
+    query = {
+        "limit": args.limit,
+        "window_days": args.window_days,
+    }
     if args.project:
-        where_proj = "AND c.matched_project = %s"
-        params.append(args.project)
-    params.append(str(args.window_days))
-    params.append(args.limit)
+        query["project"] = args.project
 
-    # cand_agg drops the old "status='posted'" hard filter and uses FILTER
-    # clauses instead, so we can compute posted-only engagement (views,
-    # likes, clicks, posts count) AND status-split virality averages
-    # (posted vs skipped/expired) in a single pass over the candidate
-    # rows. The HAVING posts > 0 below keeps the result set focused on
-    # queries that actually produced replies — queries that never posted
-    # are surfaced via the dud-queries feed instead.
-    #
-    # Click attribution (fixed 2026-05-10): real clicks come from the
-    # `post_link_clicks` per-hit log joined via `pl.code = plc.code`,
-    # COUNT WHERE is_bot=false. The legacy `pl.real_clicks` PostHog-backfill
-    # column was reporting 148 vs the actual 1028 (7x undercount) for
-    # twitter and was permanently 0 for reddit. The dashboard reads the
-    # per-hit log; this query now matches.
-    sql = f"""
-        WITH cand_agg AS (
-            SELECT c.search_topic AS query,
-                   c.matched_project AS project_name,
-                   -- posted engagement (downstream metrics — only meaningful for posted rows)
-                   COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
-                   COALESCE(SUM(p.views)         FILTER (WHERE c.status='posted'), 0) AS views_total,
-                   COALESCE(SUM(p.upvotes)       FILTER (WHERE c.status='posted'), 0) AS likes_total,
-                   COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
-                   -- sample sizes per status group so the model can weight the averages
-                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted')                          AS posted_n,
-                   COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped', 'expired'))         AS skipped_n,
-                   -- source-thread virality, split by what we did with the candidate.
-                   -- Both AVGs are over twitter_candidates.virality_score (set at discovery).
-                   AVG(c.virality_score) FILTER (WHERE c.status='posted')             AS avg_virality_posted,
-                   AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped', 'expired')) AS avg_virality_skipped
-            FROM twitter_candidates c
-            LEFT JOIN posts      p   ON p.id  = c.post_id
-            LEFT JOIN post_links pl  ON pl.post_id = c.post_id
-            LEFT JOIN post_link_clicks plc ON plc.code = pl.code
-            WHERE c.discovered_at > NOW() - (%s || ' days')::interval
-              AND c.search_topic IS NOT NULL
-              AND c.search_topic <> ''
-              {where_proj}
-            GROUP BY c.search_topic, c.matched_project
-            HAVING COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') > 0
-        ),
-        supply_agg AS (
-            SELECT query,
-                   project_name,
-                   COUNT(*) AS attempts,
-                   ROUND(AVG(tweets_found)::numeric, 2) AS tweets_found_avg
-            FROM twitter_search_attempts
-            WHERE ran_at > NOW() - (%s || ' days')::interval
-            GROUP BY query, project_name
-        )
-        SELECT ca.query,
-               ca.project_name,
-               ca.posts,
-               ca.posted_n,
-               ca.skipped_n,
-               ca.avg_virality_posted,
-               ca.avg_virality_skipped,
-               ca.views_total,
-               ca.likes_total,
-               ca.clicks_total,
-               COALESCE(sa.tweets_found_avg, 0) AS tweets_found_avg,
-               -- composite: clicks dominate (×100), likes mid, views faint
-               (ca.clicks_total * 100
-                + ca.likes_total
-                + ca.views_total * 0.001) AS composite_score
-        FROM cand_agg ca
-        LEFT JOIN supply_agg sa
-               ON sa.query = ca.query
-              AND sa.project_name = ca.project_name
-        -- clicks_total DESC is the explicit tiebreaker that guarantees any
-        -- query with at least one tracked click sorts above queries with
-        -- pure view/like score equivalent. Without it, "1 click = 100 likes"
-        -- ties under composite_score alone and the wrong one can win.
-        -- Conversion (clicks) is the priority signal; views and likes are
-        -- only used to rank within the no-click strata.
-        ORDER BY clicks_total DESC, composite_score DESC, ca.posts DESC
-        LIMIT %s
-    """
+    resp = api_get("/api/v1/twitter-search-attempts/top-queries", query=query)
+    rows = (resp.get("data") or {}).get("rows") or []
 
-    conn = dbmod.get_conn()
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    # Pass-through shape, but float-coerce so the legacy JSON consumers
+    # (run-twitter-cycle.sh's Phase 1 prompt) see the same types as before.
+    # Derived field: post_rate = posted_n / (posted_n + skipped_n), the draft-gate
+    # acceptance ratio. Lets the model see whether a query that LOOKS productive
+    # by raw posts count actually clears the skip filter, or whether it surfaces
+    # 100 candidates and we reject 95 of them. Safe-divide on empty denominator.
+    # Dropped: 'posts' field (was identical to 'posted_n' in every observed row).
+    def _post_rate(posted: int, skipped: int) -> float:
+        denom = posted + skipped
+        if denom <= 0:
+            return 0.0
+        return round(posted / denom, 3)
 
-    out = [
-        {
-            "query": r[0],
-            "project": r[1],
-            "posts": r[2],
-            "posted_n": r[3],
-            "skipped_n": r[4],
-            "avg_virality_posted": round(float(r[5] or 0), 2),
-            "avg_virality_skipped": round(float(r[6] or 0), 2),
-            "views_total": r[7],
-            "likes_total": r[8],
-            "clicks_total": r[9],
-            "tweets_found_avg": float(r[10] or 0),
-            "composite_score": round(float(r[11] or 0), 2),
-        }
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        posted_n = int(r.get("posted_n") or 0)
+        skipped_n = int(r.get("skipped_n") or 0)
+        out.append({
+            "query": r.get("query"),
+            "project": r.get("project") or "",
+            "posted_n": posted_n,
+            "skipped_n": skipped_n,
+            "post_rate": _post_rate(posted_n, skipped_n),
+            "avg_virality_posted": round(float(r.get("avg_virality_posted") or 0), 2),
+            "avg_virality_skipped": round(float(r.get("avg_virality_skipped") or 0), 2),
+            "views_total": int(r.get("views_total") or 0),
+            "likes_total": int(r.get("likes_total") or 0),
+            "clicks_total": int(r.get("clicks_total") or 0),
+            "tweets_found_avg": float(r.get("tweets_found_avg") or 0),
+            "composite_score": round(float(r.get("composite_score") or 0), 2),
+        })
     json.dump(out, sys.stdout)
     print("", file=sys.stdout)
 
