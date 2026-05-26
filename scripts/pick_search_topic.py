@@ -14,13 +14,13 @@ which aggregates from twitter_candidates -> posts -> post_link_clicks.
 
 Three branches in priority order:
 
-1. EXPLORE (~5%): uniform random over cold topics
+1. EXPLORE (~10%): uniform random over cold topics
    (universe minus the trusted top-N). Forces the cycle to genuinely
    try seeds the model has been ignoring. If no cold topics exist
    (every universe topic is already trusted), this degenerates to
    weighted use.
 
-2. USE (~95%): weighted random sample over the trusted top-N by
+2. USE (~90%): weighted random sample over the trusted top-N by
    composite_score (clicks*100 + likes + views*0.001). A topic enters
    the trusted pool when it has posted_n >= 1 AND composite_score > 0
    within the window. The set rotates as performance shifts.
@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 
-EXPLORE_RATE = 0.05
+EXPLORE_RATE = 0.10
 CURATED_TOP_N = 5
 MIN_POSTED_N = 1
 WINDOW_DAYS = 30
