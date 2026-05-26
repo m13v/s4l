@@ -520,10 +520,11 @@ EXCLUDES_TOTAL=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.loa
 # historical rows of its own. Per-project routing isolates the signal so
 # each project's prompt sees only queries it ran itself.
 #
-# Cold-start fallback: when a project has <5 rows, we inline the GLOBAL top 10
-# under cold_start_inspiration with an explicit "structural inspiration only;
-# do NOT copy min_faves" disclaimer. The PER-PROJECT SUPPLY SIGNAL block
-# below remains the canonical source for min_faves selection.
+# Cold-start projects (zero historical rows): no cross-project fallback. They
+# get an empty project_queries array and rely on PER-PROJECT SUPPLY SIGNAL
+# (for min_faves) + their config.json description (for keyword phrasing). A
+# cross-project "structural inspiration" fallback contradicts the whole point
+# of the per-project routing; explicitly removed 2026-05-26.
 TOP_QUERIES_PER_PROJECT_JSON=$(echo "$PROJECTS_JSON" | python3 -c "
 import json, sys, subprocess
 projects = json.load(sys.stdin)
@@ -537,20 +538,13 @@ def run_q(args):
     except Exception:
         return []
 
-global_top = run_q(['--limit', '10', '--window-days', '14'])
 out = {}
 for p in projects:
     name = (p.get('name') or '').strip()
     if not name:
         continue
     rows = run_q(['--limit', '20', '--window-days', '14', '--project', name])
-    entry = {'project_queries': rows}
-    if len(rows) < 5:
-        entry['cold_start_inspiration'] = {
-            'note': 'Fewer than 5 historical queries for this project. The global_top list below is STRUCTURAL inspiration only (operators, length, keyword density). Do NOT copy min_faves tiers from these; rely on PER-PROJECT SUPPLY SIGNAL further down for min_faves selection.',
-            'global_top': global_top,
-        }
-    out[name] = entry
+    out[name] = {'project_queries': rows}
 print(json.dumps(out))
 " 2>/dev/null || echo "{}")
 TOP_QUERIES_SUMMARY=$(echo "$TOP_QUERIES_PER_PROJECT_JSON" | python3 -c '
@@ -561,9 +555,9 @@ cold = 0
 for name, entry in d.items():
     n = len(entry.get("project_queries") or [])
     parts.append(f"{name}={n}")
-    if entry.get("cold_start_inspiration"):
+    if n == 0:
         cold += 1
-print(", ".join(parts) + f" (cold_start_fallbacks={cold})")
+print(", ".join(parts) + f" (cold_start_projects={cold})")
 ')
 log "Per-project top queries loaded: $TOP_QUERIES_SUMMARY"
 
@@ -791,9 +785,11 @@ Each project's \`reference_topics\` is the project-scoped pool the picker drew f
 Projects:
 $PROJECTS_JSON
 
-Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Any query with \`clicks_total > 0\` is GOLD TIER for THAT project — clicks are the only metric that proves our reply drove someone to actually visit the project's link. Likes and views are vanity. Mimic the structure (operators, keyword density, length) of YOUR project's gold-tier queries FIRST; do NOT cross-mimic structure or min_faves from a different project's list (each project has its own audience density). Optimize the entire pipeline for clicks; everything else is leading indicators.
+Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Any query with \`clicks_total > 0\` is GOLD TIER for THAT project — clicks are the only metric that proves our reply drove someone to actually visit the project's link. Likes and views are vanity. Optimize the entire pipeline for clicks; everything else is leading indicators.
 
-JSON shape: a dict keyed by project name. For each project: \`project_queries\` is the array of that project's top historical queries (may be empty). If a project has fewer than 5 historical queries, a \`cold_start_inspiration\` block is included with a \`global_top\` list across ALL projects — use that ONLY for structural inspiration (operators, length, keyword density). Do NOT copy min_faves tiers from the cold-start global_top; rely on the PER-PROJECT SUPPLY SIGNAL block below for min_faves selection regardless.
+ROLE BOUNDARY (strict): this list is for STRUCTURE inspiration only — operators, keyword density, query length, phrasing patterns. The canonical source for \`min_faves:N\` selection is the PER-PROJECT SUPPLY SIGNAL block further down. Do NOT pull min_faves tiers from this list even when a gold-tier row uses a specific tier; the supply table reflects what X actually serves for the project's audience today. Mimic the STRUCTURE of YOUR project's gold-tier queries; let the supply table set the min_faves floor.
+
+JSON shape: a dict keyed by project name. For each project: \`project_queries\` is the array of that project's top historical queries (may be empty). Cold-start projects (empty array) have no historical signal yet — rely on the PER-PROJECT SUPPLY SIGNAL block below for min_faves and your project's \`description\` + assigned \`search_topic\` for keyword phrasing. There is no cross-project fallback by design.
 
 Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so you can diagnose query failure modes:
 
