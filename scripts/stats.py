@@ -1920,7 +1920,8 @@ def refresh_reddit_replies(db, user_agent, quiet=False):
             "skipped_fresh": skipped_fresh}
 
 
-def refresh_twitter_threads(db, config=None, quiet=False):
+def refresh_twitter_threads(db, config=None, quiet=False,
+                            max_per_run=500, stale_hours=20):
     """Poll fxtwitter for parent threads we've commented on and append one
     row to thread_snapshots per successful poll.
 
@@ -1956,8 +1957,15 @@ def refresh_twitter_threads(db, config=None, quiet=False):
                 "no_change": 0}
 
     threads = _http_list_twitter_parent_threads(
-        our_account=handle, stale_hours=5, max_age_days=30,
+        our_account=handle, stale_hours=int(stale_hours), max_age_days=30,
     )
+
+    total_eligible = len(threads)
+    if max_per_run and max_per_run > 0 and total_eligible > max_per_run:
+        # Take the freshest-commented threads first (the active-for-stats
+        # endpoint already orders by posted_at DESC). The capped-out
+        # remainder will be picked up on the next cron run.
+        threads = threads[:max_per_run]
 
     scanned = written = deleted_count = errors = no_change = 0
     rate_limit_sleep = 1.0  # fxtwitter etiquette: 1 req/sec
@@ -2051,12 +2059,15 @@ def refresh_twitter_threads(db, config=None, quiet=False):
 
         time.sleep(rate_limit_sleep)
 
+    capped_remaining = max(0, total_eligible - scanned)
     if not quiet:
+        cap_note = f", {capped_remaining} capped" if capped_remaining else ""
         print(f"  thread_snapshots: {scanned} scanned, {written} written, "
               f"{deleted_count} deleted, {errors} errors, "
-              f"{no_change} unchanged", flush=True)
+              f"{no_change} unchanged{cap_note}", flush=True)
     return {"scanned": scanned, "written": written, "deleted": deleted_count,
-            "errors": errors, "no_change": no_change}
+            "errors": errors, "no_change": no_change,
+            "eligible": total_eligible, "capped_remaining": capped_remaining}
 
 
 def refresh_twitter_replies(db, quiet=False):
@@ -2319,6 +2330,22 @@ def main():
                         help="Write a small JSON file with per-platform reply update "
                              "counts ({reddit, twitter, github}) so the calling shell "
                              "can pass them to log_run.py for the dashboard.")
+    parser.add_argument("--twitter-threads-only", action="store_true",
+                        help="Only refresh parent-thread snapshots (refresh_twitter_threads); "
+                             "skip posts + replies entirely. Useful for isolated testing.")
+    parser.add_argument("--skip-thread-snapshots", action="store_true",
+                        help="Skip the parent-thread snapshot refresh that piggybacks on "
+                             "--twitter-only and --twitter-audit. Use when you only want "
+                             "the post-engagement refresh and not the parent-thread curve.")
+    parser.add_argument("--twitter-threads-max", type=int, default=500,
+                        help="Cap the number of parent threads polled per run (default 500). "
+                             "fxtwitter is paced at 1 req/sec so 500 threads ~= 8.3 min. "
+                             "0 means unlimited.")
+    parser.add_argument("--twitter-threads-stale-hours", type=int, default=20,
+                        help="Skip threads whose latest snapshot is younger than this many "
+                             "hours (default 20, so each thread ends up with ~1 snapshot/day "
+                             "at steady state). Set lower for finer-grained curves; higher "
+                             "to save fxtwitter quota.")
     parser.add_argument("--stats-summary", default=None,
                         help="Write a small JSON file with per-platform stats refresh "
                              "counts ({platform: {refreshed, removed}}) so stats.sh "
@@ -2351,6 +2378,7 @@ def main():
     reddit_resurrect_stats = None
     moltbook_stats = None
     twitter_stats = None
+    twitter_thread_stats = None
     github_stats = None
     reddit_reply_stats = None
     twitter_reply_stats = None
@@ -2360,8 +2388,18 @@ def main():
     # (no new launchd job, no shell-script edits). --skip-replies bypasses,
     # --replies-only runs only the reply pass for that platform's scope.
     do_replies = not args.skip_replies
+    # Same pattern for parent-thread snapshots: piggyback on twitter passes
+    # unless explicitly skipped. --twitter-threads-only short-circuits to
+    # only the snapshot pass (no posts, no replies).
+    do_thread_snapshots = not args.skip_thread_snapshots
 
-    if args.replies_only:
+    if args.twitter_threads_only:
+        twitter_thread_stats = refresh_twitter_threads(
+            db, config=config, quiet=args.quiet,
+            max_per_run=args.twitter_threads_max,
+            stale_hours=args.twitter_threads_stale_hours,
+        )
+    elif args.replies_only:
         if args.twitter_only or args.twitter_audit:
             twitter_reply_stats = refresh_twitter_replies(db, quiet=args.quiet)
         elif args.reddit_only:
@@ -2376,10 +2414,22 @@ def main():
         twitter_stats = refresh_twitter(db, config=config, quiet=args.quiet, audit_mode=True)
         if do_replies:
             twitter_reply_stats = refresh_twitter_replies(db, quiet=args.quiet)
+        if do_thread_snapshots:
+            twitter_thread_stats = refresh_twitter_threads(
+                db, config=config, quiet=args.quiet,
+                max_per_run=args.twitter_threads_max,
+                stale_hours=args.twitter_threads_stale_hours,
+            )
     elif args.twitter_only:
         twitter_stats = refresh_twitter(db, config=config, quiet=args.quiet)
         if do_replies:
             twitter_reply_stats = refresh_twitter_replies(db, quiet=args.quiet)
+        if do_thread_snapshots:
+            twitter_thread_stats = refresh_twitter_threads(
+                db, config=config, quiet=args.quiet,
+                max_per_run=args.twitter_threads_max,
+                stale_hours=args.twitter_threads_stale_hours,
+            )
     elif args.reddit_resurrect:
         reddit_resurrect_stats = refresh_reddit_resurrect(db, user_agent, config=config, quiet=args.quiet, days=args.resurrect_days)
     elif args.reddit_only:
@@ -2401,6 +2451,12 @@ def main():
             reddit_reply_stats = refresh_reddit_replies(db, user_agent, quiet=args.quiet)
             twitter_reply_stats = refresh_twitter_replies(db, quiet=args.quiet)
             github_reply_stats = refresh_github_replies(db, quiet=args.quiet)
+        if do_thread_snapshots:
+            twitter_thread_stats = refresh_twitter_threads(
+                db, config=config, quiet=args.quiet,
+                max_per_run=args.twitter_threads_max,
+                stale_hours=args.twitter_threads_stale_hours,
+            )
 
     # Gather aggregate totals across all platforms (HTTP-only, db ignored).
     totals = get_aggregate_totals(db)
@@ -2423,6 +2479,8 @@ def main():
         output["reddit_replies"] = reddit_reply_stats
     if twitter_reply_stats is not None:
         output["twitter_replies"] = twitter_reply_stats
+    if twitter_thread_stats is not None:
+        output["twitter_threads"] = twitter_thread_stats
     if github_reply_stats is not None:
         output["github_replies"] = github_reply_stats
 
