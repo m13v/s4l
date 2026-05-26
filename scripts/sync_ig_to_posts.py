@@ -32,6 +32,25 @@ def log(msg, quiet=False):
         print(msg)
 
 
+def _load_canonical_style_names(quiet=False):
+    """Return the set of allowlisted engagement_style names.
+
+    Union of the hardcoded STYLES dict + the registry (seed + model_invented +
+    human_derived rows). Used to gate what we write to posts.engagement_style:
+    Claude sometimes stamps caption-style metadata with non-canonical labels
+    (e.g. 'studyly-rescue-arc') that never went through validate_or_register
+    on the IG render path. We refuse to mirror those into posts so they don't
+    pollute the dashboard's engagement-style A/B picker.
+    """
+    names = set()
+    try:
+        from engagement_styles import get_all_styles
+        names.update((get_all_styles() or {}).keys())
+    except Exception as e:
+        log(f"[sync] WARNING — could not load canonical styles: {e!r}", quiet)
+    return names
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quiet", action="store_true")
@@ -40,6 +59,16 @@ def main():
     args = parser.parse_args()
 
     db = dbmod.get_conn()
+
+    # 2026-05-25: gate posts.engagement_style writes against the canonical
+    # registry. IG renders pre-pick a style (run-instagram-render.sh) and ask
+    # Claude to stamp metadata.engagement_style=<picked>, but Claude has been
+    # observed writing caption_style/description_style with off-list labels
+    # (e.g. 'studyly-rescue-arc') instead. Mirroring those into posts.* lets
+    # them pollute the engagement_style A/B picker. We mirror NULL for any
+    # value not in the canonical set; the orphan label remains in
+    # media_posts.metadata for forensics.
+    canonical_styles = _load_canonical_style_names(args.quiet)
 
     # NB: db._translate_sql blindly rewrites `?` -> `%s`, so we can't use the
     # JSONB `?` exists operator. Use ->'key' IS NOT NULL instead.
@@ -82,6 +111,11 @@ def main():
         elif metadata is None:
             metadata = {}
         engagement_style = metadata.get("engagement_style") or metadata.get("caption_style")
+        if engagement_style and canonical_styles and engagement_style not in canonical_styles:
+            log(f"[sync] WARNING — dropping non-canonical engagement_style "
+                f"{engagement_style!r} for post-{r['post_number']} "
+                f"({r['target_account']}); mirroring NULL", args.quiet)
+            engagement_style = None
         db.execute(
             """
             INSERT INTO posts (
