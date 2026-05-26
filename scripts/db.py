@@ -89,7 +89,7 @@ class PGConn:
     def _apply_session_defaults(self):
         # 5 min per-statement ceiling. Prevents silent hangs when the
         # pooler drops an idle socket and psycopg2's recv stalls forever
-        # (originally observed 2026-04-23/24 on Neon under update_stats.py
+        # (originally observed 2026-04-23/24 on Neon under stats.py
         # --github-only; kept after Cloud SQL migration as defensive). The
         # pooler rejects libpq `options=` at connect time, so we set this via
         # SQL after connect. Reapplied after commit() because transaction-mode
