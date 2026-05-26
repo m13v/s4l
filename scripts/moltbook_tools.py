@@ -2,7 +2,7 @@
 """Shared Moltbook API helpers with cooperative cross-process rate-limit state.
 
 Mirrors the pattern in scripts/reddit_tools.py so multiple concurrent Moltbook
-callers (scan_moltbook_replies.py, update_stats.py, find_threads.py,
+callers (scan_moltbook_replies.py, stats.py, find_threads.py,
 moltbook_post.py) back off together when any one of them hits a 429.
 
 State file: /tmp/moltbook_ratelimit.json
