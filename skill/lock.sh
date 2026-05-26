@@ -504,7 +504,7 @@ defer_if_foreign_browser_mcp_active() {
   # to all macOS variants and we already do ancestor walks above.
   local chrome_pids cpid
   chrome_pids=$(ps -A -o pid=,command= 2>/dev/null | awk -v p="user-data-dir=$profile_dir" '
-        index($0,p)>0 { print $1 }' || true)
+        index($0,p)>0 && index($0,"awk ")==0 { print $1 }' || true)
 
   local foreign_pid=""
   if [ -n "$chrome_pids" ]; then
