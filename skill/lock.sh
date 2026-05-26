@@ -249,41 +249,6 @@ acquire_lock() {
   # because launchd treats the slot as still in flight.
   if $is_browser_lock; then
     local platform="${name%-browser}"
-    # Profile health: normalize a "Crashed" exit_type left behind when the
-    # previous Chrome on this profile died ungracefully (SIGKILL from the
-    # orphan sweep below, OOM/jetsam, force-quit, system sleep). Chrome reads
-    # profile.exit_type at startup; if it's "Crashed" it pops the "Something
-    # went wrong when opening your profile. Some features may be unavailable"
-    # modal. That dialog is GUI-only — it never reaches the launchd log — and
-    # blocks the headless pipeline until dismissed. We hold the exclusive
-    # browser lock here, so editing Preferences is race-free. Mirrors the
-    # clean-exit flush Playwright/Selenium do internally but that a killed
-    # Chrome never gets to run.
-    local prefs_file="$HOME/.claude/browser-profiles/${platform}/Default/Preferences"
-    if [ -f "$prefs_file" ]; then
-      python3 - "$prefs_file" "$platform" <<'PYEOF' || true
-import json, sys
-prefs_path, platform = sys.argv[1], sys.argv[2]
-try:
-    with open(prefs_path) as f:
-        data = json.load(f)
-    prof = data.setdefault("profile", {})
-    before = prof.get("exit_type")
-    changed = False
-    if prof.get("exit_type") != "Normal":
-        prof["exit_type"] = "Normal"; changed = True
-    if prof.get("exited_cleanly") is not True:
-        prof["exited_cleanly"] = True; changed = True
-    if changed:
-        with open(prefs_path, "w") as f:
-            json.dump(data, f)
-        print(f"[profile_health] {platform}: normalized exit_type={before!r} -> 'Normal'")
-    else:
-        print(f"[profile_health] {platform}: exit_type already clean")
-except Exception as e:
-    print(f"[profile_health] {platform}: normalize skipped ({e})", file=sys.stderr)
-PYEOF
-    fi
     # Chrome sweep: only kill Chromes whose top-level Chromium has been
     # reparented to launchd (ppid==1), i.e. true orphans whose parent
     # playwright-mcp died without cleanup. A LIVE peer's Chromium is parented
@@ -420,6 +385,41 @@ ensure_browser_healthy() {
   rm -f "$profile_dir/SingletonLock" \
         "$profile_dir/SingletonCookie" \
         "$profile_dir/SingletonSocket" 2>/dev/null || true
+
+  # 5. Normalize a "Crashed" exit_type left behind when the previous Chrome on
+  # this profile died ungracefully (the force-kill above, OOM/jetsam, force-
+  # quit, system sleep). Chrome reads profile.exit_type at startup; if it's
+  # "Crashed" it pops the "Something went wrong when opening your profile. Some
+  # features may be unavailable" modal. That dialog is GUI-only — it never
+  # reaches the launchd log — and blocks the headless pipeline until dismissed.
+  # Chrome is confirmed not running here (probe failed / we waited it out /
+  # force-killed), so editing Preferences is race-free. Mirrors the clean-exit
+  # flush Playwright/Selenium do internally but that a killed Chrome never runs.
+  local prefs_file="$profile_dir/Default/Preferences"
+  if [ -f "$prefs_file" ]; then
+    python3 - "$prefs_file" "$platform" <<'PYEOF' || true
+import json, sys
+prefs_path, platform = sys.argv[1], sys.argv[2]
+try:
+    with open(prefs_path) as f:
+        data = json.load(f)
+    prof = data.setdefault("profile", {})
+    before = prof.get("exit_type")
+    changed = False
+    if prof.get("exit_type") != "Normal":
+        prof["exit_type"] = "Normal"; changed = True
+    if prof.get("exited_cleanly") is not True:
+        prof["exited_cleanly"] = True; changed = True
+    if changed:
+        with open(prefs_path, "w") as f:
+            json.dump(data, f)
+        print(f"[profile_health] {platform}: normalized exit_type={before!r} -> 'Normal'")
+    else:
+        print(f"[profile_health] {platform}: exit_type already clean")
+except Exception as e:
+    print(f"[profile_health] {platform}: normalize skipped ({e})", file=sys.stderr)
+PYEOF
+  fi
 
   return 0
 }
