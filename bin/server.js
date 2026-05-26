@@ -1456,23 +1456,31 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // Deterministic variant fallback: when a run has an ownBatchId but no
   // candidate rows yet carry cycle_variant (e.g. Phase 1 aborted before
   // upserting any row, or rows were rolled back), recompute it the same way
-  // skill/run-twitter-cycle.sh does: sha1(batch_id) % 3 -> 'ABC'. Keeps the
-  // job-history "experiment X" pill populated for scan-only / aborted cycles.
-  // Ship date of twitter-ripen-freshness-abc. Before this, run-twitter-cycle.sh
-  // didn't compute TWITTER_CYCLE_VARIANT and every cycle ran legacy (=variant A
-  // by today's labels). We refuse to back-label those runs from the hash because
-  // it would mislabel them as B/C — they never actually ran those code paths.
-  const EXPERIMENT_SHIP_MS = new Date('2026-05-22T00:00:00').getTime();
+  // skill/run-twitter-cycle.sh does. Keeps the job-history "experiment X"
+  // pill populated for scan-only / aborted cycles.
+  //
+  // Two ship dates:
+  //  - 2026-05-22: A/B/C shipped (sha1(batch_id) % 3 -> 'ABC').
+  //  - 2026-05-25 ~16:58 PDT: D shipped, hash changed to % 4 -> 'ABCD'.
+  // Before the first date, run-twitter-cycle.sh didn't compute the variant
+  // at all (every cycle ran legacy = variant A by today's labels). We refuse
+  // to back-label those runs from the hash because it would mislabel them
+  // as B/C/D — they never actually ran those code paths.
+  const EXPERIMENT_SHIP_MS  = new Date('2026-05-22T00:00:00').getTime();
+  const D_VARIANT_SHIP_MS   = new Date('2026-05-25T16:58:00-07:00').getTime();
   const variantFromBatchId = (batchId) => {
     if (!batchId) return null;
     const batchMs = parseTwitterBatchIdMs(batchId);
     if (!Number.isFinite(batchMs) || batchMs < EXPERIMENT_SHIP_MS) return null;
     try {
       const hex = crypto.createHash('sha1').update(batchId).digest('hex');
-      // Mirror Python's int(hex,16) % 3 exactly. The 160-bit hash doesn't fit
+      // Mirror Python's int(hex,16) % N exactly. The 160-bit hash doesn't fit
       // in a JS Number, so use BigInt for the full-width modulus; truncating
       // hex digits would silently disagree with the shell-side variant.
       const n = BigInt('0x' + hex);
+      if (batchMs >= D_VARIANT_SHIP_MS) {
+        return 'ABCD'[Number(n % 4n)];
+      }
       return 'ABC'[Number(n % 3n)];
     } catch { return null; }
   };
@@ -5632,10 +5640,12 @@ async function handleApi(req, res) {
     return;
   }
 
-  // GET /api/experiments - currently-running A/B/C tests across the pipeline.
+  // GET /api/experiments - currently-running A/B/C/D tests across the pipeline.
   // First (and only, for now) experiment is the twitter-cycle variant test
   // shipped 2026-05-22: variant A = ripen+6h (control), B = no-ripen+6h, C =
-  // no-ripen+1h. Variant assignment lives on twitter_candidates.cycle_variant
+  // no-ripen+1h. Variant D added 2026-05-25 = C + drop parent threads with T0
+  // views > 2000 (audience-ceiling test). Variant assignment lives on
+  // twitter_candidates.cycle_variant
   // (set by skill/run-twitter-cycle.sh from hash(BATCH_ID) % 3). This endpoint
   // reads that column directly; no separate experiments table yet. When a
   // second experiment ships we'll either add another block here or promote
@@ -5675,7 +5685,7 @@ async function handleApi(req, res) {
               GROUP BY pl2.post_id
             ) pl ON pl.post_id = tc.post_id
             WHERE tc.cycle_variant IS NOT NULL
-              AND tc.cycle_variant IN ('A','B','C')
+              AND tc.cycle_variant IN ('A','B','C','D')
               AND tc.discovered_at > NOW() - INTERVAL '30 days'
           )
           SELECT variant,
@@ -5697,7 +5707,7 @@ async function handleApi(req, res) {
           ORDER BY variant
         `, []);
         const variantDefs = TWITTER_VARIANT_DEFS;
-        const variants = ['A', 'B', 'C'].map(k => {
+        const variants = ['A', 'B', 'C', 'D'].map(k => {
           const row = (rows || []).find(r => r.variant === k) || {};
           const n = Number(row.n_candidates || 0);
           const posted = Number(row.n_posted || 0);
@@ -5727,16 +5737,16 @@ async function handleApi(req, res) {
           return acc;
         }, { n_candidates: 0, n_posted: 0, n_batches: 0 });
         const startedAt = variants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
-        // Assignment weights: skill/run-twitter-cycle.sh uses hash(BATCH_ID) % 3,
-        // so each variant gets ~33.3% of batches over time. No fixed cap on
-        // total batches; experiment ends when we decide.
-        variants.forEach(v => { v.weight_pct = 33.33; });
+        // Assignment weights: skill/run-twitter-cycle.sh uses hash(BATCH_ID) % 4
+        // (since 2026-05-25, when D shipped), so each variant gets ~25% of batches
+        // over time. No fixed cap on total batches; experiment ends when we decide.
+        variants.forEach(v => { v.weight_pct = 25.0; });
         const experiments = [{
-          id: 'twitter-ripen-freshness-abc',
-          name: 'Twitter ripen + freshness (A/B/C)',
+          id: 'twitter-ripen-freshness-abcd',
+          name: 'Twitter ripen + freshness + ceiling (A/B/C/D)',
           status: 'running',
           started_at: startedAt,
-          hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate.',
+          hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate. D additionally drops parent threads with T0 views > 2000 — view-share collapses on large threads, so capping reach should improve posted-quality (avg_views, avg_clicks) relative to C.',
           primary_metric: 'thread_age_min_p50',
           progress: null,  // no fixed target
           totals,
