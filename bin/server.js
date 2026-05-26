@@ -10342,6 +10342,13 @@ function renderResult(run) {
             + r.styles_used.join(', ')
             + '</span></span>'
           : '') +
+        (Array.isArray(r.topics_used) && r.topics_used.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
+            + 'topics '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.topics_used.join(', ')
+            + '</span></span>'
+          : '') +
       '</span>'
     );
   }
@@ -10576,6 +10583,13 @@ function renderResult(run) {
             + 'styles '
             + '<span style="color:var(--text);font-weight:600;">'
             + r.styles_used.join(', ')
+            + '</span></span>'
+          : '') +
+        (Array.isArray(r.topics_used) && r.topics_used.length
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
+            + 'topics '
+            + '<span style="color:var(--text);font-weight:600;">'
+            + r.topics_used.join(', ')
             + '</span></span>'
           : '') +
       '</span>'
