@@ -9246,7 +9246,7 @@ const HTML = `<!DOCTYPE html>
       <button type="button" class="style-stats-pill" data-value="30d">Last 30d</button>
     </div>
   </div>
-  <details class="style-stats-section sa-admin-only" id="cost-stats" open>
+  <details class="style-stats-section sa-admin-only" id="cost-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">&#9654;</span><span id="cost-stats-heading">Cost per Activity (last 24 hours)</span></span>
       <span class="style-stats-total" id="cost-stats-total"></span>
@@ -9268,7 +9268,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading&hellip;</div>
     </div>
   </details>
-  <details class="style-stats-section" id="project-status" open>
+  <details class="style-stats-section" id="project-status">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="project-status-heading">Project Status (last 24h)</span></span>
       <span class="style-stats-total" id="project-status-total"></span>
@@ -9374,7 +9374,7 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div class="stats-grid" id="stats-grid"></div>
   </div>
-  <details class="style-stats-section" id="cohort-stats" open>
+  <details class="style-stats-section" id="cohort-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="cohort-stats-heading">Score Cohort Distribution (24h)</span><span class="stat-card-info" data-tooltip="Buckets posts by composite score (clicks \u00D7 10 + comments \u00D7 3 + upvotes; Reddit/Moltbook subtract 1 to strip OP self-upvote). Click weight \u00D710 because a real human click outvalues 10 likes of vibes (matches top_performers.SCORE_SQL and the engagement_styles.py picker). Views are deliberately excluded. Cohorts: Dead = 0, Low = 1\u20139, Mid = 10\u201329, High = 30+. Honors the Window / Platform / Project filters above.">i</span></span>
       <span class="style-stats-total" id="cohort-stats-total"></span>
@@ -9383,7 +9383,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="style-stats" open>
+  <details class="style-stats-section" id="style-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="style-stats-heading">Posts by Engagement Style (24h)</span></span>
       <span class="style-stats-total" id="style-stats-total"></span>
@@ -9392,7 +9392,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="funnel-stats" open>
+  <details class="style-stats-section" id="funnel-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="funnel-stats-heading">Project Funnel Stats (last 24 hours)</span></span>
       <span class="style-stats-total" id="funnel-stats-total"></span>
@@ -9401,7 +9401,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Click to load\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="dm-stats" open>
+  <details class="style-stats-section" id="dm-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="dm-stats-heading">DM Funnel Stats (last 24 hours)</span></span>
       <span class="style-stats-total" id="dm-stats-total"></span>
@@ -9410,7 +9410,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="search-topics-stats">
+  <details class="style-stats-section" id="search-topics-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-topics-stats-heading">Search Topics (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-topic stats across Twitter (twitter_search_attempts.search_topic, set by pick_search_topic.py) + Reddit (reddit_search_attempts.seed). LinkedIn + GitHub don\u2019t track a topic concept at the attempt layer. Topic is the higher-level theme the LLM drafts queries from (e.g. \u2018AI phone agent\u2019 \u2192 many literal queries). attempts = times any query from this topic was drafted. candidates_found = total tweets/posts those searches returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this topic that we actually posted to. avg_engagement = comments\u00D73 + upvotes on resulting posts. Honors Window/Platform/Project filters above. Drill into \u2018Search Queries\u2019 below for the literal-phrase granularity within each topic.">i</span></span>
       <span class="style-stats-total" id="search-topics-stats-total"></span>
@@ -9442,7 +9442,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="subreddit-stats" open>
+  <details class="style-stats-section" id="subreddit-stats">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="subreddit-stats-heading">Per-Subreddit Stats (last 24 hours)</span><span class="stat-card-info" data-tooltip="Reddit posts only, grouped by subreddit. Same post-engagement columns as Project Funnel Stats above, but the row identity is the subreddit slug (extracted from posts.thread_url) instead of project_name. Funnel cells (pageviews / CTAs / bookings) are NOT shown here because they\u2019re project-level signals and can\u2019t be attributed to a subreddit. The Projects column lists which projects posted to that sub in the window.">i</span></span>
       <span class="style-stats-total" id="subreddit-stats-total"></span>
@@ -9469,7 +9469,7 @@ const HTML = `<!DOCTYPE html>
       <button type="button" class="style-stats-pill" data-value="weekly">Weekly</button>
     </div>
   </div>
-  <details class="style-stats-section" id="daily-metrics" open>
+  <details class="style-stats-section" id="daily-metrics">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="daily-metrics-heading">Daily Metrics (last 30 days)</span></span>
       <span class="style-stats-total" id="daily-metrics-status"></span>
@@ -9491,7 +9491,7 @@ const HTML = `<!DOCTYPE html>
       </details>
     </div>
   </details>
-  <details class="style-stats-section" id="ratio-metrics" open>
+  <details class="style-stats-section" id="ratio-metrics">
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="ratio-metrics-heading">Engagement Ratios (last 30 days)</span></span>
       <span class="style-stats-total" id="ratio-metrics-status"></span>
