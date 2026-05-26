@@ -89,7 +89,7 @@ scripts/neon-migration/
 scripts/config.json.before-*.json
 config.json.backup-*
 config.json.bak-*
-config.json.pre-rename-*
+config.json.pre-rename.*
 
 # Pre-migration env snapshots (kept locally, never tracked)
 .env.pre-*
