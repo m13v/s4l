@@ -507,16 +507,65 @@ log "Selected projects: $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; p
 EXCLUDES_TOTAL=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(p.get("excludes_for_search") or []) for p in d))')
 [ "${EXCLUDES_TOTAL:-0}" -gt 0 ] && log "Active project-wide excludes loaded across selected projects: $EXCLUDES_TOTAL"
 
-# --- Top past queries for style inspiration ---------------------------------
-# Now scored by composite (clicks×100 + likes + views×0.001) and tagged with
-# tweets_found_avg, posts, views, likes, clicks per query so the model can
-# see the full conversion funnel for each historical query — not just "this
-# query produced posts" but "this min_faves:30 query for mk0r found 7
-# tweets, produced 8 posts, drove 2 clicks". Clicks are the ultimate signal;
-# weighting them ×100 makes a single click outvalue 100 likes worth of vibes.
-TOP_QUERIES_JSON=$(python3 "$REPO_DIR/scripts/top_twitter_queries.py" --limit 20 --window-days 14 2>/dev/null || echo "[]")
-TOP_COUNT=$(echo "$TOP_QUERIES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-log "Top past queries loaded: $TOP_COUNT (composite-scored)"
+# --- Top past queries for style inspiration (PER-PROJECT, 2026-05-26) -------
+# Now scored by composite (clicks×100 + likes + views×0.001) AND filtered by
+# project so the model sees ITS OWN historical winners, not a global pool.
+# Each query carries the full conversion funnel: tweets_found_avg, posted_n,
+# skipped_n, post_rate, views, likes, clicks. Clicks are the ultimate signal;
+# composite weights them ×100 so one click outvalues 100 likes of vibes.
+#
+# Why per-project (vs the previous global TOP_QUERIES_JSON): the global list
+# let a thin niche (paperback-expert) cross-mimic a stronger project's
+# min_faves tier from the gold list, even when paperback-expert had ZERO
+# historical rows of its own. Per-project routing isolates the signal so
+# each project's prompt sees only queries it ran itself.
+#
+# Cold-start fallback: when a project has <5 rows, we inline the GLOBAL top 10
+# under cold_start_inspiration with an explicit "structural inspiration only;
+# do NOT copy min_faves" disclaimer. The PER-PROJECT SUPPLY SIGNAL block
+# below remains the canonical source for min_faves selection.
+TOP_QUERIES_PER_PROJECT_JSON=$(echo "$PROJECTS_JSON" | python3 -c "
+import json, sys, subprocess
+projects = json.load(sys.stdin)
+repo_dir = '$REPO_DIR'
+
+def run_q(args):
+    try:
+        r = subprocess.run(['python3', f'{repo_dir}/scripts/top_twitter_queries.py'] + args,
+                           capture_output=True, text=True, timeout=30)
+        return json.loads((r.stdout or '[]').strip() or '[]') if r.returncode == 0 else []
+    except Exception:
+        return []
+
+global_top = run_q(['--limit', '10', '--window-days', '14'])
+out = {}
+for p in projects:
+    name = (p.get('name') or '').strip()
+    if not name:
+        continue
+    rows = run_q(['--limit', '20', '--window-days', '14', '--project', name])
+    entry = {'project_queries': rows}
+    if len(rows) < 5:
+        entry['cold_start_inspiration'] = {
+            'note': 'Fewer than 5 historical queries for this project. The global_top list below is STRUCTURAL inspiration only (operators, length, keyword density). Do NOT copy min_faves tiers from these; rely on PER-PROJECT SUPPLY SIGNAL further down for min_faves selection.',
+            'global_top': global_top,
+        }
+    out[name] = entry
+print(json.dumps(out))
+" 2>/dev/null || echo "{}")
+TOP_QUERIES_SUMMARY=$(echo "$TOP_QUERIES_PER_PROJECT_JSON" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+parts = []
+cold = 0
+for name, entry in d.items():
+    n = len(entry.get("project_queries") or [])
+    parts.append(f"{name}={n}")
+    if entry.get("cold_start_inspiration"):
+        cold += 1
+print(", ".join(parts) + f" (cold_start_fallbacks={cold})")
+')
+log "Per-project top queries loaded: $TOP_QUERIES_SUMMARY"
 
 # --- Top performing search topics (topic-universe evolution, 2026-05-25) ----
 # Sibling signal to TOP_QUERIES_JSON, one level up the funnel: where queries
@@ -742,25 +791,27 @@ Each project's \`reference_topics\` is the project-scoped pool the picker drew f
 Projects:
 $PROJECTS_JSON
 
-Past top-performing queries (sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Any query with \`clicks_total > 0\` is GOLD TIER — clicks are the only metric that proves our reply drove someone to actually visit the project's link. Likes and views are vanity. If a project in your draft set has a gold-tier query in this list, mimic ITS structure (operators, min_faves tier, keyword density, length) FIRST before falling back to other styles. Optimize the entire pipeline for clicks; everything else is leading indicators.
+Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Any query with \`clicks_total > 0\` is GOLD TIER for THAT project — clicks are the only metric that proves our reply drove someone to actually visit the project's link. Likes and views are vanity. Mimic the structure (operators, keyword density, length) of YOUR project's gold-tier queries FIRST; do NOT cross-mimic structure or min_faves from a different project's list (each project has its own audience density). Optimize the entire pipeline for clicks; everything else is leading indicators.
+
+JSON shape: a dict keyed by project name. For each project: \`project_queries\` is the array of that project's top historical queries (may be empty). If a project has fewer than 5 historical queries, a \`cold_start_inspiration\` block is included with a \`global_top\` list across ALL projects — use that ONLY for structural inspiration (operators, length, keyword density). Do NOT copy min_faves tiers from the cold-start global_top; rely on the PER-PROJECT SUPPLY SIGNAL block below for min_faves selection regardless.
 
 Each entry exposes the FULL conversion funnel AND a posted-vs-skipped split so you can diagnose query failure modes:
 
-  Funnel signals (downstream — only meaningful for posted candidates):
+  Funnel signals (downstream, only meaningful for posted candidates):
   - \`tweets_found_avg\`: X's supply for that query (how many tweets it returned per search attempt)
-  - \`posts\`: replies we actually shipped from this query
+  - \`posted_n\`: replies we actually shipped from this query (status='posted')
+  - \`skipped_n\`: candidates discovered but NOT posted (status='skipped' or 'expired')
+  - \`post_rate\`: posted_n / (posted_n + skipped_n); the draft-gate acceptance ratio. A high \`posted_n\` with low \`post_rate\` means the query is loud (surfaces lots of candidates) but Claude keeps rejecting them at the draft gate; reword for tighter fit rather than copying it as-is.
   - \`views_total\`, \`likes_total\`: engagement on OUR replies
   - \`clicks_total\`: link clicks attributed to our replies (CTA tracking).
-    THIS IS THE ULTIMATE SIGNAL — clicks on Twitter are extremely sparse, so a single click is a strong endorsement of the query+reply combo. Composite score weights clicks ×100 deliberately.
+    THIS IS THE ULTIMATE SIGNAL, clicks on Twitter are extremely sparse, so a single click is a strong endorsement of the query+reply combo. Composite score weights clicks ×100 deliberately.
 
   Source-thread split (read these together, they tell you WHY the query did or did not produce posts):
-  - \`posted_n\`: count of candidates with status='posted'
-  - \`skipped_n\`: count of candidates we discovered but did NOT post (status='skipped' or 'expired')
   - \`avg_virality_posted\`: avg source-thread virality_score for the threads we DID post to. High = the query surfaces threads that are both viral AND on-topic enough that Claude judged them post-worthy.
-  - \`avg_virality_skipped\`: avg source-thread virality_score for the threads we did NOT post to. Diagnostic: if \`avg_virality_skipped\` is high but \`posts\` is low, the query is finding viral NOISE (loud but off-topic threads — the keyword cluster is mismatched even though the engagement floor is fine). Reword the query in that case rather than dropping it. If both \`avg_virality_skipped\` and \`avg_virality_posted\` are low, the query is just dead supply — drop the keyword cluster.
+  - \`avg_virality_skipped\`: avg source-thread virality_score for the threads we did NOT post to. Diagnostic: if \`avg_virality_skipped\` is high but \`posted_n\` is low, the query is finding viral NOISE (loud but off-topic threads, the keyword cluster is mismatched even though the engagement floor is fine). Reword the query in that case rather than dropping it. If both \`avg_virality_skipped\` and \`avg_virality_posted\` are low, the query is just dead supply, drop the keyword cluster.
 
-Use these as STYLE inspiration for phrasing, operators, and the min_faves tier that worked. Do NOT copy keywords literally; adapt them to each project's domain.
-$TOP_QUERIES_JSON
+Use these as STYLE inspiration for phrasing and operators within YOUR project's row. Do NOT copy keywords literally; adapt them to each project's current assigned search_topic.
+$TOP_QUERIES_PER_PROJECT_JSON
 
 TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — one level above queries. Where queries are the literal X strings, topics are the conceptual seeds they were drafted from. The pipeline writes \`search_topic\` onto every twitter_candidates row at discovery, so this list aggregates per topic across all the different queries that surfaced it. Use this to evolve the TOPIC UNIVERSE itself, not just to reword queries:
   - \`posts\` / \`skipped_n\`: how often a topic surfaces threads we post to versus skip. A topic with high skipped vs low posted is ON-TOPIC but the queries that surface it find off-fit threads — REWORD the queries for that topic, do not drop the topic.
@@ -1177,7 +1228,7 @@ payload = {
     'top_search_topics_text': sys.argv[7],
     'recent_comment_ids': [],
     'extras': {
-        'top_queries': json.loads(sys.argv[2] or '[]'),
+        'top_queries_per_project': json.loads(sys.argv[2] or '{}'),
         'supply_signal': json.loads(sys.argv[3] or '[]'),
         'dud_queries': json.loads(sys.argv[4] or '[]'),
         'auto_picked_style': sys.argv[5] or None,
@@ -1187,7 +1238,7 @@ payload = {
     'min_score_floor': 5,
 }
 print(json.dumps(payload))
-" "$TOP_REPORT" "$TOP_QUERIES_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" "$TOP_TOPICS_JSON" 2>/dev/null || echo '{}')
+" "$TOP_REPORT" "$TOP_QUERIES_PER_PROJECT_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" "$TOP_TOPICS_JSON" 2>/dev/null || echo '{}')
 SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
 export SAPS_TWITTER_GEN_TRACE_PATH
 if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
