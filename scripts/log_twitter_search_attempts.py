@@ -86,17 +86,26 @@ def main():
             tweets_found = int(tweets_found if tweets_found is not None else 0)
         except (TypeError, ValueError):
             tweets_found = 0
+        # search_topic is the higher-level theme driving this query (set by
+        # pick_search_topic.py at the start of the cycle). Optional, because
+        # run-twitter-cycle.sh hasn't been threaded through the queries_used
+        # envelope yet; score_twitter_candidates.py also backfills it from
+        # twitter_candidates.search_topic on its end of the pipeline.
+        search_topic = (r.get("search_topic") or "").strip() or None
         if not query:
             continue
         try:
+            payload = {
+                "query": query,
+                "project_name": project,
+                "tweets_found": tweets_found,
+                "batch_id": args.batch_id,
+            }
+            if search_topic:
+                payload["search_topic"] = search_topic
             resp = api_post(
                 "/api/v1/twitter-search-attempts",
-                {
-                    "query": query,
-                    "project_name": project,
-                    "tweets_found": tweets_found,
-                    "batch_id": args.batch_id,
-                },
+                payload,
             )
             inserted += 1
             attempt_id = ((resp.get("data") or {}).get("attempt") or {}).get("id")
