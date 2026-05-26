@@ -46,9 +46,21 @@ trap 'rc=$?; echo "SCRIPT DIED line=$LINENO cmd=\"$BASH_COMMAND\" exit=$rc" | te
 source "$REPO_DIR/skill/lock.sh"
 acquire_lock "reddit-threads" 600
 
-# Load engagement styles
+# Load engagement styles.
+# 2026-05-25: switched from generate_styles_block (which throws away the
+# picker assignment) to the explicit saps_pick_style + saps_render_style_block
+# pair. PICKED_STYLE/PICK_MODE flow into the DB-insert heredoc below as env
+# vars so validate_or_register can coerce USE-mode drift back to the assigned
+# style, matching post_reddit.py / twitter_post_plan.py / post_github.py
+# semantics. Without this, the prompt's "pick from the list" instruction is
+# unenforced and any drifted/invented name silently lands in posts.engagement_style.
 source "$REPO_DIR/skill/styles.sh"
-STYLES_BLOCK=$(generate_styles_block reddit posting)
+STYLE_ASSIGN_FILE=$(mktemp -t saps_reddit_threads_style_XXXXXX.json)
+saps_pick_style reddit posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
+PICKED_STYLE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('style') or '')" 2>/dev/null || echo "")
+PICK_MODE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('mode','')) " 2>/dev/null || echo "")
+STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" reddit posting)
+echo "engagement_style: picked='${PICKED_STYLE}' mode='${PICK_MODE}'" | tee -a "$LOG_FILE"
 
 # RETRY-FROM-PENDING (added 2026-05-01 after r/AutoHotkey MCP-crash incident):
 # Before paying for fresh research+drafting, check if a previously-aborted draft
@@ -530,6 +542,8 @@ if [ "$PERMALINK" != "null" ] && [ "$PERMALINK" != "PARSE_ERROR" ]; then
   POST_ACCOUNT="$POST_ACCOUNT" \
   REPO_DIR="$REPO_DIR" \
   PENDING_ID_ENV="${PENDING_ID:-}" \
+  PICKED_STYLE_ENV="${PICKED_STYLE:-}" \
+  PICK_MODE_ENV="${PICK_MODE:-}" \
   /usr/bin/python3 <<'PYEOF' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, sys
 sys.path.insert(0, os.path.join(os.environ["REPO_DIR"], "scripts"))
@@ -541,11 +555,60 @@ permalink = parsed.get("permalink") or ""
 title     = parsed.get("title", "")
 body      = parsed.get("body", "")
 summary   = parsed.get("source_summary", "")
-style     = parsed.get("engagement_style", "") or None
+raw_style = (parsed.get("engagement_style") or "").strip()
 session   = os.environ.get("CLAUDE_SESSION_ID") or None
 project   = os.environ.get("PROJECT_ENV", "")
 account   = os.environ.get("POST_ACCOUNT", "")
 pending_id_str = os.environ.get("PENDING_ID_ENV", "")
+
+# 2026-05-25: validate_or_register pass. The picker assignment (PICKED_STYLE +
+# PICK_MODE) is sourced from the shell-level saps_pick_style call near the top
+# of this script. USE mode coerces drift back to the assigned style; INVENT
+# mode registers the new_style block (if the model shipped one) into
+# engagement_styles_registry via /api/v1/engagement-styles/registry. Without
+# this gate, run-reddit-threads.sh was the lone Reddit pipeline writing raw
+# model output straight to posts.engagement_style, which let names like
+# 'sensory_contrast' leak in without ever hitting the registry (caught
+# 2026-05-25 during the engagement-style audit).
+style = raw_style or None
+try:
+    from engagement_styles import validate_or_register
+    picked_style = (os.environ.get("PICKED_STYLE_ENV") or "").strip() or None
+    pick_mode    = (os.environ.get("PICK_MODE_ENV") or "").strip() or None
+    if raw_style:
+        new_style_block = parsed.get("new_style") if isinstance(parsed.get("new_style"), dict) else None
+        decision = {
+            "engagement_style": raw_style,
+            **({"new_style": new_style_block} if new_style_block else {}),
+        }
+        coerced_style, action = validate_or_register(
+            decision,
+            source_post={
+                "platform": "reddit",
+                "post_url": permalink or None,
+                "post_id": None,
+                "model": None,
+            },
+            assigned_style=picked_style,
+            assigned_mode=pick_mode,
+        )
+        if action == "coerced" and coerced_style and coerced_style != raw_style:
+            print(f"[engagement_style] coerced {raw_style!r} -> {coerced_style!r} "
+                  f"(assigned={picked_style!r} mode={pick_mode!r})")
+        elif action == "registered":
+            print(f"[engagement_style] registered new style {coerced_style!r} "
+                  f"into engagement_styles_registry")
+        elif action == "rejected":
+            print(f"[engagement_style] rejected {raw_style!r} (assigned={picked_style!r}); "
+                  f"falling back to assigned")
+            coerced_style = picked_style
+        style = (coerced_style or picked_style or raw_style) or None
+except Exception as e:
+    # Never block a posted thread on registry plumbing. Log and fall back
+    # to the raw model output.
+    print(f"[engagement_style] validate_or_register raised {e!r}; "
+          f"falling back to raw={raw_style!r}")
+    style = raw_style or None
 
 if not permalink or not title:
     print("[db-insert] SKIP — empty permalink or title in structured_output")
