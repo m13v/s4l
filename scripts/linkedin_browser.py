@@ -231,45 +231,42 @@ def _pid_listening_on(port: int) -> Optional[int]:
 
 
 def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
-    """Get a BrowserContext for the LinkedIn profile without a kill+reopen.
+    """Get a BrowserContext for LinkedIn via CDP attach to a running harness.
 
-    Strategy:
-      1. If `prefer_cdp` (default) and DevToolsActivePort exists, try
-         `chromium.connect_over_cdp(http://localhost:<port>)` to attach
-         to the linkedin-agent MCP's already-running Chrome. New tabs
-         go into the existing persistent BrowserContext, so cookies
-         and fingerprint match perfectly. Returns owns_context=False:
-         caller MUST close only the page they opened, never the
-         context (would terminate the MCP's Chrome).
-      2. If CDP is unavailable (port file missing, socket dead, MCP
-         cold), fall back to `launch_persistent_context(PROFILE_DIR,
-         headless=False)` on the same profile dir. We're the only
-         Chrome on it, so SingletonLock collisions are limited to
-         ungraceful prior crashes; we clear stale Singleton* files
-         and retry until LOCK_WAIT_MAX seconds elapse. Returns
-         owns_context=True: caller MUST close the context in finally.
+    Cold-launch fallback REMOVED 2026-05-27. Per explicit user instruction:
+    the pipeline must NEVER spawn its own Chrome on the `linkedin` profile.
+    That fallback would attach to a *different* profile from the one the
+    harness Chrome owns (`browser-harness-linkedin`), and the two have
+    drifted in practice: the harness profile holds the active `li_at`
+    session cookie, the `linkedin` profile does not. Cold-launching it
+    sent every scrape straight to /authwall and silently masked the real
+    failure (the harness was unreachable).
 
-    This is the architectural fix for the 2026-05-06 lockout incident,
-    where stats-linkedin-comments.sh would `pkill` the live MCP Chrome
-    via ensure_browser_healthy and then immediately relaunch on the
-    same profile, producing a kill+reopen cadence LinkedIn anti-bot
-    flagged. With CDP-attach, the MCP Chrome is never killed.
+    Strategy now:
+      1. If `LINKEDIN_CDP_URL` env var is set (skill/lib/linkedin-backend.sh
+         sets it to http://127.0.0.1:9556), attach to the linkedin-harness
+         Chrome via connect_over_cdp. Returns owns_context=False; caller
+         closes only the page they opened, never the context.
+      2. Otherwise try the legacy DevToolsActivePort discovery path inside
+         PROFILE_DIR for backwards compatibility with manually-launched
+         linkedin-agent MCP sessions. Same owns_context=False semantics.
+      3. If both attach paths fail, RAISE. Do not launch a sibling Chrome.
+
+    `prefer_cdp` kept as a kwarg for caller-API stability but no longer
+    has a meaningful False branch (cold-launch is gone).
 
     Returns:
-        (context, owns_context)
+        (context, owns_context)  # owns_context is always False on success
 
     Raises:
-        RuntimeError if neither path produces a usable context within
-        LOCK_WAIT_MAX seconds.
+        RuntimeError if no warm harness/MCP Chrome is reachable.
     """
     from playwright.sync_api import sync_playwright  # noqa: F401
 
-    # Harness CDP fast-path (2026-05-26): if LINKEDIN_CDP_URL is set in env
-    # (skill/lib/linkedin-backend.sh sets it to http://127.0.0.1:9556), attach
-    # directly to the linkedin-harness Chrome and skip ps-discovery /
-    # DevToolsActivePort entirely. The harness Chrome is multi-client safe
-    # (no SingletonLock fight), so we return owns_context=False; caller
-    # closes only the page they opened, never the context.
+    last_err: Optional[Exception] = None
+
+    # Lane 1: explicit harness CDP URL (preferred — set by linkedin-backend.sh
+    # when the browser-harness Chrome is up on port 9556).
     harness_cdp_url = os.environ.get("LINKEDIN_CDP_URL", "").strip()
     if prefer_cdp and harness_cdp_url:
         try:
@@ -281,44 +278,36 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
             if contexts:
                 print(
                     f"[linkedin_browser] mode=harness_cdp_attach "
-                    f"url={harness_cdp_url} profile={PROFILE_DIR}",
+                    f"url={harness_cdp_url} profile=browser-harness-linkedin",
                     file=sys.stderr,
                     flush=True,
                 )
                 return contexts[0], False
+            last_err = RuntimeError("harness CDP attach: zero contexts")
         except Exception as e:
-            # Harness Chrome may be down; fall through to legacy path so we
-            # still try DevToolsActivePort + cold-launch. Log once for forensics.
+            last_err = e
             print(
-                f"[linkedin_browser] harness_cdp_attach failed: {e}; "
-                f"falling back to legacy path",
+                f"[linkedin_browser] harness_cdp_attach failed: {e}",
                 file=sys.stderr,
                 flush=True,
             )
 
+    # Lane 2: legacy DevToolsActivePort attach inside PROFILE_DIR (for a
+    # manually-launched linkedin-agent MCP). NOT a cold launch — this only
+    # attaches to a Chrome that is already running.
     if prefer_cdp:
         port = _read_devtools_active_port()
         if port is not None:
             try:
                 # Pin to 127.0.0.1; localhost resolves IPv6 first on macOS
-                # and Chrome --remote-debugging-port listens IPv4-only,
-                # producing ECONNREFUSED ::1:<port> on the first attempt.
+                # and Chrome --remote-debugging-port listens IPv4-only.
                 browser = p.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{port}",
                     timeout=5000,
                 )
                 contexts = browser.contexts
                 if contexts:
-                    # A persistent profile = exactly one default context;
-                    # any tabs the MCP already opened live there. Our new
-                    # page goes into the same context so cookies match.
                     chrome_pid = _pid_listening_on(port)
-                    # Diagnostic line: this is the #1 signal that lets you
-                    # answer "did we warm-attach or did we cold-launch a
-                    # fresh Chrome on a stale profile?" after the fact. The
-                    # 2026-05-19 16:44 stats-linkedin session_invalid had
-                    # no such line in the log, so we couldn't distinguish
-                    # the two modes. Always emit, single line, stderr.
                     print(
                         f"[linkedin_browser] mode=cdp_attach port={port} "
                         f"chrome_pid={chrome_pid} "
@@ -327,62 +316,19 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                         flush=True,
                     )
                     return contexts[0], False
-                # Edge case: connected but no context. Treat as cold.
-            except Exception:
-                # connect_over_cdp can raise PlaywrightError /
-                # ConnectionRefusedError when the port is stale (Chrome
-                # quit but didn't clean up DevToolsActivePort). Fall
-                # through to launch_persistent_context.
-                pass
-
-    deadline = time.time() + LOCK_WAIT_MAX
-    last_err: Optional[Exception] = None
-    while True:
-        for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-            try:
-                os.remove(os.path.join(PROFILE_DIR, fname))
-            except OSError:
-                pass
-        try:
-            context = p.chromium.launch_persistent_context(
-                PROFILE_DIR,
-                headless=False,
-                executable_path=(
-                    SYSTEM_CHROME
-                    if os.path.exists(SYSTEM_CHROME) else None
-                ),
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-position=3953,-1032",
-                    "--window-size=911,1016",
-                ],
-                viewport=VIEWPORT,
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-            )
-            # Diagnostic line: cold-launch is the high-risk path because
-            # the profile may be days/weeks idle and any post-launch nav
-            # bumps right into authwall if the session token rotated.
-            # Single stderr line, mirrors the cdp_attach branch above.
-            print(
-                f"[linkedin_browser] mode=cold_launch "
-                f"profile={PROFILE_DIR} system_chrome="
-                f"{os.path.exists(SYSTEM_CHROME)}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return context, True
-        except Exception as e:
-            last_err = e
-            if time.time() >= deadline:
-                raise RuntimeError(
-                    "linkedin profile unreachable: cdp-attach failed and "
-                    f"launch_persistent_context failed: {last_err}"
+                last_err = RuntimeError(
+                    f"DevToolsActivePort attach port={port}: zero contexts"
                 )
-            time.sleep(LOCK_POLL_INTERVAL)
+            except Exception as e:
+                last_err = e
+
+    # No warm Chrome reachable. Fail loudly — never cold-launch.
+    raise RuntimeError(
+        "linkedin_browser: no warm Chrome reachable. Cold-launch fallback "
+        "was removed 2026-05-27 (would attach to wrong profile and mask "
+        "real failures). Restart the linkedin-harness Chrome (port 9556) "
+        f"and retry. Last error: {last_err}"
+    )
 
 
 def unread_dms() -> dict:
