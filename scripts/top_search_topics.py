@@ -163,42 +163,93 @@ def _query_twitter(conn, project, window_days, limit):
     only set if t1_checked_at fired, so it's NULL on a large fraction of
     skipped/expired rows, which would bias the avg toward posted-only.
     virality_score is set unconditionally at discovery.
+
+    Supply join (2026-05-27): FULL OUTER JOIN twitter_search_attempts so
+    every topic the scanner ATTEMPTED is visible to the picker, even when
+    every tweet got stale-age-skipped in score_twitter_candidates.py BEFORE
+    a candidate row was written (those skips currently `continue` without
+    INSERT, so the candidate-only join previously missed them entirely).
+    New fields per row:
+      attempts_n           — how many times this topic was searched
+      tweets_found_total   — sum of raw scrape counts across attempts
+      zero_supply_attempts — attempts where X returned 0 tweets
+    Together they let pick_search_topic separate FIT failure
+    (tweets_found>0 but posted_n=0) from SUPPLY failure
+    (tweets_found_total=0 across N attempts). FIT gets a heavy weight
+    penalty, SUPPLY gets a milder one (partly outside our control).
     """
-    where_proj = ""
+    where_proj_c = ""
+    where_proj_a = ""
     params = [str(window_days)]
     if project:
-        where_proj = "AND LOWER(c.matched_project) = LOWER(%s)"
+        where_proj_c = "AND LOWER(c.matched_project) = LOWER(%s)"
+        params.append(project)
+    params.append(str(window_days))
+    if project:
+        where_proj_a = "AND LOWER(a.project_name) = LOWER(%s)"
         params.append(project)
     params.append(int(limit))
 
     sql = f"""
-        SELECT c.search_topic AS search_topic,
-               c.matched_project AS project_name,
-               COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
-               COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
-               COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
-               AVG(c.virality_score) FILTER (WHERE c.status='posted')                            AS avg_virality_posted,
-               AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped','expired','failed'))   AS avg_virality_skipped,
-               COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) AS views_total,
-               COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0) AS likes_total,
-               COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
-               (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
-                + COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0)
-                + COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) * 0.001) AS composite_score,
-               MAX(c.posted_at) AS last_posted
-        FROM twitter_candidates c
-        LEFT JOIN posts            p   ON p.id = c.post_id
-        LEFT JOIN post_links       pl  ON pl.post_id = c.post_id
-        LEFT JOIN post_link_clicks plc ON plc.code = pl.code
-        WHERE c.discovered_at > NOW() - (%s || ' days')::interval
-          AND c.search_topic IS NOT NULL
-          AND c.search_topic <> ''
-          {where_proj}
-        GROUP BY c.search_topic, c.matched_project
-        HAVING COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') > 0
-            OR COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) > 0
-        ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_posted DESC NULLS LAST
-        LIMIT %s
+        WITH cand_agg AS (
+            SELECT c.search_topic AS search_topic,
+                   c.matched_project AS project_name,
+                   COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
+                   AVG(c.virality_score) FILTER (WHERE c.status='posted')                            AS avg_virality_posted,
+                   AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped','expired','failed'))   AS avg_virality_skipped,
+                   COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) AS views_total,
+                   COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0) AS likes_total,
+                   COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
+                   (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
+                    + COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0)
+                    + COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) * 0.001) AS composite_score,
+                   MAX(c.posted_at) AS last_posted
+              FROM twitter_candidates c
+              LEFT JOIN posts            p   ON p.id = c.post_id
+              LEFT JOIN post_links       pl  ON pl.post_id = c.post_id
+              LEFT JOIN post_link_clicks plc ON plc.code = pl.code
+             WHERE c.discovered_at > NOW() - (%s || ' days')::interval
+               AND c.search_topic IS NOT NULL
+               AND c.search_topic <> ''
+               {where_proj_c}
+             GROUP BY c.search_topic, c.matched_project
+        ),
+        attempt_agg AS (
+            SELECT a.search_topic AS search_topic,
+                   a.project_name AS project_name,
+                   COUNT(*)::int AS attempts_n,
+                   COALESCE(SUM(a.tweets_found), 0)::int AS tweets_found_total,
+                   COUNT(*) FILTER (WHERE COALESCE(a.tweets_found, 0) = 0)::int AS zero_supply_attempts
+              FROM twitter_search_attempts a
+             WHERE a.ran_at > NOW() - (%s || ' days')::interval
+               AND a.search_topic IS NOT NULL
+               AND a.search_topic <> ''
+               {where_proj_a}
+             GROUP BY a.search_topic, a.project_name
+        )
+        SELECT COALESCE(c.search_topic, a.search_topic) AS search_topic,
+               COALESCE(c.project_name, a.project_name) AS project_name,
+               COALESCE(c.posts, 0) AS posts,
+               COALESCE(c.posted_n, 0) AS posted_n,
+               COALESCE(c.skipped_n, 0) AS skipped_n,
+               COALESCE(c.avg_virality_posted, 0) AS avg_virality_posted,
+               COALESCE(c.avg_virality_skipped, 0) AS avg_virality_skipped,
+               COALESCE(c.views_total, 0) AS views_total,
+               COALESCE(c.likes_total, 0) AS likes_total,
+               COALESCE(c.clicks_total, 0) AS clicks_total,
+               COALESCE(c.composite_score, 0) AS composite_score,
+               c.last_posted,
+               COALESCE(a.attempts_n, 0) AS attempts_n,
+               COALESCE(a.tweets_found_total, 0) AS tweets_found_total,
+               COALESCE(a.zero_supply_attempts, 0) AS zero_supply_attempts
+          FROM cand_agg c
+          FULL OUTER JOIN attempt_agg a
+            ON c.search_topic = a.search_topic
+           AND c.project_name = a.project_name
+         ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_posted DESC NULLS LAST
+         LIMIT %s
     """
     rows = conn.execute(sql, params).fetchall()
     return [
@@ -215,6 +266,9 @@ def _query_twitter(conn, project, window_days, limit):
             "clicks_total": int(r[9] or 0),
             "composite_score": round(float(r[10] or 0), 2),
             "last_used": r[11].isoformat() if r[11] else None,
+            "attempts_n": int(r[12] or 0),
+            "tweets_found_total": int(r[13] or 0),
+            "zero_supply_attempts": int(r[14] or 0),
         }
         for r in rows
     ]
