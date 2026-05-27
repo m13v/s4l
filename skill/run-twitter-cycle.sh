@@ -735,10 +735,30 @@ _pre_age_count = len(tweets)
 tweets = [_t for _t in tweets if _is_fresh(_t)]
 _age_dropped = _pre_age_count - len(tweets)
 # Unconditional log so every bh_run leaves positive evidence the gate ran,
-# not just the cycles where it had stale tweets to drop. Operators (and the
-# dashboard scraper) can grep this marker to confirm the harness-level gate
-# is loaded in the running script body.
+# not just the cycles where it had stale tweets to drop.
+# print() goes only into the bh_run tool_result text (model-visible), so
+# also append to a sidecar file so operators can grep without parsing the
+# session archive. Fail-open: any I/O error is swallowed.
 print(f'[harness_age_gate] dropped={_age_dropped} kept={len(tweets)} pre={_pre_age_count} cap_h={_AGE_CAP_S//3600}', flush=True)
+try:
+    import os as _os_sc, json as _json_sc, time as _time_sc
+    _SIDECAR = _os_sc.path.expanduser('~/social-autoposter/skill/logs/twitter-harness-age-gate.jsonl')
+    with open(_SIDECAR, 'a') as _fh_sc:
+        _fh_sc.write(_json_sc.dumps({
+            'ts': _time_sc.strftime('%Y-%m-%dT%H:%M:%S%z'),
+            'ts_epoch': int(_time_sc.time()),
+            'batch_id': _os_sc.environ.get('BATCH_ID') or None,
+            'cycle_variant': _os_sc.environ.get('TWITTER_CYCLE_VARIANT') or None,
+            'freshness_hours': _AGE_CAP_S // 3600,
+            'pre_count': _pre_age_count,
+            'kept_count': len(tweets),
+            'dropped_count': _age_dropped,
+            'query': locals().get('query'),
+            'project': locals().get('matched_project'),
+            'search_topic': locals().get('search_topic'),
+        }) + '\n')
+except Exception:
+    pass
 
 # Bake project/topic/query into each tweet object IN PYTHON, before printing —
 # so the model has zero degrees of freedom on these fields. The model only
