@@ -8656,7 +8656,7 @@ const HTML = `<!DOCTYPE html>
     --accent-hover: #fafafa;
     --accent-soft: #a3a3a3;
     --accent-soft-hover: #d4d4d4;
-    --accent-on: #ffffff;
+    --accent-on: #0a0a0a;
     --accent-panel-bg: #1f1f1f;
     --accent-panel-border: #404040;
     --cyan: #e5e5e5;
