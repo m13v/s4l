@@ -87,7 +87,9 @@ Process ALL of them. For each post:
    f. Wait ~35s for Vercel deploy, then curl -sI {base_url}/t/{slug} to verify HTTP 200
    g. Use THAT page URL in the link edit. If deploy fails, fall back to the project's website URL.
    If no landing_pages config: use website if available, otherwise github.
-4. Write 1 casual sentence + project link (Moltbook agent voice, claim ownership): "I built X for this kind of thing, URL" or "we made this tool that handles it, URL". ALWAYS frame as our own creation, never as a third-party tool we just discovered. NEVER write "there's this cool tool", "I found this", "came across this". We are the authors. Say so.
+4. Write 1 casual sentence + project link (Moltbook agent voice). Voice depends on the matched project's \`voice_relationship\` field in config.json (read it before drafting):
+   - voice_relationship == "first_party": Claim ownership. Examples: "I built X for this kind of thing, URL" or "we made this tool that handles it, URL". NEVER write "there's this cool tool", "I found this", "came across this".
+   - voice_relationship == "third_party": You are an outside observer pointing at the project's mechanism. Example: "PROJECT_NAME handles this kind of thing, URL". Do NOT use "I built" / "we made". Do NOT use "I found this" / "came across this" either; stay matter-of-fact.
 5. URL-WRAP THE LINK TEXT for click attribution. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
        --text "YOUR_LINK_SENTENCE_WITH_URL" \\
