@@ -2080,6 +2080,12 @@ def refresh_twitter_threads(db, config=None, quiet=False,
         print(f"  thread_snapshots: {scanned} scanned, {written} written, "
               f"{deleted_count} deleted, {errors} errors, "
               f"{no_change} unchanged{cap_note}", flush=True)
+        print("STATS_JSON: " + json.dumps({
+            "platform": "twitter", "kind": "thread_snapshots",
+            "scanned": scanned, "written": written, "deleted": deleted_count,
+            "errors": errors, "unchanged": no_change,
+            "capped_remaining": capped_remaining,
+        }), flush=True)
     return {"scanned": scanned, "written": written, "deleted": deleted_count,
             "errors": errors, "no_change": no_change,
             "eligible": total_eligible, "capped_remaining": capped_remaining}
@@ -2323,6 +2329,15 @@ def print_aggregate_totals(totals):
           f"Upvotes: {totals['total_upvotes']:,}  |  "
           f"Comments: {totals['total_comments']:,}  |  "
           f"Views/day: {totals['views_per_day']:,}")
+    print("STATS_JSON: " + json.dumps({
+        "platform": "all", "kind": "aggregate_totals",
+        "days_active": totals['days_active'],
+        "total_posts": totals['total_posts'],
+        "total_views": totals['total_views'],
+        "total_upvotes": totals['total_upvotes'],
+        "total_comments": totals['total_comments'],
+        "views_per_day": totals['views_per_day'],
+    }))
 
 
 def main():
@@ -2569,6 +2584,12 @@ def main():
                   f"{checked} checked, "
                   f"{r.get('changed', r.get('updated', 0))} changed, "
                   f"{r['deleted']} deleted, {r['removed']} removed, {r['errors']} errors" + err_break)
+            print("STATS_JSON: " + json.dumps({
+                "platform": "reddit", "kind": "posts",
+                "total": r['total'], "skipped": skipped_total, "checked": checked,
+                "changed": r.get('changed', r.get('updated', 0)),
+                "deleted": r['deleted'], "removed": r['removed'], "errors": r['errors'],
+            }))
             if not args.quiet and r["results"]:
                 print(f"{'ID':>4} {'Score':>5} {'Thread':>7} {'Comments':>8}  Title")
                 for row in sorted(r["results"], key=lambda x: x["score"], reverse=True):
@@ -2590,6 +2611,12 @@ def main():
             m = moltbook_stats
             print(f"\nMoltbook: {m['total']} checked, {m['updated']} updated, "
                   f"{m['deleted']} deleted, {m['errors']} errors")
+            print("STATS_JSON: " + json.dumps({
+                "platform": "moltbook", "kind": "posts",
+                "total": m['total'], "skipped": 0, "checked": m['total'],
+                "changed": m['updated'],
+                "deleted": m['deleted'], "removed": 0, "errors": m['errors'],
+            }))
 
         if twitter_stats is not None:
             t = twitter_stats
@@ -2604,6 +2631,12 @@ def main():
                   f"{t_checked} checked, "
                   f"{t.get('changed', t.get('updated', 0))} changed, "
                   f"{t['deleted']} deleted, {t['errors']} errors")
+            print("STATS_JSON: " + json.dumps({
+                "platform": "twitter", "kind": "posts",
+                "total": t['total'], "skipped": t_skipped_total, "checked": t_checked,
+                "changed": t.get('changed', t.get('updated', 0)),
+                "deleted": t['deleted'], "removed": 0, "errors": t['errors'],
+            }))
             if not args.quiet and t["results"]:
                 top = sorted(t["results"], key=lambda x: x.get("views", 0), reverse=True)[:30]
                 print(f"{'ID':>4} {'Views':>7} {'Likes':>5} {'Replies':>7} {'RTs':>4}")
@@ -2615,6 +2648,12 @@ def main():
             g = github_stats
             print(f"\nGitHub: {g['total']} checked, {g['updated']} updated, "
                   f"{g['deleted']} deleted, {g['errors']} errors")
+            print("STATS_JSON: " + json.dumps({
+                "platform": "github", "kind": "posts",
+                "total": g['total'], "skipped": 0, "checked": g['total'],
+                "changed": g['updated'],
+                "deleted": g['deleted'], "removed": 0, "errors": g['errors'],
+            }))
             if not args.quiet and g["results"]:
                 top = sorted(g["results"],
                              key=lambda x: (x.get("reactions", 0) + x.get("replies", 0)),
@@ -2630,6 +2669,12 @@ def main():
                 continue
             print(f"\n{label}: {stats['total']} checked, {stats['updated']} updated, "
                   f"{stats['errors']} errors, {stats.get('skipped_fresh', 0)} fresh")
+            print("STATS_JSON: " + json.dumps({
+                "platform": label.split()[0].lower(), "kind": "replies",
+                "total": stats['total'], "checked": stats['total'],
+                "updated": stats['updated'], "errors": stats['errors'],
+                "fresh": stats.get('skipped_fresh', 0),
+            }))
 
         print_aggregate_totals(totals)
 
