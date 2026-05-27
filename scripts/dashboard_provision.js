@@ -37,7 +37,18 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-admin.initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 's4l-app-prod' });
+// The dashboard always lives in s4l-app-prod. Hardcode rather than reading
+// FIREBASE_PROJECT_ID from the environment: that var leaks in from shell rc
+// files for other repos (e.g. fazm-prod) and silently misroutes provisioning
+// to the wrong project, where the Firebase user has no relationship to
+// app.s4l.ai. The polluted-env failure mode: create completes "successfully"
+// in fazm-prod, the client signs into s4l-app-prod via magic link, lands as
+// an unclaimed user, and gets 403s on every scoped endpoint until someone
+// notices. To intentionally target a different project, pass --project=NAME.
+const projectFlag = process.argv.find(a => a.startsWith('--project='));
+const FIREBASE_PROJECT_ID = projectFlag ? projectFlag.split('=')[1] : 's4l-app-prod';
+admin.initializeApp({ projectId: FIREBASE_PROJECT_ID });
+console.log(`[dashboard_provision] firebase project=${FIREBASE_PROJECT_ID}`);
 
 // Magic-link sign-in continues here. The hash includes the email so the
 // dashboard's onIdTokenChanged handler can match the link against the
@@ -176,7 +187,8 @@ async function magicCmd(email) {
   console.log(link);
 }
 
-const [, , subcmd, ...rest] = process.argv;
+const positionalArgs = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const [subcmd, ...rest] = positionalArgs;
 (async () => {
   switch (subcmd) {
     case 'list':   await listCmd(); break;
