@@ -16002,9 +16002,14 @@ function renderTopPosts(payload) {
       link_real_clicks:    _real,
       link_bot_clicks:     _bots,
       link_backfill_real:  _backfill,
+      // link_effective_clicks = the displayed numerator (humans first, then
+      // PostHog backfill, then legacy). Used as a secondary sortKey on the
+      // Ours column so "sort by clicks" matches what the row actually
+      // shows instead of the raw legacy counter.
+      link_effective_clicks: _effective,
       // link_ctr is the click-through rate of the displayed (filtered)
       // click number over views, used as a secondary sort key on the
-      // Links column. 0 when views are missing/zero so rows without
+      // Ours column. 0 when views are missing/zero so rows without
       // view data sort to the bottom on a desc-by-CTR pass.
       link_ctr:      _ctr,
       link_count:    Number(p.link_count)  || 0,
@@ -16053,6 +16058,11 @@ function renderTopPosts(payload) {
         filterOptions: distinctOptions(normalized, 'project_name', 'All'),
         filterPredicate: filterPredicateExact },
       { key: 'score',          label: 'Ours',     type: 'numeric', align: 'left',  widthPct: 20,
+        // Header-click cycle (mountSortableTable):
+        //   score desc -> score asc -> clicks desc -> clicks asc -> CTR desc -> CTR asc -> back to score desc
+        // link_effective_clicks is the displayed click number (humans first,
+        // then PostHog backfill, then legacy) so row order matches the cell.
+        sortKeys: ['score', 'link_effective_clicks', 'link_ctr'],
         formatter: (_v, r) => {
           // 2026-05-26: clicks bit moved here from the now-removed "Links"
           // column. Click tracking is independent of the engagement scrape
