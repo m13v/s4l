@@ -163,11 +163,18 @@ def cmd_candidates(batch_id: str) -> int:
     """List pending candidates for a batch in the EXACT pipe-separated
     column order run-twitter-cycle.sh's old psql query produced.
 
-    Sort logic (delta_score + intent boost) was previously inline in SQL;
-    we now reproduce it client-side using the candidate fields the route
-    returns. The 25-row cap is also enforced here.
+    Sort key (2026-05-27): virality_score DESC.
+    virality_score is the composite predictor stamped by score_twitter_candidates.py
+    at discovery (velocity * reach_mult * age_decay * rt_bonus * (1+reply_bonus)
+    * (1+discussion_bonus)). Cohort analysis on 30d posted data showed the
+    [10k+) virality bucket gets ~36x the median reply views of the [0-10)
+    bucket, while the previous sort (delta_score + flat-5 intent regex
+    boost) ignored author reach, age decay, and discussion quality. The
+    intent regex was a crutch when the sort key was raw delta; the model
+    reads tweet text directly in the prep prompt and can detect intent
+    itself, so the lexical layer is now redundant.
+    The 25-row cap is unchanged (draft budget, not a quality gate).
     """
-    import re
     from datetime import datetime, timezone
 
     # Scope by our_account so a peer machine's pending rows on the same
@@ -185,19 +192,8 @@ def cmd_candidates(batch_id: str) -> int:
     resp = api_get("/api/v1/twitter-candidates", query=query)
     rows = (resp.get("data") or {}).get("candidates") or []
 
-    INTENT_RE = re.compile(
-        r"\b(wish|need a|need an|looking for|recommend|alternative to|frustrated|"
-        r"hate (that|when)|should exist|would pay|missing.*(feature|tool|app)|"
-        r"why (is there no|doesn't)|anyone know|anyone use|how do you|"
-        r"what do you use|best (tool|app))\b",
-        re.IGNORECASE,
-    )
-
     def composite(r):
-        delta = float(r.get("delta_score") or 0)
-        text = r.get("tweet_text") or ""
-        intent_boost = 5 if INTENT_RE.search(text) else 0
-        return delta + intent_boost
+        return float(r.get("virality_score") or 0)
 
     now = datetime.now(timezone.utc)
 
