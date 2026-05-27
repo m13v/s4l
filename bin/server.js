@@ -18783,18 +18783,22 @@ function saAuthNotReady() {
   return !!cfg.clientMode && !window.SA_ID_TOKEN;
 }
 
-// Client-side stats cache. Server already caches by (days|platform|project) for
-// 5 min, but every filter pill toggle still costs a network RTT and shows a
-// "loading…" flicker. Cache the rendered payload here keyed by the same combo
-// so toggling back to a previously-seen filter renders instantly with no fetch.
-// TTL 120s; periodic 5-min setInterval refreshes still bust it naturally.
+// Client-side stats cache with stale-while-revalidate. Two TTLs:
+//   FRESH (120s): render from cache, skip the fetch entirely.
+//   MAX_AGE (10m): render the stale payload immediately AND fire a background
+//     revalidation so the user sees no "loading…" flicker. After MAX_AGE we
+//     treat the entry as absent and fall back to a normal fetch with loading UI.
+// Server already caches by (days|platform|project) for 5 min, so the
+// revalidation fetch is usually a cheap cache-hit on the server side.
 const _statsClientCache = new Map();
 const STATS_CLIENT_CACHE_TTL_MS = 120 * 1000;
-function statsCacheGet(name, key) {
+const STATS_CLIENT_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+function statsCacheGetEntry(name, key) {
   const e = _statsClientCache.get(name + ':' + key);
   if (!e) return null;
-  if (Date.now() - e.at > STATS_CLIENT_CACHE_TTL_MS) return null;
-  return e.payload;
+  const age = Date.now() - e.at;
+  if (age > STATS_CLIENT_CACHE_MAX_AGE_MS) return null;
+  return { payload: e.payload, fresh: age <= STATS_CLIENT_CACHE_TTL_MS, age };
 }
 function statsCacheSet(name, key, payload) {
   _statsClientCache.set(name + ':' + key, { at: Date.now(), payload });
