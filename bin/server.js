@@ -14348,14 +14348,22 @@ function mountSortableTable(opts) {
         // (e.g. domain_pageviews under the "Pageviews" header) so the
         // user can tell which field is active inside the cycle.
         const suffix = idx === 0 ? '' : String.fromCharCode(0x00B9 + (idx === 1 ? 1 : idx)); // \u00B2, \u00B3, ...
-        el.textContent = arrow + suffix;
+        // When the column declares a sortLabelMap, also render a human-
+        // readable label of the active sort field in brackets next to the
+        // arrow (e.g. "Ours (clicks) \u25BC"). Makes multi-key cycles
+        // self-documenting without forcing the user to read the tooltip.
+        const labelMap = col && col.sortLabelMap;
+        const friendly = labelMap && labelMap[state.sortField];
+        const labelChip = friendly ? ' (' + friendly + ')' : '';
+        el.textContent = labelChip + ' ' + arrow + suffix;
         el.classList.add('active');
         if (idx === 0) el.classList.remove('secondary');
         else el.classList.add('secondary');
         if (keys.length > 1) {
-          const activeLabel = state.sortField;
+          const activeLabel = friendly || state.sortField;
           const dirLabel = state.sortDir === 'asc' ? 'ascending' : 'descending';
-          el.setAttribute('data-tooltip', 'Sorting by ' + activeLabel + ' (' + dirLabel + '). Click to cycle through ' + keys.join(' \u2192 ') + '.');
+          const cycleLabels = labelMap ? keys.map(k => labelMap[k] || k) : keys;
+          el.setAttribute('data-tooltip', 'Sorting by ' + activeLabel + ' (' + dirLabel + '). Click to cycle through ' + cycleLabels.join(' \u2192 ') + '.');
         } else {
           el.removeAttribute('data-tooltip');
         }
