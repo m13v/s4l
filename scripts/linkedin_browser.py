@@ -78,7 +78,16 @@ def _is_holder_alive(holder: str) -> bool:
         # On error, assume alive to err on the side of NOT stealing the lock.
         return True
 
-PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/linkedin")
+# Profile dir is overridable so the harness migration (2026-05-26) can point
+# the cold-launch fallback at ~/.claude/browser-profiles/browser-harness-linkedin
+# while leaving legacy linkedin-agent callers unchanged. The Twitter harness
+# uses the same pattern (TWITTER_CDP_URL + harness profile dir).
+PROFILE_DIR = os.path.expanduser(
+    os.environ.get(
+        "LINKEDIN_PROFILE_DIR",
+        "~/.claude/browser-profiles/linkedin",
+    )
+)
 LOCK_FILE = os.path.expanduser("~/.claude/linkedin-agent-lock.json")
 LOCK_EXPIRY = 300  # Must match ~/.claude/hooks/linkedin-agent-lock.sh
 LOCK_WAIT_MAX = 30  # seconds; pre-check should not block long
@@ -254,6 +263,38 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
         LOCK_WAIT_MAX seconds.
     """
     from playwright.sync_api import sync_playwright  # noqa: F401
+
+    # Harness CDP fast-path (2026-05-26): if LINKEDIN_CDP_URL is set in env
+    # (skill/lib/linkedin-backend.sh sets it to http://127.0.0.1:9556), attach
+    # directly to the linkedin-harness Chrome and skip ps-discovery /
+    # DevToolsActivePort entirely. The harness Chrome is multi-client safe
+    # (no SingletonLock fight), so we return owns_context=False; caller
+    # closes only the page they opened, never the context.
+    harness_cdp_url = os.environ.get("LINKEDIN_CDP_URL", "").strip()
+    if prefer_cdp and harness_cdp_url:
+        try:
+            browser = p.chromium.connect_over_cdp(
+                harness_cdp_url,
+                timeout=5000,
+            )
+            contexts = browser.contexts
+            if contexts:
+                print(
+                    f"[linkedin_browser] mode=harness_cdp_attach "
+                    f"url={harness_cdp_url} profile={PROFILE_DIR}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return contexts[0], False
+        except Exception as e:
+            # Harness Chrome may be down; fall through to legacy path so we
+            # still try DevToolsActivePort + cold-launch. Log once for forensics.
+            print(
+                f"[linkedin_browser] harness_cdp_attach failed: {e}; "
+                f"falling back to legacy path",
+                file=sys.stderr,
+                flush=True,
+            )
 
     if prefer_cdp:
         port = _read_devtools_active_port()
