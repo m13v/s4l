@@ -200,6 +200,27 @@ def _read_devtools_active_port() -> Optional[int]:
         return None
 
 
+def _pid_listening_on(port: int) -> Optional[int]:
+    """Return the PID listening on a TCP port, via lsof. Best-effort.
+
+    Used purely for diagnostic logging in `_connect_to_running_or_launch`
+    so failure logs can answer "did we attach to an existing Chrome or
+    cold-launch one ourselves?" without guesswork. Never raises.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).stdout.decode("utf-8", "replace").strip()
+        if out:
+            return int(out.splitlines()[0])
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, OSError):
+        pass
+    return None
+
+
 def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
     """Get a BrowserContext for the LinkedIn profile without a kill+reopen.
 
@@ -250,6 +271,20 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                     # A persistent profile = exactly one default context;
                     # any tabs the MCP already opened live there. Our new
                     # page goes into the same context so cookies match.
+                    chrome_pid = _pid_listening_on(port)
+                    # Diagnostic line: this is the #1 signal that lets you
+                    # answer "did we warm-attach or did we cold-launch a
+                    # fresh Chrome on a stale profile?" after the fact. The
+                    # 2026-05-19 16:44 stats-linkedin session_invalid had
+                    # no such line in the log, so we couldn't distinguish
+                    # the two modes. Always emit, single line, stderr.
+                    print(
+                        f"[linkedin_browser] mode=cdp_attach port={port} "
+                        f"chrome_pid={chrome_pid} "
+                        f"profile={PROFILE_DIR}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     return contexts[0], False
                 # Edge case: connected but no context. Treat as cold.
             except Exception:
@@ -286,6 +321,17 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/131.0.0.0 Safari/537.36"
                 ),
+            )
+            # Diagnostic line: cold-launch is the high-risk path because
+            # the profile may be days/weeks idle and any post-launch nav
+            # bumps right into authwall if the session token rotated.
+            # Single stderr line, mirrors the cdp_attach branch above.
+            print(
+                f"[linkedin_browser] mode=cold_launch "
+                f"profile={PROFILE_DIR} system_chrome="
+                f"{os.path.exists(SYSTEM_CHROME)}",
+                file=sys.stderr,
+                flush=True,
             )
             return context, True
         except Exception as e:
