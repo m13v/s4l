@@ -10762,21 +10762,7 @@ function renderResult(run) {
           ? pill('viral', (r.virality_median_posted || 0).toFixed(1))
           : '') +
         ((r.age_posted_n || 0) > 0
-          ? (function () {
-              // Visual signal: red when median exceeds the variant's freshness
-              // cap (X Latest tab leaked AND score-time cutoff didn't catch
-              // it), green when within. The existing pill() helper ignores
-              // its color arg, so inline a custom span here so the operator
-              // can spot the leak at a glance without opening the tooltip.
-              const v = r.experiment_variant || '';
-              const cap = (v === 'C' || v === 'D') ? 1 : 6;
-              const med = r.age_median_posted_h || 0;
-              const color = med > cap ? '#ef4444' : '#22c55e';
-              return '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
-                + 'age <span style="color:' + color + ';font-weight:600;">'
-                + med.toFixed(1) + 'h'
-                + '</span></span>';
-            })()
+          ? pill('age', (r.age_median_posted_h || 0).toFixed(1) + 'h')
           : '') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
