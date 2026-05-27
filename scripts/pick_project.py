@@ -23,6 +23,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from project_topics import topics_for_project  # noqa: E402
+
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 
 # Rolling window (days) for inverse-recent-share weighting in pick_projects().
@@ -136,9 +138,9 @@ def _eligible_pool(config, platform=None, exclude=None):
     if platform:
         pool = [p for p in pool if platform not in (p.get("platforms_disabled") or [])]
     # twitter/linkedin/github draft a search query, so they need seed topics
-    # (the unified search_topics list, post 2026-04-30 legacy-field removal).
+    # (DB-backed project_search_topics, post 2026-05-27 config.json removal).
     if platform in ("twitter", "linkedin", "github"):
-        pool = [p for p in pool if p.get("search_topics")]
+        pool = [p for p in pool if topics_for_project(p.get("name") or "")]
     return pool
 
 
