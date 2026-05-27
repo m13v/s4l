@@ -29,6 +29,17 @@ if [ -n "$PLATFORM" ]; then
     esac
 fi
 
+# LinkedIn killswitch (2026-05-27): refuse to run --platform linkedin if a
+# prior fire detected session compromise (http_999, authwall, throttle,
+# li_at cleared). Other platforms unaffected.
+# State: ~/.claude/social-autoposter/linkedin.killswitch
+# Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
+if [ "$PLATFORM" = "linkedin" ] && [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn DM-replies pipeline."
+    echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
+    exit 0
+fi
+
 LOCK_NAME="dm-replies"
 [ -n "$PLATFORM" ] && LOCK_NAME="dm-replies-$PLATFORM"
 
