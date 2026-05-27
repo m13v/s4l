@@ -68,13 +68,24 @@ def cmd_post_reset() -> int:
 
 
 def _counts_dict() -> dict[str, int]:
-    """Reshape /api/v1/replies/counts (array-of-{status,count}) into the
-    flat {pending, replied, skipped, processing} dict our callers expect."""
+    """Reshape /api/v1/replies/counts into the flat {pending, replied,
+    skipped, processing} dict our callers expect.
+
+    Prefers `eligible_counts` (JOIN-aware: matches what /next-pending
+    actually surfaces) over the raw `counts` field. The two diverge when
+    truly-orphan rows exist (post_id pointing at a deleted post AND no
+    mention_id / parent_reply_id fallback) — historically the raw count
+    misled engage-twitter's early-skip gate into burning the
+    twitter-browser lock for the full Phase B window finding nothing.
+    Falls back to raw `counts` if the deploy doesn't yet expose
+    `eligible_counts` (pre-2026-05-26 vintage).
+    """
     resp = api_get(
         "/api/v1/replies/counts",
         query={"platform": "x"},
     )
-    rows = (resp.get("data") or {}).get("counts") or []
+    data = resp.get("data") or {}
+    rows = data.get("eligible_counts") or data.get("counts") or []
     out: dict[str, int] = {}
     for r in rows:
         s = r.get("status")
