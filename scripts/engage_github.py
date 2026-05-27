@@ -519,6 +519,33 @@ def main():
                 print(f"[engage_github] #{reply['id']} BAD OUTPUT ({reply_elapsed:.0f}s): {output[:300]}")
             elif decision.get("action") == "skip":
                 reason = decision.get("reason", "unknown") or "unknown"
+                # Bot/engagement-loop escape hatch. The github engage prompt
+                # is run with --tools Read only (no Bash), so the model
+                # cannot shell out to reply_db.py blocklist add itself.
+                # Instead it signals via the skip reason pattern
+                # `blocklist_added:HANDLE[:classification]` and the
+                # orchestrator records the block here. HANDLE defaults to
+                # the reply's their_author when the model omits it (which
+                # is the common case for github since the author IS the
+                # GitHub login).
+                if reason.startswith("blocklist_added"):
+                    parts = reason.split(":")
+                    handle = parts[1].strip() if len(parts) > 1 and parts[1].strip() else (reply["their_author"] or "").strip()
+                    classification = parts[2].strip() if len(parts) > 2 and parts[2].strip() in ("bot", "engagement_loop") else "bot"
+                    if handle:
+                        bl_cmd = [
+                            "python3", REPLY_DB, "blocklist", "add",
+                            "github_issues", handle,
+                            "--reason", f"engage_llm judgment: {reason}",
+                            "--classification", classification,
+                            "--severity", "hard",
+                            "--source-reply-id", str(reply["id"]),
+                        ]
+                        bl_res = subprocess.run(bl_cmd, capture_output=True, text=True)
+                        if bl_res.returncode == 0:
+                            print(f"[engage_github] blocklist add github_issues/{handle} cls={classification}")
+                        else:
+                            print(f"[engage_github] blocklist add FAILED for {handle}: {bl_res.stderr[:200]}")
                 subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), reason])
                 skipped += 1
                 print(f"[engage_github] #{reply['id']} SKIPPED: {reason} ({reply_elapsed:.0f}s) "
