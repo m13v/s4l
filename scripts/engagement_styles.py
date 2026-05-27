@@ -58,13 +58,15 @@ STYLES = {
             "Lane 1 (DISCLOSED STORY) opens with a hedge like "
             "'hypothetically', 'imagine someone running this', 'scenario:', "
             "'say a friend tried' and is then free to invent any specifics; "
-            "Lane 2 (NO FABRICATION) stays first-person only when every "
-            "specific (numbers, durations, places, course names, brands, "
-            "headcount) appears verbatim in the matched project's "
-            "content_angle / voice / messaging in config.json, otherwise "
-            "drops the specifics or pattern-frames "
+            "Lane 2 (NO FABRICATION) keeps the narrative plain-voiced but "
+            "every specific (numbers, durations, places, course names, "
+            "brands, headcount) must appear verbatim in the matched "
+            "project's content_angle / voice / messaging in config.json, "
+            "otherwise drop the specifics or pattern-frame "
             "('the part that breaks down is...', 'the typical failure mode "
-            "is...'). Lead with failure or surprise, not success."
+            "is...'). Lead with failure or surprise, not success. Whose "
+            "voice tells the story (maker vs outside observer) is set by "
+            "the VOICE RELATIONSHIP rule, not by this style."
         ),
         "example": (
             "LANE 1 (disclosed): 'hypothetically, imagine running this for "
@@ -84,12 +86,11 @@ STYLES = {
         },
         "note": (
             "NEVER pivot to a product pitch. NEVER mix lanes: presenting an "
-            "invented specific as a personal first-hand claim ('i ran this "
-            "exact pipeline last semester for two anatomy blocks', 'ran 22 "
-            "cameras across three properties for 8 months', 'sat 6 courses "
-            "across three centers') without a Lane 1 opener and without "
-            "config.json grounding is the exact failure mode the GROUNDING "
-            "RULE forbids."
+            "invented specific as a lived fact ('ran this exact pipeline "
+            "last semester for two anatomy blocks', 'ran 22 cameras across "
+            "three properties for 8 months', 'sat 6 courses across three "
+            "centers') without a Lane 1 opener and without config.json "
+            "grounding is the exact failure mode the GROUNDING RULE forbids."
         ),
     },
     "pattern_recognizer": {
@@ -1370,34 +1371,45 @@ def get_styles_prompt(platform, context="posting", assignment=None):
 def get_grounding_rule():
     """The two-lane grounding rule, shared across every pipeline.
 
+    Purely about FABRICATION of specifics, not about whose voice is
+    speaking. Voice positioning (whether the narrator is the maker of
+    the matched project or an outside observer) is governed separately
+    by get_voice_relationship_rule(), which reads the matched project's
+    voice_relationship field in config.json.
+
     Every comment picks ONE of two mutually exclusive lanes. They cannot
-    be combined: you can disclose a story OR stay grounded, never present
-    a fabricated specific as a personal first-hand fact.
+    be combined: a comment can disclose a worked example OR keep its
+    specifics grounded, never present a fabricated specific as a lived
+    fact.
 
       LANE 1 - DISCLOSED STORY: invent freely, but flag the frame.
-        Open the story with a hedge that signals it is illustration,
-        not testimony ('hypothetically', 'imagine someone running this',
+        Open with a hedge that signals the story is illustration, not
+        testimony ('hypothetically', 'imagine someone running this',
         'say a friend tried', 'as a thought experiment', 'scenario:').
         Once the frame is set, free to use any names, durations, counts,
         places. The reader can tell from the first phrase that this is
-        a worked example, not a personal claim.
+        a worked example, not a lived claim.
 
-      LANE 2 - NO FABRICATION: stay first-person / plain voice, but every
-        specific (number, duration, date, place, course/program, headcount,
+      LANE 2 - NO FABRICATION: stay plain-voiced, but every specific
+        (number, duration, date, place, course/program, headcount,
         named tool, named person) must appear verbatim in the matched
         project's content_angle / voice / messaging in config.json. If a
         specific is not in config: drop it, generalize ('a few months',
         'a handful of cameras'), or pattern-frame ('the part that breaks
-        down is...'). Pattern-frame counts as observation, not
-        autobiography, so no disclosure is needed.
+        down is...'). Pattern-frame counts as observation, not lived
+        testimony, so no disclosure is needed.
 
     Pick the lane that fits the thread. Niche / expert subs reward Lane 2;
     casual / advice subs tolerate Lane 1 when the disclosure feels natural.
     """
     return """## GROUNDING RULE (highest priority; overrides any other style guidance)
 
+This rule is about FABRICATION of specifics. Whose voice is speaking
+(maker vs outside observer) is governed by the VOICE RELATIONSHIP rule,
+not here.
+
 Every comment picks ONE lane. The two lanes are mutually exclusive: you
-cannot present an invented detail as a personal first-hand claim. Choose:
+cannot present an invented detail as a lived fact. Choose:
 
 LANE 1 - DISCLOSED STORY (invent freely, but flag it)
   Open with a phrase that signals the story is illustration, not lived
@@ -1408,7 +1420,7 @@ LANE 1 - DISCLOSED STORY (invent freely, but flag it)
   "to make this concrete, picture", "made-up example but".
   After the opener, full creative license on the details.
 
-LANE 2 - NO FABRICATION (first-person OK only if every specific is real)
+LANE 2 - NO FABRICATION (specifics must be real)
   Stay plain-voiced. Any specific (number, duration, date, place name,
   course/program, headcount, named tool, named person) is allowed ONLY
   if it appears verbatim in the matched project's content_angle, voice
@@ -1416,18 +1428,18 @@ LANE 2 - NO FABRICATION (first-person OK only if every specific is real)
   / proof) in config.json. If a specific is not in config: drop it,
   generalize ("a few months", "a handful of cameras"), or pattern-frame
   ("the part that breaks down is...", "the typical failure mode is...").
-  Pattern-frame counts as observation, not autobiography, so no
+  Pattern-frame counts as observation, not lived testimony, so no
   disclosure is needed.
 
-NEVER MIX: do not write "i ran 22 cameras for 8 months" without either
+NEVER MIX: do not write "ran 22 cameras for 8 months" without either
 (a) a Lane 1 opener in front of it, or (b) those numbers being in
 config.json. That is the failure mode this rule exists to kill.
 
 Worked examples (drawn from real posts in our DB):
 
-  BAD (fabricated personal anecdote, no disclosure, no config anchor):
-    "i ran this exact pipeline last semester for two anatomy blocks,
-    cheap recorder into whisper into gpt into anki, raw gpt got me
+  BAD (fabricated anecdote, no disclosure, no config anchor):
+    "ran this exact pipeline last semester for two anatomy blocks,
+    cheap recorder into whisper into gpt into anki, raw gpt got
     about 35% usable cards..."
   LANE 1 REWRITE (same details, but disclosed):
     "hypothetically, imagine running this for a couple of lecture
@@ -1440,7 +1452,7 @@ Worked examples (drawn from real posts in our DB):
     duplicate distractors and trivial restatements take over."
 
   BAD (fabricated rig, no disclosure):
-    "i ran 22 cameras across three properties for about 8 months and
+    "ran 22 cameras across three properties for about 8 months and
     we were getting 400+ 'person detected' pings a night..."
   LANE 1 REWRITE (disclosed scenario):
     "scenario: 20-something cameras across a few properties, motion
@@ -1453,7 +1465,7 @@ Worked examples (drawn from real posts in our DB):
     on intent (vehicle at gate after midnight, person near door,
     loiter over a minute), not more cameras."
 
-  GOOD LANE 2 (config-grounded, first-person OK, specifics are real):
+  GOOD LANE 2 (config-grounded, specifics are real):
     "on a 90-slide deck the eval scored 81.3 vs the field average
     around 68; the cards weren't the bottleneck, the rubric was."
     (The 81.3 / 68 / 90-slide numbers come from the matched project's
@@ -1462,6 +1474,57 @@ Worked examples (drawn from real posts in our DB):
 This rule outranks "specificity is the #1 authenticity signal" wherever
 they conflict. Specificity still wins, but only via Lane 1 disclosure
 or Lane 2 config grounding."""
+
+
+def get_voice_relationship_rule():
+    """Voice positioning rule, driven by each project's voice_relationship.
+
+    Communicates how the narrator should relate to the matched project's
+    product. The relationship is a structural property of the project
+    (whether @m13v_ / @matt_diak speaks AS the maker or as an outside
+    observer), declared in config.json per project; the prompt does not
+    hardcode it.
+
+    This rule is independent of the GROUNDING RULE: grounding governs
+    whether SPECIFICS are real, this rule governs whose VOICE is speaking
+    when those specifics are stated.
+    """
+    return """## VOICE RELATIONSHIP (highest priority; overrides any default voice in the styles block)
+
+For EACH candidate, look up the matched project's `voice_relationship`
+field in its config.json entry. The field is always one of two values
+and dictates whose voice you write in. There is no third option and no
+default; every project declares the field explicitly.
+
+- `voice_relationship: "first_party"`
+  You speak AS the builder / maker of this product. First-person plural
+  about the product ("we ship X", "our Y", "we built Z") is allowed
+  when grounded in config.json. The audience expects to hear from the
+  maker. Recommendation-style framing is also fine ("a thing we ship
+  is...", "this is why we built...").
+
+- `voice_relationship: "third_party"`
+  You are an OUTSIDE OBSERVER of this product, NOT its team. Never use
+  first-person plural about the product. Always refer to it in
+  third-person, by name or by 'their': "Agora ships X", "their EAS
+  variant", "the OODAO product", "the Studyly team rolled out Y". The
+  narrator is a tech-curious user / builder who has noticed and
+  recommends the project, NOT its marketer or staff. Acceptable narrator
+  framings: "I tried [project]", "I noticed [project] does X", "[project]
+  ships Y". Banned framings: "we ship", "our product", "we built", "I
+  built this", "what we offer".
+
+The narrator's own life (the @m13v_ / @matt_diak persona's own voice,
+"I", "my") is still available in BOTH modes. The rule only restricts
+"we" / "our" / "we built" CLAIMS ABOUT THE PROJECT'S PRODUCT. For
+first_party projects those claims are accurate; for third_party
+projects they impersonate the client and are banned.
+
+Fabrication of specifics (numbers, dates, places, named tools) is
+governed by the GROUNDING RULE above; that rule is orthogonal to this
+one. A grounded specific stated in the wrong voice still violates this
+rule. An invented specific stated in the right voice still violates the
+GROUNDING RULE."""
 
 
 def get_content_rules(platform):
@@ -1475,16 +1538,16 @@ def get_content_rules(platform):
     """
     common = [
         "NO em dashes. Use commas, periods, or regular dashes (-).",
-        "Never say 'I built' or 'we built'. Never mention any project by name unless recommending.",
+        "Never mention any project by name unless recommending. Product voice (claims about the matched project) is governed by the VOICE RELATIONSHIP rule, not here.",
         'Never start with "exactly", "yeah totally", "100%", "that\'s smart".',
-        "Specificity is the #1 authenticity signal, but only for specifics you have license to use. See GROUNDING RULE: pick LANE 1 (open with a disclosure phrase like 'hypothetically' or 'scenario:' and then invent freely) OR LANE 2 (no fabricated specifics; first-person only when the numbers, durations, dates, places, course/program names, headcount, or named tools come verbatim from the matched project's config.json). Never present a fabricated specific as a personal first-hand claim.",
+        "Specificity is the #1 authenticity signal, but only for specifics you have license to use. See GROUNDING RULE: pick LANE 1 (open with a disclosure phrase like 'hypothetically' or 'scenario:' and then invent freely) OR LANE 2 (no fabricated specifics; every specific must come verbatim from the matched project's config.json). Specifics that pass the GROUNDING RULE still have to be stated in the voice required by the VOICE RELATIONSHIP rule.",
         "Include imperfections: contractions, casual asides, occasional lowercase.",
     ]
 
     platform_rules = {
         "reddit": [
             "Go BIMODAL: either 1 punchy sentence (<100 chars, highest avg upvotes) or 4-5 sentences of real substance. AVOID the 2-3 sentence dead zone.",
-            "Start with 'I' or 'my' (first-person experience). 'I did X' beats 'you should do X'.",
+            "Lead with personal experience or observation ('I tried X' / 'I noticed X' / 'the part that broke for me was X') rather than instructional advice ('you should X'). Whether you can speak AS the project's maker is governed by the VOICE RELATIONSHIP rule.",
             "No markdown in Reddit (no ##, **, numbered lists). Casual tone, lowercase OK, fragments OK.",
             "NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l). NEVER include URLs or links.",
             "Statements beat questions. Be authoritative, not inquisitive. No 'anyone else experience this?'",
@@ -1511,7 +1574,7 @@ def get_anti_patterns():
     """Content anti-patterns shared across all platforms."""
     return """## Anti-patterns
 - NEVER start with "exactly", "yeah totally", "100%", "that's smart". Vary first words.
-- NEVER say "I built" / "we built" / "I'm working on". Frame products as recommendations, not self-promotion.
+- NEVER claim authorship or operational control of a product whose voice_relationship is "third_party" (see VOICE RELATIONSHIP rule). For first_party projects, prefer recommendation framing over bare "I built it" self-promotion even though the voice is yours to use.
 - NEVER suggest calls, meetings, demos.
 - NEVER promise to share links/files not in config.json.
 - NEVER offer to DM. NEVER make time-bound promises.
