@@ -122,16 +122,17 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
    a. Re-read our_content (the comment we already left on this Reddit thread). Identify the SINGLE strongest claim, mechanism, or specific number we said in that comment (examples: "auto-rephrasing on revisit", "the 81 number on the rubric", "scoring distractor quality", "200ms p95 latency", "structured output across nested tool calls"). Pick ONE concrete thing, not a category.
    b. Read the landing page at LINK_URL (use WebFetch on LINK_URL). Identify the SPECIFIC mechanism on the page that delivers the thing from step 4a (one feature, one capability, named in the page's own language).
    c. Write 1-2 sentences (max ~35 words) that explicitly bridge: comment-claim → product mechanism → URL. The sentence MUST name at least ONE concrete capability inline (verb + noun, e.g. "scores against a rubric and rephrases the same fact on revisit"); NOT a category ("a tool for studying", "something for this"). The URL is the last token; nothing after it.
-   d. ALWAYS frame as our own creation. We built / made / shipped this; we are not "finding" or "stumbling on" it.
-      - First-person ownership phrasing only: "fwiw the [specific-thing-from-4a] is from [PROJECT_NAME], a thing I built that [specific-mechanism-from-4b], LINK_URL".
-      - Concrete examples of the bridge form (do NOT copy these verbatim; rewrite to match each post's actual claim):
+   d. Voice depends on the matched project's \`voice_relationship\` field in config.json (read it before drafting):
+      - voice_relationship == "first_party": Frame as our own creation. Bridge form: "fwiw the [specific-thing-from-4a] is from [PROJECT_NAME], a thing I built that [specific-mechanism-from-4b], LINK_URL". Concrete first_party examples (do NOT copy verbatim; rewrite to match each post's actual claim):
         * "fwiw the 81 number is from a rubric we trained on med-school decks, scores factual correctness, distractor quality, and rephrases on revisit so you can't pattern-match the stem, https://studyly.io/t/anki-card-generator-for-medical-school"
         * "we shipped this for the rephrase-on-revisit problem specifically, it scores against a 4-axis rubric and re-asks the same fact in different stems, https://studyly.io/t/active-recall-question-generator"
+      - voice_relationship == "third_party": You are an outside observer pointing at the project's mechanism. Bridge form: "fwiw [PROJECT_NAME] handles the [specific-thing-from-4a] via [specific-mechanism-from-4b], LINK_URL". Do NOT use "I built" / "we shipped" / "we made". Do NOT pretend you stumbled on it ("found this", "came across this") either; that drops engagement. Stay matter-of-fact and concrete.
    e. BANNED phrasing (rejects the bridge structure, costs CTR):
-      - "I found this", "there's a tool", "came across this", "saw this manual", "found this guide" (pretends we're a neutral commenter pointing at someone else's project).
-      - Bare citation with no mechanism: "fwiw the X number is from a thing I built, URL" (this is what's currently shipping; underperforms).
-      - Generic verbs with no object: "a tool for exactly this", "made this for it", "does this" (no concrete mechanism named).
+      - Bare citation with no mechanism: "fwiw the X number is from PROJECT, URL" with no named mechanism.
+      - Generic verbs with no object: "a tool for exactly this", "does this" (no concrete mechanism named).
       - "Click here", "check it out", "give it a try" (Reddit downvotes pitchy CTAs).
+      - For voice_relationship=third_party only: "I built" / "we shipped" / "we made" (ownership claims on a project you don't own).
+      - For voice_relationship=first_party only: "I found this", "there's a tool", "came across this", "saw this manual", "found this guide" (pretends we're a neutral commenter pointing at someone else's project).
    f. SELF-REVIEW before posting: read your sentence aloud. Does it (1) reference the comment's specific claim, (2) name a concrete product mechanism, and (3) end on the URL? If any of the three is missing, rewrite. If after one rewrite it still doesn't pass all three checks, write a fresh sentence from scratch.
 5. URL-WRAP THE LINK TEXT for click attribution. This MUST run for every LINK_SOURCE (seo_page, plain_url_fallback:*, plain_url_no_lp). The wrap helper accepts homepage URLs and mints a /r/<code> on the project's own domain. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
