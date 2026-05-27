@@ -9374,7 +9374,7 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div class="stats-grid" id="stats-grid"></div>
   </div>
-  <details class="style-stats-section" id="cohort-stats">
+  <details class="style-stats-section" id="cohort-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="cohort-stats-heading">Score Cohort Distribution (24h)</span><span class="stat-card-info" data-tooltip="Buckets posts by composite score (clicks \u00D7 10 + comments \u00D7 3 + upvotes; Reddit/Moltbook subtract 1 to strip OP self-upvote). Click weight \u00D710 because a real human click outvalues 10 likes of vibes (matches top_performers.SCORE_SQL and the engagement_styles.py picker). Views are deliberately excluded. Cohorts: Dead = 0, Low = 1\u20139, Mid = 10\u201329, High = 30+. Honors the Window / Platform / Project filters above.">i</span></span>
       <span class="style-stats-total" id="cohort-stats-total"></span>
@@ -9383,7 +9383,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="style-stats">
+  <details class="style-stats-section" id="style-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="style-stats-heading">Posts by Engagement Style (24h)</span></span>
       <span class="style-stats-total" id="style-stats-total"></span>
@@ -9392,7 +9392,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="funnel-stats">
+  <details class="style-stats-section" id="funnel-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="funnel-stats-heading">Project Funnel Stats (last 24 hours)</span></span>
       <span class="style-stats-total" id="funnel-stats-total"></span>
@@ -9401,7 +9401,7 @@ const HTML = `<!DOCTYPE html>
       <div class="style-stats-empty">Click to load\u2026</div>
     </div>
   </details>
-  <details class="style-stats-section" id="dm-stats">
+  <details class="style-stats-section" id="dm-stats" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="dm-stats-heading">DM Funnel Stats (last 24 hours)</span></span>
       <span class="style-stats-total" id="dm-stats-total"></span>
@@ -11461,6 +11461,12 @@ async function loadJobsHistory(force) {
 }
 
 async function loadStatus() {
+  // /api/status and /api/pending are admin-only. Skip the doomed 403s for
+  // project-scoped clients; the Status tab UI is sa-local-only anyway, so
+  // there is nothing to render for them. Without this guard, the global
+  // refresh button (↻) triggers a forEach-on-undefined crash that surfaces
+  // as the toast "Failed to load status: Cannot read properties of undefined".
+  if (document.body.classList.contains('sa-cloud')) return;
   try {
     const [statusRes, pendingRes] = await Promise.all([
       fetch('/api/status'),
@@ -11468,6 +11474,10 @@ async function loadStatus() {
     ]);
     const data = await statusRes.json();
     const pending = await pendingRes.json();
+    if (!Array.isArray(data.jobs)) {
+      toast('Status unavailable: ' + (data.error || ('HTTP ' + statusRes.status)), true);
+      return;
+    }
     loadJobsHistory();
 
     _paused = !!data.paused;
