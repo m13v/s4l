@@ -11035,7 +11035,12 @@ function renderResult(run) {
   //
   // Each pill carries data-tooltip so hovering surfaces the meaning
   // line-by-line via the global .sa-tooltip handler.
-  if (run.job_type === 'stats') {
+  // Post Audit jobs (audit-twitter, audit-reddit, audit-moltbook) emit the
+  // same structured counters as stats jobs (scanned/checked/changed/removed
+  // + replies_refreshed), so they reuse the same rich pill renderer below.
+  // Before 2026-05-27 audit rows showed posted=<active_count> and nothing
+  // else; now they surface the real per-run delta.
+  if (run.job_type === 'stats' || run.job_type === 'audit') {
     const checked = r.checked || 0;
     const updated = r.updated || 0;
     const removed = r.removed || 0;
