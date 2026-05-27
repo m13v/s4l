@@ -126,6 +126,10 @@ class _DebugRecorder:
         02_post_goto_url.txt   page.url after goto (the smoking-gun for
                                session_invalid: shows /authwall URL)
         02_cookies.json        full cookie jar (li_at, JSESSIONID, etc.)
+        02_storage.json        localStorage + sessionStorage dump
+                               (LinkedIn stores some auth state outside
+                               cookies; presence of lidc / lang in
+                               localStorage IS a diagnostic signal)
         99_failure.png         screenshot at error-return path
         99_failure.html        outerHTML at error-return path
         99_failure.txt         error/detail + Python traceback
@@ -135,7 +139,24 @@ class _DebugRecorder:
         network.jsonl          response events for *.linkedin.com requests
                                (status, url, content-type; body truncated
                                to 2KB to keep bundle tractable)
-        meta.json              start/end timestamps + scrape summary
+        requests.jsonl         request events for *.linkedin.com (URL,
+                               method, resource_type, headers, post_data
+                               truncated to 2KB). Catches POSTs / beacons
+                               that on_response alone can't surface.
+        requests_failed.jsonl  network-level failures (DNS, abort,
+                               connection-refused). Empty on clean fires.
+        harvest_js_source.js   the exact JS template that ran inside
+                               page.evaluate. Captured per-fire so a
+                               future failure can be diffed against the
+                               version of HARVEST_JS that produced it.
+        trace.zip              Playwright trace (snapshots + screenshots
+                               + network + console + sources). Open with
+                               `npx playwright show-trace <path>`.
+                               Best single forensic artifact when present.
+        meta.json              start/end timestamps + scrape summary +
+                               per-phase timings (cdp_attach_ms, goto_ms,
+                               settle_ms, evaluate_ms, …) + viewport +
+                               saw_429 events
 
     Disable globally by passing debug_dir=None to scrape(). The instance
     becomes a no-op shim — all `dbg.x(...)` calls return None instantly.
@@ -151,6 +172,17 @@ class _DebugRecorder:
         self._fh_console = None
         self._fh_nav = None
         self._fh_net = None
+        self._fh_req = None
+        self._fh_reqfail = None
+        # Tracing state. Stored so finalize() can stop tracing before it
+        # tars the bundle (the trace.zip must exist on disk when tar
+        # runs). _context kept as a weakref-style handle; if Playwright
+        # tears down the context before we stop tracing, the stop call
+        # will raise and we swallow.
+        self._tracing_started: bool = False
+        self._context = None
+        # Phase timings filled in by set_timing(). Surfaced in meta.json.
+        self.timings: dict = {}
         if self.enabled:
             try:
                 os.makedirs(self.dir, exist_ok=True)
@@ -213,7 +245,8 @@ class _DebugRecorder:
             pass
 
     def _close_handles(self) -> None:
-        for attr in ("_fh_console", "_fh_nav", "_fh_net"):
+        for attr in ("_fh_console", "_fh_nav", "_fh_net",
+                     "_fh_req", "_fh_reqfail"):
             fh = getattr(self, attr, None)
             if fh is not None:
                 try:
@@ -351,11 +384,58 @@ class _DebugRecorder:
                 rec = {"ts": _ts_ms(), "err": repr(e)}
             self._append_jsonl("_fh_net", "network.jsonl", rec)
 
+        def on_request(req):
+            # LinkedIn-only filter mirrors on_response. Catches POSTs +
+            # beacons that on_response can't surface on its own (a
+            # silently-dropped POST shows up here, not there).
+            try:
+                url = req.url
+                if "linkedin.com" not in url:
+                    return
+                post_data = None
+                try:
+                    pd = req.post_data
+                    if pd:
+                        post_data = pd[:2048]
+                except Exception:
+                    pass
+                rec = {
+                    "ts": _ts_ms(),
+                    "method": req.method,
+                    "url": url,
+                    "type": req.resource_type,
+                    "headers": dict(list(req.headers.items())[:30]),
+                    "post_data": post_data,
+                }
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "err": repr(e)}
+            self._append_jsonl("_fh_req", "requests.jsonl", rec)
+
+        def on_request_failed(req):
+            # Network-level failures (DNS, abort, connection-refused).
+            # Empty on clean fires; the first appearance is a strong
+            # signal that LinkedIn cut us off below the HTTP layer.
+            try:
+                rec = {
+                    "ts": _ts_ms(),
+                    "method": req.method,
+                    "url": req.url,
+                    "type": req.resource_type,
+                    "failure": getattr(req, "failure", None),
+                }
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "err": repr(e)}
+            self._append_jsonl(
+                "_fh_reqfail", "requests_failed.jsonl", rec
+            )
+
         try:
             page.on("console", on_console)
             page.on("pageerror", on_pageerror)
             page.on("framenavigated", on_framenav)
             page.on("response", on_response)
+            page.on("request", on_request)
+            page.on("requestfailed", on_request_failed)
         except Exception as e:
             print(
                 f"[scrape_linkedin] WARN: page.on subscribe failed: {e!r}",
@@ -423,6 +503,174 @@ class _DebugRecorder:
                 f"{prefix}.err.txt",
                 f"cookies_serialize_failed: {e!r}\nts={_ts_ms()}\n",
             )
+
+    def start_tracing(self, context) -> None:
+        """Begin Playwright tracing on the attached context.
+
+        Tracing produces a single .zip with DOM snapshots, screenshots,
+        network, console, and source-stack-traces at every Playwright
+        action. Open with `npx playwright show-trace <path>` to step
+        through the scrape interactively. Best single forensic artifact
+        we capture.
+
+        CDP-attached contexts CAN trace (Playwright supports it for
+        connect_over_cdp) but the underlying browser must be Playwright-
+        compatible — Chrome 148 is. Wrapped in try/except so a tracing
+        failure never derails the actual scrape.
+        """
+        if not self.enabled or context is None:
+            return
+        self._context = context
+        try:
+            context.tracing.start(
+                screenshots=True,
+                snapshots=True,
+                sources=True,
+                title="stats-linkedin-scrape",
+            )
+            self._tracing_started = True
+        except Exception as e:
+            print(
+                f"[scrape_linkedin] WARN: tracing.start failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._tracing_started = False
+
+    def stop_tracing(self) -> None:
+        """Stop tracing and write trace.zip into the bundle dir.
+
+        Called from finalize() BEFORE the tarball is created so the
+        trace.zip ends up inside the .tar.gz alongside the other
+        artifacts. Idempotent: safe to call when tracing never started.
+        """
+        if not self.enabled or not self._tracing_started:
+            return
+        if self._context is None:
+            return
+        out = self._path("trace.zip")
+        if not out:
+            return
+        try:
+            self._context.tracing.stop(path=out)
+        except Exception as e:
+            print(
+                f"[scrape_linkedin] WARN: tracing.stop failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            # One-shot. Don't try to stop again from a later code path.
+            self._tracing_started = False
+
+    def capture_storage(self, page) -> None:
+        """Dump localStorage + sessionStorage to 02_storage.json.
+
+        LinkedIn keeps some auth + UX state outside cookies (lidc,
+        recently-viewed flags, A/B test buckets). Presence / absence of
+        specific keys is occasionally the only signal that distinguishes
+        "logged-in but throttled" from "session forced to bg state".
+        Quotas can hold ~5MB per origin but real LinkedIn storage is
+        usually <100KB so no truncation needed.
+        """
+        if not self.enabled or page is None:
+            return
+        try:
+            data = page.evaluate(
+                """() => {
+                  const dump = (s) => {
+                    const o = {};
+                    for (let i = 0; i < s.length; i++) {
+                      const k = s.key(i);
+                      try { o[k] = s.getItem(k); }
+                      catch (e) { o[k] = '<read_failed:' + e + '>'; }
+                    }
+                    return o;
+                  };
+                  return {
+                    local: dump(window.localStorage),
+                    session: dump(window.sessionStorage),
+                  };
+                }"""
+            ) or {}
+        except Exception as e:
+            self._write_text(
+                "02_storage.err.txt",
+                f"storage_read_failed: {e!r}\nts={_ts_ms()}\n",
+            )
+            return
+        try:
+            self._write_text(
+                "02_storage.json",
+                json.dumps(data, indent=2, default=str),
+            )
+        except Exception as e:
+            self._write_text(
+                "02_storage.err.txt",
+                f"storage_serialize_failed: {e!r}\nts={_ts_ms()}\n",
+            )
+
+    def capture_harvest_js(self, js_source: str) -> None:
+        """Snapshot the JS template that ran inside page.evaluate.
+
+        Captured per-fire so a future failure DOM can be diffed against
+        the exact version of HARVEST_JS that produced it. Keeps the
+        bundle self-describing: you can replay the scrape against the
+        captured 02_post_goto.html locally without git-checking-out the
+        scraper revision that ran.
+        """
+        if not self.enabled:
+            return
+        self._write_text("harvest_js_source.js", js_source or "")
+
+    def capture_viewport(self, page) -> None:
+        """Record viewport size + scroll position into self.meta.
+
+        Surfaced as meta.json.viewport. Catches the case where Chrome
+        booted with an unexpected window size (mobile-emulation flag
+        leaked, --window-size override forgotten) that would cause our
+        scroll math to miss content. Best-effort; never raises.
+        """
+        if not self.enabled or page is None:
+            return
+        view = {}
+        try:
+            vp = page.viewport_size or {}
+            view["width"] = vp.get("width")
+            view["height"] = vp.get("height")
+        except Exception:
+            pass
+        try:
+            scroll = page.evaluate(
+                """() => ({
+                  scroll_y: window.scrollY,
+                  scroll_x: window.scrollX,
+                  inner_w: window.innerWidth,
+                  inner_h: window.innerHeight,
+                  document_h: document.documentElement.scrollHeight,
+                  device_pixel_ratio: window.devicePixelRatio,
+                  user_agent: navigator.userAgent,
+                })"""
+            ) or {}
+            view.update(scroll)
+        except Exception as e:
+            view["err"] = repr(e)
+        self.meta["viewport"] = view
+
+    def set_timing(self, name: str, ms: int) -> None:
+        """Record a per-phase elapsed time in milliseconds.
+
+        Called from scrape() around each major step (cdp_attach, goto,
+        settle, evaluate, ...). Aggregated under meta.json.timings on
+        finalize. Lets a future "scrape took 90s, why?" investigation
+        skip the timestamp arithmetic.
+        """
+        if not self.enabled:
+            return
+        try:
+            self.timings[name] = int(ms)
+        except Exception:
+            pass
 
     def failure(self, page, error: str, detail: str = "") -> None:
         """Capture failure-mode artifacts: screenshot, html, error text."""
