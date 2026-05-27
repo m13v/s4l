@@ -70,8 +70,8 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=40           # in-page scrolls
-SCRAPER_TIMEOUT_SEC=480  # whole scraper run cap (~2.5min scroll + overhead)
+MAX_SCROLLS=80           # in-page scrolls
+SCRAPER_TIMEOUT_SEC=900  # whole scraper run cap (~6min scroll + overhead at 80 scrolls)
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
