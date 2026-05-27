@@ -10736,6 +10736,11 @@ function renderResult(run) {
           '(max ' + (r.virality_max_posted || 0).toFixed(1) + ', n=' + (r.virality_posted_n || 0) + '); ' +
           'rule of thumb: ≥100 = strong, ~36x reply views vs [0-10) bucket' + NL
         : '') +
+      ((r.age_posted_n || 0) > 0
+        ? '• **age ' + (r.age_median_posted_h || 0).toFixed(1) + 'h** — median thread-age-at-post ' +
+          '(max ' + (r.age_max_posted_h || 0).toFixed(1) + 'h, n=' + (r.age_posted_n || 0) + '); ' +
+          'soft cap: variant A/B ≤6h, C/D ≤1h. Higher = X Latest tab leaked stale tweets past the freshness wall' + NL
+        : '') +
       NL +
       '**Pending end-of-run:** ' + queue + NL +
       '  start ' + queueStart + ', +' + qAdded + ' / -' + qDrained + ' = ' +
@@ -10755,6 +10760,23 @@ function renderResult(run) {
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
         ((r.virality_posted_n || 0) > 0
           ? pill('viral', (r.virality_median_posted || 0).toFixed(1))
+          : '') +
+        ((r.age_posted_n || 0) > 0
+          ? (function () {
+              // Visual signal: red when median exceeds the variant's freshness
+              // cap (X Latest tab leaked AND score-time cutoff didn't catch
+              // it), green when within. The existing pill() helper ignores
+              // its color arg, so inline a custom span here so the operator
+              // can spot the leak at a glance without opening the tooltip.
+              const v = r.experiment_variant || '';
+              const cap = (v === 'C' || v === 'D') ? 1 : 6;
+              const med = r.age_median_posted_h || 0;
+              const color = med > cap ? '#ef4444' : '#22c55e';
+              return '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+                + 'age <span style="color:' + color + ';font-weight:600;">'
+                + med.toFixed(1) + 'h'
+                + '</span></span>';
+            })()
           : '') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
