@@ -221,6 +221,40 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
         tweet["age_hours"] = age_hours
         tweet["author_followers"] = tweet.get("author_followers", 0)
 
+        # Hard age cutoff (2026-05-27): defense-in-depth against X's Latest tab
+        # silently degrading to "best available" results when our `since_time:`
+        # operator yields a sparse window. The pre-search hook
+        # (~/.claude/hooks/twitter-search-since-rewrite.py) injects
+        # `since_time:<now - FRESHNESS_HOURS_DISCOVER>` into every cycle query,
+        # and the harness scrape opens &f=live (Latest tab). In theory those
+        # two together cap age at the variant's freshness window. In practice
+        # x.com/search?f=live ignores `since_time:` on low-yield queries and
+        # falls back to whatever stale tweets it has. Without this cutoff,
+        # those stale rows land in twitter_candidates with virality ~0 (the
+        # 6h half-life decay floors them), survive into the post_twitter
+        # draft prompt, and get chosen when all candidates score near zero.
+        # We hard-drop here so they never reach the API, the draft prompt,
+        # or any per-row token spend. Reads the same env var the hook reads,
+        # so the cutoff matches the variant's window (1h for C/D, 6h for A/B).
+        # Falls back to 6h for non-cycle callers (legacy paths). Discovered
+        # 2026-05-27 after batches twcycle-20260527-134432 (Mediar) and
+        # twcycle-20260527-135430 (paperback-expert) posted under 49-77h-old
+        # threads that bypassed both layers.
+        try:
+            _freshness_cap = int(os.environ.get("FRESHNESS_HOURS_DISCOVER") or "6")
+        except ValueError:
+            _freshness_cap = 6
+        if age_hours > _freshness_cap:
+            skipped += 1
+            print(
+                f"[stale_age_skip] age_hours={age_hours:.1f} cap={_freshness_cap}h "
+                f"variant={os.environ.get('TWITTER_CYCLE_VARIANT') or ''} "
+                f"url={url}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+
         # Variant D (2026-05-25): 2k-view ceiling cap on parent thread.
         # Bucket analysis on 250+ mature posts showed view-share collapses
         # from ~4% on 500-2k-view threads to ~0.1% on >10k-view threads —
