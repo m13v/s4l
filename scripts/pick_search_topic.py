@@ -218,17 +218,32 @@ def _load_universe(project_name):
     rows = data.get("topics") or []
     seen = set()
     out = []
+    source_counts = {"seed": 0, "invented": 0, "manual": 0}
     for r in rows:
         t = (r.get("topic") or "").strip()
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        src = (r.get("source") or "").strip()
+        if src in source_counts:
+            source_counts[src] += 1
     if not out:
         raise PickerError(
             f"no active search topics for project={project_name!r} in "
             f"project_search_topics. Seed via scripts/seed_search_topics.py "
             f"or activate at least one row."
         )
+    # Grep-able marker so cycle logs show the new universe source explicitly.
+    # active= is the count the picker actually uses; seed/invented/manual
+    # split surfaces auto-promoted topics vs the original seed pool so
+    # invention activity is visible without a DB query.
+    sys.stderr.write(
+        f"[pick_search_topic] universe_source=db project={project_name!r} "
+        f"active={len(out)} seed={source_counts['seed']} "
+        f"invented={source_counts['invented']} "
+        f"manual={source_counts['manual']}\n"
+    )
     return out
 
 
