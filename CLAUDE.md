@@ -25,6 +25,23 @@ Already shipped (partial): `InlineCta`, `StickyBottomCta`, `BookCallCTA`, `GetSt
 
 Consumer sites import via the `@seo/components` alias. When adding a new component: build in `~/seo-components/src/components/`, bump version, then update each consumer (the `bump:consumers` script automates this).
 
+## Dashboard colors: black and white only (per user instruction 2026-05-27)
+
+**The dashboard at `bin/server.js` (and any HTML/CSS surface it renders) MUST use only black, white, and shades of gray.** No chromatic colors. No green for "good", no red for "bad", no purple/blue/amber/yellow accents on pills, badges, charts, or text.
+
+Use `var(--text)` for foreground, `var(--muted)` for secondary, `var(--bg)` and `var(--card)` for backgrounds, and `var(--border)` for separators. The existing `pill(label, n)` helper at `bin/server.js` already enforces this shape (`color:var(--muted)` for the label, `color:var(--text)` for the number) and accepts a `_color` arg that is **deliberately ignored**; do not "fix" it to apply the color.
+
+Forbidden in any new code on this dashboard:
+- Hardcoded hex colors: `#22c55e` (green), `#ef4444` (red), `#a78bfa` (purple), `#eab308` (amber), `#3b82f6` (blue), etc.
+- Tailwind palette classes: `text-green-*`, `bg-red-*`, `border-purple-*`, etc.
+- Color-coded "good/bad" pills, status badges, or chart series.
+
+If you need to convey severity, use weight (`font-weight:600`), brackets, parens, or a tooltip line, never color. Example: `age 77.1h (cap 1h, leak)` not `age <span style="color:red">77.1h</span>`.
+
+Existing hardcoded chromatic colors elsewhere in `bin/server.js` are tech debt; do NOT proactively refactor them, but do NOT add new ones, and when you touch a line that has one, drop the color while you are there.
+
+To audit when asked to "remove all colors": grep `bin/server.js` for `#[0-9a-fA-F]{3,8}` and `color:\s*(?!var\(|inherit|transparent|currentColor)` to find remaining chromatic usages.
+
 ## No retention pruning, ever (per user instruction 2026-05-08)
 
 **Never delete `*_candidates` rows by age.** The user explicitly requires that every candidate row (`twitter_candidates`, `linkedin_candidates`, `reddit_candidates`, etc.) be kept forever, regardless of `status`. The full history (chosen, skipped, expired, posted) powers analytics on skip reasons, project routing, engagement curves, and growth dynamics; pruning destroys that signal.
