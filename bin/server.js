@@ -14344,17 +14344,20 @@ function mountSortableTable(opts) {
       const idx = keys.indexOf(state.sortField);
       if (idx !== -1) {
         const arrow = state.sortDir === 'asc' ? '\u25B2' : '\u25BC';
-        // Append a small superscript when sorting by a secondary key
-        // (e.g. domain_pageviews under the "Pageviews" header) so the
-        // user can tell which field is active inside the cycle.
-        const suffix = idx === 0 ? '' : String.fromCharCode(0x00B9 + (idx === 1 ? 1 : idx)); // \u00B2, \u00B3, ...
-        // When the column declares a sortLabelMap, also render a human-
-        // readable label of the active sort field in brackets next to the
-        // arrow (e.g. "Ours (clicks) \u25BC"). Makes multi-key cycles
-        // self-documenting without forcing the user to read the tooltip.
+        // When the column declares a sortLabelMap, render a human-readable
+        // label of the active sort field in brackets next to the arrow
+        // (e.g. "Ours (clicks) \u25BC"). Makes multi-key cycles self-
+        // documenting without forcing the user to read the tooltip.
         const labelMap = col && col.sortLabelMap;
         const friendly = labelMap && labelMap[state.sortField];
         const labelChip = friendly ? ' (' + friendly + ')' : '';
+        // Legacy: when a column has multiple sortKeys but NO labelMap,
+        // append a tiny ASCII tag like " #2", " #3" so the user can still
+        // tell which slot in the cycle is active. The old superscript
+        // mapping (String.fromCharCode(0x00B9 + idx)) rendered the wrong
+        // glyphs (\u00BA, \u00BB, \u00BC, \u00BD instead of \u00B2/\u00B3/...)
+        // so we replaced it with a plain "#N" tag.
+        const suffix = (idx === 0 || friendly) ? '' : ' #' + (idx + 1);
         el.textContent = labelChip + ' ' + arrow + suffix;
         el.classList.add('active');
         if (idx === 0) el.classList.remove('secondary');
