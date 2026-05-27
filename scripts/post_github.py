@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 import pick_project
 from author_history_block import render as _render_author_history
+from project_topics import topics_for_project
 
 # ---------------------------------------------------------------------------
 # Run-summary safety net (atexit + SIGTERM/SIGHUP handlers).
@@ -812,7 +813,7 @@ def main():
             f"(weight={project.get('weight', 0)})")
 
     # ---- Phase 1: search topics, T0 snapshot -------------------------------
-    topics_pool = list(project.get("search_topics") or [])
+    topics_pool = list(topics_for_project(project["name"]))
     if not topics_pool:
         log("Project has no topics to search. Exiting.")
         sys.exit(0)
