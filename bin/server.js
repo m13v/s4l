@@ -18855,6 +18855,14 @@ async function loadSubredditStats(force) {
   const proj = currentStatsProject();
   const loadKey = days + '|' + proj;
   if (_subredditStatsLoadedFor === loadKey && !force) return;
+  if (!force) {
+    const cached = statsCacheGet('subreddit', loadKey);
+    if (cached) {
+      renderSubredditStats(cached);
+      _subredditStatsLoadedFor = loadKey;
+      return;
+    }
+  }
   _subredditStatsLoading = true;
   const totalEl = document.getElementById('subreddit-stats-total');
   const body = document.getElementById('subreddit-stats-body');
@@ -18865,6 +18873,7 @@ async function loadSubredditStats(force) {
     if (proj && proj !== 'all') params.push('project=' + encodeURIComponent(proj));
     const res = await fetch('/api/funnel/stats/by_subreddit?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('subreddit', loadKey, data);
     renderSubredditStats(data);
     _subredditStatsLoadedFor = loadKey;
   } catch (e) {
@@ -18884,6 +18893,14 @@ async function loadDmStats(force) {
   const proj = currentStatsProject();
   const key  = days + '|' + plat + '|' + proj;
   if (_dmStatsLoadedFor === key && !force) return;
+  if (!force) {
+    const cached = statsCacheGet('dm', key);
+    if (cached) {
+      renderDmStats(cached);
+      _dmStatsLoadedFor = key;
+      return;
+    }
+  }
   _dmStatsLoading = true;
   const totalEl = document.getElementById('dm-stats-total');
   const body = document.getElementById('dm-stats-body');
@@ -18895,6 +18912,7 @@ async function loadDmStats(force) {
     if (proj && proj !== 'all') params.push('project='  + encodeURIComponent(proj));
     const res = await fetch('/api/dm/stats?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('dm', key, data);
     renderDmStats(data);
     _dmStatsLoadedFor = key;
   } catch (e) {
@@ -18916,6 +18934,14 @@ async function loadSearchTopicsStats(force) {
   const dudsOnly = !!(dudsOnlyEl && dudsOnlyEl.checked);
   const key  = days + '|' + plat + '|' + proj + '|' + (dudsOnly ? '1' : '0');
   if (_searchTopicsStatsLoadedFor === key && !force) return;
+  if (!force) {
+    const cached = statsCacheGet('searchTopics', key);
+    if (cached) {
+      renderSearchTopicsStats(cached);
+      _searchTopicsStatsLoadedFor = key;
+      return;
+    }
+  }
   _searchTopicsStatsLoading = true;
   const totalEl = document.getElementById('search-topics-stats-total');
   const body = document.getElementById('search-topics-stats-body');
@@ -18929,6 +18955,7 @@ async function loadSearchTopicsStats(force) {
     params.push('limit=5000');
     const res = await fetch('/api/search-topics/stats?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('searchTopics', key, data);
     renderSearchTopicsStats(data);
     _searchTopicsStatsLoadedFor = key;
   } catch (e) {
@@ -18950,6 +18977,14 @@ async function loadSearchQueriesStats(force) {
   const dudsOnly = !!(dudsOnlyEl && dudsOnlyEl.checked);
   const key  = days + '|' + plat + '|' + proj + '|' + (dudsOnly ? '1' : '0');
   if (_searchQueriesStatsLoadedFor === key && !force) return;
+  if (!force) {
+    const cached = statsCacheGet('searchQueries', key);
+    if (cached) {
+      renderSearchQueriesStats(cached);
+      _searchQueriesStatsLoadedFor = key;
+      return;
+    }
+  }
   _searchQueriesStatsLoading = true;
   const totalEl = document.getElementById('search-queries-stats-total');
   const body = document.getElementById('search-queries-stats-body');
@@ -18963,6 +18998,7 @@ async function loadSearchQueriesStats(force) {
     params.push('limit=5000');
     const res = await fetch('/api/search-queries/stats?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('searchQueries', key, data);
     renderSearchQueriesStats(data);
     _searchQueriesStatsLoadedFor = key;
   } catch (e) {
