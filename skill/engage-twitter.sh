@@ -90,6 +90,43 @@ else
     # the response into the legacy field set the prompt expects.
     PENDING_DATA=$(python3 "$ENGAGE_TWITTER_HELPER" pending-data --batch-size "$BATCH_SIZE")
 
+    # JOIN-aware emptiness guard (2026-05-26). /api/v1/replies/counts returns
+    # the raw pending count (no JOIN), but /api/v1/replies/next-pending INNER
+    # JOINs posts; orphan replies whose post_id no longer exists make these
+    # two disagree. Without this guard, Phase B burns the full gtimeout
+    # holding the twitter-browser lock while Claude finds nothing to do,
+    # starving dm-outreach-twitter and dm-replies-twitter in the lock queue
+    # for 30+ min. Skip Phase B and release the browser lock early when
+    # /next-pending returns 0 rows.
+    PENDING_REAL_COUNT=$(echo "$PENDING_DATA" | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read() or '{}')
+    if isinstance(d, dict):
+        rows = d.get('replies', [])
+    elif isinstance(d, list):
+        rows = d
+    else:
+        rows = []
+    print(len(rows))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+
+    if [ "$PENDING_REAL_COUNT" -eq 0 ]; then
+        log "Phase B: counts says $PENDING_COUNT pending but JOIN returned 0 rows (likely orphan replies whose post_id is missing). Skipping Phase B."
+        log "Releasing twitter + twitter-browser locks so other pipelines (dm-outreach-twitter, dm-replies-twitter) can run."
+        release_lock "twitter" 2>>"$LOG_FILE" || true
+        release_lock "twitter-browser" 2>>"$LOG_FILE" || true
+        rm -f "$HOME/.claude/twitter-browser-lock.json" 2>/dev/null || true
+        RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
+        log "=== Twitter Engagement Run done (no real work): elapsed=${RUN_ELAPSED}s ==="
+        python3 "$REPO_DIR/scripts/log_run.py" --script "engage_twitter" --posted 0 --skipped 0 --failed 0 --cost 0 --elapsed "$RUN_ELAPSED" 2>/dev/null || true
+        exit 0
+    fi
+
+    log "Phase B: $PENDING_REAL_COUNT pending Twitter replies confirmed via JOIN (counts said $PENDING_COUNT)"
+
     # Per-project voice map (so each reply can be drafted in the matched project's voice)
     PROJECTS_VOICE_JSON=$(python3 -c "
 import json
@@ -306,7 +343,12 @@ If the tweet has been deleted or is unavailable, mark as 'skipped' with reason '
 After every 10 replies, run: python3 $REPO_DIR/scripts/reply_db.py status
 PROMPT_EOF
 
-    gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-twitter-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
+    # Phase B Claude timeout: 30 min (was 5400=90 min). Real engage runs
+    # complete in 5-15 min. The 90-min cap let a single broken-data run hold
+    # the twitter-browser lock for 45+ min and starve DM lanes (see 2026-05-26
+    # incident). 30 min is a generous ceiling for legitimate work; the
+    # JOIN-aware guard above already cuts the no-op case to <3 s.
+    gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-twitter-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
     rm -f "$PHASE_B_PROMPT"
 fi
 
