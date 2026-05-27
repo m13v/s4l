@@ -220,7 +220,79 @@ log "Post status: active=$ACTIVE deleted=$DELETED removed=$REMOVED"
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 AUDIT_FAILED=$(( (STEP1_EXIT != 0 ? 1 : 0) + (STEP2_EXIT != 0 ? 1 : 0) + (STEP3_EXIT != 0 ? 1 : 0) ))
 SCRIPT_TAG="audit${PLATFORM:+-$PLATFORM}"
-python3 "$REPO_DIR/scripts/log_run.py" --script "$SCRIPT_TAG" --posted "$ACTIVE" --skipped 0 --failed "$AUDIT_FAILED" --cost 0 --elapsed "$RUN_ELAPSED"
+
+# Sum per-platform STATS_JSON lines emitted by stats.py into log_run.py flags so
+# the dashboard Job History row shows real counters (scanned/checked/changed/
+# replies-refreshed/removed) instead of the legacy posted=<active_count> mush.
+# Each platform's stats.py print is followed by one `STATS_JSON: {...}` line;
+# we read them all from $LOG_FILE and aggregate by kind. Missing keys default to
+# 0 so the existing log_run.py flag surface stays unchanged.
+read -r SCANNED CHECKED CHANGED DELETED ERRORS REPLIES_REFRESHED REPLIES_FRESH THREADS_SCANNED THREADS_WRITTEN <<<"$(
+    python3 - "$LOG_FILE" <<'PY'
+import json, sys, re
+log_path = sys.argv[1]
+agg = dict(scanned=0, checked=0, changed=0, deleted=0, errors=0,
+           replies_refreshed=0, replies_fresh=0,
+           threads_scanned=0, threads_written=0)
+try:
+    with open(log_path) as f:
+        for line in f:
+            m = re.search(r"STATS_JSON:\s*(\{.*\})\s*$", line)
+            if not m:
+                continue
+            try:
+                d = json.loads(m.group(1))
+            except Exception:
+                continue
+            kind = d.get("kind")
+            if kind == "posts":
+                agg["scanned"] += int(d.get("total", 0) or 0)
+                agg["checked"] += int(d.get("checked", 0) or 0)
+                agg["changed"] += int(d.get("changed", 0) or 0)
+                agg["deleted"] += int(d.get("deleted", 0) or 0) + int(d.get("removed", 0) or 0)
+                agg["errors"]  += int(d.get("errors", 0) or 0)
+            elif kind == "replies":
+                agg["replies_refreshed"] += int(d.get("updated", 0) or 0)
+                agg["replies_fresh"]     += int(d.get("fresh", 0) or 0)
+            elif kind == "thread_snapshots":
+                agg["threads_scanned"] += int(d.get("scanned", 0) or 0)
+                agg["threads_written"] += int(d.get("written", 0) or 0)
+except FileNotFoundError:
+    pass
+print(agg["scanned"], agg["checked"], agg["changed"], agg["deleted"],
+      agg["errors"], agg["replies_refreshed"], agg["replies_fresh"],
+      agg["threads_scanned"], agg["threads_written"])
+PY
+)"
+SCANNED="${SCANNED:-0}"
+CHECKED="${CHECKED:-0}"
+CHANGED="${CHANGED:-0}"
+DELETED="${DELETED:-0}"
+ERRORS="${ERRORS:-0}"
+REPLIES_REFRESHED="${REPLIES_REFRESHED:-0}"
+REPLIES_FRESH="${REPLIES_FRESH:-0}"
+THREADS_SCANNED="${THREADS_SCANNED:-0}"
+THREADS_WRITTEN="${THREADS_WRITTEN:-0}"
+
+# Roll API errors from stats.py into the dashboard `failed` pill alongside
+# step-exit counts (same convention stats.sh uses).
+AUDIT_FAILED=$(( AUDIT_FAILED + ERRORS ))
+
+log "Per-run counters: scanned=$SCANNED checked=$CHECKED changed=$CHANGED removed=$DELETED errors=$ERRORS replies_refreshed=$REPLIES_REFRESHED replies_fresh=$REPLIES_FRESH thread_snapshots_written=$THREADS_WRITTEN"
+
+python3 "$REPO_DIR/scripts/log_run.py" \
+    --script "$SCRIPT_TAG" \
+    --posted 0 \
+    --skipped 0 \
+    --failed "$AUDIT_FAILED" \
+    --replies-refreshed "$REPLIES_REFRESHED" \
+    --checked "$CHECKED" \
+    --updated "$CHANGED" \
+    --removed "$DELETED" \
+    --scanned "$SCANNED" \
+    --changed "$CHANGED" \
+    --cost 0 \
+    --elapsed "$RUN_ELAPSED"
 
 log "=== Audit Pipeline complete (${LOG_TAG}): $(date) ==="
 
