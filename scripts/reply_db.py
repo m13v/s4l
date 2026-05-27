@@ -172,3 +172,112 @@ elif cmd == "status":
     counts = ((resp or {}).get("data") or {}).get("counts") or []
     for row in counts:
         print(f"{row.get('status', '')} {row.get('count', 0)}")
+elif cmd == "blocklist":
+    # reply_db.py blocklist <subcmd> ...
+    #
+    # The escape hatch for the engagement-loop / bot defense. The Twitter,
+    # LinkedIn, and GitHub engage prompts call:
+    #   blocklist add <platform> <handle> --reason "<one-line judgment>"
+    #     [--classification bot|engagement_loop] [--severity hard|soft]
+    #     [--source-reply-id N]
+    # when the model identifies a handle that should be permanently
+    # filtered. Future candidates from the same handle are dropped silently
+    # at /api/v1/replies POST time (server-side gate). See
+    # migrations/2026-05-27_author_blocklist.sql for the full design.
+    #
+    # Also exposes:
+    #   blocklist list [platform]   -> print active blocks for the install
+    #   blocklist remove <platform> <handle>
+    #   blocklist check <platform> <handle>  -> exit 0 if blocked, 1 if not
+    from http_api import api_get, api_post
+    sub = sys.argv[2] if len(sys.argv) > 2 else None
+    if sub == "add":
+        # blocklist add <platform> <handle> --reason "..." [opts]
+        platform = sys.argv[3]
+        handle = sys.argv[4]
+        # naive arg parsing: --flag value pairs after position 5
+        opts = {}
+        i = 5
+        while i < len(sys.argv):
+            key = sys.argv[i]
+            if key.startswith("--") and i + 1 < len(sys.argv):
+                opts[key[2:].replace("-", "_")] = sys.argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        body = {
+            "platform": platform,
+            "handle": handle,
+            "reason": opts.get("reason") or "engage prompt flagged",
+            "classification": opts.get("classification", "bot"),
+            "severity": opts.get("severity", "hard"),
+            "added_by": opts.get("added_by", "engage_llm"),
+            "source_session_id": CLAUDE_SESSION_ID,
+        }
+        if opts.get("source_reply_id"):
+            try:
+                body["source_reply_id"] = int(opts["source_reply_id"])
+            except (TypeError, ValueError):
+                pass
+        if opts.get("project"):
+            body["project"] = opts["project"]
+        resp = api_post("/api/v1/blocklist", body=body)
+        data = (resp or {}).get("data") or {}
+        action = data.get("action", "?")
+        row = data.get("row") or {}
+        print(f"ok blocklist {action} {row.get('platform', platform)}/{row.get('handle', handle)} severity={row.get('severity', '?')}")
+    elif sub == "list":
+        platform = sys.argv[3] if len(sys.argv) > 3 else None
+        query = {"platform": platform} if platform else None
+        resp = api_get("/api/v1/blocklist", query=query)
+        rows = ((resp or {}).get("data") or {}).get("rows") or []
+        if not rows:
+            print("(no active blocks)")
+        for r in rows:
+            print(
+                f"{r.get('platform','')} @{r.get('handle','')} "
+                f"sev={r.get('severity','?')} "
+                f"cls={r.get('classification','?')} "
+                f"by={r.get('added_by','?')} "
+                f"hits={r.get('hit_count', 0)} "
+                f"reason={(r.get('reason') or '')[:80]}"
+            )
+    elif sub == "remove":
+        import urllib.request, urllib.parse
+        from identity import get_identity_header
+        platform = sys.argv[3]
+        handle = sys.argv[4].lstrip("@").lower()
+        url = f"{API_BASE}/api/v1/blocklist/{urllib.parse.quote(platform)}/{urllib.parse.quote(handle)}"
+        req = urllib.request.Request(
+            url,
+            method="DELETE",
+            headers={"x-installation": get_identity_header()},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+            print(f"ok removed {platform}/{handle}")
+        except Exception as e:
+            raise SystemExit(f"DELETE {url} failed: {e}")
+    elif sub == "check":
+        platform = sys.argv[3]
+        handle = sys.argv[4].lstrip("@").lower()
+        resp = api_get(
+            "/api/v1/blocklist",
+            query={"platform": platform},
+        )
+        rows = ((resp or {}).get("data") or {}).get("rows") or []
+        match = next(
+            (r for r in rows if (r.get("handle") or "").lower() == handle and r.get("severity") == "hard"),
+            None,
+        )
+        if match:
+            print(f"BLOCKED {platform}/{handle} cls={match.get('classification','?')} reason={(match.get('reason') or '')[:100]}")
+            sys.exit(0)
+        else:
+            print(f"not blocked {platform}/{handle}")
+            sys.exit(1)
+    else:
+        raise SystemExit(
+            "usage: reply_db.py blocklist {add|list|remove|check} ..."
+        )
