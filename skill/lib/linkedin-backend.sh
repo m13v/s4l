@@ -186,8 +186,9 @@ ensure_linkedin_browser_for_backend() {
                 fi
                 ;;
             Darwin)
-                # Offset slightly from Twitter's window so they don't stack.
-                _extra+=(--window-position="${BH_LINKEDIN_WINDOW_POS:-3042,40}")
+                # Default position captured 2026-05-26 from the user's
+                # secondary monitor; overridable via BH_LINKEDIN_WINDOW_POS.
+                _extra+=(--window-position="${BH_LINKEDIN_WINDOW_POS:-3814,-1050}")
                 _extra+=(--window-size="${BH_LINKEDIN_WINDOW_SIZE:-1024,1013}")
                 ;;
         esac
