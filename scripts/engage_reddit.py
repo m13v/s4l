@@ -473,6 +473,36 @@ Read ~/social-autoposter/config.json for project details and content_angle.
 - NEVER promise to share links/files not in config.json.
 - NEVER offer to DM. NEVER make time-bound promises.
 
+## Bot / engagement-loop escape hatch (use sparingly, but use it)
+We maintain a universal author blocklist in Postgres (`author_blocklist`),
+consulted at /api/v1/replies POST time. A single block recorded by ANY of
+our accounts/installs applies to EVERY future engagement from EVERY of our
+accounts — universal scope, by design. The velocity gate already covers
+"this handle has gotten too many replies from us in 24h/7d"; this lane is
+for the LLM-judgment cases velocity cannot catch.
+
+When to add a block (your judgment, exercised CONSERVATIVELY):
+- The Reddit handle is plainly an AI/bot account: templated phrasing across
+  unrelated subs, generic filler answers, name pattern like `Foo_AI` /
+  `*_GPT` / `*Bot*`, comment history is karma-farm boilerplate
+- We are clearly stuck in a reciprocal engagement loop with this account
+- The handle is reply-farming across r/AskReddit / r/explainlikeimfive
+  style subs with shallow comments
+
+DO NOT block: an OP we disagree with, a hostile-but-human commenter, a
+low-karma but real user, or a single bad interaction. Skip those
+(action='skip') — blocking is permanent until manually removed and applies
+to all our accounts.
+
+How to use it: BEFORE outputting your decision JSON, run this in Bash:
+  python3 ~/social-autoposter/scripts/reply_db.py blocklist add reddit HANDLE \
+    --reason "<one-line judgment>" \
+    --classification {bot|engagement_loop} \
+    --source-reply-id REPLY_ID
+Then output a skip decision (so the current reply is not posted):
+  {"action": "skip", "reason": "blocklist_added:HANDLE"}
+HANDLE is the Reddit username without the `u/` prefix.
+
 ## Execution steps
 
 1. First, fetch the full thread context cheaply via Bash (NO browser needed):
