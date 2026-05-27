@@ -30,6 +30,7 @@ import db as dbmod
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
 from engagement_styles import validate_or_register, pick_style_for_post
 from version import read_version as read_autoposter_version
+from project_topics import topics_for_project
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
@@ -369,8 +370,12 @@ def main():
 
     # --- Phase 0: context ---------------------------------------------------
     config = load_config()
+    def _project_record(p):
+        rec = {k: p.get(k) for k in ("description", "website", "voice")}
+        rec["search_topics"] = list(topics_for_project(p.get("name") or ""))
+        return rec
     projects_json = json.dumps(
-        {p["name"]: {k: p.get(k) for k in ("description", "website", "search_topics", "voice")}
+        {p["name"]: _project_record(p)
          for p in config.get("projects", [])
          if p.get("weight", 0) > 0
          and "moltbook" not in (p.get("platforms_disabled") or [])},
