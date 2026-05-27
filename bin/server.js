@@ -18960,20 +18960,25 @@ async function loadSearchTopicsStats(force) {
   const dudsOnlyEl = document.getElementById('search-topics-stats-duds-only');
   const dudsOnly = !!(dudsOnlyEl && dudsOnlyEl.checked);
   const key  = days + '|' + plat + '|' + proj + '|' + (dudsOnly ? '1' : '0');
-  if (_searchTopicsStatsLoadedFor === key && !force) return;
-  if (!force) {
-    const cached = statsCacheGet('searchTopics', key);
-    if (cached) {
-      renderSearchTopicsStats(cached);
-      _searchTopicsStatsLoadedFor = key;
-      return;
-    }
+  const cached = force ? null : statsCacheGetEntry('searchTopics', key);
+  if (cached && cached.fresh) {
+    renderSearchTopicsStats(cached.payload);
+    _searchTopicsStatsLoadedFor = key;
+    return;
   }
+  const haveStale = !!cached;
+  if (haveStale) {
+    renderSearchTopicsStats(cached.payload);
+    _searchTopicsStatsLoadedFor = key;
+  }
+  if (!haveStale && _searchTopicsStatsLoadedFor === key && !force) return;
   _searchTopicsStatsLoading = true;
   const totalEl = document.getElementById('search-topics-stats-total');
   const body = document.getElementById('search-topics-stats-body');
-  if (totalEl) totalEl.textContent = 'loading\u2026';
-  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading\u2026';
+    if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  }
   try {
     const params = ['days=' + days];
     if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
@@ -18986,7 +18991,7 @@ async function loadSearchTopicsStats(force) {
     renderSearchTopicsStats(data);
     _searchTopicsStatsLoadedFor = key;
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _searchTopicsStatsLoading = false;
   }
@@ -19003,20 +19008,25 @@ async function loadSearchQueriesStats(force) {
   const dudsOnlyEl = document.getElementById('search-queries-stats-duds-only');
   const dudsOnly = !!(dudsOnlyEl && dudsOnlyEl.checked);
   const key  = days + '|' + plat + '|' + proj + '|' + (dudsOnly ? '1' : '0');
-  if (_searchQueriesStatsLoadedFor === key && !force) return;
-  if (!force) {
-    const cached = statsCacheGet('searchQueries', key);
-    if (cached) {
-      renderSearchQueriesStats(cached);
-      _searchQueriesStatsLoadedFor = key;
-      return;
-    }
+  const cached = force ? null : statsCacheGetEntry('searchQueries', key);
+  if (cached && cached.fresh) {
+    renderSearchQueriesStats(cached.payload);
+    _searchQueriesStatsLoadedFor = key;
+    return;
   }
+  const haveStale = !!cached;
+  if (haveStale) {
+    renderSearchQueriesStats(cached.payload);
+    _searchQueriesStatsLoadedFor = key;
+  }
+  if (!haveStale && _searchQueriesStatsLoadedFor === key && !force) return;
   _searchQueriesStatsLoading = true;
   const totalEl = document.getElementById('search-queries-stats-total');
   const body = document.getElementById('search-queries-stats-body');
-  if (totalEl) totalEl.textContent = 'loading\u2026';
-  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading\u2026';
+    if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  }
   try {
     const params = ['days=' + days];
     if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
@@ -19029,7 +19039,7 @@ async function loadSearchQueriesStats(force) {
     renderSearchQueriesStats(data);
     _searchQueriesStatsLoadedFor = key;
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _searchQueriesStatsLoading = false;
   }
