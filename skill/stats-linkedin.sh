@@ -70,8 +70,8 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=120          # in-page scrolls (bumped 80->120 on 2026-05-27 after 80-scroll fire hit stagnant_ticks=1, still depth-limited)
-SCRAPER_TIMEOUT_SEC=900  # whole scraper run cap (~10min scroll + overhead at 120 scrolls; projected ~720s, safe)
+MAX_SCROLLS=1000          # in-page scrolls. Generous upper bound; JS-side `stagnant >= 8` early-stop is the true ceiling, max_scrolls just caps runaway.
+SCRAPER_TIMEOUT_SEC=1500  # whole scraper run cap. 1500s = ~325 ticks at 4.6s/tick — enough headroom for natural bail wherever LinkedIn's tail ends.
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
