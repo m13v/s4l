@@ -1572,7 +1572,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   const candidateRows = await pq(
     "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
     "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id, " +
-    "       matched_project, tweet_url, cycle_variant " +
+    "       matched_project, tweet_url, cycle_variant, virality_score " +
     "FROM twitter_candidates " +
     "WHERE discovered_at >= $1::timestamp OR posted_at >= $1::timestamp OR t1_checked_at >= $1::timestamp OR status='pending'",
     [since]
@@ -1656,6 +1656,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
       matched_project: r.matched_project || '',
       tweet_url: r.tweet_url || '',
       cycle_variant: r.cycle_variant || null,
+      virality_score: (r.virality_score == null) ? null : Number(r.virality_score),
     };
   });
 
@@ -1729,6 +1730,14 @@ async function enrichPostCommentsTwitterRuns(runs) {
     }
     let candidatesPassed = 0;
     let salvagePosted = 0;
+    // Virality of posted candidates this batch. Median is robust to the
+    // one-big-account outlier (e.g. a 451k-follower tweet scoring 2315 while
+    // the rest sit at ~50); mean would be dominated by it. Surfaced inline in
+    // the result pills via renderResult() as `viral` — a single quality
+    // signal answering "what's the median virality of threads we actually
+    // replied to this run?" (calibrated against the prompt rule
+    // `Virality >= 100 = strong, ~36x reply views vs [0-10) bucket`).
+    const postedViralityScores = [];
     // Project labels this cycle actually worked on, surfaced at the end of the
     // pill row (mirrors enrichPostCommentsRedditRuns). Source is the
     // twitter_candidates.matched_project values for rows tied to this run's
@@ -1756,6 +1765,9 @@ async function enrichPostCommentsTwitterRuns(runs) {
       if (!runVariant && c.cycle_variant) runVariant = c.cycle_variant;
       if (c.status === 'posted') {
         posted++;
+        if (c.virality_score != null && Number.isFinite(c.virality_score)) {
+          postedViralityScores.push(c.virality_score);
+        }
         // Salvage signature: candidate's discovered_at predates this cycle's
         // start by enough that it must have been pulled in by Phase 0 (which
         // rewrites batch_id to the current BATCH_ID). Tolerance covers Phase 1
@@ -1764,6 +1776,18 @@ async function enrichPostCommentsTwitterRuns(runs) {
           salvagePosted++;
         }
       } else if (c.status === 'expired') expired++;
+    }
+    // Inline median (no helper exists yet in this file). Returns null on
+    // empty input so the pill is suppressed for runs that posted nothing.
+    let viralityMedianPosted = null;
+    let viralityMaxPosted = null;
+    if (postedViralityScores.length) {
+      const sorted = postedViralityScores.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      viralityMedianPosted = (sorted.length % 2)
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
+      viralityMaxPosted = sorted[sorted.length - 1];
     }
     const candidatesDropped = Math.max(0, candidatesRaw - candidatesPassed);
     // Phase 0 salvage attempt count from the cycle log — what was actually
@@ -1957,6 +1981,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
       // posts.search_topic when the candidate is posted. Aggregated here as
       // `topic(count)` strings, sorted desc, parallel to styles_used.
       topics_used: topicsUsedTx,
+      // Median virality_score across candidates this batch posted. Anchored
+      // against the prompt rule `Virality >= 100 = strong`; ~36x reply-views
+      // lift vs the [0-10) bucket per 30d cohort analysis. Null when posted=0.
+      virality_median_posted: viralityMedianPosted,
+      virality_max_posted: viralityMaxPosted,
+      virality_posted_n: postedViralityScores.length,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
@@ -10614,6 +10644,11 @@ function renderResult(run) {
       '• **Δ≥10: ' + aboveFloor + '** — crossed POST_LIMIT=3 review cap' + NL +
       '• **posted ' + posted + '** — shipped' + NL +
       '• **failed ' + failed + '** — post errors' + NL +
+      ((r.virality_posted_n || 0) > 0
+        ? '• **viral ' + (r.virality_median_posted || 0).toFixed(1) + '** — median virality_score of posted ' +
+          '(max ' + (r.virality_max_posted || 0).toFixed(1) + ', n=' + (r.virality_posted_n || 0) + '); ' +
+          'rule of thumb: ≥100 = strong, ~36x reply views vs [0-10) bucket' + NL
+        : '') +
       NL +
       '**Pending end-of-run:** ' + queue + NL +
       '  start ' + queueStart + ', +' + qAdded + ' / -' + qDrained + ' = ' +
@@ -10631,6 +10666,15 @@ function renderResult(run) {
         pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#a78bfa' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
+        ((r.virality_posted_n || 0) > 0
+          ? pill(
+              'viral',
+              (r.virality_median_posted || 0).toFixed(1),
+              (r.virality_median_posted || 0) >= 100 ? '#22c55e'
+                : (r.virality_median_posted || 0) >= 10 ? 'var(--text)'
+                : 'var(--muted)'
+            )
+          : '') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
           ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
