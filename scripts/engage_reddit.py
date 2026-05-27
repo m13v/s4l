@@ -38,6 +38,7 @@ from engagement_styles import (
     get_styles_prompt,
     get_content_rules,
     get_anti_patterns,
+    get_voice_relationship_rule,
     validate_or_register,
     pick_style_for_post,
 )
@@ -454,10 +455,11 @@ Read ~/social-autoposter/config.json for project details and content_angle.
 {recent_context}{top_context}{voice_block}{history_block}{callout_block}
 ## Content rules
 {get_content_rules("reddit")}
-- First person has TWO valid forms per the GROUNDING RULE below. Lane 1: open with a disclosure phrase ("hypothetically", "imagine someone running this", "scenario:") and then invent freely. Lane 2: stay first-person only when every specific is grounded in content_angle / voice / messaging in config.json, or drop the specific and pattern-frame ("the part that breaks down is..."). Never undisclosed first-person with invented numbers / places / programs.
 - Vary openings. Don't always start with credentials.
 
 {get_styles_prompt(style_platform, context="replying", assignment=style_assignment)}
+
+{get_voice_relationship_rule()}
 
 {get_anti_patterns()}
 
