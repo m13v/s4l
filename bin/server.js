@@ -5009,6 +5009,224 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // -----------------------------------------------------------------------
+  // /api/blocklist — Live engagement-loop / bot exclusion list. Admins only.
+  // Two sources of writes:
+  //   1) /api/v1/replies POST gate (server-side, automatic):
+  //        velocity_auto rows when (24h>=6 OR 7d>=15) outbound replies to
+  //        a single handle.
+  //   2) reply_db.py blocklist add  (LLM-side, judgment):
+  //        engage_llm rows when the model flags a handle as bot/loop.
+  //
+  // The dashboard view shows ALL installs combined; per-row install_id and
+  // added_by are exposed so an operator can see who/what triggered each
+  // block. See migrations/2026-05-27_author_blocklist.sql for the schema.
+  // -----------------------------------------------------------------------
+
+  // GET /api/blocklist?platform=&severity=&include_expired=&limit=200
+  if (p === '/api/blocklist' && req.method === 'GET') {
+    if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    return (async () => {
+      const url = new URL(req.url, 'http://localhost');
+      const platform = (url.searchParams.get('platform') || '').toLowerCase();
+      const severity = (url.searchParams.get('severity') || '').toLowerCase();
+      const includeExpired = url.searchParams.get('include_expired') === 'true';
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 1), 500);
+      // Optional filter by installation_id so the operator can drill into
+      // one install's view. Absent = show everything.
+      const installId = (url.searchParams.get('installation_id') || '').trim();
+      const params = [];
+      const clauses = [];
+      if (platform) { params.push(platform); clauses.push('platform = $' + params.length); }
+      if (severity) { params.push(severity); clauses.push('severity = $' + params.length); }
+      if (installId) { params.push(installId); clauses.push('installation_id = $' + params.length); }
+      if (!includeExpired) clauses.push('(expires_at IS NULL OR expires_at > NOW())');
+      const where = clauses.length ? ('WHERE ' + clauses.join(' AND ')) : '';
+      params.push(limit);
+      const rows = await pq(
+        'SELECT installation_id, platform, handle, classification, severity, ' +
+        '       reason, added_by, source_reply_id, source_session_id, project, ' +
+        '       expires_at, hit_count, last_hit_at, created_at, updated_at ' +
+        '  FROM author_blocklist ' + where + ' ' +
+        ' ORDER BY created_at DESC LIMIT $' + params.length,
+        params,
+      );
+      return json(res, { rows: rows || [], count: (rows || []).length });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // POST /api/blocklist
+  // Body: { installation_id, platform, handle, classification, severity, reason, ... }
+  // Required: installation_id (so we know which install owns the block), platform, handle, reason.
+  if (p === '/api/blocklist' && req.method === 'POST') {
+    if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    return readBody(req).then(async raw => {
+      let body;
+      try { body = JSON.parse(raw || '{}'); }
+      catch { return json(res, { error: 'invalid JSON' }, 400); }
+      const installId = String(body.installation_id || '').trim();
+      const platform = String(body.platform || '').trim().toLowerCase();
+      const handle = String(body.handle || '').trim().replace(/^@+/, '').toLowerCase();
+      const reason = String(body.reason || '').trim();
+      const classification = String(body.classification || 'manual_block').trim().toLowerCase();
+      const severity = String(body.severity || 'hard').trim().toLowerCase();
+      const project = body.project ? String(body.project).trim() : null;
+      const expiresAt = body.expires_at ? String(body.expires_at) : null;
+      if (!installId) return json(res, { error: 'installation_id required' }, 400);
+      if (!platform) return json(res, { error: 'platform required' }, 400);
+      if (!handle) return json(res, { error: 'handle required' }, 400);
+      if (!reason) return json(res, { error: 'reason required' }, 400);
+      if (!['hard', 'soft'].includes(severity)) {
+        return json(res, { error: 'severity must be hard | soft' }, 400);
+      }
+      if (!['bot', 'engagement_loop', 'manual_block', 'velocity_auto'].includes(classification)) {
+        return json(res, { error: 'invalid classification' }, 400);
+      }
+      const rows = await pq(
+        'INSERT INTO author_blocklist (' +
+        '  installation_id, platform, handle, classification, severity, ' +
+        '  reason, added_by, project, expires_at' +
+        ') VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz) ' +
+        'ON CONFLICT (installation_id, platform, handle) DO UPDATE SET ' +
+        '  severity = CASE WHEN author_blocklist.severity = $5 OR EXCLUDED.severity = $5 THEN ' +
+        "    (CASE WHEN $5 = 'hard' OR author_blocklist.severity = 'hard' THEN 'hard' ELSE 'soft' END) " +
+        '    ELSE author_blocklist.severity END, ' +
+        '  classification = EXCLUDED.classification, ' +
+        "  reason = author_blocklist.reason || E'\\n--\\n' || EXCLUDED.reason, " +
+        '  project = COALESCE(EXCLUDED.project, author_blocklist.project), ' +
+        '  expires_at = COALESCE(EXCLUDED.expires_at, author_blocklist.expires_at), ' +
+        '  updated_at = NOW() ' +
+        'RETURNING *, (xmax = 0) AS inserted',
+        [installId, platform, handle, classification, severity, reason, 'dashboard', project, expiresAt],
+      );
+      const row = rows && rows[0];
+      return json(res, { row, action: row && row.inserted ? 'inserted' : 'updated' }, row && row.inserted ? 201 : 200);
+    }).catch(e => json(res, { error: e.message }, 500));
+  }
+
+  // PATCH /api/blocklist/:platform/:handle
+  // DELETE /api/blocklist/:platform/:handle
+  // installation_id provided via query string (?installation_id=...) since
+  // the path can't carry a UUID cleanly alongside the platform/handle pair.
+  {
+    const m = p.match(/^\/api\/blocklist\/([a-z0-9_]+)\/(.+)$/);
+    if (m && (req.method === 'PATCH' || req.method === 'DELETE')) {
+      if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
+      const platform = m[1];
+      const handle = decodeURIComponent(m[2]).replace(/^@+/, '').toLowerCase();
+      const url = new URL(req.url, 'http://localhost');
+      const installId = (url.searchParams.get('installation_id') || '').trim();
+      if (!installId) return json(res, { error: 'installation_id query param required' }, 400);
+      if (req.method === 'DELETE') {
+        return (async () => {
+          const rows = await pq(
+            'DELETE FROM author_blocklist ' +
+            ' WHERE installation_id = $1 AND platform = $2 AND handle = $3 ' +
+            'RETURNING *',
+            [installId, platform, handle],
+          );
+          if (!rows || rows.length === 0) return json(res, { error: 'not found' }, 404);
+          return json(res, { row: rows[0], deleted: true });
+        })().catch(e => json(res, { error: e.message }, 500));
+      }
+      // PATCH
+      return readBody(req).then(async raw => {
+        let body;
+        try { body = JSON.parse(raw || '{}'); }
+        catch { return json(res, { error: 'invalid JSON' }, 400); }
+        const sev = body.severity ? String(body.severity).toLowerCase() : null;
+        if (sev && !['hard', 'soft'].includes(sev)) return json(res, { error: 'invalid severity' }, 400);
+        const cls = body.classification ? String(body.classification).toLowerCase() : null;
+        if (cls && !['bot', 'engagement_loop', 'manual_block', 'velocity_auto'].includes(cls)) {
+          return json(res, { error: 'invalid classification' }, 400);
+        }
+        const reason = body.reason ? String(body.reason) : null;
+        const project = body.project ? String(body.project) : null;
+        // expires_at semantics: undefined = unchanged, null = clear, string = set.
+        const clearExpiry = Object.prototype.hasOwnProperty.call(body, 'expires_at') && body.expires_at === null;
+        const setExpiry = body.expires_at && typeof body.expires_at === 'string' ? body.expires_at : null;
+        const rows = await pq(
+          'UPDATE author_blocklist SET ' +
+          '  severity       = COALESCE($4::text, severity), ' +
+          '  classification = COALESCE($5::text, classification), ' +
+          '  reason         = COALESCE($6::text, reason), ' +
+          '  project        = COALESCE($7::text, project), ' +
+          '  expires_at     = CASE ' +
+          '                     WHEN $8::boolean THEN NULL ' +
+          '                     WHEN $9::text IS NOT NULL THEN $9::timestamptz ' +
+          '                     ELSE expires_at END, ' +
+          '  updated_at     = NOW() ' +
+          ' WHERE installation_id = $1 AND platform = $2 AND handle = $3 ' +
+          'RETURNING *',
+          [installId, platform, handle, sev, cls, reason, project, clearExpiry, setExpiry],
+        );
+        if (!rows || rows.length === 0) return json(res, { error: 'not found' }, 404);
+        return json(res, { row: rows[0] });
+      }).catch(e => json(res, { error: e.message }, 500));
+    }
+  }
+
+  // GET /api/blocklist/suspects?days=7&platform=&min_replies=3&limit=50
+  // The "social sibling creeper" derived view: top reciprocal authors in
+  // the last N days who AREN'T already hard-blocked. Surfaces the next
+  // engagement-loop account before the velocity gate auto-fires.
+  if (p === '/api/blocklist/suspects' && req.method === 'GET') {
+    if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    return (async () => {
+      const url = new URL(req.url, 'http://localhost');
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '7', 10) || 7, 1), 90);
+      const minReplies = Math.max(parseInt(url.searchParams.get('min_replies') || '3', 10) || 3, 1);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+      let platform = (url.searchParams.get('platform') || '').toLowerCase();
+      // Replies table uses 'x' for Twitter; canonicalize.
+      if (platform === 'twitter') platform = 'x';
+      const installFilter = (url.searchParams.get('installation_id') || '').trim() || null;
+      const rows = await pq(
+        "WITH our_replies AS (" +
+        "  SELECT LOWER(their_author) AS handle, platform, install_id, replied_at, claude_session_id " +
+        "    FROM replies " +
+        "   WHERE replied_at IS NOT NULL " +
+        "     AND replied_at >= NOW() - ($1::int || ' days')::interval " +
+        "     AND their_author IS NOT NULL AND status = 'replied' " +
+        "     AND ($2::text IS NULL OR platform = $2) " +
+        "     AND ($3::uuid IS NULL OR install_id = $3) " +
+        "), inbound AS (" +
+        "  SELECT LOWER(their_author) AS handle, platform, install_id, COUNT(*)::int AS inbound_count " +
+        "    FROM replies " +
+        "   WHERE discovered_at >= NOW() - ($1::int || ' days')::interval " +
+        "     AND their_author IS NOT NULL " +
+        "     AND ($2::text IS NULL OR platform = $2) " +
+        "     AND ($3::uuid IS NULL OR install_id = $3) " +
+        "   GROUP BY 1, 2, 3" +
+        "), aggregated AS (" +
+        "  SELECT o.handle, o.platform, o.install_id, COUNT(*)::int AS our_replies_count, " +
+        "         COALESCE(MAX(i.inbound_count), 0)::int AS inbound_count, " +
+        "         MAX(o.replied_at) AS last_engagement_at, " +
+        "         (ARRAY_AGG(o.claude_session_id) FILTER (WHERE o.claude_session_id IS NOT NULL))[1] AS sample_session_id " +
+        "    FROM our_replies o LEFT JOIN inbound i USING (handle, platform, install_id) " +
+        "   GROUP BY 1, 2, 3" +
+        ") " +
+        "SELECT a.handle, a.platform, a.install_id, a.our_replies_count, a.inbound_count, " +
+        "       CASE WHEN a.our_replies_count = 0 THEN NULL " +
+        "            ELSE (a.inbound_count::numeric / a.our_replies_count)::numeric(6,2) END AS reciprocity_ratio, " +
+        "       a.last_engagement_at, a.sample_session_id, " +
+        "       EXISTS (SELECT 1 FROM author_blocklist b WHERE b.installation_id = a.install_id " +
+        "                AND b.platform = a.platform AND b.handle = a.handle AND b.severity = 'hard' " +
+        "                AND (b.expires_at IS NULL OR b.expires_at > NOW())) AS already_blocked " +
+        "  FROM aggregated a " +
+        " WHERE a.our_replies_count >= $4 " +
+        " ORDER BY a.our_replies_count DESC, a.last_engagement_at DESC " +
+        " LIMIT $5",
+        [days, platform || null, installFilter, minReplies, limit],
+      );
+      const all = rows || [];
+      // Dashboard shows unblocked first; client can request include_blocked=true if needed
+      const includeBlocked = url.searchParams.get('include_blocked') === 'true';
+      const visible = includeBlocked ? all : all.filter(r => !r.already_blocked);
+      return json(res, { rows: visible, total_with_blocked: all.length, window_days: days, min_replies: minReplies });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
   // POST /api/activity/mark-deletion - flag an activity row for manual review
   // and email i@m13v.com with the details. We do NOT actually delete the
   // underlying post/reply/mention; the user reviews the email and decides.
