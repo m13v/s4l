@@ -15,10 +15,15 @@ that broke every launchd-fired twitter script.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 
-CDP_URL = "http://127.0.0.1:9555"
+# Port can be overridden via BH_CLEANUP_PORT so the LinkedIn backend
+# (skill/lib/linkedin-backend.sh) can reuse this same cleanup script against
+# its own harness Chrome on 9556. Default 9555 keeps Twitter callers unchanged.
+CDP_PORT = int(os.environ.get("BH_CLEANUP_PORT", "9555"))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
 
 def main() -> int:
