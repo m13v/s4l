@@ -44,12 +44,22 @@ Failure shapes:
     {"ok": false, "error": "session_invalid", "url": "..."}
     {"ok": false, "error": "wrong_page", "url": "...", "title": "..."}
     {"ok": false, "error": "captcha_or_checkpoint", "detail": "..."}
+    {"ok": false, "error": "early_stop_no_records",
+                            "early_stop_reason": "..."}
     {"ok": false, "error": "navigation_failed", "detail": "..."}
     {"ok": false, "error": "profile_locked", "detail": "..."}
     {"ok": false, "error": "evaluate_failed", "detail": "..."}
     {"ok": false, "error": "exception", "detail": "..."}
 
-Exit 0 on ok, 1 on error.
+Partial-success shape (records harvested before a challenge fired
+mid-scroll). 2026-05-26: added so the writer can still apply real
+stats deltas instead of dropping a whole fire's worth of work on a
+late-injected captcha:
+    {"ok": true, "partial": true,
+     "early_stop_reason": "title:security verification | url:.../checkpoint",
+     "records": [...], "record_count": N, ...}
+
+Exit 0 on ok (including partial), 1 on error.
 """
 
 from __future__ import annotations
@@ -299,6 +309,25 @@ class _DebugRecorder:
                 url = response.url
                 if "linkedin.com" not in url:
                     return
+                # Rate-limit canary. LinkedIn rarely returns a bare 429 —
+                # it usually redirects to /authwall or injects a captcha
+                # overlay (both caught by the in-JS detectChallengeInDom
+                # gate). But when a raw 429 does fire, surface it as a
+                # grep-able stderr marker so the orchestrator log shows
+                # the canary even when the run continues. Also stamp
+                # meta.json so the in-bundle summary records it.
+                if response.status == 429:
+                    print(
+                        f"[scrape_linkedin] saw_429 url={url[:200]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    try:
+                        self.meta.setdefault("saw_429", []).append({
+                            "ts": _ts_ms(), "url": url[:200],
+                        })
+                    except Exception:
+                        pass
                 rec = {
                     "ts": _ts_ms(),
                     "status": response.status,
@@ -544,11 +573,73 @@ HARVEST_JS_TEMPLATE = r"""
     return added_this_tick;
   }
 
+  // Mid-scrape challenge detector. Pre-loop gates in Python catch the
+  // URL-redirect form (LinkedIn 302's to /authwall on stale session).
+  // This catches the DOM-overlay + title-change + URL-mutate forms
+  // LinkedIn can inject BETWEEN ticks (rate-limit captcha, security
+  // verification splash, "let's confirm it's you"). On detect, the
+  // tick loop breaks NOW and resolves with whatever records have been
+  // accumulated so far, plus an early_stop_reason so Python can mark
+  // the result partial and still feed records into the writer.
+  function detectChallengeInDom() {
+    try {
+      const u = (location.href || '').toLowerCase();
+      if (u.indexOf('/authwall') !== -1
+          || u.indexOf('/checkpoint') !== -1
+          || u.indexOf('/uas/login') !== -1) {
+        return 'url:' + u.slice(0, 200);
+      }
+      const title = (document.title || '').toLowerCase();
+      if (title.indexOf('security verification') !== -1
+          || title.indexOf('checkpoint') !== -1
+          || title.indexOf("let's do a quick") !== -1) {
+        return 'title:' + title.slice(0, 200);
+      }
+      const body = ((document.body && document.body.innerText) || '')
+                    .slice(0, 400).toLowerCase();
+      const bodyMarkers = ["let's do a quick security check",
+                           "let us do a quick security check",
+                           "verify you're a human",
+                           "press and hold",
+                           "we couldn't verify",
+                           "we want to make sure",
+                           "captcha"];
+      for (let i = 0; i < bodyMarkers.length; i++) {
+        if (body.indexOf(bodyMarkers[i]) !== -1) {
+          return 'body:' + bodyMarkers[i];
+        }
+      }
+    } catch (e) {
+      return null;
+    }
+    return null;
+  }
+
   let ticks = 0;
   let stagnant = 0;  // consecutive ticks with no new comments
   let lastScrollHeight = document.documentElement.scrollHeight;
 
   const tick = () => {
+    // Mid-scrape gate. If LinkedIn injected a challenge between ticks
+    // (captcha overlay, /checkpoint redirect, "security verification"),
+    // stop NOW with whatever we've already harvested rather than
+    // hammering through the wall. Partial > zero.
+    const challenge = detectChallengeInDom();
+    if (challenge) {
+      // Final best-effort harvest before bailing, in case the
+      // challenge overlay sits on top of still-rendered comments.
+      try { harvest(); } catch (e) { /* swallow */ }
+      resolve({
+        records: [...acc.values()],
+        ticks,
+        stagnant,
+        scroll_height_final: document.documentElement.scrollHeight,
+        ticks_log: ticksLog,
+        early_stop_reason: challenge,
+      });
+      return;
+    }
+
     const added = harvest();
     const sh = document.documentElement.scrollHeight;
     ticksLog.push({tick: ticks, added, total: acc.size,
@@ -583,6 +674,7 @@ HARVEST_JS_TEMPLATE = r"""
           stagnant,
           scroll_height_final: document.documentElement.scrollHeight,
           ticks_log: ticksLog,
+          early_stop_reason: null,
         });
       }, opts.settle_ms);
     }
