@@ -92,6 +92,22 @@ FEED_JSON="$LOG_DIR/stats-linkedin-feed-$(date +%Y%m%d_%H%M%S).json"
 POSTS_SUMMARY_JSON=$(mktemp -t fazm-li-posts-summary.XXXXXX).json
 SCRAPER_STDOUT=$(mktemp -t fazm-li-scrape.XXXXXX).json
 
+# Forensic-bundle directory. The scraper writes screenshots, html, cookies,
+# console.jsonl / navigation.jsonl / network.jsonl + a Python traceback on
+# any non-ok return path here, then tar.gz's it and prints the path to
+# stderr as `[scrape_linkedin] debug_bundle=<tarball>`. We grep that out of
+# the captured stderr below.
+#
+# On session_invalid / captcha_or_checkpoint specifically, we promote the
+# tarball to skill/logs/linkedin-debug-failures/ — that subdir is NOT swept
+# by the 14-day retention sweep at the end of this script. Permanent
+# archive so the next failure can be diff'd byte-for-byte against the last
+# known good/bad bundle.
+DEBUG_BUNDLE_BASE="$LOG_DIR/linkedin-debug"
+DEBUG_BUNDLE_DIR="$DEBUG_BUNDLE_BASE/$(date +%Y%m%d_%H%M%S)"
+DEBUG_FAILURES_DIR="$LOG_DIR/linkedin-debug-failures"
+mkdir -p "$DEBUG_BUNDLE_BASE" "$DEBUG_FAILURES_DIR"
+
 # 1. Acquire the linkedin-browser lock. Two CDP clients hammering the same
 #    DOM corrupt each other's evaluate() calls, so the lock matters even
 #    though we no longer launch a second Chrome.
@@ -107,6 +123,7 @@ acquire_lock "linkedin-browser" 1800
 
 # 2. Run the headed-Chromium scraper (single scrape, shared between writers).
 log "Launching headed Chromium scraper..."
+log "Debug bundle dir (pre-tar): $DEBUG_BUNDLE_DIR"
 SCRAPER_RC=0
 set +e
 SOCIAL_AUTOPOSTER_LINKEDIN_COMMENT_STATS=1 \
@@ -114,6 +131,7 @@ SOCIAL_AUTOPOSTER_LINKEDIN_COMMENT_STATS=1 \
     "$SCRAPER_PYTHON_BIN" "$REPO_DIR/scripts/scrape_linkedin_comment_stats.py" \
         --out "$FEED_JSON" \
         --max-scrolls "$MAX_SCROLLS" \
+        --debug-dir "$DEBUG_BUNDLE_DIR" \
     > "$SCRAPER_STDOUT" 2>&1
 SCRAPER_RC=$?
 set -e
@@ -124,6 +142,26 @@ rm -f "$HOME/.claude/linkedin-agent-lock.json"
 
 # Echo scraper output to log.
 cat "$SCRAPER_STDOUT" | tee -a "$LOG_FILE"
+
+# Surface the debug-bundle tarball path. The scraper writes a single
+# `[scrape_linkedin] debug_bundle=<path>` line to stderr right before exit;
+# grep it back out so it's visible in the orchestrator log without needing
+# to unpack the tarball.
+DEBUG_TARBALL=$(grep -m1 -E '^\[scrape_linkedin\] debug_bundle=' "$SCRAPER_STDOUT" | sed -E 's/^\[scrape_linkedin\] debug_bundle=//')
+if [ -n "$DEBUG_TARBALL" ] && [ -f "$DEBUG_TARBALL" ]; then
+    log "Debug bundle: $DEBUG_TARBALL"
+else
+    log "Debug bundle: <missing — scraper did not emit debug_bundle marker>"
+fi
+
+# Also surface the linkedin_browser mode line — this is the #1 signal for
+# answering "did we cdp_attach or cold_launch?" after a failure.
+BROWSER_MODE_LINE=$(grep -m1 -E '^\[linkedin_browser\] mode=' "$SCRAPER_STDOUT" || true)
+if [ -n "$BROWSER_MODE_LINE" ]; then
+    log "Browser mode: $BROWSER_MODE_LINE"
+else
+    log "Browser mode: <missing — _connect_to_running_or_launch never logged>"
+fi
 
 if [ "$SCRAPER_RC" -ne 0 ]; then
     log "ERROR: scraper exited rc=$SCRAPER_RC"
@@ -137,9 +175,21 @@ except Exception:
 " 2>/dev/null || echo "unknown")
     log "scraper error code: $SCRAPER_ERROR"
 
+    # Permanent archive of session_invalid / captcha tarballs. We never
+    # want to wake up to another 14-line "session_invalid" log file with
+    # no way to forensically inspect the DOM that triggered it. Keep these
+    # forever (or until the user manually cleans the dir).
     if [ "$SCRAPER_ERROR" = "session_invalid" ] \
        || [ "$SCRAPER_ERROR" = "captcha_or_checkpoint" ]; then
         log "SESSION_INVALID — abort run, do not retry."
+        if [ -n "$DEBUG_TARBALL" ] && [ -f "$DEBUG_TARBALL" ]; then
+            FAILURE_COPY="$DEBUG_FAILURES_DIR/$(basename "$DEBUG_TARBALL" .tar.gz)__${SCRAPER_ERROR}.tar.gz"
+            cp -p "$DEBUG_TARBALL" "$FAILURE_COPY" 2>/dev/null \
+                && log "Archived failure bundle: $FAILURE_COPY" \
+                || log "WARN: failed to archive failure bundle to $FAILURE_COPY"
+        else
+            log "WARN: no debug tarball available to archive for $SCRAPER_ERROR"
+        fi
     fi
 
     if [ ! -s "$FEED_JSON" ]; then
@@ -185,5 +235,15 @@ RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 rm -f "$POSTS_SUMMARY_JSON" "$SCRAPER_STDOUT"
 find "$LOG_DIR" -name "stats-linkedin-*.log"  -mtime +14 -delete 2>/dev/null || true
 find "$LOG_DIR" -name "stats-linkedin-feed-*.json" -mtime +7 -delete 2>/dev/null || true
+
+# Debug-bundle retention. Two layers:
+#   - linkedin-debug/<ts>/        : per-fire unpacked dirs, 14d
+#   - linkedin-debug/<ts>.tar.gz  : per-fire tarballs, 14d
+#   - linkedin-debug-failures/    : permanent archive of session_invalid /
+#                                   captcha tarballs; NEVER swept here.
+# Adjust the +14 numbers if disk pressure becomes an issue; do NOT add the
+# failures dir to the find sweep without explicit user instruction.
+find "$DEBUG_BUNDLE_BASE" -maxdepth 1 -type d -name "20*" -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+find "$DEBUG_BUNDLE_BASE" -maxdepth 1 -type f -name "20*.tar.gz" -mtime +14 -delete 2>/dev/null || true
 
 log "=== LinkedIn stats complete: $(date) ==="
