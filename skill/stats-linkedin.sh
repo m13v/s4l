@@ -70,8 +70,8 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=1000          # in-page scrolls. Generous upper bound; JS-side `stagnant >= 8` early-stop is the true ceiling, max_scrolls just caps runaway.
-SCRAPER_TIMEOUT_SEC=1500  # whole scraper run cap. 1500s = ~325 ticks at 4.6s/tick — enough headroom for natural bail wherever LinkedIn's tail ends.
+MAX_SCROLLS=150          # in-page scrolls. 120-scroll fire on 2026-05-27 hit stagnant_ticks=3 (depth-limited still); 150 lets the natural bail fire if it's going to. 1000-scroll attempt the same day proved the JS stagnant-guard breaks at >~150 because document.documentElement.scrollHeight includes sidebar/footer mutations that reset stagnant=0 indefinitely. Until that's fixed, max_scrolls is the binding constraint.
+SCRAPER_TIMEOUT_SEC=900  # whole scraper run cap. ~10min scroll + overhead at 150 scrolls; projected ~690s, safe.
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
