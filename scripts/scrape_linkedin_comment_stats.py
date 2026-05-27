@@ -794,7 +794,23 @@ class _DebugRecorder:
             pass
 
     def failure(self, page, error: str, detail: str = "") -> None:
-        """Capture failure-mode artifacts: screenshot, html, error text."""
+        """Capture failure-mode artifacts: screenshot, html, error text.
+
+        Also routes the failure to the killswitch when the error code
+        is unambiguous (session_invalid, captcha_or_checkpoint), or when
+        a listener earlier set self._kill_signal from a network signal."""
+        # Killswitch engagement runs even when self.enabled is False; the
+        # debug recorder being disabled has no bearing on whether we
+        # should halt the pipelines.
+        try:
+            self.engage_killswitch_for_failure(error, detail, page)
+        except Exception as _e:
+            print(
+                f"[scrape_linkedin] WARN: killswitch engage in failure() "
+                f"raised: {_e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
         if not self.enabled:
             return
         self.snapshot(page, "99_failure")
@@ -807,10 +823,106 @@ class _DebugRecorder:
             f"detail={detail}\n"
             f"url={url}\n"
             f"ts={_ts_ms()}\n"
+            f"kill_signal={self._kill_signal}\n"
+            f"kill_detail={self._kill_detail}\n"
+            f"voyager_paginate_calls={self._voyager_paginate_calls}\n"
             f"\n--- python traceback ---\n"
             f"{traceback.format_exc()}"
         )
         self._write_text("99_failure.txt", body)
+
+    # --- killswitch glue --------------------------------------------------
+
+    # Map error codes coming out of scrape() to killswitch signal names.
+    # Listed errors trip the killswitch unconditionally; any error NOT
+    # listed here trips the killswitch ONLY if a listener already set
+    # self._kill_signal (network-level signals like http_999, authwall
+    # redirect, li_at_cleared, voyager-throttle-detected).
+    _FAILURE_TO_SIGNAL = {
+        "session_invalid": "session_invalid_marker",
+        "captcha_or_checkpoint": "captcha_detected",
+    }
+
+    def maybe_detect_throttle(self) -> None:
+        """Post-evaluate throttle detection.
+
+        Called after page.evaluate() returns. If the scroll loop ran for
+        at least THROTTLE_MIN_RUNTIME_SEC and we saw fewer than
+        THROTTLE_PAGINATION_MIN_CALLS voyagerFeedDashProfileUpdates calls,
+        LinkedIn is silently dropping our pagination XHRs and the session
+        is being shadow-throttled. Trip the killswitch signal so the
+        next failure() call (or the post-evaluate engagement below)
+        engages the killswitch."""
+        if self._kill_signal is not None:
+            return
+        runtime = time.time() - self._scrape_started_at
+        if runtime < THROTTLE_MIN_RUNTIME_SEC:
+            return
+        if self._voyager_paginate_calls < THROTTLE_PAGINATION_MIN_CALLS:
+            self._kill_signal = "throttle_no_pagination"
+            self._kill_detail = (
+                f"voyager_paginate_calls={self._voyager_paginate_calls} "
+                f"(min={THROTTLE_PAGINATION_MIN_CALLS}) "
+                f"runtime_sec={int(runtime)}"
+            )
+            print(
+                f"[scrape_linkedin] KILL_SIGNAL=throttle_no_pagination "
+                f"{self._kill_detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def engage_killswitch_for_failure(
+        self, error: str, detail: str, page,
+    ) -> None:
+        """Engage the killswitch if this failure code maps to a signal,
+        OR if a listener already set self._kill_signal from a network
+        observation. Idempotent within the process via
+        self._killswitch_engaged; the killswitch file itself is also
+        idempotent so a duplicate call is a no-op."""
+        if self._killswitch_engaged:
+            return
+        signal_name = self._kill_signal
+        signal_detail = self._kill_detail
+        if not signal_name:
+            signal_name = self._FAILURE_TO_SIGNAL.get(error)
+            if signal_name:
+                signal_detail = f"error={error} detail={detail}"
+        if not signal_name:
+            return
+        try:
+            url = page.url if page is not None else ""
+        except Exception:
+            url = ""
+        run_log_path = os.environ.get("SAPS_RUN_LOG_PATH", "")
+        try:
+            linkedin_killswitch.engage(
+                signal=signal_name,
+                detail=signal_detail or f"error={error}",
+                run_log_path=run_log_path,
+                extra={
+                    "url": url,
+                    "scrape_error": error,
+                    "scrape_detail": detail,
+                    "voyager_paginate_calls": self._voyager_paginate_calls,
+                    "saw_429_count": self._saw_429_count,
+                    "debug_dir": self.dir,
+                },
+            )
+            self._killswitch_engaged = True
+            print(
+                f"[scrape_linkedin] LINKEDIN_KILLSWITCH_ENGAGED "
+                f"signal={signal_name} error={error}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[scrape_linkedin] WARN: linkedin_killswitch.engage "
+                f"raised: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def finalize(self, result: dict) -> Optional[str]:
         """Write meta.json, close jsonl handles, tar.gz the dir.
@@ -1403,11 +1515,16 @@ def scrape(
                         "settle_ms": HARVEST_SETTLE_MS,
                         # Self-imposed JS deadline (Bug B fix, 2026-05-27).
                         # Picks up SAPS_SCRAPER_DEADLINE_MS if set by the
-                        # shell caller; otherwise defaults to 35min so the
-                        # loop bails before the shell's gtimeout backstop.
+                        # shell caller; defaults to 10min after the
+                        # 2026-05-27 killswitch ship. 35min was the
+                        # runaway envelope that gave LinkedIn 25 minutes
+                        # of unbroken behavioral fingerprinting before
+                        # any external timer fired; 10min is well above
+                        # the 56-record healthy-fire cap (~3min) but
+                        # below any plausible "we're just slow" tail.
                         "deadline_ms": int(
                             os.environ.get(
-                                "SAPS_SCRAPER_DEADLINE_MS", "2100000"
+                                "SAPS_SCRAPER_DEADLINE_MS", "600000"
                             )
                         ),
                     },
@@ -1442,6 +1559,26 @@ def scrape(
             # the writer still applies whatever the loop did harvest.
             if dbg._abort_reason and not early_stop_reason:
                 early_stop_reason = dbg._abort_reason
+
+            # Post-evaluate throttle detection. If the scroll loop ran
+            # for >=60s and emitted fewer than 2 voyagerFeedDashProfileUpdates
+            # XHRs, LinkedIn is silently dropping our pagination — trip
+            # the killswitch signal now. Then engage the killswitch if
+            # any signal is set (this covers HTTP 999 / authwall /
+            # li_at_cleared / throttle paths where the scroll loop
+            # otherwise returned cleanly).
+            dbg.maybe_detect_throttle()
+            if dbg._kill_signal and not early_stop_reason:
+                early_stop_reason = f"kill_signal={dbg._kill_signal}"
+            if dbg._kill_signal:
+                try:
+                    dbg.engage_killswitch_for_failure(
+                        error="kill_signal_post_evaluate",
+                        detail=dbg._kill_detail,
+                        page=page,
+                    )
+                except Exception:
+                    pass
 
             # Hard-fail path: challenge fired before we got ANY records.
             # Treat as captcha_or_checkpoint-equivalent so stats-linkedin.sh
