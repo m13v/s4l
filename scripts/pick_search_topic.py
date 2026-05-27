@@ -22,8 +22,22 @@ Two branches:
    around 0.5-1% per topic (low but never zero). This way Claude Code
    (and any other underexplored topic) always has a real shot.
 
-   weight(score>0)  = log_e(score + 1) + 1.0
-   weight(score==0) = COLD_TOPIC_WEIGHT (= 0.15)
+   base(score>0)  = log_e(score + 1) + 1.0
+   base(score==0) = COLD_TOPIC_WEIGHT (= 0.15)
+
+   2026-05-27: base weight is then adjusted by two layered factors
+   that read from twitter_search_attempts (via the supply join in
+   top_search_topics._query_twitter) so the picker distinguishes
+   topics that were tried-and-failed from topics that were never
+   tried at all. Math lives in _compute_weight; concretely:
+
+     - attempts_n == 0           → return base unchanged
+     - 0 supply across N tries   → base * SUPPLY_DEAD_WEIGHT (0.3x)
+     - else                      → base * conversion (posts/attempt)
+
+   Floor at base*DEAD_FLOOR_FRACTION so no topic ever locks out
+   entirely; we always keep a small retest probability in case X's
+   firehose or our criteria shift.
 
 2. EXPLORE_INVENT (~10%): the picker returns search_topic=None and
    mode='explore_invent'. The downstream prompt then asks Claude to
