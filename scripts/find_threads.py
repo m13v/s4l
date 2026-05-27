@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
+from project_topics import topics_for_project
 try:
     from account_resolver import resolve as _resolve_account
 except Exception:
@@ -477,9 +478,9 @@ def main():
         moltbook_key = os.environ.get("MOLTBOOK_API_KEY", "")
         threads.extend(fetch_moltbook_threads(moltbook_key))
 
-    # Unified search_topics is the single source of truth across platforms
-    # (post 2026-04-24 migration; legacy *_topics fields removed 2026-04-30).
-    project_search_topics = (project_config or {}).get("search_topics") or []
+    # DB-backed search_topics is the single source of truth across platforms
+    # (post 2026-05-27 config.json removal; legacy *_topics fields removed 2026-04-30).
+    project_search_topics = list(topics_for_project((project_config or {}).get("name") or ""))
 
     if args.include_twitter:
         twitter_topics = list(project_search_topics)
