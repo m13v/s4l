@@ -744,8 +744,11 @@ def _is_fresh(_t):
 _pre_age_count = len(tweets)
 tweets = [_t for _t in tweets if _is_fresh(_t)]
 _age_dropped = _pre_age_count - len(tweets)
-if _age_dropped:
-    print(f'[harness_age_gate] dropped={_age_dropped} kept={len(tweets)} cap_h={_AGE_CAP_S//3600}', flush=True)
+# Unconditional log so every bh_run leaves positive evidence the gate ran,
+# not just the cycles where it had stale tweets to drop. Operators (and the
+# dashboard scraper) can grep this marker to confirm the harness-level gate
+# is loaded in the running script body.
+print(f'[harness_age_gate] dropped={_age_dropped} kept={len(tweets)} pre={_pre_age_count} cap_h={_AGE_CAP_S//3600}', flush=True)
 
 # Bake project/topic/query into each tweet object IN PYTHON, before printing —
 # so the model has zero degrees of freedom on these fields. The model only
