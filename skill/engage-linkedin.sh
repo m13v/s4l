@@ -11,6 +11,16 @@
 
 set -euo pipefail
 
+# LinkedIn killswitch (2026-05-27): refuse to run if a prior fire detected
+# session compromise (http_999, authwall, throttle, li_at cleared).
+# State: ~/.claude/social-autoposter/linkedin.killswitch
+# Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
+if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
+    exit 0
+fi
+
 # 2026-05-01: lock policy changed from "hold the entire run" to "hold only
 # while a Claude phase is actively driving the browser" — same pattern as
 # run-linkedin.sh. The old policy held linkedin-browser for the whole 25-45min
