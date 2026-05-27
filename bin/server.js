@@ -8690,11 +8690,33 @@ const HTML = `<!DOCTYPE html>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
   .header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
   .header h1 { font-size: 20px; font-weight: 600; }
-  .header .pending { background: var(--accent); color: var(--accent-on); padding: 4px 12px; border-radius: 12px; font-size: 13px; }
+  /* Unified header control sizing (2026-05-27): refresh, theme toggle,
+     pause-all, and pending pill all render as the same chip — same height,
+     padding, font, border, radius, background. Pending loses its accent fill
+     to match the others; status is conveyed by the number, not the color. */
+  .header .theme-toggle, .header .btn, .header .pending {
+    background: var(--bg-button);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 600;
+    line-height: 1;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    cursor: pointer;
+  }
+  .header .pending { cursor: default; }
+  .header .theme-toggle:hover, .header .btn:hover { background: var(--bg-button-hover); border-color: var(--border-strong); }
 
   .theme-toggle { background: var(--bg-button); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; line-height: 1; }
   .theme-toggle:hover { background: var(--bg-button-hover); border-color: var(--border-strong); }
-  .theme-toggle .theme-icon { font-size: 14px; line-height: 1; }
+  .theme-toggle .theme-icon { font-size: 13px; line-height: 1; }
   .theme-toggle .sun-icon { display: none; }
   .theme-toggle .moon-icon { display: inline; }
   [data-theme="dark"] .theme-toggle .sun-icon { display: inline; }
@@ -9579,8 +9601,8 @@ const HTML = `<!DOCTYPE html>
       <span id="global-refresh-icon" style="font-size:14px;line-height:1;">↻</span>
     </button>
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" aria-label="Toggle theme">
-      <span class="theme-icon moon-icon">\u{1F319}</span>
-      <span class="theme-icon sun-icon">\u2600\uFE0F</span>
+      <span class="theme-icon moon-icon">\u25D0</span>
+      <span class="theme-icon sun-icon">\u25D1</span>
     </button>
     <button class="btn sa-local-only" id="pause-btn" onclick="togglePause()" style="font-weight:600;"></button>
     <span class="pending sa-local-only" id="pending-badge">-- pending</span>
