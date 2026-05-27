@@ -54,6 +54,31 @@ from pathlib import Path
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
+CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+
+
+def resolve_voice_relationship(project: str) -> str:
+    """Look up the matched project's `voice_relationship` field in config.json.
+
+    Returns "first_party" or "third_party". Defaults to "first_party" if the
+    project is missing or the field is absent, matching the historical
+    pre-2026-05-27 behavior so we never silently mute first-party voice.
+    The link_tail subprocess runs with --disallowed-tools that bans Read/Glob,
+    so the value must be resolved here in Python rather than inside the prompt.
+    """
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        return "first_party"
+    name_lc = (project or "").lower()
+    for p in cfg.get("projects", []):
+        if (p.get("name") or "").lower() == name_lc:
+            val = (p.get("voice_relationship") or "").strip().lower()
+            if val in ("first_party", "third_party"):
+                return val
+            return "first_party"
+    return "first_party"
 
 # Paths to the Claude Code CLI in order of preference. run_claude.sh resolves
 # `claude` from PATH; we fall back to a direct nvm path if PATH lookup fails
