@@ -5028,7 +5028,8 @@ async function handleApi(req, res) {
     if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
     return (async () => {
       const url = new URL(req.url, 'http://localhost');
-      const platform = (url.searchParams.get('platform') || '').toLowerCase();
+      let platform = (url.searchParams.get('platform') || '').toLowerCase();
+      if (platform === 'twitter') platform = 'x';  // reply-canonical form
       const severity = (url.searchParams.get('severity') || '').toLowerCase();
       const includeExpired = url.searchParams.get('include_expired') === 'true';
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 1), 500);
@@ -5065,7 +5066,8 @@ async function handleApi(req, res) {
       try { body = JSON.parse(raw || '{}'); }
       catch { return json(res, { error: 'invalid JSON' }, 400); }
       const installId = String(body.installation_id || '').trim();
-      const platform = String(body.platform || '').trim().toLowerCase();
+      let platform = String(body.platform || '').trim().toLowerCase();
+      if (platform === 'twitter') platform = 'x';  // reply-canonical form
       const handle = String(body.handle || '').trim().replace(/^@+/, '').toLowerCase();
       const reason = String(body.reason || '').trim();
       const classification = String(body.classification || 'manual_block').trim().toLowerCase();
@@ -5112,7 +5114,8 @@ async function handleApi(req, res) {
     const m = p.match(/^\/api\/blocklist\/([a-z0-9_]+)\/(.+)$/);
     if (m && (req.method === 'PATCH' || req.method === 'DELETE')) {
       if (!req.user || !req.user.admin) return json(res, { error: 'forbidden' }, 403);
-      const platform = m[1];
+      let platform = m[1].toLowerCase();
+      if (platform === 'twitter') platform = 'x';  // reply-canonical form
       const handle = decodeURIComponent(m[2]).replace(/^@+/, '').toLowerCase();
       const url = new URL(req.url, 'http://localhost');
       const installId = (url.searchParams.get('installation_id') || '').trim();
