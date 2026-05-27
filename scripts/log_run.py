@@ -7,9 +7,75 @@ Usage:
 
 import argparse
 import os
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta, timezone
 
 LOG_PATH = os.path.expanduser("~/social-autoposter/skill/logs/run_monitor.log")
+
+
+# Map a script-name prefix to the blocklist platform value. The blocklist
+# table uses canonical 'x' for Twitter; everything else matches the prefix.
+_PLATFORM_MAP = [
+    ("reddit", "reddit"),
+    ("twitter", "x"),
+    ("linkedin", "linkedin"),
+    ("github", "github_issues"),
+    ("instagram", "instagram"),
+]
+
+
+def _platform_from_script(script_name):
+    name = (script_name or "").lower()
+    for prefix, plat in _PLATFORM_MAP:
+        if prefix in name:
+            return plat
+    return None
+
+
+def _detect_escape_hatch(script_name, elapsed_seconds):
+    """Query /api/v1/blocklist for LLM/manual escape-hatch firings during
+    this run window, filtered by the script's platform.
+
+    Returns (count, details_list) where details_list contains 'handle:class'
+    strings. Velocity-auto rows are EXCLUDED — they fire programmatically
+    via the route.ts SQL path on every reply and would flood the pill on
+    discovery cycles. We only surface model-judgment / operator-judgment
+    classifications (bot, engagement_loop, manual_block).
+
+    Fail-safe: any API error returns (0, []) so the run line still writes.
+    """
+    if not elapsed_seconds:
+        return 0, []
+    platform = _platform_from_script(script_name)
+    if not platform:
+        return 0, []
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get  # noqa: E402
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=float(elapsed_seconds) + 30)
+        resp = api_get("/api/v1/blocklist", query={"platform": platform, "limit": 100})
+        rows = ((resp or {}).get("data") or {}).get("blocklist") or []
+        hits = []
+        for r in rows:
+            created_at = r.get("created_at")
+            if not created_at:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            # Rows are ordered DESC by created_at, so once we cross the
+            # cutoff every remaining row is older — short-circuit.
+            if ts < cutoff:
+                break
+            classification = r.get("classification") or ""
+            if classification not in ("bot", "engagement_loop", "manual_block"):
+                continue
+            handle = (r.get("handle") or "?").replace(",", "").replace(":", "")
+            hits.append(f"{handle}:{classification}")
+        return len(hits), hits
+    except Exception:
+        return 0, []
 
 
 def main():
@@ -223,11 +289,26 @@ def main():
     scan_raw = (args.scan or "").strip()
     scan_clean = scan_raw.replace("|", "").replace(" ", "")
     scan_segment = f" scan={scan_clean}" if scan_clean else ""
+    # `escape_hatch=` segment surfaces author_blocklist writes that happened
+    # during this run window (LLM-judgment via reply_db.py CLI, or manual
+    # operator adds). Auto-detected via the API so callers don't have to
+    # plumb it; fail-safe to empty on any error. Velocity-auto rows are
+    # excluded inside _detect_escape_hatch — they fire on every reply and
+    # would flood the pill. Tails after skip_reasons so old log lines (no
+    # escape-hatch info) still parse via the bin/server.js positional regex.
+    eh_count, eh_details = _detect_escape_hatch(args.script, args.elapsed)
+    if eh_count:
+        eh_details_clean = ",".join(eh_details).replace("|", "").replace(" ", "")
+        escape_hatch_segment = (
+            f" escape_hatch={eh_count} escape_hatch_details={eh_details_clean}"
+        )
+    else:
+        escape_hatch_segment = ""
     line = (
         f"{timestamp} | {args.script} | "
         f"posted={args.posted} skipped={args.skipped} failed={args.failed}"
         f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment}{scan_segment} "
-        f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}{skip_segment}"
+        f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}{skip_segment}{escape_hatch_segment}"
     )
 
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
