@@ -8,7 +8,14 @@ the candidate row, then propagated to posts. This replaces the legacy
 flow, which made end-to-end attribution noisy because the same tweet
 could be tagged with different topics on re-discovery.
 
-Universe: projects[].search_topics in config.json (the eligibility list).
+Universe: project_search_topics table via /api/v1/project-search-topics
+(install-scoped, status='active' only). config.json is seed-only and is
+ONLY consulted as a cold-start fallback when the API is unreachable or
+the table is empty for this project (i.e. the install hasn't been seeded
+yet). Run scripts/seed_search_topics.py once to mirror config.json into
+the DB; from then on, paused/excluded topics and invented winners live
+in the DB and the picker honors them.
+
 Performance signal: top_search_topics.query(project, "twitter", ...)
 which aggregates from twitter_candidates -> posts -> post_link_clicks.
 
@@ -268,6 +275,66 @@ def _ref_meta(r, weight_pct):
         "zero_supply_attempts": r.get("zero_supply_attempts", 0),
         "weight_pct": round(weight_pct, 2),
     }
+
+
+def _verdict_for_row(r):
+    """Same FIT_FAIL / SUPPLY_DEAD classification used in the prompt
+    block, returned as a flat string for trace-log consumers (greppable
+    after the fact)."""
+    attempts_n = int(r.get("attempts_n") or 0)
+    tweets_found_total = int(r.get("tweets_found_total") or 0)
+    posted_n = int(r.get("posted_n") or 0)
+    if attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT and tweets_found_total == 0:
+        return "SUPPLY_DEAD"
+    if attempts_n >= 3 and posted_n == 0 and tweets_found_total > 0:
+        return "FIT_FAIL"
+    return None
+
+
+def _emit_trace(assignment, pool, weight_pcts, chosen_idx):
+    """Write a single JSON line to stderr capturing the entire pick
+    decision: project, mode, picked topic + weight%, and the full pool
+    with weights/stats/verdicts. Grep-friendly tag `[pick_search_topic]`
+    so cycle logs (skill/logs/twitter-cycle-*.log, which capture stderr
+    of the bash pipeline) carry the full audit trail without the prompt
+    needing to.
+
+    Failures here are swallowed so a logging hiccup never breaks the
+    actual pick.
+    """
+    try:
+        trace = {
+            "project": assignment.get("project"),
+            "platform": assignment.get("platform"),
+            "mode": assignment.get("mode"),
+            "picked": assignment.get("search_topic"),
+            "picked_weight_pct": assignment.get("picked_weight_pct"),
+            "universe_size": assignment.get("universe_size"),
+            "scored_n": assignment.get("scored_n"),
+            "cold_n": assignment.get("cold_n"),
+            "window_days": assignment.get("window_days"),
+            "picked_at": assignment.get("picked_at"),
+            "pool": [
+                {
+                    "topic": r["search_topic"],
+                    "weight_pct": round(weight_pcts[i], 2),
+                    "score": round(r["composite_score"], 2),
+                    "posts": r["posts"],
+                    "clicks": r["clicks_total"],
+                    "posted_n": r["posted_n"],
+                    "skipped_n": r["skipped_n"],
+                    "attempts": r.get("attempts_n", 0),
+                    "supply": r.get("tweets_found_total", 0),
+                    "verdict": _verdict_for_row(r),
+                    "chosen": (chosen_idx is not None and i == chosen_idx),
+                }
+                for i, r in enumerate(pool)
+            ],
+        }
+        sys.stderr.write("[pick_search_topic] " + json.dumps(trace) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def pick_topic_for_project(project_name, platform="twitter",
