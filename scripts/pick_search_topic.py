@@ -51,12 +51,14 @@ Two branches:
    INVENT a brand-new topic for this project given the stats of every
    existing topic (so it sees what's working, what's saturated, and
    what gaps to probe). The invented topic gets stamped onto every
-   candidate row from this cycle for analytics, but it does NOT
-   automatically enter the eligible universe — promoting a winning
-   invention is a manual config.json edit (intentional human gate so
-   the universe stays curated). To see inventions that performed, look
-   at top_search_topics for the project: any search_topic not in the
-   project's config.json seed list is an invention from a past cycle.
+   candidate row from this cycle for analytics, and the candidate-scoring
+   step (score_twitter_candidates.py::auto_promote_invented_topics) then
+   upserts it into project_search_topics with source='invented',
+   status='active' so the next USE cycle can re-select it via the normal
+   weighted-random path. The existing _compute_weight gates (conversion
+   penalty, supply-dead penalty) act as the quality filter: a FIT_FAIL
+   invention naturally drops to the floor weight without any manual
+   curation.
 
 Output schema (single JSON object to stdout, one row per --project):
 
@@ -176,10 +178,13 @@ def _compute_weight(r):
     return max(base * DEAD_FLOOR_FRACTION, base * conversion)
 
 
-def _load_universe(project_name):
-    """Return the project's search_topics[] from config.json (unique, ordered)."""
-    with open(CONFIG_PATH) as f:
-        cfg = json.load(f)
+def _load_universe_from_config(project_name):
+    """Cold-start fallback: read seed list from config.json."""
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except Exception:
+        return []
     for p in cfg.get("projects", []):
         if (p.get("name") or "").lower() == project_name.lower():
             seen = set()
@@ -190,6 +195,52 @@ def _load_universe(project_name):
                     out.append(t)
             return out
     return []
+
+
+def _load_universe(project_name):
+    """Return the project's active search topics (unique, ordered).
+
+    Primary path: GET /api/v1/project-search-topics?project=X&status=active.
+    Each install sees its own rows plus the legacy null-install bucket
+    (same null-claim pattern as posts/replies). The picker only uses
+    'active' rows so paused/excluded topics drop out without any local
+    config.
+
+    Fallback path (logged to stderr): config.json projects[].search_topics[].
+    Triggered when the API is unreachable, returns non-OK, or returns zero
+    rows for this project (cold-start, install hasn't been seeded yet).
+    Once seed_search_topics.py runs, the fallback should never fire under
+    normal operation.
+    """
+    try:
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/project-search-topics",
+            query={"project": project_name, "status": "active"},
+        )
+        data = (resp or {}).get("data") or {}
+        rows = data.get("topics") or []
+        seen = set()
+        out = []
+        for r in rows:
+            t = (r.get("topic") or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        if out:
+            return out
+        # Empty result -> cold-start fallback.
+        sys.stderr.write(
+            f"[pick_search_topic] DB universe empty for project="
+            f"{project_name!r}; falling back to config.json (run "
+            f"scripts/seed_search_topics.py to seed)\n"
+        )
+    except Exception as e:
+        sys.stderr.write(
+            f"[pick_search_topic] DB universe lookup failed for project="
+            f"{project_name!r}: {e}; falling back to config.json\n"
+        )
+    return _load_universe_from_config(project_name)
 
 
 def _load_signal(project_name, platform, window_days):
@@ -526,9 +577,13 @@ def get_assigned_topic_prompt(assignment):
                 "INVENTED topic. In the JSON you emit per tweet, set "
                 "`search_topic` to the EXACT invented topic name you "
                 "chose (one consistent string for every tweet in this "
-                "cycle). Future cycles will automatically pick up the "
-                "invented topic via top_search_topics if it earns posts "
-                "or clicks — no config.json edit needed."
+                "cycle). After scoring, the candidate pipeline upserts "
+                "your invention into project_search_topics with "
+                "source='invented', status='active', so future USE "
+                "cycles can re-select it via the normal weighted-random "
+                "path. If it FIT_FAILs (≥3 attempts, 0 posted), the "
+                "existing weight floor naturally throttles it without "
+                "any manual curation."
             ),
         ]
         return "\n".join(lines)
