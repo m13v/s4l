@@ -110,17 +110,54 @@ def resolve_claude_cli() -> str:
 
 
 def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
-                 project: str, platform: str) -> str:
+                 project: str, platform: str,
+                 voice_relationship: str = "first_party") -> str:
     """Compose the one-shot prompt for the bridge sentence.
 
     Kept tight on purpose: the model gets only the four pieces of context it
     needs, plus a precise output contract. No tools, no MCP, no file access.
+
+    `voice_relationship` ("first_party" | "third_party") is resolved by the
+    caller from config.json and selects the example sentences + voice rule
+    embedded in the prompt. third_party projects (Agora, Runner, Podlog,
+    studyly, NightOwl, PieLine as of 2026-05-27) MUST be referred to in
+    third-person; first_party projects own the "we ship / we built" voice.
     """
+    if voice_relationship == "third_party":
+        voice_rule = (
+            f"VOICE RELATIONSHIP — third_party (HIGHEST PRIORITY):\n"
+            f"You are an OUTSIDE OBSERVER of {project}, NOT its team. Refer "
+            f"to the product in third-person, by name or by 'their': "
+            f"\"{project} ships X\", \"their Y\", \"the {project} team rolled "
+            f"out Z\". Acceptable narrator framings: \"I tried {project}\", "
+            f"\"I noticed {project} does X\", \"{project} ships Y\". BANNED: "
+            f"\"we ship\", \"our product\", \"we built\", \"I built this\", "
+            f"\"what we offer\". A bridge that uses first-person plural about "
+            f"{project} impersonates the client and is a hard failure."
+        )
+        example_block = (
+            f"  - \"fwiw the rubric scoring on rephrased stems is what {project} ships, {link_url}\"\n"
+            f"  - \"{project} runs the same recall-on-revisit pattern, scores against a 4-axis rubric, {link_url}\""
+        )
+    else:
+        voice_rule = (
+            f"VOICE RELATIONSHIP — first_party:\n"
+            f"You speak AS the builder / maker of {project}. First-person "
+            f"plural about the product (\"we ship X\", \"our Y\", \"we built "
+            f"Z\") is allowed. Recommendation-style framing is also fine."
+        )
+        example_block = (
+            f"  - \"fwiw the rubric scoring on rephrased stems is what we built {project} for, {link_url}\"\n"
+            f"  - \"we ship the same recall-on-revisit pattern in {project}, scores against a 4-axis rubric, {link_url}\""
+        )
+
     return f"""You are writing the FINAL bridge sentence that folds a product link into a social media reply we already drafted. This is a one-shot task. Output ONLY the bridge sentence (no preamble, no explanation, no quotes).
 
 PLATFORM: {platform}
 PROJECT: {project}
 LANDING PAGE URL: {link_url}
+
+{voice_rule}
 
 ORIGINAL THREAD WE ARE REPLYING TO:
 {thread_text}
@@ -134,6 +171,7 @@ Rewrite the reply so the LAST sentence is a 1-sentence (≤ 22 words) bridge tha
   2. Names a CONCRETE PRODUCT MECHANISM that delivers it (verb + noun, inferred from the URL slug + project context). Do NOT say "a tool for this", "something that helps", "made this for it" — those are banned.
   3. Ends with the URL exactly as given. No period after. No "click here", "check it out", "give it a try".
   4. Reads in the voice of the reply (lowercase if reply is lowercase, casual if reply is casual).
+  5. Obeys the VOICE RELATIONSHIP rule above. This rule overrides any default phrasing instinct.
 
 REPLACEMENT RULE:
 - If the reply has a clear empathy/advice body, KEEP that body verbatim and append the bridge as a new sentence (separated by a single space).
@@ -142,9 +180,8 @@ REPLACEMENT RULE:
 OUTPUT FORMAT (strict):
 Output the FULL FINAL REPLY TEXT (body + bridge sentence ending in URL) on a single line. Nothing else. No JSON, no markdown, no quotes.
 
-Example bridge sentences (do NOT copy verbatim — these are FORM examples):
-  - "fwiw the rubric scoring on rephrased stems is what we built {project} for, {link_url}"
-  - "we ship the same recall-on-revisit pattern in {project}, scores against a 4-axis rubric, {link_url}"
+Example bridge sentences (do NOT copy verbatim — these are FORM examples, voice-matched to this project):
+{example_block}
 
 Write the final reply now."""
 
@@ -240,7 +277,20 @@ def clean_output(text: str) -> str:
     return candidate
 
 
-def passes_quality_gate(final_text: str, link_url: str) -> tuple[bool, str]:
+THIRD_PARTY_VOICE_VIOLATIONS = (
+    re.compile(r"\bwe ship\b", re.IGNORECASE),
+    re.compile(r"\bwe built\b", re.IGNORECASE),
+    re.compile(r"\bwe made\b", re.IGNORECASE),
+    re.compile(r"\bwe offer\b", re.IGNORECASE),
+    re.compile(r"\bour product\b", re.IGNORECASE),
+    re.compile(r"\bI built (?:this|it)\b", re.IGNORECASE),
+    re.compile(r"\bwhat we (?:ship|build|offer|make)\b", re.IGNORECASE),
+)
+
+
+def passes_quality_gate(final_text: str, link_url: str,
+                        voice_relationship: str = "first_party"
+                        ) -> tuple[bool, str]:
     """Return (passes, reason_if_not).
 
     Hard rules:
@@ -248,6 +298,12 @@ def passes_quality_gate(final_text: str, link_url: str) -> tuple[bool, str]:
       - must end with link_url (allow trailing whitespace, nothing else)
       - must NOT contain banned phrases
       - must not be shorter than reply text would have been (silly model fail)
+      - on third_party projects, must NOT use first-person-plural product
+        ownership phrases ("we ship", "we built", "our product", ...). The
+        link_tail prompt now selects voice-matched examples but the model can
+        still drift; on violation we fall back to the mechanical concat so
+        the post still ships without impersonating the client (root cause of
+        the 2026-05-27 Agora OODAO incident).
     """
     if not final_text:
         return (False, "empty")
@@ -263,6 +319,11 @@ def passes_quality_gate(final_text: str, link_url: str) -> tuple[bool, str]:
     for phrase in BANNED_PHRASES:
         if phrase in lower:
             return (False, f"banned_phrase: {phrase!r}")
+    if voice_relationship == "third_party":
+        for rx in THIRD_PARTY_VOICE_VIOLATIONS:
+            m = rx.search(final_text)
+            if m:
+                return (False, f"third_party_voice_violation: {m.group(0)!r}")
     # Length sanity: model returning a 5-word stub is a fail.
     if len(final_text.split()) < 8:
         return (False, "too_short")
@@ -287,6 +348,11 @@ def main() -> int:
                     help="Project name (e.g. 'studyly', 'fazm').")
     ap.add_argument("--platform", default="twitter",
                     help="Platform (twitter, reddit, linkedin).")
+    ap.add_argument("--voice-relationship", default=None,
+                    choices=["first_party", "third_party"],
+                    help="Override the voice_relationship lookup. Defaults to "
+                         "the value in config.json for --project, or "
+                         "first_party if missing.")
     ap.add_argument("--timeout", type=int, default=120,
                     help="Hard timeout for the claude call (seconds).")
     ap.add_argument("--no-wrapper", action="store_true",
@@ -308,10 +374,12 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
+    voice_relationship = args.voice_relationship or resolve_voice_relationship(args.project)
     prompt = build_prompt(
         reply_text=reply_text, link_url=link_url,
         thread_text=(args.thread_text or "").strip()[:2000],
         project=args.project, platform=args.platform,
+        voice_relationship=voice_relationship,
     )
 
     started = time.time()
@@ -333,7 +401,8 @@ def main() -> int:
         return 0
 
     cleaned = clean_output(raw)
-    passes, reason = passes_quality_gate(cleaned, link_url)
+    passes, reason = passes_quality_gate(cleaned, link_url,
+                                         voice_relationship=voice_relationship)
     if not passes:
         out = {
             "ok": True,
