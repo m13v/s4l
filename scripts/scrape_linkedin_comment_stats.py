@@ -191,6 +191,21 @@ class _DebugRecorder:
         # context and can't observe this; the bailout is post-loop.
         self._abort_reason: Optional[str] = None
         self._saw_429_count: int = 0
+        # Killswitch state (added 2026-05-27). Set by on_response /
+        # on_framenav when a hard signal fires. Engaged exactly once per
+        # scrape() invocation via _engage_killswitch_if_signal(); the
+        # killswitch file itself is idempotent (first signal wins) so a
+        # double-fire here is harmless but wasteful.
+        self._kill_signal: Optional[str] = None
+        self._kill_detail: str = ""
+        self._killswitch_engaged: bool = False
+        # Pagination canary: count voyagerFeedDashProfileUpdates calls.
+        # Healthy runs see 5+; throttled runs see <=1 (initial paint only).
+        self._voyager_paginate_calls: int = 0
+        # Wall-clock start for the throttle window. Set in __init__ so
+        # _engage_killswitch_if_signal can compute scrape runtime even
+        # if it fires from a late error-return path.
+        self._scrape_started_at: float = time.time()
         if self.enabled:
             try:
                 os.makedirs(self.dir, exist_ok=True)
@@ -334,12 +349,44 @@ class _DebugRecorder:
 
         def on_framenav(frame):
             try:
+                is_main = frame == page.main_frame
                 rec = {
                     "ts": _ts_ms(),
                     "url": frame.url,
                     "name": frame.name,
-                    "is_main": frame == page.main_frame,
+                    "is_main": is_main,
                 }
+                # Main-frame redirect canary. Any of these means the
+                # session is gone (or going) and we MUST stop. Detect
+                # here, before the auth gate at line ~1230, so the
+                # killswitch fires even on async redirects that happen
+                # after page.goto returned cleanly.
+                if is_main and self._kill_signal is None:
+                    u = (frame.url or "").lower()
+                    if "/authwall" in u:
+                        self._kill_signal = "authwall_redirect"
+                        self._kill_detail = f"main-frame -> {frame.url}"
+                    elif "/checkpoint/" in u or "/checkpoint?" in u:
+                        self._kill_signal = "checkpoint_redirect"
+                        self._kill_detail = f"main-frame -> {frame.url}"
+                    elif (
+                        "/uas/login" in u
+                        or u.endswith("/login")
+                        or "/login?" in u
+                    ):
+                        # Exclude the same-origin /login redirect we
+                        # cause ourselves on a SESSION_INVALID. Only
+                        # fire for the LinkedIn-initiated redirect.
+                        if "linkedin.com" in u:
+                            self._kill_signal = "login_redirect"
+                            self._kill_detail = f"main-frame -> {frame.url}"
+                    if self._kill_signal:
+                        print(
+                            f"[scrape_linkedin] KILL_SIGNAL="
+                            f"{self._kill_signal} url={frame.url[:200]}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
             except Exception as e:
                 rec = {"ts": _ts_ms(), "err": repr(e)}
             self._append_jsonl("_fh_nav", "navigation.jsonl", rec)
@@ -350,6 +397,59 @@ class _DebugRecorder:
                 url = response.url
                 if "linkedin.com" not in url:
                     return
+                # HTTP 999: LinkedIn's "you're flagged" canary. Hard
+                # signal: any 999 from linkedin.com means the session
+                # is being throttled at the edge. 2026-05-27 forensic:
+                # GET /in/me/recent-activity/comments/ returned 999,
+                # then 302'd to /authwall?trk=bf. Trip the killswitch
+                # immediately, no threshold needed.
+                if response.status == 999 and self._kill_signal is None:
+                    self._kill_signal = "http_999"
+                    self._kill_detail = (
+                        f"{response.request.method} {url[:300]} -> 999"
+                    )
+                    print(
+                        f"[scrape_linkedin] KILL_SIGNAL=http_999 "
+                        f"url={url[:200]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                # Voyager pagination canary. Count calls to the recent-
+                # activity-comments graphql endpoint. Post-scroll, if
+                # this count is <THROTTLE_PAGINATION_MIN_CALLS, we are
+                # being silently throttled.
+                if VOYAGER_PAGINATION_QUERYID in url:
+                    self._voyager_paginate_calls += 1
+                # li_at cookie clearing. LinkedIn signs us out by
+                # sending Set-Cookie: li_at=; Max-Age=0 (or similar)
+                # in the authwall response. Catch that here before
+                # the next request even fires so the killswitch
+                # engages on the FIRST cleared response, not after
+                # the redirect chain completes.
+                try:
+                    sc = response.headers.get("set-cookie") or ""
+                    if sc:
+                        sc_low = sc.lower()
+                        if "li_at=" in sc_low and (
+                            "max-age=0" in sc_low
+                            or "li_at=;" in sc_low
+                            or 'li_at="";' in sc_low
+                            or "expires=thu, 01 jan 1970" in sc_low
+                        ):
+                            if self._kill_signal is None:
+                                self._kill_signal = "li_at_cleared"
+                                self._kill_detail = (
+                                    f"Set-Cookie cleared li_at on "
+                                    f"{url[:200]}"
+                                )
+                                print(
+                                    f"[scrape_linkedin] KILL_SIGNAL="
+                                    f"li_at_cleared url={url[:200]}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                except Exception:
+                    pass
                 # Rate-limit canary. LinkedIn rarely returns a bare 429 —
                 # it usually redirects to /authwall or injects a captcha
                 # overlay (both caught by the in-JS detectChallengeInDom
@@ -776,6 +876,44 @@ HARVEST_SETTLE_MS = 1500
 # throttle from a one-off API hiccup but tight enough to stop the bleed
 # before LinkedIn escalates the session to /checkpoint.
 ABORT_429_THRESHOLD = 3
+
+# Killswitch thresholds (added 2026-05-27 after the behavioral fingerprint
+# session revocation). Forensic data from the 2026-05-27 run:
+#   healthy:    5-17 voyagerFeedDashProfileUpdates pagination calls
+#   throttled:  1 call (initial paint only; pagination XHRs silently dropped)
+#   authwalled: 0 calls
+# So "post-scroll loop, fewer than 2 voyager calls" is a reliable throttle
+# canary. We only fire it after the loop has run for THROTTLE_MIN_RUNTIME_SEC
+# (60s) so a fast-error fire doesn't spuriously trip it.
+THROTTLE_PAGINATION_MIN_CALLS = 2
+THROTTLE_MIN_RUNTIME_SEC = 60
+# Voyager queryId we use as the pagination canary. LinkedIn occasionally
+# renames these (e.g. when they ship a new feed surface), so this constant
+# is the single point of update. If they rename it, the canary goes silent
+# and throttle detection becomes too tight; watch the trail log for a
+# spike in throttle_no_pagination engagements on healthy-looking bundles.
+VOYAGER_PAGINATION_QUERYID = "voyagerFeedDashProfileUpdates"
+
+# Killswitch helper is a sibling module; import is best-effort so an
+# import error here can NEVER block a scrape from running. If the import
+# fails we fall back to a no-op shim (engage() does nothing).
+try:
+    import linkedin_killswitch  # noqa: E402
+except Exception as _e_killswitch:
+    class _KillswitchShim:
+        @staticmethod
+        def engage(*_a, **_k):
+            return None
+        @staticmethod
+        def is_active():
+            return False
+    linkedin_killswitch = _KillswitchShim()  # type: ignore
+    print(
+        f"[scrape_linkedin] WARN: linkedin_killswitch import failed: "
+        f"{_e_killswitch!r}; killswitch engage will no-op",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 # JS executed inside ONE page.evaluate(). Does the slow scroll +
