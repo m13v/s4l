@@ -1600,7 +1600,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // (discovered before our `since` cutoff but still in queue), which would
   // otherwise undercount the per-run queue snapshot at older runs.
   const candidateRows = await pq(
-    "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, " +
+    "SELECT discovered_at, posted_at, t1_checked_at, drafted_at, tweet_posted_at, " +
     "       (draft_reply_text IS NOT NULL) AS has_draft, status, batch_id, " +
     "       matched_project, tweet_url, cycle_variant, virality_score " +
     "FROM twitter_candidates " +
@@ -1679,6 +1679,12 @@ async function enrichPostCommentsTwitterRuns(runs) {
       postedMs,
       t1CheckedMs: t1Ms,
       draftedMs,
+      // Parent-thread publish time. Used to compute thread-age-at-post for the
+      // `age` pill (2026-05-27) — surfaces how stale the threads we replied to
+      // were at the moment of post, parallel to the `viral` pill's quality
+      // signal. Missing only for very old rows where the scraper didn't
+      // capture a datetime; treated as null and excluded from the median.
+      tweetPostedMs: toMs(r.tweet_posted_at),
       hasDraft: !!r.has_draft,
       exitMs,
       status: r.status,
@@ -1768,6 +1774,17 @@ async function enrichPostCommentsTwitterRuns(runs) {
     // replied to this run?" (calibrated against the prompt rule
     // `Virality >= 100 = strong, ~36x reply views vs [0-10) bucket`).
     const postedViralityScores = [];
+    // Thread-age-at-post for posted candidates this batch, in hours. Mirrors
+    // postedViralityScores and is summarized with median+max+n into the
+    // result.age_* fields below. Median (not mean) for robustness against the
+    // X-Latest-tab-leaks-stale-tweet edge case: one 75h-old row would skew the
+    // mean badly. The `age` pill surfaces the median; the tooltip shows max
+    // and n so the operator can spot when a single stale outlier slipped past
+    // both the pre-search hook AND the score_twitter_candidates age cutoff.
+    // Only rows with a parseable tweetPostedMs contribute; rows missing the
+    // upstream tweet_posted_at (very old discoveries pre-scraper-fix) are
+    // silently excluded so they don't pollute the median with a 0 or NaN.
+    const postedAgeHours = [];
     // Project labels this cycle actually worked on, surfaced at the end of the
     // pill row (mirrors enrichPostCommentsRedditRuns). Source is the
     // twitter_candidates.matched_project values for rows tied to this run's
@@ -1798,6 +1815,22 @@ async function enrichPostCommentsTwitterRuns(runs) {
         if (c.virality_score != null && Number.isFinite(c.virality_score)) {
           postedViralityScores.push(c.virality_score);
         }
+        // Thread age = (when we posted our reply) - (when the parent thread
+        // was tweeted). Both timestamps come from twitter_candidates; the
+        // parent timestamp originates from the harness scrape's <time
+        // datetime="..."> attribute and is decoded server-side from the
+        // snowflake-encoded tweet ID for cross-check (see score_twitter_
+        // candidates.py). Fallback to discoveredMs when postedMs is missing
+        // (shouldn't happen for status='posted' but defensive).
+        if (c.tweetPostedMs != null) {
+          const refMs = c.postedMs != null ? c.postedMs : c.discoveredMs;
+          if (refMs != null) {
+            const ageH = (refMs - c.tweetPostedMs) / 3600000;
+            if (Number.isFinite(ageH) && ageH >= 0) {
+              postedAgeHours.push(ageH);
+            }
+          }
+        }
         // Salvage signature: candidate's discovered_at predates this cycle's
         // start by enough that it must have been pulled in by Phase 0 (which
         // rewrites batch_id to the current BATCH_ID). Tolerance covers Phase 1
@@ -1818,6 +1851,19 @@ async function enrichPostCommentsTwitterRuns(runs) {
         ? sorted[mid]
         : (sorted[mid - 1] + sorted[mid]) / 2;
       viralityMaxPosted = sorted[sorted.length - 1];
+    }
+    // Same shape for thread-age-at-post. Surfaces in the `age` pill +
+    // tooltip below. Suppressed when no posted row had a parseable
+    // tweetPostedMs (the pill is hidden, matching the viral-pill behaviour).
+    let ageMedianPosted = null;
+    let ageMaxPosted = null;
+    if (postedAgeHours.length) {
+      const sorted = postedAgeHours.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      ageMedianPosted = (sorted.length % 2)
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
+      ageMaxPosted = sorted[sorted.length - 1];
     }
     const candidatesDropped = Math.max(0, candidatesRaw - candidatesPassed);
     // Phase 0 salvage attempt count from the cycle log — what was actually
@@ -2017,6 +2063,17 @@ async function enrichPostCommentsTwitterRuns(runs) {
       virality_median_posted: viralityMedianPosted,
       virality_max_posted: viralityMaxPosted,
       virality_posted_n: postedViralityScores.length,
+      // Median thread-age-at-post, in hours. Parallels virality_median_posted
+      // — same robustness story (median for the X-Latest-tab-leak outlier),
+      // same suppression behaviour (null = pill hidden). Anchored against the
+      // FRESHNESS_HOURS_DISCOVER cap enforced upstream: when the cycle's
+      // variant=A/B the soft target is <=6h, variant=C/D it's <=1h. A median
+      // above the variant cap means the X Latest tab leaked stale tweets AND
+      // the score-time cutoff didn't catch them (or the cutoff was disabled);
+      // surfaces it without needing to grep cycle logs for [stale_age_skip].
+      age_median_posted_h: ageMedianPosted,
+      age_max_posted_h: ageMaxPosted,
+      age_posted_n: postedAgeHours.length,
       cost_usd: prior.cost_usd || 0,
       failed: prior.failed || 0,
       failure_reasons: Array.isArray(prior.failure_reasons) ? prior.failure_reasons : [],
