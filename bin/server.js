@@ -12998,17 +12998,18 @@ async function loadActivityStats(force) {
   const plat = currentStatsPlatform();
   const proj = currentStatsProject();
   const cacheKey = hours + '|' + plat + '|' + proj;
-  if (!force) {
-    const cached = statsCacheGet('activity', cacheKey);
-    if (cached) { renderActivityStats(cached); return; }
-  }
-  // Immediate visual feedback on filter change. Without this the previously
-  // rendered grid sits frozen until the 9-way UNION returns; on a cold cache
-  // miss that's a couple seconds with zero indication anything is happening.
+  const cached = force ? null : statsCacheGetEntry('activity', cacheKey);
+  if (cached && cached.fresh) { renderActivityStats(cached.payload); return; }
+  const haveStale = !!cached;
+  if (haveStale) renderActivityStats(cached.payload);
+  // Loading UI only when we have nothing on screen yet. With stale data
+  // already rendered, the background revalidation is silent.
   const grid = document.getElementById('stats-grid');
   const totalEl = document.getElementById('stats-total');
-  if (grid) grid.classList.add('is-loading');
-  if (totalEl) totalEl.textContent = 'loading…';
+  if (!haveStale) {
+    if (grid) grid.classList.add('is-loading');
+    if (totalEl) totalEl.textContent = 'loading…';
+  }
   try {
     const params = ['hours=' + hours];
     if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
@@ -13018,7 +13019,7 @@ async function loadActivityStats(force) {
     if (data && !data.error) statsCacheSet('activity', cacheKey, data);
     renderActivityStats(data);
   } catch {} finally {
-    if (grid) grid.classList.remove('is-loading');
+    if (!haveStale && grid) grid.classList.remove('is-loading');
   }
 }
 
@@ -14913,14 +14914,16 @@ async function loadStyleStats(force) {
   const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
   const hours = currentStatsWindow().hours;
   const cacheKey = hours + '|' + platform + '|' + project;
-  if (!force) {
-    const cached = statsCacheGet('style', cacheKey);
-    if (cached) { renderStyleStats(cached.stats, cached.meta); return; }
-  }
+  const cached = force ? null : statsCacheGetEntry('style', cacheKey);
+  if (cached && cached.fresh) { renderStyleStats(cached.payload.stats, cached.payload.meta); return; }
+  const haveStale = !!cached;
+  if (haveStale) renderStyleStats(cached.payload.stats, cached.payload.meta);
   const body = document.getElementById('style-stats-body');
   const totalEl = document.getElementById('style-stats-total');
-  if (body) body.classList.add('is-loading');
-  if (totalEl) totalEl.textContent = 'loading…';
+  if (!haveStale) {
+    if (body) body.classList.add('is-loading');
+    if (totalEl) totalEl.textContent = 'loading…';
+  }
   try {
     const params = ['hours=' + hours];
     if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
@@ -14932,7 +14935,7 @@ async function loadStyleStats(force) {
     if (statsRes && !statsRes.error) statsCacheSet('style', cacheKey, { stats: statsRes, meta });
     renderStyleStats(statsRes, meta);
   } catch {} finally {
-    if (body) body.classList.remove('is-loading');
+    if (!haveStale && body) body.classList.remove('is-loading');
   }
 }
 
@@ -15044,14 +15047,16 @@ async function loadCohortStats(force) {
   const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
   const hours = currentStatsWindow().hours;
   const cacheKey = hours + '|' + platform + '|' + project;
-  if (!force) {
-    const cached = statsCacheGet('cohort', cacheKey);
-    if (cached) { renderCohortStats(cached); return; }
-  }
+  const cached = force ? null : statsCacheGetEntry('cohort', cacheKey);
+  if (cached && cached.fresh) { renderCohortStats(cached.payload); return; }
+  const haveStale = !!cached;
+  if (haveStale) renderCohortStats(cached.payload);
   const body = document.getElementById('cohort-stats-body');
   const totalEl = document.getElementById('cohort-stats-total');
-  if (body) body.classList.add('is-loading');
-  if (totalEl) totalEl.textContent = 'loading…';
+  if (!haveStale) {
+    if (body) body.classList.add('is-loading');
+    if (totalEl) totalEl.textContent = 'loading…';
+  }
   try {
     const params = ['hours=' + hours];
     if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
@@ -15061,9 +15066,9 @@ async function loadCohortStats(force) {
     if (data && !data.error) statsCacheSet('cohort', cacheKey, data);
     renderCohortStats(data);
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load cohort stats.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load cohort stats.</div>';
   } finally {
-    if (body) body.classList.remove('is-loading');
+    if (!haveStale && body) body.classList.remove('is-loading');
   }
 }
 
@@ -18815,22 +18820,30 @@ async function loadFunnelStats(force) {
   // Cache key is window+platform so a platform-pill change forces a refetch
   // even when the days dropdown stayed the same. Matches the server's cache key.
   const loadKey = days + '|' + platform;
-  if (_funnelStatsLoadedFor === loadKey && !force) return;
-  if (!force) {
-    const cached = statsCacheGet('funnel', loadKey);
-    if (cached) {
-      _lastFunnelPayload = cached;
-      renderFunnelStats(cached);
-      _funnelStatsLoadedFor = loadKey;
-      return;
-    }
+  const cached = force ? null : statsCacheGetEntry('funnel', loadKey);
+  if (cached && cached.fresh) {
+    _lastFunnelPayload = cached.payload;
+    renderFunnelStats(cached.payload);
+    _funnelStatsLoadedFor = loadKey;
+    return;
   }
+  const haveStale = !!cached;
+  if (haveStale) {
+    _lastFunnelPayload = cached.payload;
+    renderFunnelStats(cached.payload);
+    _funnelStatsLoadedFor = loadKey;
+  }
+  // _loadedFor short-circuit still helps when nothing cached AND a recent
+  // fetch already populated state mid-flight via another path.
+  if (!haveStale && _funnelStatsLoadedFor === loadKey && !force) return;
   _funnelStatsLoading = true;
   const totalEl = document.getElementById('funnel-stats-total');
   const body = document.getElementById('funnel-stats-body');
-  if (totalEl) totalEl.textContent = 'loading\u2026';
-  if (body) {
-    body.innerHTML = '<div class="style-stats-empty">Loading\u2026 (first call can take 15\u201330s)</div>';
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading\u2026';
+    if (body) {
+      body.innerHTML = '<div class="style-stats-empty">Loading\u2026 (first call can take 15\u201330s)</div>';
+    }
   }
   try {
     const params = ['days=' + days];
@@ -18844,7 +18857,7 @@ async function loadFunnelStats(force) {
     renderFunnelStats(data);
     _funnelStatsLoadedFor = loadKey;
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _funnelStatsLoading = false;
   }
@@ -18858,20 +18871,25 @@ async function loadSubredditStats(force) {
   const days = currentStatsWindow().days;
   const proj = currentStatsProject();
   const loadKey = days + '|' + proj;
-  if (_subredditStatsLoadedFor === loadKey && !force) return;
-  if (!force) {
-    const cached = statsCacheGet('subreddit', loadKey);
-    if (cached) {
-      renderSubredditStats(cached);
-      _subredditStatsLoadedFor = loadKey;
-      return;
-    }
+  const cached = force ? null : statsCacheGetEntry('subreddit', loadKey);
+  if (cached && cached.fresh) {
+    renderSubredditStats(cached.payload);
+    _subredditStatsLoadedFor = loadKey;
+    return;
   }
+  const haveStale = !!cached;
+  if (haveStale) {
+    renderSubredditStats(cached.payload);
+    _subredditStatsLoadedFor = loadKey;
+  }
+  if (!haveStale && _subredditStatsLoadedFor === loadKey && !force) return;
   _subredditStatsLoading = true;
   const totalEl = document.getElementById('subreddit-stats-total');
   const body = document.getElementById('subreddit-stats-body');
-  if (totalEl) totalEl.textContent = 'loading\u2026';
-  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading\u2026';
+    if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  }
   try {
     const params = ['days=' + days];
     if (proj && proj !== 'all') params.push('project=' + encodeURIComponent(proj));
@@ -18881,7 +18899,7 @@ async function loadSubredditStats(force) {
     renderSubredditStats(data);
     _subredditStatsLoadedFor = loadKey;
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _subredditStatsLoading = false;
   }
@@ -18896,20 +18914,25 @@ async function loadDmStats(force) {
   const plat = currentStatsPlatform();
   const proj = currentStatsProject();
   const key  = days + '|' + plat + '|' + proj;
-  if (_dmStatsLoadedFor === key && !force) return;
-  if (!force) {
-    const cached = statsCacheGet('dm', key);
-    if (cached) {
-      renderDmStats(cached);
-      _dmStatsLoadedFor = key;
-      return;
-    }
+  const cached = force ? null : statsCacheGetEntry('dm', key);
+  if (cached && cached.fresh) {
+    renderDmStats(cached.payload);
+    _dmStatsLoadedFor = key;
+    return;
   }
+  const haveStale = !!cached;
+  if (haveStale) {
+    renderDmStats(cached.payload);
+    _dmStatsLoadedFor = key;
+  }
+  if (!haveStale && _dmStatsLoadedFor === key && !force) return;
   _dmStatsLoading = true;
   const totalEl = document.getElementById('dm-stats-total');
   const body = document.getElementById('dm-stats-body');
-  if (totalEl) totalEl.textContent = 'loading\u2026';
-  if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading\u2026';
+    if (body) body.innerHTML = '<div class="style-stats-empty">Loading\u2026</div>';
+  }
   try {
     const params = ['days=' + days];
     if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
@@ -18920,7 +18943,7 @@ async function loadDmStats(force) {
     renderDmStats(data);
     _dmStatsLoadedFor = key;
   } catch (e) {
-    if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
   } finally {
     _dmStatsLoading = false;
   }
