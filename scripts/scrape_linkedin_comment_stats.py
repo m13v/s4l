@@ -924,6 +924,23 @@ def scrape(
             with_rxn = sum(
                 1 for r in records if r.get("reactions") is not None
             )
+            early_stop_reason = result.get("early_stop_reason")
+
+            # Hard-fail path: challenge fired before we got ANY records.
+            # Treat as captcha_or_checkpoint-equivalent so stats-linkedin.sh
+            # can promote the debug bundle to the permanent archive.
+            if early_stop_reason and len(records) == 0:
+                dbg.failure(
+                    page,
+                    "early_stop_no_records",
+                    early_stop_reason,
+                )
+                return _finalize_and_return({
+                    "ok": False,
+                    "error": "early_stop_no_records",
+                    "url": cur_url,
+                    "early_stop_reason": early_stop_reason,
+                })
 
             out = {
                 "ok": True,
@@ -937,6 +954,19 @@ def scrape(
                 "with_reactions": with_rxn,
                 "ticks_log": result.get("ticks_log", []),
             }
+            if early_stop_reason:
+                # Partial success: writer still applies the records we did
+                # harvest. Surface a grep-able stderr marker so the
+                # orchestrator log shows the canary even though rc=0.
+                out["partial"] = True
+                out["early_stop_reason"] = early_stop_reason
+                print(
+                    f"[scrape_linkedin] partial_stop "
+                    f"reason={early_stop_reason} "
+                    f"records={len(records)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             if out_path:
                 # Write the records-only JSON in the shape that
