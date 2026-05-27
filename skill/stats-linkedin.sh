@@ -70,8 +70,8 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=300           # diagnostic run 2026-05-27: 2x prior safe ceiling. Per-tick console.log added to JS loop so we can post-mortem stagnation behavior past tick 150.
-SCRAPER_TIMEOUT_SEC=2400  # 40min budget. Worst-case 300 * 6.6s/tick = 1980s + 60s overhead = 2040s; this leaves ~360s headroom.
+MAX_SCROLLS=1000          # Generous ceiling 2026-05-27. Natural bail (stagnant>=8) decides when to stop. Bug A patched (scrollHeight scoped to comments-list container) and Bug B patched (Python SIGTERM trap aborts JS loop) so runaway risk is mitigated.
+SCRAPER_TIMEOUT_SEC=2400  # 40min budget. Outer gtimeout safety net; SIGTERM handler now tells JS loop to abort cleanly before exit.
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
