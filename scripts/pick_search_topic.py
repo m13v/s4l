@@ -319,12 +319,14 @@ def pick_topic_for_project(project_name, platform="twitter",
     # topic given the full stats. search_topic=None signals the prompt
     # branch downstream.
     if rnd.random() < explore_rate:
-        return {
+        assignment = {
             **base,
             "mode": "explore_invent",
             "search_topic": None,
             "score": 0.0,
         }
+        _emit_trace(assignment, pool, weight_pcts, chosen_idx=None)
+        return assignment
 
     # USE: weighted random over the FULL pool (smoothed weights).
     needle = rnd.uniform(0.0, weight_total)
@@ -337,13 +339,15 @@ def pick_topic_for_project(project_name, platform="twitter",
             break
     chosen = pool[chosen_idx]
 
-    return {
+    assignment = {
         **base,
         "mode": "use",
         "search_topic": chosen["search_topic"],
         "score": round(chosen["composite_score"], 2),
         "picked_weight_pct": round(weight_pcts[chosen_idx], 2),
     }
+    _emit_trace(assignment, pool, weight_pcts, chosen_idx=chosen_idx)
+    return assignment
 
 
 def _format_pool_table(refs, mode):
@@ -462,31 +466,19 @@ def get_assigned_topic_prompt(assignment):
         ]
         return "\n".join(lines)
 
-    # Mode == "use"
-    weight_pct = assignment.get("picked_weight_pct", 0.0)
+    # Mode == "use" — programmatic pick is final; the model gets the
+    # topic and the instruction, nothing else. The full pool with
+    # weights/verdicts is emitted to the cycle log via the
+    # `[pick_search_topic]` trace line in pick_topic_for_project, so any
+    # post-hoc tracing reads from the log, not the prompt.
     lines = [
         f"## Your assigned search topic: **{topic}**",
         "",
         (
-            f"This topic was selected by the picker (weighted random over "
-            f"the FULL universe; this topic carried "
-            f"{weight_pct:.2f}% of the weight). Weights are log-smoothed "
-            f"so the top performer lands around 20-30% while every cold "
-            f"topic still has a small but real chance "
-            f"(floor weight = {COLD_TOPIC_WEIGHT}). Composite score is "
-            f"clicks*100 + likes + views*0.001 over the last "
-            f"{window_days}d. Draft ONE Twitter advanced-search query "
-            f"that surfaces fresh tweets about this exact topic. Do not "
-            f"substitute a different topic."
+            f"Draft ONE Twitter advanced-search query that surfaces fresh "
+            f"tweets about this exact topic. Do not substitute a different "
+            f"topic."
         ),
-        "",
-        (
-            f"Universe: {universe_size} seeded topics in config.json. "
-            f"Pool: {assignment.get('pool_size', 0)} topics total "
-            f"({scored_n} with data, {cold_n} cold)."
-        ),
-        "",
-        _format_pool_table(refs, mode),
         "",
         (
             "In the JSON you emit per tweet, set `search_topic` to "
