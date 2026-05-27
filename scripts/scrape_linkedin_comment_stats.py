@@ -183,6 +183,13 @@ class _DebugRecorder:
         self._context = None
         # Phase timings filled in by set_timing(). Surfaced in meta.json.
         self.timings: dict = {}
+        # Soft abort signal raised by on_response when 429 count crosses
+        # ABORT_429_THRESHOLD. Polled by scrape() after page.evaluate()
+        # returns so we don't burn through the post-throttle window with
+        # follow-up scrolls. JS-side scroll loop runs in a separate exec
+        # context and can't observe this; the bailout is post-loop.
+        self._abort_reason: Optional[str] = None
+        self._saw_429_count: int = 0
         if self.enabled:
             try:
                 os.makedirs(self.dir, exist_ok=True)
@@ -350,8 +357,10 @@ class _DebugRecorder:
                 # the canary even when the run continues. Also stamp
                 # meta.json so the in-bundle summary records it.
                 if response.status == 429:
+                    self._saw_429_count += 1
                     print(
-                        f"[scrape_linkedin] saw_429 url={url[:200]}",
+                        f"[scrape_linkedin] saw_429 "
+                        f"count={self._saw_429_count} url={url[:200]}",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -361,6 +370,17 @@ class _DebugRecorder:
                         })
                     except Exception:
                         pass
+                    if (self._saw_429_count >= ABORT_429_THRESHOLD
+                            and self._abort_reason is None):
+                        self._abort_reason = (
+                            f"saw_429_count={self._saw_429_count}"
+                        )
+                        print(
+                            f"[scrape_linkedin] ABORT signal raised "
+                            f"reason={self._abort_reason}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 rec = {
                     "ts": _ts_ms(),
                     "status": response.status,
@@ -742,12 +762,19 @@ class _DebugRecorder:
 COMMENTS_URL = "https://www.linkedin.com/in/me/recent-activity/comments/"
 
 # Tunables (also passable via CLI flags).
-DEFAULT_MAX_SCROLLS = 40
+DEFAULT_MAX_SCROLLS = 80
 SCROLL_PAUSE_MIN_MS = 2500
 SCROLL_PAUSE_MAX_MS = 6500
 SCROLL_DY_MIN = 600
 SCROLL_DY_MAX = 1100
 HARVEST_SETTLE_MS = 1500
+# Number of 429 responses (LinkedIn or sub-resource) before we raise the
+# soft abort flag inside _DebugRecorder. Once tripped, scrape() bails out
+# after the current page.evaluate() returns, preserving whatever records
+# the JS loop already accumulated. Three is enough to distinguish a real
+# throttle from a one-off API hiccup but tight enough to stop the bleed
+# before LinkedIn escalates the session to /checkpoint.
+ABORT_429_THRESHOLD = 3
 
 
 # JS executed inside ONE page.evaluate(). Does the slow scroll +
@@ -1201,6 +1228,14 @@ def scrape(
                 1 for r in records if r.get("reactions") is not None
             )
             early_stop_reason = result.get("early_stop_reason")
+
+            # 429 soft-abort: on_response trips dbg._abort_reason once the
+            # cumulative 429 count crosses ABORT_429_THRESHOLD. JS scroll
+            # loop can't observe it (different exec context), but we catch
+            # it post-evaluate and convert into a partial-success bail so
+            # the writer still applies whatever the loop did harvest.
+            if dbg._abort_reason and not early_stop_reason:
+                early_stop_reason = dbg._abort_reason
 
             # Hard-fail path: challenge fired before we got ANY records.
             # Treat as captcha_or_checkpoint-equivalent so stats-linkedin.sh
