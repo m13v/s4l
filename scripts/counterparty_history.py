@@ -296,13 +296,15 @@ def get_counterparty_history_block(platform, author, current_post_id=None, curre
     if not author:
         return None, ""
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         dm_fut = ex.submit(_fetch_dm_history, platform, author, current_post_id)
         pub_fut = ex.submit(_fetch_public_reply_history, platform, author, current_reply_id)
+        sum_fut = ex.submit(_fetch_author_summary, platform, author, 7)
         same_post_disengage, dm_lines = dm_fut.result()
         pub_lines = pub_fut.result()
+        summary_line = sum_fut.result()
 
-    if not dm_lines and not pub_lines:
+    if not dm_lines and not pub_lines and not summary_line:
         return same_post_disengage, ""
 
     parts = [f"## Prior history with @{author}"]
@@ -312,6 +314,9 @@ def get_counterparty_history_block(platform, author, current_post_id=None, curre
         "have already declined or warmed up to a topic. Does NOT auto-block; "
         "you still decide reply or skip based on the current thread."
     )
+    if summary_line:
+        parts.append("")
+        parts.append(summary_line)
     if dm_lines:
         parts.append("\n### DM threads on other posts")
         parts.append("\n".join(dm_lines))
