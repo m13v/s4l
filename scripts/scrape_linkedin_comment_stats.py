@@ -743,8 +743,8 @@ COMMENTS_URL = "https://www.linkedin.com/in/me/recent-activity/comments/"
 
 # Tunables (also passable via CLI flags).
 DEFAULT_MAX_SCROLLS = 40
-SCROLL_PAUSE_MIN_MS = 1800
-SCROLL_PAUSE_MAX_MS = 3500
+SCROLL_PAUSE_MIN_MS = 2500
+SCROLL_PAUSE_MAX_MS = 6500
 SCROLL_DY_MIN = 600
 SCROLL_DY_MAX = 1100
 HARVEST_SETTLE_MS = 1500
@@ -916,7 +916,7 @@ HARVEST_JS_TEMPLATE = r"""
     const wait = opts.pause_min_ms
                + Math.random() * (opts.pause_max_ms - opts.pause_min_ms);
 
-    if (ticks < opts.max_scrolls && stagnant < 4) {
+    if (ticks < opts.max_scrolls && stagnant < 8) {
       setTimeout(tick, wait);
     } else {
       // Final settle + harvest.
