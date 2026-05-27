@@ -9382,19 +9382,14 @@ const HTML = `<!DOCTYPE html>
   .per-project-chart .pp-tooltip .tt-row .val { margin-left: auto; }
   .per-project-chart .pp-empty { padding: 14px 12px; color: var(--text-muted); font-size: 11px; text-align: center; }
   .per-project-row.pp-loading .per-project-chart .pp-empty { color: var(--text-secondary); }
-  /* Deploy Health: slim inline bar when collapsed, alert colors when there is something worth attention */
+  /* Deploy Health: standard section appearance regardless of alert state (2026-05-27).
+     Per user instruction: no special colors. warn/error states intentionally
+     inherit the default section styling. Severity is conveyed by the row
+     contents (counts, labels) inside the section, not by background or border. */
   #deploy-health:not([open]) { margin-bottom: 10px; border-radius: 8px; }
   #deploy-health:not([open]) > summary { padding: 6px 14px; }
   #deploy-health:not([open]) .style-stats-title { font-size: 11px; text-transform: none; letter-spacing: normal; font-weight: 600; }
   #deploy-health:not([open]) .style-stats-total { font-size: 11px; }
-  #deploy-health[data-alert="warn"] { border-color: #d2d2d2; }
-  #deploy-health[data-alert="warn"] > summary { background: #fbfbfb; }
-  #deploy-health[data-alert="warn"] .style-stats-title,
-  #deploy-health[data-alert="warn"] .style-stats-total { color: #626262; }
-  #deploy-health[data-alert="error"] { border-color: #b7b7b7; }
-  #deploy-health[data-alert="error"] > summary { background: #f5f5f5; }
-  #deploy-health[data-alert="error"] .style-stats-title,
-  #deploy-health[data-alert="error"] .style-stats-total { color: #3d3d3d; }
   .style-stats-table-wrapper { border-top: 1px solid var(--border); overflow-x: auto; }
   .style-stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .style-stats-table th, .style-stats-table td { padding: 10px 16px; text-align: right; font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--divider); }
