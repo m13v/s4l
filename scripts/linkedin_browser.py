@@ -195,7 +195,8 @@ def _read_devtools_active_port() -> Optional[int]:
     by Chrome on startup whenever `--remote-debugging-port=0` is passed
     (the linkedin-agent MCP launches Chrome that way). First line is the
     port, second line is the browser uuid path. Missing file -> None
-    (MCP is cold; caller should fall back to launch_persistent_context).
+    (MCP is cold; caller raises RuntimeError — cold-launch removed
+    2026-05-27, never attach to the wrong profile).
     """
     port_file = os.path.join(PROFILE_DIR, "DevToolsActivePort")
     try:
@@ -332,57 +333,28 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
 
 
 def unread_dms() -> dict:
-    """Scan LinkedIn /messaging/ sidebar in headed mode, read-only."""
+    """Scan LinkedIn /messaging/ sidebar in headed mode, read-only.
+
+    Cold-launch removed 2026-05-27 — this now requires the linkedin-harness
+    Chrome to be reachable via CDP; otherwise it returns
+    error='no_warm_browser' so the caller can surface the real cause
+    instead of silently attaching to a logged-out sibling profile.
+    """
     from playwright.sync_api import sync_playwright
 
     _acquire_browser_lock()
 
     with sync_playwright() as p:
-        # Persistent context = same profile/cookies/session as linkedin-agent.
-        # Headed mode per CLAUDE.md (LinkedIn fingerprints headless).
-        deadline = time.time() + LOCK_WAIT_MAX
-        context = None
-        last_err: Optional[Exception] = None
-        while True:
-            # Clear stale Singleton* before each attempt. The MCP-spawned
-            # Chrome may have left these behind on a non-graceful exit;
-            # ensure_browser_healthy in lock.sh also tries this but
-            # there's still a race window.
-            for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                try:
-                    os.remove(os.path.join(PROFILE_DIR, fname))
-                except OSError:
-                    pass
-            try:
-                context = p.chromium.launch_persistent_context(
-                    PROFILE_DIR,
-                    headless=False,
-                    executable_path=(
-                        SYSTEM_CHROME if os.path.exists(SYSTEM_CHROME) else None
-                    ),
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--window-position=3953,-1032",
-                        "--window-size=911,1016",
-                    ],
-                    viewport=VIEWPORT,
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                )
-                break
-            except Exception as e:
-                last_err = e
-                if time.time() >= deadline:
-                    return {
-                        "ok": False,
-                        "error": "profile_locked",
-                        "detail": f"launch_persistent_context failed: {e}",
-                    }
-                time.sleep(LOCK_POLL_INTERVAL)
+        try:
+            context, _owns_context = _connect_to_running_or_launch(p)
+        except RuntimeError as e:
+            return {
+                "ok": False,
+                "error": "no_warm_browser",
+                "detail": str(e),
+            }
 
+        page = None
         try:
             page = context.new_page()
             try:
@@ -532,10 +504,14 @@ def unread_dms() -> dict:
             }
 
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            # CDP-attach branch: NEVER close the context — that would
+            # terminate the harness Chrome we just attached to. Only
+            # close the page we opened.
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
 
 def unread_dms_with_retry(max_attempts: int = 2) -> dict:
