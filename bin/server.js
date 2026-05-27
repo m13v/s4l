@@ -1871,6 +1871,14 @@ async function enrichPostCommentsTwitterRuns(runs) {
     // the salvaged pill so it shows what THIS cycle salvaged, not what NEXT
     // cycle could salvage.
     let salvageAttempted = 0;
+    // 2026-05-27: count of candidates score_twitter_candidates.py hard-dropped
+    // via the FRESHNESS_HOURS_DISCOVER cap (variant A/B=6h, C/D=1h) before any
+    // API insert. These rows never enter twitter_candidates, so they're absent
+    // from raw/passed/expired counts. Sourced from `[stale_age_skip]` stderr
+    // markers in the cycle log. Surfaced as the `age-dropped` pill next to
+    // `expired` so the operator can see how many stale tweets the X Latest tab
+    // leaked past the pre-search hook this cycle.
+    let ageDropped = 0;
     let chosenLog = null;
     let chosenLogDelta = Infinity;
     for (const f of logFiles) {
@@ -1887,6 +1895,11 @@ async function enrichPostCommentsTwitterRuns(runs) {
         const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
         const m = body.match(phase0SalvageRe);
         if (m) salvageAttempted = parseInt(m[1], 10);
+        // Count every [stale_age_skip] marker in the cycle log. The marker is
+        // line-anchored and emitted once per dropped candidate by
+        // score_twitter_candidates.py.
+        const ageSkipMatches = body.match(/\[stale_age_skip\] /g);
+        if (ageSkipMatches) ageDropped = ageSkipMatches.length;
         // Fallback for scan-only cycles where 0 candidates upserted (so
         // matched_project never landed in twitter_candidates for this batch):
         // pull project names from the cycle log's "Selected projects:" header.
@@ -2016,6 +2029,10 @@ async function enrichPostCommentsTwitterRuns(runs) {
       candidates_passed: candidatesPassed,
       candidates_dropped: candidatesDropped,
       candidates_expired: expired,
+      // 2026-05-27: Phase 1 hard age-cap drops (score_twitter_candidates.py
+      // FRESHNESS_HOURS_DISCOVER). Counted from `[stale_age_skip]` markers in
+      // the cycle log; surfaced as the `age-dropped` pill in the result row.
+      age_dropped: ageDropped,
       above_floor: priorDiscover.above_floor || 0,
       posted,
       pending_queue: pendingNow,    // live snapshot, kept for backward compat
@@ -10645,6 +10662,12 @@ function renderResult(run) {
     const passed = r.candidates_passed || 0;
     const dropped = r.candidates_dropped || 0;
     const expired = r.candidates_expired || 0;
+    // 2026-05-27: hard age-cap drops at Phase 1 (FRESHNESS_HOURS_DISCOVER).
+    // Sourced from [stale_age_skip] markers in the cycle log; never lands in
+    // twitter_candidates. Surfaces as a sibling pill to "expired" so the
+    // operator can see how many stale tweets the X Latest tab leaked past the
+    // pre-search since_time hook this cycle.
+    const ageDropped = r.age_dropped || 0;
     const aboveFloor = r.above_floor || 0;
     const posted = r.posted || 0;
     // Salvageable pool = pending rows with a persisted draft (Phase 0 salvage
@@ -10718,6 +10741,7 @@ function renderResult(run) {
       '• **searches ' + searches + '** — queries run' + NL +
       '• **raw ' + raw + '** — tweets returned' + NL +
       '• **passed ' + passed + '** — after dedup + age>18h cuts (' + dropped + ' dropped)' + NL +
+      '• **age-dropped ' + ageDropped + '** — hard-dropped at score time (FRESHNESS_HOURS_DISCOVER cap, A/B=6h C/D=1h); X Latest tab leaked stale tweets past the since_time: hook' + NL +
       NL +
       '**Phase 2a — Δ re-score**' + NL +
       '• **expired ' + expired + '** — below Δ<1 likes floor' + NL +
@@ -10751,6 +10775,7 @@ function renderResult(run) {
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('passed', passed, passed > 0 ? '#9b9b9b' : 'var(--muted)') +
         pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
+        pill('age-dropped', ageDropped, ageDropped > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#999999' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
         ((r.virality_posted_n || 0) > 0
