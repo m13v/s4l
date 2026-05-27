@@ -405,7 +405,7 @@ ${TOP_POSTS}
 4. Draft the post. RULES:
    - No em dashes anywhere. Commas, periods, or plain '-' only.
    - No markdown formatting (no ##, no **bold**, no bullet lists).
-   - 2-4 short paragraphs, casual tone, first person.
+   - 2-4 short paragraphs, casual tone. Narrator voice follows the VOICE RELATIONSHIP block in the styles section.
    - Include at least one imperfection (sentence fragment, aside, lowercase start).
    - Title: lowercase, no clickbait patterns, no emojis.
    - Ground in a specific detail from the product source you read in step 1.
