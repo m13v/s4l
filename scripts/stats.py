@@ -1921,7 +1921,7 @@ def refresh_reddit_replies(db, user_agent, quiet=False):
 
 
 def refresh_twitter_threads(db, config=None, quiet=False,
-                            max_per_run=500, stale_hours=20):
+                            max_per_run=1000, stale_hours=20):
     """Poll fxtwitter for parent threads we've commented on and append one
     row to thread_snapshots per successful poll.
 
@@ -2352,9 +2352,9 @@ def main():
                         help="Skip the parent-thread snapshot refresh that piggybacks on "
                              "--twitter-only and --twitter-audit. Use when you only want "
                              "the post-engagement refresh and not the parent-thread curve.")
-    parser.add_argument("--twitter-threads-max", type=int, default=500,
-                        help="Cap the number of parent threads polled per run (default 500). "
-                             "fxtwitter is paced at 1 req/sec so 500 threads ~= 8.3 min. "
+    parser.add_argument("--twitter-threads-max", type=int, default=1000,
+                        help="Cap the number of parent threads polled per run (default 1000). "
+                             "fxtwitter is paced at 1 req/sec so 1000 threads ~= 16.7 min. "
                              "0 means unlimited.")
     parser.add_argument("--twitter-threads-stale-hours", type=int, default=20,
                         help="Skip threads whose latest snapshot is younger than this many "
