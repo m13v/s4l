@@ -29,6 +29,7 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post, api_patch
 from author_history_block import render as _render_author_history
+from project_topics import topics_for_project
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -904,7 +905,7 @@ def build_discover_prompt(project, config, limit, top_report, recent_comments,
     Claude call in this cycle that writes a comment).
     """
     content_angle = build_content_angle(project, config)
-    topics_list = project.get("search_topics") or []
+    topics_list = list(topics_for_project(project.get("name") or ""))
     project_json = json.dumps({
         "name": project.get("name"),
         "description": project.get("description"),
@@ -1185,8 +1186,8 @@ def build_prompt(project, config, limit, top_report, recent_comments,
     """
     content_angle = build_content_angle(project, config)
 
-    # Unified search_topics (post 2026-04-30 legacy field cleanup).
-    topics_list = project.get("search_topics") or []
+    # DB-backed search_topics (post 2026-05-27 config.json removal).
+    topics_list = list(topics_for_project(project.get("name") or ""))
 
     project_json = json.dumps({
         "name": project.get("name"),
