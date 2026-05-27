@@ -16052,17 +16052,96 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: distinctOptions(normalized, 'project_name', 'All'),
         filterPredicate: filterPredicateExact },
-      { key: 'score',          label: 'Ours',     type: 'numeric', align: 'left',  widthPct: 14,
+      { key: 'score',          label: 'Ours',     type: 'numeric', align: 'left',  widthPct: 20,
         formatter: (_v, r) => {
+          // 2026-05-26: clicks bit moved here from the now-removed "Links"
+          // column. Click tracking is independent of the engagement scrape
+          // (it flows from the /r/<code> resolver in real time), so we can
+          // render clicks even when engagement_ts is 0 (pending). If the
+          // post never carried a link, render "N/A".
+          const URL_RE_DISPLAY = /https?:\\/\\/\\S+|(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[\\w\\-./?#=&%+~:@!$,;*]+/i;
+          const hasInlineUrl = !!(r.our_content && URL_RE_DISPLAY.test(String(r.our_content)));
+          const hasLink = Number(r.link_count) > 0 || hasInlineUrl;
+          let clicksBit = '';
+          if (!hasLink) {
+            clicksBit = '<span class="top-stats-bit" title="No link posted with this content"><span class="top-stats-k">clicks</span>N/A</span>';
+          } else {
+            const real     = Number(r.link_real_clicks)   || 0;
+            const bots     = Number(r.link_bot_clicks)    || 0;
+            const backfill = Number(r.link_backfill_real) || 0;
+            const legacy   = Number(r.link_clicks)        || 0;
+            const havePerClick = real > 0 || bots > 0;
+            const ctr = Number(r.link_ctr) || 0;
+            let ctrLabel = '';
+            if (ctr > 0) {
+              const pct = ctr * 100;
+              const pctStr = pct >= 10 ? pct.toFixed(0)
+                            : pct >= 1  ? pct.toFixed(1)
+                            :             pct.toFixed(2);
+              ctrLabel = ' <span style="color:var(--text-muted);">(' + pctStr + '%)</span>';
+            }
+            if (havePerClick) {
+              const tip =
+                '**Clicks: humans / bots**' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Split from post_link_clicks (UA bot regex).' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '\u2022 **Real clicks** = the human number' + String.fromCharCode(10) +
+                '\u2022 **Bots** = Twitter card / LinkedIn unfurl / Slack preview prefetches' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = humans / views';
+              clicksBit = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + real
+                + ctrLabel
+                + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
+                + '</span>';
+            } else if (backfill > 0) {
+              const tip =
+                '**Clicks (estimated)**' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Estimated from PostHog $pageview events with matching utm_content. Real humans only, bots already filtered by PostHog.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = backfill / views';
+              clicksBit = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + backfill
+                + ctrLabel
+                + ' <span style="color:var(--text-muted);">(estimated)</span>'
+                + '</span>';
+            } else if (legacy > 0) {
+              const tip =
+                '**Clicks (legacy)**, pre 2026-05-07' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'Twitter card / LinkedIn / Slack preview bots inflated this ~20x.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                'New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number.' + String.fromCharCode(10) +
+                String.fromCharCode(10) +
+                '**CTR** = legacy / views (also inflated)';
+              clicksBit = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
+                + '<span class="top-stats-k">clicks</span>'
+                + legacy
+                + ctrLabel
+                + ' <span style="color:var(--text-muted);">(legacy)</span>'
+                + '</span>';
+            } else {
+              clicksBit = '<span class="top-stats-bit"><span class="top-stats-k">clicks</span>0</span>';
+            }
+          }
           // engagement_ts === 0 means engagement_updated_at IS NULL: the
           // post landed in the DB but the engagement scrape (stats.sh)
           // hasn't run against it yet. Render a "pending" pill instead of
           // a misleading row of zeros, with em-dashes for the individual
-          // metrics. Once stats.sh fires, real numbers replace this.
+          // metrics. Once stats.sh fires, real numbers replace this. Clicks
+          // are independent of the engagement scrape, so we still show the
+          // real clicks bit (or N/A) even in pending mode.
           if (!r.engagement_ts) {
             const pendingTitle = 'Engagement scrape has not run yet for this post. Numbers will fill in once stats.sh fires.';
             const parts = [
               '<span class="top-stats-bit" title="' + escapeHtml(pendingTitle) + '"><span class="top-stats-k">score</span><span class="top-stats-pending">pending</span></span>',
+              clicksBit,
               '<span class="top-stats-bit"><span class="top-stats-k">upvotes</span>\u2014</span>',
               '<span class="top-stats-bit"><span class="top-stats-k">comments</span>\u2014</span>',
               '<span class="top-stats-bit"><span class="top-stats-k">views</span>\u2014</span>',
@@ -16071,6 +16150,7 @@ function renderTopPosts(payload) {
           }
           const parts = [
             '<span class="top-stats-bit"><span class="top-stats-k">score</span>' + fmt(r.score) + '</span>',
+            clicksBit,
             '<span class="top-stats-bit"><span class="top-stats-k">upvotes</span>' + fmt(r.upvotes) + '</span>',
             '<span class="top-stats-bit"><span class="top-stats-k">comments</span>' + fmt(r.comments_count) + '</span>',
             '<span class="top-stats-bit"><span class="top-stats-k">views</span>' + (r.views == null ? '\u2014' : fmt(r.views)) + '</span>',
@@ -16138,164 +16218,6 @@ function renderTopPosts(payload) {
           return '<div class="top-stats-cell">' + parts.join('') + '</div>';
         },
         filterMode: 'none' },
-      { key: 'link_clicks',    label: 'Links',    type: 'numeric', align: 'left',  widthPct: 10,
-        // Sort by what the cell ACTUALLY displays. Display priority:
-        //   1. per-click log present (real/bot split) -> sort by real (humans only)
-        //   2. PostHog backfill present              -> sort by backfill
-        //   3. legacy conflated counter              -> sort by link_clicks
-        // Without this accessor, sort uses the raw link_clicks integer which
-        // includes Twitter card / LinkedIn unfurl / Slack preview bot prefetches
-        // (~20x inflation pre 2026-05-07), so the visible "humans / bots" split
-        // and the row order disagree. Filed as the "Links sort weird" bug.
-        //
-        // Header-click cycle (mountSortableTable): clicks desc -> clicks asc
-        // -> CTR desc -> CTR asc -> back to clicks desc. CTR = displayed
-        // (filtered) clicks / views, computed once during normalize as
-        // r.link_ctr.
-        sortKeys: ['link_clicks', 'link_ctr'],
-        accessor: r => {
-          const real     = Number(r.link_real_clicks)   || 0;
-          const bots     = Number(r.link_bot_clicks)    || 0;
-          const backfill = Number(r.link_backfill_real) || 0;
-          if (real > 0 || bots > 0) return real;
-          if (backfill > 0) return backfill;
-          return Number(r.link_clicks) || 0;
-        },
-        formatter: (_v, r) => {
-          // Match the filterPredicate below: a post counts as "has link"
-          // if either post_links has a row OR the comment text itself
-          // contains a URL (the plain_url_ab_skip / plain_url_no_lp paths
-          // post the URL inline without going through dm_short_links, so
-          // link_count stays 0 even though the user clearly sent a link).
-          // Doubled backslashes because we live inside a server template
-          // literal (see feedback_server_js_template_regex memory).
-          const URL_RE_DISPLAY = /https?:\\/\\/\\S+|(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[\\w\\-./?#=&%+~:@!$,;*]+/i;
-          const hasInlineUrl = !!(r.our_content && URL_RE_DISPLAY.test(String(r.our_content)));
-          const hasLink = Number(r.link_count) > 0 || hasInlineUrl;
-          const real    = Number(r.link_real_clicks)   || 0;
-          const bots    = Number(r.link_bot_clicks)    || 0;
-          const backfill= Number(r.link_backfill_real) || 0;
-          const legacy  = Number(r.link_clicks)        || 0;
-          const havePerClick = real > 0 || bots > 0;
-          const linkLine  = '<span class="top-stats-bit"><span class="top-stats-k">link</span>'
-            + (hasLink ? '\u2714' : '\u2014') + '</span>';
-          // Click-through rate: displayed (filtered) clicks / views. Shown
-          // in brackets next to the human number so the row order under
-          // the secondary "CTR" sort is legible. Only render when we
-          // actually have a views denominator AND a non-zero CTR.
-          const ctr = Number(r.link_ctr) || 0;
-          let ctrLabel = '';
-          if (ctr > 0) {
-            const pct = ctr * 100;
-            const pctStr = pct >= 10 ? pct.toFixed(0)
-                          : pct >= 1  ? pct.toFixed(1)
-                          :             pct.toFixed(2);
-            ctrLabel = ' <span style="color:var(--text-muted);">(' + pctStr + '%)</span>';
-          }
-          // Three display modes:
-          //   1. Per-click log present: "humans / bots" with bots dimmed.
-          //      Real human clicks drive sort + filter going forward.
-          //   2. PostHog backfill present (pre 2026-05-07 row, but the
-          //      destination domain has PostHog wired): show backfill as
-          //      "(estimated from PostHog)".
-          //   3. Legacy only (no per-click log, no backfill possible
-          //      because destination has no PostHog): show the conflated
-          //      counter with "(legacy)" tag.
-          let clickLine = '';
-          if (hasLink) {
-            if (havePerClick) {
-              const tip =
-                '**Clicks: humans / bots**' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                'Split from post_link_clicks (UA bot regex).' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                '• **Real clicks** = the human number' + String.fromCharCode(10) +
-                '• **Bots** = Twitter card / LinkedIn unfurl / Slack preview prefetches' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                '**CTR** = humans / views';
-              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
-                + '<span class="top-stats-k">clicks</span>'
-                + real
-                + ctrLabel
-                + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
-                + '</span>';
-            } else if (backfill > 0) {
-              const tip =
-                '**Clicks (estimated)**' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                'Estimated from PostHog $pageview events with matching utm_content. Real humans only — bots already filtered by PostHog.' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                'Pre 2026-05-07 row, no per-click log; backfilled by scripts/backfill_real_clicks.py.' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                '**CTR** = backfill / views';
-              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
-                + '<span class="top-stats-k">clicks</span>'
-                + backfill
-                + ctrLabel
-                + ' <span style="color:var(--text-muted);">(estimated)</span>'
-                + '</span>';
-            } else if (legacy > 0) {
-              const tip =
-                '**Clicks (legacy)** — pre 2026-05-07' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                'Twitter card / LinkedIn / Slack preview bots inflated this ~20×.' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                'New clicks split humans/bots in post_link_clicks. Destination domain has no PostHog so we cannot backfill the real number.' + String.fromCharCode(10) +
-                String.fromCharCode(10) +
-                '**CTR** = legacy / views (also inflated)';
-              clickLine = '<span class="top-stats-bit" data-tooltip="' + escapeHtml(tip) + '">'
-                + '<span class="top-stats-k">clicks</span>'
-                + legacy
-                + ctrLabel
-                + ' <span style="color:var(--text-muted);">(legacy)</span>'
-                + '</span>';
-            } else {
-              clickLine = '<span class="top-stats-bit"><span class="top-stats-k">clicks</span>0</span>';
-            }
-          }
-          const ctaLine = hasLink
-            ? '<span class="top-stats-bit" title="CTA conversion data flows once UTM-tagged visits land in PostHog"><span class="top-stats-k">CTA</span>\u2014</span>'
-            : '';
-          return '<div class="top-stats-cell">' + linkLine + clickLine + ctaLine + '</div>';
-        },
-        filterMode: 'dropdown',
-        filterOptions: [
-          { label: 'Any', value: '' },
-          { label: 'Has link', value: 'has_link' },
-          { label: 'Has clicks', value: 'has_clicks' },
-          { label: 'No link', value: 'no_link' },
-        ],
-        // The column key is link_clicks (so sort works on clicks), but "Has link"
-        // must read link_count, not link_clicks. The legacy ">=1" value from the
-        // earlier (broken) version is mapped onto has_link so persisted state
-        // upgrades cleanly. has_clicks gives the user the "clicks >= 1" option
-        // explicitly.
-        filterPredicate: (fv, row, _raw) => {
-          if (!fv) return true;
-          // Most comments are posted with the URL typed inline (no wrap
-          // pipeline -> no post_links row -> link_count=0 even though the
-          // user clearly "sent a link"). Fall back to a regex scan over
-          // our_content for that case, mirroring dmHasOutboundUrl on the
-          // DM rail. Doubled backslashes because we live inside a server
-          // template literal.
-          const URL_RE = /https?:\\/\\/\\S+|(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[\\w\\-./?#=&%+~:@!$,;*]+/i;
-          const hasInlineUrl = !!(row.our_content && URL_RE.test(String(row.our_content)));
-          const hasLink = Number(row.link_count) >= 1 || hasInlineUrl;
-          if (fv === 'has_link' || fv === '>=1') return hasLink;
-          if (fv === 'has_clicks') {
-            // Prefer real (human) clicks when the per-click log has anything,
-            // then fall back to PostHog backfill, then legacy link_clicks so
-            // historical rows still match.
-            const real = Number(row.link_real_clicks)   || 0;
-            const bots = Number(row.link_bot_clicks)    || 0;
-            const back = Number(row.link_backfill_real) || 0;
-            if (real > 0 || bots > 0) return real >= 1;
-            if (back > 0) return true;
-            return Number(row.link_clicks) >= 1;
-          }
-          if (fv === 'no_link') return !hasLink;
-          return true;
-        } },
       { key: 'posted_ts',      label: 'Posted',   type: 'numeric', align: 'right', widthPct: 6,
         formatter: (_v, r) => {
           const abs = r.posted_at ? new Date(r.posted_at).toLocaleString() : '';
@@ -16304,7 +16226,7 @@ function renderTopPosts(payload) {
         filterMode: 'dropdown',
         filterOptions: ageThresholdOptions(),
         filterPredicate: filterPredicateAge },
-      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 34,
+      { key: 'our_content',    label: 'Content',  type: 'text',    align: 'left',  widthPct: 38,
         formatter: renderTopContentCell,
         filterMode: 'none' },
       { key: 'id',             label: '',         type: 'text',    align: 'center', widthPct: 2,
