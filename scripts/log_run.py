@@ -236,7 +236,14 @@ def main():
 
     print(line)
 
-    if args.posted == 0 and args.failed > 0:
+    # Silent-failure warning fires when a posting job claims `failed>0` but
+    # never posted anything. Stats/audit jobs legitimately run with posted=0
+    # while doing real work (scanning rows, checking the API); suppress the
+    # warning when any of `--checked / --scanned / --replies-refreshed` is
+    # non-zero so audit and stats rows don't trip a false positive.
+    _real_work = (args.checked or args.scanned or args.replies_refreshed
+                  or args.changed or args.updated or args.views_refreshed)
+    if args.posted == 0 and args.failed > 0 and not _real_work:
         warning = f"WARNING: {args.script} posted=0 failed={args.failed} -- possible silent failure"
         with open(LOG_PATH, "a") as f:
             f.write(f"{timestamp} | {warning}\n")
