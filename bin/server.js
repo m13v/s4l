@@ -16067,10 +16067,19 @@ function renderTopPosts(payload) {
         filterPredicate: filterPredicateExact },
       { key: 'score',          label: 'Ours',     type: 'numeric', align: 'left',  widthPct: 20,
         // Header-click cycle (mountSortableTable):
-        //   score desc -> score asc -> clicks desc -> clicks asc -> CTR desc -> CTR asc -> back to score desc
+        //   score desc -> score asc -> clicks desc -> clicks asc -> views desc -> views asc -> upvotes desc -> upvotes asc -> comments desc -> comments asc -> back to score desc
         // link_effective_clicks is the displayed click number (humans first,
         // then PostHog backfill, then legacy) so row order matches the cell.
-        sortKeys: ['score', 'link_effective_clicks', 'link_ctr'],
+        // sortLabelMap maps each key to a short human label that the header
+        // surfaces in brackets, e.g. "Ours (clicks) v".
+        sortKeys: ['score', 'link_effective_clicks', 'views', 'upvotes', 'comments_count'],
+        sortLabelMap: {
+          score: 'score',
+          link_effective_clicks: 'clicks',
+          views: 'views',
+          upvotes: 'upvotes',
+          comments_count: 'comments',
+        },
         formatter: (_v, r) => {
           // 2026-05-26: clicks bit moved here from the now-removed "Links"
           // column. Click tracking is independent of the engagement scrape
