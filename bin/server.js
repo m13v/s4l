@@ -5774,21 +5774,23 @@ async function handleApi(req, res) {
   // '%test%'). Grouped by the local date of created_at. When project is
   // passed, filters by client_slug = <project>.
   if (p === '/api/bookings/per-day' && req.method === 'GET') {
-    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
-    const cacheKey = days + '|' + project;
+    // cal_bookings.client_slug holds the project name (matches config.json
+    // casing). Use projectClause so non-admins see only their own bookings.
+    const pc = auth.projectClause(req.user, 'client_slug', project || null);
+    if (!pc.ok) return json(res, { days, rows: [] });
+    const scopeKey = pc.list ? pc.list.join(',') : 'all';
+    const cacheKey = days + '|' + project + '|' + scopeKey;
     const cached = bookingsPerDayCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
     }
-    const projectFilter = project
-      ? " AND client_slug = '" + project.replace(/'/g, "''") + "'"
-      : '';
+    const projectFilter = pc.clause;
     const q =
       "SELECT json_agg(row_to_json(r)) FROM (" +
         "SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day, " +
@@ -5814,13 +5816,19 @@ async function handleApi(req, res) {
   // PostHog bucket. Cached 5 min (PostHog calls are slow and rate-limited).
   // Admin-only because the underlying data isn't project-scoped.
   if (p === '/api/funnel/per-day' && req.method === 'GET') {
-    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawProject = (url.searchParams.get('project') || '').trim();
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
+    // Non-admins must scope to a project they own; cross-project unfiltered
+    // PostHog totals leak data across clients. Honor projectClause: if a
+    // non-admin requested 'all' (or no project), it returns user.projects[0]
+    // when single-project, or falls through to the CLIENT_MODE empty branch.
+    const pc = auth.projectClause(req.user, 'project_name', project || null);
+    if (!pc.ok) return json(res, { days, rows: [] });
+    const effectiveProject = pc.list && pc.list.length === 1 ? pc.list[0] : project;
     const cacheKey = days + '|' + project;
     const cached = funnelPerDayCache.get(cacheKey);
     if (cached && cached.value && Date.now() - cached.at < 300000) {
