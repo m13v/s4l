@@ -700,6 +700,10 @@ class _DebugRecorder:
         """
         if not self.enabled or not self.dir:
             return None
+        # Stop tracing FIRST so trace.zip lands in the dir before tarring.
+        # Idempotent + try/except internally so a tracing failure can't
+        # block meta.json + the tarball.
+        self.stop_tracing()
         self.meta["started_at"] = self.started_at
         self.meta["finished_at"] = _ts_ms()
         self.meta["pid"] = os.getpid()
@@ -708,6 +712,8 @@ class _DebugRecorder:
         self.meta["records"] = result.get("record_count")
         self.meta["with_impressions"] = result.get("with_impressions")
         self.meta["with_reactions"] = result.get("with_reactions")
+        if self.timings:
+            self.meta["timings"] = self.timings
         try:
             self._write_text(
                 "meta.json",
@@ -1051,6 +1057,7 @@ def scrape(
         return result
 
     with sync_playwright() as p:
+        _t_attach = time.time()
         try:
             context, owns_context = _connect_to_running_or_launch(p)
         except Exception as e:
@@ -1059,12 +1066,14 @@ def scrape(
                 "error": "profile_locked",
                 "detail": str(e),
             })
+        dbg.set_timing("cdp_attach_ms", int((time.time() - _t_attach) * 1000))
 
         # Mode hint: caller knows from stderr whether we cdp-attached or
         # cold-launched. The bundle gets the same info as a top-level file
         # so it's grep-able from a tarball without unpacking everything.
         dbg.note_owns_context(owns_context)
         dbg.capture_browser_version(context)
+        dbg.start_tracing(context)
 
         page = None
         try:
@@ -1078,6 +1087,7 @@ def scrape(
             dbg.attach_page_listeners(page)
             dbg.snapshot(page, "01_pre_goto")
 
+            _t_goto = time.time()
             try:
                 page.goto(
                     COMMENTS_URL,
@@ -1085,14 +1095,19 @@ def scrape(
                     timeout=30000,
                 )
             except Exception as e:
+                dbg.set_timing(
+                    "goto_ms", int((time.time() - _t_goto) * 1000),
+                )
                 dbg.failure(page, "navigation_failed", str(e))
                 return _finalize_and_return({
                     "ok": False,
                     "error": "navigation_failed",
                     "detail": str(e),
                 })
+            dbg.set_timing("goto_ms", int((time.time() - _t_goto) * 1000))
 
             # Settle.
+            _t_settle = time.time()
             try:
                 page.wait_for_selector(
                     "article, main",
@@ -1101,6 +1116,9 @@ def scrape(
             except Exception:
                 pass
             page.wait_for_timeout(2500)
+            dbg.set_timing(
+                "settle_ms", int((time.time() - _t_settle) * 1000),
+            )
 
             # Post-goto checkpoint: URL, html, screenshot, cookie jar.
             # Captured BEFORE the auth/captcha gates so we always have a
@@ -1108,6 +1126,8 @@ def scrape(
             dbg.capture_url(page, "02_post_goto")
             dbg.snapshot(page, "02_post_goto")
             dbg.capture_cookies(context, "02_cookies")
+            dbg.capture_storage(page)
+            dbg.capture_viewport(page)
 
             cur_url = page.url
             if _is_login_or_checkpoint(cur_url):
@@ -1145,6 +1165,8 @@ def scrape(
                 })
 
             # ONE harvest evaluate. Internal scroll loop runs there.
+            dbg.capture_harvest_js(HARVEST_JS_TEMPLATE)
+            _t_eval = time.time()
             try:
                 result = page.evaluate(
                     HARVEST_JS_TEMPLATE,
@@ -1158,12 +1180,18 @@ def scrape(
                     },
                 )
             except Exception as e:
+                dbg.set_timing(
+                    "evaluate_ms", int((time.time() - _t_eval) * 1000),
+                )
                 dbg.failure(page, "evaluate_failed", str(e))
                 return _finalize_and_return({
                     "ok": False,
                     "error": "evaluate_failed",
                     "detail": str(e),
                 })
+            dbg.set_timing(
+                "evaluate_ms", int((time.time() - _t_eval) * 1000),
+            )
 
             records = result.get("records") or []
             with_imp = sum(
