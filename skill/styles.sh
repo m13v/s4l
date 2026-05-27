@@ -42,7 +42,10 @@ print(json.dumps(assignment))
 
 # Render the compact prompt block from an assignment JSON file.
 # Includes the styles block + content rules + anti-patterns + grounding rule
-# (the grounding rule is bundled inside get_assigned_style_prompt).
+# (the grounding rule is bundled inside get_assigned_style_prompt) +
+# voice relationship rule (introduced 2026-05-27 so the model knows whether
+# to speak AS the matched project's maker or as an outside observer; per
+# project the rule reads voice_relationship in config.json).
 saps_render_style_block() {
   local assign_file="$1"
   local platform="$2"
@@ -52,10 +55,13 @@ import json, sys
 sys.path.insert(0, '$REPO_DIR/scripts')
 from engagement_styles import (
     get_assigned_style_prompt, get_content_rules, get_anti_patterns,
+    get_voice_relationship_rule,
 )
 with open('$assign_file', 'r') as f:
     assignment = json.load(f)
 print(get_assigned_style_prompt('$platform', assignment, context='$context'))
+print()
+print(get_voice_relationship_rule())
 print()
 print('## Content rules')
 print(get_content_rules('$platform'))
