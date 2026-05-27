@@ -93,7 +93,7 @@ _TRANSIENT_CDP_ERRORS = {
 
 from engagement_styles import (
     VALID_STYLES, get_styles_prompt, get_content_rules, validate_or_register,
-    pick_style_for_post,
+    pick_style_for_post, get_voice_relationship_rule,
 )
 # Audience-page routing: tells Claude which curated landing pages exist for the
 # project so it can bake a deep URL (e.g. https://s4l.ai/ghostwriting) into the
@@ -1111,7 +1111,8 @@ OMIT THESE (clear no-bridge cases only):
 - Go BIMODAL on length: 1 punchy sentence (<100 chars) OR 4-5 sentences of real substance. Avoid 2-3 sentence middle-ground.
 - GROUNDING RULE — pick ONE lane per comment:
   LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this", "scenario:") then you may invent specifics freely.
-  LANE 2 - NO FABRICATION: first-person only if every specific (numbers, durations, places, tools) appears verbatim in the content_angle above. Otherwise drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is...").
+  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, tools) must appear verbatim in the content_angle above. Otherwise drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is...").
+- VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
 - NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l).
 - NEVER include URLs or links in your comment text.
 - Prefer replying to OP (top-level reply). ONE comment per thread.
@@ -1121,6 +1122,8 @@ OMIT THESE (clear no-bridge cases only):
 {get_content_rules("reddit")}
 
 {get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
+
+{get_voice_relationship_rule()}
 
 ## OUTPUT FORMAT
 For each thread that PASSES the SELECTION GATE, output one JSON object per line:
@@ -1263,13 +1266,16 @@ or GitHub repos. Product mentions happen ONLY later in the reply pipeline when p
 CRITICAL: every comment picks ONE of two lanes (see the GROUNDING RULE below).
   LANE 1 - DISCLOSED STORY: open with a hedge ("hypothetically", "imagine someone running this",
   "scenario:", "say a friend tried") and you may then invent any specifics.
-  LANE 2 - NO FABRICATION: stay first-person / plain voice, but every specific (numbers, durations,
-  places, course names, headcount, named tools) must appear verbatim in this project's content_angle /
-  voice / messaging in config.json. Otherwise drop the specific or pattern-frame ("the part that
-  breaks down is...", "the typical failure mode is...").
+  LANE 2 - NO FABRICATION: every specific (numbers, durations, places, course names, headcount,
+  named tools) must appear verbatim in this project's content_angle / voice / messaging in
+  config.json. Otherwise drop the specific or pattern-frame ("the part that breaks down is...",
+  "the typical failure mode is...").
 Never present an invented specific as a personal first-hand claim without a Lane 1 opener.
+VOICE RELATIONSHIP: see the dedicated section below; it governs whether you speak AS the maker or as an outside observer.
 {recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
 {get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
+
+{get_voice_relationship_rule()}
 
 ## Tools (via Bash) - ALWAYS foreground, NEVER run_in_background
 - Search (global, by relevance): python3 {REDDIT_TOOLS} search "QUERY" --limit 15
@@ -1305,7 +1311,8 @@ is going cold; skip it for a fresher candidate.
 ## CRITICAL CONTENT RULES
 - Study the style performance data in the feedback report below. Pick styles with the highest avg upvotes.
 - Go BIMODAL on length: either 1 punchy sentence (<100 chars) or 4-5 sentences of real substance. AVOID the 2-3 sentence middle.
-- First-person ("I"/"my") has TWO valid forms (see GROUNDING RULE). Lane 1: open with a disclosure phrase ("hypothetically", "imagine someone running this", "scenario:") and then invent freely. Lane 2: stay first-person only if every specific is grounded in content_angle/voice/messaging in config.json, or drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is..."). Never undisclosed first-person with invented numbers/places/programs.
+- GROUNDING has TWO valid forms. Lane 1: open with a disclosure phrase ("hypothetically", "imagine someone running this", "scenario:") and then invent freely. Lane 2: every specific (numbers/places/programs) must be grounded in content_angle/voice/messaging in config.json, or drop the specific and pattern-frame ("the part that breaks down is...", "the typical failure mode is..."). Never present an invented specific as a personal first-hand claim without a Lane 1 opener.
+- VOICE: see the VOICE RELATIONSHIP section below; it governs whether you speak AS the maker or as an outside observer based on the matched project's voice_relationship field.
 - NEVER mention product names (fazm, assrt, pieline, cyrano, terminator, mk0r, s4l).
 - NEVER include URLs or links.
 - Prefer replying to OP (top-level reply).
