@@ -35,6 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+from project_topics import topics_for_project  # noqa: E402
 try:
     from account_resolver import resolve as _resolve_account  # noqa: E402
 except Exception:
@@ -128,8 +129,8 @@ def guess_project(text, config):
     text_lower = (text or "").lower()
     for p in projects:
         name = p.get("name", "")
-        # Unified seed list (post 2026-04-30 legacy field removal).
-        topics = p.get("search_topics", [])
+        # DB-backed seed list (post 2026-05-27 config.json removal).
+        topics = topics_for_project(name)
         for topic in topics:
             if topic.lower() in text_lower:
                 return name
