@@ -25,6 +25,9 @@ import base64
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from project_topics import topics_for_project  # noqa: E402
+
 
 def slugify(keyword: str) -> str:
     """Normalize a keyword into a URL-safe slug.
@@ -236,7 +239,7 @@ def generate_keywords_dataforseo(project):
 
     # 1. Keyword suggestions from topics
     # Use more specific seed phrases to avoid ambiguity (e.g. "playwright" the person)
-    topics = project.get("search_topics", [])
+    topics = topics_for_project(project["name"])
     seed_suffixes = ["tool", "framework", "software", "automation"]
     print(f"\n  Fetching suggestions for {len(topics)} topics (min vol >= {min_vol})...")
     for topic in topics:
@@ -282,7 +285,7 @@ def generate_keywords_dataforseo(project):
         # Build relevance word set from topics, features, competitors, and industry terms
         if not hasattr(generate_keywords_dataforseo, '_relevance_words'):
             rw = set()
-            for t in project.get("search_topics", []):
+            for t in topics_for_project(project["name"]):
                 rw.update(w.lower() for w in t.split() if len(w) > 3)
             rw.add(project["name"].lower())
             for f in project.get("features", [])[:10]:
@@ -310,7 +313,7 @@ def generate_keyword_templates(project):
     """Fallback: generate keywords from templates (no API needed)."""
     name = project["name"]
     name_lower = name.lower()
-    topics = project.get("search_topics", [])
+    topics = topics_for_project(name)
     features = project.get("features", [])
     competitive = project.get("competitive_positioning", {})
 
@@ -445,7 +448,7 @@ def main():
         sys.exit(1)
 
     print(f"Generating keywords for: {project['name']}")
-    print(f"  Topics: {len(project.get('search_topics', []))}")
+    print(f"  Topics: {len(topics_for_project(project['name']))}")
     print(f"  Competitors: {len(extract_competitor_domains(project))}")
     print(f"  Min volume: {project_min_volume(project)}")
 
