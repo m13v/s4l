@@ -43,7 +43,7 @@ except Exception:
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 MIN_WORDS = 3
-OUR_HANDLE = "m13v_"
+OUR_HANDLE = _resolve_account("twitter") or "m13v_"
 
 # Paginate the replies prefetch in chunks so we never blow the route's max
 # limit. 500 is the per-call cap inside /api/v1/replies; we walk pages until
@@ -263,6 +263,7 @@ def process_notifications(notifications, config):
                 "their_comment_url": tweet_url,
                 "depth": 1,
                 "status": "pending",
+                "our_account": OUR_HANDLE,
             },
             ok_on_conflict=True,
         )
