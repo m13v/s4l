@@ -19540,6 +19540,23 @@ function saStartApp() {
       try { loadSettings(); _tabLoaded.settings = true; } catch {}
     }
   }, 100);
+  // Background warm-up of the <details>-gated stats loaders. These are
+  // collapsed by default, so the saStartApp block above skips them; without
+  // this warm-up the first expand pays a cold cache-miss (5-30s on funnel).
+  // requestIdleCallback yields to the active-tab fetches; setTimeout fallback
+  // for Safari and older browsers. Each loader checks its own auth-ready gate.
+  const _warmStatsDetails = () => {
+    try { loadFunnelStats(); } catch {}
+    try { loadDmStats(); } catch {}
+    try { loadSubredditStats(); } catch {}
+    try { loadSearchTopicsStats(); } catch {}
+    try { loadSearchQueriesStats(); } catch {}
+  };
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(_warmStatsDetails, { timeout: 3000 });
+  } else {
+    setTimeout(_warmStatsDetails, 1500);
+  }
 }
 window.saStartApp = saStartApp;
 
