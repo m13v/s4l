@@ -44,9 +44,14 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+try:
+    from account_resolver import resolve as _resolve_account  # noqa: E402
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
-OUR_HANDLE = "m13v_"
+OUR_HANDLE = _resolve_account("twitter") or "m13v_"
 DEFAULT_DAYS = 14
 DEFAULT_MAX_URLS = 40
 REPO_DIR = os.path.expanduser("~/social-autoposter")
@@ -168,6 +173,7 @@ def insert_followup(followup, parent_reply_id, post_id, parent_depth):
             "depth": (parent_depth or 1) + 1,
             "status": "pending",
             "parent_reply_id": parent_reply_id,
+            "our_account": OUR_HANDLE,
         },
         ok_on_conflict=True,
     )
