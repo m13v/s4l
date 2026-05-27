@@ -26,7 +26,42 @@ except Exception:
 CLAUDE_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID") or None
 API_BASE = (os.environ.get("AUTOPOSTER_API_BASE") or "https://s4l.ai").rstrip("/")
 AUTOPOSTER_VERSION = read_autoposter_version()
+# Resolved once at import time from config.json. Used ONLY as a fallback when
+# we have no URL to derive the live handle from (e.g. Reddit, where the
+# permalink doesn't carry the author). For Twitter we prefer _handle_from_url
+# below because playwright-extension attaches to the user's running Chrome and
+# whichever account is logged in there at post time may not match config.json
+# (persona drift bug surfaced 2026-05-27: 97 MacBook rows stamped m13v_/NULL
+# while x.com URL said matt_diak).
 OUR_ACCOUNT = _resolve_account("twitter")
+
+
+def _handle_from_url(url):
+    """Extract the canonical posting handle from an our_reply_url, or None.
+
+    Twitter/X URLs are shaped `https://x.com/<handle>/status/<id>` and
+    `https://twitter.com/<handle>/status/<id>`. The handle in the URL is the
+    ground truth for which account actually posted (X mints the URL after the
+    POST succeeds against the logged-in session), so it beats config.json /
+    AUTOPOSTER_TWITTER_HANDLE env var, which can disagree with the live Chrome
+    when playwright-extension is attached.
+
+    Reddit, LinkedIn, and GitHub URLs don't include the author in the path
+    shape we use, so this returns None for them and the caller falls back to
+    the module-level OUR_ACCOUNT (config.json) — which is fine on those
+    platforms because they don't have the playwright-extension multi-account
+    drift problem.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    import re
+    m = re.match(r"^https?://(?:www\.)?(?:x\.com|twitter\.com)/([^/?#]+)/status/", url)
+    if not m:
+        return None
+    handle = m.group(1).strip()
+    if handle.startswith("@"):
+        handle = handle[1:]
+    return handle or None
 
 
 def _http_patch(rid: int, body: dict) -> None:
@@ -121,11 +156,13 @@ elif cmd == "replied":
         # attribute reply engagement back to the release that produced
         # this comment. None when package.json + env are both missing.
         "autoposter_version": AUTOPOSTER_VERSION,
-        # our_account: stamp the persona on every transition (server-side
-        # COALESCE preserves an earlier value if already set). Defense in
-        # depth so even pending rows inserted before the scan-side fix get
-        # attributed on first update.
-        "our_account": OUR_ACCOUNT,
+        # our_account: stamp the persona on every transition. Prefer the
+        # handle baked into our_reply_url because X mints that URL against
+        # the actually-logged-in session, so it's the ground truth for which
+        # account posted. Fall back to OUR_ACCOUNT (config.json / env) only
+        # when the URL is missing or non-Twitter-shaped. Server uses COALESCE
+        # so subsequent transitions don't overwrite an earlier good stamp.
+        "our_account": _handle_from_url(url) or OUR_ACCOUNT,
     }
     # Server uses COALESCE for is_recommendation: only send TRUE so we
     # never accidentally clobber an existing TRUE flag back to FALSE.
