@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+from project_topics import topics_for_project
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 # Min-word floor to promote a public reply into a DM candidate.
@@ -136,7 +137,7 @@ def build_project_topic_index(config, platform):
         if not name:
             continue
         phrases = []
-        for v in p.get("search_topics") or []:
+        for v in topics_for_project(name):
             if isinstance(v, str) and v.strip():
                 phrases.append(v.strip().lower())
         if phrases:
