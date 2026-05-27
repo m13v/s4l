@@ -34,6 +34,17 @@ REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 
+# LinkedIn killswitch (2026-05-27): refuse to even fork the daemon if a
+# prior fire detected session compromise (http_999, authwall, throttle,
+# li_at cleared). Cheaper than letting the inner script discover it.
+# State: ~/.claude/social-autoposter/linkedin.killswitch
+# Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
+if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Skipping run-linkedin." \
+        >> "$LOG_DIR/launchd-linkedin-stderr.log"
+    exit 0
+fi
+
 SCRIPT="$REPO_DIR/skill/run-linkedin.sh"
 OUT="$LOG_DIR/launchd-linkedin-stdout.log"
 ERR="$LOG_DIR/launchd-linkedin-stderr.log"
