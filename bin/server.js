@@ -12993,7 +12993,15 @@ function renderActivityStats(payload) {
   }).join('');
 }
 
-async function loadActivityStats() {
+async function loadActivityStats(force) {
+  const hours = currentStatsWindow().hours;
+  const plat = currentStatsPlatform();
+  const proj = currentStatsProject();
+  const cacheKey = hours + '|' + plat + '|' + proj;
+  if (!force) {
+    const cached = statsCacheGet('activity', cacheKey);
+    if (cached) { renderActivityStats(cached); return; }
+  }
   // Immediate visual feedback on filter change. Without this the previously
   // rendered grid sits frozen until the 9-way UNION returns; on a cold cache
   // miss that's a couple seconds with zero indication anything is happening.
@@ -13002,14 +13010,12 @@ async function loadActivityStats() {
   if (grid) grid.classList.add('is-loading');
   if (totalEl) totalEl.textContent = 'loading…';
   try {
-    const hours = currentStatsWindow().hours;
-    const plat = currentStatsPlatform();
-    const proj = currentStatsProject();
     const params = ['hours=' + hours];
     if (plat && plat !== 'all') params.push('platform=' + encodeURIComponent(plat));
     if (proj && proj !== 'all') params.push('project='  + encodeURIComponent(proj));
     const res = await fetch('/api/activity/stats?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('activity', cacheKey, data);
     renderActivityStats(data);
   } catch {} finally {
     if (grid) grid.classList.remove('is-loading');
@@ -14900,17 +14906,22 @@ function getStyleMeta() {
   return _styleMetaPromise;
 }
 
-async function loadStyleStats() {
+async function loadStyleStats(force) {
+  const platformRow = document.getElementById('style-stats-platform-pills');
+  const projectRow  = document.getElementById('style-stats-project-pills');
+  const platform = (platformRow && platformRow.dataset.selected) || 'all';
+  const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
+  const hours = currentStatsWindow().hours;
+  const cacheKey = hours + '|' + platform + '|' + project;
+  if (!force) {
+    const cached = statsCacheGet('style', cacheKey);
+    if (cached) { renderStyleStats(cached.stats, cached.meta); return; }
+  }
   const body = document.getElementById('style-stats-body');
   const totalEl = document.getElementById('style-stats-total');
   if (body) body.classList.add('is-loading');
   if (totalEl) totalEl.textContent = 'loading…';
   try {
-    const platformRow = document.getElementById('style-stats-platform-pills');
-    const projectRow  = document.getElementById('style-stats-project-pills');
-    const platform = (platformRow && platformRow.dataset.selected) || 'all';
-    const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
-    const hours = currentStatsWindow().hours;
     const params = ['hours=' + hours];
     if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
     if (project  && project  !== 'all') params.push('project='  + encodeURIComponent(project));
@@ -14918,6 +14929,7 @@ async function loadStyleStats() {
       fetch('/api/style/stats?' + params.join('&')).then(r => r.json()),
       getStyleMeta(),
     ]);
+    if (statsRes && !statsRes.error) statsCacheSet('style', cacheKey, { stats: statsRes, meta });
     renderStyleStats(statsRes, meta);
   } catch {} finally {
     if (body) body.classList.remove('is-loading');
@@ -15025,22 +15037,28 @@ function renderCohortStats(payload) {
     '</table></div>';
 }
 
-async function loadCohortStats() {
+async function loadCohortStats(force) {
+  const platformRow = document.getElementById('style-stats-platform-pills');
+  const projectRow  = document.getElementById('style-stats-project-pills');
+  const platform = (platformRow && platformRow.dataset.selected) || 'all';
+  const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
+  const hours = currentStatsWindow().hours;
+  const cacheKey = hours + '|' + platform + '|' + project;
+  if (!force) {
+    const cached = statsCacheGet('cohort', cacheKey);
+    if (cached) { renderCohortStats(cached); return; }
+  }
   const body = document.getElementById('cohort-stats-body');
   const totalEl = document.getElementById('cohort-stats-total');
   if (body) body.classList.add('is-loading');
   if (totalEl) totalEl.textContent = 'loading…';
   try {
-    const platformRow = document.getElementById('style-stats-platform-pills');
-    const projectRow  = document.getElementById('style-stats-project-pills');
-    const platform = (platformRow && platformRow.dataset.selected) || 'all';
-    const project  = (projectRow  && projectRow.dataset.selected)  || 'all';
-    const hours = currentStatsWindow().hours;
     const params = ['hours=' + hours];
     if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
     if (project  && project  !== 'all') params.push('project='  + encodeURIComponent(project));
     const res = await fetch('/api/cohort/stats?' + params.join('&'));
     const data = await res.json();
+    if (data && !data.error) statsCacheSet('cohort', cacheKey, data);
     renderCohortStats(data);
   } catch (e) {
     if (body) body.innerHTML = '<div class="style-stats-empty">Failed to load cohort stats.</div>';
@@ -18765,6 +18783,23 @@ function saAuthNotReady() {
   return !!cfg.clientMode && !window.SA_ID_TOKEN;
 }
 
+// Client-side stats cache. Server already caches by (days|platform|project) for
+// 5 min, but every filter pill toggle still costs a network RTT and shows a
+// "loading…" flicker. Cache the rendered payload here keyed by the same combo
+// so toggling back to a previously-seen filter renders instantly with no fetch.
+// TTL 120s; periodic 5-min setInterval refreshes still bust it naturally.
+const _statsClientCache = new Map();
+const STATS_CLIENT_CACHE_TTL_MS = 120 * 1000;
+function statsCacheGet(name, key) {
+  const e = _statsClientCache.get(name + ':' + key);
+  if (!e) return null;
+  if (Date.now() - e.at > STATS_CLIENT_CACHE_TTL_MS) return null;
+  return e.payload;
+}
+function statsCacheSet(name, key, payload) {
+  _statsClientCache.set(name + ':' + key, { at: Date.now(), payload });
+}
+
 let _funnelStatsLoadedFor = null;
 let _funnelStatsLoading = false;
 let _lastFunnelPayload = null;
@@ -18777,6 +18812,15 @@ async function loadFunnelStats(force) {
   // even when the days dropdown stayed the same. Matches the server's cache key.
   const loadKey = days + '|' + platform;
   if (_funnelStatsLoadedFor === loadKey && !force) return;
+  if (!force) {
+    const cached = statsCacheGet('funnel', loadKey);
+    if (cached) {
+      _lastFunnelPayload = cached;
+      renderFunnelStats(cached);
+      _funnelStatsLoadedFor = loadKey;
+      return;
+    }
+  }
   _funnelStatsLoading = true;
   const totalEl = document.getElementById('funnel-stats-total');
   const body = document.getElementById('funnel-stats-body');
@@ -18789,7 +18833,10 @@ async function loadFunnelStats(force) {
     if (platform && platform !== 'all') params.push('platform=' + encodeURIComponent(platform));
     const res = await fetch('/api/funnel/stats?' + params.join('&'));
     const data = await res.json();
-    if (data && !data.error) _lastFunnelPayload = data;
+    if (data && !data.error) {
+      _lastFunnelPayload = data;
+      statsCacheSet('funnel', loadKey, data);
+    }
     renderFunnelStats(data);
     _funnelStatsLoadedFor = loadKey;
   } catch (e) {
