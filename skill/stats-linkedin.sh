@@ -50,6 +50,16 @@
 
 set -euo pipefail
 
+# LinkedIn killswitch (2026-05-27): refuse to run if a prior fire detected
+# session compromise (http_999, authwall, throttle, li_at cleared).
+# State: ~/.claude/social-autoposter/linkedin.killswitch
+# Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
+if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+    echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
+    echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
+    exit 0
+fi
+
 source "$(dirname "$0")/lock.sh"
 # 2026-05-26 harness migration: linkedin-backend.sh exports LINKEDIN_CDP_URL
 # (http://127.0.0.1:9556) and exposes ensure_linkedin_browser_for_backend
@@ -70,8 +80,8 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=1000          # Generous ceiling 2026-05-27. Natural bail (stagnant>=8) decides when to stop. Bug A patched (scrollHeight scoped to comments-list container) and Bug B patched (Python SIGTERM trap aborts JS loop) so runaway risk is mitigated.
-SCRAPER_TIMEOUT_SEC=2400  # 40min budget. Outer gtimeout safety net; SIGTERM handler now tells JS loop to abort cleanly before exit.
+MAX_SCROLLS=300           # Reduced from 1000 on 2026-05-27 after the runaway-+-session-revoke event. 56 records / fire is the healthy cap; even at 5 ticks/record this is ample headroom while shrinking the runaway envelope by 3.3x.
+SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via SAPS_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
