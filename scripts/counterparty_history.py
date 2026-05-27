@@ -30,7 +30,9 @@ callers, symmetric behavior.
 from __future__ import annotations
 
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -52,6 +54,101 @@ def _truncate(text, n=140):
         return ""
     t = str(text).replace("\n", " ").strip()
     return t if len(t) <= n else t[: n - 1] + "..."
+
+
+_TWITTER_STATUS_RE = re.compile(r"/status/(\d+)")
+_REDDIT_COMMENT_RE = re.compile(r"/comments/([a-z0-9]+)/")
+
+
+def _conversation_root(platform, post_id, their_comment_url):
+    """Best-effort key identifying the conversation root for grouping.
+
+    - Our own post: post_id (always wins when present and non-zero).
+    - Twitter guest thread: '/status/<id>' from the URL.
+    - Reddit guest thread: '/comments/<id>/' from the URL.
+    - Fallback: the URL with the last path segment stripped.
+    """
+    if post_id:
+        return f"post:{post_id}"
+    if not their_comment_url:
+        return None
+    if platform == "x":
+        m = _TWITTER_STATUS_RE.search(their_comment_url)
+        if m:
+            return f"x_status:{m.group(1)}"
+    if platform == "reddit":
+        m = _REDDIT_COMMENT_RE.search(their_comment_url)
+        if m:
+            return f"r_thread:{m.group(1)}"
+    return f"url:{their_comment_url.rsplit('/', 1)[0]}"
+
+
+def _fetch_author_summary(platform, author, days=7):
+    """Compute bot/loop-judgment stats for `author` in the last `days` window.
+
+    Returns a one-line summary string (or "" when there is no history).
+    Signals: total candidates, our replied count, our skipped count,
+    distinct conversation roots, our_replies / distinct_roots ratio (the
+    "engagement-loop shape" metric — closer to 1.0 = farm-shaped), skip
+    rate (% of our heuristics filtering this person out — low = bait too
+    clean), span_hours.
+    """
+    if not author:
+        return ""
+    since_ts = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    try:
+        resp = api_get(
+            "/api/v1/replies",
+            query={
+                "platform": platform,
+                "their_author": author,
+                "since": since_ts,
+                "limit": 500,
+                "order_by": "discovered_at",
+            },
+        )
+        rows = ((resp or {}).get("data") or {}).get("replies") or []
+    except Exception as e:
+        print(
+            f"[counterparty_history] summary fetch failed for "
+            f"{platform}/@{author}: {e}",
+            file=sys.stderr,
+        )
+        return ""
+
+    total = len(rows)
+    if total == 0:
+        return ""
+
+    replied = sum(1 for r in rows if r.get("status") == "replied")
+    skipped = sum(1 for r in rows if r.get("status") == "skipped")
+    roots = {_conversation_root(platform, r.get("post_id"), r.get("their_comment_url")) for r in rows}
+    roots.discard(None)
+    distinct_roots = len(roots) or 1
+
+    skip_pct = (skipped / total * 100.0) if total else 0.0
+    ratio = (replied / distinct_roots) if distinct_roots else 0.0
+
+    timestamps = []
+    for r in rows:
+        ts = r.get("discovered_at") or r.get("replied_at")
+        if not ts:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(str(ts).replace("Z", "+00:00")))
+        except Exception:
+            continue
+    span_h = 0.0
+    if len(timestamps) >= 2:
+        span_h = (max(timestamps) - min(timestamps)).total_seconds() / 3600.0
+
+    return (
+        f"SUMMARY (last {days}d): {total} candidates, {replied} our_replies, "
+        f"{skipped} skipped ({skip_pct:.1f}% skip_rate), "
+        f"{distinct_roots} distinct conversation_roots "
+        f"(replies/root={ratio:.2f}, closer to 1.0 = farm-shaped), "
+        f"span={span_h:.1f}h"
+    )
 
 
 def _fetch_dm_history(platform, author, post_id):
