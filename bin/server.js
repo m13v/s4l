@@ -619,7 +619,16 @@ const RUN_MONITOR_PATH = path.join(LOG_DIR, 'run_monitor.log');
 // changed, views_refreshed) tail the unavailable/not_found block so old log
 // lines still parse via the existing positional regex. Each is independently
 // optional so a partial roll-out (just scanned, just changed) also parses.
-const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+scanned=(\d+))?(?:\s+changed=(\d+))?(?:\s+views_refreshed=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?/;
+// 2026-05-27 escape-hatch surfacing: two new optional groups
+// (escape_hatch=N, escape_hatch_details=handle:class,...) tail the
+// skip_reasons segment. Auto-detected inside log_run.py from the
+// /api/v1/blocklist API on the run window; the dashboard Result column
+// renders a red 'escape hatch ×N' pill with a tooltip listing the handles
+// + classifications so an operator can see when the LLM (or a manual
+// reply_db.py call) blocklisted a counterparty mid-cycle. Velocity-auto
+// rows are excluded inside log_run.py — those fire on every reply and
+// would flood the pill.
+const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+scanned=(\d+))?(?:\s+changed=(\d+))?(?:\s+views_refreshed=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?(?:\s+escape_hatch=(\d+))?(?:\s+escape_hatch_details=([^\s|]+))?/;
 
 // posts.platform is lowercase; UI labels are capitalized.
 const PLATFORM_LABELS = {
@@ -766,7 +775,7 @@ function parseRunMonitorLog(maxLines) {
   for (const line of tail) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
-    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, scannedRaw, changedRaw, viewsRefreshedRaw, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr] = m;
+    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, scannedRaw, changedRaw, viewsRefreshedRaw, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr, escapeHatchStr, escapeHatchDetailsStr] = m;
     if (JOB_HISTORY_HIDDEN_SCRIPTS.has(script)) continue;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
@@ -829,6 +838,26 @@ function parseRunMonitorLog(maxLines) {
         if (Number.isFinite(n) && n >= 0) scan[k.trim()] = n;
       }
     }
+    // Parse "handle1:bot,handle2:engagement_loop" -> [{handle, classification}, ...].
+    // Sorted by classification then handle for stable tooltip ordering. The
+    // count comes from the dedicated escape_hatch=N capture so the pill stays
+    // accurate even if the details string was truncated.
+    const escapeHatch = {
+      count: escapeHatchStr ? parseInt(escapeHatchStr, 10) : 0,
+      entries: [],
+    };
+    if (escapeHatchDetailsStr) {
+      escapeHatch.entries = escapeHatchDetailsStr.split(',')
+        .map(p => {
+          const [handle, classification] = p.split(':');
+          return {
+            handle: (handle || '').trim(),
+            classification: (classification || '').trim(),
+          };
+        })
+        .filter(x => x.handle && x.classification)
+        .sort((a, b) => (a.classification + a.handle).localeCompare(b.classification + b.handle));
+    }
     runs.push({
       script,
       job_type: cls.job_type,
@@ -863,6 +892,7 @@ function parseRunMonitorLog(maxLines) {
         cost_usd: parseFloat(cost),
         failure_reasons: failureReasons,
         skip_reasons: skipReasons,
+        escape_hatch: escapeHatch, // {count, entries:[{handle,classification},...]}
       },
     });
   }
@@ -11249,6 +11279,31 @@ function renderResult(run) {
       'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
       label + ' <span style="color:#eab308;font-weight:600;">' + count + '</span></span>';
   };
+  // LLM / manual escape-hatch firings: surface every author_blocklist write
+  // that landed during this run window (auto-detected in log_run.py via the
+  // /api/v1/blocklist API). Velocity-auto rows are excluded inside the
+  // detector — they fire on every reply and would flood the pill. Tooltip
+  // lists each handle with its classification (bot, engagement_loop,
+  // manual_block) so an operator can tell at a glance whether the model
+  // judged a counterparty a bot mid-cycle or whether a human acted.
+  const escapeHatch = (r.escape_hatch && typeof r.escape_hatch === 'object') ? r.escape_hatch : { count: 0, entries: [] };
+  const renderEscapeHatchPill = () => {
+    const count = escapeHatch.count || 0;
+    if (!count) return '';
+    const entries = Array.isArray(escapeHatch.entries) ? escapeHatch.entries : [];
+    const DNL = String.fromCharCode(10);
+    const tooltip = '**Escape hatch firings**' + DNL +
+      'Counterparties added to author_blocklist during this run' + DNL +
+      '(LLM judgment or manual operator action; velocity_auto excluded).' + DNL +
+      DNL +
+      (entries.length
+        ? entries.map(function (e) { return '• @' + e.handle + ' \u2192 ' + e.classification; }).join(DNL)
+        : '(no per-handle details logged)');
+    const label = 'escape hatch';
+    return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
+      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
+      label + ' <span style="color:#ef4444;font-weight:600;">' + count + '</span></span>';
+  };
   // Discovery counters (Twitter cycle today, LinkedIn next): condense the
   // queries/duds/tweets_pulled/candidates/above_floor breakdown into a single
   // "scan: Q→C→A" pill where Q=queries, C=candidates that survived the
@@ -11285,6 +11340,7 @@ function renderResult(run) {
     pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
     renderSkipReasonsPill() +
     renderFailedPill() +
+    renderEscapeHatchPill() +
     pill('salvaged', salvaged, salvaged > 0 ? '#3b82f6' : 'var(--muted)') +
     renderDiscoverPill() +
     pill('replies refreshed', repliesRefreshed, repliesRefreshed > 0 ? '#3b82f6' : 'var(--muted)')
