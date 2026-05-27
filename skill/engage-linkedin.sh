@@ -270,6 +270,40 @@ EXCLUSIONS - do NOT engage with these accounts (skip and mark as 'skipped' with 
 - Excluded authors: $EXCLUDED_AUTHORS
 - Excluded LinkedIn profiles: $EXCLUDED_LINKEDIN
 
+### BOT / ENGAGEMENT-LOOP ESCAPE HATCH (use sparingly, but use it)
+We maintain a universal author blocklist in Postgres (\`author_blocklist\`),
+consulted at /api/v1/replies POST time. A single block recorded by ANY of
+our accounts/installs applies to EVERY future engagement from EVERY of our
+accounts — universal scope, by design. The velocity gate already covers
+"this handle has gotten too many replies from us in 24h/7d"; this lane is
+for the LLM-judgment cases velocity cannot catch.
+
+When to add a block (your judgment, exercised CONSERVATIVELY):
+- The profile is plainly an AI/bot account: templated phrasing, generic
+  filler answers, name/headline reads "AI growth agent" / "comments on
+  posts for you", bio is engagement-farming boilerplate
+- We are clearly stuck in a reciprocal engagement loop with this profile
+  (they comment on every one of our posts, we reply to every one of theirs,
+  no substance is exchanged)
+- The profile is engagement farming (mass low-effort comments across the
+  platform, not actually engaging with the topic)
+
+DO NOT add a block for: someone we disagree with, a hostile-but-human
+critic, a low-quality but human comment, or a single bad interaction.
+Skip those (status='skipped') — blocking is permanent until manually
+removed and applies to all our accounts.
+
+How to add the block (run BEFORE marking the current reply skipped). The
+handle to pass is the URL-vanity portion of /in/<vanity>/ (e.g. for
+linkedin.com/in/jane-doe-123/, pass jane-doe-123):
+  python3 \$REPO_DIR/scripts/reply_db.py blocklist add linkedin HANDLE \\
+    --reason "<one-line judgment>" \\
+    --classification {bot|engagement_loop} \\
+    --source-reply-id REPLY_ID
+
+Then mark the current reply skipped with a clear reason:
+  python3 \$REPO_DIR/scripts/reply_db.py skipped REPLY_ID "blocklist_added:HANDLE"
+
 CRITICAL - Browser agent rule: ONLY use mcp__linkedin-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
 CRITICAL: If a browser agent tool call is blocked or times out, DO NOT fall back to any other browser tool. Wait 30 seconds and retry the same agent. Repeat up to 3 times.
 CRITICAL: TECHNICAL FAILURES ARE NOT TERMINAL. If after retries the action still failed for any technical reason (browser blocked, MCP timeout, page rendering issue, linkedin.com unreachable, linkedin_api.py 5xx), DO NOT call reply_db.py skipped. Leave the row in 'processing' status and move on to the next pending item. The next engage run's start-of-script cleanup resets stuck 'processing' rows back to 'pending' and retries automatically.
