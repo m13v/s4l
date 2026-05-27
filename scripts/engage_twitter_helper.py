@@ -107,9 +107,17 @@ def cmd_reply_counts() -> int:
 
 
 def cmd_pending_data(batch_size: int) -> int:
+    try:
+        from account_resolver import resolve as _resolve_account  # noqa: WPS433
+        our_account = _resolve_account("twitter")
+    except Exception:
+        our_account = None
+    query = {"platform": "x", "limit": batch_size}
+    if our_account:
+        query["our_account"] = our_account
     resp = api_get(
         "/api/v1/replies/next-pending",
-        query={"platform": "x", "limit": batch_size},
+        query=query,
     )
     rows = (resp.get("data") or {}).get("replies") or []
 
