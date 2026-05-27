@@ -84,20 +84,75 @@ COLD_TOPIC_WEIGHT = 0.15
 # can now genuinely weigh a long tail of underperformers when inventing.
 REFERENCE_TOP_N = 10
 
+# 2026-05-27 conversion + supply gates (closes the "S4L empty-batch" gap:
+# a topic with N attempts and 0 posts used to weight identically to a
+# brand-new topic — see top_search_topics._query_twitter for the upstream
+# join that makes this signal visible).
+#
+# DEAD_FLOOR_FRACTION: even the worst-performing topic keeps this fraction
+# of its base weight, so we always retest occasionally in case supply
+# recovers. Tune up to retest more often, down to lock duds out harder.
+DEAD_FLOOR_FRACTION = 0.02
+# SUPPLY_DEAD_WEIGHT: when X returns 0 tweets across many attempts, the
+# topic isn't necessarily a bad fit — supply is dead. Apply a mild fixed
+# penalty rather than the heavy conversion math (which would drive the
+# weight to ~0 even though the fault is partly external).
+SUPPLY_DEAD_WEIGHT = 0.3
+# Need at least this many attempts before calling a topic supply-dead.
+# A single dry attempt isn't evidence; 3 in a row across a 30d window is.
+MIN_ATTEMPTS_FOR_SUPPLY_VERDICT = 3
 
-def _smooth_weight(score):
-    """Log-smoothed weight for weighted-random sampling.
 
-    Raw composite_score is heavily right-skewed (one winner often has
-    100x the score of the runner-up), so proportional sampling collapses
-    onto a single topic. log(score+1)+1 compresses the curve so the top
-    performer gets a meaningful but not-overwhelming share, and the
-    rest of the pool stays in play. Unscored topics get COLD_TOPIC_WEIGHT
-    directly so they always have a small but visible chance.
+def _compute_weight(r):
+    """Final weighted-sampling weight for one pool row.
+
+    Three layered factors, applied in order:
+
+    1. base = log(composite_score+1)+1 (positive performance), or
+              COLD_TOPIC_WEIGHT (=0.15) when never scored. Log-smoothing
+              compresses the right-skewed composite distribution so the
+              top performer lands around 20-30%, not 90%+.
+
+    2. supply gate: if attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT and
+       tweets_found_total == 0, X is just not returning tweets for this
+       topic. Apply a mild 0.3x rather than the heavy conversion math —
+       supply failure is partly outside our control, so the topic stays
+       on the bench for occasional retest.
+
+    3. conversion: posts per attempt, Laplace-smoothed
+       (posted_n + 1) / (attempts_n + 1). Capped at 1.0 so we don't BOOST
+       above base. Heavy penalty for topics that surface supply but
+       never convert to posts (the "got 10 attempts, 50 tweets, 0 posts"
+       FIT failure — our prompts/criteria aren't working for this topic).
+
+    Untried topics (attempts_n == 0) skip both #2 and #3 and return base
+    unchanged, so cold topics still get full exploration weight.
+
+    A floor of base*DEAD_FLOOR_FRACTION ensures no topic drops to zero
+    weight: we always want some chance to retest a stale dud in case
+    supply/fit changes (X firehose shifts, project description evolves).
     """
-    if score and score > 0:
-        return math.log(score + 1.0) + 1.0
-    return COLD_TOPIC_WEIGHT
+    score = float(r.get("composite_score") or 0)
+    posted_n = int(r.get("posted_n") or 0)
+    attempts_n = int(r.get("attempts_n") or 0)
+    tweets_found_total = int(r.get("tweets_found_total") or 0)
+
+    if score > 0:
+        base = math.log(score + 1.0) + 1.0
+    else:
+        base = COLD_TOPIC_WEIGHT
+
+    if attempts_n == 0:
+        return base
+
+    if (
+        tweets_found_total == 0
+        and attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT
+    ):
+        return max(base * DEAD_FLOOR_FRACTION, base * SUPPLY_DEAD_WEIGHT)
+
+    conversion = min(1.0, (posted_n + 1.0) / (attempts_n + 1.0))
+    return max(base * DEAD_FLOOR_FRACTION, base * conversion)
 
 
 def _load_universe(project_name):
@@ -170,6 +225,9 @@ def _build_pool(universe, signal_rows):
             "clicks_total": int(r.get("clicks_total") or 0),
             "posted_n": int(r.get("posted_n") or 0),
             "skipped_n": int(r.get("skipped_n") or 0),
+            "attempts_n": int(r.get("attempts_n") or 0),
+            "tweets_found_total": int(r.get("tweets_found_total") or 0),
+            "zero_supply_attempts": int(r.get("zero_supply_attempts") or 0),
         })
 
     pool.sort(key=lambda r: (-r["composite_score"], -r["posts"]))
@@ -177,7 +235,13 @@ def _build_pool(universe, signal_rows):
 
 
 def _ref_meta(r, weight_pct):
-    """Strip the pool row down to the fields the prompt block surfaces."""
+    """Strip the pool row down to the fields the prompt block surfaces.
+
+    attempts_n / tweets_found_total are surfaced so Claude can see the
+    fit-vs-supply story in the explore_invent branch ("topic X had 10
+    attempts and 50 tweets_found but zero posts → fit failure, propose a
+    different angle on the same audience").
+    """
     return {
         "search_topic": r["search_topic"],
         "composite_score": round(r["composite_score"], 2),
@@ -185,6 +249,9 @@ def _ref_meta(r, weight_pct):
         "clicks_total": r["clicks_total"],
         "posted_n": r["posted_n"],
         "skipped_n": r["skipped_n"],
+        "attempts_n": r.get("attempts_n", 0),
+        "tweets_found_total": r.get("tweets_found_total", 0),
+        "zero_supply_attempts": r.get("zero_supply_attempts", 0),
         "weight_pct": round(weight_pct, 2),
     }
 
@@ -210,7 +277,7 @@ def pick_topic_for_project(project_name, platform="twitter",
     signal = _load_signal(project_name, platform, window_days)
     pool = _build_pool(universe, signal)
 
-    weights = [_smooth_weight(r["composite_score"]) for r in pool]
+    weights = [_compute_weight(r) for r in pool]
     weight_total = sum(weights) or 1.0
     weight_pcts = [w / weight_total * 100.0 for w in weights]
 
@@ -277,13 +344,26 @@ def _format_pool_table(refs, mode):
         header += f"Pool stats (your topic is already assigned, this is context only)"
     lines.append(header)
     for r in refs:
+        attempts_n = r.get("attempts_n", 0)
+        tweets_found_total = r.get("tweets_found_total", 0)
+        verdict = ""
+        if attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT and tweets_found_total == 0:
+            verdict = " [SUPPLY_DEAD]"
+        elif attempts_n >= 3 and r["posted_n"] == 0 and tweets_found_total > 0:
+            verdict = " [FIT_FAIL]"
         lines.append(
             f"- **{r['search_topic']}** "
             f"(weight {r['weight_pct']:.2f}%, "
             f"score {r['composite_score']:.1f}, "
             f"posts {r['posts']}, clicks {r['clicks_total']}, "
-            f"posted_n {r['posted_n']}, skipped_n {r['skipped_n']})"
+            f"posted_n {r['posted_n']}, skipped_n {r['skipped_n']}, "
+            f"attempts {attempts_n}, supply {tweets_found_total}){verdict}"
         )
+    lines.append(
+        "  ([SUPPLY_DEAD] = ≥3 attempts and 0 tweets returned; X isn't surfacing "
+        "anything for this topic. [FIT_FAIL] = ≥3 attempts and tweets found but "
+        "0 posted; the topic surfaces noise we keep rejecting.)"
+    )
     return "\n".join(lines)
 
 
