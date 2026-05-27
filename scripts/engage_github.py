@@ -181,6 +181,35 @@ Read it carefully before deciding anything.
 - Do not promote. Voice (whether you speak AS the maker or as an outside observer) is governed by the VOICE RELATIONSHIP section below; do not override it here.
 - Never link to your own repo or product in a thread that is a bug report for someone else's project. Ever.
 
+## Bot / engagement-loop escape hatch (use sparingly, but use it)
+We maintain a universal author blocklist in Postgres (`author_blocklist`),
+consulted at /api/v1/replies POST time. A single block recorded by ANY of
+our accounts/installs applies to EVERY future engagement from EVERY of our
+accounts — universal scope, by design. The velocity gate already covers
+"this handle has gotten too many replies from us in 24h/7d"; this lane is
+for the LLM-judgment cases velocity cannot catch.
+
+When to add a block (your judgment, exercised CONSERVATIVELY):
+- The GitHub handle is plainly an AI/bot account: templated phrasing across
+  unrelated issues, generic filler answers, account name pattern like
+  `*-bot` / `Foo-AI`, comments are repository drive-by promo
+- We are clearly stuck in a reciprocal engagement loop with this account
+- The handle is comment-spamming across many repos (drive-by self-promo on
+  every issue, not actually engaging with the bug)
+
+DO NOT block: a maintainer we disagree with, a hostile-but-human critic,
+a low-quality but human comment, or a single bad interaction. Skip those
+(action='skip') — blocking is permanent until manually removed and applies
+to all our accounts.
+
+How to use it: do NOT emit a reply for this row. Instead, output the skip
+JSON with reason='blocklist_added:HANDLE', and the orchestrator's
+post-decision step will run reply_db.py blocklist add for you when the
+reason starts with `blocklist_added:`. The handle to pass is the GitHub
+login (e.g. for github.com/octocat, pass octocat). If you also want a
+classification, output reason='blocklist_added:HANDLE:bot' or
+'blocklist_added:HANDLE:engagement_loop'.
+
 {get_voice_relationship_rule()}
 
 {get_anti_patterns()}
