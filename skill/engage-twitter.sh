@@ -201,6 +201,41 @@ EXCLUSIONS - do NOT engage with these accounts (skip and mark as 'skipped' with 
 - Excluded authors: $EXCLUDED_AUTHORS
 - Excluded Twitter accounts: $EXCLUDED_TWITTER
 
+### BOT / ENGAGEMENT-LOOP ESCAPE HATCH (use sparingly, but use it)
+We maintain a universal author blocklist in Postgres (\`author_blocklist\`),
+consulted at /api/v1/replies POST time. A single block recorded by ANY of
+our accounts/installs applies to EVERY future engagement from EVERY of our
+accounts — universal scope, by design. The velocity gate already covers
+"this handle has gotten too many replies from us in 24h/7d"; this lane is
+for the LLM-judgment cases velocity cannot catch.
+
+When to add a block (your judgment, exercised CONSERVATIVELY):
+- The handle is plainly an AI/bot account: templated phrasing, generic
+  filler answers, name pattern like \`SomethingAI\` / \`Foo_GPT\`, bio reads
+  "AI agent that replies to…"
+- We are clearly stuck in a reciprocal engagement loop with this handle
+  (they reply to every one of our posts, we reply to every one of theirs,
+  no substance is exchanged)
+- The handle is engagement farming (mass low-effort replies across the
+  platform, not actually engaging with the topic)
+
+DO NOT add a block for: someone we disagree with, a hostile-but-human
+critic, a low-quality but human reply, or a single bad interaction.
+Skip those (status='skipped') — blocking is permanent until manually
+removed and applies to all our accounts.
+
+How to add the block (run BEFORE marking the current reply skipped):
+  python3 \$REPO_DIR/scripts/reply_db.py blocklist add x HANDLE \\
+    --reason "<one-line judgment, e.g. 'AI-named account, templated replies>" \\
+    --classification {bot|engagement_loop} \\
+    --source-reply-id REPLY_ID
+
+Then mark the current reply skipped with a clear reason:
+  python3 \$REPO_DIR/scripts/reply_db.py skipped REPLY_ID "blocklist_added:HANDLE"
+
+You can verify with:
+  python3 \$REPO_DIR/scripts/reply_db.py blocklist check x HANDLE
+
 CRITICAL - Reply posting: Use the SAME browser session you used in Step 2 (navigate), via the tools described in the BROWSER BACKEND block above. Do NOT call scripts/twitter_browser.py reply: that launches a second Chromium against the same profile dir, which wedges x.com on a Loading state and times out. NEVER use any other browser MCP (playwright-extension, isolated-browser, macos-use, etc.) for posting.
 CRITICAL: If a click or type fails (stale ref, button not found, page not ready, page wedged on Loading), re-snapshot the page (per the BROWSER BACKEND block) and retry up to 2 times.
 CRITICAL: TECHNICAL FAILURES ARE NOT TERMINAL. If after retries the post still failed for any technical reason (browser, network, MCP, x.com unreachable, page rendering issue), DO NOT call reply_db.py skipped. Leave the row in 'processing' status (i.e., do nothing further with it) and move on to the next pending item. The post-run cleanup will reset 'processing' rows back to 'pending' so the next engage run retries automatically.
