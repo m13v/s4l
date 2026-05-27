@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
 from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
+from project_topics import topics_for_project  # noqa: E402
 
 
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
@@ -143,7 +144,7 @@ def match_project(tweet_text, search_topic, config):
 
     for proj in projects:
         name = proj.get("name", "")
-        topics = [t.lower() for t in proj.get("search_topics", [])]
+        topics = [t.lower() for t in topics_for_project(name)]
         # Direct topic match
         for t in topics:
             if t in topic_lower or t in text_lower:
