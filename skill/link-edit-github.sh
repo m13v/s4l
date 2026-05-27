@@ -107,7 +107,9 @@ Process ALL of them. For each post:
    e. git add the new page && git commit -m "Add guide: SHORT_DESCRIPTION" && git push
    f. Wait ~35s for Vercel deploy, then curl -sI {base_url}/t/{slug} to verify HTTP 200
    g. On success, set LINK_URL = the deployed page URL and LINK_SOURCE="seo_page". On deploy failure, fall back GRACEFULLY: set LINK_URL = the project's homepage from config.json (the \`website\` field), set LINK_SOURCE="plain_url_fallback:deploy_failed". Do NOT skip the post; continue to step 4.
-4. Write 1 sentence + project link (GitHub peer tone, claim ownership): "fwiw we built an implementation of this, URL" or "I shipped a tool that does this, URL". ALWAYS frame as our own creation, never as a third-party tool we just discovered. NEVER write "I found this", "there's a tool", "came across this implementation". We are the authors of this code. Say so.
+4. Write 1 sentence + project link (GitHub peer tone). Voice depends on the matched project's \`voice_relationship\` field in config.json (read it before drafting):
+   - voice_relationship == "first_party": Claim ownership. Examples: "fwiw we built an implementation of this, URL" or "I shipped a tool that does this, URL". NEVER write "I found this", "there's a tool", "came across this implementation".
+   - voice_relationship == "third_party": You are an outside observer pointing at the project's mechanism. Example: "fwiw PROJECT_NAME has an implementation of this, URL". Do NOT use "I built" / "we shipped" / "we made". Do NOT use "I found this" / "came across this" either; stay matter-of-fact.
 5. URL-WRAP THE LINK TEXT for click attribution. Run:
      python3 ~/social-autoposter/scripts/dm_short_links.py wrap-post-text \\
        --text "YOUR_LINK_SENTENCE_WITH_URL" \\
