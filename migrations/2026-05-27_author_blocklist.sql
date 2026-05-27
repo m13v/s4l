@@ -52,12 +52,12 @@ CREATE TABLE IF NOT EXISTS author_blocklist (
     PRIMARY KEY (installation_id, platform, handle)
 );
 
--- Hot-path index for the ingest-time lookup in POST /api/v1/replies.
--- Only indexes active hard blocks; soft + expired rows fall through to the
--- full table scan, which is fine because they don't gate anything.
-CREATE INDEX IF NOT EXISTS idx_blocklist_active_hard
-    ON author_blocklist (installation_id, platform, handle)
-    WHERE severity = 'hard' AND (expires_at IS NULL OR expires_at > NOW());
+-- Hot-path lookup (installation_id, platform, handle) is already covered by
+-- the PRIMARY KEY index, so the blocklist check in POST /api/v1/replies is
+-- O(log n) on that index. The severity + expires_at filter is a cheap row-
+-- level check after the seek. No additional hot-path index needed.
+-- (A partial index with `expires_at > NOW()` would be redundant AND illegal
+--  because NOW() isn't IMMUTABLE per Postgres index-predicate rules.)
 
 -- Dashboard list view ordering. Most recently created first.
 CREATE INDEX IF NOT EXISTS idx_blocklist_recent
