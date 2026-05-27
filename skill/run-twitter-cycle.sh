@@ -435,10 +435,7 @@ if res.returncode == 0 and res.stdout.strip():
 if isinstance(picked, dict):
     picked = [picked]
 
-try:
-    from pick_search_topic import pick_topic_for_project
-except Exception:
-    pick_topic_for_project = None
+from pick_search_topic import pick_topic_for_project, PickerError
 
 chosen = []
 for p in picked:
@@ -457,28 +454,21 @@ for p in picked:
     #     INVENTS a new topic for this cycle given the per-project pool
     #     stats (reference_topics). The invention is captured in
     #     twitter_candidates.search_topic for analytics; promotion into
-    #     config.json is a manual human-review step.
+    #     project_search_topics happens in score_twitter_candidates.
     # See scripts/pick_search_topic.py.
-    topic_pick = None
-    if pick_topic_for_project is not None:
-        try:
-            topic_pick = pick_topic_for_project(p.get('name'), platform='twitter')
-        except Exception:
-            topic_pick = None
-    if topic_pick is not None:
-        picked_topic = topic_pick.get('search_topic')  # may be None on explore_invent
-        picked_mode = topic_pick.get('mode', 'use')
-        reference_topics = topic_pick.get('reference_topics') or []
-        picked_weight_pct = topic_pick.get('picked_weight_pct')
-    else:
-        # Picker unavailable or project has no search_topics[] in
-        # config.json. Fall back to the first legacy entry so the
-        # pipeline degrades gracefully instead of erroring.
-        legacy = p.get('search_topics') or []
-        picked_topic = legacy[0] if legacy else ''
-        picked_mode = 'fallback'
-        reference_topics = []
-        picked_weight_pct = None
+    #
+    # 2026-05-27: NO fallback. The DB is the only source of truth for
+    # the universe. If pick_topic_for_project raises (DB unreachable or
+    # zero active topics for this project), let the heredoc crash so
+    # PROJECTS_JSON is empty, the bash trap fires, and launchd records
+    # a hard failure. Silent fallback to config.json or to the first
+    # legacy search_topics[] entry would post against a stale seed list
+    # and corrupt attribution; the rule is "stop the pipeline".
+    topic_pick = pick_topic_for_project(p.get('name'), platform='twitter')
+    picked_topic = topic_pick.get('search_topic')  # may be None on explore_invent
+    picked_mode = topic_pick.get('mode', 'use')
+    reference_topics = topic_pick.get('reference_topics') or []
+    picked_weight_pct = topic_pick.get('picked_weight_pct')
     chosen.append({
         'name': p.get('name'),
         'description': p.get('description', ''),
