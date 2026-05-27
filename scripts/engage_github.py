@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
-from engagement_styles import get_styles_prompt, get_anti_patterns
+from engagement_styles import get_styles_prompt, get_anti_patterns, get_voice_relationship_rule
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -178,8 +178,10 @@ Read it carefully before deciding anything.
 - Write like a technical peer in the thread, not a marketer.
 - NO em dashes. Use commas, periods, or regular dashes.
 - Match the length and register of the thread. Short threads get short replies.
-- Never say "I built" / "we built" / "I'm working on". Do not promote.
+- Do not promote. Voice (whether you speak AS the maker or as an outside observer) is governed by the VOICE RELATIONSHIP section below; do not override it here.
 - Never link to your own repo or product in a thread that is a bug report for someone else's project. Ever.
+
+{get_voice_relationship_rule()}
 
 {get_anti_patterns()}
 
