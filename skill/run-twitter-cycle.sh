@@ -1079,22 +1079,30 @@ else
     log "Variant $TWITTER_CYCLE_VARIANT: skipping ripening wait and T1 fetch (no sleep, delta_score stays at T0 value)"
 fi
 
-# --- Phase 2b: top 25 by hybrid score (delta + product-discussion intent boost), no post cap ---------------------
-# Hybrid sort: keep raw growth (delta_score) as the dominant signal, but add a +5 boost
-# when the tweet text shows a "product-discussion intent" pattern (someone asking for a tool,
-# venting a pain point, comparing alternatives, asking for recs). This lets slow-growing but
-# on-theme tweets compete with fast-growing news/drama instead of being truncated.
-# 2026-05-15: ripening floor removed entirely (was `delta_score >= 0`). The model
-# already sees per-candidate Delta in CANDIDATE_BLOCK below and can weigh
-# engagement velocity against topical fit itself. Letting negative-delta tweets
-# through means a thoughtful comment can still ride an on-theme but cooling
-# thread to the right audience. Sort is still hybrid (delta + intent) DESC so
-# the hottest tweets land at the top of the prompt; LIMIT 25 stays as a
-# draft-budget cap, not a ripening gate.
-# Candidate list now comes through /api/v1/twitter-candidates (route returns
-# all pending rows for the batch); the helper applies the same intent-boost
-# composite sort + 25-row cap client-side and emits the SAME pipe-separated
-# columns the legacy psql -F '|' query produced. Pipe shape is documented in
+# --- Phase 2b: top 25 by virality_score, no post cap ---------------------
+# Sort key (2026-05-27): virality_score DESC. This is the composite predictor
+# stamped at discovery by score_twitter_candidates.py:
+#   virality_score = velocity * reach_mult * age_decay * rt_bonus
+#                    * (1 + reply_bonus) * (1 + discussion_bonus)
+# It folds in engagement velocity, author reach (follower-tier multiplier),
+# age decay (6h half-life), retweet ratio, reply count, and discussion
+# quality (reply:like ratio). Cohort analysis on 30d posted data: the
+# [10k+) virality bucket gets ~36x the median reply views of the [0-10)
+# bucket, which is much steeper than what raw 5-min delta predicts.
+# Replaces the prior `delta + flat-5 intent-regex boost` sort: the intent
+# regex was a crutch for delta_score (a raw growth count that ignored
+# reach + decay); the model reads tweet text directly in the prep prompt
+# and detects intent itself, so the lexical layer is redundant.
+# 2026-05-15: ripening floor removed entirely (was `delta_score >= 0`).
+# The model already sees per-candidate Virality + Delta in CANDIDATE_BLOCK
+# below and can weigh velocity against topical fit itself. Letting
+# negative-delta tweets through means a thoughtful comment can still ride
+# an on-theme but cooling thread to the right audience. LIMIT 25 stays as
+# a draft-budget cap, not a ripening gate.
+# Candidate list comes through /api/v1/twitter-candidates (route returns
+# all pending rows for the batch); the helper applies the virality_score
+# sort + 25-row cap client-side and emits the SAME pipe-separated columns
+# the legacy psql -F '|' query produced. Pipe shape is documented in
 # scripts/twitter_cycle_helper.py:cmd_candidates.
 CANDIDATES=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" candidates --batch-id "$BATCH_ID" 2>/dev/null || echo "")
 
@@ -1121,7 +1129,7 @@ if [ -z "$CANDIDATES" ]; then
 fi
 
 CANDIDATE_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
-log "Top $CANDIDATE_COUNT candidates by delta selected for post review."
+log "Top $CANDIDATE_COUNT candidates by virality_score selected for post review."
 
 # No post cap: Phase 2b-prep posts every candidate it judges genuinely
 # on-brand. HIGH_DELTA_COUNT is still computed, but ONLY as a dashboard
@@ -1156,7 +1164,7 @@ Candidate ID: $cid
 URL: $curl
 Author: @$cauthor (${cfollowers} followers)
 Text: $ctext
-Score: $cscore | Delta (5min): $cdelta | Likes: $clikes | RTs: $crts | Replies: $creplies | Views: $cviews | Age: ${cage}h
+Virality: $cscore | Delta (5min): $cdelta | Likes: $clikes | RTs: $crts | Replies: $creplies | Views: $cviews | Age: ${cage}h
 Search query: $ctopic
 Project match: $cproject${DRAFT_LINE}${AUTHOR_HISTORY_LINE}
 "
