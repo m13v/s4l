@@ -57,8 +57,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tarfile
 import time
+import traceback
+from datetime import datetime, timezone
 from typing import Optional
 
 # Reuse the shared lock + login-detector + profile constants from
@@ -75,6 +79,381 @@ from linkedin_browser import (  # noqa: E402
     _connect_to_running_or_launch,
     _is_login_or_checkpoint,
 )
+
+
+# ---------------------------------------------------------------------------
+# Debug-bundle helpers (added 2026-05-26 after the 2026-05-19 session_invalid
+# event left only 14 lines of orchestrator log to debug from).
+#
+# When --debug-dir is set, the scraper writes a forensic bundle for every
+# fire (success or failure), then tars it up. The shell caller (stats-
+# linkedin.sh) promotes the tarball to a permanent archive on session_
+# invalid / captcha_or_checkpoint so we can compare the next failure DOM
+# against the last-known-good one byte-for-byte. On success the bundle
+# stays in skill/logs/linkedin-debug/<ts>/ on disk for 14 days then ages
+# out via stats-linkedin.sh's existing find -mtime sweep.
+#
+# Every helper here is wrapped so a debug-side failure can NEVER raise into
+# the main scrape() path. The whole point is fault diagnosis; a diagnostics
+# helper that crashes the production run would be worse than no helper.
+# ---------------------------------------------------------------------------
+
+
+def _ts_ms() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _DebugRecorder:
+    """Sink for forensic artifacts captured during one scrape() invocation.
+
+    Files written under self.dir (one bundle per fire):
+        00_owns_context.txt    cdp_attach vs cold_launch (post-attach)
+        00_chrome_version.txt  browser.version + platform info
+        01_pre_goto.png        screenshot before page.goto
+        01_pre_goto.html       outerHTML before page.goto
+        02_post_goto.png       screenshot after page.goto + settle
+        02_post_goto.html      outerHTML after page.goto + settle
+        02_post_goto_url.txt   page.url after goto (the smoking-gun for
+                               session_invalid: shows /authwall URL)
+        02_cookies.json        full cookie jar (li_at, JSESSIONID, etc.)
+        99_failure.png         screenshot at error-return path
+        99_failure.html        outerHTML at error-return path
+        99_failure.txt         error/detail + Python traceback
+        console.jsonl          page console messages + uncaught pageerrors
+        navigation.jsonl       framenavigated events (ALL frames; the
+                               authwall redirect chain is the data here)
+        network.jsonl          response events for *.linkedin.com requests
+                               (status, url, content-type; body truncated
+                               to 2KB to keep bundle tractable)
+        meta.json              start/end timestamps + scrape summary
+
+    Disable globally by passing debug_dir=None to scrape(). The instance
+    becomes a no-op shim — all `dbg.x(...)` calls return None instantly.
+    """
+
+    def __init__(self, debug_dir: Optional[str]):
+        self.dir: Optional[str] = debug_dir
+        self.enabled: bool = bool(debug_dir)
+        self.started_at: str = _ts_ms()
+        self.meta: dict = {}
+        # Open file handles (append) for the streaming sinks. Lazy so we
+        # don't create empty files when the recorder is disabled.
+        self._fh_console = None
+        self._fh_nav = None
+        self._fh_net = None
+        if self.enabled:
+            try:
+                os.makedirs(self.dir, exist_ok=True)
+            except OSError as e:
+                # If we can't make the dir, drop to no-op.
+                print(
+                    f"[scrape_linkedin] WARN: debug dir create failed "
+                    f"({e!r}); disabling debug capture",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self.enabled = False
+                self.dir = None
+
+    # --- low-level writers ------------------------------------------------
+
+    def _path(self, name: str) -> Optional[str]:
+        if not self.enabled or not self.dir:
+            return None
+        return os.path.join(self.dir, name)
+
+    def _write_text(self, name: str, body: str) -> None:
+        p = self._path(name)
+        if not p:
+            return
+        try:
+            with open(p, "w", encoding="utf-8", errors="replace") as f:
+                f.write(body)
+        except OSError as e:
+            print(
+                f"[scrape_linkedin] WARN: debug write {name} failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _append_jsonl(self, handle_name: str, name: str, obj: dict) -> None:
+        if not self.enabled:
+            return
+        fh = getattr(self, handle_name)
+        if fh is None:
+            p = self._path(name)
+            if not p:
+                return
+            try:
+                fh = open(p, "a", encoding="utf-8", errors="replace")
+            except OSError as e:
+                print(
+                    f"[scrape_linkedin] WARN: debug open {name} failed: "
+                    f"{e!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            setattr(self, handle_name, fh)
+        try:
+            fh.write(json.dumps(obj, default=str) + "\n")
+            fh.flush()
+        except (OSError, TypeError, ValueError):
+            # Never let a jsonl write derail the scrape.
+            pass
+
+    def _close_handles(self) -> None:
+        for attr in ("_fh_console", "_fh_nav", "_fh_net"):
+            fh = getattr(self, attr, None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                setattr(self, attr, None)
+
+    # --- public capture API ----------------------------------------------
+
+    def note_owns_context(self, owns_context: bool) -> None:
+        if not self.enabled:
+            return
+        line = (
+            f"owns_context={owns_context}\n"
+            f"meaning="
+            f"{'cold_launch_persistent_context' if owns_context else 'cdp_attach_to_running_mcp'}\n"
+            f"profile={PROFILE_DIR}\n"
+            f"pid={os.getpid()}\n"
+            f"timestamp={_ts_ms()}\n"
+        )
+        self._write_text("00_owns_context.txt", line)
+
+    def capture_browser_version(self, context) -> None:
+        if not self.enabled or context is None:
+            return
+        info = {}
+        try:
+            br = getattr(context, "browser", None)
+            if br is not None:
+                info["browser_version"] = getattr(br, "version", "?")
+                info["browser_type"] = (
+                    br.browser_type.name if getattr(br, "browser_type", None)
+                    else "?"
+                )
+        except Exception as e:
+            info["browser_version_err"] = repr(e)
+        info["sys.platform"] = sys.platform
+        info["py"] = sys.version.split()[0]
+        info["captured_at"] = _ts_ms()
+        try:
+            body = "\n".join(f"{k}={v}" for k, v in info.items())
+        except Exception:
+            body = repr(info)
+        self._write_text("00_chrome_version.txt", body + "\n")
+
+    def attach_page_listeners(self, page) -> None:
+        """Subscribe to page events. Must be called BEFORE page.goto."""
+        if not self.enabled or page is None:
+            return
+
+        def on_console(msg):
+            try:
+                rec = {
+                    "ts": _ts_ms(),
+                    "kind": "console",
+                    "type": msg.type,
+                    "text": (msg.text or "")[:4000],
+                    "location": getattr(msg, "location", None),
+                }
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "kind": "console", "err": repr(e)}
+            self._append_jsonl("_fh_console", "console.jsonl", rec)
+
+        def on_pageerror(err):
+            try:
+                rec = {
+                    "ts": _ts_ms(),
+                    "kind": "pageerror",
+                    "name": getattr(err, "name", type(err).__name__),
+                    "message": (str(err) or "")[:4000],
+                    "stack": (getattr(err, "stack", "") or "")[:4000],
+                }
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "kind": "pageerror", "err": repr(e)}
+            self._append_jsonl("_fh_console", "console.jsonl", rec)
+
+        def on_framenav(frame):
+            try:
+                rec = {
+                    "ts": _ts_ms(),
+                    "url": frame.url,
+                    "name": frame.name,
+                    "is_main": frame == page.main_frame,
+                }
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "err": repr(e)}
+            self._append_jsonl("_fh_nav", "navigation.jsonl", rec)
+
+        def on_response(response):
+            # LinkedIn-only: keeps bundle <1MB on a typical run.
+            try:
+                url = response.url
+                if "linkedin.com" not in url:
+                    return
+                rec = {
+                    "ts": _ts_ms(),
+                    "status": response.status,
+                    "url": url,
+                    "method": response.request.method,
+                    "type": response.request.resource_type,
+                    "headers": dict(list(response.headers.items())[:30]),
+                }
+                # Only capture body for HTML/JSON and only first 2KB; full
+                # response bodies blow up the tarball with no diagnostic
+                # win over the URL + status.
+                ct = (response.headers.get("content-type") or "").lower()
+                if response.status >= 300 and ("html" in ct or "json" in ct
+                                              or ct == ""):
+                    try:
+                        body = response.text()
+                        rec["body_snip"] = (body or "")[:2048]
+                    except Exception:
+                        pass
+            except Exception as e:
+                rec = {"ts": _ts_ms(), "err": repr(e)}
+            self._append_jsonl("_fh_net", "network.jsonl", rec)
+
+        try:
+            page.on("console", on_console)
+            page.on("pageerror", on_pageerror)
+            page.on("framenavigated", on_framenav)
+            page.on("response", on_response)
+        except Exception as e:
+            print(
+                f"[scrape_linkedin] WARN: page.on subscribe failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def snapshot(self, page, prefix: str) -> None:
+        """Write <prefix>.png + <prefix>.html for the given page."""
+        if not self.enabled or page is None:
+            return
+        # screenshot
+        png_path = self._path(f"{prefix}.png")
+        if png_path:
+            try:
+                page.screenshot(path=png_path, full_page=False, timeout=8000)
+            except Exception as e:
+                self._write_text(
+                    f"{prefix}.png.err.txt",
+                    f"screenshot_failed: {e!r}\nts={_ts_ms()}\n",
+                )
+        # outerHTML
+        try:
+            html = page.content()
+            self._write_text(f"{prefix}.html", html)
+        except Exception as e:
+            self._write_text(
+                f"{prefix}.html.err.txt",
+                f"content_read_failed: {e!r}\nts={_ts_ms()}\n",
+            )
+
+    def capture_url(self, page, prefix: str) -> None:
+        if not self.enabled or page is None:
+            return
+        try:
+            url = page.url
+        except Exception as e:
+            url = f"<url_read_failed: {e!r}>"
+        self._write_text(
+            f"{prefix}_url.txt", f"{url}\nts={_ts_ms()}\n"
+        )
+
+    def capture_cookies(self, context, prefix: str = "02_cookies") -> None:
+        if not self.enabled or context is None:
+            return
+        try:
+            cookies = context.cookies()
+        except Exception as e:
+            self._write_text(
+                f"{prefix}.err.txt",
+                f"cookies_read_failed: {e!r}\nts={_ts_ms()}\n",
+            )
+            return
+        # Don't redact li_at / JSESSIONID: this is a private bundle stored
+        # on the user's machine; the same cookies are sitting in the same
+        # profile dir on disk anyway. Their presence / absence / age IS
+        # the diagnostic signal for session_invalid.
+        try:
+            self._write_text(
+                f"{prefix}.json",
+                json.dumps(cookies, indent=2, default=str),
+            )
+        except Exception as e:
+            self._write_text(
+                f"{prefix}.err.txt",
+                f"cookies_serialize_failed: {e!r}\nts={_ts_ms()}\n",
+            )
+
+    def failure(self, page, error: str, detail: str = "") -> None:
+        """Capture failure-mode artifacts: screenshot, html, error text."""
+        if not self.enabled:
+            return
+        self.snapshot(page, "99_failure")
+        try:
+            url = page.url if page is not None else "<no_page>"
+        except Exception:
+            url = "<url_read_failed>"
+        body = (
+            f"error={error}\n"
+            f"detail={detail}\n"
+            f"url={url}\n"
+            f"ts={_ts_ms()}\n"
+            f"\n--- python traceback ---\n"
+            f"{traceback.format_exc()}"
+        )
+        self._write_text("99_failure.txt", body)
+
+    def finalize(self, result: dict) -> Optional[str]:
+        """Write meta.json, close jsonl handles, tar.gz the dir.
+
+        Returns absolute path to the .tar.gz on success, None on failure
+        or when disabled. The shell caller surfaces this path in its log
+        and (on session_invalid) promotes it to a permanent archive.
+        """
+        if not self.enabled or not self.dir:
+            return None
+        self.meta["started_at"] = self.started_at
+        self.meta["finished_at"] = _ts_ms()
+        self.meta["pid"] = os.getpid()
+        self.meta["ok"] = bool(result.get("ok"))
+        self.meta["error"] = result.get("error")
+        self.meta["records"] = result.get("record_count")
+        self.meta["with_impressions"] = result.get("with_impressions")
+        self.meta["with_reactions"] = result.get("with_reactions")
+        try:
+            self._write_text(
+                "meta.json",
+                json.dumps(self.meta, indent=2, default=str),
+            )
+        except Exception:
+            pass
+
+        self._close_handles()
+
+        # Tar the directory next to itself: <dir>.tar.gz
+        tarball = self.dir.rstrip("/") + ".tar.gz"
+        try:
+            with tarfile.open(tarball, "w:gz") as tar:
+                tar.add(self.dir, arcname=os.path.basename(self.dir))
+        except Exception as e:
+            print(
+                f"[scrape_linkedin] WARN: tarball create failed: {e!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+        return tarball
 
 
 COMMENTS_URL = "https://www.linkedin.com/in/me/recent-activity/comments/"
@@ -287,7 +666,11 @@ def _comments_tab_present(page) -> bool:
         return False
 
 
-def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
+def scrape(
+    out_path: Optional[str],
+    max_scrolls: int,
+    debug_dir: Optional[str] = None,
+) -> dict:
     """Run the scrape. Returns result dict.
 
     2026-05-08: switched from launch_persistent_context (which forced
@@ -299,24 +682,62 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
     perfectly and no second Chrome process is ever spawned. The
     launch_persistent_context fallback inside the helper still exists
     for the cold-MCP case.
+
+    2026-05-26: added optional debug_dir. When set, every fire writes
+    a forensic bundle (screenshots, html, cookies, console+nav+network
+    jsonl, error trace) and tar.gz's it. See _DebugRecorder docstring
+    for the full file layout. Disabled when debug_dir is None.
     """
     from playwright.sync_api import sync_playwright
 
     _acquire_browser_lock()
 
+    dbg = _DebugRecorder(debug_dir)
+
+    # Helper so every return path can finalize the bundle and surface the
+    # tarball location. The tarball path goes into the result dict (so
+    # main() can echo it on stdout) AND to stderr as a single
+    # `[scrape_linkedin] debug_bundle=<path>` marker (so the shell can
+    # grep for it without re-parsing JSON).
+    def _finalize_and_return(result: dict) -> dict:
+        tarball = dbg.finalize(result)
+        if tarball:
+            result["debug_bundle"] = tarball
+            print(
+                f"[scrape_linkedin] debug_bundle={tarball}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return result
+
     with sync_playwright() as p:
         try:
             context, owns_context = _connect_to_running_or_launch(p)
         except Exception as e:
-            return {
+            return _finalize_and_return({
                 "ok": False,
                 "error": "profile_locked",
                 "detail": str(e),
-            }
+            })
+
+        # Mode hint: caller knows from stderr whether we cdp-attached or
+        # cold-launched. The bundle gets the same info as a top-level file
+        # so it's grep-able from a tarball without unpacking everything.
+        dbg.note_owns_context(owns_context)
+        dbg.capture_browser_version(context)
 
         page = None
         try:
             page = context.new_page()
+
+            # Subscribe to page events BEFORE goto so the navigation
+            # chain (homepage -> /authwall -> /login) is captured in
+            # navigation.jsonl. After goto is too late: we'd miss the
+            # opening redirect that is the smoking gun for
+            # session_invalid.
+            dbg.attach_page_listeners(page)
+            dbg.snapshot(page, "01_pre_goto")
+
             try:
                 page.goto(
                     COMMENTS_URL,
@@ -324,11 +745,12 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
                     timeout=30000,
                 )
             except Exception as e:
-                return {
+                dbg.failure(page, "navigation_failed", str(e))
+                return _finalize_and_return({
                     "ok": False,
                     "error": "navigation_failed",
                     "detail": str(e),
-                }
+                })
 
             # Settle.
             try:
@@ -340,22 +762,31 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
                 pass
             page.wait_for_timeout(2500)
 
+            # Post-goto checkpoint: URL, html, screenshot, cookie jar.
+            # Captured BEFORE the auth/captcha gates so we always have a
+            # last-known-state dump even when those gates fire.
+            dbg.capture_url(page, "02_post_goto")
+            dbg.snapshot(page, "02_post_goto")
+            dbg.capture_cookies(context, "02_cookies")
+
             cur_url = page.url
             if _is_login_or_checkpoint(cur_url):
-                return {
+                dbg.failure(page, "session_invalid", cur_url)
+                return _finalize_and_return({
                     "ok": False,
                     "error": "session_invalid",
                     "url": cur_url,
-                }
+                })
 
             challenge = _looks_like_captcha_or_checkpoint(page)
             if challenge:
-                return {
+                dbg.failure(page, "captcha_or_checkpoint", challenge)
+                return _finalize_and_return({
                     "ok": False,
                     "error": "captcha_or_checkpoint",
                     "url": cur_url,
                     "detail": challenge,
-                }
+                })
 
             if not _comments_tab_present(page):
                 # Page loaded but isn't the comments tab. Could be
@@ -365,12 +796,13 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
                     title = page.title() or ""
                 except Exception:
                     title = ""
-                return {
+                dbg.failure(page, "wrong_page", f"title={title}")
+                return _finalize_and_return({
                     "ok": False,
                     "error": "wrong_page",
                     "url": cur_url,
                     "title": title,
-                }
+                })
 
             # ONE harvest evaluate. Internal scroll loop runs there.
             try:
@@ -386,11 +818,12 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
                     },
                 )
             except Exception as e:
-                return {
+                dbg.failure(page, "evaluate_failed", str(e))
+                return _finalize_and_return({
                     "ok": False,
                     "error": "evaluate_failed",
                     "detail": str(e),
-                }
+                })
 
             records = result.get("records") or []
             with_imp = sum(
@@ -424,7 +857,7 @@ def scrape(out_path: Optional[str], max_scrolls: int) -> dict:
                         f"failed to write {out_path}: {e}"
                     )
 
-            return out
+            return _finalize_and_return(out)
         finally:
             # Always close OUR page so the MCP Chrome doesn't accumulate
             # tabs across fires.
@@ -470,10 +903,17 @@ def main():
                          "If omitted, only stdout summary is produced.")
     ap.add_argument("--max-scrolls", type=int, default=DEFAULT_MAX_SCROLLS,
                     help=f"Max scroll ticks (default {DEFAULT_MAX_SCROLLS}).")
+    ap.add_argument("--debug-dir", default=None,
+                    help="Optional directory to write a forensic bundle "
+                         "(screenshots, html, cookies, console+nav+network "
+                         "jsonl, error trace). Auto-tar.gz'd at exit; the "
+                         "path is echoed to stderr as "
+                         "`[scrape_linkedin] debug_bundle=<path>` for the "
+                         "shell caller to surface. Disabled when omitted.")
     args = ap.parse_args()
 
     try:
-        result = scrape(args.out, args.max_scrolls)
+        result = scrape(args.out, args.max_scrolls, debug_dir=args.debug_dir)
     except Exception as e:
         result = {
             "ok": False,
