@@ -934,6 +934,16 @@ HARVEST_JS_TEMPLATE = r"""
     } else {
       stagnant = 0;
     }
+    // Per-tick diagnostic (added 2026-05-27). Captures in console.jsonl
+    // so we can post-mortem stagnation behavior. If `dsh` is consistently
+    // nonzero even when `added=0`, the whole-document scrollHeight is
+    // being mutated by non-comment content (sidebar/footer/ads).
+    console.log('[scrape_tick] tick=' + ticks
+      + ' added=' + added
+      + ' acc=' + acc.size
+      + ' sh=' + sh
+      + ' dsh=' + (sh - lastScrollHeight)
+      + ' stagnant=' + stagnant);
     lastScrollHeight = sh;
 
     const dy = opts.dy_min + Math.random() * (opts.dy_max - opts.dy_min);
