@@ -718,6 +718,35 @@ tweets = js("""
   return results;
 })()
 """)
+# 2026-05-27: HARD AGE GATE at the scrape boundary. Drops stale tweets BEFORE
+# they are baked with metadata and printed between the ###TWEETS_*### sentinels,
+# so the scan model literally cannot see anything older than the variant's
+# freshness window in its tool_result. This closes every bypass at once:
+#   - X "Latest" tab leaking older tweets past since_time: (X-side filter is
+#     advisory, not authoritative)
+#   - bare-keyword queries that route around the operator-anchored hook
+#   - prompt drift where the model swaps since_time: back to since:
+# Reads FRESHNESS_HOURS_DISCOVER from the cycle env (set by run-twitter-cycle.sh
+# per variant: A/B=6h, C/D=1h). Falls back to 6h if unset. Any tweet whose
+# `datetime` is malformed or missing is dropped (we cannot prove it's fresh).
+import os as _os_age, datetime as _dt_age
+_AGE_CAP_S = int(_os_age.environ.get('FRESHNESS_HOURS_DISCOVER') or '6') * 3600
+_NOW_AGE = _dt_age.datetime.now(_dt_age.timezone.utc).timestamp()
+def _is_fresh(_t):
+    _ds = _t.get('datetime') or ''
+    if not _ds:
+        return False
+    try:
+        _ts = _dt_age.datetime.fromisoformat(_ds.replace('Z', '+00:00')).timestamp()
+    except Exception:
+        return False
+    return (_NOW_AGE - _ts) <= _AGE_CAP_S
+_pre_age_count = len(tweets)
+tweets = [_t for _t in tweets if _is_fresh(_t)]
+_age_dropped = _pre_age_count - len(tweets)
+if _age_dropped:
+    print(f'[harness_age_gate] dropped={_age_dropped} kept={len(tweets)} cap_h={_AGE_CAP_S//3600}', flush=True)
+
 # Bake project/topic/query into each tweet object IN PYTHON, before printing —
 # so the model has zero degrees of freedom on these fields. The model only
 # concatenates the per-project arrays; it does not regenerate any value.
