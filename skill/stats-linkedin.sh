@@ -14,8 +14,11 @@
 #   1. Acquire the linkedin-browser lock (serializes against run-linkedin.sh
 #      / engage-linkedin.sh / dm-outreach-linkedin.sh / engage-dm-replies.sh).
 #   2. Run scripts/scrape_linkedin_comment_stats.py ONCE. It CDP-attaches
-#      to the running linkedin-agent MCP Chrome (no second Chrome spawned;
-#      the kill+reopen cadence flagged on 2026-05-06 is gone), opens a
+#      to the linkedin-harness Chrome on port 9556 (2026-05-26 migration:
+#      replaced the legacy ps-discovery of linkedin-agent MCP. The harness
+#      is multi-client safe so no kill+reopen, no Singleton fight. The
+#      LINKEDIN_CDP_URL env var exported by skill/lib/linkedin-backend.sh
+#      tells linkedin_browser.py to attach via CDP directly), opens a
 #      tab to /in/me/recent-activity/comments/, harvests per-comment
 #      impressions / reactions / replies into a single JSON feed.
 #   3. Run scripts/update_linkedin_stats_from_feed.py — writes the feed
@@ -48,6 +51,12 @@
 set -euo pipefail
 
 source "$(dirname "$0")/lock.sh"
+# 2026-05-26 harness migration: linkedin-backend.sh exports LINKEDIN_CDP_URL
+# (http://127.0.0.1:9556) and exposes ensure_linkedin_browser_for_backend
+# which probes + launches the linkedin-harness Chrome idempotently. The
+# scraper picks up LINKEDIN_CDP_URL automatically via linkedin_browser.py's
+# harness-cdp fast-path.
+source "$(dirname "$0")/lib/linkedin-backend.sh"
 
 # shellcheck source=/dev/null
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
@@ -114,12 +123,15 @@ mkdir -p "$DEBUG_BUNDLE_BASE" "$DEBUG_FAILURES_DIR"
 #
 #    DELIBERATELY do NOT call ensure_browser_healthy "linkedin" — that
 #    helper SIGKILLs the linkedin-agent MCP and clears Singleton lockfiles
-#    so a second Chrome can launch on the same profile. With the 2026-05-08
-#    cutover, scrape_linkedin_comment_stats.py CDP-attaches to the running
-#    MCP Chrome instead, so there's no second Chrome to make room for.
-#    Killing the MCP would just be the exact kill+reopen cadence LinkedIn
-#    anti-bot flagged on 2026-05-06.
+#    so a second Chrome can launch on the same profile. With the 2026-05-26
+#    harness cutover, scrape_linkedin_comment_stats.py CDP-attaches to the
+#    linkedin-harness Chrome (port 9556) which is multi-client safe.
 acquire_lock "linkedin-browser" 1800
+
+# Probe + launch harness Chrome idempotently if it's down. Safe to call under
+# the linkedin-browser lock; harness CDP supports concurrent clients on the
+# same profile so no SingletonLock fight.
+ensure_linkedin_browser_for_backend
 
 # 2. Run the headed-Chromium scraper (single scrape, shared between writers).
 log "Launching headed Chromium scraper..."
@@ -138,6 +150,10 @@ set -e
 
 # Always release the browser lock; updaters are DB-only.
 release_lock "linkedin-browser"
+# 2026-05-26 harness migration: the linkedin-agent JSON lockfile still gets
+# written by linkedin_browser._acquire_browser_lock for serialization between
+# concurrent Python invocations; sweep it on the way out so it doesn't
+# accumulate stale entries.
 rm -f "$HOME/.claude/linkedin-agent-lock.json"
 
 # Echo scraper output to log.
