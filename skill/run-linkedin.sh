@@ -139,15 +139,19 @@ PROJECT_DIST=$(python3 "$REPO_DIR/scripts/pick_project.py" --platform linkedin -
 
 # Slim project list: name + description + qualification + search_topics.
 # Phase A needs search_topics so the LLM can draft per-project queries.
+# search_topics is read from the DB via project_topics.topics_for_project
+# (config.json is seed-only, post 2026-05-27 migration).
 PROJECTS_SLIM_JSON=$(python3 -c "
-import json, os
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from project_topics import topics_for_project
 config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 slim = {}
 for p in config.get('projects', []):
     if 'linkedin' in (p.get('platforms_disabled') or []):
         continue
     rec = {k: p[k] for k in ('name','description','qualification') if k in p}
-    rec['search_topics'] = p.get('search_topics') or []
+    rec['search_topics'] = list(topics_for_project(p.get('name') or ''))
     slim[p['name']] = rec
 print(json.dumps(slim, indent=2))
 " 2>/dev/null || echo "{}")
