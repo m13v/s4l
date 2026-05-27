@@ -10667,13 +10667,7 @@ function renderResult(run) {
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#a78bfa' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
         ((r.virality_posted_n || 0) > 0
-          ? pill(
-              'viral',
-              (r.virality_median_posted || 0).toFixed(1),
-              (r.virality_median_posted || 0) >= 100 ? '#22c55e'
-                : (r.virality_median_posted || 0) >= 10 ? 'var(--text)'
-                : 'var(--muted)'
-            )
+          ? pill('viral', (r.virality_median_posted || 0).toFixed(1))
           : '') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
