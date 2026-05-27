@@ -57,9 +57,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from http_api import api_get, api_post, api_delete
+from project_topics import topics_for_project
 
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 ACTIVATION_BATCH_FLOOR = 2          # term must appear in this many distinct batches before applying
 DECAY_DAYS_DEFAULT = 60             # prune unused terms older than this with <3 distinct batches
 TERM_MIN_LEN = 3
@@ -104,34 +104,28 @@ def parse_term(term):
 
 
 def _load_reserved_terms_for_project(project_name):
-    """Tokens we MUST NEVER let Claude exclude. Source: config.json search_topics for the project.
+    """Tokens we MUST NEVER let Claude exclude. Source: project_search_topics (DB) for the project.
 
-    `search_topics` entries can be Twitter-search-style strings with OR/parens/quotes;
+    Topic entries can be Twitter-search-style strings with OR/parens/quotes;
     we split them into bare lowercase tokens so a query string like
     `"vipassana" OR "Goenka"` reserves both `vipassana` and `goenka`.
     """
     reserved = set()
-    if not os.path.exists(CONFIG_PATH):
+    if not project_name:
         return reserved
     try:
-        cfg = json.load(open(CONFIG_PATH))
+        topics = topics_for_project(project_name)
     except Exception:
         return reserved
-    for p in cfg.get("projects", []):
-        if p.get("name") != project_name:
+    for t in topics:
+        if not isinstance(t, str):
             continue
-        topics = p.get("search_topics") or []
-        for t in topics:
-            if not isinstance(t, str):
-                continue
-            for tok in re.split(r"[\s\(\)\"\'\|]+|\bOR\b|\bAND\b|\bNOT\b|min_faves:\d+|since:[\d\-]+|-filter:\w+", t):
-                tok = tok.strip().lower()
-                if tok and TERM_MIN_LEN <= len(tok) <= 32:
-                    reserved.add(tok)
-        # Also reserve the project name itself (case-insensitive single token).
-        if isinstance(p.get("name"), str):
-            reserved.add(p["name"].lower())
-        break
+        for tok in re.split(r"[\s\(\)\"\'\|]+|\bOR\b|\bAND\b|\bNOT\b|min_faves:\d+|since:[\d\-]+|-filter:\w+", t):
+            tok = tok.strip().lower()
+            if tok and TERM_MIN_LEN <= len(tok) <= 32:
+                reserved.add(tok)
+    # Also reserve the project name itself (case-insensitive single token).
+    reserved.add(project_name.lower())
     return reserved
 
 
