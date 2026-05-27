@@ -5584,7 +5584,6 @@ async function handleApi(req, res) {
   // the aggregate UNION branch is skipped entirely so reconstructed days
   // return 0 rather than misleading totals.
   const perDayMetric = (metricCol, cache, gainedKey, aggregateCol) => {
-    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
@@ -5596,7 +5595,10 @@ async function handleApi(req, res) {
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
-    const cacheKey = days + '|' + platform + '|' + project;
+    const pc = auth.projectClause(req.user, 'p.project_name', project || null);
+    if (!pc.ok) return json(res, { days, rows: [] });
+    const scopeKey = pc.list ? pc.list.join(',') : 'all';
+    const cacheKey = days + '|' + platform + '|' + project + '|' + scopeKey;
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
@@ -5604,10 +5606,10 @@ async function handleApi(req, res) {
     const platformFilter = platform
       ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
       : '';
-    const projectFilter = project
-      ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
-      : '';
-    const includeAggregate = !platform && !project;
+    const projectFilter = pc.clause;
+    // Aggregate union has no per-project breakdown, so skip it whenever the
+    // effective scope is narrower than "all" (admin filter OR client scope).
+    const includeAggregate = !platform && !projectFilter;
     const aggregateUnion = includeAggregate
       ? "UNION ALL SELECT day, " + aggregateCol + "::bigint AS metric_gained " +
         "FROM aggregate_stats_daily " +
@@ -5664,7 +5666,6 @@ async function handleApi(req, res) {
   // (they were inflated by ~20x bot traffic), so we deliberately return 0
   // for days before that rather than pretend a backfilled total is comparable.
   if (p === '/api/clicks/per-day' && req.method === 'GET') {
-    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
@@ -5676,7 +5677,10 @@ async function handleApi(req, res) {
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
-    const cacheKey = days + '|' + platform + '|' + project;
+    const pc = auth.projectClause(req.user, 'p.project_name', project || null);
+    if (!pc.ok) return json(res, { days, rows: [] });
+    const scopeKey = pc.list ? pc.list.join(',') : 'all';
+    const cacheKey = days + '|' + platform + '|' + project + '|' + scopeKey;
     const cached = clicksPerDayCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
@@ -5684,9 +5688,7 @@ async function handleApi(req, res) {
     const platformFilter = platform
       ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
       : '';
-    const projectFilter = project
-      ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
-      : '';
+    const projectFilter = pc.clause;
     const q =
       "SELECT json_agg(row_to_json(r)) FROM (" +
         "SELECT to_char((plc.ts AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
@@ -5716,7 +5718,6 @@ async function handleApi(req, res) {
   // would understate the views-per-post ratio). Backs the Trends-tab
   // "Views / Post" pill.
   if (p === '/api/posts/per-day' && req.method === 'GET') {
-    if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
     const url = new URL(req.url, 'http://localhost');
     const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
@@ -5728,7 +5729,10 @@ async function handleApi(req, res) {
     const project = (rawProject === '' || rawProject.toLowerCase() === 'all') ? '' : rawProject;
     const projectOk = project === '' || /^[A-Za-z0-9_\- ]{1,64}$/.test(project);
     if (!projectOk) return json(res, { error: 'invalid project' }, 400);
-    const cacheKey = days + '|' + platform + '|' + project;
+    const pc = auth.projectClause(req.user, 'p.project_name', project || null);
+    if (!pc.ok) return json(res, { days, rows: [] });
+    const scopeKey = pc.list ? pc.list.join(',') : 'all';
+    const cacheKey = days + '|' + platform + '|' + project + '|' + scopeKey;
     const cached = postsPerDayCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
@@ -5736,9 +5740,7 @@ async function handleApi(req, res) {
     const platformFilter = platform
       ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
       : '';
-    const projectFilter = project
-      ? " AND p.project_name = '" + project.replace(/'/g, "''") + "'"
-      : '';
+    const projectFilter = pc.clause;
     // Split posts_made into threads_made (we authored the thread itself) vs
     // comments_made (we engaged on someone else's thread). Matches the
     // /api/activity classifier: thread iff thread_url = our_url AND
