@@ -17,10 +17,16 @@ the Reddit pipeline.
 import sys, json, os
 sys.path.insert(0, os.path.dirname(__file__))
 from version import read_version as read_autoposter_version
+try:
+    from account_resolver import resolve as _resolve_account
+except Exception:
+    def _resolve_account(_platform):  # type: ignore[unused-arg]
+        return None
 
 CLAUDE_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID") or None
 API_BASE = (os.environ.get("AUTOPOSTER_API_BASE") or "https://s4l.ai").rstrip("/")
 AUTOPOSTER_VERSION = read_autoposter_version()
+OUR_ACCOUNT = _resolve_account("twitter")
 
 
 def _http_patch(rid: int, body: dict) -> None:
@@ -115,6 +121,11 @@ elif cmd == "replied":
         # attribute reply engagement back to the release that produced
         # this comment. None when package.json + env are both missing.
         "autoposter_version": AUTOPOSTER_VERSION,
+        # our_account: stamp the persona on every transition (server-side
+        # COALESCE preserves an earlier value if already set). Defense in
+        # depth so even pending rows inserted before the scan-side fix get
+        # attributed on first update.
+        "our_account": OUR_ACCOUNT,
     }
     # Server uses COALESCE for is_recommendation: only send TRUE so we
     # never accidentally clobber an existing TRUE flag back to FALSE.
