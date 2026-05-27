@@ -1319,7 +1319,8 @@ You will NOT post anything. You will NOT generate landing pages. You will NOT ca
 Read $SKILL_FILE for content rules and voice context.
 Read $REPO_DIR/config.json for project metadata.
 
-## PRE-SCORED CANDIDATES (top by 5-min engagement velocity, best first)
+## PRE-SCORED CANDIDATES (sorted by Virality DESC, highest first)
+Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
 $CANDIDATE_BLOCK
 
 ## PROJECT ROUTING (per-candidate)
