@@ -497,10 +497,10 @@ to all our accounts.
 How to use it: BEFORE outputting your decision JSON, run this in Bash:
   python3 ~/social-autoposter/scripts/reply_db.py blocklist add reddit HANDLE \
     --reason "<one-line judgment>" \
-    --classification {bot|engagement_loop} \
+    --classification {{bot|engagement_loop}} \
     --source-reply-id REPLY_ID
 Then output a skip decision (so the current reply is not posted):
-  {"action": "skip", "reason": "blocklist_added:HANDLE"}
+  {{"action": "skip", "reason": "blocklist_added:HANDLE"}}
 HANDLE is the Reddit username without the `u/` prefix.
 
 ## Execution steps
