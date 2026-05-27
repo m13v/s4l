@@ -226,6 +226,20 @@ elif cmd == "blocklist":
         action = data.get("action", "?")
         row = data.get("row") or {}
         print(f"ok blocklist {action} {row.get('platform', platform)}/{row.get('handle', handle)} severity={row.get('severity', '?')}")
+        # Stable stderr marker so log_run.py / grep-based observability can
+        # count escape-hatch firings without re-querying the DB. Velocity-gate
+        # auto-blocks land directly via the route.ts SQL path and do NOT pass
+        # through here, so this marker is specific to LLM-judgment-driven
+        # adds (or manual operator adds).
+        classification = body["classification"]
+        source = body.get("source_reply_id", "")
+        reason_safe = (body.get("reason") or "").replace("\n", " ").replace("|", "/")[:200]
+        print(
+            f"[escape_hatch] platform={body['platform']} handle={body['handle']} "
+            f"classification={classification} severity={body['severity']} "
+            f"source_reply_id={source} action={action} reason=\"{reason_safe}\"",
+            file=sys.stderr,
+        )
     elif sub == "list":
         platform = sys.argv[3] if len(sys.argv) > 3 else None
         query = {"platform": platform} if platform else None
