@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tarfile
@@ -896,9 +897,37 @@ HARVEST_JS_TEMPLATE = r"""
     return null;
   }
 
+  // Bug A fix (2026-05-27): scope the stagnation check to the bottom
+  // edge of the LAST comment article rather than document.scrollHeight.
+  // Diagnostic console.log on the prior fire proved that sidebar / page
+  // chrome mutations push documentElement.scrollHeight up (dsh=608, 23)
+  // even when added=0, resetting `stagnant` to 0 and keeping the loop
+  // alive against an exhausted feed. Measuring the last comment's
+  // absolute bottom is immune to that.
+  function lastCommentBottomPx() {
+    let lastBottom = 0;
+    const arts = document.querySelectorAll('article');
+    for (const art of arts) {
+      if (!art.querySelector(
+        '[data-urn^="urn:li:comment:"], [data-id^="urn:li:comment:"]'
+      )) continue;
+      const r = art.getBoundingClientRect();
+      const b = r.bottom + window.scrollY;
+      if (b > lastBottom) lastBottom = b;
+    }
+    return lastBottom;
+  }
+
   let ticks = 0;
   let stagnant = 0;  // consecutive ticks with no new comments
   let lastScrollHeight = document.documentElement.scrollHeight;
+  let lastCommentBottom = lastCommentBottomPx();
+  // Bug B fix (2026-05-27): self-imposed deadline so the JS loop bails
+  // cleanly BEFORE Python's gtimeout fires SIGKILL. CDP does not cancel
+  // executing JS when the client disconnects, so prior runs left tabs
+  // scrolling indefinitely after the Python parent died. Default keeps
+  // the loop inside its budget; Python passes `opts.deadline_ms`.
+  const startTime = Date.now();
 
   const tick = () => {
     // Mid-scrape gate. If LinkedIn injected a challenge between ticks
@@ -921,30 +950,50 @@ HARVEST_JS_TEMPLATE = r"""
       return;
     }
 
+    // Bug B fix: self-imposed deadline. If Python's gtimeout would fire
+    // before we naturally bail, stop NOW with whatever we've harvested
+    // and emit `early_stop_reason='deadline'` so the writer still gets
+    // partial records.
+    if (opts.deadline_ms && (Date.now() - startTime) >= opts.deadline_ms) {
+      try { harvest(); } catch (e) { /* swallow */ }
+      resolve({
+        records: [...acc.values()],
+        ticks,
+        stagnant,
+        scroll_height_final: document.documentElement.scrollHeight,
+        ticks_log: ticksLog,
+        early_stop_reason: 'deadline_ms_reached',
+      });
+      return;
+    }
+
     const added = harvest();
     const sh = document.documentElement.scrollHeight;
+    const cb = lastCommentBottomPx();
     ticksLog.push({tick: ticks, added, total: acc.size,
-                   scroll_height: sh});
+                   scroll_height: sh, comment_bottom: cb});
 
-    // Early-stop if list has stabilized and we've stopped finding new
-    // comments. Saves time + avoids hammering the lazy-loader past its
-    // wall.
-    if (added === 0 && sh === lastScrollHeight) {
+    // Early-stop if the LAST comment's bottom position hasn't moved AND
+    // no new comments were added. The original guard (`sh === last`)
+    // false-negatived on sidebar/page-chrome mutations (Bug A,
+    // confirmed by per-tick diagnostic 2026-05-27).
+    if (added === 0 && cb === lastCommentBottom) {
       stagnant++;
     } else {
       stagnant = 0;
     }
-    // Per-tick diagnostic (added 2026-05-27). Captures in console.jsonl
-    // so we can post-mortem stagnation behavior. If `dsh` is consistently
-    // nonzero even when `added=0`, the whole-document scrollHeight is
-    // being mutated by non-comment content (sidebar/footer/ads).
+    // Per-tick diagnostic. `dsh` shows whole-document drift (sidebar);
+    // `dcb` shows comment-list drift (what stagnant now keys on).
     console.log('[scrape_tick] tick=' + ticks
       + ' added=' + added
       + ' acc=' + acc.size
       + ' sh=' + sh
       + ' dsh=' + (sh - lastScrollHeight)
+      + ' cb=' + cb
+      + ' dcb=' + (cb - lastCommentBottom)
       + ' stagnant=' + stagnant);
     lastScrollHeight = sh;
+    lastCommentBottom = cb;
 
     const dy = opts.dy_min + Math.random() * (opts.dy_max - opts.dy_min);
     window.scrollBy(0, dy);
@@ -1214,6 +1263,15 @@ def scrape(
                         "dy_min": SCROLL_DY_MIN,
                         "dy_max": SCROLL_DY_MAX,
                         "settle_ms": HARVEST_SETTLE_MS,
+                        # Self-imposed JS deadline (Bug B fix, 2026-05-27).
+                        # Picks up SAPS_SCRAPER_DEADLINE_MS if set by the
+                        # shell caller; otherwise defaults to 35min so the
+                        # loop bails before the shell's gtimeout backstop.
+                        "deadline_ms": int(
+                            os.environ.get(
+                                "SAPS_SCRAPER_DEADLINE_MS", "2100000"
+                            )
+                        ),
                     },
                 )
             except Exception as e:
@@ -1321,7 +1379,32 @@ def scrape(
                     pass
 
 
+def _install_sigterm_trap():
+    """Convert SIGTERM/SIGINT into SystemExit so the scrape()'s `finally`
+    block runs and closes the page. Bug B fix (2026-05-27): without this,
+    gtimeout's SIGTERM kills the Python process but leaves the harvest
+    JS executing inside Chrome (CDP does NOT cancel page-side execution
+    on client disconnect). The orphan JS keeps scrolling and harvesting
+    for minutes, hammering the session and risking a soft ban.
+
+    Pairing this with the JS-side `deadline_ms` self-bail means SIGTERM
+    is now a true backstop, not a steady-state cleanup."""
+    def _on_term(signum, _frame):
+        # 143 = 128 + SIGTERM(15), the conventional exit code for a
+        # SIGTERM-killed process. Matches shell `kill -TERM` semantics.
+        sys.exit(143 if signum == signal.SIGTERM else 130)
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
+    except (ValueError, OSError):
+        # signal.signal() can only run from the main thread; we are
+        # invoked as a standalone process so this is the main thread.
+        # Swallow defensively in case of future imports-as-module.
+        pass
+
+
 def main():
+    _install_sigterm_trap()
     if os.environ.get("SOCIAL_AUTOPOSTER_LINKEDIN_COMMENT_STATS") != "1":
         print(
             json.dumps({
