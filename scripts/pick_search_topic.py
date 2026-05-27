@@ -10,11 +10,12 @@ could be tagged with different topics on re-discovery.
 
 Universe: project_search_topics table via /api/v1/project-search-topics
 (install-scoped, status='active' only). config.json is seed-only and is
-ONLY consulted as a cold-start fallback when the API is unreachable or
-the table is empty for this project (i.e. the install hasn't been seeded
-yet). Run scripts/seed_search_topics.py once to mirror config.json into
-the DB; from then on, paused/excluded topics and invented winners live
-in the DB and the picker honors them.
+NEVER consulted at pick time. Run scripts/seed_search_topics.py once
+per install to mirror config.json into the DB; from then on,
+paused/excluded topics and invented winners live in the DB and the
+picker honors them. If the DB is unreachable or the project has zero
+active topics, the picker raises PickerError and the cycle aborts
+loudly — there is no config.json fallback.
 
 Performance signal: top_search_topics.query(project, "twitter", ...)
 which aggregates from twitter_candidates -> posts -> post_link_clicks.
@@ -91,7 +92,16 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+
+class PickerError(RuntimeError):
+    """Raised when the picker cannot get a valid universe from the DB.
+
+    Callers (run-twitter-cycle.sh's heredoc, CLI main) must treat this
+    as a hard stop: do NOT silently degrade to free-form picking or
+    config.json reads. The DB is the only source of truth for what's
+    eligible (paused/excluded/invented topics all live there).
+    """
+
 
 EXPLORE_RATE = 0.10
 WINDOW_DAYS = 30
@@ -178,39 +188,20 @@ def _compute_weight(r):
     return max(base * DEAD_FLOOR_FRACTION, base * conversion)
 
 
-def _load_universe_from_config(project_name):
-    """Cold-start fallback: read seed list from config.json."""
-    try:
-        with open(CONFIG_PATH) as f:
-            cfg = json.load(f)
-    except Exception:
-        return []
-    for p in cfg.get("projects", []):
-        if (p.get("name") or "").lower() == project_name.lower():
-            seen = set()
-            out = []
-            for t in (p.get("search_topics") or []):
-                if t and t not in seen:
-                    seen.add(t)
-                    out.append(t)
-            return out
-    return []
-
-
 def _load_universe(project_name):
     """Return the project's active search topics (unique, ordered).
 
-    Primary path: GET /api/v1/project-search-topics?project=X&status=active.
-    Each install sees its own rows plus the legacy null-install bucket
-    (same null-claim pattern as posts/replies). The picker only uses
-    'active' rows so paused/excluded topics drop out without any local
-    config.
+    GET /api/v1/project-search-topics?project=X&status=active. Each
+    install sees its own rows plus the legacy null-install bucket (same
+    null-claim pattern as posts/replies). Only 'active' rows are used
+    so paused/excluded topics drop out without any local config.
 
-    Fallback path (logged to stderr): config.json projects[].search_topics[].
-    Triggered when the API is unreachable, returns non-OK, or returns zero
-    rows for this project (cold-start, install hasn't been seeded yet).
-    Once seed_search_topics.py runs, the fallback should never fire under
-    normal operation.
+    Raises PickerError on API failure or zero rows. There is NO
+    config.json fallback by design (per 2026-05-27): a misconfigured
+    install must fail loud rather than silently posting against a stale
+    seed list. Cold-start procedure: run scripts/seed_search_topics.py
+    once per install to mirror config.json into the DB, then the
+    picker has a universe to work with.
     """
     try:
         from http_api import api_get
@@ -218,29 +209,27 @@ def _load_universe(project_name):
             "/api/v1/project-search-topics",
             query={"project": project_name, "status": "active"},
         )
-        data = (resp or {}).get("data") or {}
-        rows = data.get("topics") or []
-        seen = set()
-        out = []
-        for r in rows:
-            t = (r.get("topic") or "").strip()
-            if t and t not in seen:
-                seen.add(t)
-                out.append(t)
-        if out:
-            return out
-        # Empty result -> cold-start fallback.
-        sys.stderr.write(
-            f"[pick_search_topic] DB universe empty for project="
-            f"{project_name!r}; falling back to config.json (run "
-            f"scripts/seed_search_topics.py to seed)\n"
-        )
     except Exception as e:
-        sys.stderr.write(
-            f"[pick_search_topic] DB universe lookup failed for project="
-            f"{project_name!r}: {e}; falling back to config.json\n"
+        raise PickerError(
+            f"project-search-topics API unreachable for project="
+            f"{project_name!r}: {e}"
+        ) from e
+    data = (resp or {}).get("data") or {}
+    rows = data.get("topics") or []
+    seen = set()
+    out = []
+    for r in rows:
+        t = (r.get("topic") or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    if not out:
+        raise PickerError(
+            f"no active search topics for project={project_name!r} in "
+            f"project_search_topics. Seed via scripts/seed_search_topics.py "
+            f"or activate at least one row."
         )
-    return _load_universe_from_config(project_name)
+    return out
 
 
 def _load_signal(project_name, platform, window_days):
@@ -394,17 +383,14 @@ def pick_topic_for_project(project_name, platform="twitter",
                            rng=None):
     """Pick ONE search_topic for this project on this platform.
 
-    Returns the assignment dict described in the module docstring, or
-    None if the project has no search_topics[] in config.json (caller
-    should handle this by falling back to free-form behavior or
-    skipping the project).
+    Returns the assignment dict described in the module docstring.
+    Raises PickerError when the DB universe lookup fails or the project
+    has zero active topics. There is no return-None fallback path —
+    callers must NOT silently swallow the exception.
     """
     rnd = rng or random
     universe = _load_universe(project_name)
     picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    if not universe:
-        return None
 
     signal = _load_signal(project_name, platform, window_days)
     pool = _build_pool(universe, signal)
@@ -624,18 +610,16 @@ def main():
     args = ap.parse_args()
 
     rng = random.Random(args.seed) if args.seed is not None else None
-    assignment = pick_topic_for_project(
-        args.project,
-        platform=args.platform,
-        window_days=args.window_days,
-        explore_rate=args.explore_rate,
-        rng=rng,
-    )
-
-    if assignment is None:
-        sys.stderr.write(
-            f"pick_search_topic: project '{args.project}' has no search_topics[] in config.json\n"
+    try:
+        assignment = pick_topic_for_project(
+            args.project,
+            platform=args.platform,
+            window_days=args.window_days,
+            explore_rate=args.explore_rate,
+            rng=rng,
         )
+    except PickerError as e:
+        sys.stderr.write(f"pick_search_topic: {e}\n")
         sys.exit(2)
 
     if args.out:
