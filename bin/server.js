@@ -5828,8 +5828,12 @@ async function handleApi(req, res) {
     // when single-project, or falls through to the CLIENT_MODE empty branch.
     const pc = auth.projectClause(req.user, 'project_name', project || null);
     if (!pc.ok) return json(res, { days, rows: [] });
+    // For non-admins requesting 'all', narrow to their single project so the
+    // python script gets a real --project filter (PostHog data is not natively
+    // project-scoped, so unfiltered totals would leak across clients).
     const effectiveProject = pc.list && pc.list.length === 1 ? pc.list[0] : project;
-    const cacheKey = days + '|' + project;
+    const scopeKey = pc.list ? pc.list.join(',') : 'all';
+    const cacheKey = days + '|' + effectiveProject + '|' + scopeKey;
     const cached = funnelPerDayCache.get(cacheKey);
     if (cached && cached.value && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value.rows || [], cachedAt: cached.at, error: cached.value.error });
@@ -5844,7 +5848,7 @@ async function handleApi(req, res) {
     }
     const scriptPath = path.join(DEST, 'scripts', 'funnel_per_day.py');
     const argv = [scriptPath, '--days', String(days)];
-    if (project) argv.push('--project', project);
+    if (effectiveProject) argv.push('--project', effectiveProject);
     const pending = new Promise((resolve, reject) => {
       const child = spawn('python3', argv, { env: process.env, cwd: DEST });
       let out = '', err = '';
