@@ -8601,34 +8601,34 @@ const HTML = `<!DOCTYPE html>
     --bg-inset: #f9fafb;
     --bg-hover: #f3f4f6;
     --bg-button: #f4f4f5;
-    --bg-button-hover: #e5e7eb;
+    --bg-button-hover: #e7e7e7;
     --bg-chip: #f4f4f5;
-    --text: #111827;
+    --text: #181818;
     --text-strong: #000000;
-    --text-secondary: #4b5563;
-    --text-muted: #6b7280;
-    --text-faint: #9ca3af;
-    --text-very-faint: #d1d5db;
-    --border: #e5e7eb;
-    --border-strong: #d1d5db;
-    --border-hover: #9ca3af;
+    --text-secondary: #545454;
+    --text-muted: #727272;
+    --text-faint: #a2a2a2;
+    --text-very-faint: #d5d5d5;
+    --border: #e7e7e7;
+    --border-strong: #d5d5d5;
+    --border-hover: #a2a2a2;
     --border-input: #d4d4d8;
     --divider: #f3f4f6;
-    --link: #2563eb;
-    --accent: #7c3aed;
-    --accent-hover: #6d28d9;
-    --accent-soft: #7c3aed;
-    --accent-soft-hover: #6d28d9;
+    --link: #181818;
+    --accent: #181818;
+    --accent-hover: #000000;
+    --accent-soft: #404040;
+    --accent-soft-hover: #282828;
     --accent-on: #ffffff;
-    --accent-panel-bg: #faf5ff;
-    --accent-panel-border: #e9d5ff;
-    --cyan: #0891b2;
-    --cyan-soft: rgba(8, 145, 178, 0.18);
+    --accent-panel-bg: #f4f4f5;
+    --accent-panel-border: #e7e7e7;
+    --cyan: #181818;
+    --cyan-soft: rgba(24, 24, 24, 0.10);
     --pill-inverse-bg: #000000;
     --pill-inverse-text: #ffffff;
     --shadow-modal: rgba(0,0,0,0.35);
     --shadow-dropdown: rgba(0,0,0,0.1);
-    --row-flash-bg: rgba(8, 145, 178, 0.14);
+    --row-flash-bg: rgba(24, 24, 24, 0.08);
     --toggle-knob: #ffffff;
   }
   [data-theme="dark"] {
@@ -8645,27 +8645,27 @@ const HTML = `<!DOCTYPE html>
     --text-secondary: #a3a3a3;
     --text-muted: #737373;
     --text-faint: #525252;
-    --text-very-faint: #3f3f46;
+    --text-very-faint: #404040;
     --border: #262626;
     --border-strong: #404040;
     --border-hover: #525252;
     --border-input: #404040;
     --divider: #1f1f1f;
-    --link: #60a5fa;
-    --accent: #7c3aed;
-    --accent-hover: #6d28d9;
-    --accent-soft: #8b5cf6;
-    --accent-soft-hover: #a78bfa;
+    --link: #e5e5e5;
+    --accent: #e5e5e5;
+    --accent-hover: #fafafa;
+    --accent-soft: #a3a3a3;
+    --accent-soft-hover: #d4d4d4;
     --accent-on: #ffffff;
-    --accent-panel-bg: #1a1625;
-    --accent-panel-border: #3b2d63;
-    --cyan: #22d3ee;
-    --cyan-soft: rgba(34, 211, 238, 0.22);
+    --accent-panel-bg: #1f1f1f;
+    --accent-panel-border: #404040;
+    --cyan: #e5e5e5;
+    --cyan-soft: rgba(229, 229, 229, 0.10);
     --pill-inverse-bg: #ffffff;
     --pill-inverse-text: #000000;
     --shadow-modal: rgba(0,0,0,0.72);
     --shadow-dropdown: rgba(0,0,0,0.5);
-    --row-flash-bg: rgba(34, 211, 238, 0.22);
+    --row-flash-bg: rgba(229, 229, 229, 0.10);
     --toggle-knob: #e5e5e5;
   }
 
@@ -8708,7 +8708,7 @@ const HTML = `<!DOCTYPE html>
   .job-name { font-weight: 600; }
   .badge { padding: 3px 10px; border-radius: 8px; font-size: 12px; font-weight: 500; display: inline-block; }
   .badge.running {
-    background: linear-gradient(135deg, #0ea5e9 0%, #22d3ee 100%);
+    background: linear-gradient(135deg, #8a8a8a 0%, #afafaf 100%);
     color: #ffffff;
     font-weight: 700;
     letter-spacing: 0.03em;
@@ -8732,15 +8732,15 @@ const HTML = `<!DOCTYPE html>
   tr.sa-job-row-running td {
     background: linear-gradient(
       90deg,
-      rgba(34, 211, 238, 0.10) 0%,
-      rgba(14, 165, 233, 0.04) 60%,
-      rgba(14, 165, 233, 0.00) 100%
+      rgba(175, 175, 175, 0.10) 0%,
+      rgba(138, 138, 138, 0.04) 60%,
+      rgba(138, 138, 138, 0.00) 100%
     );
     background-size: 200% 100%;
     animation: runningRowShimmer 2.6s ease-in-out infinite;
   }
   tr.sa-job-row-running td:first-child {
-    box-shadow: inset 3px 0 0 0 #22d3ee;
+    box-shadow: inset 3px 0 0 0 #afafaf;
   }
   @keyframes runningRowShimmer {
     0%   { background-position: 0% 0%; }
@@ -8748,8 +8748,8 @@ const HTML = `<!DOCTYPE html>
     100% { background-position: 0% 0%; }
   }
   .badge.blocked {
-    background: linear-gradient(135deg, #b45309 0%, #f59e0b 100%);
-    color: #fff7ed;
+    background: linear-gradient(135deg, #626262 0%, #a6a6a6 100%);
+    color: #f8f8f8;
     font-weight: 600;
     letter-spacing: 0.03em;
     animation: blockedPulse 2.4s ease-in-out infinite;
@@ -8760,35 +8760,35 @@ const HTML = `<!DOCTYPE html>
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #fde68a;
+    background: #e4e4e4;
     margin-right: 7px;
     vertical-align: middle;
-    box-shadow: 0 0 4px rgba(253, 230, 138, 0.7);
+    box-shadow: 0 0 4px rgba(228, 228, 228, 0.7);
   }
   @keyframes blockedPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55); }
-    50%      { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(166, 166, 166, 0.55); }
+    50%      { box-shadow: 0 0 0 8px rgba(166, 166, 166, 0); }
   }
-  .badge.scheduled { background: #064e3b; color: #6ee7b7; }
+  .badge.scheduled { background: #3d3d3d; color: #cacaca; }
   .badge.stopped { background: var(--bg-button); color: var(--text); }
   .toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; cursor: pointer; flex-shrink: 0; }
   .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
   .toggle-slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--border-strong); border: 1px solid var(--border-hover); border-radius: 22px; transition: background 0.15s, border-color 0.15s; }
   .toggle-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px; background: var(--toggle-knob); border-radius: 50%; transition: transform 0.15s, background 0.15s; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
-  .toggle-switch input:checked + .toggle-slider { background: #10b981; border-color: #10b981; }
+  .toggle-switch input:checked + .toggle-slider { background: #919191; border-color: #919191; }
   .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); background: #ffffff; }
   .toggle-switch:hover .toggle-slider { filter: brightness(1.15); }
   .toggle-switch input:disabled + .toggle-slider { opacity: 0.5; cursor: not-allowed; }
   .toggle-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; color: var(--text); margin-left: 6px; }
-  .toggle-label.on { color: #10b981; }
+  .toggle-label.on { color: #919191; }
   @keyframes runningPulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.75), 0 0 10px rgba(14, 165, 233, 0.55); transform: scale(1); }
-    60%  { box-shadow: 0 0 0 10px rgba(34, 211, 238, 0), 0 0 18px rgba(34, 211, 238, 0.85); transform: scale(1.05); }
-    100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0), 0 0 10px rgba(14, 165, 233, 0.55); transform: scale(1); }
+    0%   { box-shadow: 0 0 0 0 rgba(175, 175, 175, 0.75), 0 0 10px rgba(138, 138, 138, 0.55); transform: scale(1); }
+    60%  { box-shadow: 0 0 0 10px rgba(175, 175, 175, 0), 0 0 18px rgba(175, 175, 175, 0.85); transform: scale(1.05); }
+    100% { box-shadow: 0 0 0 0 rgba(175, 175, 175, 0), 0 0 10px rgba(138, 138, 138, 0.55); transform: scale(1); }
   }
   @keyframes runningDot {
     0%, 100% { transform: scale(1);   opacity: 1;    box-shadow: 0 0 6px #ffffff; }
-    50%      { transform: scale(1.5); opacity: 0.85; box-shadow: 0 0 14px #ffffff, 0 0 22px #22d3ee; }
+    50%      { transform: scale(1.5); opacity: 0.85; box-shadow: 0 0 14px #ffffff, 0 0 22px #afafaf; }
   }
   .job-actions { display: flex; gap: 8px; }
   .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
@@ -8800,8 +8800,8 @@ const HTML = `<!DOCTYPE html>
   .btn:hover { background: var(--bg-button-hover); border-color: var(--border-hover); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
   .btn.primary:hover { background: var(--accent-hover); }
-  .btn.danger { background: #991b1b; border-color: #991b1b; color: #ffffff; }
-  .btn.danger:hover { background: #7f1d1d; }
+  .btn.danger { background: #363636; border-color: #363636; color: #ffffff; }
+  .btn.danger:hover { background: #323232; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   select { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-button); color: var(--text); font-size: 13px; cursor: pointer; }
   .log-viewer { background: var(--bg-inset); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-top: 16px; }
@@ -8812,9 +8812,9 @@ const HTML = `<!DOCTYPE html>
   .field { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
   .field label { min-width: 140px; font-size: 13px; color: var(--text); }
   .field input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-card); color: var(--text); font-size: 13px; }
-  .toast { position: fixed; bottom: 24px; right: 24px; background: #065f46; color: #6ee7b7; padding: 12px 20px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #4a4a4a; color: #cacaca; padding: 12px 20px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
-  .toast.error { background: #7f1d1d; color: #fca5a5; }
+  .toast.error { background: #323232; color: #b7b7b7; }
   .pending-card { background: var(--accent-panel-bg); border-color: var(--accent-panel-border); }
   .reply-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
   .reply-item:last-child { border-bottom: none; }
@@ -8840,14 +8840,14 @@ const HTML = `<!DOCTYPE html>
     line-height: 1; font-size: 14px;
     vertical-align: middle;
   }
-  .sa-del-btn:hover { opacity: 1; color: #ef4444; border-color: rgba(239, 68, 68, 0.35); }
-  .sa-del-btn:focus-visible { outline: 1px solid #ef4444; outline-offset: 1px; opacity: 1; }
+  .sa-del-btn:hover { opacity: 1; color: #686868; border-color: rgba(104, 104, 104, 0.35); }
+  .sa-del-btn:focus-visible { outline: 1px solid #686868; outline-offset: 1px; opacity: 1; }
   .sa-del-btn svg { width: 14px; height: 14px; display: block; }
-  .sa-del-btn.is-loading { pointer-events: none; opacity: 1; color: var(--cyan, #06b6d4); }
+  .sa-del-btn.is-loading { pointer-events: none; opacity: 1; color: var(--var(--text), #939393); }
   .sa-del-btn.is-loading svg { opacity: 0; }
   .sa-del-btn.is-loading::after {
     content: ''; position: absolute; width: 12px; height: 12px;
-    border: 2px solid rgba(6, 182, 212, 0.25); border-top-color: var(--cyan, #06b6d4);
+    border: 2px solid rgba(147, 147, 147, 0.25); border-top-color: var(--var(--text), #939393);
     border-radius: 50%; animation: saDelSpin 0.8s linear infinite;
   }
   .sa-del-btn { position: relative; }
@@ -8862,20 +8862,20 @@ const HTML = `<!DOCTYPE html>
   .pw-cell.is-saving .pw-spinner { display: inline-block; }
   .pw-cell.is-saving input { opacity: 0.6; }
   .sa-del-btn.is-pending {
-    opacity: 1; color: #f59e0b; border-color: rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.08);
+    opacity: 1; color: #a6a6a6; border-color: rgba(166, 166, 166, 0.35);
+    background: rgba(166, 166, 166, 0.08);
   }
-  .sa-del-btn.is-pending:hover { color: #f59e0b; border-color: rgba(245, 158, 11, 0.55); }
-  .sa-del-btn.is-failed { color: #ef4444; opacity: 1; border-color: rgba(239, 68, 68, 0.55); }
+  .sa-del-btn.is-pending:hover { color: #a6a6a6; border-color: rgba(166, 166, 166, 0.55); }
+  .sa-del-btn.is-failed { color: #686868; opacity: 1; border-color: rgba(104, 104, 104, 0.55); }
 
   /* Activity tab */
   .activity-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
   .activity-filter-group { display: flex; gap: 6px; flex-wrap: wrap; }
 
-  .activity-status { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--cyan); }
+  .activity-status { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--var(--text)); }
   .activity-live-dot {
-    width: 8px; height: 8px; border-radius: 50%; background: var(--cyan);
-    box-shadow: 0 0 8px var(--cyan);
+    width: 8px; height: 8px; border-radius: 50%; background: var(--var(--text));
+    box-shadow: 0 0 8px var(--var(--text));
     animation: activityHeartbeat 1.4s ease-in-out infinite;
   }
   @keyframes activityHeartbeat {
@@ -9021,8 +9021,8 @@ const HTML = `<!DOCTYPE html>
   }
   .activity-row-new { animation: activityRowFlash 2.6s ease-out; }
   @keyframes activityRowFlash {
-    0%   { background: var(--row-flash-bg); box-shadow: inset 3px 0 0 var(--cyan); }
-    60%  { background: var(--cyan-soft); box-shadow: inset 3px 0 0 var(--cyan); }
+    0%   { background: var(--row-flash-bg); box-shadow: inset 3px 0 0 var(--var(--text)); }
+    60%  { background: var(--var(--text)-soft); box-shadow: inset 3px 0 0 var(--var(--text)); }
     100% { background: transparent; box-shadow: inset 3px 0 0 transparent; }
   }
 
@@ -9070,9 +9070,9 @@ const HTML = `<!DOCTYPE html>
   .top-project-cell { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; min-width: 0; }
   .top-project-name { color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
   .top-kind-pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid var(--border); line-height: 1.5; }
-  .top-kind-pill--thread { background: rgba(96, 165, 250, 0.12); color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); }
-  .top-kind-pill--comment { background: rgba(167, 139, 250, 0.12); color: #a78bfa; border-color: rgba(167, 139, 250, 0.35); }
-  .top-kind-pill--rec { background: rgba(251, 191, 36, 0.14); color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); margin-left: 4px; }
+  .top-kind-pill--thread { background: rgba(156, 156, 156, 0.12); color: #9c9c9c; border-color: rgba(156, 156, 156, 0.35); }
+  .top-kind-pill--comment { background: rgba(153, 153, 153, 0.12); color: #999999; border-color: rgba(153, 153, 153, 0.35); }
+  .top-kind-pill--rec { background: rgba(193, 193, 193, 0.14); color: #c1c1c1; border-color: rgba(193, 193, 193, 0.4); margin-left: 4px; }
   .top-stats-cell { display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; font-size: 12px; }
   .top-stats-bit { color: var(--text); white-space: nowrap; }
   .top-stats-k { color: var(--text-muted); font-weight: 600; margin-right: 4px; }
@@ -9106,13 +9106,13 @@ const HTML = `<!DOCTYPE html>
   #top-links-container .style-stats-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 10px 10px; vertical-align: top; }
   #top-links-container .style-stats-table td[data-col-key="target_url"] { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-all; }
   #top-links-container .dest-kind-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
-  #top-links-container .dest-kind-home     { background: rgba(16,185,129,0.18); color: #10b981; }
-  #top-links-container .dest-kind-subpage  { background: rgba(59,130,246,0.18); color: #3b82f6; }
-  #top-links-container .dest-kind-seo      { background: rgba(168,85,247,0.18); color: #a855f7; }
-  #top-links-container .dest-kind-booking  { background: rgba(245,158,11,0.18); color: #f59e0b; }
-  #top-links-container .dest-kind-github   { background: rgba(148,163,184,0.18); color: #94a3b8; }
-  #top-links-container .dest-kind-external { background: rgba(239,68,68,0.18); color: #ef4444; }
-  #top-links-container .dest-kind-other    { background: rgba(148,163,184,0.18); color: #94a3b8; }
+  #top-links-container .dest-kind-home     { background: rgba(145, 145, 145, 0.18); color: #919191; }
+  #top-links-container .dest-kind-subpage  { background: rgba(123, 123, 123, 0.18); color: #7b7b7b; }
+  #top-links-container .dest-kind-seo      { background: rgba(114, 114, 114, 0.18); color: #727272; }
+  #top-links-container .dest-kind-booking  { background: rgba(166, 166, 166, 0.18); color: #a6a6a6; }
+  #top-links-container .dest-kind-github   { background: rgba(161, 161, 161, 0.18); color: #a1a1a1; }
+  #top-links-container .dest-kind-external { background: rgba(104, 104, 104, 0.18); color: #686868; }
+  #top-links-container .dest-kind-other    { background: rgba(161, 161, 161, 0.18); color: #a1a1a1; }
   /* DMs sub-tab */
   #top-dms-container .style-stats-table { table-layout: fixed; }
   #top-dms-container .style-stats-table th,
@@ -9127,14 +9127,14 @@ const HTML = `<!DOCTYPE html>
   .dm-stat-num { font-weight: 600; }
   .dm-stat-label { color: var(--text-muted); font-size: 11px; }
   .dm-class-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
-  .dm-class-human    { background: #7f1d1d; color: #fecaca; }
-  .dm-class-hot      { background: #b91c1c; color: #fff; }
-  .dm-class-warm     { background: #b45309; color: #fff; }
+  .dm-class-human    { background: #323232; color: #d5d5d5; }
+  .dm-class-hot      { background: #3d3d3d; color: #fff; }
+  .dm-class-warm     { background: #626262; color: #fff; }
   .dm-class-general  { background: var(--bg-chip); color: var(--text); border: 1px solid var(--border); }
-  .dm-class-cold     { background: #1e3a8a; color: #bfdbfe; }
+  .dm-class-cold     { background: #3a3a3a; color: #d8d8d8; }
   .dm-class-declined { background: var(--bg-chip); color: var(--text-secondary); border: 1px solid var(--border); }
   .dm-class-notours  { background: var(--bg-chip); color: var(--text-muted); border: 1px solid var(--border); }
-  .dm-class-converted{ background: #14532d; color: #bbf7d0; }
+  .dm-class-converted{ background: #434343; color: #e7e7e7; }
   .dm-class-closed   { background: var(--bg-chip); color: var(--text-muted); border: 1px solid var(--border); }
   .dm-class-none     { background: var(--bg-chip); color: var(--text-secondary); border: 1px solid var(--border); }
   .dm-class-sub      { color: var(--text-muted); font-size: 10px; margin-top: 2px; text-transform: lowercase; }
@@ -9149,14 +9149,14 @@ const HTML = `<!DOCTYPE html>
   .dm-prospect-pill:hover { background: var(--bg-hover); border-color: var(--link); color: var(--link); }
   .dm-meta-row       { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
   .dm-meta-chip      { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; background: var(--bg-chip); color: var(--text-secondary); border: 1px solid var(--border); }
-  .dm-icp-icp_match    { background: #14532d; color: #bbf7d0; border-color: #166534; }
-  .dm-icp-icp_miss     { background: #3f2e1e; color: #fde68a; border-color: #78350f; }
-  .dm-icp-disqualified { background: #3f1d1d; color: #fecaca; border-color: #7f1d1d; }
+  .dm-icp-icp_match    { background: #434343; color: #e7e7e7; border-color: #515151; }
+  .dm-icp-icp_miss     { background: #303030; color: #e4e4e4; border-color: #414141; }
+  .dm-icp-disqualified { background: #242424; color: #d5d5d5; border-color: #323232; }
   .dm-icp-unknown      { background: var(--bg-chip); color: var(--text-muted); border-color: var(--border); }
-  .dm-qual-qualified    { background: #14532d; color: #bbf7d0; border-color: #166534; }
-  .dm-qual-disqualified { background: #3f1d1d; color: #fecaca; border-color: #7f1d1d; }
-  .dm-qual-asked        { background: #1e3a8a; color: #bfdbfe; border-color: #1d4ed8; }
-  .dm-qual-answered     { background: #312e81; color: #c7d2fe; border-color: #4338ca; }
+  .dm-qual-qualified    { background: #434343; color: #e7e7e7; border-color: #515151; }
+  .dm-qual-disqualified { background: #242424; color: #d5d5d5; border-color: #323232; }
+  .dm-qual-asked        { background: #3a3a3a; color: #d8d8d8; border-color: #4e4e4e; }
+  .dm-qual-answered     { background: #353535; color: #d3d3d3; border-color: #454545; }
   .dm-qual-pending      { background: var(--bg-chip); color: var(--text-secondary); border-color: var(--border); }
   .dm-qual-note        { color: var(--text-muted); font-size: 10px; margin-top: 3px; white-space: normal; word-break: break-word; line-height: 1.3; }
 
@@ -9189,21 +9189,21 @@ const HTML = `<!DOCTYPE html>
      visually distinct (dashed purple border, translucent fill, "public" chip)
      so the operator can tell at a glance which surface a turn happened on. */
   .dm-exp-msg-public { border-style: dashed; }
-  .dm-exp-msg-public-inbound  { align-self: flex-start; background: rgba(139, 92, 246, 0.06); color: var(--text); border-color: rgba(139, 92, 246, 0.45); border-top-left-radius: 3px; }
-  .dm-exp-msg-public-outbound { align-self: flex-end;   background: rgba(139, 92, 246, 0.10); color: var(--text); border-color: rgba(139, 92, 246, 0.55); border-top-right-radius: 3px; }
-  .dm-exp-msg-public .dm-exp-msg-head { color: #6d28d9; opacity: 1; }
-  .dm-exp-msg-kind-chip { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; background: rgba(139, 92, 246, 0.18); color: #6d28d9; border: 1px solid rgba(139, 92, 246, 0.45); }
-  .dm-exp-msg-link { margin-left: auto; color: #6d28d9; text-decoration: none; font-weight: 500; font-size: 10px; }
+  .dm-exp-msg-public-inbound  { align-self: flex-start; background: rgba(113, 113, 113, 0.06); color: var(--text); border-color: rgba(113, 113, 113, 0.45); border-top-left-radius: 3px; }
+  .dm-exp-msg-public-outbound { align-self: flex-end;   background: rgba(113, 113, 113, 0.10); color: var(--text); border-color: rgba(113, 113, 113, 0.55); border-top-right-radius: 3px; }
+  .dm-exp-msg-public .dm-exp-msg-head { color: #434343; opacity: 1; }
+  .dm-exp-msg-kind-chip { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; background: rgba(113, 113, 113, 0.18); color: #434343; border: 1px solid rgba(113, 113, 113, 0.45); }
+  .dm-exp-msg-link { margin-left: auto; color: #434343; text-decoration: none; font-weight: 500; font-size: 10px; }
   .dm-exp-msg-link:hover { text-decoration: underline; }
   /* Highlighted URL inside DM text bubbles + last-message preview. Readable on
      both the muted card background (inbound) and the accent fill (outbound). */
-  .dm-link { background: rgba(34, 197, 94, 0.18); color: #15803d; border-bottom: 1px dotted #15803d; padding: 0 3px; border-radius: 3px; text-decoration: none; font-weight: 600; word-break: break-all; }
-  .dm-link:hover { background: rgba(34, 197, 94, 0.30); text-decoration: underline; }
+  .dm-link { background: rgba(155, 155, 155, 0.18); color: #646464; border-bottom: 1px dotted #646464; padding: 0 3px; border-radius: 3px; text-decoration: none; font-weight: 600; word-break: break-all; }
+  .dm-link:hover { background: rgba(155, 155, 155, 0.30); text-decoration: underline; }
   .dm-exp-msg-outbound .dm-link { background: rgba(255,255,255,0.22); color: var(--accent-on); border-bottom-color: rgba(255,255,255,0.7); }
   .dm-exp-msg-outbound .dm-link:hover { background: rgba(255,255,255,0.36); }
   /* Last-message cell already uses muted text color; the highlighted link
      should not inherit that. */
-  #top-dms-container .style-stats-table td[data-col-key="last_msg"] .dm-link { color: #15803d; }
+  #top-dms-container .style-stats-table td[data-col-key="last_msg"] .dm-link { color: #646464; }
   .dm-exp-ctx        { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
   .dm-exp-ctx-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; line-height: 1.45; }
   .dm-exp-ctx-head   { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; font-size: 10px; text-transform: lowercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; }
@@ -9213,34 +9213,34 @@ const HTML = `<!DOCTYPE html>
   .dm-exp-ctx-link:hover { text-decoration: underline; }
   .dm-exp-ctx-body   { white-space: pre-wrap; word-break: break-word; color: var(--text); }
   .dm-exp-ctx-title  { font-weight: 600; color: var(--text); margin-bottom: 3px; }
-  .dm-exp-ctx-fallback { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; margin-left: 4px; cursor: help; }
+  .dm-exp-ctx-fallback { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; background: #f2f2f2; color: #4e4e4e; border: 1px solid #e4e4e4; margin-left: 4px; cursor: help; }
 
   /* Escalation card — surfaces the human-handoff request and the queue of
      instructions written for the DM-reply agent. Sits above the context block. */
-  .dm-esc-card { background: var(--bg-card); border: 1px solid #fbbf24; border-left: 3px solid #f59e0b; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.45; display: flex; flex-direction: column; gap: 10px; }
+  .dm-esc-card { background: var(--bg-card); border: 1px solid #c1c1c1; border-left: 3px solid #a6a6a6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.45; display: flex; flex-direction: column; gap: 10px; }
   .dm-esc-head { display: flex; align-items: baseline; gap: 8px; }
-  .dm-esc-tag  { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+  .dm-esc-tag  { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; background: #f2f2f2; color: #4e4e4e; border: 1px solid #e4e4e4; }
   .dm-esc-reason { color: var(--text); white-space: pre-wrap; word-break: break-word; }
   .dm-esc-list { display: flex; flex-direction: column; gap: 6px; }
   .dm-esc-item { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 6px 8px; }
   .dm-esc-item-meta { display: flex; align-items: center; gap: 6px; font-size: 10px; text-transform: lowercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; font-weight: 600; }
   .dm-esc-item-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); font-weight: 700; margin-top: 6px; margin-bottom: 2px; }
-  .dm-esc-item-label-reply { color: #047857; }
+  .dm-esc-item-label-reply { color: #5d5d5d; }
   .dm-esc-item-body { white-space: pre-wrap; word-break: break-word; color: var(--text); font-size: 12px; }
-  .dm-esc-item-reply { white-space: pre-wrap; word-break: break-word; color: var(--text); font-size: 12px; padding: 6px 8px; background: rgba(16, 185, 129, 0.08); border-left: 2px solid #10b981; border-radius: 0 4px 4px 0; }
+  .dm-esc-item-reply { white-space: pre-wrap; word-break: break-word; color: var(--text); font-size: 12px; padding: 6px 8px; background: rgba(145, 145, 145, 0.08); border-left: 2px solid #919191; border-radius: 0 4px 4px 0; }
   .dm-esc-item-reply-missing { color: var(--text-muted); font-style: italic; background: transparent; border-left-color: var(--border); }
   .dm-esc-status { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 700; }
-  .dm-esc-status-pending { background: #fef3c7; color: #92400e; }
-  .dm-esc-status-sent    { background: #d1fae5; color: #065f46; }
-  .dm-esc-status-failed  { background: #fee2e2; color: #991b1b; }
+  .dm-esc-status-pending { background: #f2f2f2; color: #4e4e4e; }
+  .dm-esc-status-sent    { background: #f0f0f0; color: #4a4a4a; }
+  .dm-esc-status-failed  { background: #e8e8e8; color: #363636; }
   .dm-esc-source { padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; }
   .dm-esc-channel { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.04em; }
-  .dm-esc-channel-dm     { background: #dbeafe; color: #1e40af; }
-  .dm-esc-channel-public { background: #ede9fe; color: #5b21b6; }
-  .dm-esc-channel-both   { background: #fce7f3; color: #9d174d; }
-  .dm-esc-item-label-public { color: #5b21b6; }
-  .dm-esc-item-label-public .dm-esc-public-link { font-size: 9px; font-weight: 600; margin-left: 6px; color: #5b21b6; text-decoration: underline; text-transform: none; letter-spacing: 0; }
-  .dm-esc-item-reply-public { background: rgba(139, 92, 246, 0.08); border-left-color: #8b5cf6; }
+  .dm-esc-channel-dm     { background: #e8e8e8; color: #414141; }
+  .dm-esc-channel-public { background: #ebebeb; color: #383838; }
+  .dm-esc-channel-both   { background: #ececec; color: #373737; }
+  .dm-esc-item-label-public { color: #383838; }
+  .dm-esc-item-label-public .dm-esc-public-link { font-size: 9px; font-weight: 600; margin-left: 6px; color: #383838; text-decoration: underline; text-transform: none; letter-spacing: 0; }
+  .dm-esc-item-reply-public { background: rgba(113, 113, 113, 0.08); border-left-color: #717171; }
   .dm-esc-channel-picker { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; color: var(--text-secondary); }
   .dm-esc-channel-picker label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
   .dm-esc-channel-picker input { margin: 0; }
@@ -9249,19 +9249,19 @@ const HTML = `<!DOCTYPE html>
   .dm-esc-textarea:focus { outline: none; border-color: var(--link); }
   .dm-esc-bar { display: flex; align-items: center; gap: 8px; }
   .dm-esc-hint { font-size: 10px; color: var(--text-muted); margin-right: auto; }
-  .dm-esc-submit { padding: 5px 12px; font-size: 11px; font-weight: 600; color: #fff; background: #f59e0b; border: 1px solid #d97706; border-radius: 4px; cursor: pointer; }
-  .dm-esc-submit:hover { background: #d97706; }
+  .dm-esc-submit { padding: 5px 12px; font-size: 11px; font-weight: 600; color: #fff; background: #a6a6a6; border: 1px solid #848484; border-radius: 4px; cursor: pointer; }
+  .dm-esc-submit:hover { background: #848484; }
   .dm-esc-submit:disabled { opacity: 0.6; cursor: not-allowed; }
   .dm-esc-feedback { font-size: 11px; padding: 4px 0; }
-  .dm-esc-feedback-ok  { color: #047857; }
-  .dm-esc-feedback-err { color: #b91c1c; }
-  .dm-esc-link { margin-left: auto; padding: 2px 8px; font-size: 11px; font-weight: 600; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 4px; text-decoration: none; }
-  .dm-esc-link:hover { background: #fde68a; }
+  .dm-esc-feedback-ok  { color: #5d5d5d; }
+  .dm-esc-feedback-err { color: #3d3d3d; }
+  .dm-esc-link { margin-left: auto; padding: 2px 8px; font-size: 11px; font-weight: 600; color: #4e4e4e; background: #f2f2f2; border: 1px solid #e4e4e4; border-radius: 4px; text-decoration: none; }
+  .dm-esc-link:hover { background: #e4e4e4; }
   .dm-esc-link-missing { font-size: 10px; color: var(--text-muted); font-style: italic; }
   .dm-esc-skip { padding: 2px 8px; font-size: 11px; font-weight: 600; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-family: inherit; }
   .dm-esc-skip:hover { color: var(--text-strong); border-color: var(--border-hover); }
   .dm-esc-skip:disabled { opacity: 0.6; cursor: not-allowed; }
-  .dm-esc-snoozed { padding: 2px 8px; font-size: 10px; font-weight: 600; color: #1d4ed8; background: #dbeafe; border: 1px solid #bfdbfe; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .dm-esc-snoozed { padding: 2px 8px; font-size: 10px; font-weight: 600; color: #4e4e4e; background: #e8e8e8; border: 1px solid #d8d8d8; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
 
   .prospect-modal-overlay { position: fixed; inset: 0; background: var(--shadow-modal); display: flex; align-items: flex-start; justify-content: center; z-index: 9999; padding: 60px 20px 20px; overflow-y: auto; }
   .prospect-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; max-width: 640px; width: 100%; padding: 24px 28px; color: var(--text); font-size: 13px; line-height: 1.5; }
@@ -9322,8 +9322,8 @@ const HTML = `<!DOCTYPE html>
   /* Views-per-day bar chart in the Stats tab */
   .views-chart { padding: 16px 20px 20px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); }
   .views-chart-bars { display: flex; align-items: flex-end; gap: 2px; height: 140px; min-height: 140px; }
-  .views-chart-bar { flex: 1 1 0; min-width: 4px; background: var(--accent, #3b82f6); border-radius: 2px 2px 0 0; position: relative; transition: background 0.1s; }
-  .views-chart-bar:hover { background: var(--accent-hover, #2563eb); }
+  .views-chart-bar { flex: 1 1 0; min-width: 4px; background: var(--accent, #7b7b7b); border-radius: 2px 2px 0 0; position: relative; transition: background 0.1s; }
+  .views-chart-bar:hover { background: var(--accent-hover, #606060); }
   .views-chart-bar.empty { background: var(--bg-subtle); }
   .views-chart-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .views-chart-axis span { white-space: nowrap; }
@@ -9387,14 +9387,14 @@ const HTML = `<!DOCTYPE html>
   #deploy-health:not([open]) > summary { padding: 6px 14px; }
   #deploy-health:not([open]) .style-stats-title { font-size: 11px; text-transform: none; letter-spacing: normal; font-weight: 600; }
   #deploy-health:not([open]) .style-stats-total { font-size: 11px; }
-  #deploy-health[data-alert="warn"] { border-color: #fcd34d; }
-  #deploy-health[data-alert="warn"] > summary { background: #fffbeb; }
+  #deploy-health[data-alert="warn"] { border-color: #d2d2d2; }
+  #deploy-health[data-alert="warn"] > summary { background: #fbfbfb; }
   #deploy-health[data-alert="warn"] .style-stats-title,
-  #deploy-health[data-alert="warn"] .style-stats-total { color: #b45309; }
-  #deploy-health[data-alert="error"] { border-color: #fca5a5; }
-  #deploy-health[data-alert="error"] > summary { background: #fef2f2; }
+  #deploy-health[data-alert="warn"] .style-stats-total { color: #626262; }
+  #deploy-health[data-alert="error"] { border-color: #b7b7b7; }
+  #deploy-health[data-alert="error"] > summary { background: #f5f5f5; }
   #deploy-health[data-alert="error"] .style-stats-title,
-  #deploy-health[data-alert="error"] .style-stats-total { color: #b91c1c; }
+  #deploy-health[data-alert="error"] .style-stats-total { color: #3d3d3d; }
   .style-stats-table-wrapper { border-top: 1px solid var(--border); overflow-x: auto; }
   .style-stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .style-stats-table th, .style-stats-table td { padding: 10px 16px; text-align: right; font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--divider); }
@@ -9423,9 +9423,9 @@ const HTML = `<!DOCTYPE html>
   .exp-card-hypothesis { margin-top: 4px; font-size: 12px; color: var(--text-secondary); max-width: 720px; line-height: 1.45; }
   .exp-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 11px; color: var(--text-muted); }
   .exp-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-  .exp-status-running { background: var(--accent-panel-bg); color: var(--text); border: 1px solid #3b82f6; }
-  .exp-status-decided { background: #6b21a8; color: #fff; }
-  .exp-status-shipped { background: #166534; color: #fff; }
+  .exp-status-running { background: var(--accent-panel-bg); color: var(--text); border: 1px solid #7b7b7b; }
+  .exp-status-decided { background: #3a3a3a; color: #fff; }
+  .exp-status-shipped { background: #515151; color: #fff; }
   .exp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .exp-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); background: var(--bg); }
   .exp-table th.num, .exp-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -9443,7 +9443,7 @@ const HTML = `<!DOCTYPE html>
   .exp-progress-label { font-weight: 600; }
   .exp-progress-nums { color: var(--text-secondary); text-transform: none; letter-spacing: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
   .exp-progress-bar { margin-top: 6px; height: 6px; background: var(--bg-subtle); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
-  .exp-progress-bar-fill { height: 100%; background: #3b82f6; transition: width 0.3s ease; }
+  .exp-progress-bar-fill { height: 100%; background: #7b7b7b; transition: width 0.3s ease; }
   /* Actual-share row: shown right above the variant table. Each pill is
      one variant with its real share of n_posted, so eye can compare
      against the configured weight in the Weight column below. */
@@ -9457,7 +9457,7 @@ const HTML = `<!DOCTYPE html>
   .style-stats-pill-row .label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; margin-right: 4px; }
   .style-stats-pill { background: var(--bg-subtle); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; font-family: inherit; cursor: pointer; user-select: none; transition: background 0.1s, border-color 0.1s; }
   .style-stats-pill:hover { border-color: var(--border-strong); background: var(--bg-hover); }
-  .style-stats-pill.active { background: var(--accent-panel-bg); border-color: #3b82f6; color: var(--text); }
+  .style-stats-pill.active { background: var(--accent-panel-bg); border-color: #7b7b7b; color: var(--text); }
 
   /* In-place loading state for stats containers. Dims the previously-rendered
      grid/table so it stays visible (no layout jump) but reads clearly as stale.
@@ -9483,18 +9483,18 @@ const HTML = `<!DOCTYPE html>
      sections hidden via body.sa-non-admin; unauthenticated users see only
      the login card. */
   .sa-login-overlay { position: fixed; inset: 0; background: var(--bg); display: none; align-items: center; justify-content: center; z-index: 9999; }
-  .sa-login-card { background: var(--bg-panel, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 12px; padding: 32px; width: 360px; max-width: 90vw; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+  .sa-login-card { background: var(--bg-panel, #fff); border: 1px solid var(--border, #e7e7e7); border-radius: 12px; padding: 32px; width: 360px; max-width: 90vw; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
   .sa-login-card h1 { margin: 0 0 4px; font-size: 20px; }
-  .sa-login-card p { color: var(--text-muted, #6b7280); margin: 0 0 20px; font-size: 13px; }
-  .sa-login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 6px; background: var(--bg-subtle, #f9fafb); color: var(--text); font: inherit; margin-bottom: 10px; box-sizing: border-box; }
-  .sa-login-card button { width: 100%; padding: 10px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer; }
-  .sa-login-card button:hover { background: #1d4ed8; }
-  .sa-login-card .sa-login-link { display: block; width: 100%; margin-top: 10px; padding: 8px; background: transparent; color: var(--text-muted, #6b7280); border: none; font: inherit; font-size: 12px; cursor: pointer; text-align: center; text-decoration: underline; }
-  .sa-login-card .sa-login-link:hover { color: var(--text, #111827); background: transparent; }
-  .sa-login-card #sa-login-password-submit { background: #6b7280; margin-top: 0; }
-  .sa-login-card #sa-login-password-submit:hover { background: #4b5563; }
-  .sa-login-error { color: #dc2626; font-size: 13px; min-height: 18px; margin-top: 6px; }
-  .sa-login-info { color: #059669; font-size: 13px; min-height: 18px; margin-top: 6px; }
+  .sa-login-card p { color: var(--text-muted, #727272); margin: 0 0 20px; font-size: 13px; }
+  .sa-login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border, #e7e7e7); border-radius: 6px; background: var(--bg-subtle, #f9fafb); color: var(--text); font: inherit; margin-bottom: 10px; box-sizing: border-box; }
+  .sa-login-card button { width: 100%; padding: 10px; background: #606060; color: #fff; border: none; border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer; }
+  .sa-login-card button:hover { background: #4e4e4e; }
+  .sa-login-card .sa-login-link { display: block; width: 100%; margin-top: 10px; padding: 8px; background: transparent; color: var(--text-muted, #727272); border: none; font: inherit; font-size: 12px; cursor: pointer; text-align: center; text-decoration: underline; }
+  .sa-login-card .sa-login-link:hover { color: var(--text, #181818); background: transparent; }
+  .sa-login-card #sa-login-password-submit { background: #727272; margin-top: 0; }
+  .sa-login-card #sa-login-password-submit:hover { background: #545454; }
+  .sa-login-error { color: #4d4d4d; font-size: 13px; min-height: 18px; margin-top: 6px; }
+  .sa-login-info { color: #747474; font-size: 13px; min-height: 18px; margin-top: 6px; }
   body.sa-non-admin .sa-admin-only { display: none !important; }
   body.sa-cloud .sa-local-only { display: none !important; }
   body.sa-authed-pending .header, body.sa-authed-pending .tabs, body.sa-authed-pending .content { visibility: hidden; }
@@ -9572,7 +9572,7 @@ const HTML = `<!DOCTYPE html>
     </button>
     <button class="btn sa-local-only" id="pause-btn" onclick="togglePause()" style="font-weight:600;"></button>
     <span class="pending sa-local-only" id="pending-badge">-- pending</span>
-    <span class="sa-user-badge" id="sa-user-badge" style="display:none;font-size:12px;color:var(--text-muted);padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:var(--bg-subtle);"></span>
+    <span class="sa-user-badge" id="sa-user-badge" style="display:none;font-size:12px;color: var(--text-muted);padding:4px 10px;border: 1px solid var(--border);border-radius:999px;background: var(--bg-subtle);"></span>
     <button class="btn sa-client-only" id="sa-signout-btn" onclick="saSignOut()" style="font-weight:600;display:none;">Sign out</button>
   </div>
 </div>
@@ -9600,7 +9600,7 @@ const HTML = `<!DOCTYPE html>
   </div>
   <details class="style-stats-section sa-admin-only" id="cost-stats">
     <summary>
-      <span class="style-stats-title"><span class="style-stats-caret">&#9654;</span><span id="cost-stats-heading">Cost per Activity (last 24 hours)</span></span>
+      <span class="style-stats-title"><span class="style-stats-caret">&#7774;</span><span id="cost-stats-heading">Cost per Activity (last 24 hours)</span></span>
       <span class="style-stats-total" id="cost-stats-total"></span>
     </summary>
     <div class="style-stats-controls">
@@ -9624,7 +9624,7 @@ const HTML = `<!DOCTYPE html>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="project-status-heading">Project Status (last 24h)</span></span>
       <span class="style-stats-total" id="project-status-total"></span>
-      <button id="project-status-refresh" onclick="event.preventDefault();event.stopPropagation();_projectStatusLoading=false;loadProjectStatus(true);" style="margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid var(--border-color,#444);border-radius:4px;background:transparent;color:var(--text-muted,#aaa);" title="Refresh">↻</button>
+      <button id="project-status-refresh" onclick="event.preventDefault();event.stopPropagation();_projectStatusLoading=false;loadProjectStatus(true);" style="margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border: 1px solid var(--border-color,#444);border-radius:4px;background: transparent;color: var(--text-muted,#aaa);" title="Refresh">↻</button>
     </summary>
     <div id="project-status-body">
       <div class="style-stats-empty">Loading…</div>
@@ -9661,9 +9661,9 @@ const HTML = `<!DOCTYPE html>
       <div class="card-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <span class="card-title">Job History</span>
       </div>
-      <div style="padding:10px 16px;border-bottom:1px solid var(--accent-panel-border);display:flex;flex-direction:column;gap:8px;">
+      <div style="padding:10px 16px;border-bottom: 1px solid var(--accent-panel-border);display:flex;flex-direction:column;gap:8px;">
         <div class="style-stats-pill-row" id="jobs-history-platform-pills" data-selected="all" style="margin:0;">
-          <span class="label" style="font-size:11px;color:var(--muted);margin-right:4px;">Platform</span>
+          <span class="label" style="font-size:11px;color: var(--muted);margin-right:4px;">Platform</span>
           <button type="button" class="style-stats-pill active" data-value="all">All</button>
           <button type="button" class="style-stats-pill" data-value="reddit">Reddit</button>
           <button type="button" class="style-stats-pill" data-value="twitter">Twitter</button>
@@ -9672,7 +9672,7 @@ const HTML = `<!DOCTYPE html>
           <button type="button" class="style-stats-pill" data-value="github">GitHub</button>
         </div>
         <div class="style-stats-pill-row" id="jobs-history-type-pills" data-selected="all" style="margin:0;">
-          <span class="label" style="font-size:11px;color:var(--muted);margin-right:4px;">Job</span>
+          <span class="label" style="font-size:11px;color: var(--muted);margin-right:4px;">Job</span>
           <button type="button" class="style-stats-pill active" data-value="all">All</button>
           <button type="button" class="style-stats-pill" data-value="post">Post Threads</button>
           <button type="button" class="style-stats-pill" data-value="post-comments">Post Comments</button>
@@ -9768,11 +9768,11 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-total" id="search-topics-stats-total"></span>
     </summary>
     <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;">
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color: var(--text-secondary);cursor:pointer;">
         <input type="checkbox" id="search-topics-stats-duds-only" style="cursor:pointer;">
         Show duds only (0 candidates)
       </label>
-      <span style="font-size:12px;color:var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
+      <span style="font-size:12px;color: var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
     </div>
     <div id="search-topics-stats-body">
       <div class="style-stats-empty">Loading\u2026</div>
@@ -9784,11 +9784,11 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-total" id="search-queries-stats-total"></span>
     </summary>
     <div id="search-queries-stats-controls" style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;">
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color: var(--text-secondary);cursor:pointer;">
         <input type="checkbox" id="search-queries-stats-duds-only" style="cursor:pointer;">
         Show duds only (0 candidates)
       </label>
-      <span style="font-size:12px;color:var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
+      <span style="font-size:12px;color: var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
     </div>
     <div id="search-queries-stats-body">
       <div class="style-stats-empty">Loading\u2026</div>
@@ -9855,7 +9855,7 @@ const HTML = `<!DOCTYPE html>
       </div>
       <details class="per-project-breakdown" id="ratio-metrics-per-project" data-scope="ratio">
         <summary>
-          <span class="pp-caret">&#9654;</span>
+          <span class="pp-caret">&#7774;</span>
           <span class="pp-label">Per-project breakdown</span>
           <span class="pp-status" id="ratio-metrics-per-project-status"></span>
         </summary>
@@ -9873,7 +9873,7 @@ const HTML = `<!DOCTYPE html>
     <div class="activity-status">
       <span class="activity-live-dot"></span>
       <span id="activity-status-text">live</span>
-      <span id="activity-count" style="color:var(--text);margin-left:8px;"></span>
+      <span id="activity-count" style="color: var(--text);margin-left:8px;"></span>
     </div>
   </div>
   <div class="activity-filters">
@@ -9927,7 +9927,7 @@ const HTML = `<!DOCTYPE html>
         </tr>
       </thead>
       <tbody id="activity-body">
-        <tr><td colspan="6" style="text-align:center;color:var(--text);padding:40px;">Loading&hellip;</td></tr>
+        <tr><td colspan="6" style="text-align:center;color: var(--text);padding:40px;">Loading&hellip;</td></tr>
       </tbody>
     </table>
   </div>
@@ -10428,19 +10428,19 @@ function renderOtherJobRow(job) {
     '<input type="time" data-field="starttime" value="' + timeValue + '"' +
     ' title="Set daily start time (converts to calendar schedule)"' +
     ' onchange="setStartTime(\\'' + job.label + '\\', this.value)"' +
-    ' style="font-size:11px;padding:1px 2px;margin-left:4px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:3px;">';
+    ' style="font-size:11px;padding:1px 2px;margin-left:4px;background: transparent;color: var(--text);border: 1px solid var(--border);border-radius:3px;">';
   return '<tr data-other-job="' + job.label + '">' +
     '<td style="text-align:left;padding-left:16px;">' + job.name + '</td>' +
-    '<td style="color:var(--text);font-size:12px;">' +
+    '<td style="color: var(--text);font-size:12px;">' +
       '<div style="display:flex;align-items:center;justify-content:center;gap:8px;">' +
         renderToggle(job.label, job.loaded) +
         '<div style="display:flex;flex-direction:column;line-height:1.3;">' +
           '<span>' + (job.schedule || '--') + timeInput + '</span>' +
-          '<span data-field="nextrun" style="color:var(--muted);font-size:11px;">' + nextLine + '</span>' +
+          '<span data-field="nextrun" style="color: var(--muted);font-size:11px;">' + nextLine + '</span>' +
         '</div>' +
       '</div>' +
     '</td>' +
-    '<td style="color:var(--text);font-size:12px;" data-field="lastrun">' + relTime(job.lastRun) + '</td>' +
+    '<td style="color: var(--text);font-size:12px;" data-field="lastrun">' + relTime(job.lastRun) + '</td>' +
     '<td><span class="badge ' + job.status + '" data-field="status">' + statusLabel + '</span></td>' +
     '<td><div class="cell-actions" style="justify-content:center;">' + runStopBtn + renderLiveLink(job) + '</div></td>' +
   '</tr>';
@@ -10544,13 +10544,13 @@ const TWITTER_VARIANT_DEFS = ${JSON.stringify(TWITTER_VARIANT_DEFS)};
 function renderResult(run) {
   const r = run.result || {};
   const pill = (label, n, _color) =>
-    '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-    label + ' <span style="color:var(--text);font-weight:600;">' + n + '</span></span>';
+    '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+    label + ' <span style="color: var(--text);font-weight:600;">' + n + '</span></span>';
   if (r.type === 'link-edit') {
     return (
       pill('touched', r.total, 'var(--text)') +
-      pill('success', r.success, '#22c55e') +
-      pill('skipped', r.skipped, '#eab308')
+      pill('success', r.success, '#9b9b9b') +
+      pill('skipped', r.skipped, '#b2b2b2')
     );
   }
   if (r.type === 'check-replies') {
@@ -10579,13 +10579,13 @@ function renderResult(run) {
     const scanPills = hasScan
       ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
          pill('scanned', scannedN, scannedN > 0 ? 'var(--text)' : 'var(--muted)') +
-         pill('new', newN, newN > 0 ? '#22c55e' : 'var(--muted)') +
+         pill('new', newN, newN > 0 ? '#9b9b9b' : 'var(--muted)') +
          (excludedN ? pill('excluded', excludedN, 'var(--muted)') : '') +
          '</span>')
       : '';
     return (
       scanPills +
-      pill('found', found, found > 0 ? '#22c55e' : 'var(--muted)') +
+      pill('found', found, found > 0 ? '#9b9b9b' : 'var(--muted)') +
       pill('queue', pending, pending > 0 ? 'var(--text)' : 'var(--muted)')
     );
   }
@@ -10616,8 +10616,8 @@ function renderResult(run) {
         : 'failed';
       const count = failed || (reasons[0] ? reasons[0].count : 0);
       return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + (count ? ' <span style="color: var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
     const LNL = String.fromCharCode(10);
     const tooltip =
@@ -10633,8 +10633,8 @@ function renderResult(run) {
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('passed', passed, passed > 0 ? '#22c55e' : 'var(--muted)') +
-        pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('passed', passed, passed > 0 ? '#9b9b9b' : 'var(--muted)') +
+        pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
         pill('queue', queue, queue > 0 ? 'var(--text)' : 'var(--muted)') +
         renderFailedPill() +
       '</span>'
@@ -10687,8 +10687,8 @@ function renderResult(run) {
         : 'failed';
       const count = failed || (reasons[0] ? reasons[0].count : 0);
       return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + (count ? ' <span style="color: var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
     // Salvaged pill. Primary number is what THIS cycle's Phase 0 actually
     // salvaged (from the cycle log). Falls back to the future-pool size when
@@ -10698,15 +10698,15 @@ function renderResult(run) {
     const salvPrimary = salvAttempted || salvageableLive;
     let salvBracket = '';
     if (salvAttempted > 0) {
-      salvBracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+      salvBracket = ' <span style="color: var(--muted);font-weight:400;">(' +
                     salvPosted + ' posted)</span>';
     } else if (salvAdded || salvDrained) {
-      salvBracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+      salvBracket = ' <span style="color: var(--muted);font-weight:400;">(' +
                     '+' + salvAdded + '/-' + salvDrained + ' pool)</span>';
     }
     const queuePill =
-      '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      'salvaged <span style="color:var(--text);font-weight:600;">' + salvPrimary + '</span>' +
+      '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      'salvaged <span style="color: var(--text);font-weight:600;">' + salvPrimary + '</span>' +
       salvBracket +
       '</span>';
     // Tooltip is grouped by cycle phase so the funnel reads chronologically.
@@ -10754,10 +10754,10 @@ function renderResult(run) {
         queuePill +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('passed', passed, passed > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('passed', passed, passed > 0 ? '#9b9b9b' : 'var(--muted)') +
         pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#a78bfa' : 'var(--muted)') +
-        pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#999999' : 'var(--muted)') +
+        pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
         ((r.virality_posted_n || 0) > 0
           ? pill('viral', (r.virality_median_posted || 0).toFixed(1))
           : '') +
@@ -10766,9 +10766,9 @@ function renderResult(run) {
           : '') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
             + 'projects '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.projects_worked.join(', ')
             + '</span></span>'
           : '') +
@@ -10782,24 +10782,24 @@ function renderResult(run) {
                 + (label ? ' — ' + v + ' ' + label : '')
                 + (desc ? ': ' + desc : '');
               return '<span title="' + tooltip.replace(/"/g, '&quot;')
-                + '" style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+                + '" style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
                 + 'experiment '
-                + '<span style="color:var(--text);font-weight:600;">'
+                + '<span style="color: var(--text);font-weight:600;">'
                 + v + (desc ? ': ' + desc : '')
                 + '</span></span>';
             })()
           : '') +
         (Array.isArray(r.styles_used) && r.styles_used.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
             + 'styles '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.styles_used.join(', ')
             + '</span></span>'
           : '') +
         (Array.isArray(r.topics_used) && r.topics_used.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
             + 'topics '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.topics_used.join(', ')
             + '</span></span>'
           : '') +
@@ -10863,8 +10863,8 @@ function renderResult(run) {
           reasons.map(function (x) { return '• ' + x.reason + ': **' + x.count + '**'; }).join(String.fromCharCode(10))
         : 'failed (no reason logged)';
       return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        'failed' + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') +
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        'failed' + (count ? ' <span style="color: var(--text);font-weight:600;">' + count + '</span>' : '') +
         breakdown + '</span>';
     };
     // Ripen pills. Only rendered when at least one iteration reached ripen,
@@ -10909,9 +10909,9 @@ function renderResult(run) {
       const bestLabel = bestComp != null
         ? ('best Δ' + bestComp.toFixed(1))
         : (ripenSurvivors > 0 ? 'best Δ?' : 'no Δ');
-      const bestColor = bestComp != null && bestComp > 0 ? '#22c55e' : 'var(--muted)';
+      const bestColor = bestComp != null && bestComp > 0 ? '#9b9b9b' : 'var(--muted)';
       return '<span title="' + ripenTip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
-        pill('ripened', ripenSurvivors, ripenSurvivors > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('ripened', ripenSurvivors, ripenSurvivors > 0 ? '#9b9b9b' : 'var(--muted)') +
         pill(bestLabel, '', bestColor) +
         '</span>';
     };
@@ -10956,10 +10956,10 @@ function renderResult(run) {
         const parts = [];
         parts.push(salvPosted + ' posted');
         if (salvFailedNow > 0) parts.push(salvFailedNow + ' failed');
-        bracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+        bracket = ' <span style="color: var(--muted);font-weight:400;">(' +
                   parts.join(', ') + ')</span>';
       } else if (salvAdded || salvDrained) {
-        bracket = ' <span style="color:var(--muted);font-weight:400;">(' +
+        bracket = ' <span style="color: var(--muted);font-weight:400;">(' +
                   '+' + salvAdded + '/-' + salvDrained + ' pool)</span>';
       }
       const QNL = String.fromCharCode(10);
@@ -10980,8 +10980,8 @@ function renderResult(run) {
         QNL +
         '**Pending live now:** ' + pendingLive;
       return '<span title="' + qTip.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        'salvaged <span style="color:var(--text);font-weight:600;">' + primaryN + '</span>' +
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        'salvaged <span style="color: var(--text);font-weight:600;">' + primaryN + '</span>' +
         bracket + '</span>';
     };
 
@@ -11014,7 +11014,7 @@ function renderResult(run) {
         pill('iterations', iterations, iterations > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('passed', passed, passed > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('passed', passed, passed > 0 ? '#9b9b9b' : 'var(--muted)') +
         // 2026-05-08: pill chain explicitly reordered per user instruction
         // to read: raw → passed → ripened → drafted → posted.
         // The legacy "discovered"/"drafted" pre-ripen pill (preRipenLabel)
@@ -11023,26 +11023,26 @@ function renderResult(run) {
         // pill inside renderRipenPills); "drafted" now means LLM-gate output.
         renderRipenPills() +
         pill('drafted', drafted, drafted > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
         renderFailedPill() +
         (Array.isArray(r.projects_worked) && r.projects_worked.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
             + 'projects '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.projects_worked.join(', ')
             + '</span></span>'
           : '') +
         (Array.isArray(r.styles_used) && r.styles_used.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
             + 'styles '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.styles_used.join(', ')
             + '</span></span>'
           : '') +
         (Array.isArray(r.topics_used) && r.topics_used.length
-          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
+          ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);" data-tooltip="search_topic force-picked by scripts/pick_search_topic.py per project per cycle (~90% weighted-random over scored pool, ~10% explore_invent invented by model).">'
             + 'topics '
-            + '<span style="color:var(--text);font-weight:600;">'
+            + '<span style="color: var(--text);font-weight:600;">'
             + r.topics_used.join(', ')
             + '</span></span>'
           : '') +
@@ -11066,11 +11066,11 @@ function renderResult(run) {
     const cost = r.cost_usd || 0;
     return (
       pill('attempted', attempted, attempted > 0 ? 'var(--text)' : 'var(--muted)') +
-      pill('sent', sent, sent > 0 ? '#22c55e' : 'var(--muted)') +
-      pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
-      pill('errored', errored, errored > 0 ? '#ef4444' : 'var(--muted)') +
+      pill('sent', sent, sent > 0 ? '#9b9b9b' : 'var(--muted)') +
+      pill('skipped', skipped, skipped > 0 ? '#b2b2b2' : 'var(--muted)') +
+      pill('errored', errored, errored > 0 ? '#686868' : 'var(--muted)') +
       pill('queue', pending, pending > 0 ? 'var(--text)' : 'var(--muted)') +
-      '<span style="font-size:12px;color:var(--muted);">$' + cost.toFixed(2) + '</span>'
+      '<span style="font-size:12px;color: var(--muted);">$' + cost.toFixed(2) + '</span>'
     );
   }
   if (r.type === 'engage') {
@@ -11104,8 +11104,8 @@ function renderResult(run) {
         ? ('failed: ' + top.reason + (reasons.length > 1 ? ' +' + (reasons.length - 1) : ''))
         : 'failed';
       return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        label + ' <span style="color:var(--text);font-weight:600;">' + failed + '</span></span>';
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + ' <span style="color: var(--text);font-weight:600;">' + failed + '</span></span>';
     };
     // Scan-stage pills: surface inbox/feed scan granularity (seen / new /
     // excluded) on engage runs so empty-inbox cycles read as "scanned 100 /
@@ -11130,18 +11130,18 @@ function renderResult(run) {
     const scanPills = hasScan
       ? ('<span title="' + scanTooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
          pill('scanned', scannedN, scannedN > 0 ? 'var(--text)' : 'var(--muted)') +
-         pill('new', newN, newN > 0 ? '#22c55e' : 'var(--muted)') +
+         pill('new', newN, newN > 0 ? '#9b9b9b' : 'var(--muted)') +
          (excludedN ? pill('excluded', excludedN, 'var(--muted)') : '') +
          '</span>')
       : '';
     return (
       scanPills +
-      pill('replied', replied, replied > 0 ? '#22c55e' : 'var(--muted)') +
-      pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
-      pill('errored', errored, errored > 0 ? '#ef4444' : 'var(--muted)') +
+      pill('replied', replied, replied > 0 ? '#9b9b9b' : 'var(--muted)') +
+      pill('skipped', skipped, skipped > 0 ? '#b2b2b2' : 'var(--muted)') +
+      pill('errored', errored, errored > 0 ? '#686868' : 'var(--muted)') +
       renderFailedPill() +
       pill('queue', pending, pending > 0 ? 'var(--text)' : 'var(--muted)') +
-      '<span style="font-size:12px;color:var(--muted);">$' + cost.toFixed(2) + '</span>'
+      '<span style="font-size:12px;color: var(--muted);">$' + cost.toFixed(2) + '</span>'
     );
   }
   // Stats jobs (stats_reddit, stats_twitter, stats_linkedin, stats_moltbook):
@@ -11190,7 +11190,7 @@ function renderResult(run) {
     if (!checked && !updated && !removed && !unavailable && !notFound &&
         !skipped && !failed && !repliesRefreshed &&
         !scanned && !changed && !viewsRefreshed) {
-      return '<span style="color:var(--muted);font-size:12px;">—</span>';
+      return '<span style="color: var(--muted);font-size:12px;">—</span>';
     }
     // Inline helper: pill with a data-tooltip attribute for per-pill hover
     // explanations. Plain pill() (above) has no tooltip slot; this is
@@ -11198,8 +11198,8 @@ function renderResult(run) {
     const tipPill = (label, n, color, tip) => {
       const tipEsc = (tip || '').replace(/"/g, '&quot;');
       return '<span data-tooltip="' + tipEsc + '" style="display:inline-block;' +
-        'margin-right:10px;font-size:12px;color:var(--muted);cursor:help;">' +
-        label + ' <span style="color:' + (color || 'var(--text)') +
+        'margin-right:10px;font-size:12px;color: var(--muted);cursor:help;">' +
+        label + ' <span style="color: ' + (color || 'var(--text)') +
         ';font-weight:600;">' + n + '</span></span>';
     };
     return (
@@ -11218,34 +11218,34 @@ function renderResult(run) {
         '**Checked**\\n\\n' +
         'Rows we actually hit the platform API for this run (Reddit old.reddit.com JSON / fxtwitter / LinkedIn activity feed).\\n\\n' +
         'Includes both successful polls and the ones that errored mid-fetch.') +
-      tipPill('changed', changed, '#22c55e',
+      tipPill('changed', changed, '#9b9b9b',
         '**Changed**\\n\\n' +
         'Subset of CHECKED where any tracked metric (upvotes, comments_count, views) actually moved since the prior scan.\\n\\n' +
         'The real-activity signal; everything else is no-op polling.') +
-      (viewsRefreshed ? tipPill('views', viewsRefreshed, '#06b6d4',
+      (viewsRefreshed ? tipPill('views', viewsRefreshed, '#939393',
         '**Views refreshed**\\n\\n' +
         'Rows where the cheap view-scrape leg wrote a fresh view count this run.\\n\\n' +
         '• **Reddit:** Step 1 profile-page scrape (sees every comment + thread on /user/<name>/)\\n' +
         '• **Twitter:** built-in to the fxtwitter call\\n\\n' +
         'Separate from CHANGED because views can tick up without upvotes/comments moving.') : '') +
-      (repliesRefreshed ? tipPill('replies', repliesRefreshed, '#3b82f6',
+      (repliesRefreshed ? tipPill('replies', repliesRefreshed, '#7b7b7b',
         '**Replies refreshed**\\n\\n' +
         'Per-reply rows refreshed: comments we authored AS replies to someone else replying to our original comment (the DM-rail follow-up). Live in the replies table, not posts.\\n\\n' +
         '• **Reddit:** refreshes upvotes + reply-count via batch JSON API\\n' +
         '• **Twitter:** also refreshes views via fxtwitter') : '') +
-      (removed ? tipPill('removed', removed, '#eab308',
+      (removed ? tipPill('removed', removed, '#b2b2b2',
         '**Removed**\\n\\n' +
         'Posts newly flagged deleted/removed this run.\\n\\n' +
         '• **Reddit:** comment gone from thread JSON for 2+ consecutive scans (deletion_detect_count threshold)\\n' +
         '• **LinkedIn:** post returned "Post unavailable"') : '') +
-      (unavailable ? tipPill('unavail', unavailable, '#eab308',
+      (unavailable ? tipPill('unavail', unavailable, '#b2b2b2',
         '**Unavailable** (LinkedIn only)\\n\\n' +
         'Post explicitly returned a Post Unavailable string.\\n\\n' +
         'Subset of REMOVED; rendered as its own pill so an operator can tell hard-deletion from rate-limit or network noise.') : '') +
       (notFound ? tipPill('not found', notFound, 'var(--muted)',
         '**Not found** (LinkedIn only)\\n\\n' +
         'Post is still active on LinkedIn but our specific comment could not be located on the activity feed (may have aged off our visible recent-activity window).') : '') +
-      (failed ? tipPill('failed', failed, '#ef4444',
+      (failed ? tipPill('failed', failed, '#686868',
         '**Failed**\\n\\n' +
         'API errors during the run, broken down by category:\\n' +
         '• 404 not_found\\n' +
@@ -11278,8 +11278,8 @@ function renderResult(run) {
         : 'failed';
       const count = failed || (reasons[0] ? reasons[0].count : 0);
       return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
-        'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-        label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + (count ? ' <span style="color: var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
     };
     const ENL = String.fromCharCode(10);
     const tooltip =
@@ -11294,7 +11294,7 @@ function renderResult(run) {
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         pill('total pages', total, total > 0 ? 'var(--text)' : 'var(--muted)') +
-        pill('deleted', deleted, deleted > 0 ? '#22c55e' : 'var(--muted)') +
+        pill('deleted', deleted, deleted > 0 ? '#9b9b9b' : 'var(--muted)') +
         pill('queue', queue, queue > 0 ? 'var(--text)' : 'var(--muted)') +
         renderFailedPill() +
       '</span>'
@@ -11323,8 +11323,8 @@ function renderResult(run) {
       : 'failed';
     const count = failed || (reasons[0] ? reasons[0].count : 0);
     return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
-      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      label + (count ? ' <span style="color:var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
+      'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      label + (count ? ' <span style="color: var(--text);font-weight:600;">' + count + '</span>' : '') + '</span>';
   };
   // Twin of renderFailedPill, but for intentional skips (dedup race guard,
   // empty draft, rate-limited thread). Yellow tint matches the existing
@@ -11341,8 +11341,8 @@ function renderResult(run) {
       (skipBreakdown.length > 1 ? ' +' + (skipBreakdown.length - 1) : '');
     const count = top.count;
     return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
-      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      label + ' <span style="color:#eab308;font-weight:600;">' + count + '</span></span>';
+      'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      label + ' <span style="color: #b2b2b2;font-weight:600;">' + count + '</span></span>';
   };
   // LLM / manual escape-hatch firings: surface every author_blocklist write
   // that landed during this run window (auto-detected in log_run.py via the
@@ -11366,8 +11366,8 @@ function renderResult(run) {
         : '(no per-handle details logged)');
     const label = 'escape hatch';
     return '<span title="' + tooltip.replace(/"/g, '&quot;') + '" ' +
-      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      label + ' <span style="color:#ef4444;font-weight:600;">' + count + '</span></span>';
+      'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      label + ' <span style="color: #686868;font-weight:600;">' + count + '</span></span>';
   };
   // Discovery counters (Twitter cycle today, LinkedIn next): condense the
   // queries/duds/tweets_pulled/candidates/above_floor breakdown into a single
@@ -11397,18 +11397,18 @@ function renderResult(run) {
     const visStr = q + '\u2192' + c + '\u2192' + af;
     const color = (q || c || af) ? 'var(--text)' : 'var(--muted)';
     return '<span title="' + tip.replace(/"/g, '&quot;') + '" ' +
-      'style="display:inline-block;margin-right:10px;font-size:12px;color:var(--muted);">' +
-      'scan <span style="color:' + color + ';font-weight:600;">' + visStr + '</span></span>';
+      'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      'scan <span style="color: ' + color + ';font-weight:600;">' + visStr + '</span></span>';
   };
   return (
-    pill('posted', posted, posted > 0 ? '#22c55e' : 'var(--muted)') +
-    pill('skipped', skipped, skipped > 0 ? '#eab308' : 'var(--muted)') +
+    pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
+    pill('skipped', skipped, skipped > 0 ? '#b2b2b2' : 'var(--muted)') +
     renderSkipReasonsPill() +
     renderFailedPill() +
     renderEscapeHatchPill() +
-    pill('salvaged', salvaged, salvaged > 0 ? '#3b82f6' : 'var(--muted)') +
+    pill('salvaged', salvaged, salvaged > 0 ? '#7b7b7b' : 'var(--muted)') +
     renderDiscoverPill() +
-    pill('replies refreshed', repliesRefreshed, repliesRefreshed > 0 ? '#3b82f6' : 'var(--muted)')
+    pill('replies refreshed', repliesRefreshed, repliesRefreshed > 0 ? '#7b7b7b' : 'var(--muted)')
   );
 }
 
@@ -11426,26 +11426,26 @@ function renderResult(run) {
 //   unknown           -> fallback when nothing matched
 function _seoStatusBadge(status) {
   const palette = {
-    committed:         { bg: 'rgba(34,197,94,0.15)',  fg: '#22c55e', text: 'committed' },
-    no_change:         { bg: 'rgba(148,163,184,0.18)', fg: '#94a3b8', text: 'no change' },
-    no_traffic:        { bg: 'rgba(148,163,184,0.18)', fg: '#94a3b8', text: 'no traffic' },
-    posthog_throttle:  { bg: 'rgba(234,179,8,0.18)',   fg: '#eab308', text: 'PostHog throttled' },
-    posthog_error:     { bg: 'rgba(234,88,12,0.18)',   fg: '#ea580c', text: 'PostHog error' },
-    claude_rate_limit: { bg: 'rgba(239,68,68,0.18)',   fg: '#ef4444', text: 'Claude rate-limit' },
-    claude_error:      { bg: 'rgba(239,68,68,0.18)',   fg: '#ef4444', text: 'Claude error' },
-    brief_error:       { bg: 'rgba(234,88,12,0.18)',   fg: '#ea580c', text: 'brief error' },
-    locked:            { bg: 'rgba(148,163,184,0.18)', fg: '#94a3b8', text: 'locked' },
-    failed:            { bg: 'rgba(239,68,68,0.18)',   fg: '#ef4444', text: 'failed' },
+    committed:         { bg: 'rgba(155, 155, 155, 0.15)',  fg: '#9b9b9b', text: 'committed' },
+    no_change:         { bg: 'rgba(161, 161, 161, 0.18)', fg: '#a1a1a1', text: 'no change' },
+    no_traffic:        { bg: 'rgba(161, 161, 161, 0.18)', fg: '#a1a1a1', text: 'no traffic' },
+    posthog_throttle:  { bg: 'rgba(178, 178, 178, 0.18)',   fg: '#b2b2b2', text: 'PostHog throttled' },
+    posthog_error:     { bg: 'rgba(114, 114, 114, 0.18)',   fg: '#727272', text: 'PostHog error' },
+    claude_rate_limit: { bg: 'rgba(104, 104, 104, 0.18)',   fg: '#686868', text: 'Claude rate-limit' },
+    claude_error:      { bg: 'rgba(104, 104, 104, 0.18)',   fg: '#686868', text: 'Claude error' },
+    brief_error:       { bg: 'rgba(114, 114, 114, 0.18)',   fg: '#727272', text: 'brief error' },
+    locked:            { bg: 'rgba(161, 161, 161, 0.18)', fg: '#a1a1a1', text: 'locked' },
+    failed:            { bg: 'rgba(104, 104, 104, 0.18)',   fg: '#686868', text: 'failed' },
     // serp_seo / gsc_seo / weekly_roundup outcomes from the DB enricher
     // ('skip' = scored low or judged consolidate; 'stuck' = pending or
     // in_progress at end of window, lane never marked the row done).
-    skipped:           { bg: 'rgba(234,179,8,0.18)',   fg: '#eab308', text: 'skipped' },
-    stuck:             { bg: 'rgba(234,88,12,0.18)',   fg: '#ea580c', text: 'stuck' },
-    unknown:           { bg: 'rgba(148,163,184,0.18)', fg: '#94a3b8', text: status || 'unknown' },
+    skipped:           { bg: 'rgba(178, 178, 178, 0.18)',   fg: '#b2b2b2', text: 'skipped' },
+    stuck:             { bg: 'rgba(114, 114, 114, 0.18)',   fg: '#727272', text: 'stuck' },
+    unknown:           { bg: 'rgba(161, 161, 161, 0.18)', fg: '#a1a1a1', text: status || 'unknown' },
   };
   const p = palette[status] || palette.unknown;
-  return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' +
-    p.bg + ';color:' + p.fg + ';">' + p.text + '</span>';
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background: ' +
+    p.bg + ';color: ' + p.fg + ';">' + p.text + '</span>';
 }
 
 function buildSeoDetailRows(run) {
@@ -11454,21 +11454,21 @@ function buildSeoDetailRows(run) {
   const subRows = details.map(d => {
     const cost = (typeof d.cost_usd === 'number' && d.cost_usd > 0)
       ? fmtCostCell(d.cost_usd, d.cost_usd_orchestrator, d.cost_usd_estimated, d.cost_usd_subagent)
-      : '<span style="color:var(--muted);">—</span>';
+      : '<span style="color: var(--muted);">—</span>';
     const turns = (typeof d.num_turns === 'number' && d.num_turns > 0)
       ? d.num_turns
-      : '<span style="color:var(--muted);">—</span>';
+      : '<span style="color: var(--muted);">—</span>';
     const fmCount = (d.files_modified || []).length;
     const filesCell = fmCount
-      ? ('<span style="color:#22c55e;font-weight:600;">' + fmCount + '</span> ' +
-         '<span style="color:var(--muted);font-size:11px;">' + (d.files_modified[0] || '') +
+      ? ('<span style="color: #9b9b9b;font-weight:600;">' + fmCount + '</span> ' +
+         '<span style="color: var(--muted);font-size:11px;">' + (d.files_modified[0] || '') +
          (fmCount > 1 ? ' +' + (fmCount - 1) : '') + '</span>')
-      : '<span style="color:var(--muted);">—</span>';
+      : '<span style="color: var(--muted);">—</span>';
     const detailCell = d.detail
-      ? '<span style="color:var(--muted);font-size:11px;">' + escapeHtml(d.detail) + '</span>'
+      ? '<span style="color: var(--muted);font-size:11px;">' + escapeHtml(d.detail) + '</span>'
       : (d.target_slug
-          ? '<span style="color:var(--muted);font-size:11px;">' + escapeHtml(d.target_slug) + '</span>'
-          : '<span style="color:var(--muted);">—</span>');
+          ? '<span style="color: var(--muted);font-size:11px;">' + escapeHtml(d.target_slug) + '</span>'
+          : '<span style="color: var(--muted);">—</span>');
     return (
       '<tr>' +
         '<td style="padding-left:32px;">' + escapeHtml(d.product) + '</td>' +
@@ -11481,10 +11481,10 @@ function buildSeoDetailRows(run) {
     );
   }).join('');
   return (
-    '<tr class="sa-job-detail-row" style="display:none;background:rgba(148,163,184,0.04);">' +
+    '<tr class="sa-job-detail-row" style="display:none;background: rgba(161, 161, 161, 0.04);">' +
       '<td colspan="6" style="padding:8px 16px;">' +
         '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
-          '<thead><tr style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">' +
+          '<thead><tr style="color: var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">' +
             '<th style="text-align:left;padding:4px 8px 4px 32px;">Project</th>' +
             '<th style="text-align:left;padding:4px 8px;">Status</th>' +
             '<th style="text-align:left;padding:4px 8px;">Target / detail</th>' +
@@ -11527,12 +11527,12 @@ function _jobHistoryCostCell(result) {
   // hint inline when partial).
   let headerHtml;
   if (sessionsAll === 0) {
-    headerHtml = '<span style="color:var(--text-very-faint);">n/a</span>';
+    headerHtml = '<span style="color: var(--text-very-faint);">n/a</span>';
   } else if (sessionsWithSdk === 0) {
-    headerHtml = '<span style="color:var(--text-very-faint);">n/a</span>';
+    headerHtml = '<span style="color: var(--text-very-faint);">n/a</span>';
   } else if (sessionsMissing > 0) {
     headerHtml = fmtCost(totalForDisplay) +
-      ' <span style="color:#eab308;font-size:11px;">(' + sessionsMissing + ' missing)</span>';
+      ' <span style="color: #b2b2b2;font-size:11px;">(' + sessionsMissing + ' missing)</span>';
   } else {
     headerHtml = fmtCost(totalForDisplay);
   }
@@ -11574,7 +11574,7 @@ function _jobHistoryCostCell(result) {
   lines.push('SDK-only mode: shows orchestrator_cost_usd captured by the SDK result event. "missing SDK" = wrapper script didn\\'t pass --output-format json to claude, so no result event = no cost data recorded. Patch the wrapper to fix.');
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) +
-    '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+    '" style="cursor:help;border-bottom: 1px dotted var(--text-muted);">' +
     headerHtml + '</span>';
 }
 
@@ -11615,10 +11615,10 @@ function _buildJobHistoryRowGroup(r, idx) {
   const hasLogCost = r.result && typeof r.result.cost_usd === 'number';
   const costCell = (hasBreakdown || hasLogCost)
     ? _jobHistoryCostCell(r.result)
-    : '<span style="color:var(--muted);">—</span>';
+    : '<span style="color: var(--muted);">—</span>';
   const hasDetails = Array.isArray(r.details) && r.details.length;
   const caret = hasDetails
-    ? '<span class="sa-job-caret" style="display:inline-block;width:12px;color:var(--muted);cursor:pointer;user-select:none;transition:transform 0.15s ease;">&#9656;</span> '
+    ? '<span class="sa-job-caret" style="display:inline-block;width:12px;color: var(--muted);cursor:pointer;user-select:none;transition:transform 0.15s ease;">&#7776;</span> '
     : '<span style="display:inline-block;width:12px;"></span> ';
   const rowKey = escapeHtml(_jobHistoryRowKey(r));
   const rowSig = escapeHtml(_jobHistoryRowSig(r));
@@ -11630,13 +11630,13 @@ function _buildJobHistoryRowGroup(r, idx) {
       '<tr class="sa-job-row sa-job-row-running" data-run-idx="' + idx + '" data-row-key="' + rowKey + '" data-row-sig="' + rowSig + '" data-started-ms="' + startedMs + '">' +
         '<td style="text-align:left;padding-left:16px;">' + caret +
           (r.job_label || r.script) +
-          (r.pid ? ' <span style="color:var(--muted);font-size:11px;">PID ' + r.pid + '</span>' : '') +
+          (r.pid ? ' <span style="color: var(--muted);font-size:11px;">PID ' + r.pid + '</span>' : '') +
         '</td>' +
-        '<td>' + (r.platform || '<span style="color:var(--muted);">—</span>') + '</td>' +
-        '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
-        '<td style="text-align:left;"><span class="sa-running-elapsed" style="color:var(--muted);font-size:12px;">' + fmtElapsed(r.elapsed_s) + '</span></td>' +
+        '<td>' + (r.platform || '<span style="color: var(--muted);">—</span>') + '</td>' +
+        '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color: var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
+        '<td style="text-align:left;"><span class="sa-running-elapsed" style="color: var(--muted);font-size:12px;">' + fmtElapsed(r.elapsed_s) + '</span></td>' +
         '<td style="text-align:left;"><span class="badge running">Running…</span></td>' +
-        '<td style="color:var(--muted);font-size:12px;">—</td>' +
+        '<td style="color: var(--muted);font-size:12px;">—</td>' +
       '</tr>'
     );
   }
@@ -11649,17 +11649,17 @@ function _buildJobHistoryRowGroup(r, idx) {
   // breakdown is available (other job types, rotated logs, aborted cycles).
   const phaseTip = (r.result && r.result.phase_durations && r.result.phase_durations.tooltip) || '';
   const elapsedSpan = phaseTip
-    ? '<span style="color:var(--muted);font-size:11px;cursor:help;border-bottom:1px dotted var(--muted);" data-tooltip="' + escapeHtml(phaseTip) + '">(' + fmtElapsed(r.elapsed_s) + ')</span>'
-    : '<span style="color:var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span>';
+    ? '<span style="color: var(--muted);font-size:11px;cursor:help;border-bottom: 1px dotted var(--muted);" data-tooltip="' + escapeHtml(phaseTip) + '">(' + fmtElapsed(r.elapsed_s) + ')</span>'
+    : '<span style="color: var(--muted);font-size:11px;">(' + fmtElapsed(r.elapsed_s) + ')</span>';
   const main = (
     '<tr class="' + rowClass + '" data-run-idx="' + idx + '" data-row-key="' + rowKey + '" data-row-sig="' + rowSig + '"' +
       (hasDetails ? ' style="cursor:pointer;"' : '') + '>' +
       '<td style="text-align:left;padding-left:16px;">' + caret + (r.job_label || r.script) + '</td>' +
-      '<td>' + (r.platform || '<span style="color:var(--muted);">—</span>') + '</td>' +
-      '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color:var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
+      '<td>' + (r.platform || '<span style="color: var(--muted);">—</span>') + '</td>' +
+      '<td style="text-align:left;">' + fmtLocalTime(r.started_at) + ' <span style="color: var(--muted);font-size:11px;">(' + fmtRelTime(r.started_at) + ')</span></td>' +
       '<td style="text-align:left;">' + fmtLocalTime(r.finished_at) + ' ' + elapsedSpan + '</td>' +
       '<td style="text-align:left;">' + renderResult(r) + '</td>' +
-      '<td style="color:var(--muted);font-size:12px;">' + costCell + '</td>' +
+      '<td style="color: var(--muted);font-size:12px;">' + costCell + '</td>' +
     '</tr>'
   );
   return main + (hasDetails ? buildSeoDetailRows(r) : '');
@@ -11855,7 +11855,7 @@ async function loadJobsHistory(force) {
     applyJobsHistoryFilter();
   } catch (e) {
     const body = document.getElementById('jobs-history-body');
-    if (body) body.innerHTML = '<div class="style-stats-empty" style="padding:16px;color:#ef4444;">Failed: ' + e.message + '</div>';
+    if (body) body.innerHTML = '<div class="style-stats-empty" style="padding:16px;color: #686868;">Failed: ' + e.message + '</div>';
   }
 }
 
@@ -11920,15 +11920,15 @@ async function loadStatus() {
 
       const statusBreakdown = (pending.statusCounts || [])
         .map(s => {
-          const colors = { pending: '#eab308', replied: '#22c55e', skipped: 'var(--text)', error: '#ef4444' };
-          return '<span style="margin-right:16px;font-size:13px;"><span style="color:' + (colors[s.status] || 'var(--text)') + ';">' + s.status + '</span> ' + s.count + '</span>';
+          const colors = { pending: '#b2b2b2', replied: '#9b9b9b', skipped: 'var(--text)', error: '#686868' };
+          return '<span style="margin-right:16px;font-size:13px;"><span style="color: ' + (colors[s.status] || 'var(--text)') + ';">' + s.status + '</span> ' + s.count + '</span>';
         }).join('');
 
       pendingSection.innerHTML = '<div class="card pending-card">' +
-        '<div class="card-header"><span class="card-title">Pending Replies</span><span class="badge" style="background:#4c1d95;color:#c4b5fd;">' + pending.count + '</span></div>' +
-        '<div class="card-row" style="justify-content:flex-start;padding:8px 16px;border-bottom:1px solid var(--accent-panel-border);">' + statusBreakdown + '</div>' +
+        '<div class="card-header"><span class="card-title">Pending Replies</span><span class="badge" style="background: #303030;color: #bdbdbd;">' + pending.count + '</span></div>' +
+        '<div class="card-row" style="justify-content:flex-start;padding:8px 16px;border-bottom: 1px solid var(--accent-panel-border);">' + statusBreakdown + '</div>' +
         platformBreakdown +
-        (recentReplies ? '<div style="margin-top:12px;border-top:1px solid var(--accent-panel-border);padding-top:12px;">' + recentReplies + '</div>' : '') +
+        (recentReplies ? '<div style="margin-top:12px;border-top: 1px solid var(--accent-panel-border);padding-top:12px;">' + recentReplies + '</div>' : '') +
       '</div>';
     }
   } catch(e) { toast('Failed to load status: ' + e.message, true); }
@@ -12689,7 +12689,7 @@ function fmtCostCell(displayed, orchestrator, estimated, subagent) {
   const hasOrch = orchestrator != null && Number.isFinite(Number(orchestrator));
   const text = hasOrch
     ? fmtCost(Number(orchestrator))
-    : '<span style="color:var(--text-very-faint);">n/a</span>';
+    : '<span style="color: var(--text-very-faint);">n/a</span>';
   const lines = [
     '**Cost (SDK orchestrator):** ' + fmtLane(orchestrator),
     '',
@@ -12701,7 +12701,7 @@ function fmtCostCell(displayed, orchestrator, estimated, subagent) {
   ];
   const tip = lines.join('\\n');
   return '<span data-tooltip="' + escapeHtml(tip) +
-    '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+    '" style="cursor:help;border-bottom: 1px dotted var(--text-muted);">' +
     text + '</span>';
 }
 
@@ -13121,7 +13121,7 @@ function renderActivityStats(payload) {
             const titleAttr = desc ? ' data-tooltip="' + escapeHtml(desc) + '"' : '';
             return '<span class="stat-plat"' + titleAttr + '><span class="stat-plat-text">' + escapeHtml(lab) + '</span><span class="stat-plat-count">' + pagesBucket.subtypes[st] + '</span></span>';
           }).join('')
-        : '<span style="color:var(--text-very-faint);">\u2014</span>';
+        : '<span style="color: var(--text-very-faint);">\u2014</span>';
       const umbrellaDesc = EVENT_DESCRIPTIONS.pages_generated || '';
       const infoIcon = '<span class="stat-card-info" data-tooltip="' + escapeHtml(umbrellaDesc) + '" aria-label="' + escapeHtml(umbrellaDesc) + '">i</span>';
       return '<div class="stat-card ev-pages-generated' + (total === 0 ? ' zero' : '') + '">' +
@@ -13142,7 +13142,7 @@ function renderActivityStats(payload) {
             : (PLATFORM_ICONS[p] || '<span class="plat-mono">' + escapeHtml((p[0] || '?').toUpperCase()) + '</span>');
           return '<span class="stat-plat" title="' + escapeHtml(p) + '">' + icon + '<span class="stat-plat-count">' + bucket.platforms[p] + '</span></span>';
         }).join('')
-      : '<span style="color:var(--text-very-faint);">\u2014</span>';
+      : '<span style="color: var(--text-very-faint);">\u2014</span>';
     const desc = EVENT_DESCRIPTIONS[t] || '';
     const infoIcon = desc
       ? '<span class="stat-card-info" title="' + escapeHtml(desc) + '" aria-label="' + escapeHtml(desc) + '">i</span>'
@@ -13210,13 +13210,13 @@ let DAILY_METRICS = [
   // /api/posts/per-day endpoint (server returns threads_made + comments_made
   // alongside posts_made). 'comments_made' is intentionally distinct from
   // the 'comments' pill below, which counts comments EARNED on our posts.
-  { id: 'threads',         label: 'Threads',           color: '#a855f7', endpoint: '/api/posts/per-day',    valueKey: 'threads_made',     platformAware: true },
-  { id: 'comments_made',   label: 'Comments Made',     color: '#d946ef', endpoint: '/api/posts/per-day',    valueKey: 'comments_made',    platformAware: true },
-  { id: 'views',           label: 'Views',             color: '#6366f1', endpoint: '/api/views/per-day',    valueKey: 'views_gained',     platformAware: true },
-  { id: 'upvotes',         label: 'Upvotes',           color: '#f97316', endpoint: '/api/upvotes/per-day',  valueKey: 'upvotes_gained',   platformAware: true },
-  { id: 'comments',        label: 'Comments',          color: '#14b8a6', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
-  { id: 'clicks',          label: 'Clicks',            color: '#0ea5e9', endpoint: '/api/clicks/per-day',   valueKey: 'clicks_gained',    platformAware: true },
-  { id: 'bookings',        label: 'Bookings',          color: '#ef4444', endpoint: '/api/bookings/per-day', valueKey: 'bookings_gained',  platformAware: false },
+  { id: 'threads',         label: 'Threads',           color: '#727272', endpoint: '/api/posts/per-day',    valueKey: 'threads_made',     platformAware: true },
+  { id: 'comments_made',   label: 'Comments Made',     color: '#717171', endpoint: '/api/posts/per-day',    valueKey: 'comments_made',    platformAware: true },
+  { id: 'views',           label: 'Views',             color: '#6f6f6f', endpoint: '/api/views/per-day',    valueKey: 'views_gained',     platformAware: true },
+  { id: 'upvotes',         label: 'Upvotes',           color: '#898989', endpoint: '/api/upvotes/per-day',  valueKey: 'upvotes_gained',   platformAware: true },
+  { id: 'comments',        label: 'Comments',          color: '#949494', endpoint: '/api/comments/per-day', valueKey: 'comments_gained',  platformAware: true },
+  { id: 'clicks',          label: 'Clicks',            color: '#8a8a8a', endpoint: '/api/clicks/per-day',   valueKey: 'clicks_gained',    platformAware: true },
+  { id: 'bookings',        label: 'Bookings',          color: '#686868', endpoint: '/api/bookings/per-day', valueKey: 'bookings_gained',  platformAware: false },
   // Cost in USD: Claude API spend attributed per day. Same per-row split
   // model as the activity log Cost column and /api/cost/stats: each
   // session's total cost is divided across the rows it produced, then
@@ -13224,7 +13224,7 @@ let DAILY_METRICS = [
   // platformAware: filters cost to the chosen platform's activity rows.
   // format: 'usd' so the legend pill, Y-axis ticks, bar labels, and
   // hover tooltip render as dollars (e.g. $12.34) instead of K/M counts.
-  { id: 'cost',            label: 'Cost (USD)',        color: '#dc2626', endpoint: '/api/cost/per-day',     valueKey: 'cost_usd',         platformAware: true,  format: 'usd', adminOnly: true },
+  { id: 'cost',            label: 'Cost (USD)',        color: '#4d4d4d', endpoint: '/api/cost/per-day',     valueKey: 'cost_usd',         platformAware: true,  format: 'usd', adminOnly: true },
   // All funnel metrics count UNIQUE VISITORS (distinct_id), not raw events.
   // A user iterating on the same project (multiple prompts, multiple
   // schedule retries, multiple pageviews) is 1, not N. See
@@ -13234,11 +13234,11 @@ let DAILY_METRICS = [
   // to count distinct $session_id; we collapsed it to distinct_id too so
   // it's identical to pageviews. Dropped from the chart to avoid showing
   // two lines that always overlap.
-  { id: 'pageviews',       label: 'Visitors',          color: '#8b5cf6', funnel: true, valueKey: 'pageviews',              platformAware: false },
-  { id: 'email_signups',   label: 'Email Signups',     color: '#10b981', funnel: true, valueKey: 'email_signups',          platformAware: false },
-  { id: 'schedule_clicks', label: 'Schedule Clicks',   color: '#f59e0b', funnel: true, valueKey: 'schedule_clicks',        platformAware: false },
-  { id: 'get_started',     label: 'Get Started',       color: '#06b6d4', funnel: true, valueKey: 'get_started_clicks',     platformAware: false },
-  { id: 'cross_product',   label: 'Cross Product',     color: '#ec4899', funnel: true, valueKey: 'cross_product_clicks',   platformAware: false },
+  { id: 'pageviews',       label: 'Visitors',          color: '#717171', funnel: true, valueKey: 'pageviews',              platformAware: false },
+  { id: 'email_signups',   label: 'Email Signups',     color: '#919191', funnel: true, valueKey: 'email_signups',          platformAware: false },
+  { id: 'schedule_clicks', label: 'Schedule Clicks',   color: '#a6a6a6', funnel: true, valueKey: 'schedule_clicks',        platformAware: false },
+  { id: 'get_started',     label: 'Get Started',       color: '#939393', funnel: true, valueKey: 'get_started_clicks',     platformAware: false },
+  { id: 'cross_product',   label: 'Cross Product',     color: '#717171', funnel: true, valueKey: 'cross_product_clicks',   platformAware: false },
 ];
 // Daily granularity uses 30 days; weekly uses 91 days = 13 weeks so the
 // chart shows a meaningful weekly trend rather than 4-5 buckets.
@@ -13347,7 +13347,7 @@ function renderDailyMetrics() {
     const off = !active.has(m.id);
     return '<button type="button" class="daily-metrics-legend-pill' + (off ? ' off' : '') +
       '" data-metric="' + escapeHtml(m.id) + '" aria-pressed="' + (off ? 'false' : 'true') + '">' +
-      '<span class="swatch" style="background:' + m.color + ';"></span>' +
+      '<span class="swatch" style="background: ' + m.color + ';"></span>' +
       '<span class="label">' + escapeHtml(m.label) + '</span>' +
       '<span class="count">' + _fmtForMetric(m, totals[m.id]) + '</span>' +
       '</button>';
@@ -13504,7 +13504,7 @@ function renderDailyMetrics() {
         const display = (m.format === 'usd')
           ? _fmtUsd(v)
           : v.toLocaleString();
-        return '<div class="tt-row"><span class="swatch" style="background:' + m.color + ';"></span>' +
+        return '<div class="tt-row"><span class="swatch" style="background: ' + m.color + ';"></span>' +
                '<span>' + escapeHtml(m.label) + '</span>' +
                '<span class="val">' + escapeHtml(display) + '</span></div>';
       }).join('');
@@ -13570,24 +13570,24 @@ let RATIO_METRICS = [
   // window. Numerator is views_gained that day; denominator is posts_made
   // that day. format='count' renders as plain K/M numbers (e.g. "1.2K")
   // since the value is a count, not a percentage or dollar figure.
-  { id: 'views_per_post',           label: 'Views / Post',             color: '#a855f7', numerator: 'views',           denominator: 'posts',     format: 'count',   scaleFactor: 1 },
-  { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#f97316', numerator: 'upvotes',         denominator: 'views',     format: 'pct',     scaleFactor: 100 },
-  { id: 'comments_per_view',        label: 'Comments / Views',         color: '#14b8a6', numerator: 'comments',        denominator: 'views',     format: 'pct',     scaleFactor: 100 },
-  { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#0ea5e9', numerator: 'clicks',          denominator: 'views',     format: 'pct',     scaleFactor: 100 },
+  { id: 'views_per_post',           label: 'Views / Post',             color: '#727272', numerator: 'views',           denominator: 'posts',     format: 'count',   scaleFactor: 1 },
+  { id: 'upvotes_per_view',         label: 'Upvotes / Views',          color: '#898989', numerator: 'upvotes',         denominator: 'views',     format: 'pct',     scaleFactor: 100 },
+  { id: 'comments_per_view',        label: 'Comments / Views',         color: '#949494', numerator: 'comments',        denominator: 'views',     format: 'pct',     scaleFactor: 100 },
+  { id: 'clicks_per_view',          label: 'Clicks / Views',           color: '#8a8a8a', numerator: 'clicks',          denominator: 'views',     format: 'pct',     scaleFactor: 100 },
   // Conversion ratios are per VISITOR (one unique distinct_id), not per
   // session. The metric IDs keep the _per_session suffix for back-compat
   // with persisted localStorage keys (RATIO_METRICS_STORAGE_KEY); only the
   // label + denominator key changed.
-  { id: 'email_signups_per_session',     label: 'Email Signups / Visitors',   color: '#10b981', numerator: 'email_signups',   denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
-  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Visitors', color: '#f59e0b', numerator: 'schedule_clicks', denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
-  { id: 'get_started_per_session',       label: 'Get Started / Visitors',     color: '#06b6d4', numerator: 'get_started',     denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  { id: 'email_signups_per_session',     label: 'Email Signups / Visitors',   color: '#919191', numerator: 'email_signups',   denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  { id: 'schedule_clicks_per_session',   label: 'Schedule Clicks / Visitors', color: '#a6a6a6', numerator: 'schedule_clicks', denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
+  { id: 'get_started_per_session',       label: 'Get Started / Visitors',     color: '#939393', numerator: 'get_started',     denominator: 'pageviews', format: 'pct',     scaleFactor: 100 },
   // Cost-efficiency ratios (USD per 1k of denominator). scaleFactor=1000
   // so each per-day point is cost / denominator * 1000 = $ per 1k events.
   // format='usd' switches the legend pill, axis labels, bar labels, and
   // tooltip to dollar rendering. Days with denominator=0 still drop out
   // (NaN) so the chart shows a gap rather than a misleading $0 bar.
-  { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#dc2626', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000, adminOnly: true },
-  { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#7c3aed', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000, adminOnly: true },
+  { id: 'cost_per_kviews',               label: 'Cost / 1k Views',            color: '#4d4d4d', numerator: 'cost',            denominator: 'views',     format: 'usd',     scaleFactor: 1000, adminOnly: true },
+  { id: 'cost_per_kvisitors',            label: 'Cost / 1k Visitors',         color: '#555555', numerator: 'cost',            denominator: 'pageviews', format: 'usd',     scaleFactor: 1000, adminOnly: true },
 ];
 const RATIO_METRICS_DEFAULTS = ['views_per_post', 'upvotes_per_view', 'comments_per_view', 'clicks_per_view', 'email_signups_per_session', 'schedule_clicks_per_session', 'get_started_per_session', 'cost_per_kviews', 'cost_per_kvisitors'];
 // .v3: ratio set expanded to include views_per_post at the head. Bumping
@@ -13677,7 +13677,7 @@ function renderRatioMetrics() {
     const off = !active.has(r.id);
     return '<button type="button" class="daily-metrics-legend-pill' + (off ? ' off' : '') +
       '" data-ratio="' + escapeHtml(r.id) + '" aria-pressed="' + (off ? 'false' : 'true') + '">' +
-      '<span class="swatch" style="background:' + r.color + ';"></span>' +
+      '<span class="swatch" style="background: ' + r.color + ';"></span>' +
       '<span class="label">' + escapeHtml(r.label) + '</span>' +
       '<span class="count">' + escapeHtml(_fmtForRatio(r, avgs[r.id])) + '</span>' +
       '</button>';
@@ -13806,7 +13806,7 @@ function renderRatioMetrics() {
                          : (r.denominator === 'posts')     ? 'no posts'
                          : 'no views';
         const display = (v == null || !isFinite(v)) ? emptyLabel : _fmtForRatio(r, v);
-        return '<div class="tt-row"><span class="swatch" style="background:' + r.color + ';"></span>' +
+        return '<div class="tt-row"><span class="swatch" style="background: ' + r.color + ';"></span>' +
                '<span>' + escapeHtml(r.label) + '</span>' +
                '<span class="val">' + escapeHtml(display) + '</span></div>';
       }).join('');
@@ -14115,7 +14115,7 @@ function _wireMiniChartHover(chartEl, plot, opts) {
       } else {
         display = formatter(m, v);
       }
-      return '<div class="tt-row"><span class="swatch" style="background:' + m.color + ';"></span>' +
+      return '<div class="tt-row"><span class="swatch" style="background: ' + m.color + ';"></span>' +
              '<span>' + escapeHtml(m.label) + '</span>' +
              '<span class="val">' + escapeHtml(display) + '</span></div>';
     }).join('');
@@ -14189,7 +14189,7 @@ function _renderPerProjectChart(project, scope) {
     if (visible.every(m => failedKeys.has(_sourceKeyForMetric(m)))) {
       const failKeys = Array.from(new Set(visible.map(m => _sourceKeyForMetric(m))));
       const timedOut = (_perProjectState.failed[project] || []).some(f => f.timedOut && failKeys.includes(f.key));
-      chartEl.innerHTML = '<div class="pp-empty" style="color:#dc2626;">Failed to load (' + (timedOut ? 'timed out' : 'error') + ': ' + escapeHtml(failKeys.join(', ')) + ')</div>';
+      chartEl.innerHTML = '<div class="pp-empty" style="color: #4d4d4d;">Failed to load (' + (timedOut ? 'timed out' : 'error') + ': ' + escapeHtml(failKeys.join(', ')) + ')</div>';
       return;
     }
     const valueOf = (m, d) => Number((projectSeries[m.id] || {})[d]) || 0;
@@ -14714,7 +14714,7 @@ function mountSortableTable(opts) {
       const rid = opts.rowId ? opts.rowId(r) : null;
       const ridAttr = (rid !== null && rid !== undefined && rid !== '') ? ' data-row-id="' + escapeHtml(String(rid)) + '"' : '';
       return '<tr' + ridAttr + '>' + cols.map(c => '<td data-col-key="' + escapeHtml(c.key) + '"' + alignAttr(c) + '>' + cellDisplay(c, r) + '</td>').join('') + '</tr>';
-    }).join('') || '<tr><td colspan="' + cols.length + '" style="text-align:center;color:var(--text-muted);padding:14px;">No rows match filters.</td></tr>';
+    }).join('') || '<tr><td colspan="' + cols.length + '" style="text-align:center;color: var(--text-muted);padding:14px;">No rows match filters.</td></tr>';
     if (tfoot) {
       if (!sorted.length) {
         tfoot.style.display = 'none';
@@ -14905,7 +14905,7 @@ function formatStyleCell(name, metaMap) {
   if (!m || name === '(none)') return safeName;
   const bracketLabel = styleKindBracket(m.kind);
   const bracketHtml = bracketLabel
-    ? ' <span style="color:var(--text-muted);font-size:0.85em;">[' + escapeHtml(bracketLabel) + ']</span>'
+    ? ' <span style="color: var(--text-muted);font-size:0.85em;">[' + escapeHtml(bracketLabel) + ']</span>'
     : '';
   const lines = [];
   // Bold the style name as the tooltip header.
@@ -14994,7 +14994,7 @@ function renderStyleStats(payload, meta) {
     if (denom <= 0) return '\u2014';
     const total = Number(r && r[field]) || 0;
     const per   = total / denom;
-    return fmt(total) + ' <span style="color:var(--text-muted);">(' + perPostStr(per) + ')</span>';
+    return fmt(total) + ' <span style="color: var(--text-muted);">(' + perPostStr(per) + ')</span>';
   };
   // Per-post score matches top_performers.SCORE_SQL and engagement_styles.py
   // picker (clicks*10 + comments*3 + upvotes, Reddit self-upvote discounted
@@ -15114,7 +15114,7 @@ const COHORT_DEFS = [
   { key: 'mid',  label: 'Mid',   scoreLabel: '10\u201329', blurb: 'A single real click (×10), OR strong discussion (3+ comments), OR 10\u201329 upvotes. Worth imitating.' },
   { key: 'high', label: 'High',  scoreLabel: '30+',   blurb: 'Multiple clicks plus discussion, or a viral comment thread. Imitate these.' },
 ];
-const COHORT_COLORS = { dead: '#9ca3af', low: '#60a5fa', mid: '#22c55e', high: '#a855f7' };
+const COHORT_COLORS = { dead: '#a2a2a2', low: '#9c9c9c', mid: '#9b9b9b', high: '#727272' };
 
 function fmtIntCohort(v) {
   if (v == null) return '\u2014';
@@ -15168,25 +15168,25 @@ function renderCohortStats(payload) {
     const pct = total ? (posts / total * 100) : 0;
     const color = COHORT_COLORS[def.key] || 'var(--text-muted)';
     const cohortCell = '<span style="display:inline-flex;align-items:center;gap:8px;">' +
-      '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';display:inline-block;flex:none;"></span>' +
-      '<span><span style="font-weight:600;color:var(--text);">' + escapeHtml(def.label) + '</span> ' +
-        '<span style="color:var(--text-muted);font-weight:400;font-size:11px;">score ' + escapeHtml(def.scoreLabel) + '</span></span>' +
+      '<span style="width:8px;height:8px;border-radius:50%;background: ' + color + ';display:inline-block;flex:none;"></span>' +
+      '<span><span style="font-weight:600;color: var(--text);">' + escapeHtml(def.label) + '</span> ' +
+        '<span style="color: var(--text-muted);font-weight:400;font-size:11px;">score ' + escapeHtml(def.scoreLabel) + '</span></span>' +
       '</span>';
     const cohortTip = def.label + ' (score ' + def.scoreLabel + ') \u2014 ' + def.blurb;
     const postsCell = r
-      ? fmtIntCohort(posts) + ' <span style="color:var(--text-muted);font-size:11px;">(' + pct.toFixed(1) + '%)</span>'
-      : '<span style="color:var(--text-very-faint);">0</span>';
+      ? fmtIntCohort(posts) + ' <span style="color: var(--text-muted);font-size:11px;">(' + pct.toFixed(1) + '%)</span>'
+      : '<span style="color: var(--text-very-faint);">0</span>';
     const scoreCell = r
-      ? fmtRangeCohort(r.min_score, r.max_score) + ' <span style="color:var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_score) + '</span>'
+      ? fmtRangeCohort(r.min_score, r.max_score) + ' <span style="color: var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_score) + '</span>'
       : '\u2014';
     const upCell = r
-      ? fmtRangeCohort(r.min_up, r.max_up) + ' <span style="color:var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_up) + '</span>'
+      ? fmtRangeCohort(r.min_up, r.max_up) + ' <span style="color: var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_up) + '</span>'
       : '\u2014';
     const cmCell = r
-      ? fmtRangeCohort(r.min_cm, r.max_cm) + ' <span style="color:var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_cm) + '</span>'
+      ? fmtRangeCohort(r.min_cm, r.max_cm) + ' <span style="color: var(--text-muted);font-size:11px;">avg ' + fmtFloatCohort(r.avg_cm) + '</span>'
       : '\u2014';
     const vCell = r && (r.min_views != null || r.max_views != null)
-      ? fmtRangeCohort(r.min_views, r.max_views) + ' <span style="color:var(--text-muted);font-size:11px;">avg ' + fmtIntCohort(r.avg_views) + '</span>'
+      ? fmtRangeCohort(r.min_views, r.max_views) + ' <span style="color: var(--text-muted);font-size:11px;">avg ' + fmtIntCohort(r.avg_views) + '</span>'
       : '\u2014';
     return '<tr data-tooltip="' + escapeHtml(cohortTip) + '">' +
       '<td>' + cohortCell + '</td>' +
@@ -15347,11 +15347,11 @@ function renderFunnelStats(payload) {
     const name = escapeHtml(v);
     if (r && r.analytics_error) {
       const tip = escapeHtml('PostHog fetch failed: ' + String(r.analytics_error));
-      return name + ' <span title="' + tip + '" style="color:#dc2626;cursor:help;margin-left:4px;" aria-label="analytics fetch error">\u26A0</span>';
+      return name + ' <span title="' + tip + '" style="color: #4d4d4d;cursor:help;margin-left:4px;" aria-label="analytics fetch error">\u26A0</span>';
     }
     if (r && r.analytics_suspected_broken) {
       const tip = escapeHtml('High visitor count but zero tracked signups, schedule clicks, or get-started clicks; posthog likely not wired on this site. See https://github.com/m13v/seo-components#posthog-setup');
-      return name + ' <span title="' + tip + '" style="color:#dc2626;cursor:help;margin-left:4px;" aria-label="analytics suspected broken">\u26A0</span>';
+      return name + ' <span title="' + tip + '" style="color: #4d4d4d;cursor:help;margin-left:4px;" aria-label="analytics suspected broken">\u26A0</span>';
     }
     return name;
   };
@@ -15363,12 +15363,12 @@ function renderFunnelStats(payload) {
   const makeFunnelFmt = domainKey => (v, r) => {
     if (r && r.analytics_error) {
       const tip = escapeHtml('PostHog fetch failed: ' + String(r.analytics_error));
-      return '<span title="' + tip + '" style="color:#dc2626;cursor:help;" aria-label="analytics fetch error">err</span>';
+      return '<span title="' + tip + '" style="color: #4d4d4d;cursor:help;" aria-label="analytics fetch error">err</span>';
     }
     if (v == null) return '\u2014';
     const d = r && r[domainKey];
     if (d != null && Number(d) !== Number(v)) {
-      return fmt(v) + ' <span style="color:var(--text-muted);">(' + fmt(d) + ')</span>';
+      return fmt(v) + ' <span style="color: var(--text-muted);">(' + fmt(d) + ')</span>';
     }
     return fmt(v);
   };
@@ -15387,12 +15387,12 @@ function renderFunnelStats(payload) {
       // earned engagement during the window. Show "\u2014 (N)" so the
       // period total stays visible.
       if (t != null && Number(t) > 0) {
-        return placeholder + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+        return placeholder + ' <span style="color: var(--text-muted);">(' + fmt(t) + ')</span>';
       }
       return placeholder;
     }
     if (t != null && Number(t) !== Number(v)) {
-      return fmt(v) + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+      return fmt(v) + ' <span style="color: var(--text-muted);">(' + fmt(t) + ')</span>';
     }
     return fmt(v);
   };
@@ -15436,9 +15436,9 @@ function renderFunnelStats(payload) {
           const t = r && r.post_clicks_period_total != null ? Number(r.post_clicks_period_total) : null;
           const scopedHtml = n
             ? '<span data-tooltip="Clicks on /r/&lt;code&gt; short links minted for this project\u2019s posts in the selected window. Excludes DM-link clicks and on-site CTA clicks." style="font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>'
-            : '<span style="color:var(--text-faint);">\u2014</span>';
+            : '<span style="color: var(--text-faint);">\u2014</span>';
           if (t != null && t !== n) {
-            return scopedHtml + ' <span style="color:var(--text-muted);">(' + fmt(t) + ')</span>';
+            return scopedHtml + ' <span style="color: var(--text-muted);">(' + fmt(t) + ')</span>';
           }
           return scopedHtml;
         } },
@@ -15468,9 +15468,9 @@ function renderFunnelStats(payload) {
             const clicks = Number(r.get_started_clicks) || 0;
             const filt = r.amplitude_filter && Object.entries(r.amplitude_filter).map(([k,vv]) => k + '=' + (Array.isArray(vv) ? vv.join('|') : vv)).join(', ');
             const tip = 'Amplitude-attributed end-product signups' + (filt ? ' (' + filt + ')' : '') + '. Number in parens is on-page get_started_click count from PostHog (button-press intent, lossy due to client-side ad-blockers).';
-            const ampSpan = '<span data-tooltip="' + escapeHtml(tip) + '" style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+            const ampSpan = '<span data-tooltip="' + escapeHtml(tip) + '" style="color: var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
             if (clicks > 0 && clicks !== n) {
-              return ampSpan + ' <span style="color:var(--text-muted);">(' + fmt(clicks) + ')</span>';
+              return ampSpan + ' <span style="color: var(--text-muted);">(' + fmt(clicks) + ')</span>';
             }
             return ampSpan;
           }
@@ -15485,7 +15485,7 @@ function renderFunnelStats(payload) {
       { key: 'dm_clicks',        label: 'DM Clicks',       type: 'numeric', align: 'right',
         formatter: (v, r) => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (!n) return '<span style="color: var(--text-faint);">\u2014</span>';
           return '<span data-tooltip="Clicks on short links sent in DMs targeting this project" style="font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
         } },
       // DM Bookings: subset of the Bookings column whose utm_content matches
@@ -15494,10 +15494,10 @@ function renderFunnelStats(payload) {
       { key: 'dm_bookings',      label: 'DM Bookings',     type: 'numeric', align: 'right',
         formatter: (v, r) => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (!n) return '<span style="color: var(--text-faint);">\u2014</span>';
           const total = Number(r && r.bookings) || 0;
           const tip = total ? (n + ' of ' + total + ' bookings came from DMs') : (n + ' DM-attributed booking' + (n === 1 ? '' : 's'));
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
         } },
       // Cross-product: clicks on CTAs that promote a sibling product
       // (e.g. Claude Meter CTA on Fazm blog posts). Fires the
@@ -15508,7 +15508,7 @@ function renderFunnelStats(payload) {
   // Inline legend below the table explaining the "N (M)" cell format.
   // Must come after mountSortableTable, which replaces container innerHTML.
   body.insertAdjacentHTML('beforeend',
-    '<div style="font-size:11px;color:var(--text-muted);padding:6px 2px 2px;">' +
+    '<div style="font-size:11px;color: var(--text-muted);padding:6px 2px 2px;">' +
       'Visitor / signup / schedule / get-started counts are <b>unique visitors</b> (PostHog distinct_id), not raw events. ' +
       'Visitors shows <b>scoped</b> (visitors on pages generated in the selected window) ' +
       'followed by <b>(domain-wide)</b> totals in parens when they differ. ' +
@@ -15560,7 +15560,7 @@ function renderSubredditStats(payload) {
   const fmtProjects = v => {
     const s = String(v || '');
     if (!s) return '\u2014';
-    return '<span style="color:var(--text-muted);font-size:12px;" title="' + escapeHtml(s) + '">' + escapeHtml(s) + '</span>';
+    return '<span style="color: var(--text-muted);font-size:12px;" title="' + escapeHtml(s) + '">' + escapeHtml(s) + '</span>';
   };
   // Banned column: comma-separated list of Reddit handles whose
   // subreddit_bans.comment_blocked entry matches this sub. Each handle
@@ -15570,12 +15570,12 @@ function renderSubredditStats(payload) {
   // so a sub can carry several bans (one per offending account).
   const fmtBannedAccounts = v => {
     const s = String(v || '').trim();
-    if (!s) return '<span style="color:var(--text-muted);">\u2014</span>';
+    if (!s) return '<span style="color: var(--text-muted);">\u2014</span>';
     const handles = s.split(',').map(x => x.trim()).filter(Boolean);
     const parts = handles.map(h => {
       const safe = h.replace(/[^a-zA-Z0-9_\-]/g, '');
       if (!safe) return escapeHtml(h);
-      return '<a href="https://www.reddit.com/user/' + encodeURIComponent(safe) + '/" target="_blank" rel="noopener" style="color:var(--danger,#e74c3c);">u/' + escapeHtml(safe) + '</a>';
+      return '<a href="https://www.reddit.com/user/' + encodeURIComponent(safe) + '/" target="_blank" rel="noopener" style="color: var(--danger,#6c6c6c);">u/' + escapeHtml(safe) + '</a>';
     });
     return parts.join(', ');
   };
@@ -15685,9 +15685,9 @@ function renderDmStats(payload) {
       { key: 'sent',               label: 'Sent',         type: 'numeric', align: 'right',
         formatter: (v) => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">—</span>';
+          if (!n) return '<span style="color: var(--text-faint);">—</span>';
           const tip = n + ' unique conversation' + (n === 1 ? '' : 's') + ' received an outbound DM in this window';
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
         } },
       { key: 'replied',            label: 'Replied',      type: 'numeric', align: 'right', formatter: fmt },
       { key: 'reply_rate',         label: 'Reply %',      type: 'numeric', align: 'right', formatter: pct, footer: replyRateFooter },
@@ -15791,45 +15791,45 @@ function renderSearchTopicsStats(payload) {
         formatter: (v, row) => {
           const n = Number(v) || 0;
           const tip = '**' + (row.dud_attempts || 0) + '** of **' + (row.attempts || 0) + '** attempts returned 0';
-          const color = n >= 0.5 ? 'var(--danger,#dc2626)' : (n >= 0.25 ? 'var(--warn,#d97706)' : 'var(--text-secondary)');
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
+          const color = n >= 0.5 ? 'var(--danger,#4d4d4d)' : (n >= 0.25 ? 'var(--warn,#848484)' : 'var(--text-secondary)');
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: ' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
         } },
       { key: 'posts_made',  label: 'Posts',     type: 'numeric', align: 'right', widthPct: 5,
         formatter: v => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
-          return '<span style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+          if (!n) return '<span style="color: var(--text-faint);">\u2014</span>';
+          return '<span style="color: var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
         } },
       { key: 'avg_engagement', label: 'Avg Eng', type: 'numeric', align: 'right', widthPct: 5,
         formatter: v => {
-          if (v == null) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (v == null) return '<span style="color: var(--text-faint);">\u2014</span>';
           const tip = '**Formula:** comments\u00D73 + upvotes on our reply' + String.fromCharCode(10) +
                       '(same as top_performers.py)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt1(v) + '</span>';
         } },
       { key: 'avg_views',   label: 'Avg Views', type: 'numeric', align: 'right', widthPct: 5,
         formatter: (v, row) => {
-          if (v == null) return '<span data-tooltip="Reddit views aren\u2019t aggregated at the topic level here" style="color:var(--text-faint);">\u2014</span>';
+          if (v == null) return '<span data-tooltip="Reddit views aren\u2019t aggregated at the topic level here" style="color: var(--text-faint);">\u2014</span>';
           const tip = '**Avg view count** on Twitter replies driven by this topic' + String.fromCharCode(10) +
                       '(raw, not weighted into Avg Eng)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt(Math.round(v)) + '</span>';
         } },
       { key: 'avg_clicks',  label: 'Avg Clicks', type: 'numeric', align: 'right', widthPct: 5,
         formatter: (v, row) => {
-          if (v == null || !row.posts_made) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (v == null || !row.posts_made) return '<span style="color: var(--text-faint);">\u2014</span>';
           const total = Number(row.clicks_total) || 0;
           const tip = '**' + fmt(total) + '** total clicks across **' + (row.posts_made || 0) + '** posts' + String.fromCharCode(10) +
                       'GREATEST(post_links.real_clicks, post_links.clicks) per post' + String.fromCharCode(10) +
                       'real_clicks = PostHog $pageview backfill; clicks = live /r/ redirect log';
           const n = Number(v) || 0;
           const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: ' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
         } },
       { key: 'last_run',    label: 'Last Run',  type: 'date',    align: 'right', widthPct: 5,
         formatter: v => {
-          if (!v) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (!v) return '<span style="color: var(--text-faint);">\u2014</span>';
           const abs = new Date(v).toLocaleString();
-          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color:var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color: var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
         } },
     ],
   });
@@ -15915,25 +15915,25 @@ function renderSearchQueriesStats(payload) {
         formatter: (v, row) => {
           const n = Number(v) || 0;
           const tip = '**' + (row.dud_attempts || 0) + '** of **' + (row.attempts || 0) + '** attempts returned 0';
-          const color = n >= 0.5 ? 'var(--danger,#dc2626)' : (n >= 0.25 ? 'var(--warn,#d97706)' : 'var(--text-secondary)');
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
+          const color = n >= 0.5 ? 'var(--danger,#4d4d4d)' : (n >= 0.25 ? 'var(--warn,#848484)' : 'var(--text-secondary)');
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: ' + color + ';font-variant-numeric:tabular-nums;">' + pct(n) + '</span>';
         } },
       { key: 'posts_made',  label: 'Posts',     type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
           const n = Number(v) || 0;
-          if (!n) return '<span style="color:var(--text-faint);">\u2014</span>';
-          return '<span style="color:var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
+          if (!n) return '<span style="color: var(--text-faint);">\u2014</span>';
+          return '<span style="color: var(--success);font-weight:600;font-variant-numeric:tabular-nums;">' + fmt(n) + '</span>';
         } },
       { key: 'avg_engagement', label: 'Avg Eng', type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
-          if (v == null) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (v == null) return '<span style="color: var(--text-faint);">\u2014</span>';
           const tip = '**Formula:** comments\u00D73 + upvotes on our reply' + String.fromCharCode(10) +
                       '(same as top_performers.py)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt1(v) + '</span>';
         } },
       { key: 'avg_views',   label: 'Avg Views', type: 'numeric', align: 'right', widthPct: 4,
         formatter: v => {
-          if (v == null) return '<span data-tooltip="LinkedIn does not expose comment views" style="color:var(--text-faint);">\u2014</span>';
+          if (v == null) return '<span data-tooltip="LinkedIn does not expose comment views" style="color: var(--text-faint);">\u2014</span>';
           const tip = '**Avg view count** on our Twitter reply' + String.fromCharCode(10) +
                       '(raw, not weighted into Avg Eng)';
           return '<span data-tooltip="' + escapeHtml(tip) + '" style="font-variant-numeric:tabular-nums;">' + fmt(Math.round(v)) + '</span>';
@@ -15944,20 +15944,20 @@ function renderSearchQueriesStats(payload) {
       // the average down (which is what we want for EV ranking).
       { key: 'avg_clicks',  label: 'Avg Clicks', type: 'numeric', align: 'right', widthPct: 4,
         formatter: (v, row) => {
-          if (v == null || !row.posts_made) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (v == null || !row.posts_made) return '<span style="color: var(--text-faint);">\u2014</span>';
           const total = Number(row.clicks_total) || 0;
           const tip = '**' + fmt(total) + '** total clicks across **' + (row.posts_made || 0) + '** posts' + String.fromCharCode(10) +
                       'GREATEST(post_links.real_clicks, post_links.clicks) per post' + String.fromCharCode(10) +
                       'real_clicks = PostHog $pageview backfill; clicks = live /r/ redirect log';
           const n = Number(v) || 0;
           const color = n >= 5 ? 'var(--success)' : (n >= 1 ? 'var(--text-primary)' : 'var(--text-secondary)');
-          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(tip) + '" style="color: ' + color + ';font-variant-numeric:tabular-nums;">' + fmt1(n) + '</span>';
         } },
       { key: 'last_run',    label: 'Last Run',  type: 'date',    align: 'right', widthPct: 4,
         formatter: v => {
-          if (!v) return '<span style="color:var(--text-faint);">\u2014</span>';
+          if (!v) return '<span style="color: var(--text-faint);">\u2014</span>';
           const abs = new Date(v).toLocaleString();
-          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color:var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
+          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color: var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
         } },
     ],
   });
@@ -16038,12 +16038,12 @@ function renderCostStats(payload) {
       '• Subagent (est): ' + (sub != null ? fmtMoney(sub) : 'n/a'),
     ].join('\\n');
     return '<span data-tooltip="' + escapeHtml(tip) +
-      '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+      '" style="cursor:help;border-bottom: 1px dotted var(--text-muted);">' +
       fmtMoney(displayed) + '</span>';
   }
   const rowsHtml = merged.map(function (r) {
     const totalCellHtml = moneyCell(r.total, r.totalOrch, r.totalEst, r.totalSub);
-    const subCellHtml   = r.totalSub != null && r.totalSub > 0 ? fmtMoney(r.totalSub) : '<span style="color:var(--text-very-faint);">$0</span>';
+    const subCellHtml   = r.totalSub != null && r.totalSub > 0 ? fmtMoney(r.totalSub) : '<span style="color: var(--text-very-faint);">$0</span>';
     const avgCellHtml = r.count > 0
       ? moneyCell(r.avg, r.avgOrch, r.avgEst, r.avgSub)
       : '&mdash;';
@@ -16051,12 +16051,12 @@ function renderCostStats(payload) {
       '<td>' + escapeHtml(r.label) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(r.count) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCellHtml + '</td>' +
-      '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + subCellHtml + '</td>' +
-      '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + avgCellHtml + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-muted);">' + subCellHtml + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-muted);">' + avgCellHtml + '</td>' +
     '</tr>';
   }).join('');
   const footerTotalHtml = moneyCell(totalCost, totalOrch, totalEst, totalSub);
-  const footerSubHtml   = totalSub > 0 ? fmtMoney(totalSub) : '<span style="color:var(--text-very-faint);">$0</span>';
+  const footerSubHtml   = totalSub > 0 ? fmtMoney(totalSub) : '<span style="color: var(--text-very-faint);">$0</span>';
   const footerAvgHtml = totalCount > 0
     ? moneyCell(totalCost / totalCount,
                 totalOrch / totalCount,
@@ -16064,7 +16064,7 @@ function renderCostStats(payload) {
                 totalSub  / totalCount)
     : '&mdash;';
   const footerHtml =
-    '<tr style="border-top:2px solid var(--border);font-weight:600;background:var(--bg-subtle);">' +
+    '<tr style="border-top: 2px solid var(--border);font-weight:600;background: var(--bg-subtle);">' +
       '<td>Total</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(totalCount) + '</td>' +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + footerTotalHtml + '</td>' +
@@ -16090,10 +16090,10 @@ function renderCostStats(payload) {
       // wrapper needs patching.
       const totalCellInner = withSdk > 0
         ? moneyCell(orch, orch, est, sub)
-        : '<span style="color:var(--text-very-faint);">n/a</span>';
+        : '<span style="color: var(--text-very-faint);">n/a</span>';
       const coverageCell = missing === 0
-        ? ('<span style="color:#15803d;">' + sessions + '/' + sessions + '</span>')
-        : ('<span style="color:#b91c1c;" title="' + missing + ' sessions missing SDK cost (wrapper script needs --output-format json on claude call)">' +
+        ? ('<span style="color: #646464;">' + sessions + '/' + sessions + '</span>')
+        : ('<span style="color: #3d3d3d;" title="' + missing + ' sessions missing SDK cost (wrapper script needs --output-format json on claude call)">' +
             withSdk + '/' + sessions + '</span>');
       const perSession = withSdk > 0
         ? moneyCell(orch / withSdk, orch / withSdk, est != null ? est / sessions : null, sub != null ? sub / sessions : null)
@@ -16103,11 +16103,11 @@ function renderCostStats(payload) {
         '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtCount(sessions) + '</td>' +
         '<td style="text-align:right;font-variant-numeric:tabular-nums;font-size:11px;">' + coverageCell + '</td>' +
         '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + totalCellInner + '</td>' +
-        '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + perSession + '</td>' +
+        '<td style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-muted);">' + perSession + '</td>' +
       '</tr>';
     }).join('');
     phaseTableHtml =
-      '<div style="font-size:12px;font-weight:600;padding:12px 2px 4px;color:var(--text-secondary);">Cost per Phase (Claude session script)</div>' +
+      '<div style="font-size:12px;font-weight:600;padding:12px 2px 4px;color: var(--text-secondary);">Cost per Phase (Claude session script)</div>' +
       '<table class="style-stats-table">' +
         '<thead><tr>' +
           '<th style="text-align:left;">Phase</th>' +
@@ -16131,7 +16131,7 @@ function renderCostStats(payload) {
       '<tbody>' + rowsHtml + footerHtml + '</tbody>' +
     '</table>' +
     phaseTableHtml +
-    '<div style="font-size:11px;color:var(--text-muted);padding:8px 2px 2px;">' +
+    '<div style="font-size:11px;color: var(--text-muted);padding:8px 2px 2px;">' +
       'SDK-only mode (2026-05-15): cost = Anthropic\\'s orchestrator_cost_usd from the SDK result event. Pipelines whose wrappers don\\'t pass --output-format json to claude show $0 with a red SDK-coverage cell — that\\'s a missing-data signal, not a real $0. Transcript estimate and Task-subagent figures (tooltip-only) come from a local pricing table and don\\'t reflect subscription billing.' +
     '</div>';
 }
@@ -16309,7 +16309,7 @@ function renderTopContentCell(_v, post) {
   if (threadHt) metaBits.push('<span class="top-post-parent-title">\u201c' + threadHt + '\u201d</span>');
   const metaHtml = metaBits.length ? '<div class="top-post-meta">(' + metaBits.join(' \u00b7 ') + ')</div>' : '';
   return '<div class="top-post-content">' +
-    '<div class="top-post-text">' + text + (date ? ' <span style="color:var(--text-muted);">\u00b7 ' + escapeHtml(date) + '</span>' : '') + '</div>' +
+    '<div class="top-post-text">' + text + (date ? ' <span style="color: var(--text-muted);">\u00b7 ' + escapeHtml(date) + '</span>' : '') + '</div>' +
     linkHtml +
     metaHtml +
   '</div>';
@@ -16540,7 +16540,7 @@ function renderTopPosts(payload) {
               const pctStr = pct >= 10 ? pct.toFixed(0)
                             : pct >= 1  ? pct.toFixed(1)
                             :             pct.toFixed(2);
-              ctrLabel = ' <span style="color:var(--text-muted);">(' + pctStr + '%)</span>';
+              ctrLabel = ' <span style="color: var(--text-muted);">(' + pctStr + '%)</span>';
             }
             if (havePerClick) {
               const tip =
@@ -16556,7 +16556,7 @@ function renderTopPosts(payload) {
                 + '<span class="top-stats-k">clicks</span>'
                 + real
                 + ctrLabel
-                + ' <span style="color:var(--text-muted);">/ ' + bots + '</span>'
+                + ' <span style="color: var(--text-muted);">/ ' + bots + '</span>'
                 + '</span>';
             } else if (backfill > 0) {
               const tip =
@@ -16571,7 +16571,7 @@ function renderTopPosts(payload) {
                 + '<span class="top-stats-k">clicks</span>'
                 + backfill
                 + ctrLabel
-                + ' <span style="color:var(--text-muted);">(estimated)</span>'
+                + ' <span style="color: var(--text-muted);">(estimated)</span>'
                 + '</span>';
             } else if (legacy > 0) {
               const tip =
@@ -16586,7 +16586,7 @@ function renderTopPosts(payload) {
                 + '<span class="top-stats-k">clicks</span>'
                 + legacy
                 + ctrLabel
-                + ' <span style="color:var(--text-muted);">(legacy)</span>'
+                + ' <span style="color: var(--text-muted);">(legacy)</span>'
                 + '</span>';
             } else {
               clicksBit = '<span class="top-stats-bit"><span class="top-stats-k">clicks</span>0</span>';
@@ -17371,7 +17371,7 @@ function renderTopLinks(payload) {
     else if (r.backfill_real > 0) bits.push(r.backfill_real + ' backfill');
     else if (r.legacy_clicks > 0) bits.push(r.legacy_clicks + ' legacy');
     if (r.bot_clicks > 0) bits.push(r.bot_clicks + ' bot');
-    const sub = bits.length ? '<div style="font-size:11px;color:var(--text-secondary)">' + escapeHtml(bits.join(' \u00b7 ')) + '</div>' : '';
+    const sub = bits.length ? '<div style="font-size:11px;color: var(--text-secondary)">' + escapeHtml(bits.join(' \u00b7 ')) + '</div>' : '';
     return '<div style="font-weight:600">' + main + '</div>' + sub;
   };
   const columns = [
@@ -17604,7 +17604,7 @@ function dmHasOutboundUrl(messages) {
 
 function renderDmLastMsgCell(dm) {
   const msg = String(dm.last_msg || '');
-  if (!msg) return '<span style="color:var(--text-faint);">(no messages)</span>';
+  if (!msg) return '<span style="color: var(--text-faint);">(no messages)</span>';
   const trimmed = msg.length > 300 ? msg.slice(0, 300) + '\u2026' : msg;
   const dirLabel = dm.last_dir === 'inbound' ? 'IN' : (dm.last_dir === 'outbound' ? 'OUT' : '');
   const dirHtml = dirLabel ? '<span class="dm-last-dir">' + dirLabel + '</span>' : '';
@@ -17777,11 +17777,11 @@ function renderTopDms(payload) {
   window.__dmExpandedIds = Object.create(null);
   const columns = [
     { key: 'rank',           label: '#',        type: 'numeric', align: 'right', widthPct: 3,
-      formatter: v => '<span style="color:var(--text-muted);">' + (Number(v) + 1) + '</span>' },
+      formatter: v => '<span style="color: var(--text-muted);">' + (Number(v) + 1) + '</span>' },
     { key: 'platform',       label: 'Platform', type: 'text',    align: 'left',  widthPct: 5,
       formatter: v => platformIconHtml(v) },
     { key: 'project_display', label: 'Project', type: 'text',    align: 'left',  widthPct: 9,
-      formatter: (_v, r) => r.project_display ? escapeHtml(PROJECT_LABELS[String(r.project_display)] || String(r.project_display)) : '<span style="color:var(--text-faint);">\u2014</span>' },
+      formatter: (_v, r) => r.project_display ? escapeHtml(PROJECT_LABELS[String(r.project_display)] || String(r.project_display)) : '<span style="color: var(--text-faint);">\u2014</span>' },
     { key: 'their_author',   label: 'Thread',   type: 'text',    align: 'left',  widthPct: 13,
       formatter: (_v, r) => renderDmThreadCell(r) },
     { key: 'last_msg',       label: 'Last message', type: 'text', align: 'left', widthPct: 30,
@@ -17806,7 +17806,7 @@ function renderTopDms(payload) {
               ? tipNL + '**Last click:** ' + lastAt
               : tipNL + 'No clicks yet');
           const color = clicks > 0 ? 'var(--accent)' : 'var(--text-muted)';
-          clickLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color:' + color + ';"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(clicks) + '</span> <span class="dm-stat-label">clicks</span></div>';
+          clickLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color: ' + color + ';"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(clicks) + '</span> <span class="dm-stat-label">clicks</span></div>';
         }
 
         let bookedLine;
@@ -17822,7 +17822,7 @@ function renderTopDms(payload) {
             tipParts.push('**Last booking:** ' + lastAt);
           }
           const tip = tipParts.join(bNL);
-          bookedLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color:var(--success);font-weight:600;"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(booked) + '</span> <span class="dm-stat-label">booked</span></div>';
+          bookedLine = '<div class="dm-stat-line" data-tooltip="' + escapeHtml(tip) + '" style="color: var(--success);font-weight:600;"><span class="dm-stat-num" style="font-variant-numeric:tabular-nums;">' + fmt(booked) + '</span> <span class="dm-stat-label">booked</span></div>';
         }
 
         return '<div class="dm-stat-stack">' + msgLine + clickLine + bookedLine + '</div>';
@@ -17833,7 +17833,7 @@ function renderTopDms(payload) {
         const linkCount = Number(r.dm_links_count) || 0;
         const wrapped = !!(r.booking_link_sent_at || linkCount > 0);
         const detected = !!r.outbound_url_detected;
-        if (!wrapped && !detected) return '<span style="color:var(--text-faint);">No</span>';
+        if (!wrapped && !detected) return '<span style="color: var(--text-faint);">No</span>';
         const tipParts = ['**Link tracking**', ''];
         if (r.booking_link_sent_at) tipParts.push('• **Booking link sent:** ' + new Date(r.booking_link_sent_at).toLocaleString());
         if (linkCount > 0) tipParts.push('• **' + linkCount + ' wrapped link' + (linkCount === 1 ? '' : 's') + '**');
@@ -17849,15 +17849,15 @@ function renderTopDms(payload) {
         const tip = tipParts.join(String.fromCharCode(10));
         const tipAttr = tip ? ' data-tooltip="' + escapeHtml(tip) + '"' : '';
         const label = wrapped ? 'Yes' : 'Yes*';
-        const color = wrapped ? 'var(--success)' : '#b45309';
-        return '<span' + tipAttr + ' style="color:' + color + ';font-weight:600;">' + label + '</span>';
+        const color = wrapped ? 'var(--success)' : '#626262';
+        return '<span' + tipAttr + ' style="color: ' + color + ';font-weight:600;">' + label + '</span>';
       } },
     { key: 'interest_level', label: 'Class',    type: 'text',    align: 'left',  widthPct: 11,
       formatter: (_v, r) => dmClassBadge(r) },
     { key: 'last_ts',        label: 'Last message', type: 'numeric', align: 'right', widthPct: 10,
       formatter: (_v, r) => {
         const d = parseServerUtcTs(r.last_message_at);
-        if (!d) return '<span style="color:var(--text-faint);">—</span>';
+        if (!d) return '<span style="color: var(--text-faint);">—</span>';
         const shown = fmtDmTs(d);
         const full = d.toLocaleString();
         return '<div class="dm-last-ts-abs" title="' + escapeHtml(full) + '">' + escapeHtml(shown) + '</div>';
@@ -18493,15 +18493,15 @@ function renderDeployHealth(data) {
     return;
   }
   const stateColor = {
-    'ERROR':        { bg: '#fef2f2', fg: '#b91c1c', border: '#fecaca' },
-    'CANCELED':     { bg: '#fff7ed', fg: '#c2410c', border: '#fed7aa' },
-    'API_ERROR':    { bg: '#fff7ed', fg: '#c2410c', border: '#fed7aa' },
-    'UNMATCHED':    { bg: '#f4f4f5', fg: '#6b7280', border: '#e5e7eb' },
-    'NO_DEPLOY':    { bg: '#f4f4f5', fg: '#6b7280', border: '#e5e7eb' },
-    'BUILDING':     { bg: '#eff6ff', fg: '#1d4ed8', border: '#bfdbfe' },
-    'QUEUED':       { bg: '#eff6ff', fg: '#1d4ed8', border: '#bfdbfe' },
-    'INITIALIZING': { bg: '#eff6ff', fg: '#1d4ed8', border: '#bfdbfe' },
-    'READY':        { bg: '#f0fdf4', fg: '#15803d', border: '#bbf7d0' },
+    'ERROR':        { bg: '#f5f5f5', fg: '#3d3d3d', border: '#d5d5d5' },
+    'CANCELED':     { bg: '#f8f8f8', fg: '#595959', border: '#dcdcdc' },
+    'API_ERROR':    { bg: '#f8f8f8', fg: '#595959', border: '#dcdcdc' },
+    'UNMATCHED':    { bg: '#f4f4f5', fg: '#727272', border: '#e7e7e7' },
+    'NO_DEPLOY':    { bg: '#f4f4f5', fg: '#727272', border: '#e7e7e7' },
+    'BUILDING':     { bg: '#f5f5f5', fg: '#4e4e4e', border: '#d8d8d8' },
+    'QUEUED':       { bg: '#f5f5f5', fg: '#4e4e4e', border: '#d8d8d8' },
+    'INITIALIZING': { bg: '#f5f5f5', fg: '#4e4e4e', border: '#d8d8d8' },
+    'READY':        { bg: '#fafafa', fg: '#646464', border: '#e7e7e7' },
   };
   function humanAge(sec) {
     if (sec == null) return '';
@@ -18512,26 +18512,26 @@ function renderDeployHealth(data) {
   }
   const cells = rows.map(r => {
     const s = r.state || 'UNKNOWN';
-    const c = stateColor[s] || { bg: '#f4f4f5', fg: '#6b7280', border: '#e5e7eb' };
-    const host = r.host ? ('<a href="https://' + escapeHtml(r.host) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">' + escapeHtml(r.host) + '</a>') : '';
+    const c = stateColor[s] || { bg: '#f4f4f5', fg: '#727272', border: '#e7e7e7' };
+    const host = r.host ? ('<a href="https://' + escapeHtml(r.host) + '" target="_blank" rel="noopener" style="color: inherit;text-decoration:none;">' + escapeHtml(r.host) + '</a>') : '';
     const inspectorLink = r.inspector_url
-      ? ' <a href="' + escapeHtml(r.inspector_url) + '" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none;">logs</a>'
+      ? ' <a href="' + escapeHtml(r.inspector_url) + '" target="_blank" rel="noopener" style="color: var(--link);text-decoration:none;">logs</a>'
       : '';
-    const commit = r.commit_sha ? '<code style="font-size:11px;color:var(--text-muted);">' + escapeHtml(r.commit_sha) + '</code>' : '';
-    const age = r.age_sec != null ? '<span style="color:var(--text-muted);font-size:11px;">' + humanAge(r.age_sec) + '</span>' : '';
-    const msg = r.commit_message ? '<span style="color:var(--text-secondary);font-size:12px;">' + escapeHtml(r.commit_message) + '</span>' : (r.error ? '<span style="color:var(--text-muted);font-size:12px;">' + escapeHtml(r.error) + '</span>' : '');
+    const commit = r.commit_sha ? '<code style="font-size:11px;color: var(--text-muted);">' + escapeHtml(r.commit_sha) + '</code>' : '';
+    const age = r.age_sec != null ? '<span style="color: var(--text-muted);font-size:11px;">' + humanAge(r.age_sec) + '</span>' : '';
+    const msg = r.commit_message ? '<span style="color: var(--text-secondary);font-size:12px;">' + escapeHtml(r.commit_message) + '</span>' : (r.error ? '<span style="color: var(--text-muted);font-size:12px;">' + escapeHtml(r.error) + '</span>' : '');
     return (
-      '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--divider);font-size:13px;">' +
-        '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background:' + c.bg + ';color:' + c.fg + ';border:1px solid ' + c.border + ';min-width:70px;text-align:center;">' + escapeHtml(s) + '</span>' +
+      '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom: 1px solid var(--divider);font-size:13px;">' +
+        '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background: ' + c.bg + ';color: ' + c.fg + ';border: 1px solid ' + c.border + ';min-width:70px;text-align:center;">' + escapeHtml(s) + '</span>' +
         '<span style="font-weight:600;min-width:140px;">' + escapeHtml(r.name || '') + '</span>' +
-        '<span style="color:var(--text-muted);min-width:200px;">' + host + '</span>' +
+        '<span style="color: var(--text-muted);min-width:200px;">' + host + '</span>' +
         commit + age + inspectorLink +
         '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + msg + '</span>' +
       '</div>'
     );
   }).join('');
   const footer = data && data.generated_at_ms
-    ? '<div style="padding:6px 12px;font-size:11px;color:var(--text-muted);">updated ' + humanAge(Math.floor((Date.now() - data.generated_at_ms) / 1000)) + '</div>'
+    ? '<div style="padding:6px 12px;font-size:11px;color: var(--text-muted);">updated ' + humanAge(Math.floor((Date.now() - data.generated_at_ms) / 1000)) + '</div>'
     : '';
   body.innerHTML = cells + footer;
 }
@@ -18667,7 +18667,7 @@ function renderProjectStatus(data, opts) {
     ].join('\\n');
     const style = 'text-align:right;font-variant-numeric:tabular-nums;' + (opts && opts.extra || '');
     const inner = '<span data-tooltip="' + escapeHtml(tip) +
-      '" style="cursor:help;border-bottom:1px dotted var(--text-muted);">' +
+      '" style="cursor:help;border-bottom: 1px dotted var(--text-muted);">' +
       fmtMoney(displayed) + '</span>';
     return '<td style="' + style + '">' + inner + '</td>';
   };
@@ -18727,18 +18727,18 @@ function renderProjectStatus(data, opts) {
     const pt = Number(platformTotal) || 0;
     const style = 'text-align:right;font-variant-numeric:tabular-nums;' + (opts && opts.extra || '');
     if (num === 0 && !(opts && opts.showZeroShare)) {
-      return '<td style="' + style + 'color:var(--text-very-faint);">0</td>';
+      return '<td style="' + style + 'color: var(--text-very-faint);">0</td>';
     }
     const share = pt > 0 ? num / pt : 0;
     let shareColor = 'var(--text-muted)';
     if (targetShare != null && pt > 0) {
       const diff = share - targetShare;
-      if (diff > 0.02) shareColor = '#15803d';
-      else if (diff < -0.02) shareColor = '#b91c1c';
+      if (diff > 0.02) shareColor = '#646464';
+      else if (diff < -0.02) shareColor = '#3d3d3d';
     }
     return '<td style="' + style + '">' +
       '<span style="font-weight:600;">' + num + '</span>' +
-      ' <span style="color:' + shareColor + ';font-size:11px;">(' + formatPct(share) + ')</span>' +
+      ' <span style="color: ' + shareColor + ';font-size:11px;">(' + formatPct(share) + ')</span>' +
     '</td>';
   };
   const rowHtml = (r) => {
@@ -18749,7 +18749,7 @@ function renderProjectStatus(data, opts) {
       // NA: project is weighted but ineligible for this platform (e.g. no
       // github_search_topics → not in the GitHub picker's pool).
       if (!r.unassigned && perPlatformTarget[p] === null) {
-        return '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-very-faint);">NA</td>';
+        return '<td style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-very-faint);">NA</td>';
       }
       const platTarget = r.unassigned
         ? null
@@ -18757,14 +18757,14 @@ function renderProjectStatus(data, opts) {
       return cellWithShare(n, totals[p], platTarget);
     }).join('');
     const nameCell = r.website
-      ? '<a href="' + escapeHtml(r.website) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;border-bottom:1px dotted var(--text-very-faint);">' + escapeHtml(r.name) + '</a>'
+      ? '<a href="' + escapeHtml(r.website) + '" target="_blank" rel="noopener" style="color: inherit;text-decoration:none;border-bottom: 1px dotted var(--text-very-faint);">' + escapeHtml(r.name) + '</a>'
       : escapeHtml(r.name);
     const nameLabel = r.unassigned
-      ? nameCell + ' <span style="color:var(--text-muted);font-size:11px;font-weight:400;">(not weighted)</span>'
+      ? nameCell + ' <span style="color: var(--text-muted);font-size:11px;font-weight:400;">(not weighted)</span>'
       : nameCell;
     const totalCell = cellWithShare(r.total, grandTotal, targetShare, { extra: 'font-weight:600;', showZeroShare: true });
     const costCellHtml = costAvailable
-      ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, Number(r.cost_usd_subagent) || 0, { extra: 'color:var(--text-secondary);' })
+      ? costCell(Number(r.cost_usd) || 0, Number(r.cost_usd_orchestrator) || 0, Number(r.cost_usd_estimated) || 0, Number(r.cost_usd_subagent) || 0, { extra: 'color: var(--text-secondary);' })
       : '';
     const weightVal = Number(r.weight) || 0;
     const editable = canEditWeight && (!r.unassigned || r.configured);
@@ -18775,7 +18775,7 @@ function renderProjectStatus(data, opts) {
               'data-project-weight-input="' + escapeHtml(r.name) + '" ' +
               'data-original-weight="' + weightVal + '" ' +
               'class="project-weight-input" ' +
-              'style="width:56px;text-align:right;font-variant-numeric:tabular-nums;padding:2px 6px;border:1px solid var(--border);background:var(--bg-subtle,transparent);color:var(--text);border-radius:4px;font-size:13px;font-weight:600;" ' +
+              'style="width:56px;text-align:right;font-variant-numeric:tabular-nums;padding:2px 6px;border: 1px solid var(--border);background: var(--bg-subtle,transparent);color: var(--text);border-radius:4px;font-size:13px;font-weight:600;" ' +
               'title="Edit and press Enter or blur to save" />' +
             '<span class="pw-spinner" aria-hidden="true"></span>' +
           '</span>' +
@@ -18784,7 +18784,7 @@ function renderProjectStatus(data, opts) {
     return '<tr>' +
       '<td style="text-align:left;font-weight:600;">' + nameLabel + '</td>' +
       weightCellHtml +
-      '<td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);">' + (r.unassigned ? '&mdash;' : formatPct(r.target_share)) + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-muted);">' + (r.unassigned ? '&mdash;' : formatPct(r.target_share)) + '</td>' +
       platformCells +
       totalCell +
       costCellHtml +
@@ -18803,14 +18803,14 @@ function renderProjectStatus(data, opts) {
     ? costCell(grandCost, grandCostOrch, grandCostEst, grandCostSub, { extra: 'font-weight:600;' })
     : '';
   const footerHtml =
-    '<tr style="border-top:2px solid var(--border);font-weight:600;background:var(--bg-subtle);">' +
+    '<tr style="border-top: 2px solid var(--border);font-weight:600;background: var(--bg-subtle);">' +
       '<td style="text-align:left;">Total</td>' +
       '<td></td><td></td>' + footerCells +
       '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + grandTotal + '</td>' +
       footerCostCell +
     '</tr>';
   const legend =
-    '<div style="font-size:11px;color:var(--text-muted);padding:8px 2px 2px;">' +
+    '<div style="font-size:11px;color: var(--text-muted);padding:8px 2px 2px;">' +
       'Bracketed % is this project’s share of that platform’s posts in the window. Green means above target share (overposting), red means below (eligible for the picker). NA means the project is ineligible for that platform (no topics configured or threads disabled) and is excluded from that platform’s target denominator.' +
     '</div>';
   body.innerHTML =
@@ -18876,13 +18876,13 @@ async function saveProjectWeight(inp) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
       inp.value = String(original);
-      inp.style.borderColor = '#b91c1c';
+      inp.style.borderColor = '#3d3d3d';
       setTimeout(() => { inp.style.borderColor = prevBorder; }, 1500);
       console.error('[project-weight] save failed', data);
       return;
     }
     inp.dataset.originalWeight = String(next);
-    inp.style.borderColor = '#15803d';
+    inp.style.borderColor = '#646464';
     setTimeout(() => { inp.style.borderColor = prevBorder; }, 800);
     try { window.posthog && window.posthog.capture('project_weight_edit', { project: name, weight: next, previous: original }); } catch (er) {}
     // Pull fresh totals + target % from the server, but preserve the row
@@ -18892,7 +18892,7 @@ async function saveProjectWeight(inp) {
     loadProjectStatus(true, { preserveOrder: true });
   } catch (e) {
     inp.value = String(original);
-    inp.style.borderColor = '#b91c1c';
+    inp.style.borderColor = '#3d3d3d';
     setTimeout(() => { inp.style.borderColor = prevBorder; }, 1500);
     console.error('[project-weight] save error', e);
   } finally {
@@ -19232,7 +19232,7 @@ function renderActivity(events) {
     sorted.length + ' of ' + events.length + ' events';
   renderPagination(sorted.length);
   if (!page.length) {
-    body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text);padding:40px;">No matching events</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" style="text-align:center;color: var(--text);padding:40px;">No matching events</td></tr>';
     return;
   }
   const rows = page.map(e => {
@@ -19309,7 +19309,7 @@ function renderActivity(events) {
         '</div>' +
       '</td>' +
       '<td class="activity-summary">' + summaryHtml + '</td>' +
-      '<td class="sa-admin-only" style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated, e.cost_usd_subagent) + '</td>' +
+      '<td class="sa-admin-only" style="text-align:right;font-variant-numeric:tabular-nums;color: var(--text-secondary);">' + fmtCostCell(e.cost_usd, e.cost_usd_orchestrator, e.cost_usd_estimated, e.cost_usd_subagent) + '</td>' +
       '<td style="text-align:center;">' + renderDeleteBtnHtml(e) + '</td>' +
     '</tr>';
   }).join('');
@@ -19944,13 +19944,13 @@ function renderTikTokOauthCallback(rawUrl) {
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const ok = !!code && !err;
   const banner = ok
-    ? '<div style="background:#ecfdf5;color:#065f46;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization successful. Copy the code below and paste it into the local oauth_helper.py script.</div>'
-    : `<div style="background:#fef2f2;color:#991b1b;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization error: ${esc(err || 'no code in callback')}${errDesc ? ` &mdash; ${esc(errDesc)}` : ''}</div>`;
-  const codeBox = ok ? `<div><label style="display:block;font-size:13px;color:#52525b;margin-bottom:6px">Authorization code</label><textarea id="tt-code" readonly style="width:100%;font-family:ui-monospace,SFMono-Regular,monospace;font-size:14px;padding:10px;border:1px solid #d4d4d8;border-radius:8px;background:#fafafa" rows="3" onclick="this.select()">${esc(code)}</textarea><button id="tt-copy" style="margin-top:8px;padding:8px 14px;background:#18181b;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:13px">Copy</button></div><script>(function(){var b=document.getElementById('tt-copy'),t=document.getElementById('tt-code');if(b&&t){b.addEventListener('click',function(){navigator.clipboard.writeText(t.value).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)})})}})();</script>` : '';
-  const next = ok ? `<details style="margin-top:24px"><summary style="cursor:pointer;color:#27272a;font-weight:500">Next steps</summary><pre style="background:#0a0a0a;color:#fafafa;padding:16px;border-radius:8px;overflow:auto;font-size:13px;line-height:1.6;margin-top:12px">cd ~/social-autoposter
-python3 scripts/tiktok/oauth_helper.py exchange '${esc(code)}'</pre><p style="color:#52525b;font-size:13px;margin-top:12px">This exchanges the code for an access token + refresh token via the TikTok API using the client secret stored in your local macOS keychain, then writes the tokens to <code>~/tiktok-content-api/.env</code>.</p></details>` : '';
-  const meta = ok ? `<dl style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin-top:24px;font-size:13px;color:#52525b"><dt>state</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(state) || '<i>(none)</i>'}</dd><dt>scopes</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(scopes) || '<i>(none)</i>'}</dd></dl>` : '';
-  return `<!doctype html><html><head><meta charset="utf-8"><title>TikTok OAuth callback &middot; Meditation Fellow Studio</title><meta name="robots" content="noindex"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 24px;color:#18181b;background:#fff;line-height:1.5}h1{font-size:24px;font-weight:600;margin:0 0 24px;letter-spacing:-0.01em}code{font-family:ui-monospace,SFMono-Regular,monospace;background:#f4f4f5;padding:1px 6px;border-radius:4px;font-size:0.9em}</style></head><body><h1>TikTok OAuth callback</h1>${banner}${codeBox}${meta}${next}</body></html>`;
+    ? '<div style="background: #f9f9f9;color: #4a4a4a;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization successful. Copy the code below and paste it into the local oauth_helper.py script.</div>'
+    : `<div style="background: #f5f5f5;color: #363636;padding:12px 16px;border-radius:8px;margin-bottom:24px">Authorization error: ${esc(err || 'no code in callback')}${errDesc ? ` &mdash; ${esc(errDesc)}` : ''}</div>`;
+  const codeBox = ok ? `<div><label style="display:block;font-size:13px;color: #535353;margin-bottom:6px">Authorization code</label><textarea id="tt-code" readonly style="width:100%;font-family:ui-monospace,SFMono-Regular,monospace;font-size:14px;padding:10px;border: 1px solid #d4d4d8;border-radius:8px;background: #fafafa" rows="3" onclick="this.select()">${esc(code)}</textarea><button id="tt-copy" style="margin-top:8px;padding:8px 14px;background: #18181b;color: #fff;border: 0;border-radius:6px;cursor:pointer;font-size:13px">Copy</button></div><script>(function(){var b=document.getElementById('tt-copy'),t=document.getElementById('tt-code');if(b&&t){b.addEventListener('click',function(){navigator.clipboard.writeText(t.value).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)})})}})();</script>` : '';
+  const next = ok ? `<details style="margin-top:24px"><summary style="cursor:pointer;color: #27272a;font-weight:500">Next steps</summary><pre style="background: #0a0a0a;color: #fafafa;padding:16px;border-radius:8px;overflow:auto;font-size:13px;line-height:1.6;margin-top:12px">cd ~/social-autoposter
+python3 scripts/tiktok/oauth_helper.py exchange '${esc(code)}'</pre><p style="color: #535353;font-size:13px;margin-top:12px">This exchanges the code for an access token + refresh token via the TikTok API using the client secret stored in your local macOS keychain, then writes the tokens to <code>~/tiktok-content-api/.env</code>.</p></details>` : '';
+  const meta = ok ? `<dl style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin-top:24px;font-size:13px;color: #535353"><dt>state</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(state) || '<i>(none)</i>'}</dd><dt>scopes</dt><dd style="font-family:ui-monospace,SFMono-Regular,monospace">${esc(scopes) || '<i>(none)</i>'}</dd></dl>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>TikTok OAuth callback &middot; Meditation Fellow Studio</title><meta name="robots" content="noindex"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 24px;color: #18181b;background: #fff;line-height:1.5}h1{font-size:24px;font-weight:600;margin:0 0 24px;letter-spacing:-0.01em}code{font-family:ui-monospace,SFMono-Regular,monospace;background: #f4f4f5;padding:1px 6px;border-radius:4px;font-size:0.9em}</style></head><body><h1>TikTok OAuth callback</h1>${banner}${codeBox}${meta}${next}</body></html>`;
 }
 
 // --- Server ---
