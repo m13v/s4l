@@ -10788,16 +10788,18 @@ function renderResult(run) {
         qDrainedPosted + ' posted, ' + qDrainedExpired + ' expired, ' + qDrainedSkipped + ' skipped' + NL +
       '**Pending live:** ' + pendingLive;
     // Pill order mirrors the tooltip story: salvaged (Phase 0 input) leads,
-    // then Phase 1 funnel (searches, raw, passed), Phase 2a drop (expired),
-    // Phase 2b decision and outcome (Δ≥10, posted, failed).
+    // then Phase 1 funnel (searches, raw, passed, age-dropped), Phase 2a drop
+    // (expired), Phase 2b decision and outcome (Δ≥10, posted, failed).
+    // age-dropped precedes expired because the hard FRESHNESS_HOURS_DISCOVER cap
+    // fires at Phase 1 score time, before the Phase 2a Δ re-score that expires.
     return (
       '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
         queuePill +
         pill('searches', searches, searches > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('raw', raw, raw > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('passed', passed, passed > 0 ? '#9b9b9b' : 'var(--muted)') +
-        pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('age-dropped', ageDropped, ageDropped > 0 ? 'var(--text)' : 'var(--muted)') +
+        pill('expired', expired, expired > 0 ? 'var(--text)' : 'var(--muted)') +
         pill('Δ≥10', aboveFloor, aboveFloor > 0 ? '#999999' : 'var(--muted)') +
         pill('posted', posted, posted > 0 ? '#9b9b9b' : 'var(--muted)') +
         ((r.virality_posted_n || 0) > 0
