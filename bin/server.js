@@ -6321,10 +6321,11 @@ async function handleApi(req, res) {
           return acc;
         }, { n_candidates: 0, n_posted: 0, n_batches: 0 });
         const startedAt = variants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
-        // Assignment weights: skill/run-twitter-cycle.sh uses hash(BATCH_ID) % 4
-        // (since 2026-05-25, when D shipped), so each variant gets ~25% of batches
-        // over time. No fixed cap on total batches; experiment ends when we decide.
-        variants.forEach(v => { v.weight_pct = 25.0; });
+        // Assignment weights (2026-05-28 reweight): skill/run-twitter-cycle.sh uses
+        // hash(BATCH_ID) % 6 with mapping [A,B,C,D,D,D], so D gets 50% and A/B/C
+        // each get ~16.67%. Up-weighted D after early signal favored the 2k view cap.
+        // No fixed cap on total batches; experiment ends when we decide.
+        variants.forEach(v => { v.weight_pct = (v.key === 'D') ? 50.0 : (100.0 / 6); });
         const experiments = [{
           id: 'twitter-ripen-freshness-abcd',
           name: 'Twitter ripen + freshness + ceiling (A/B/C/D)',
