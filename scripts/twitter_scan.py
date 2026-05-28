@@ -288,7 +288,7 @@ def scan(
         }
     )
 
-    print("###TWEETS_BEGIN###")
-    print(json.dumps(kept))
-    print("###TWEETS_END###")
+    # 2026-05-28 cleanup: sentinel-print removed. The cycle reads SCAN_TWEETS_FILE
+    # directly via _write_scan_tweets_record() above; the bh_run stdout relay path
+    # is no longer wired. scan() still returns `kept` so direct callers can use it.
     return kept
