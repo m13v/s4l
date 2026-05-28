@@ -45,6 +45,7 @@ REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 SINGLETON_LOG="$LOG_DIR/twitter-cycle-singleton.log"
 CYCLE_SCRIPT="$REPO_DIR/skill/run-twitter-cycle.sh"
+SNAPSHOT=""
 
 mkdir -p "$LOG_DIR"
 
@@ -81,11 +82,26 @@ fi
 echo "$$" > "$LOCK_DIR/pid"
 
 # Release lock on any exit path.
-trap 'rm -rf "$LOCK_DIR"; log "[singleton] done pid=$$ rc=${EXIT_CODE:-?}"' EXIT
+trap 'rm -rf "$LOCK_DIR"; rm -f "$SNAPSHOT"; log "[singleton] done pid=$$ rc=${EXIT_CODE:-?}"' EXIT
 
 log "[singleton] start pid=$$"
 
-# Foreground run. Do NOT exec (so the trap fires on completion).
-/bin/bash "$CYCLE_SCRIPT"
+# Snapshot the cycle script to a temp copy and run THAT, so an in-place edit of
+# run-twitter-cycle.sh mid-run (e.g. the auto-commit agent committing a rewrite)
+# cannot corrupt bash's byte-offset execution of a live cycle. run-twitter-cycle.sh
+# hardcodes REPO_DIR="$HOME/social-autoposter" (no $0/BASH_SOURCE), so running the
+# copy from /tmp resolves the repo identically.
+# 2026-05-28 incident: commit 0ac29141 landed mid-run, byte-offset misaligned,
+# the cycle skipped its unconditional release_lock + Variant-A sleep, then
+# re-acquired its own still-held twitter-browser lock and self-deadlocked.
+SNAPSHOT="/tmp/sa-twitter-cycle-snapshot-$$.sh"
+cp "$CYCLE_SCRIPT" "$SNAPSHOT"
+if ! /bin/bash -n "$SNAPSHOT" 2>/dev/null; then
+  log "[singleton] snapshot syntax check failed (caught mid-edit?); aborting, launchd retries in 60s"
+  exit 1
+fi
+
+# Foreground run of the snapshot. Do NOT exec (so the trap fires on completion).
+/bin/bash "$SNAPSHOT"
 EXIT_CODE=$?
 exit "$EXIT_CODE"
