@@ -734,10 +734,10 @@ CUMULATIVE_TWEETS_PULLED=0
 TRIED_QUERIES_JSON='[]'
 # Running list of SEARCH TOPICS already tried this cycle. Each retry calls
 # pick_topic_for_project again with this list as exclude_topics so the model
-# isn't pinned to one assigned topic for all 5 attempts. When the universe
-# is exhausted the picker falls back to explore_invent mode so the cycle
-# still gets a fresh angle. Seeded below with the topic from the pre-loop
-# pick so attempt 2 doesn't accidentally re-pick it.
+# isn't pinned to one assigned topic for all 5 attempts. When the filtered
+# universe empties (small-project case), the picker raises
+# UniverseExhaustedError and the retry loop breaks — no invent fallback
+# (invention is the standalone invent_topics.py job's responsibility).
 TRIED_TOPICS_JSON='[]'
 # Latest Anthropic-side error classification for the post-loop log_run when
 # every attempt returned zero tweets (stream_idle_timeout vs phase1_no_tweets
@@ -758,8 +758,10 @@ SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
 # exclude_topics, then rewrite PROJECTS_JSON in place with the new topic and
 # its reference_topics. This makes the retry genuinely end-to-end programmatic:
 # new topic -> new query -> new tweets, not just "model rephrases the same
-# assigned topic 5 times". When the project's topic universe is exhausted,
-# the picker auto-flips to explore_invent so Claude still gets a fresh angle.
+# assigned topic 5 times". When the project's filtered universe empties
+# (small project, all topics tried this cycle), the picker raises
+# UniverseExhaustedError and the shell breaks the retry loop cleanly
+# (post-2026-05-28: no invent fallback; invention lives in invent_topics.py).
 if [ "$SCAN_ATTEMPT" -gt 1 ]; then
     log "Phase 1 attempt $SCAN_ATTEMPT: re-picking search_topic via pick_topic_for_project (exclude=$(echo "$TRIED_TOPICS_JSON" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0) tried)..."
     # The exhaustion marker file is the cross-boundary signal back to
@@ -836,7 +838,7 @@ print(json.dumps(cur))
 PY
 )
 
-_CURRENT_TOPICS=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; ps=json.load(sys.stdin); print(", ".join((p.get("search_topic") or "<invent>") for p in ps))' 2>/dev/null || echo "")
+_CURRENT_TOPICS=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; ps=json.load(sys.stdin); print(", ".join((p.get("search_topic") or "?") for p in ps))' 2>/dev/null || echo "")
 log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, candidates so far=$BATCH_COUNT/$RETRY_TARGET, topic(s)=$_CURRENT_TOPICS)"
 
 log "Phase 1: drafting queries and scraping tweets..."
@@ -859,15 +861,9 @@ SCAN_OUTPUT=$(TWITTER_SCAN_ENFORCE=1 "$REPO_DIR/scripts/run_claude.sh" "run-twit
 
 You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') projects. Draft exactly ONE Twitter search query for each, tailored to that project's ASSIGNED search_topic.
 
-Each project entry carries TWO fields that drive your behavior: \`topic_picked_mode\` (either \`use\` or \`explore_invent\`) and \`search_topic\` (a string in \`use\` mode, NULL in \`explore_invent\` mode).
+Each project entry carries an ASSIGNED \`search_topic\` (a string). The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe of active topics in project_search_topics. Weights are log-smoothed so the top performer takes about 20-30% and every cold topic still has a small but real chance (around 0.5-1%). The chosen topic's share of the weight is in \`picked_weight_pct\` for transparency. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if a sibling topic looks more attractive. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics. If the assigned topic is genuinely unworkable for the current Twitter supply, the right move is the empty-result path (return zero tweets for that query) — NOT to silently switch topics. Topic invention happens in a separate offline job; this cycle is pure use-mode.
 
-USE mode (~90% of cycles, indicated by \`topic_picked_mode: "use"\` and a non-null \`search_topic\`):
-The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe in config.json. Weights are log-smoothed so the top performer takes about 20-30% and every cold topic still has a small but real chance (around 0.5-1%). The chosen topic's share of the weight is in \`picked_weight_pct\` for transparency. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets discussing it. Do NOT substitute a different topic; do NOT paraphrase the topic into an adjacent angle even if a sibling topic looks more attractive. The picker has already made the selection and end-to-end attribution joins on this exact string — drift breaks the analytics.
-
-EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: "explore_invent"\` and \`search_topic: null\`):
-The picker is asking you to INVENT a brand-new search_topic for this project. Look at the project's own \`reference_topics\` array (per-project pool stats with weight, score, posts, clicks, posted_n, skipped_n) to see what's already working, what's saturated, and where the gaps are. Propose ONE new topic concept that does NOT appear in reference_topics and is NOT a paraphrase of anything in reference_topics. The invention should be in the project's domain (see \`description\`) but probe a gap the current list does not cover — adjacent verticals, longer-tail phrasings, fresh angles on the value prop. It must be plausible as something real users tweet about. Use your invented topic for the query AND stamp it on every tweet's \`search_topic\` field in the bh_run output (one consistent string for every tweet you return from this project's query).
-
-Each project's \`reference_topics\` is the project-scoped pool the picker drew from (or that you're inventing around). Use it to ground your query phrasing in either mode. The global TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for operator selection only, NOT a menu to pick a different topic from.
+Each project's \`reference_topics\` is the project-scoped pool the picker drew from. Use it to ground your query phrasing. The global TOP_TOPICS_JSON / DUD_TOPICS_JSON blocks below are CONTEXT for operator selection only, NOT a menu to pick a different topic from.
 
 Projects:
 $PROJECTS_JSON
