@@ -686,19 +686,13 @@ What scan() does for you (so you understand the contract; you do not write any o
 - Stamps `search_topic`, `matched_project`, `query` on every kept tweet.
 - Prints the kept tweets as JSON between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels.
 
-Output rules, READ CAREFULLY, this part has historically been buggy.
+Output rules:
 
-1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH; every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`, `query`) is already correct.
+1. The cycle shell reads scan() output directly from a sidecar file (env `SCAN_TWEETS_FILE`); you do NOT need to read or parse the sentinel-framed JSON scan() prints to stdout. Each bh_run call appends one JSONL record there; the shell aggregates them across all calls in this attempt.
 
-2. When you assemble the final structured `tweets` array, you MUST copy each tweet object byte-for-byte from the JSON output. You MUST NOT:
-   - Regenerate, beautify, summarize, infer, round, or otherwise modify any field.
-   - "Fix" what looks like a truncated tweet URL (e.g. an ID ending in many zeros). If a card has a malformed snowflake the JS already dropped it; nothing reaches you that needs fixing.
-   - "Fill in" a datetime that looks weird (round-hour stamps, missing seconds). Real Twitter datetimes look like `2026-05-16T15:42:17.000Z`. If you find yourself emitting `2026-05-16T10:00:00.000Z`, `09:00:00.000Z`, `08:00:00.000Z` etc. in 1-hour decrements, STOP, you are hallucinating, not copying. Re-read the bh_run stdout and copy the actual datetime strings.
-   - Invent any tweet that did not appear in the JSON output. The tweet count you report in `queries_used.tweets_found` must equal the array length printed between the sentinels for that bh_run call.
+2. Your final `structured_output` only needs to satisfy the schema. Emit `tweets: []` and `queries_used: []` as empty placeholders. The shell uses the sidecar file as ground truth and ignores your arrays unless the sidecar is empty (e.g. every bh_run was denied by the stub-enforcement hook).
 
-3. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`, and `search_topic`). The `search_topic` field is the project's ASSIGNED topic (the `search_topic` value from PROJECTS_JSON in `use` mode, or the topic you INVENTED for that project in `explore_invent` mode) pasted verbatim; same string you stamped on every tweet's `search_topic` field. Emit zero-result entries, they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings and so dud-cycle topics still get attributed end-to-end.
-
-4. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
+3. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
 HARNESS_STEP2_EOF
 
 # Substitute cycle-resolved values for the stub's freshness/skip placeholders.
@@ -823,6 +817,18 @@ log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, can
 
 log "Phase 1: drafting queries and scraping tweets..."
 
+# Shell-side data path. scripts/twitter_scan.scan() appends one JSONL record
+# per call to this file. After the claude scan session ends we parse it
+# directly into $RAW_FILE and $QUERIES_FILE, bypassing the model's
+# structured_output relay so the model no longer pays per-tweet copy tokens.
+# One file per Phase 1 attempt so retry iterations do not share state. The
+# rm -f makes each attempt's accumulation start clean. Falls back to the
+# structured_output parse below when the file is empty (e.g. every bh_run was
+# denied by the stub-enforcement hook so scan() never executed).
+SCAN_TWEETS_FILE="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-tweets.jsonl"
+rm -f "$SCAN_TWEETS_FILE"
+export SCAN_TWEETS_FILE
+
 SCAN_OUTPUT=$(TWITTER_SCAN_ENFORCE=1 "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA" "${TW_ENGINE_PREFIX}You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
 
 ## Step 1: Draft one search query per project
@@ -919,36 +925,69 @@ echo "$SCAN_OUTPUT" >> "$LOG_FILE"
 # whole point of this telemetry. We MUST write $QUERIES_FILE even on the
 # no-tweets exit path; otherwise duds never get logged and the negative
 # anti-list stays empty.
-python3 -c "
+if [ -s "$SCAN_TWEETS_FILE" ]; then
+    log "Parsing tweets from $SCAN_TWEETS_FILE (bypassing model relay)"
+    python3 -c "
 import json, sys
-text = sys.stdin.read().strip()
-# raw_decode reads the first complete JSON object and stops, so the trailing
-# run_claude.sh cost-log JSON line on stdout/stderr does not cause 'Extra data'.
-try:
-    env, _ = json.JSONDecoder().raw_decode(text)
-except Exception as e:
-    print(f'No tweet data found in output (envelope parse error: {e})', file=sys.stderr); sys.exit(1)
-so = env.get('structured_output')
-if so is None:
-    so = env.get('result')
-if isinstance(so, str):
-    try: so = json.loads(so)
-    except Exception: pass
-
-queries_used = so.get('queries_used', []) if isinstance(so, dict) else []
-# Always write \$QUERIES_FILE even when empty so the shell's existence check
-# is unambiguous; logger no-ops on empty list.
+recs = []
+for ln in open('$SCAN_TWEETS_FILE'):
+    ln = ln.strip()
+    if not ln:
+        continue
+    try:
+        recs.append(json.loads(ln))
+    except json.JSONDecodeError:
+        print(f'shell-side: skipping bad JSONL line', file=sys.stderr)
+tweets = []
+queries_used = []
+for r in recs:
+    ts = r.get('tweets') or []
+    tweets.extend(ts)
+    queries_used.append({
+        'query': r.get('query', ''),
+        'project': r.get('project', ''),
+        'tweets_found': len(ts),
+        'search_topic': r.get('search_topic', ''),
+    })
 json.dump(queries_used, open('$QUERIES_FILE', 'w'))
-print(f'Extracted {len(queries_used)} queries_used entries to $QUERIES_FILE', file=sys.stderr)
-
-tweets = so.get('tweets', []) if isinstance(so, dict) else []
-if not tweets:
-    print('No tweets in structured_output.tweets', file=sys.stderr); sys.exit(1)
 json.dump(tweets, open('$RAW_FILE', 'w'))
-print(f'Extracted {len(tweets)} tweets to $RAW_FILE', file=sys.stderr)
-" <<< "$SCAN_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
+print(f'shell-side parse: {len(tweets)} tweets, {len(queries_used)} attempts from SCAN_TWEETS_FILE', flush=True)
+sys.exit(0 if tweets else 1)
+" 2>&1 | tee -a "$LOG_FILE"
+    EXTRACT_EXIT=${PIPESTATUS[0]:-1}
+else
+    log "SCAN_TWEETS_FILE empty/missing, falling back to structured_output relay"
+    python3 -c "
+    import json, sys
+    text = sys.stdin.read().strip()
+    # raw_decode reads the first complete JSON object and stops, so the trailing
+    # run_claude.sh cost-log JSON line on stdout/stderr does not cause 'Extra data'.
+    try:
+        env, _ = json.JSONDecoder().raw_decode(text)
+    except Exception as e:
+        print(f'No tweet data found in output (envelope parse error: {e})', file=sys.stderr); sys.exit(1)
+    so = env.get('structured_output')
+    if so is None:
+        so = env.get('result')
+    if isinstance(so, str):
+        try: so = json.loads(so)
+        except Exception: pass
 
-EXTRACT_EXIT=${PIPESTATUS[0]:-1}
+    queries_used = so.get('queries_used', []) if isinstance(so, dict) else []
+    # Always write \$QUERIES_FILE even when empty so the shell's existence check
+    # is unambiguous; logger no-ops on empty list.
+    json.dump(queries_used, open('$QUERIES_FILE', 'w'))
+    print(f'Extracted {len(queries_used)} queries_used entries to $QUERIES_FILE', file=sys.stderr)
+
+    tweets = so.get('tweets', []) if isinstance(so, dict) else []
+    if not tweets:
+        print('No tweets in structured_output.tweets', file=sys.stderr); sys.exit(1)
+    json.dump(tweets, open('$RAW_FILE', 'w'))
+    print(f'Extracted {len(tweets)} tweets to $RAW_FILE', file=sys.stderr)
+    " <<< "$SCAN_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
+
+    EXTRACT_EXIT=${PIPESTATUS[0]:-1}
+fi
 
 # --- Discovery-stage counters ------------------------------------------------
 # Capture queries-run / duds / raw-tweets-pulled BEFORE any early-exit branch
