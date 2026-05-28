@@ -41,11 +41,17 @@ from http_api import api_get, api_post  # noqa: E402
 
 
 def _recent_candidate_pairs(since_iso: str, only_project: str | None):
-    """Return {project_name: set(search_topic)} for candidates since `since_iso`.
+    """Return per-project candidate stats since `since_iso`.
 
     Paginates twitter-candidates by discovered_at (the API supports `since`).
-    Stops at limit=500 per page — we only care about distinct pairs so a few
-    skipped trailing rows are harmless; the next run picks them up.
+    Stops at limit=500 per page — distinct pairs are stable across truncation
+    but raw row counts may be a slight under-read on heavy windows; the next
+    run picks up the tail.
+
+    Returns dict keyed by project_name with:
+        topics        set[str]              — distinct search_topic strings
+        row_total     int                   — raw rows in window
+        rows_by_topic dict[str, int]        — row count per topic
     """
     query = {
         "since": since_iso,
@@ -55,25 +61,37 @@ def _recent_candidate_pairs(since_iso: str, only_project: str | None):
         query["matched_project"] = only_project
     resp = api_get("/api/v1/twitter-candidates", query=query)
     rows = ((resp or {}).get("data") or {}).get("candidates") or []
-    pairs: dict[str, set[str]] = {}
+    out: dict[str, dict] = {}
     for r in rows:
         proj = (r.get("matched_project") or "").strip()
         topic = (r.get("search_topic") or "").strip()
         if not proj or not topic:
             continue
-        pairs.setdefault(proj, set()).add(topic)
-    return pairs
+        bucket = out.setdefault(proj, {
+            "topics": set(),
+            "row_total": 0,
+            "rows_by_topic": {},
+        })
+        bucket["topics"].add(topic)
+        bucket["row_total"] += 1
+        bucket["rows_by_topic"][topic] = bucket["rows_by_topic"].get(topic, 0) + 1
+    return out
 
 
-def _existing_topics(project: str) -> set[str]:
-    """Return every topic for `project` in project_search_topics, any status."""
+def _existing_topics_with_source(project: str) -> dict[str, str]:
+    """Return {topic: source} for every row in project_search_topics, any status.
+
+    Used both as the "already known" idempotency check (key membership) and
+    to identify which existing topics are invented (value=='invented') so
+    `posts_for_known_inventions` can be reported on a 0-new cycle.
+    """
     resp = api_get(
         "/api/v1/project-search-topics",
         query={"project": project, "status": "all"},
     )
     rows = ((resp or {}).get("data") or {}).get("topics") or []
     return {
-        (r.get("topic") or "").strip()
+        (r.get("topic") or "").strip(): (r.get("source") or "seed").strip()
         for r in rows
         if r.get("topic")
     }
@@ -103,27 +121,52 @@ def main():
     total_failed = 0
 
     for proj in sorted(pairs):
-        topics = pairs[proj]
+        bucket = pairs[proj]
+        topics = bucket["topics"]
+        row_total = bucket["row_total"]
+        rows_by_topic = bucket["rows_by_topic"]
         try:
-            existing = _existing_topics(proj)
+            existing = _existing_topics_with_source(proj)
         except SystemExit as e:
             print(f"[promote_invented] FAIL list project={proj!r}: {e}",
                   file=sys.stderr)
             total_failed += 1
             continue
-        new_topics = sorted(t for t in topics if t not in existing)
+        existing_keys = set(existing.keys())
+        new_topics = sorted(t for t in topics if t not in existing_keys)
         skipped = len(topics) - len(new_topics)
         total_skipped += skipped
         if not new_topics:
+            # "0 new" used to be silent on whether known inventions
+            # earned activity in the window. Now we surface raw row
+            # counts so a quiet cycle (truly nothing happening) is
+            # distinguishable from a busy-but-no-net-new cycle (known
+            # inventions accruing candidates).
+            known_invention_rows = {
+                t: rows_by_topic[t]
+                for t in rows_by_topic
+                if existing.get(t) == "invented"
+            }
+            inv_summary = (
+                " activity_for_known_inventions="
+                + ",".join(
+                    f"{t!r}:{n}" for t, n in
+                    sorted(known_invention_rows.items(), key=lambda kv: -kv[1])
+                )
+            ) if known_invention_rows else ""
             print(
                 f"{proj}: 0 new (candidate-distinct={len(topics)}, "
-                f"already-known={skipped})"
+                f"already-known={skipped}, candidate-rows={row_total})"
+                + inv_summary
             )
             continue
         if args.dry_run:
             for t in new_topics:
                 print(f"[dry] would promote: project={proj!r} topic={t!r}")
-            print(f"{proj}: {len(new_topics)} new (dry-run)")
+            print(
+                f"{proj}: {len(new_topics)} new (dry-run, "
+                f"candidate-rows={row_total})"
+            )
             continue
         promoted = 0
         for topic in new_topics:
@@ -147,7 +190,10 @@ def main():
                 print(f"[promote_invented] FAIL {proj!r}/{topic!r}: {e}",
                       file=sys.stderr)
         total_new += promoted
-        print(f"{proj}: {promoted} new promoted, {skipped} already known")
+        print(
+            f"{proj}: {promoted} new promoted, {skipped} already known, "
+            f"candidate-rows={row_total}"
+        )
 
     print(
         f"\n[promote_invented] done. new={total_new} skipped_known="
