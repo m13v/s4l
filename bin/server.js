@@ -705,7 +705,9 @@ const JOB_HISTORY_HIDDEN_SCRIPTS = new Set([
 // filter on the Job History tab include in-progress wrapper runs alongside
 // completed log_run.py entries that already use canonical names.
 const SCRIPT_ALIASES = {
-  run_twitter_cycle:         'post_twitter',
+  run_twitter_cycle:           'post_twitter',
+  run_twitter_cycle_singleton: 'post_twitter',
+  run_twitter_cycle_launchd:   'post_twitter',
   run_twitter_threads:       'thread_twitter',
   run_linkedin:              'post_linkedin',
   run_reddit_threads:        'thread_reddit',
