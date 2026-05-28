@@ -450,16 +450,13 @@ for p in picked:
     # 2026-05-26: force-pick ONE search_topic per project via the Python
     # picker so end-to-end attribution (topic -> query -> candidate ->
     # post -> click) is clean. Mirrors the engagement_styles flow.
-    # Two branches:
-    #   - use (~90%): picker returns search_topic=<string>, weighted-random
-    #     over the FULL universe with log-smoothed weights (top ~20-30%,
-    #     cold ~0.5-1%). Claude must use the assigned topic verbatim.
-    #   - explore_invent (~10%): picker returns search_topic=None, Claude
-    #     INVENTS a new topic for this cycle given the per-project pool
-    #     stats (reference_topics). The invention is captured in
-    #     twitter_candidates.search_topic for analytics; promotion into
-    #     project_search_topics happens in score_twitter_candidates.
-    # See scripts/pick_search_topic.py.
+    #
+    # Single mode (post-2026-05-28): picker returns search_topic=<string>,
+    # weighted-random over the FULL universe with log-smoothed weights
+    # (top ~20-30%, cold ~0.5-1%). Claude must use the assigned topic
+    # verbatim. EXPLORE_INVENT was removed in favor of the standalone
+    # invent_topics.py job that writes new topics directly into
+    # project_search_topics outside the cycle.
     #
     # 2026-05-27: NO fallback. The DB is the only source of truth for
     # the universe. If pick_topic_for_project raises (DB unreachable or
@@ -469,8 +466,7 @@ for p in picked:
     # legacy search_topics[] entry would post against a stale seed list
     # and corrupt attribution; the rule is "stop the pipeline".
     topic_pick = pick_topic_for_project(p.get('name'), platform='twitter')
-    picked_topic = topic_pick.get('search_topic')  # may be None on explore_invent
-    picked_mode = topic_pick.get('mode', 'use')
+    picked_topic = topic_pick.get('search_topic')
     reference_topics = topic_pick.get('reference_topics') or []
     picked_weight_pct = topic_pick.get('picked_weight_pct')
     chosen.append({
@@ -480,14 +476,10 @@ for p in picked:
         # `search_topics: [...]` array. Claude draws its query from THIS
         # topic and must echo it verbatim on every tweet object via the
         # bh_run scrape script's `search_topic` Python variable.
-        # NULL when topic_picked_mode == 'explore_invent' — Claude must
-        # invent a new topic given the reference_topics stats below.
         'search_topic': picked_topic,
-        'topic_picked_mode': picked_mode,
         'picked_weight_pct': picked_weight_pct,
-        # Per-project pool stats (top by composite_score). Surfaced so
-        # Claude can see what's working / saturated when inventing on
-        # the explore_invent branch, and as context in use mode.
+        # Per-project pool stats (top by composite_score). Surfaced as
+        # context to help Claude understand the topic's history.
         'reference_topics': reference_topics,
         # Self-improving exclusion list (2026-05-09): MUST be appended
         # as `-term` to every query drafted for this project.
@@ -751,6 +743,11 @@ TRIED_TOPICS_JSON='[]'
 # every attempt returned zero tweets (stream_idle_timeout vs phase1_no_tweets
 # vs api_overloaded, etc.). Falls back to phase1_no_tweets when unset.
 LAST_PHASE1_REASON=""
+# Set to 1 by the in-loop repick when pick_search_topic raises
+# UniverseExhaustedError (the project ran out of un-tried active topics).
+# Used by the post-loop empty-batch branch to emit `universe_exhausted:1`
+# instead of `empty_batch:1` so the dashboard shows the right cause.
+UNIVERSE_EXHAUSTED=0
 
 while [ "$SCAN_ATTEMPT" -lt "$MAX_SCAN_ATTEMPTS" ]; do
 SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
@@ -765,13 +762,23 @@ SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
 # the picker auto-flips to explore_invent so Claude still gets a fresh angle.
 if [ "$SCAN_ATTEMPT" -gt 1 ]; then
     log "Phase 1 attempt $SCAN_ATTEMPT: re-picking search_topic via pick_topic_for_project (exclude=$(echo "$TRIED_TOPICS_JSON" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0) tried)..."
-    PROJECTS_JSON=$(python3 - "$PROJECTS_JSON" "$TRIED_TOPICS_JSON" <<'PY' 2>>"$LOG_FILE"
+    # The exhaustion marker file is the cross-boundary signal back to
+    # bash: when pick_topic_for_project raises UniverseExhaustedError for
+    # ANY selected project, the Python writes this file and the shell
+    # breaks the retry loop after the heredoc returns. No invent fallback
+    # (2026-05-28 architecture: invention is the standalone
+    # invent_topics.py job's responsibility, not the cycle's).
+    UNIVERSE_EXHAUSTED_MARKER="/tmp/twitter_cycle_universe_exhausted_${BATCH_ID}"
+    rm -f "$UNIVERSE_EXHAUSTED_MARKER"
+    PROJECTS_JSON=$(python3 - "$PROJECTS_JSON" "$TRIED_TOPICS_JSON" "$UNIVERSE_EXHAUSTED_MARKER" <<'PY' 2>>"$LOG_FILE"
 import json, os, sys
 sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
-from pick_search_topic import pick_topic_for_project, PickerError
+from pick_search_topic import pick_topic_for_project, PickerError, UniverseExhaustedError
 
 projects = json.loads(sys.argv[1] or '[]')
 excluded = json.loads(sys.argv[2] or '[]')
+marker_path = sys.argv[3]
+exhausted_for = []
 for p in projects:
     name = p.get('name')
     if not name:
@@ -780,18 +787,35 @@ for p in projects:
         new_pick = pick_topic_for_project(
             name, platform='twitter', exclude_topics=excluded,
         )
+    except UniverseExhaustedError as exc:
+        # All active topics for this project already tried this cycle.
+        # Stamp the marker file so the shell breaks the retry loop and
+        # logs `universe_exhausted:1` as the failure reason. Leave the
+        # project entry as-is (the loop will exit before scanning anyway).
+        sys.stderr.write(f"repick_universe_exhausted project={name!r} error={exc}\n")
+        exhausted_for.append(name)
+        continue
     except PickerError as exc:
-        # On repick failure keep the previous topic; the scan will still
-        # run, just without a fresh angle. Strictly better than aborting.
+        # On repick PickerError (DB unreachable, etc) keep the previous
+        # topic; the scan will still run. Strictly better than aborting.
         sys.stderr.write(f"repick_failed project={name!r} error={exc}\n")
         continue
     p['search_topic'] = new_pick.get('search_topic')
-    p['topic_picked_mode'] = new_pick.get('mode', 'use')
     p['picked_weight_pct'] = new_pick.get('picked_weight_pct')
     p['reference_topics'] = new_pick.get('reference_topics') or []
+if exhausted_for:
+    with open(marker_path, 'w') as fh:
+        fh.write(','.join(exhausted_for) + '\n')
 print(json.dumps(projects))
 PY
 )
+if [ -f "$UNIVERSE_EXHAUSTED_MARKER" ]; then
+    UNIVERSE_EXHAUSTED=1
+    _EXH_PROJECTS=$(cat "$UNIVERSE_EXHAUSTED_MARKER" 2>/dev/null | tr -d '\n')
+    log "  Universe exhausted for project(s)=$_EXH_PROJECTS after $((SCAN_ATTEMPT - 1)) prior attempt(s); breaking retry loop"
+    rm -f "$UNIVERSE_EXHAUSTED_MARKER"
+    break
+fi
 fi
 
 # Snapshot this attempt's topic(s) into TRIED_TOPICS_JSON so the NEXT
@@ -1151,11 +1175,13 @@ log "Phase 1 complete after $SCAN_ATTEMPT scan attempt(s). Final batch has $BATC
 
 if [ "$BATCH_COUNT" = "0" ]; then
     # Distinguish "Claude returned no tweets at all" from "Claude returned
-    # tweets but enrichment dropped them all" so the dashboard can surface
-    # the right failure mode. If every attempt classified an Anthropic-side
-    # error, surface that; else it was the all-stale / all-dedupe case and
-    # we surface empty_batch.
-    if [ -n "$LAST_PHASE1_REASON" ] && [ "$CUMULATIVE_TWEETS_PULLED" = "0" ]; then
+    # tweets but enrichment dropped them all" from "we exhausted the topic
+    # universe mid-retry" so the dashboard can surface the right failure
+    # mode. Priority order: universe_exhausted (the picker said stop) >
+    # Anthropic-side classified error > generic empty_batch.
+    if [ "${UNIVERSE_EXHAUSTED:-0}" = "1" ]; then
+        _FAILURE_REASON="universe_exhausted:1"
+    elif [ -n "$LAST_PHASE1_REASON" ] && [ "$CUMULATIVE_TWEETS_PULLED" = "0" ]; then
         _FAILURE_REASON="${LAST_PHASE1_REASON}:1"
     else
         _FAILURE_REASON="empty_batch:1"
