@@ -652,148 +652,61 @@ ANTI_DEBUG_RULE='ANTI-DEBUG RULE — Phase 1 is a STRAIGHT-LINE scrape with a HA
 # into the variable with no command substitution, sidestepping the bug.
 # `|| true` because read returns 1 when it hits EOF without the delimiter.
 IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
-## Step 2: Search and extract — RUN THIS EXACT SCRIPT, NO IMPROVEMENTS
+## Step 2: Search and extract, RUN EXACTLY THIS STUB, NO IMPROVEMENTS
 
-For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. Substitute ONLY the values of `query`, `search_topic`, and `matched_project`; leave every other byte identical. Use `new_tab(url)` on the very FIRST bh_run call of the cycle, and `goto_url(url)` for every subsequent call (reuse the tab — opening a new tab per query leaks tabs and exhausts Chrome).
+For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. The body is a thin stub that calls the operator-owned `twitter_scan.scan` function. DO NOT write `goto_url`, `js(...)`, `new_tab`, URL construction, scrape loops, or age-gate logic yourself; the operator owns ALL of that inside scan(). The PreToolUse hook is in enforcement mode and WILL REJECT or REWRITE any bh_run script that is not this stub.
 
-CRITICAL — `search_topic` is the assigned topic from the project's JSON entry under the `search_topic` field, NOT the query string. The picker has already chosen one canonical topic per project; you MUST paste that exact string verbatim into the `search_topic` Python variable. End-to-end attribution (topic → query → candidate → click) joins on this string match, so any drift breaks the analytics. Do NOT set `search_topic = query`, do NOT paraphrase the topic, do NOT lowercase or strip operators from it.
+Your ONLY freedom is the three quoted keyword arguments. Substitute:
+- `query`: the query string you drafted for this project (with operators).
+- `project`: the project name (e.g. studyly, Podlog, S4L).
+- `search_topic`: the project's ASSIGNED `search_topic` field, pasted VERBATIM. End-to-end attribution joins on this string; do NOT set it equal to the query, do NOT paraphrase the topic, do NOT lowercase or strip operators from it.
+
+`freshness_hours` and `skip_ids` are pre-filled with cycle-correct values; leave them as-is.
 
 ```python
-import json, urllib.parse, time
-query = "YOUR DRAFTED QUERY HERE WITH OPERATORS"
-search_topic = "PASTE THE PROJECT'S ASSIGNED search_topic FIELD VERBATIM"  # NOT the query string
-matched_project = "PROJECT_NAME"                     # e.g. studyly, Podlog, S4L
-url = "https://x.com/search?q=" + urllib.parse.quote(query) + "&f=live"
-goto_url(url)  # FIRST call of the cycle only: replace with new_tab(url)
-wait_for_load()
-time.sleep(4)
-tweets = js("""
-(() => {
-  const SNOWFLAKE = /\/status\/(\d{15,19})(?:[\/?#]|$)/;
-  const FAKE_TAIL = /0{6,}$/;
-  const results = [];
-  for (const article of [...document.querySelectorAll('article[data-testid="tweet"]')].slice(0, 8)) {
-    try {
-      let handle = '';
-      for (const link of article.querySelectorAll('a[role="link"]')) {
-        const href = link.getAttribute('href');
-        if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/search') && href.length > 1 && href.split('/').length === 2) {
-          handle = href.replace('/', ''); break;
-        }
-      }
-      const tweetText = article.querySelector('[data-testid="tweetText"]');
-      const text = tweetText ? tweetText.textContent : '';
-      const timeEl = article.querySelector('time');
-      const timeParent = timeEl ? timeEl.closest('a') : null;
-      const tweetUrl = timeParent ? 'https://x.com' + timeParent.getAttribute('href') : '';
-      const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
-      // Defense-in-depth: drop any card whose snowflake suffix looks fabricated
-      // (no status ID, length wrong, or 6+ trailing zeros — the model's
-      // template signature observed 2026-05-16). The scorer also rejects these,
-      // but stripping them at scrape time keeps the structured_output clean.
-      const sm = tweetUrl.match(SNOWFLAKE);
-      if (!sm || FAKE_TAIL.test(sm[1])) continue;
-      // Drop cards with no readable timestamp (real <time> elements always
-      // carry an ISO datetime attribute).
-      if (!datetime || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(datetime)) continue;
-      let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
-      for (const btn of article.querySelectorAll('[role="group"] button')) {
-        const al = btn.getAttribute('aria-label') || '';
-        let m;
-        if (m=al.match(/([\d,]+)\s*repl/i)) replies=parseInt(m[1].replace(/,/g,''));
-        if (m=al.match(/([\d,]+)\s*repost/i)) retweets=parseInt(m[1].replace(/,/g,''));
-        if (m=al.match(/([\d,]+)\s*like/i)) likes=parseInt(m[1].replace(/,/g,''));
-        if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
-        if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
-      }
-      results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
-    } catch(e) {}
-  }
-  return results;
-})()
-""")
-# 2026-05-27: HARD AGE GATE at the scrape boundary. Drops stale tweets BEFORE
-# they are baked with metadata and printed between the ###TWEETS_*### sentinels,
-# so the scan model literally cannot see anything older than the variant's
-# freshness window in its tool_result. This closes every bypass at once:
-#   - X "Latest" tab leaking older tweets past since_time: (X-side filter is
-#     advisory, not authoritative)
-#   - bare-keyword queries that route around the operator-anchored hook
-#   - prompt drift where the model swaps since_time: back to since:
-# Reads FRESHNESS_HOURS_DISCOVER from the cycle env (set by run-twitter-cycle.sh
-# per variant: A/B=6h, C/D=1h). Falls back to 6h if unset. Any tweet whose
-# `datetime` is malformed or missing is dropped (we cannot prove it's fresh).
-import os as _os_age, datetime as _dt_age
-_AGE_CAP_S = int(_os_age.environ.get('FRESHNESS_HOURS_DISCOVER') or '6') * 3600
-_NOW_AGE = _dt_age.datetime.now(_dt_age.timezone.utc).timestamp()
-def _is_fresh(_t):
-    _ds = _t.get('datetime') or ''
-    if not _ds:
-        return False
-    try:
-        _ts = _dt_age.datetime.fromisoformat(_ds.replace('Z', '+00:00')).timestamp()
-    except Exception:
-        return False
-    return (_NOW_AGE - _ts) <= _AGE_CAP_S
-_pre_age_count = len(tweets)
-tweets = [_t for _t in tweets if _is_fresh(_t)]
-_age_dropped = _pre_age_count - len(tweets)
-# Unconditional log so every bh_run leaves positive evidence the gate ran,
-# not just the cycles where it had stale tweets to drop.
-# print() goes only into the bh_run tool_result text (model-visible), so
-# also append to a sidecar file so operators can grep without parsing the
-# session archive. Fail-open: any I/O error is swallowed.
-print(f'[harness_age_gate] dropped={_age_dropped} kept={len(tweets)} pre={_pre_age_count} cap_h={_AGE_CAP_S//3600}', flush=True)
-try:
-    import os as _os_sc, json as _json_sc, time as _time_sc
-    _SIDECAR = _os_sc.path.expanduser('~/social-autoposter/skill/logs/twitter-harness-age-gate.jsonl')
-    with open(_SIDECAR, 'a') as _fh_sc:
-        _fh_sc.write(_json_sc.dumps({
-            'ts': _time_sc.strftime('%Y-%m-%dT%H:%M:%S%z'),
-            'ts_epoch': int(_time_sc.time()),
-            'batch_id': _os_sc.environ.get('BATCH_ID') or None,
-            'cycle_variant': _os_sc.environ.get('TWITTER_CYCLE_VARIANT') or None,
-            'freshness_hours': _AGE_CAP_S // 3600,
-            'pre_count': _pre_age_count,
-            'kept_count': len(tweets),
-            'dropped_count': _age_dropped,
-            'query': locals().get('query'),
-            'project': locals().get('matched_project'),
-            'search_topic': locals().get('search_topic'),
-        }) + '\n')
-except Exception:
-    pass
-
-# Bake project/topic/query into each tweet object IN PYTHON, before printing —
-# so the model has zero degrees of freedom on these fields. The model only
-# concatenates the per-project arrays; it does not regenerate any value.
-# `query` is the LITERAL X advanced-search string this bh_run call used; the
-# scorer joins on it against twitter_search_attempts so each candidate gets
-# stamped with the exact discovering attempt_id (2026-05-21 bug fix: dashboard
-# was crediting dud queries with posts from sibling queries in the same batch).
-for t in tweets:
-    t['search_topic'] = search_topic
-    t['matched_project'] = matched_project
-    t['query'] = query
-print('###TWEETS_BEGIN###')
-print(json.dumps(tweets))
-print('###TWEETS_END###')
+import sys
+sys.path.insert(0, "/Users/matthewdi/social-autoposter/scripts")
+from twitter_scan import scan
+scan(
+    query="YOUR DRAFTED QUERY HERE WITH OPERATORS",
+    project="PROJECT_NAME",
+    search_topic="PASTE THE PROJECT'S ASSIGNED search_topic VERBATIM",
+    freshness_hours=___FRESHNESS_HOURS___,
+    skip_ids=___ENGAGED_IDS___,
+)
 ```
 
-Output rules — READ CAREFULLY, this part has historically been buggy.
+What scan() does for you (so you understand the contract; you do not write any of this):
+- Builds the URL with `&f=live` (Latest tab forced; you cannot pick Top).
+- Strips any since/until/since_time/until_time from your query string.
+- Force-appends `since_time:<now - freshness_hours*3600>` to the URL.
+- Navigates the harness Chrome (reuses an existing real tab or opens one).
+- Scrapes up to 8 article cards with the same JS the legacy template used.
+- Drops tweets older than `freshness_hours` and any tweet ID in `skip_ids`.
+- Stamps `search_topic`, `matched_project`, `query` on every kept tweet.
+- Prints the kept tweets as JSON between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels.
 
-1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH — every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`, `query`) is already correct.
+Output rules, READ CAREFULLY, this part has historically been buggy.
+
+1. The print() emits a tagged JSON array between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels. THE JSON BETWEEN THE SENTINELS IS GROUND TRUTH; every field (`handle`, `text`, `tweetUrl`, `datetime`, `replies`, `retweets`, `likes`, `views`, `bookmarks`, `search_topic`, `matched_project`, `query`) is already correct.
 
 2. When you assemble the final structured `tweets` array, you MUST copy each tweet object byte-for-byte from the JSON output. You MUST NOT:
    - Regenerate, beautify, summarize, infer, round, or otherwise modify any field.
    - "Fix" what looks like a truncated tweet URL (e.g. an ID ending in many zeros). If a card has a malformed snowflake the JS already dropped it; nothing reaches you that needs fixing.
-   - "Fill in" a datetime that looks weird (round-hour stamps, missing seconds). Real Twitter datetimes look like `2026-05-16T15:42:17.000Z`. If you find yourself emitting `2026-05-16T10:00:00.000Z`, `09:00:00.000Z`, `08:00:00.000Z` etc. in 1-hour decrements, STOP — you are hallucinating, not copying. Re-read the bh_run stdout and copy the actual datetime strings.
+   - "Fill in" a datetime that looks weird (round-hour stamps, missing seconds). Real Twitter datetimes look like `2026-05-16T15:42:17.000Z`. If you find yourself emitting `2026-05-16T10:00:00.000Z`, `09:00:00.000Z`, `08:00:00.000Z` etc. in 1-hour decrements, STOP, you are hallucinating, not copying. Re-read the bh_run stdout and copy the actual datetime strings.
    - Invent any tweet that did not appear in the JSON output. The tweet count you report in `queries_used.tweets_found` must equal the array length printed between the sentinels for that bh_run call.
 
-3. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`, and `search_topic`). The `search_topic` field is the project's ASSIGNED topic (the `search_topic` value from PROJECTS_JSON in `use` mode, or the topic you INVENTED for that project in `explore_invent` mode) pasted verbatim — same string you stamped on every tweet's `search_topic` field. Emit zero-result entries — they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings and so dud-cycle topics still get attributed end-to-end.
+3. After all projects: return the full `tweets` array AND a `queries_used` array (one entry per project, with `query`, `project`, `tweets_found`, and `search_topic`). The `search_topic` field is the project's ASSIGNED topic (the `search_topic` value from PROJECTS_JSON in `use` mode, or the topic you INVENTED for that project in `explore_invent` mode) pasted verbatim; same string you stamped on every tweet's `search_topic` field. Emit zero-result entries, they are logged to `twitter_search_attempts` so future cycles avoid dud phrasings and so dud-cycle topics still get attributed end-to-end.
 
 4. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
 HARNESS_STEP2_EOF
+
+# Substitute cycle-resolved values for the stub's freshness/skip placeholders.
+# Single-quoted heredoc above prevents shell expansion, so we do it here against
+# the captured variable. Bash 3.2 supports ${var//search/replace}.
+STEP2_INSTRUCTIONS="${STEP2_INSTRUCTIONS//___FRESHNESS_HOURS___/$FRESHNESS_HOURS_DISCOVER}"
+STEP2_INSTRUCTIONS="${STEP2_INSTRUCTIONS//___ENGAGED_IDS___/$ENGAGED_TWEET_IDS}"
+
 
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
@@ -833,6 +746,13 @@ CUMULATIVE_TWEETS_PULLED=0
 # into each retry's prompt as "do NOT repeat these phrasings". Extended after
 # every scan from QUERIES_FILE before log_twitter_search_attempts deletes it.
 TRIED_QUERIES_JSON='[]'
+# Running list of SEARCH TOPICS already tried this cycle. Each retry calls
+# pick_topic_for_project again with this list as exclude_topics so the model
+# isn't pinned to one assigned topic for all 5 attempts. When the universe
+# is exhausted the picker falls back to explore_invent mode so the cycle
+# still gets a fresh angle. Seeded below with the topic from the pre-loop
+# pick so attempt 2 doesn't accidentally re-pick it.
+TRIED_TOPICS_JSON='[]'
 # Latest Anthropic-side error classification for the post-loop log_run when
 # every attempt returned zero tweets (stream_idle_timeout vs phase1_no_tweets
 # vs api_overloaded, etc.). Falls back to phase1_no_tweets when unset.
@@ -840,11 +760,70 @@ LAST_PHASE1_REASON=""
 
 while [ "$SCAN_ATTEMPT" -lt "$MAX_SCAN_ATTEMPTS" ]; do
 SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
-log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, candidates so far=$BATCH_COUNT/$RETRY_TARGET)"
+
+# --- Per-attempt topic (re)pick (2026-05-27) ---------------------------------
+# Attempt 1 keeps the pre-loop topic that PROJECTS_JSON already carries.
+# Attempts 2+ call pick_topic_for_project again with TRIED_TOPICS_JSON as
+# exclude_topics, then rewrite PROJECTS_JSON in place with the new topic and
+# its reference_topics. This makes the retry genuinely end-to-end programmatic:
+# new topic -> new query -> new tweets, not just "model rephrases the same
+# assigned topic 5 times". When the project's topic universe is exhausted,
+# the picker auto-flips to explore_invent so Claude still gets a fresh angle.
+if [ "$SCAN_ATTEMPT" -gt 1 ]; then
+    log "Phase 1 attempt $SCAN_ATTEMPT: re-picking search_topic via pick_topic_for_project (exclude=$(echo "$TRIED_TOPICS_JSON" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0) tried)..."
+    PROJECTS_JSON=$(python3 - "$PROJECTS_JSON" "$TRIED_TOPICS_JSON" <<'PY' 2>>"$LOG_FILE"
+import json, os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from pick_search_topic import pick_topic_for_project, PickerError
+
+projects = json.loads(sys.argv[1] or '[]')
+excluded = json.loads(sys.argv[2] or '[]')
+for p in projects:
+    name = p.get('name')
+    if not name:
+        continue
+    try:
+        new_pick = pick_topic_for_project(
+            name, platform='twitter', exclude_topics=excluded,
+        )
+    except PickerError as exc:
+        # On repick failure keep the previous topic; the scan will still
+        # run, just without a fresh angle. Strictly better than aborting.
+        sys.stderr.write(f"repick_failed project={name!r} error={exc}\n")
+        continue
+    p['search_topic'] = new_pick.get('search_topic')
+    p['topic_picked_mode'] = new_pick.get('mode', 'use')
+    p['picked_weight_pct'] = new_pick.get('picked_weight_pct')
+    p['reference_topics'] = new_pick.get('reference_topics') or []
+print(json.dumps(projects))
+PY
+)
+fi
+
+# Snapshot this attempt's topic(s) into TRIED_TOPICS_JSON so the NEXT
+# iteration's repick excludes them. Runs every attempt (incl. attempt 1)
+# so the initial pre-loop topic also goes into the exclude list before
+# attempt 2's repick. Idempotent: same topic added twice is a no-op.
+TRIED_TOPICS_JSON=$(python3 - "$TRIED_TOPICS_JSON" "$PROJECTS_JSON" <<'PY' 2>>"$LOG_FILE"
+import json, sys
+cur = json.loads(sys.argv[1] or '[]')
+projects = json.loads(sys.argv[2] or '[]')
+seen = {(t or '').strip().lower() for t in cur if t}
+for p in projects:
+    t = (p.get('search_topic') or '').strip()
+    if t and t.lower() not in seen:
+        cur.append(t)
+        seen.add(t.lower())
+print(json.dumps(cur))
+PY
+)
+
+_CURRENT_TOPICS=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; ps=json.load(sys.stdin); print(", ".join((p.get("search_topic") or "<invent>") for p in ps))' 2>/dev/null || echo "")
+log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, candidates so far=$BATCH_COUNT/$RETRY_TARGET, topic(s)=$_CURRENT_TOPICS)"
 
 log "Phase 1: drafting queries and scraping tweets..."
 
-SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA" "${TW_ENGINE_PREFIX}You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
+SCAN_OUTPUT=$(TWITTER_SCAN_ENFORCE=1 "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA" "${TW_ENGINE_PREFIX}You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
 
 ## Step 1: Draft one search query per project
 
@@ -910,7 +889,7 @@ $SUPPLY_SIGNAL_JSON
 ALREADY-ENGAGED TWEET IDS — we have already posted a reply to each of these tweets within the last 48h, so they are dead candidates. Do NOT return any tweet whose status ID (the digits in \`/status/<ID>\`) appears in this list; skip it while scraping so it never reaches your \`tweets\` array. Returning one only wastes tokens — it is dropped downstream regardless.
 $ENGAGED_TWEET_IDS
 
-THIS-CYCLE QUERIES ALREADY TRIED (this is attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS this cycle, target=$RETRY_TARGET candidates after filters) — do NOT repeat any of these phrasings or close variants. If this list is non-empty, the previous scan(s) returned too few survivors after the harness age gate + scorer dedupe. Draft a MEANINGFULLY DIFFERENT query for the SAME project and SAME assigned search_topic: vary the keyword cluster, swap or remove operators, lower min_faves one tier, or broaden the topic phrasing one notch wider (e.g. \"NotebookLM developers\" -> \"NotebookLM coding\" -> \"AI knowledge tool developers\"). The list grows each retry; if you've already tried 3 phrasings without 5 survivors the topic likely has thin supply right now, so widen aggressively on the next attempt.
+THIS-CYCLE QUERIES ALREADY TRIED (this is attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS this cycle, target=$RETRY_TARGET candidates after filters) — do NOT repeat any of these phrasings or close variants. If this list is non-empty, the previous scan(s) returned too few survivors after the harness age gate + scorer dedupe. The Python picker has ALSO re-rolled to a FRESH search_topic for this attempt (different from prior attempts' topics — see each project's \`search_topic\` field above). Draft a query for THAT new topic; don't bend it back toward an earlier topic just because the same project is being targeted. If the prior queries were narrow, go broader; if narrow already, switch the operator set or drop a tier of min_faves.
 $TRIED_QUERIES_JSON
 
 $HOOK_NOTICE
