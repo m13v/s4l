@@ -115,6 +115,27 @@ class UniverseExhaustedError(RuntimeError):
 
 WINDOW_DAYS = 30
 
+# 2026-05-28: dedicated explore branch for freshly-invented topics.
+# The standalone invent_topics.py job writes new (source='invented') topics
+# into project_search_topics, but those topics start with composite_score=0
+# and attempts_n=0, which would put them at COLD_TOPIC_WEIGHT (0.15) — about
+# 0.2% selection probability in a 48-topic universe. At 5 picks/day per
+# project that means ~31 days until first sample, effectively a dead end.
+#
+# This branch reserves 10% of every pick for "give a brand-new invention
+# its first shot": with probability INVENTED_UNTRIED_EXPLORE_RATE we look
+# for any pool row with source='invented' AND attempts_n=0 and pick
+# uniformly from that set. If none exist, we fall through to the normal
+# weighted-random branch — no double dip, no separate "explore" mode.
+#
+# Why 10%: per Thompson-sampling intuition, an explore rate roughly matching
+# the expected fraction of "topics worth testing" gives invention output a
+# guaranteed sampling cadence without starving the proven winners. With ~5
+# picks/day per project, 10% means ~1 invented-untried sample every other
+# day per project, so a new invention typically gets at least one shot within
+# 24-48h of being committed by invent_topics.py.
+INVENTED_UNTRIED_EXPLORE_RATE = 0.10
+
 # Log-smoothed weighting constants. See module docstring for the curve.
 # COLD_TOPIC_WEIGHT is intentionally non-zero so any topic in config.json
 # can be selected even with no history (the floor maps to ~0.5-1% in a
@@ -499,8 +520,52 @@ def pick_topic_for_project(project_name, platform="twitter",
         for i in range(min(REFERENCE_TOP_N, len(pool)))
     ]
 
-    # USE: weighted random over the (possibly filtered) pool. This is now
-    # the only path — EXPLORE_INVENT was removed 2026-05-28 in favor of
+    # 2026-05-28 dedicated explore branch for freshly-invented topics.
+    # 10% of the time, if there's any source='invented' + attempts_n==0
+    # topic in the pool, pick one of those uniformly. Gives invent_topics.py
+    # outputs a guaranteed sampling cadence (~1 sample every other day per
+    # project at default 5 picks/day) instead of languishing at the
+    # COLD_TOPIC_WEIGHT floor for weeks. Falls through to the normal
+    # weighted-random branch when (a) no eligible invented-untried topics
+    # exist OR (b) the random roll lands outside the explore rate.
+    invented_untried_idxs = [
+        i for i, r in enumerate(pool)
+        if r.get("source") == "invented"
+        and int(r.get("attempts_n") or 0) == 0
+    ]
+    if invented_untried_idxs and rnd.random() < INVENTED_UNTRIED_EXPLORE_RATE:
+        chosen_idx = rnd.choice(invented_untried_idxs)
+        sys.stderr.write(
+            f"[pick_search_topic] invented_untried_explore "
+            f"project={project_name!r} pool_size={len(invented_untried_idxs)} "
+            f"chosen={pool[chosen_idx]['search_topic']!r}\n"
+        )
+        chosen = pool[chosen_idx]
+        assignment = {
+            "project": project_name,
+            "platform": platform,
+            "reference_topics": reference_topics,
+            "universe_size": len(universe),
+            "scored_n": scored_n,
+            "cold_n": cold_n,
+            "pool_size": len(pool),
+            "window_days": window_days,
+            "picked_at": picked_at,
+            "mode": "use",
+            "search_topic": chosen["search_topic"],
+            "score": round(chosen["composite_score"], 2),
+            # weight_pct on this row is informational only — the explore
+            # branch ignored weights for this pick. Surfacing it anyway so
+            # callers see the gap between the branch decision and what the
+            # weight model would have produced.
+            "picked_weight_pct": round(weight_pcts[chosen_idx], 2),
+            "explore_branch": "invented_untried",
+        }
+        _emit_trace(assignment, pool, weight_pcts, chosen_idx=chosen_idx)
+        return assignment
+
+    # USE: weighted random over the (possibly filtered) pool. This is the
+    # default path — EXPLORE_INVENT was removed 2026-05-28 in favor of
     # the standalone invent_topics.py job that writes new topics directly
     # into project_search_topics.
     needle = rnd.uniform(0.0, weight_total)
