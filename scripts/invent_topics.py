@@ -559,9 +559,9 @@ def main():
         return sum(1 for c in committed_actually if c.get("committed"))
 
     for attempt in range(1, args.max_attempts + 1):
-        attempts_used = attempt
         if n_committed() >= args.target:
             break
+        attempts_used = attempt
 
         prompt = build_prompt(project, topics_for_project, args.proposals,
                               avoid_topics=avoid_topics)
