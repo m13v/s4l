@@ -13177,7 +13177,7 @@ async function reloadStatsTabSections() {
   const dmEl = document.getElementById('dm-stats');
   if (dmEl && dmEl.open) pending.push(loadDmStats(true));
   const stEl = document.getElementById('search-topics-stats');
-  if (stEl && stEl.open) pending.push(loadSearchTopicsStats(true));
+  if (stEl && stEl.open) pending.push(loadSearchTopicsCurrentView(true));
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) pending.push(loadSearchQueriesStats(true));
   const subEl = document.getElementById('subreddit-stats');
@@ -19073,7 +19073,7 @@ async function refreshAllData() {
   loadCohortStats();
   loadStyleStats();
   loadDmStats(true);
-  loadSearchTopicsStats(true);
+  loadSearchTopicsCurrentView(true);
   loadSearchQueriesStats(true);
   loadAllPerDayCharts();
   loadFunnelStats(true);
@@ -19907,7 +19907,7 @@ _saInstallDeleteListener();
   if (!el) return;
   el.addEventListener('toggle', () => {
     try { window.posthog && window.posthog.capture('section_toggle', { section: 'search-topics-stats', open: !!el.open }); } catch (er) {}
-    if (el.open) loadSearchTopicsStats();
+    if (el.open) loadSearchTopicsCurrentView();
   });
   const duds = document.getElementById('search-topics-stats-duds-only');
   if (duds) {
@@ -20023,7 +20023,7 @@ function saStartApp() {
   const dmEl = document.getElementById('dm-stats');
   if (dmEl && dmEl.open) loadDmStats();
   const stTopEl = document.getElementById('search-topics-stats');
-  if (stTopEl && stTopEl.open) loadSearchTopicsStats();
+  if (stTopEl && stTopEl.open) loadSearchTopicsCurrentView();
   const sqEl = document.getElementById('search-queries-stats');
   if (sqEl && sqEl.open) loadSearchQueriesStats();
   const subEl = document.getElementById('subreddit-stats');
@@ -20053,7 +20053,7 @@ function saStartApp() {
     try { loadFunnelStats(); } catch {}
     try { loadDmStats(); } catch {}
     try { loadSubredditStats(); } catch {}
-    try { loadSearchTopicsStats(); } catch {}
+    try { loadSearchTopicsCurrentView(); } catch {}
     try { loadSearchQueriesStats(); } catch {}
   };
   if (typeof window.requestIdleCallback === 'function') {
