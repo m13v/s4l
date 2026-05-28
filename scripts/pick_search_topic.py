@@ -218,6 +218,7 @@ def _load_universe(project_name):
     rows = data.get("topics") or []
     seen = set()
     out = []
+    source_map = {}  # topic -> source (first occurrence wins)
     source_counts = {"seed": 0, "invented": 0, "manual": 0}
     for r in rows:
         t = (r.get("topic") or "").strip()
@@ -226,6 +227,7 @@ def _load_universe(project_name):
         seen.add(t)
         out.append(t)
         src = (r.get("source") or "").strip()
+        source_map[t] = src or "seed"
         if src in source_counts:
             source_counts[src] += 1
     if not out:
@@ -244,7 +246,7 @@ def _load_universe(project_name):
         f"invented={source_counts['invented']} "
         f"manual={source_counts['manual']}\n"
     )
-    return out
+    return out, source_map
 
 
 def _load_signal(project_name, platform, window_days):
@@ -267,20 +269,21 @@ def _load_signal(project_name, platform, window_days):
         return []
 
 
-def _build_pool(universe, signal_rows):
-    """Pool = full universe (config.json) with scores attached.
+def _build_pool(universe, signal_rows, source_map=None):
+    """Pool = full DB universe (project_search_topics, status='active') with
+    scores attached.
 
-    Every topic in config.json is eligible, scored or not. Unscored topics
-    get composite_score=0 and rely on COLD_TOPIC_WEIGHT to remain in play.
+    Every active topic is eligible, scored or not. Unscored topics get
+    composite_score=0 and rely on COLD_TOPIC_WEIGHT to remain in play.
 
-    DB-only topics (i.e. legacy free-form `search_topic` strings from
-    before the picker existed, or future inventions from explore cycles)
-    are NOT included here. The pre-picker era wrote entire query strings
-    into search_topic (e.g. `("foo" OR "bar") min_faves:50 since:...`),
-    so re-introducing them via top_search_topics would pollute the pool.
-    Invented topics from the explore_invent branch are captured in
-    twitter_candidates.search_topic for analytics; promotion into the
-    eligible universe is a manual config.json edit (intentional gate).
+    The pre-picker era wrote entire query strings into search_topic
+    (e.g. `("foo" OR "bar") min_faves:50 since:...`); those would pollute
+    the pool, so universe membership (not top_search_topics) is the
+    source of truth. Invented topics promoted by
+    scripts/promote_invented_topics.py carry source='invented' in
+    project_search_topics and are eligible the same way seeds are. The
+    optional `source_map` is a topic -> source dict so per-row source
+    can be surfaced to the trace without a second API call.
 
     Returns the pool sorted by composite_score DESC.
     """
@@ -289,6 +292,7 @@ def _build_pool(universe, signal_rows):
         for r in signal_rows
         if r.get("search_topic")
     }
+    source_map = source_map or {}
 
     pool = []
     for topic in universe:
@@ -296,6 +300,7 @@ def _build_pool(universe, signal_rows):
         score = float(r.get("composite_score") or 0)
         pool.append({
             "search_topic": topic,
+            "source": source_map.get(topic, "seed"),
             "composite_score": score,
             "posts": int(r.get("posts") or 0),
             "clicks_total": int(r.get("clicks_total") or 0),
@@ -358,6 +363,41 @@ def _emit_trace(assignment, pool, weight_pcts, chosen_idx):
     actual pick.
     """
     try:
+        pool_entries = [
+            {
+                "topic": r["search_topic"],
+                "source": r.get("source", "seed"),
+                "weight_pct": round(weight_pcts[i], 2),
+                "score": round(r["composite_score"], 2),
+                "posts": r["posts"],
+                "clicks": r["clicks_total"],
+                "posted_n": r["posted_n"],
+                "skipped_n": r["skipped_n"],
+                "attempts": r.get("attempts_n", 0),
+                "supply": r.get("tweets_found_total", 0),
+                "verdict": _verdict_for_row(r),
+                "chosen": (chosen_idx is not None and i == chosen_idx),
+            }
+            for i, r in enumerate(pool)
+        ]
+        # Compact time-series snapshot of every invented topic in the
+        # active pool — answers "is Laravel Horizon's score growing?"
+        # straight from the cycle log without a DB query. Picked flag
+        # is included so post-hoc you can also answer "was an invented
+        # topic ever drawn?" by greping `"invented_in_pool".*"picked":\s*true`.
+        invented_in_pool = [
+            {
+                "topic": e["topic"],
+                "weight_pct": e["weight_pct"],
+                "score": e["score"],
+                "posts": e["posts"],
+                "clicks": e["clicks"],
+                "supply": e["supply"],
+                "picked": e["chosen"],
+            }
+            for e in pool_entries
+            if e["source"] == "invented"
+        ]
         trace = {
             "project": assignment.get("project"),
             "platform": assignment.get("platform"),
@@ -369,22 +409,8 @@ def _emit_trace(assignment, pool, weight_pcts, chosen_idx):
             "cold_n": assignment.get("cold_n"),
             "window_days": assignment.get("window_days"),
             "picked_at": assignment.get("picked_at"),
-            "pool": [
-                {
-                    "topic": r["search_topic"],
-                    "weight_pct": round(weight_pcts[i], 2),
-                    "score": round(r["composite_score"], 2),
-                    "posts": r["posts"],
-                    "clicks": r["clicks_total"],
-                    "posted_n": r["posted_n"],
-                    "skipped_n": r["skipped_n"],
-                    "attempts": r.get("attempts_n", 0),
-                    "supply": r.get("tweets_found_total", 0),
-                    "verdict": _verdict_for_row(r),
-                    "chosen": (chosen_idx is not None and i == chosen_idx),
-                }
-                for i, r in enumerate(pool)
-            ],
+            "invented_in_pool": invented_in_pool,
+            "pool": pool_entries,
         }
         sys.stderr.write("[pick_search_topic] " + json.dumps(trace) + "\n")
         sys.stderr.flush()
@@ -404,11 +430,11 @@ def pick_topic_for_project(project_name, platform="twitter",
     callers must NOT silently swallow the exception.
     """
     rnd = rng or random
-    universe = _load_universe(project_name)
+    universe, source_map = _load_universe(project_name)
     picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     signal = _load_signal(project_name, platform, window_days)
-    pool = _build_pool(universe, signal)
+    pool = _build_pool(universe, signal, source_map=source_map)
 
     weights = [_compute_weight(r) for r in pool]
     weight_total = sum(weights) or 1.0
