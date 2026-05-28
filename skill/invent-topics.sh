@@ -22,14 +22,23 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/invent-topics-$(date +%Y-%m-%d_%H%M%S).log"
 
-# Number of candidate topics to ask Claude for per run. Picker validation
+# Number of candidate topics to ask Claude for per attempt. Picker validation
 # typically rejects 30-60% of these as dupes/near-dupes, so 4 proposals
 # usually means 1-3 land. Override via INVENT_PROPOSALS_PER_RUN.
 PROPOSALS="${INVENT_PROPOSALS_PER_RUN:-4}"
 
+# Retry loop: keep re-asking Claude (steering away from already-tried topics)
+# until TARGET genuinely-new non-dupe topics land or MAX_ATTEMPTS Claude calls
+# are spent, then proceed with whatever survived. Tune via env.
+TARGET="${INVENT_TARGET:-3}"
+MAX_ATTEMPTS="${INVENT_MAX_ATTEMPTS:-5}"
+
 {
-    echo "[$(date +%Y-%m-%dT%H:%M:%S%z)] invent-topics start (proposals=$PROPOSALS)"
-    /usr/bin/python3 "$REPO_DIR/scripts/invent_topics.py" --proposals "$PROPOSALS"
+    echo "[$(date +%Y-%m-%dT%H:%M:%S%z)] invent-topics start (proposals=$PROPOSALS target=$TARGET max_attempts=$MAX_ATTEMPTS)"
+    /usr/bin/python3 "$REPO_DIR/scripts/invent_topics.py" \
+        --proposals "$PROPOSALS" \
+        --target "$TARGET" \
+        --max-attempts "$MAX_ATTEMPTS"
     rc=$?
     echo "[$(date +%Y-%m-%dT%H:%M:%S%z)] invent-topics done rc=$rc"
     exit $rc
