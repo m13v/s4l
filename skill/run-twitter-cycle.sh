@@ -4,7 +4,11 @@
 # Phase 1 (t=0):
 #   - select 8 projects via the shared inverse-recent-share picker
 #     (scripts/pick_project.py, same logic as github/reddit)
-#   - LLM drafts one search query per project (style from past top queries)
+#   - LLM drafts a search query per project (style from past top queries);
+#     if Phase 1 yields <RETRY_TARGET candidates that pass all filters
+#     (harness age gate + scorer dedupe + already-posted), the scan is
+#     re-invoked with the previously-tried queries injected as "do NOT
+#     repeat" — up to MAX_SCAN_ATTEMPTS total per cycle, same batch_id.
 #   - scrape tweets via twitter-harness, enrich via fxtwitter -> T0 snapshot
 #   - store all candidates with batch_id and search_topic
 #
@@ -1067,43 +1071,44 @@ if total:
     print(f"project_excludes: marked {total} term(s) used across selected projects")
 PY
 if [ "$EXTRACT_EXIT" -ne 0 ] || [ ! -f "$RAW_FILE" ]; then
-    log "No tweets extracted in Phase 1. Aborting cycle."
-    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-    # Classify the Anthropic-side cause of the empty-tweet outcome so the
-    # dashboard surfaces the *actual* error (stream_idle_timeout,
-    # monthly_limit, api_overloaded, context_overflow, etc.) instead of
-    # collapsing every Claude failure to a generic phase1_no_tweets pill.
-    # Bit us on 2026-05-15 16:45 cycle: $10.77 burned to a "Stream idle
-    # timeout - partial response received" that read as a silent
-    # phase1_no_tweets in run_monitor.log. Falls back to phase1_no_tweets
-    # when Claude returned successfully but with zero usable tweets (the
-    # historical "Claude tried, found nothing relevant" case).
-    PHASE1_REASON=$(echo "$SCAN_OUTPUT" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
-    [ -z "$PHASE1_REASON" ] && PHASE1_REASON="phase1_no_tweets"
-    python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 1 \
-        --salvaged "${SALVAGED:-0}" \
-        --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
-        --tweets-pulled "${TWEETS_PULLED:-0}" \
-        --failure-reasons "${PHASE1_REASON}:1" \
-        --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
-    # Tell the EXIT trap's _sa_emit_run_summary_oneshot to skip; this branch
-    # already wrote its tailored failure-reasons line above.
-    _SA_RUN_SUMMARY_EMITTED=1
-    exit 0
+    # Claude returned no usable tweet array this attempt. Could be a real
+    # Anthropic error (stream_idle_timeout, api_overloaded, monthly_limit,
+    # context_overflow) or just "model found nothing relevant". Classify
+    # the failure for the post-loop log_run summary; the loop control below
+    # decides whether to retry or give up.
+    PHASE1_REASON_LATEST=$(echo "$SCAN_OUTPUT" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
+    [ -z "$PHASE1_REASON_LATEST" ] && PHASE1_REASON_LATEST="phase1_no_tweets"
+    LAST_PHASE1_REASON="$PHASE1_REASON_LATEST"
+    log "  Phase 1 attempt $SCAN_ATTEMPT returned no tweets (reason=$PHASE1_REASON_LATEST); falling through to loop control"
+else
+    # --- Phase 1 finalize: enrich + score with T0 + batch_id ----------------
+    log "Enriching via fxtwitter + scoring with T0 snapshot (batch=$BATCH_ID, attempt=$SCAN_ATTEMPT)..."
+    cat "$RAW_FILE" \
+        | python3 "$REPO_DIR/scripts/enrich_twitter_candidates.py" \
+        | python3 "$REPO_DIR/scripts/score_twitter_candidates.py" --batch-id "$BATCH_ID" \
+            ${ATTEMPTS_FILE:+--attempts "$ATTEMPTS_FILE"} \
+        2>&1 | tee -a "$LOG_FILE"
+    rm -f "$RAW_FILE" "$ATTEMPTS_FILE"
 fi
 
-# --- Phase 1 finalize: enrich + score with T0 + batch_id --------------------
-log "Enriching via fxtwitter + scoring with T0 snapshot (batch=$BATCH_ID)..."
-cat "$RAW_FILE" \
-    | python3 "$REPO_DIR/scripts/enrich_twitter_candidates.py" \
-    | python3 "$REPO_DIR/scripts/score_twitter_candidates.py" --batch-id "$BATCH_ID" \
-        ${ATTEMPTS_FILE:+--attempts "$ATTEMPTS_FILE"} \
-    2>&1 | tee -a "$LOG_FILE"
-rm -f "$RAW_FILE" "$ATTEMPTS_FILE"
-
 BATCH_COUNT=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" batch-count --batch-id "$BATCH_ID" 2>/dev/null || echo 0)
-log "Phase 1 complete. Batch has $BATCH_COUNT candidates with T0 snapshot."
+log "Phase 1 attempt $SCAN_ATTEMPT complete. Batch has $BATCH_COUNT/$RETRY_TARGET candidates with T0 snapshot."
 
+# --- Retry-loop control ------------------------------------------------------
+# Break out if we hit the target; else either retry or give up at the cap.
+if [ "$BATCH_COUNT" -ge "$RETRY_TARGET" ]; then
+    log "  Reached target ($BATCH_COUNT >= $RETRY_TARGET) after $SCAN_ATTEMPT scan(s); proceeding to Phase 2"
+    break
+fi
+if [ "$SCAN_ATTEMPT" -ge "$MAX_SCAN_ATTEMPTS" ]; then
+    log "  Hit scan cap ($MAX_SCAN_ATTEMPTS); proceeding with $BATCH_COUNT candidate(s)"
+    break
+fi
+_TRIED_N=$(echo "$TRIED_QUERIES_JSON" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+log "  Below target ($BATCH_COUNT/$RETRY_TARGET); $_TRIED_N queries tried so far this cycle; looping for attempt $((SCAN_ATTEMPT + 1))..."
+done
+
+# --- Post-loop bookkeeping ---------------------------------------------------
 # Stamp the A/B/C variant onto every candidate in this batch so downstream
 # analytics (post-rate, thread-age-at-discover, lag-after-thread, top-reply
 # ratio) can split by variant. Idempotent: same value would be written if the
@@ -1116,18 +1121,34 @@ with psycopg.connect(os.environ['DATABASE_URL']) as conn:
         conn.commit()
 " 2>>"$LOG_FILE" || log "Phase 1: cycle_variant stamp failed (non-fatal)"
 
+# Promote cumulative totals onto the per-iteration names so every downstream
+# log_run.py / trap handler picks up the cycle-level work (not just the last
+# attempt's counts). Keeps all the existing "${QUERIES_TOTAL:-0}" etc. call
+# sites correct without touching them individually.
+QUERIES_TOTAL="$CUMULATIVE_QUERIES"
+DUDS_TOTAL="$CUMULATIVE_DUDS"
+TWEETS_PULLED="$CUMULATIVE_TWEETS_PULLED"
+
+log "Phase 1 complete after $SCAN_ATTEMPT scan attempt(s). Final batch has $BATCH_COUNT candidates with T0 snapshot."
+
 if [ "$BATCH_COUNT" = "0" ]; then
-    log "Empty batch. Nothing to re-score. Exiting."
+    # Distinguish "Claude returned no tweets at all" from "Claude returned
+    # tweets but enrichment dropped them all" so the dashboard can surface
+    # the right failure mode. If every attempt classified an Anthropic-side
+    # error, surface that; else it was the all-stale / all-dedupe case and
+    # we surface empty_batch.
+    if [ -n "$LAST_PHASE1_REASON" ] && [ "$CUMULATIVE_TWEETS_PULLED" = "0" ]; then
+        _FAILURE_REASON="${LAST_PHASE1_REASON}:1"
+    else
+        _FAILURE_REASON="empty_batch:1"
+    fi
+    log "Empty batch after $SCAN_ATTEMPT attempt(s) (reason=$_FAILURE_REASON). Nothing to re-score. Exiting."
     _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
-    # Surface as failed=1 with reason so the dashboard doesn't render this as a
-    # silent "—". Distinct reason from phase1_no_tweets so the operator can tell
-    # "Claude returned tweets but enrichment dropped them all" from "Claude
-    # returned no tweets at all".
     python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 1 \
         --salvaged "${SALVAGED:-0}" \
-        --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
-        --tweets-pulled "${TWEETS_PULLED:-0}" \
-        --failure-reasons "empty_batch:1" \
+        --queries "${CUMULATIVE_QUERIES:-0}" --duds "${CUMULATIVE_DUDS:-0}" \
+        --tweets-pulled "${CUMULATIVE_TWEETS_PULLED:-0}" \
+        --failure-reasons "$_FAILURE_REASON" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
     _SA_RUN_SUMMARY_EMITTED=1
     exit 0
