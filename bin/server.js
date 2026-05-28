@@ -19318,6 +19318,189 @@ async function loadSearchTopicsStats(force) {
   }
 }
 
+// --- Invented topics subtab (2026-05-28) ----------------------------------
+// Sibling view to renderSearchTopicsStats / loadSearchTopicsStats. Sources
+// from /api/search-topics/invented instead of /api/search-topics/stats so
+// untried inventions appear (the attempts-only view filters them out).
+// State + storage key are intentionally separate so column sort prefs
+// don't bleed between the two subtabs.
+let _searchTopicsInventedTableState = { sortField: 'created_at', sortDir: 'desc', filters: {} };
+let _searchTopicsInventedLoadedFor = null;
+let _searchTopicsInventedLoading = false;
+
+function renderSearchTopicsInvented(payload) {
+  const body = document.getElementById('search-topics-invented-body');
+  const totalEl = document.getElementById('search-topics-stats-total');
+  if (!body) return;
+  if (payload && payload.error) {
+    if (totalEl) totalEl.textContent = 'error';
+    body.innerHTML = '<div class="style-stats-empty">' + escapeHtml(payload.error) + '</div>';
+    return;
+  }
+  const rows = (payload && payload.rows) || [];
+  if (!rows.length) {
+    if (totalEl) totalEl.textContent = '0 invented';
+    body.innerHTML = '<div class="style-stats-empty">No invented topics yet. The invent_topics.py job runs hourly; new inventions land here.</div>';
+    return;
+  }
+  if (totalEl) totalEl.textContent = rows.length + ' invented';
+  const fmt = n => (Number(n) || 0).toLocaleString();
+  const fmt3 = n => (Number(n) || 0).toFixed(3);
+  const normalized = rows.map(r => ({
+    project_name:        r.project_name || '(none)',
+    topic:               String(r.topic || ''),
+    verdict:             String(r.verdict || 'untried'),
+    created_at:          r.created_at || null,
+    attempts_n:          Number(r.attempts_n) || 0,
+    last_attempted_at:   r.last_attempted_at || null,
+    tweets_found_total:  Number(r.tweets_found_total) || 0,
+    candidates_n:        Number(r.candidates_n) || 0,
+    posted_n:            Number(r.posted_n) || 0,
+    skipped_n:           Number(r.skipped_n) || 0,
+    clicks_total:        Number(r.clicks_total) || 0,
+    // clicks_per_post comes back as null when posted_n=0; keep as null
+    // so the sortable table treats it correctly (sorts to the bottom).
+    clicks_per_post:     r.clicks_per_post == null ? null : Number(r.clicks_per_post),
+  }));
+  mountSortableTable({
+    containerId: 'search-topics-invented-body',
+    rows: normalized,
+    state: _searchTopicsInventedTableState,
+    storageKey: 'sa.searchTopicsInventedTable.v1',
+    showTotals: false,
+    columns: [
+      { key: 'topic',         label: 'Topic',     type: 'text',    align: 'left',  widthPct: 28,
+        formatter: v => {
+          const s = String(v || '');
+          return '<span data-tooltip="' + escapeHtml(s) + '" style="display:block;white-space:normal;overflow-wrap:anywhere;word-break:break-word;font-size:12px;line-height:1.35;">' + escapeHtml(s) + '</span>';
+        } },
+      { key: 'project_name',  label: 'Project',   type: 'text',    align: 'left',  widthPct: 9,
+        formatter: v => escapeHtml((typeof PROJECT_LABELS !== 'undefined' && PROJECT_LABELS[v]) || v) },
+      // Verdict bucket from the server-side SQL. Rendered as a plain
+      // text pill — no color per the project's "black/white/gray only"
+      // dashboard rule (see CLAUDE.md).
+      { key: 'verdict',       label: 'Verdict',   type: 'text',    align: 'center', widthPct: 6,
+        formatter: v => '<span style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);">' + escapeHtml(String(v || '')) + '</span>' },
+      { key: 'created_at',    label: 'Invented',  type: 'datetime', align: 'right', widthPct: 9,
+        formatter: v => v ? '<span data-tooltip="' + escapeHtml(String(v)) + '">' + formatRelativeTime(v) + '</span>' : '—' },
+      { key: 'attempts_n',    label: 'Attempts',  type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
+      { key: 'tweets_found_total', label: 'Supply', type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
+      { key: 'candidates_n',  label: 'Cands',     type: 'numeric', align: 'right', widthPct: 5, formatter: fmt },
+      { key: 'posted_n',      label: 'Posted',    type: 'numeric', align: 'right', widthPct: 5, formatter: fmt },
+      { key: 'clicks_total',  label: 'Clicks',    type: 'numeric', align: 'right', widthPct: 5, formatter: fmt },
+      { key: 'clicks_per_post', label: 'Clk/Post', type: 'numeric', align: 'right', widthPct: 6,
+        formatter: v => v == null ? '—' : fmt3(v) },
+      { key: 'last_attempted_at', label: 'Last tried', type: 'datetime', align: 'right', widthPct: 9,
+        formatter: v => v ? '<span data-tooltip="' + escapeHtml(String(v)) + '">' + formatRelativeTime(v) + '</span>' : '—' },
+    ],
+  });
+}
+
+async function loadSearchTopicsInvented(force) {
+  if (_searchTopicsInventedLoading) return;
+  if (saAuthNotReady()) return;
+  const days = currentStatsWindow().days;
+  const proj = currentStatsProject();
+  const key  = days + '|' + proj;
+  const cached = force ? null : statsCacheGetEntry('searchTopicsInvented', key);
+  if (cached && cached.fresh) {
+    renderSearchTopicsInvented(cached.payload);
+    _searchTopicsInventedLoadedFor = key;
+    return;
+  }
+  const haveStale = !!cached;
+  if (haveStale) {
+    renderSearchTopicsInvented(cached.payload);
+    _searchTopicsInventedLoadedFor = key;
+  }
+  if (!haveStale && _searchTopicsInventedLoadedFor === key && !force) return;
+  _searchTopicsInventedLoading = true;
+  const totalEl = document.getElementById('search-topics-stats-total');
+  const body = document.getElementById('search-topics-invented-body');
+  if (!haveStale) {
+    if (totalEl) totalEl.textContent = 'loading…';
+    if (body) body.innerHTML = '<div class="style-stats-empty">Loading…</div>';
+  }
+  try {
+    const params = ['days=' + days];
+    if (proj && proj !== 'all') params.push('project=' + encodeURIComponent(proj));
+    params.push('limit=5000');
+    const res = await fetch('/api/search-topics/invented?' + params.join('&'));
+    const data = await res.json();
+    if (data && !data.error) statsCacheSet('searchTopicsInvented', key, data);
+    renderSearchTopicsInvented(data);
+    _searchTopicsInventedLoadedFor = key;
+  } catch (e) {
+    if (!haveStale && body) body.innerHTML = '<div class="style-stats-empty">Failed to load.</div>';
+  } finally {
+    _searchTopicsInventedLoading = false;
+  }
+}
+
+// Tab switching: hides/shows the two body divs, swaps which loader fires,
+// and persists the current view in localStorage so the next page load
+// honors it. The "duds only" checkbox is only meaningful on the attempted
+// view (the invented view has its own verdict column instead), so we hide
+// it when invented is active.
+function setSearchTopicsView(view) {
+  view = (view === 'invented') ? 'invented' : 'attempted';
+  try { localStorage.setItem('sa.searchTopicsSubtab.v1', view); } catch (e) {}
+  const tabAtt = document.getElementById('search-topics-tab-attempted');
+  const tabInv = document.getElementById('search-topics-tab-invented');
+  const bodyAtt = document.getElementById('search-topics-stats-body');
+  const bodyInv = document.getElementById('search-topics-invented-body');
+  const helpAtt = document.getElementById('search-topics-stats-help-attempted');
+  const helpInv = document.getElementById('search-topics-stats-help-invented');
+  const dudsWrap = document.getElementById('search-topics-stats-duds-only-wrap');
+  const setTabStyle = (btn, active) => {
+    if (!btn) return;
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    btn.style.background = active ? 'var(--bg-elev, #1a1a1a)' : 'transparent';
+    btn.style.color = active ? 'var(--text)' : 'var(--text-secondary)';
+  };
+  setTabStyle(tabAtt, view === 'attempted');
+  setTabStyle(tabInv, view === 'invented');
+  if (bodyAtt) bodyAtt.style.display = view === 'attempted' ? '' : 'none';
+  if (bodyInv) bodyInv.style.display = view === 'invented' ? '' : 'none';
+  if (helpAtt) helpAtt.style.display = view === 'attempted' ? '' : 'none';
+  if (helpInv) helpInv.style.display = view === 'invented' ? '' : 'none';
+  if (dudsWrap) dudsWrap.style.display = view === 'attempted' ? 'flex' : 'none';
+  if (view === 'invented') {
+    loadSearchTopicsInvented(false);
+  } else {
+    loadSearchTopicsStats(false);
+  }
+}
+
+// Wire up tab clicks + restore the persisted view on page load.
+document.addEventListener('DOMContentLoaded', function () {
+  const tabAtt = document.getElementById('search-topics-tab-attempted');
+  const tabInv = document.getElementById('search-topics-tab-invented');
+  if (tabAtt) tabAtt.addEventListener('click', () => setSearchTopicsView('attempted'));
+  if (tabInv) tabInv.addEventListener('click', () => setSearchTopicsView('invented'));
+  let persisted = null;
+  try { persisted = localStorage.getItem('sa.searchTopicsSubtab.v1'); } catch (e) {}
+  if (persisted === 'invented') setSearchTopicsView('invented');
+});
+
+// Dispatcher used by the global "filters changed, refresh open sections"
+// path so the right subtab loader fires. Falls back to the attempted view
+// when the invented tab isn't yet wired (e.g. during the first DOMContent-
+// Loaded race). Both loaders are no-ops when their section is closed,
+// which keeps the global refresh idempotent.
+function loadSearchTopicsCurrentView(force) {
+  let view = 'attempted';
+  try {
+    const persisted = localStorage.getItem('sa.searchTopicsSubtab.v1');
+    if (persisted === 'invented') view = 'invented';
+  } catch (e) {}
+  // Honor the live DOM state if it's already been set by setSearchTopicsView()
+  const tabInv = document.getElementById('search-topics-tab-invented');
+  if (tabInv && tabInv.getAttribute('aria-selected') === 'true') view = 'invented';
+  if (view === 'invented') return loadSearchTopicsInvented(force);
+  return loadSearchTopicsStats(force);
+}
+
 let _searchQueriesStatsLoadedFor = null;
 let _searchQueriesStatsLoading = false;
 async function loadSearchQueriesStats(force) {
