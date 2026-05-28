@@ -432,42 +432,36 @@ def _emit_trace(assignment, pool, weight_pcts, chosen_idx):
 
 def pick_topic_for_project(project_name, platform="twitter",
                            window_days=WINDOW_DAYS,
-                           explore_rate=EXPLORE_RATE,
                            exclude_topics=None,
                            rng=None):
     """Pick ONE search_topic for this project on this platform.
 
     Returns the assignment dict described in the module docstring.
     Raises PickerError when the DB universe lookup fails or the project
-    has zero active topics. There is no return-None fallback path —
-    callers must NOT silently swallow the exception.
+    has zero active topics. Raises UniverseExhaustedError when
+    `exclude_topics` filters the universe to empty.
 
     `exclude_topics` is an optional iterable of topic strings to drop from
     the universe before sampling (case-insensitive, whitespace-trimmed).
     Used by `run-twitter-cycle.sh`'s Phase 1 retry loop to force a fresh
     topic on each scan attempt so the model isn't pinned to one assigned
-    topic across all 5 retries. When the exclusion list empties the
-    universe, the picker falls back to `explore_invent` mode regardless
-    of `explore_rate` so the cycle still gets a fresh angle from Claude
-    instead of failing or repeating a tried topic.
+    topic across all retries. When the exclusion list empties the universe,
+    we raise `UniverseExhaustedError` and the shell breaks the retry loop
+    cleanly — no invent fallback. Invention is the standalone
+    `invent_topics.py` job's responsibility (2026-05-28 architectural
+    split); this picker is pure use-mode selection over the universe.
     """
     rnd = rng or random
     universe, source_map = _load_universe(project_name)
     picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     signal = _load_signal(project_name, platform, window_days)
-    # Build the FULL pool first (unfiltered) so reference_topics — the
-    # context block surfaced to Claude for invention — always reflects the
-    # project's real performance signal, even when we're forced into
-    # explore_invent by an exhausted exclusion list.
-    full_pool = _build_pool(universe, signal, source_map=source_map)
 
     excluded_set = {
         (t or "").strip().lower()
         for t in (exclude_topics or [])
         if t and isinstance(t, str)
     }
-    universe_excluded = False
     if excluded_set:
         filtered_universe = [
             t for t in universe
@@ -475,26 +469,26 @@ def pick_topic_for_project(project_name, platform="twitter",
         ]
         if not filtered_universe:
             # All topics in the universe were already tried this cycle.
-            # Force explore_invent — the picker yields search_topic=None and
-            # the prompt branch tells Claude to invent a fresh topic given
-            # the (unfiltered) reference_topics it has seen so far. Falling
-            # back this way keeps the retry loop alive on small universes.
+            # Hard stop. The shell's retry loop catches this and exits
+            # Phase 1 with whatever candidates accumulated; the cycle's
+            # log_run summary surfaces `universe_exhausted:1` so the
+            # dashboard distinguishes this from empty_batch / phase1_no_tweets.
             sys.stderr.write(
                 f"[pick_search_topic] universe_exhausted project={project_name!r} "
-                f"excluded={len(excluded_set)} active={len(universe)} -> "
-                f"forcing explore_invent\n"
+                f"excluded={len(excluded_set)} active={len(universe)}\n"
             )
-            universe_excluded = True
-            pool = full_pool  # for reference_topics on the assignment below
-        else:
-            sys.stderr.write(
-                f"[pick_search_topic] excluded={len(excluded_set)} "
-                f"remaining_universe={len(filtered_universe)} project={project_name!r}\n"
+            raise UniverseExhaustedError(
+                f"project={project_name!r} exhausted: all "
+                f"{len(universe)} active topics already tried this cycle "
+                f"(excluded={len(excluded_set)})"
             )
-            universe = filtered_universe
-            pool = _build_pool(universe, signal, source_map=source_map)
-    else:
-        pool = full_pool
+        sys.stderr.write(
+            f"[pick_search_topic] excluded={len(excluded_set)} "
+            f"remaining_universe={len(filtered_universe)} project={project_name!r}\n"
+        )
+        universe = filtered_universe
+
+    pool = _build_pool(universe, signal, source_map=source_map)
 
     weights = [_compute_weight(r) for r in pool]
     weight_total = sum(weights) or 1.0
@@ -508,34 +502,10 @@ def pick_topic_for_project(project_name, platform="twitter",
         for i in range(min(REFERENCE_TOP_N, len(pool)))
     ]
 
-    base = {
-        "project": project_name,
-        "platform": platform,
-        "reference_topics": reference_topics,
-        "universe_size": len(universe),
-        "scored_n": scored_n,
-        "cold_n": cold_n,
-        "pool_size": len(pool),
-        "window_days": window_days,
-        "picked_at": picked_at,
-    }
-
-    # EXPLORE_INVENT: picker punts on selection, Claude invents a new
-    # topic given the full stats. search_topic=None signals the prompt
-    # branch downstream. Forced (independent of explore_rate) when the
-    # exclude_topics list emptied the universe — see the universe_excluded
-    # branch above.
-    if universe_excluded or rnd.random() < explore_rate:
-        assignment = {
-            **base,
-            "mode": "explore_invent",
-            "search_topic": None,
-            "score": 0.0,
-        }
-        _emit_trace(assignment, pool, weight_pcts, chosen_idx=None)
-        return assignment
-
-    # USE: weighted random over the FULL pool (smoothed weights).
+    # USE: weighted random over the (possibly filtered) pool. This is now
+    # the only path — EXPLORE_INVENT was removed 2026-05-28 in favor of
+    # the standalone invent_topics.py job that writes new topics directly
+    # into project_search_topics.
     needle = rnd.uniform(0.0, weight_total)
     cum = 0.0
     chosen_idx = 0
@@ -547,7 +517,15 @@ def pick_topic_for_project(project_name, platform="twitter",
     chosen = pool[chosen_idx]
 
     assignment = {
-        **base,
+        "project": project_name,
+        "platform": platform,
+        "reference_topics": reference_topics,
+        "universe_size": len(universe),
+        "scored_n": scored_n,
+        "cold_n": cold_n,
+        "pool_size": len(pool),
+        "window_days": window_days,
+        "picked_at": picked_at,
         "mode": "use",
         "search_topic": chosen["search_topic"],
         "score": round(chosen["composite_score"], 2),
@@ -557,16 +535,17 @@ def pick_topic_for_project(project_name, platform="twitter",
     return assignment
 
 
-def _format_pool_table(refs, mode):
-    """Render the pool stats as a compact markdown table for the prompt."""
+def _format_pool_table(refs):
+    """Render the pool stats as a compact markdown table for the prompt.
+
+    Single-purpose post-2026-05-28: the picker only has one mode (use),
+    so the table is always rendered as "context for an already-assigned
+    topic". The `mode` param was removed when explore_invent was deleted.
+    """
     if not refs:
         return "(no stats yet for any topic in this project)"
     lines = []
-    header = "### "
-    if mode == "explore_invent":
-        header += f"Full pool stats for context (do NOT pick from this list — invent something NEW)"
-    else:
-        header += f"Pool stats (your topic is already assigned, this is context only)"
+    header = "### Pool stats (your topic is already assigned, this is context only)"
     lines.append(header)
     for r in refs:
         attempts_n = r.get("attempts_n", 0)
@@ -595,93 +574,20 @@ def _format_pool_table(refs, mode):
 def get_assigned_topic_prompt(assignment):
     """Compact prompt block built from a pick_topic_for_project() assignment.
 
-    Two branches mirror the picker's two modes:
-    - use: tell Claude the topic is locked, don't substitute.
-    - explore_invent: tell Claude to invent a brand-new topic given the
-      stats of every existing topic for this project.
+    Single-mode: the picker always returns a use-mode assignment now
+    (2026-05-28 explore_invent removal). Invention is owned by the
+    standalone `invent_topics.py` job.
     """
     if not assignment:
         return "(no search_topics defined for this project)"
 
-    mode = assignment.get("mode", "use")
     topic = assignment.get("search_topic") or ""
-    refs = assignment.get("reference_topics") or []
-    universe_size = assignment.get("universe_size", 0)
-    scored_n = assignment.get("scored_n", 0)
-    cold_n = assignment.get("cold_n", 0)
-    window_days = assignment.get("window_days", WINDOW_DAYS)
 
-    if mode == "explore_invent":
-        lines = [
-            "## Your assigned mode: **EXPLORE_INVENT (invent a new topic)**",
-            "",
-            (
-                f"This cycle is on the EXPLORE branch (~{int(EXPLORE_RATE*100)}% "
-                f"of cycles). Instead of picking from the existing pool, "
-                f"you must INVENT one new search_topic for this project — "
-                f"a concept that does NOT appear in the stats below and is "
-                f"NOT a paraphrase of any topic in the stats below. The new "
-                f"topic should be in the project's domain (see the "
-                f"project's `description` field), but probe a gap the "
-                f"current list doesn't cover."
-            ),
-            "",
-            (
-                f"How to use the stats: \n"
-                f"  - clicks vs skipped_n: which topics convert vs which "
-                f"surface noise we keep rejecting (audience mismatch).\n"
-                f"  - attempts vs supply: how many times we searched the "
-                f"topic, and how many raw tweets X returned across those "
-                f"searches. \n"
-                f"  - **[FIT_FAIL]** tag = ≥3 attempts, X returned tweets, "
-                f"but we posted 0. Means the topic surfaces threads our "
-                f"prompts/criteria reject. Do NOT propose a paraphrase of a "
-                f"FIT_FAIL topic; pivot to a DIFFERENT angle on the same "
-                f"audience. \n"
-                f"  - **[SUPPLY_DEAD]** tag = ≥3 attempts, X returned 0 "
-                f"tweets total. Supply problem, not fit. You may propose a "
-                f"related but more concrete/timely angle that might surface "
-                f"actual tweets (e.g. swap 'AI agent' for 'Claude Code agent', "
-                f"add a verb people actually tweet, etc.). \n"
-                f"\n"
-                f"Propose a topic that aims at the audience the winners reach "
-                f"without copying their wording. Inventions can be longer-tail "
-                f"phrases ('AI coding agent for legacy codebases'), adjacent "
-                f"verticals ('Cursor alternative for designers'), or fresh "
-                f"angles on the project's value prop. They MUST be plausible "
-                f"as a Twitter advanced-search query (i.e. real people "
-                f"would tweet about it)."
-            ),
-            "",
-            (
-                f"Universe today: {universe_size} seeded topics in "
-                f"config.json. {scored_n} have data (any posts/skips/clicks), "
-                f"{cold_n} are unscored."
-            ),
-            "",
-            _format_pool_table(refs, mode),
-            "",
-            (
-                "Draft ONE Twitter advanced-search query targeting your "
-                "INVENTED topic. In the JSON you emit per tweet, set "
-                "`search_topic` to the EXACT invented topic name you "
-                "chose (one consistent string for every tweet in this "
-                "cycle). After scoring, the candidate pipeline upserts "
-                "your invention into project_search_topics with "
-                "source='invented', status='active', so future USE "
-                "cycles can re-select it via the normal weighted-random "
-                "path. If it FIT_FAILs (≥3 attempts, 0 posted), the "
-                "existing weight floor naturally throttles it without "
-                "any manual curation."
-            ),
-        ]
-        return "\n".join(lines)
-
-    # Mode == "use" — programmatic pick is final; the model gets the
-    # topic and the instruction, nothing else. The full pool with
-    # weights/verdicts is emitted to the cycle log via the
-    # `[pick_search_topic]` trace line in pick_topic_for_project, so any
-    # post-hoc tracing reads from the log, not the prompt.
+    # Programmatic pick is final; the model gets the topic and the
+    # instruction, nothing else. The full pool with weights/verdicts is
+    # emitted to the cycle log via the `[pick_search_topic]` trace line
+    # in pick_topic_for_project, so any post-hoc tracing reads from the
+    # log, not the prompt.
     lines = [
         f"## Your assigned search topic: **{topic}**",
         "",
