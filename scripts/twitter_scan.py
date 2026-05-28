@@ -125,7 +125,22 @@ _SCRAPE_JS = r"""
 })()
 """
 
-_DATE_OPS_RE = re.compile(r"\b(since|until|since_time|until_time):\S+", re.IGNORECASE)
+# 2026-05-28: also matches the bash-arithmetic form
+# `since_time:$(( $(date +%s) - FRESHNESS_HOURS_DISCOVER * 3600 ))` that was
+# accidentally taught to the model when an escaping bug in the prompt sent
+# the literal template text instead of an evaluated epoch. \S+ alone stops
+# at the first space and leaves the tail (`$(date +%s) - ... ))`) behind as
+# keyword garbage that X searches for literally. The non-greedy `.*?` inside
+# `$((...))` matches up to the first `))` which is the template's own close.
+_DATE_OPS_RE = re.compile(
+    r"\b(since|until|since_time|until_time):(?:\$\(\(.*?\)\)|\S+)",
+    re.IGNORECASE,
+)
+# Belt + suspenders: even after _DATE_OPS_RE, residual orphan fragments could
+# remain if the model invents some other broken template. Strip common ones.
+_BASH_GARBAGE_RE = re.compile(
+    r"\$\(\(|\$\([^)]*\)|\bFRESHNESS_HOURS_DISCOVER\s*\*\s*\d+\b|\)\)"
+)
 _STATUS_ID_RE = re.compile(r"/status/(\d+)")
 
 
@@ -136,8 +151,9 @@ def _build_url(query: str, freshness_hours: int) -> str:
     rogue `since:2020-01-01` in the model's query string can no longer widen
     the window. `f=live` is what closes the Top-tab dodge: without it X may
     serve the Top tab where the time operator is advisory."""
-    cleaned = _DATE_OPS_RE.sub("", query).strip()
-    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = _DATE_OPS_RE.sub("", query)
+    cleaned = _BASH_GARBAGE_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cap_epoch = int(time.time()) - int(freshness_hours) * 3600
     full = f"{cleaned} since_time:{cap_epoch}".strip()
     return "https://x.com/search?q=" + urllib.parse.quote(full) + "&src=typed_query&f=live"
