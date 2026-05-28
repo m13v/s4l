@@ -932,10 +932,10 @@ You have $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(len(json.l
 
 Each project entry carries TWO fields that drive your behavior: \`topic_picked_mode\` (either \`use\` or \`explore_invent\`) and \`search_topic\` (a string in \`use\` mode, NULL in \`explore_invent\` mode).
 
-USE mode (~90% of cycles, indicated by \`topic_picked_mode: "use"\` and a non-null \`search_topic\`):
+USE mode (~90% of cycles, indicated by \`topic_picked_mode: \"use\"\` and a non-null \`search_topic\`):
 The Python picker has already chosen this project's search_topic by weighted-random sampling over the FULL universe in config.json. Your job is to translate that ASSIGNED topic into the best Twitter advanced-search query that will surface fresh, on-topic tweets. Do NOT substitute a different topic; do NOT paraphrase the topic. End-to-end attribution joins on the exact string.
 
-EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: "explore_invent"\` and \`search_topic: null\`):
+EXPLORE_INVENT mode (~10% of cycles, indicated by \`topic_picked_mode: \"explore_invent\"\` and \`search_topic: null\`):
 The picker is asking you to INVENT a brand-new search_topic. Look at the project's own \`reference_topics\` array and propose ONE new topic concept that does NOT appear there and is NOT a paraphrase of anything in it. Use your invented topic as the query's \`search_topic\` AND drive the keyword phrasing from it (one consistent string per project).
 
 Projects:
@@ -974,8 +974,8 @@ Query guidelines:
 
 ## Output
 
-Return ONLY the structured_output JSON:
-{"queries": [{"project": "<project_name>", "query": "<X advanced-search string>", "search_topic": "<assigned or invented topic, verbatim>"}, ...]}
+Return ONLY the structured_output JSON with this shape:
+{\"queries\": [{\"project\": \"PROJECT_NAME\", \"query\": \"X advanced search string with operators\", \"search_topic\": \"assigned or invented topic, verbatim\"}, ...]}
 
 One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>"$LEAN_STDERR")
 QUERIES_RC=$?
