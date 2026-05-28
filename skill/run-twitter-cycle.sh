@@ -34,6 +34,17 @@
 
 set -uo pipefail
 
+# 2026-05-28: launchd inherits a default open-files limit of 256 on macOS,
+# which is below the threshold the claude binary needs when it loads MCP
+# servers from ~/.claude.json (50+ servers, each opening a stdio pipe pair).
+# Without this bump, `claude -p` exits with code 1 and ZERO bytes of output
+# (no stdout, no stderr, no archive) because the fd-exhaustion crash happens
+# inside Node.js startup before any handler can run. The lean Phase 1 path
+# (no --strict-mcp-config) was the first thing in the cycle to hit it.
+# 4096 is well above what claude + uv + helpers need; soft-fail to original
+# if the kernel/account caps below this.
+ulimit -n 4096 2>/dev/null || true
+
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
@@ -913,7 +924,7 @@ mkdir -p "$LEAN_DBG_DIR"
 LEAN_STDERR="$LEAN_DBG_DIR/stderr.log"
 log "[DBG] lean call about to run; env_log=$LEAN_DBG_DIR/env.log stderr_path=$LEAN_STDERR"
 
-QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
+QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
 
 ## Step 1: Draft one search query per project
 
