@@ -103,7 +103,19 @@ class PickerError(RuntimeError):
     """
 
 
-EXPLORE_RATE = 0.10
+class UniverseExhaustedError(RuntimeError):
+    """Raised when `exclude_topics` has filtered the universe to empty.
+
+    Happens mid-cycle when the retry loop has already tried every active
+    topic for this project. Callers should catch this distinctly from
+    PickerError and stop the retry loop gracefully (log
+    `universe_exhausted:1` as the cycle's failure reason and proceed to
+    Phase 2 with whatever candidates accumulated). There is no invent
+    fallback here by design (2026-05-28): invention is owned by the
+    standalone `invent_topics.py` job, not this in-cycle picker.
+    """
+
+
 WINDOW_DAYS = 30
 
 # Log-smoothed weighting constants. See module docstring for the curve.
