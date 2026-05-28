@@ -20,55 +20,52 @@ loudly — there is no config.json fallback.
 Performance signal: top_search_topics.query(project, "twitter", ...)
 which aggregates from twitter_candidates -> posts -> post_link_clicks.
 
-Two branches:
+Single-mode (post-2026-05-28 architectural split):
 
-1. USE (~90%): weighted random sample over the FULL universe. Every
-   topic in config.json is always eligible, including ones with no
-   post history. Weights are LOG-SMOOTHED so the top performer lands
-   around 20-30% (vs raw proportional which would give 75-95% to one
-   dominant topic) and unscored topics get an explicit floor weight
-   around 0.5-1% per topic (low but never zero). This way Claude Code
-   (and any other underexplored topic) always has a real shot.
+USE: weighted random sample over the FULL universe. Every topic active
+in project_search_topics is eligible, including ones with no post
+history. Weights are LOG-SMOOTHED so the top performer lands around
+20-30% (vs raw proportional which would give 75-95% to one dominant
+topic) and unscored topics get an explicit floor weight around 0.5-1%
+per topic (low but never zero). This way every active topic always has
+a real shot.
 
    base(score>0)  = log_e(score + 1) + 1.0
    base(score==0) = COLD_TOPIC_WEIGHT (= 0.15)
 
-   2026-05-27: base weight is then adjusted by two layered factors
-   that read from twitter_search_attempts (via the supply join in
-   top_search_topics._query_twitter) so the picker distinguishes
-   topics that were tried-and-failed from topics that were never
-   tried at all. Math lives in _compute_weight; concretely:
+2026-05-27: base weight is adjusted by two layered factors that read
+from twitter_search_attempts (via the supply join in
+top_search_topics._query_twitter) so the picker distinguishes topics
+that were tried-and-failed from topics that were never tried at all.
+Math lives in _compute_weight; concretely:
 
      - attempts_n == 0           → return base unchanged
      - 0 supply across N tries   → base * SUPPLY_DEAD_WEIGHT (0.3x)
      - else                      → base * conversion (posts/attempt)
 
-   Floor at base*DEAD_FLOOR_FRACTION so no topic ever locks out
-   entirely; we always keep a small retest probability in case X's
-   firehose or our criteria shift.
+Floor at base*DEAD_FLOOR_FRACTION so no topic ever locks out entirely;
+we always keep a small retest probability in case X's firehose or our
+criteria shift.
 
-2. EXPLORE_INVENT (~10%): the picker returns search_topic=None and
-   mode='explore_invent'. The downstream prompt then asks Claude to
-   INVENT a brand-new topic for this project given the stats of every
-   existing topic (so it sees what's working, what's saturated, and
-   what gaps to probe). The invented topic gets stamped onto every
-   candidate row from this cycle for analytics, and the candidate-scoring
-   step (score_twitter_candidates.py::auto_promote_invented_topics) then
-   upserts it into project_search_topics with source='invented',
-   status='active' so the next USE cycle can re-select it via the normal
-   weighted-random path. The existing _compute_weight gates (conversion
-   penalty, supply-dead penalty) act as the quality filter: a FIT_FAIL
-   invention naturally drops to the floor weight without any manual
-   curation.
+EXPLORE_INVENT was REMOVED 2026-05-28. Invention is now the
+responsibility of the standalone `invent_topics.py` job (hourly, picks
+one project per run, runs a propose-refine loop with topic-ledger
+lookups, writes committed inventions directly to project_search_topics).
+This picker is pure use-mode selection over the universe — no
+in-cycle invention, no fallback branches.
+
+When `exclude_topics` filters the universe to empty (small-project
+mid-cycle case), the picker raises UniverseExhaustedError. Callers
+must catch it and stop gracefully — there is no invent fallback here.
 
 Output schema (single JSON object to stdout, one row per --project):
 
     {
-      "mode": "use" | "explore_invent",
-      "search_topic": str | None,        # None when mode == explore_invent
+      "mode": "use",
+      "search_topic": str,
       "project": str,
       "platform": "twitter",
-      "score": float,                    # composite_score; 0 for explore_invent
+      "score": float,                    # composite_score
       "reference_topics": [              # full pool, sorted by score DESC
         {"search_topic", "composite_score", "posts",
          "clicks_total", "posted_n", "skipped_n", "weight_pct"},
@@ -612,7 +609,6 @@ def main():
     ap.add_argument("--project", required=True, help="Project name from config.json")
     ap.add_argument("--platform", default="twitter", help="Platform (default: twitter)")
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS)
-    ap.add_argument("--explore-rate", type=float, default=EXPLORE_RATE)
     ap.add_argument("--seed", type=int, default=None, help="Deterministic RNG seed for tests")
     ap.add_argument("--out", default=None, help="Optional path to also write the JSON to (mirrors styles.sh pattern)")
     ap.add_argument("--prompt", action="store_true", help="Print the prompt block to stdout instead of JSON")
@@ -633,10 +629,14 @@ def main():
             args.project,
             platform=args.platform,
             window_days=args.window_days,
-            explore_rate=args.explore_rate,
             exclude_topics=excluded,
             rng=rng,
         )
+    except UniverseExhaustedError as e:
+        # CLI surface for the same exhaustion signal the shell catches.
+        # Distinct exit code 3 so callers can branch on it.
+        sys.stderr.write(f"pick_search_topic: {e}\n")
+        sys.exit(3)
     except PickerError as e:
         sys.stderr.write(f"pick_search_topic: {e}\n")
         sys.exit(2)
