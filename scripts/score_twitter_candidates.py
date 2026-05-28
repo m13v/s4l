@@ -45,6 +45,15 @@ _SNOWFLAKE_OK = re.compile(r"/status/(\d{15,19})(?:[/?#]|$)")
 _TRAILING_ZEROS_FAKE = re.compile(r"0{6,}$")
 
 
+# Weight on the additive reach-potential term in calculate_virality_score
+# (2026-05-28). Tunable. Larger = a fresh high-follower thread with no
+# engagement yet ranks higher relative to threads with demonstrated velocity.
+# At 0.6, a freshly-posted tweet from a 50k-200k account scores ~4 on reach
+# alone; a 200M account ~5.4; a sub-1k account stays near 0. Set to 0 to fall
+# back to the pure multiplicative (engagement-only) score.
+REACH_POTENTIAL_WEIGHT = 0.6
+
+
 def looks_like_fabricated_tweet_url(url: str) -> bool:
     """True if the URL's snowflake suffix is the model's fabrication signature.
 
