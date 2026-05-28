@@ -176,6 +176,30 @@ def _write_sidecar(rec: dict) -> None:
         pass  # fail-open; sidecar is operator visibility only, not on the data path
 
 
+def _write_scan_tweets_record(rec: dict) -> None:
+    """Append one JSONL record per scan() call to the path in SCAN_TWEETS_FILE.
+
+    2026-05-28: shell-side data path. When the cycle exports SCAN_TWEETS_FILE,
+    run-twitter-cycle.sh reads this file after the scan claude session ends
+    and uses it as the source of truth for both $RAW_FILE (tweets fed to the
+    scorer) and $QUERIES_FILE (attempts fed to log_twitter_search_attempts.py),
+    skipping the model's structured_output relay entirely. This cuts the
+    relay-tokens bill (model no longer has to copy the tweets/queries_used
+    arrays from bh_run stdout into structured_output).
+
+    Inert when SCAN_TWEETS_FILE is unset; the model's structured_output path
+    remains the fallback so existing standalone test invocations (no cycle
+    env) and any session where the file write fails still produce candidates."""
+    path = os.environ.get("SCAN_TWEETS_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass  # fail-open; shell falls back to structured_output if file is missing
+
+
 def _navigate(url: str) -> None:
     """Reuse the existing real tab if there is one (typical cycle behavior),
     otherwise open one. The MCP-managed Chrome always has at least an
@@ -247,6 +271,20 @@ def scan(
             "dropped_skip": dropped_skip,
             "batch_id": os.environ.get("BATCH_ID"),
             "cycle_variant": os.environ.get("TWITTER_CYCLE_VARIANT"),
+        }
+    )
+
+    # Shell-side data path. The cycle (when it exports SCAN_TWEETS_FILE) reads
+    # this file directly instead of asking the scan model to relay tweets via
+    # structured_output, saving relay tokens. One JSONL record per scan() call;
+    # the cycle aggregates across all calls in one Phase 1 attempt.
+    _write_scan_tweets_record(
+        {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "query": query,
+            "project": project,
+            "search_topic": search_topic,
+            "tweets": kept,
         }
     )
 
