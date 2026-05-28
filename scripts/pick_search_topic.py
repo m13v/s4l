@@ -288,8 +288,8 @@ def _build_pool(universe, signal_rows, source_map=None):
     The pre-picker era wrote entire query strings into search_topic
     (e.g. `("foo" OR "bar") min_faves:50 since:...`); those would pollute
     the pool, so universe membership (not top_search_topics) is the
-    source of truth. Invented topics promoted by
-    scripts/promote_invented_topics.py carry source='invented' in
+    source of truth. Invented topics written by
+    scripts/invent_topics.py carry source='invented' in
     project_search_topics and are eligible the same way seeds are. The
     optional `source_map` is a topic -> source dict so per-row source
     can be surfaced to the trace without a second API call.
