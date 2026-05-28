@@ -172,7 +172,7 @@ PENDING_CONVOS=$(psql "$DATABASE_URL" -t -A -c "
                r.our_reply_url as our_prior_public_reply_url,
                d.comment_context, d.project_name, d.target_project,
                d.qualification_status, d.qualification_notes,
-               d.booking_link_sent_at, d.mode as current_mode,
+               d.booking_link_sent_at, d.mode,
                pr.headline as prospect_headline,
                pr.bio as prospect_bio,
                pr.company as prospect_company,
@@ -1150,7 +1150,7 @@ Rules:
 - \`mode\` is INDEPENDENT of \`tier\` and \`first_product_mention_at\`. A thread that pitched on turn 2 (tier=2, first_product_mention_at stamped) can still have \`mode='rapport'\` on turn 5 if we stepped back to a casual reply.
 - If you SKIPPED (no reply sent) or flagged for human, do NOT call set-mode; mode only updates on turns where we actually sent an outbound message.
 - Re-setting the same mode as the prior turn is fine and expected (e.g. three rapport turns in a row all re-stamp \`rapport\`).
-- \`current_mode\` is included in the PENDING_CONVOS payload so you can see what the previous outbound was labeled.
+- \`mode\` is included in the PENDING_CONVOS payload so you can see what the previous outbound was labeled.
 
 ### Step 6: Let go when it's time
 Mark as stale ONLY if ALL of these are true (be conservative — when in doubt, SKIP without marking stale):
