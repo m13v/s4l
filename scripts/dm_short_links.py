@@ -707,6 +707,16 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     # The remaining _utm_fallback paths below are runtime failures of the mint
     # API / pool itself, where UTM is the genuine last resort.
 
+    # Opt-in policy override: a project may set `force_utm_only: true` in
+    # config.json to deliberately post UTM-tagged bare URLs instead of minting
+    # a /r/<code> short link. This re-opens (per-project, explicitly) the path
+    # that was globally closed on 2026-05-22. Trade-off: no /r/<code> means no
+    # post_links row and no first-party post_link_clicks join; attribution still
+    # works via the baked-in UTM scheme (utm_source/campaign/term/content) that
+    # _build_target_url_for_post already applied to `fallback_target`.
+    if project_cfg and project_cfg.get('force_utm_only'):
+        return _utm_fallback('policy')
+
     if project_cfg and project_cfg.get('external_short_links'):
         # Pool path. Atomically claim the oldest unclaimed pool row.
         if use_legacy:
