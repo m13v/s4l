@@ -7,8 +7,10 @@ background job:
 
   - Picks ONE project per run using the same `pick_projects()` weighting
     the cycle uses (inverse-recent-share, dampens active projects).
-  - Loads that project's per-topic ledger
-    (~/social-autoposter/state/topic_ledger.json).
+  - Reads that project's per-topic funnel from
+    GET /api/v1/topic-funnel?project=<name> — server-side aggregation,
+    no local-file state (replaces ~/social-autoposter/state/topic_ledger.json
+    from earlier draft of this job, 2026-05-28).
   - Asks Claude to propose 3-5 NEW search_topic candidates given the
     project's description, the existing universe, the strong/decent
     performers, the duds, and the untried tail.
@@ -19,9 +21,8 @@ background job:
     (Jaccard >= SIMILARITY_THRESHOLD against any existing topic).
   - POSTs survivors to /api/v1/project-search-topics with
     source='invented', status='active'.
-  - Writes an audit row to ~/social-autoposter/state/invented_topics_audit.jsonl
-    (one JSON line per invocation) capturing project, proposals,
-    rejections, commits — so we can review invention quality offline.
+  - POSTs an audit row to /api/v1/invented-topics-audit so invention
+    quality is reviewable offline (no local file).
 
 Cadence: hourly via launchd com.m13v.social-invent-topics.
 Project budget: one per run (n=1). Knob is PROJECTS_PER_RUN below.
@@ -29,7 +30,7 @@ Project budget: one per run (n=1). Knob is PROJECTS_PER_RUN below.
 CLI:
     python3 scripts/invent_topics.py                       # pick a project, invent, commit
     python3 scripts/invent_topics.py --project studyly     # force a specific project
-    python3 scripts/invent_topics.py --dry-run             # print plan, do not commit
+    python3 scripts/invent_topics.py --dry-run             # log plan, do not commit or audit
     python3 scripts/invent_topics.py --proposals 5         # ask Claude for N proposals
 """
 from __future__ import annotations
@@ -42,7 +43,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,12 +50,6 @@ from http_api import api_get, api_post  # noqa: E402
 from pick_project import load_config, pick_projects  # noqa: E402
 
 
-LEDGER_PATH = Path(os.path.expanduser(
-    "~/social-autoposter/state/topic_ledger.json"
-))
-AUDIT_PATH = Path(os.path.expanduser(
-    "~/social-autoposter/state/invented_topics_audit.jsonl"
-))
 PROJECTS_PER_RUN = 1
 DEFAULT_PROPOSALS = 4
 SIMILARITY_THRESHOLD = 0.6  # Jaccard threshold above which we reject as near-dupe
@@ -93,31 +87,36 @@ def _jaccard(a: str, b: str) -> float:
     return len(inter) / len(union)
 
 
-# --- Ledger loading ---------------------------------------------------------
+# --- Ledger / universe loading via API --------------------------------------
 
-def load_ledger() -> list[dict]:
-    """Read the materialized ledger written by scripts/topic_ledger.py.
+def load_project_topics(project_name: str,
+                        window_days: int = WINDOW_DAYS) -> list[dict]:
+    """Fetch the per-topic funnel from /api/v1/topic-funnel for one project.
 
-    Hard-fails if the file is missing — readers must NOT silently
-    degrade to candidate-only signal (that's the bug the ledger
-    exists to fix). The cron schedule guarantees the file is at most
-    15 min stale; staler than that means the ledger job has broken
-    and we'd rather abort than make uninformed inventions.
+    Server-side aggregation (no direct DB access from this client).
+    Returns rows already enriched with `verdict` and `clicks_per_post`.
+    Hard-fails on network errors — invention without ledger signal
+    would be uninformed and risks producing dupes-by-accident.
     """
-    if not LEDGER_PATH.exists():
-        raise SystemExit(
-            f"topic_ledger.json missing at {LEDGER_PATH}. "
-            f"Run scripts/topic_ledger.py first."
+    try:
+        resp = api_get(
+            "/api/v1/topic-funnel",
+            query={
+                "project": project_name,
+                "window_days": str(window_days),
+                "platform": "twitter",
+            },
         )
-    with open(LEDGER_PATH) as fh:
-        data = json.load(fh)
+    except Exception as exc:
+        raise SystemExit(
+            f"topic-funnel API failed for project={project_name!r}: {exc}"
+        ) from exc
+    data = (resp or {}).get("data") or {}
     rows = data.get("rows") or []
-    return rows
-
-
-def project_topics(ledger: list[dict], project_name: str) -> list[dict]:
-    """Slice the ledger to one project, sorted strong -> weak."""
-    rows = [r for r in ledger if r.get("project") == project_name]
+    # Server returns rows sorted by clicks_total DESC. Re-sort by verdict
+    # for the prompt's table so strong/decent appear first regardless of
+    # raw click counts (a strong topic with low absolute clicks is still
+    # a quality signal we want to highlight).
     verdict_rank = {"strong": 0, "decent": 1, "weak": 2, "untried": 3, "dud": 4}
     rows.sort(key=lambda r: (
         verdict_rank.get(r.get("verdict", "untried"), 5),
@@ -130,10 +129,9 @@ def project_topics(ledger: list[dict], project_name: str) -> list[dict]:
 def project_universe_strings(project_name: str) -> set[str]:
     """Full active universe for the project from project_search_topics.
 
-    Read directly from the API so we have the freshest read at invent
-    time — the ledger uses a 30d window but the universe is the
-    authoritative dedupe target. Lowercased for case-insensitive
-    matching against proposals.
+    Read from /api/v1/project-search-topics for the freshest read at
+    invent time. Lowercased for case-insensitive matching against
+    proposals.
     """
     try:
         resp = api_get(
@@ -406,7 +404,7 @@ def validate_proposals(
     return committed, rejected
 
 
-# --- Commit + audit ---------------------------------------------------------
+# --- Commit + audit (both via API) ------------------------------------------
 
 def commit_topic(project_name: str, topic: str, dry_run: bool = False) -> bool:
     """POST a new topic to project_search_topics with source='invented'.
@@ -437,17 +435,23 @@ def commit_topic(project_name: str, topic: str, dry_run: bool = False) -> bool:
         return False
 
 
-def write_audit(payload: dict) -> None:
-    """Append one JSON line per invocation to the audit log.
+def write_audit(payload: dict, dry_run: bool = False) -> None:
+    """POST one audit row to /api/v1/invented-topics-audit.
 
-    The audit row captures inputs (project, proposals, universe size)
-    and outputs (committed, rejected) so invention quality is
-    reviewable offline without re-running. Atomic append; file
-    grows monotonically — no rotation yet (cheap to add later).
+    No local file: persistence is server-side via the API. Failures
+    are logged but never raise — losing one audit row is preferable
+    to crashing the invocation that just successfully committed topics.
     """
-    AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(AUDIT_PATH, "a") as fh:
-        fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    if dry_run:
+        print(f"[dry-run] would write audit row (project={payload.get('project')!r})",
+              file=sys.stderr)
+        return
+    try:
+        api_post("/api/v1/invented-topics-audit", body=payload)
+    except SystemExit as exc:
+        print(f"[invent_topics] audit POST failed: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[invent_topics] audit POST exception: {exc}", file=sys.stderr)
 
 
 # --- Main -------------------------------------------------------------------
@@ -461,7 +465,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="Print plan; do not commit to project_search_topics")
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS,
-                    help="Ledger window (must match topic_ledger.py)")
+                    help="Ledger window passed to /api/v1/topic-funnel")
     args = ap.parse_args()
 
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -490,13 +494,12 @@ def main():
     print(f"[invent_topics] project={project_name!r} (pick_method={pick_method})",
           file=sys.stderr)
 
-    # --- Load the ledger + slice to this project ---
-    ledger = load_ledger()
-    topics_for_project = project_topics(ledger, project_name)
+    # --- Load the ledger via API ---
+    topics_for_project = load_project_topics(project_name, args.window_days)
     print(f"[invent_topics] ledger rows for {project_name}: {len(topics_for_project)}",
           file=sys.stderr)
 
-    # --- Read fresh universe for dedupe ---
+    # --- Read fresh universe via API ---
     universe = project_universe_strings(project_name)
     print(f"[invent_topics] active universe size: {len(universe)}",
           file=sys.stderr)
@@ -531,9 +534,9 @@ def main():
         else:
             committed_actually.append({**c, "committed": False})
 
-    # --- Audit row ---
+    # --- Audit row (via API; no local file) ---
     elapsed = round(time.time() - t0, 2)
-    audit_row = {
+    audit_payload = {
         "ts": started_at,
         "elapsed_sec": elapsed,
         "project": project_name,
@@ -547,7 +550,7 @@ def main():
         "dry_run": args.dry_run,
         "raw_response_head": (raw or "")[:500],
     }
-    write_audit(audit_row)
+    write_audit(audit_payload, dry_run=args.dry_run)
 
     n_new = sum(1 for c in committed_actually if c.get("committed"))
     print(f"[invent_topics] done. project={project_name!r} "
