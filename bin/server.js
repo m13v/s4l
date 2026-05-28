@@ -8103,6 +8103,111 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
+  // GET /api/search-topics/invented - sibling of /api/search-topics/stats,
+  // sourced from project_search_topics (the universe) rather than
+  // twitter_search_attempts (the attempt log). Surfaces invented topics
+  // that may have ZERO attempts so far, so the dashboard can show what the
+  // invent_topics.py job has added vs. what's actually been tested.
+  //
+  // The existing /api/search-topics/stats endpoint shows "effectiveness"
+  // (only topics with at least one attempt). This endpoint shows the
+  // "invention pipeline" — every source='invented' row in the universe,
+  // with whatever attempt/candidate/post stats accumulated since they
+  // were committed. Untried inventions appear with all zeros and
+  // verdict='untried'.
+  //
+  // Twitter-only today (mirrors /api/v1/topic-funnel on the website).
+  // Reddit + LinkedIn don't have an equivalent invent path yet.
+  if (p === '/api/search-topics/invented' && req.method === 'GET') {
+    const url = new URL(req.url, 'http://localhost');
+    const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+    const limit = Math.max(1, Math.min(5000, parseInt(url.searchParams.get('limit') || '5000', 10) || 5000));
+    const stPc = auth.projectClause(req.user, "pst.project_name", url.searchParams.get('project'));
+    if (!stPc.ok) return json(res, { days, rows: [] });
+    const projClause = stPc.clause ? stPc.clause.replace(/^\s*AND\s+/, ' AND ') : '';
+    // Verdict bucketing thresholds mirror scripts/topic_ledger.py + the
+    // topic-funnel route in the website repo. Computed in SQL to keep the
+    // dashboard frontend's render path agnostic.
+    const q =
+      // The drivers: invented-source rows from the universe. LEFT JOIN
+      // attempts + candidates + posts + clicks so untried inventions
+      // still appear with zeros.
+      "WITH invented AS ( " +
+        "SELECT pst.project_name, pst.topic, pst.created_at, pst.source " +
+          "FROM project_search_topics pst " +
+         "WHERE pst.source = 'invented' " +
+           "AND pst.status = 'active' " +
+           projClause +
+      "), " +
+      "att AS ( " +
+        "SELECT a.project_name, a.search_topic, " +
+               "COUNT(*)::int AS attempts_n, " +
+               "MAX(a.ran_at) AS last_attempted_at, " +
+               "COALESCE(SUM(a.tweets_found), 0)::int AS tweets_found_total, " +
+               "COUNT(*) FILTER (WHERE COALESCE(a.tweets_found, 0) = 0)::int AS zero_supply_attempts " +
+          "FROM twitter_search_attempts a " +
+         "WHERE a.ran_at > NOW() - (" + days + "::int * INTERVAL '1 day') " +
+           "AND a.search_topic IS NOT NULL AND a.search_topic <> '' " +
+         "GROUP BY a.project_name, a.search_topic " +
+      "), " +
+      "cand AS ( " +
+        "SELECT c.matched_project AS project_name, c.search_topic, " +
+               "COUNT(DISTINCT c.id) AS candidates_n, " +
+               "COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n, " +
+               "COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n, " +
+               "MIN(c.discovered_at) AS first_candidate_at, " +
+               "MAX(c.discovered_at) AS last_candidate_at, " +
+               "COALESCE(SUM(p.views)          FILTER (WHERE c.status='posted'), 0) AS views_total, " +
+               "COALESCE(SUM(p.upvotes)        FILTER (WHERE c.status='posted'), 0) AS likes_total, " +
+               "COALESCE(SUM(p.comments_count) FILTER (WHERE c.status='posted'), 0) AS comments_total, " +
+               "COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total " +
+          "FROM twitter_candidates c " +
+          "LEFT JOIN posts            p   ON p.id = c.post_id " +
+          "LEFT JOIN post_links       pl  ON pl.post_id = c.post_id " +
+          "LEFT JOIN post_link_clicks plc ON plc.code = pl.code " +
+         "WHERE c.discovered_at > NOW() - (" + days + "::int * INTERVAL '1 day') " +
+           "AND c.search_topic IS NOT NULL AND c.search_topic <> '' " +
+         "GROUP BY c.matched_project, c.search_topic " +
+      ") " +
+      "SELECT inv.project_name, " +
+             "inv.topic, " +
+             "inv.source, " +
+             "inv.created_at, " +
+             "COALESCE(att.attempts_n, 0)::int          AS attempts_n, " +
+             "att.last_attempted_at                      AS last_attempted_at, " +
+             "COALESCE(att.tweets_found_total, 0)::int  AS tweets_found_total, " +
+             "COALESCE(att.zero_supply_attempts, 0)::int AS zero_supply_attempts, " +
+             "COALESCE(cand.candidates_n, 0)::int       AS candidates_n, " +
+             "COALESCE(cand.posted_n, 0)::int           AS posted_n, " +
+             "COALESCE(cand.skipped_n, 0)::int          AS skipped_n, " +
+             "cand.first_candidate_at                   AS first_candidate_at, " +
+             "cand.last_candidate_at                    AS last_candidate_at, " +
+             "COALESCE(cand.views_total, 0)::int        AS views_total, " +
+             "COALESCE(cand.likes_total, 0)::int        AS likes_total, " +
+             "COALESCE(cand.comments_total, 0)::int     AS comments_total, " +
+             "COALESCE(cand.clicks_total, 0)::int       AS clicks_total, " +
+             // clicks_per_post = clicks_total / NULLIF(posted_n,0); NULL when no posts
+             "CASE WHEN COALESCE(cand.posted_n, 0) > 0 " +
+                  "THEN ROUND((COALESCE(cand.clicks_total, 0)::numeric / cand.posted_n), 3) " +
+                  "ELSE NULL END AS clicks_per_post, " +
+             // verdict bucketing matches topic_ledger.py + website route
+             "CASE WHEN COALESCE(att.attempts_n, 0) = 0 THEN 'untried' " +
+                  "WHEN COALESCE(att.attempts_n, 0) >= 3 AND COALESCE(cand.candidates_n, 0) = 0 THEN 'dud' " +
+                  "WHEN COALESCE(cand.posted_n, 0) = 0 THEN 'weak' " +
+                  "WHEN COALESCE(cand.clicks_total, 0)::numeric / NULLIF(cand.posted_n, 0) >= 1.0 THEN 'strong' " +
+                  "WHEN COALESCE(cand.clicks_total, 0)::numeric / NULLIF(cand.posted_n, 0) >= 0.3 THEN 'decent' " +
+                  "ELSE 'weak' END AS verdict " +
+        "FROM invented inv " +
+        "LEFT JOIN att  ON att.project_name  = inv.project_name AND att.search_topic = inv.topic " +
+        "LEFT JOIN cand ON cand.project_name = inv.project_name AND cand.search_topic = inv.topic " +
+       "ORDER BY inv.created_at DESC, posted_n DESC, attempts_n DESC " +
+       "LIMIT " + limit;
+    return (async () => {
+      const rows = await pq(q);
+      return json(res, { days, rows: rows || [] });
+    })().catch(e => json(res, { error: e.message }, 500));
+  }
+
   // GET /api/search-queries/stats - per-query intelligence across Twitter +
   // LinkedIn (the two platforms that log discovery queries to *_search_attempts).
   // Joins each query back to its candidates table to count posts that came from
@@ -9801,14 +9906,22 @@ const HTML = `<!DOCTYPE html>
       <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-topics-stats-heading">Search Topics (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-topic stats across Twitter (twitter_search_attempts.search_topic, set by pick_search_topic.py) + Reddit (reddit_search_attempts.seed). LinkedIn + GitHub don\u2019t track a topic concept at the attempt layer. Topic is the higher-level theme the LLM drafts queries from (e.g. \u2018AI phone agent\u2019 \u2192 many literal queries). attempts = times any query from this topic was drafted. candidates_found = total tweets/posts those searches returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this topic that we actually posted to. avg_engagement = comments\u00D73 + upvotes on resulting posts. Honors Window/Platform/Project filters above. Drill into \u2018Search Queries\u2019 below for the literal-phrase granularity within each topic.">i</span></span>
       <span class="style-stats-total" id="search-topics-stats-total"></span>
     </summary>
-    <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;">
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color: var(--text-secondary);cursor:pointer;">
+    <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <div role="tablist" aria-label="Search topics view" style="display:inline-flex;gap:0;border:1px solid var(--border, #2a2a2a);border-radius:6px;overflow:hidden;">
+        <button type="button" role="tab" id="search-topics-tab-attempted" aria-selected="true" data-view="attempted" style="padding:4px 10px;font-size:12px;background:var(--bg-elev, #1a1a1a);color:var(--text);border:none;cursor:pointer;border-right:1px solid var(--border, #2a2a2a);">Attempted</button>
+        <button type="button" role="tab" id="search-topics-tab-invented" aria-selected="false" data-view="invented" style="padding:4px 10px;font-size:12px;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;">Invented</button>
+      </div>
+      <label id="search-topics-stats-duds-only-wrap" style="display:flex;align-items:center;gap:6px;font-size:12px;color: var(--text-secondary);cursor:pointer;">
         <input type="checkbox" id="search-topics-stats-duds-only" style="cursor:pointer;">
         Show duds only (0 candidates)
       </label>
-      <span style="font-size:12px;color: var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
+      <span id="search-topics-stats-help-attempted" style="font-size:12px;color: var(--text-faint);">Up to 5000 rows, sorted by posts_made then attempts</span>
+      <span id="search-topics-stats-help-invented" style="font-size:12px;color: var(--text-faint);display:none;">Invented topics (source='invented' in project_search_topics). Includes untried ones \u2014 those show verdict='untried' and all zeros.</span>
     </div>
     <div id="search-topics-stats-body">
+      <div class="style-stats-empty">Loading\u2026</div>
+    </div>
+    <div id="search-topics-invented-body" style="display:none;">
       <div class="style-stats-empty">Loading\u2026</div>
     </div>
   </details>
