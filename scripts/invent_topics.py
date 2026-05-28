@@ -182,13 +182,34 @@ def _format_topic_table(rows: list[dict], max_per_bucket: int = 12) -> str:
     return "\n".join(parts)
 
 
-def build_prompt(project: dict, topics: list[dict], n_proposals: int) -> str:
-    """Assemble the single Claude prompt for the proposal step."""
+def build_prompt(
+    project: dict,
+    topics: list[dict],
+    n_proposals: int,
+    avoid_topics: set[str] | None = None,
+) -> str:
+    """Assemble the Claude prompt for one proposal attempt.
+
+    `avoid_topics` carries topics already proposed earlier in THIS run
+    (committed or rejected as dupes) so the retry loop steers the model
+    away from re-suggesting them. Empty/None on the first attempt.
+    """
     name = project.get("name", "")
     description = project.get("description", "")
     voice = project.get("voice_relationship", "")
 
     table = _format_topic_table(topics)
+
+    avoid_block = ""
+    if avoid_topics:
+        avoid_lines = "\n".join(f"- {t}" for t in sorted(avoid_topics))
+        avoid_block = (
+            "\n## Already proposed this run — DO NOT repeat or paraphrase these\n\n"
+            "An earlier attempt this run already suggested the topics below; "
+            "they were either committed or rejected as dupes. Propose something "
+            "genuinely different from ALL of them:\n\n"
+            f"{avoid_lines}\n"
+        )
 
     return f"""You are inventing new Twitter search_topic seeds for project **{name}**.
 
@@ -205,7 +226,7 @@ A topic is a short concept phrase (2-6 words typically) that we use to draft Twi
 The full universe currently has {len(topics)} topics in five performance buckets.
 
 {table}
-
+{avoid_block}
 ## Your task
 
 Propose **exactly {n_proposals}** NEW topic phrases to add to the universe. Each must:
