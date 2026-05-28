@@ -2,57 +2,49 @@
 """
 twitter_scan.py — deterministic X/Twitter search scrape.
 
-Designed to run inside the browser-harness CLI process (BU_NAME=twitter-harness,
-BU_CDP_URL=http://127.0.0.1:9555) and drive the live managed Chrome on 9555.
+Runs inside the browser-harness CLI process (BU_NAME=twitter-harness,
+BU_CDP_URL=http://127.0.0.1:9555) and drives the live managed Chrome on 9555.
+Called once per drafted query by run-twitter-cycle.sh's Phase 1 lean loop:
 
-The scan model in run-twitter-cycle.sh is allowed to write ONE thing inside
-`mcp__twitter-harness__bh_run`: a two-line stub that imports this module and
-calls scan() with its per-project keyword arguments. The model still owns the
-query string (its actual semantic contribution); the operator owns query-to-URL
-construction, tab selection, the freshness window, and the age gate. The model
-can no longer pick the Top tab to dodge since_time, can no longer skip the age
-gate, and can no longer override the freshness operator from inside the query.
-
-Canonical stub (what the model emits and what the PreToolUse hook will
-enforce in a follow-up step):
-
-    import sys; sys.path.insert(0, "/Users/matthewdi/social-autoposter/scripts")
+    BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
+        browser-harness -c "
+    import sys; sys.path.insert(0, '/Users/matthewdi/social-autoposter/scripts')
     from twitter_scan import scan
-    scan(
-        query="WhatsApp automation AI min_faves:5",
-        project="WhatsApp MCP",
-        search_topic="WhatsApp automation AI",
-        freshness_hours=6,
-        skip_ids=["123","456"],
-    )
+    for q in <queries list>:
+        scan(query=q['query'], project=q['project'],
+             search_topic=q['search_topic'],
+             freshness_hours=<env FRESHNESS_HOURS_DISCOVER>,
+             skip_ids=<env ENGAGED_TWEET_IDS>)
+    "
+
+The cycle shell drafts queries via a small Claude call (no tools), then loops
+this function per query. Result tweets go to SCAN_TWEETS_FILE (env-set), which
+the cycle reads directly into $RAW_FILE + $QUERIES_FILE for the scorer.
 
 What scan() does:
-- Strips any model-supplied since/until/since_time/until_time so the freshness
-  window is operator-controlled, not model-controlled.
+- Strips any since/until/since_time/until_time from the query so the
+  freshness window is operator-controlled, not caller-controlled.
 - Builds an x.com/search URL with `&f=live` (Latest tab forced) and appends
   `since_time:<now - freshness_hours*3600>` to the query.
-- Reuses an existing real tab (cycle-typical) or opens one on the first call.
-- Scrapes the first ~8 article cards with byte-identical JS to the legacy
-  template at skill/run-twitter-cycle.sh:666-708, so twitter_candidates rows
-  retain the same shape and the scorer/dashboard see no schema drift.
-- Applies a deterministic Python age gate as belt-and-suspenders behind the
-  URL since_time (in case X serves a cached / lazy-loaded stale viewport).
+- Reuses an existing real tab or opens one on the first call.
+- Scrapes the first ~8 article cards.
+- Applies a deterministic Python age gate behind the URL since_time
+  (belt-and-suspenders against cached / lazy-loaded stale viewports).
 - Drops skip_ids (recently-engaged tweets).
 - Stamps search_topic / matched_project / query on every kept tweet.
 - Appends a sidecar JSONL record to
-  ~/social-autoposter/skill/logs/twitter-scan-attempts.jsonl so operators can
-  grep without parsing the Claude session archive.
-- Prints the kept tweets as JSON between ###TWEETS_BEGIN###/###TWEETS_END###
-  sentinels (legacy contract) and also returns them.
+  ~/social-autoposter/skill/logs/twitter-scan-attempts.jsonl for operator
+  visibility, and a per-attempt record to SCAN_TWEETS_FILE for the shell.
+- Returns the kept tweet list.
 
-Standalone test (no model, no cycle shell):
+Standalone test (no cycle shell):
 
     ~/.local/bin/browser-harness -c '
     import sys; sys.path.insert(0, "/Users/matthewdi/social-autoposter/scripts")
     from twitter_scan import scan
-    scan(query="WhatsApp automation AI min_faves:5",
+    scan(query="AI agent min_faves:10",
          project="WhatsApp MCP",
-         search_topic="WhatsApp automation AI",
+         search_topic="AI agent",
          freshness_hours=6)
     '
 """
