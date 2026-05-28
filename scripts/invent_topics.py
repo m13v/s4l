@@ -55,6 +55,14 @@ DEFAULT_PROPOSALS = 4
 SIMILARITY_THRESHOLD = 0.6  # Jaccard threshold above which we reject as near-dupe
 WINDOW_DAYS = 30  # ledger window the picker reads from
 
+# Retry-loop knobs. Invention re-asks Claude (steering it away from
+# already-tried topics) until it has committed TARGET genuinely-new,
+# non-dupe topics or exhausts MAX_ATTEMPTS — then proceeds with whatever
+# survived. Mirrors the Twitter Phase 1 scan retry pattern. Without the
+# loop a high-dupe batch could net zero new topics for the hour.
+DEFAULT_TARGET = 3       # how many NEW non-dupe topics we want committed per run
+DEFAULT_MAX_ATTEMPTS = 5  # hard cap on Claude calls per run (cost guard)
+
 
 # --- Tokenization for cheap similarity --------------------------------------
 
@@ -482,7 +490,11 @@ def main():
     ap.add_argument("--project", default=None,
                     help="Force a specific project (skips pick_projects)")
     ap.add_argument("--proposals", type=int, default=DEFAULT_PROPOSALS,
-                    help="How many candidate topics to ask Claude for")
+                    help="How many candidate topics to ask Claude for per attempt")
+    ap.add_argument("--target", type=int, default=DEFAULT_TARGET,
+                    help="Loop until this many NEW non-dupe topics are committed")
+    ap.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS,
+                    help="Hard cap on Claude calls per run (cost guard)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print plan; do not commit to project_search_topics")
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS,
@@ -522,38 +534,76 @@ def main():
 
     # --- Read fresh universe via API ---
     universe = project_universe_strings(project_name)
-    print(f"[invent_topics] active universe size: {len(universe)}",
+    universe_size_before = len(universe)
+    print(f"[invent_topics] active universe size: {universe_size_before}",
           file=sys.stderr)
 
-    # --- Build prompt + call Claude ---
-    prompt = build_prompt(project, topics_for_project, args.proposals)
-    raw = call_claude(prompt)
-    proposals = extract_proposals(raw)
-    print(f"[invent_topics] proposals parsed: {len(proposals)}",
-          file=sys.stderr)
-    for p in proposals:
-        print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
-              file=sys.stderr)
+    # --- Retry loop: propose -> validate -> commit until TARGET new
+    #     non-dupe topics land or MAX_ATTEMPTS is exhausted. ----------------
+    # working_universe grows as we commit so later attempts dedupe against
+    # both the original universe AND topics minted earlier this run.
+    working_universe = set(universe)
+    # avoid_topics carries every proposal seen so far (committed or rejected)
+    # back into the next prompt as an explicit do-not-repeat list, so the
+    # model spends each retry exploring genuinely new ground instead of
+    # re-suggesting the same dupes.
+    avoid_topics: set[str] = set()
 
-    # --- Validate against the universe ---
-    committed_plan, rejected = validate_proposals(proposals, universe)
-    print(f"[invent_topics] valid: {len(committed_plan)} | rejected: {len(rejected)}",
-          file=sys.stderr)
-    for r in rejected:
-        print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
-              f"{r['topic']!r} ~ {r['neighbor']!r}",
-              file=sys.stderr)
-
-    # --- Commit survivors ---
     committed_actually: list[dict] = []
-    for c in committed_plan:
-        ok = commit_topic(project_name, c["topic"], dry_run=args.dry_run)
-        if ok:
-            committed_actually.append({**c, "committed": True})
-            print(f"  committed: {c['topic']!r} (neighbor={c['neighbor']!r}, "
-                  f"sim={c['similarity']})", file=sys.stderr)
-        else:
-            committed_actually.append({**c, "committed": False})
+    all_rejected: list[dict] = []
+    total_proposals_parsed = 0
+    last_raw = ""
+    attempts_used = 0
+
+    def n_committed() -> int:
+        return sum(1 for c in committed_actually if c.get("committed"))
+
+    for attempt in range(1, args.max_attempts + 1):
+        attempts_used = attempt
+        if n_committed() >= args.target:
+            break
+
+        prompt = build_prompt(project, topics_for_project, args.proposals,
+                              avoid_topics=avoid_topics)
+        last_raw = call_claude(prompt)
+        proposals = extract_proposals(last_raw)
+        total_proposals_parsed += len(proposals)
+        print(f"[invent_topics] attempt {attempt}/{args.max_attempts}: "
+              f"proposals parsed={len(proposals)} "
+              f"(committed so far={n_committed()}/{args.target})",
+              file=sys.stderr)
+        for p in proposals:
+            print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
+                  file=sys.stderr)
+            avoid_topics.add(p["topic"])
+
+        # Validate against the CURRENT working universe (original + minted).
+        committed_plan, rejected = validate_proposals(proposals, working_universe)
+        all_rejected.extend(rejected)
+        for r in rejected:
+            print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
+                  f"{r['topic']!r} ~ {r['neighbor']!r}",
+                  file=sys.stderr)
+
+        for c in committed_plan:
+            ok = commit_topic(project_name, c["topic"], dry_run=args.dry_run)
+            committed_actually.append({**c, "committed": ok, "attempt": attempt})
+            # Add to working_universe regardless of API success so the next
+            # attempt won't re-propose it (it's a real concept now either way).
+            working_universe.add(c["topic"])
+            if ok:
+                print(f"  committed: {c['topic']!r} (neighbor={c['neighbor']!r}, "
+                      f"sim={c['similarity']})", file=sys.stderr)
+            else:
+                print(f"  commit FAILED: {c['topic']!r}", file=sys.stderr)
+
+        if not proposals:
+            # Model returned nothing parseable; retrying with the same
+            # avoid-set is unlikely to help, but the loop cap protects us.
+            print("[invent_topics] no proposals parsed this attempt",
+                  file=sys.stderr)
+
+    target_met = n_committed() >= args.target
 
     # --- Audit row (via API; no local file) ---
     elapsed = round(time.time() - t0, 2)
@@ -563,20 +613,26 @@ def main():
         "project": project_name,
         "pick_method": pick_method,
         "ledger_rows_for_project": len(topics_for_project),
-        "universe_size_before": len(universe),
+        "universe_size_before": universe_size_before,
         "proposals_requested": args.proposals,
-        "proposals_parsed": len(proposals),
+        "target": args.target,
+        "max_attempts": args.max_attempts,
+        "attempts_used": attempts_used,
+        "target_met": target_met,
+        "proposals_parsed": total_proposals_parsed,
         "committed": committed_actually,
-        "rejected": rejected,
+        "rejected": all_rejected,
         "dry_run": args.dry_run,
-        "raw_response_head": (raw or "")[:500],
+        "raw_response_head": (last_raw or "")[:500],
     }
     write_audit(audit_payload, dry_run=args.dry_run)
 
-    n_new = sum(1 for c in committed_actually if c.get("committed"))
+    n_new = n_committed()
     print(f"[invent_topics] done. project={project_name!r} "
-          f"proposals={len(proposals)} committed={n_new} "
-          f"rejected={len(rejected)} elapsed={elapsed}s",
+          f"attempts={attempts_used}/{args.max_attempts} "
+          f"target={args.target} target_met={target_met} "
+          f"proposals={total_proposals_parsed} committed={n_new} "
+          f"rejected={len(all_rejected)} elapsed={elapsed}s",
           file=sys.stderr)
 
 
