@@ -137,8 +137,26 @@ def calculate_virality_score(tweet):
     # 7. Retweet ratio bonus
     rt_bonus = 1.0 + min(rt_ratio * 2, 1.0)  # up to 2x for high RT ratio
 
-    # Combine
-    score = velocity * reach_mult * age_decay * rt_bonus * (1 + reply_bonus) * (1 + discussion_bonus)
+    # Engagement-driven score (multiplicative). This collapses to 0 for any
+    # tweet with zero engagement, because velocity (= total_eng / age) gates the
+    # entire product. That is correct for ranking *demonstrated* momentum.
+    engagement_score = velocity * reach_mult * age_decay * rt_bonus * (1 + reply_bonus) * (1 + discussion_bonus)
+
+    # Reach-potential term (ADDITIVE, 2026-05-28). The multiplicative score above
+    # throws away the follower signal whenever engagement is 0: a freshly-posted
+    # tweet from a 200M-follower account scored identically (0.0) to a 1-follower
+    # nobody, because anything * 0 = 0. That is wrong as a *predictor* — catching
+    # a fresh thread on a large account early is real option value (the account
+    # reliably draws reach the thread just hasn't accumulated yet). We ADD (not
+    # multiply) a reach term so the follower signal survives a zero-engagement
+    # velocity. It is monotonic in followers (log10 growth dominates the
+    # mega-account reach_mult dip) and decays on the SAME 6h half-life via
+    # age_decay, so a stale big-account tweet that STILL has no engagement sinks
+    # back toward zero (a real dud), while a fresh one ranks above a fresh nobody.
+    # No cap, no cutoff: this only ever raises a score, never removes a candidate.
+    reach_potential = math.log10(max(followers, 1)) * reach_mult * age_decay * REACH_POTENTIAL_WEIGHT
+
+    score = engagement_score + reach_potential
 
     return round(score, 2), round(velocity, 2), round(rt_ratio, 3)
 
