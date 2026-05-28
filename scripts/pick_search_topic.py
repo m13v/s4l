@@ -421,6 +421,7 @@ def _emit_trace(assignment, pool, weight_pcts, chosen_idx):
 def pick_topic_for_project(project_name, platform="twitter",
                            window_days=WINDOW_DAYS,
                            explore_rate=EXPLORE_RATE,
+                           exclude_topics=None,
                            rng=None):
     """Pick ONE search_topic for this project on this platform.
 
@@ -428,13 +429,60 @@ def pick_topic_for_project(project_name, platform="twitter",
     Raises PickerError when the DB universe lookup fails or the project
     has zero active topics. There is no return-None fallback path —
     callers must NOT silently swallow the exception.
+
+    `exclude_topics` is an optional iterable of topic strings to drop from
+    the universe before sampling (case-insensitive, whitespace-trimmed).
+    Used by `run-twitter-cycle.sh`'s Phase 1 retry loop to force a fresh
+    topic on each scan attempt so the model isn't pinned to one assigned
+    topic across all 5 retries. When the exclusion list empties the
+    universe, the picker falls back to `explore_invent` mode regardless
+    of `explore_rate` so the cycle still gets a fresh angle from Claude
+    instead of failing or repeating a tried topic.
     """
     rnd = rng or random
     universe, source_map = _load_universe(project_name)
     picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     signal = _load_signal(project_name, platform, window_days)
-    pool = _build_pool(universe, signal, source_map=source_map)
+    # Build the FULL pool first (unfiltered) so reference_topics — the
+    # context block surfaced to Claude for invention — always reflects the
+    # project's real performance signal, even when we're forced into
+    # explore_invent by an exhausted exclusion list.
+    full_pool = _build_pool(universe, signal, source_map=source_map)
+
+    excluded_set = {
+        (t or "").strip().lower()
+        for t in (exclude_topics or [])
+        if t and isinstance(t, str)
+    }
+    universe_excluded = False
+    if excluded_set:
+        filtered_universe = [
+            t for t in universe
+            if (t or "").strip().lower() not in excluded_set
+        ]
+        if not filtered_universe:
+            # All topics in the universe were already tried this cycle.
+            # Force explore_invent — the picker yields search_topic=None and
+            # the prompt branch tells Claude to invent a fresh topic given
+            # the (unfiltered) reference_topics it has seen so far. Falling
+            # back this way keeps the retry loop alive on small universes.
+            sys.stderr.write(
+                f"[pick_search_topic] universe_exhausted project={project_name!r} "
+                f"excluded={len(excluded_set)} active={len(universe)} -> "
+                f"forcing explore_invent\n"
+            )
+            universe_excluded = True
+            pool = full_pool  # for reference_topics on the assignment below
+        else:
+            sys.stderr.write(
+                f"[pick_search_topic] excluded={len(excluded_set)} "
+                f"remaining_universe={len(filtered_universe)} project={project_name!r}\n"
+            )
+            universe = filtered_universe
+            pool = _build_pool(universe, signal, source_map=source_map)
+    else:
+        pool = full_pool
 
     weights = [_compute_weight(r) for r in pool]
     weight_total = sum(weights) or 1.0
@@ -462,8 +510,10 @@ def pick_topic_for_project(project_name, platform="twitter",
 
     # EXPLORE_INVENT: picker punts on selection, Claude invents a new
     # topic given the full stats. search_topic=None signals the prompt
-    # branch downstream.
-    if rnd.random() < explore_rate:
+    # branch downstream. Forced (independent of explore_rate) when the
+    # exclude_topics list emptied the universe — see the universe_excluded
+    # branch above.
+    if universe_excluded or rnd.random() < explore_rate:
         assignment = {
             **base,
             "mode": "explore_invent",
@@ -648,15 +698,25 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="Deterministic RNG seed for tests")
     ap.add_argument("--out", default=None, help="Optional path to also write the JSON to (mirrors styles.sh pattern)")
     ap.add_argument("--prompt", action="store_true", help="Print the prompt block to stdout instead of JSON")
+    ap.add_argument("--exclude-topics", default="", help="JSON array of topic strings to drop from the universe before sampling (used by Phase 1 retry loop)")
     args = ap.parse_args()
 
     rng = random.Random(args.seed) if args.seed is not None else None
+    excluded = []
+    if args.exclude_topics:
+        try:
+            excluded = json.loads(args.exclude_topics) or []
+            if not isinstance(excluded, list):
+                excluded = []
+        except json.JSONDecodeError:
+            excluded = []
     try:
         assignment = pick_topic_for_project(
             args.project,
             platform=args.platform,
             window_days=args.window_days,
             explore_rate=args.explore_rate,
+            exclude_topics=excluded,
             rng=rng,
         )
     except PickerError as e:
