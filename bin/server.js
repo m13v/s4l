@@ -659,7 +659,7 @@ const TAIL_LINK_VARIANT_DEFS = {
 };
 
 // ai-disclosure-suffix variant defs (campaigns.id=3, "ai_disclosure_100",
-// suffix " written with s4lai", sample_rate=0.5, platforms=reddit,twitter,
+// suffix " written with ai", sample_rate=0.5, platforms=reddit,twitter,
 // active since 2026-04-15). Assignment is the per-post coin flip in
 // reddit_browser.reply / twitter_browser.reply_to_tweet against
 // _load_active_*_campaigns(). When the flip wins, posts.campaign_id is
@@ -670,7 +670,7 @@ const TAIL_LINK_VARIANT_DEFS = {
 // active on the same platforms the arm split will need disambiguation.
 const AI_DISCLOSURE_CAMPAIGN_ID = 3;
 const AI_DISCLOSURE_VARIANT_DEFS = {
-  tagged:   { label: 'With AI label',   desc: 'reply ends with " written with s4lai"' },
+  tagged:   { label: 'With AI label',   desc: 'reply ends with " written with ai"' },
   untagged: { label: 'No AI label',     desc: 'reply posted as-is, no disclosure suffix' },
 };
 
@@ -6423,7 +6423,7 @@ async function handleApi(req, res) {
         }
 
         // Third experiment: ai-disclosure-suffix (campaigns.id=3,
-        // "ai_disclosure_100", suffix " written with s4lai", sample_rate=0.5,
+        // "ai_disclosure_100", suffix " written with ai", sample_rate=0.5,
         // platforms=reddit,twitter, active since 2026-04-15). Arms derived
         // from posts.campaign_id; see AI_DISCLOSURE_VARIANT_DEFS for the
         // rationale. Window: campaign's created_at to now (NOT trailing 30d
@@ -6525,7 +6525,7 @@ async function handleApi(req, res) {
             name: 'AI label suffix (Twitter + Reddit)',
             status: adStatus,
             started_at: adStartedAt,
-            hypothesis: 'Appending " written with s4lai" to replies signals authenticity but may suppress engagement vs unlabeled replies. Comparing views, likes, and replies across the 50/50 coin flip on campaigns.id=3.',
+            hypothesis: 'Appending " written with ai" to replies signals authenticity but may suppress engagement vs unlabeled replies. Comparing views, likes, and replies across the 50/50 coin flip on campaigns.id=3.',
             primary_metric: 'avg_replies',
             progress: adProgress,
             totals: adTotals,
