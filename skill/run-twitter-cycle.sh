@@ -882,6 +882,37 @@ export SCAN_TWEETS_FILE
 
 log "Lean Phase 1: drafting queries (no browser tools)..."
 
+# === DEBUG INSTRUMENTATION (2026-05-28) ============================
+# The lean call deterministically fails inside cycle context with 0 bytes
+# of stdout AND nothing captured via 2>&1, even though identical isolated
+# invocations succeed. Split stderr to a side file (so '[skipped]' or
+# wrapper errors land even if stdout is empty) and dump env / ancestry
+# so we can compare cycle vs isolated runtime.
+LEAN_DBG_DIR="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-lean-debug"
+mkdir -p "$LEAN_DBG_DIR"
+{
+    echo "=== ts=$(date) batch=$BATCH_ID attempt=$SCAN_ATTEMPT pid=$$ ==="
+    echo
+    echo "=== ancestry (this shell + parents) ==="
+    ps -o pid,ppid,pgid,sid,etime,command -p $$ 2>&1
+    if [ -n "${PPID:-}" ]; then ps -o pid,ppid,pgid,sid,etime,command -p $PPID 2>&1; fi
+    echo
+    echo "=== relevant env vars ==="
+    env | grep -iE "claude|api_key|anthropic|model|sa_pipeline|tw_engine|repo_dir|^home=|^path=|^user=|batch_id|freshness|fresh_hours|scan_tweets_file|engaged_tweet" | sort
+    echo
+    echo "=== ulimit -a ==="
+    ulimit -a 2>&1
+    echo
+    echo "=== which claude / which uv ==="
+    which claude 2>&1
+    which uv 2>&1
+    echo
+    echo "=== open fds ==="
+    ls -la /proc/self/fd 2>/dev/null || lsof -p $$ 2>&1 | head -25
+} > "$LEAN_DBG_DIR/env.log" 2>&1
+LEAN_STDERR="$LEAN_DBG_DIR/stderr.log"
+log "[DBG] lean call about to run; env_log=$LEAN_DBG_DIR/env.log stderr_path=$LEAN_STDERR"
+
 QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
 
 ## Step 1: Draft one search query per project
@@ -935,7 +966,19 @@ Query guidelines:
 Return ONLY the structured_output JSON:
 {"queries": [{"project": "<project_name>", "query": "<X advanced-search string>", "search_topic": "<assigned or invented topic, verbatim>"}, ...]}
 
-One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>&1)
+One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>"$LEAN_STDERR")
+QUERIES_RC=$?
+
+# === DEBUG POST-CALL LOGGING (2026-05-28) ==========================
+log "[DBG] run_claude.sh rc=$QUERIES_RC stdout_len=$(printf '%s' "$QUERIES_OUTPUT" | wc -c | tr -d ' ') stderr_len=$(wc -c < "$LEAN_STDERR" 2>/dev/null | tr -d ' ' || echo 0)"
+if [ -s "$LEAN_STDERR" ]; then
+    log "[DBG] stderr first 1000 chars:"
+    head -c 1000 "$LEAN_STDERR" 2>/dev/null | tr '\n' ' ' | tee -a "$LOG_FILE" >/dev/null
+    echo "" >> "$LOG_FILE"
+fi
+# Save the captured stdout to a side file too, in case the parse path mangles it.
+printf '%s' "$QUERIES_OUTPUT" > "$LEAN_DBG_DIR/stdout.log"
+log "[DBG] full dbg dir: $LEAN_DBG_DIR (env.log, stdout.log, stderr.log)"
 
 # Dump the captured envelope to the cycle log for offline inspection.
 echo "$QUERIES_OUTPUT" >> "$LOG_FILE"
