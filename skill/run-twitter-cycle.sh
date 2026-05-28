@@ -806,6 +806,38 @@ log "twitter-browser lock held (pid=$$) Phase 1"
 # refuses to clean if the lock PID is alive.
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
+# --- Phase 1 retry loop (2026-05-27) ----------------------------------------
+# When a single scan produces fewer than RETRY_TARGET candidates that survive
+# all Phase 1 filters (harness age gate, scorer stale_age cutoff, already-
+# posted dedupe, fabricated_id check), re-invoke the Claude scan with the
+# queries already tried this cycle injected as a "do NOT repeat" block.
+# Each iteration upserts into the SAME batch_id so survivors accumulate.
+# Cap at MAX_SCAN_ATTEMPTS to stay inside the 20-min Phase 1 budget; if the
+# cap is hit before target, proceed with whatever we have (even 1 candidate
+# is better than 0). When BATCH_COUNT is still 0 after the loop, the
+# post-loop empty_batch branch fires.
+MAX_SCAN_ATTEMPTS=5
+RETRY_TARGET=5
+SCAN_ATTEMPT=0
+BATCH_COUNT=0
+# Cumulative counters across iterations — feed log_run.py once at end so the
+# dashboard shows the total work the cycle did, not just the last attempt.
+CUMULATIVE_QUERIES=0
+CUMULATIVE_DUDS=0
+CUMULATIVE_TWEETS_PULLED=0
+# Running list of queries the model has already tried THIS cycle, injected
+# into each retry's prompt as "do NOT repeat these phrasings". Extended after
+# every scan from QUERIES_FILE before log_twitter_search_attempts deletes it.
+TRIED_QUERIES_JSON='[]'
+# Latest Anthropic-side error classification for the post-loop log_run when
+# every attempt returned zero tweets (stream_idle_timeout vs phase1_no_tweets
+# vs api_overloaded, etc.). Falls back to phase1_no_tweets when unset.
+LAST_PHASE1_REASON=""
+
+while [ "$SCAN_ATTEMPT" -lt "$MAX_SCAN_ATTEMPTS" ]; do
+SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
+log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, candidates so far=$BATCH_COUNT/$RETRY_TARGET)"
+
 log "Phase 1: drafting queries and scraping tweets..."
 
 SCAN_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-scan" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA" "${TW_ENGINE_PREFIX}You are a Twitter hot-tweet scanner. Your ONLY job is to find high-engagement tweets happening RIGHT NOW that are relevant to one of our projects. Do NOT post anything.
@@ -873,6 +905,9 @@ $SUPPLY_SIGNAL_JSON
 
 ALREADY-ENGAGED TWEET IDS — we have already posted a reply to each of these tweets within the last 48h, so they are dead candidates. Do NOT return any tweet whose status ID (the digits in \`/status/<ID>\`) appears in this list; skip it while scraping so it never reaches your \`tweets\` array. Returning one only wastes tokens — it is dropped downstream regardless.
 $ENGAGED_TWEET_IDS
+
+THIS-CYCLE QUERIES ALREADY TRIED ($SCAN_ATTEMPT prior scan attempt(s) this cycle, target=$RETRY_TARGET candidates after filters) — do NOT repeat any of these phrasings or close variants. If this list is non-empty, the previous scan(s) returned too few survivors after the harness age gate + scorer dedupe. Draft a MEANINGFULLY DIFFERENT query for the SAME project and SAME assigned search_topic: vary the keyword cluster, swap or remove operators, lower min_faves one tier, or broaden the topic phrasing one notch wider (e.g. \"NotebookLM developers\" -> \"NotebookLM coding\" -> \"AI knowledge tool developers\"). The list grows each retry; if you've already tried 3 phrasings without 5 survivors the topic likely has thin supply right now, so widen aggressively on the next attempt.
+$TRIED_QUERIES_JSON
 
 $HOOK_NOTICE
 
@@ -969,6 +1004,31 @@ try:
 except Exception:
     print(0)
 " "$RAW_FILE" 2>/dev/null || echo 0)
+fi
+
+# Accumulate per-iteration counts into cycle-level totals for the post-loop
+# log_run.py call (otherwise the dashboard would show only the last attempt's
+# queries/duds/tweets-pulled, hiding the retry work).
+CUMULATIVE_QUERIES=$((CUMULATIVE_QUERIES + QUERIES_TOTAL))
+CUMULATIVE_DUDS=$((CUMULATIVE_DUDS + DUDS_TOTAL))
+CUMULATIVE_TWEETS_PULLED=$((CUMULATIVE_TWEETS_PULLED + TWEETS_PULLED))
+
+# Snapshot this iteration's queries into TRIED_QUERIES_JSON BEFORE
+# log_twitter_search_attempts.py deletes QUERIES_FILE. Used in the next
+# iteration's prompt to tell the model which phrasings it has already burned.
+if [ -f "$QUERIES_FILE" ]; then
+    TRIED_QUERIES_JSON=$(python3 -c "
+import json, sys
+cur = json.loads(sys.argv[1] or '[]')
+try:
+    new = json.load(open(sys.argv[2]))
+    if not isinstance(new, list):
+        new = []
+except Exception:
+    new = []
+cur.extend(new)
+print(json.dumps(cur))
+" "$TRIED_QUERIES_JSON" "$QUERIES_FILE" 2>/dev/null || echo "$TRIED_QUERIES_JSON")
 fi
 
 # Log every drafted query (incl. zero-result ones) to twitter_search_attempts
