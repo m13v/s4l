@@ -9908,8 +9908,8 @@ const HTML = `<!DOCTYPE html>
     </summary>
     <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
       <div role="tablist" aria-label="Search topics view" style="display:inline-flex;gap:0;border:1px solid var(--border, #2a2a2a);border-radius:6px;overflow:hidden;">
-        <button type="button" role="tab" id="search-topics-tab-attempted" aria-selected="true" data-view="attempted" style="padding:4px 10px;font-size:12px;background:var(--bg-elev, #1a1a1a);color:var(--text);border:none;cursor:pointer;border-right:1px solid var(--border, #2a2a2a);">Attempted</button>
-        <button type="button" role="tab" id="search-topics-tab-invented" aria-selected="false" data-view="invented" style="padding:4px 10px;font-size:12px;background:transparent;color:var(--text-secondary);border:none;cursor:pointer;">Invented</button>
+        <button type="button" role="tab" id="search-topics-tab-attempted" aria-selected="true" data-view="attempted" style="padding:4px 10px;font-size:12px;background:var(--text);color:var(--bg);border:none;cursor:pointer;border-right:1px solid var(--border, #2a2a2a);">Attempted</button>
+        <button type="button" role="tab" id="search-topics-tab-invented" aria-selected="false" data-view="invented" style="padding:4px 10px;font-size:12px;background:transparent;color:var(--muted, var(--text-secondary));border:none;cursor:pointer;">Invented</button>
       </div>
       <label id="search-topics-stats-duds-only-wrap" style="display:flex;align-items:center;gap:6px;font-size:12px;color: var(--text-secondary);cursor:pointer;">
         <input type="checkbox" id="search-topics-stats-duds-only" style="cursor:pointer;">
@@ -19381,8 +19381,12 @@ function renderSearchTopicsInvented(payload) {
       // dashboard rule (see CLAUDE.md).
       { key: 'verdict',       label: 'Verdict',   type: 'text',    align: 'center', widthPct: 6,
         formatter: v => '<span style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);">' + escapeHtml(String(v || '')) + '</span>' },
-      { key: 'created_at',    label: 'Invented',  type: 'datetime', align: 'right', widthPct: 9,
-        formatter: v => v ? '<span data-tooltip="' + escapeHtml(String(v)) + '">' + formatRelativeTime(v) + '</span>' : '—' },
+      { key: 'created_at',    label: 'Invented',  type: 'date', align: 'right', widthPct: 9,
+        formatter: v => {
+          if (!v) return '<span style="color: var(--text-faint);">—</span>';
+          const abs = new Date(v).toLocaleString();
+          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color: var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
+        } },
       { key: 'attempts_n',    label: 'Attempts',  type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
       { key: 'tweets_found_total', label: 'Supply', type: 'numeric', align: 'right', widthPct: 6, formatter: fmt },
       { key: 'candidates_n',  label: 'Cands',     type: 'numeric', align: 'right', widthPct: 5, formatter: fmt },
@@ -19390,8 +19394,12 @@ function renderSearchTopicsInvented(payload) {
       { key: 'clicks_total',  label: 'Clicks',    type: 'numeric', align: 'right', widthPct: 5, formatter: fmt },
       { key: 'clicks_per_post', label: 'Clk/Post', type: 'numeric', align: 'right', widthPct: 6,
         formatter: v => v == null ? '—' : fmt3(v) },
-      { key: 'last_attempted_at', label: 'Last tried', type: 'datetime', align: 'right', widthPct: 9,
-        formatter: v => v ? '<span data-tooltip="' + escapeHtml(String(v)) + '">' + formatRelativeTime(v) + '</span>' : '—' },
+      { key: 'last_attempted_at', label: 'Last tried', type: 'date', align: 'right', widthPct: 9,
+        formatter: v => {
+          if (!v) return '<span style="color: var(--text-faint);">—</span>';
+          const abs = new Date(v).toLocaleString();
+          return '<span data-tooltip="' + escapeHtml(abs) + '" style="color: var(--text-secondary);">' + escapeHtml(relTime(v)) + '</span>';
+        } },
     ],
   });
 }
@@ -19455,8 +19463,12 @@ function setSearchTopicsView(view) {
   const setTabStyle = (btn, active) => {
     if (!btn) return;
     btn.setAttribute('aria-selected', active ? 'true' : 'false');
-    btn.style.background = active ? 'var(--bg-elev, #1a1a1a)' : 'transparent';
-    btn.style.color = active ? 'var(--text)' : 'var(--text-secondary)';
+    // Inverted pill style: active uses foreground for bg and background for
+    // text so contrast flips correctly in both light and dark mode (the
+    // dashboard is monochrome — black/white/gray only — so this matches
+    // the project rule).
+    btn.style.background = active ? 'var(--text)' : 'transparent';
+    btn.style.color = active ? 'var(--bg)' : 'var(--muted, var(--text-secondary))';
   };
   setTabStyle(tabAtt, view === 'attempted');
   setTabStyle(tabInv, view === 'invented');
