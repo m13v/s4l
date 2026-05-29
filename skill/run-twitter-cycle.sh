@@ -915,6 +915,25 @@ json.dump(qs, open('$QUERIES_TMP', 'w'))
 print(f'lean phase 1: drafted {len(qs)} queries', flush=True)
 " <<< "$QUERIES_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
 
+else
+# === DETERMINISTIC QUALIFIED-QUERY-BANK PATH (default, 2026-05-28) ==========
+# No Claude call. Replay every historically qualified query for the picked
+# project(s): every distinct query that ever produced a posted reply with
+# >=1 like OR >=1 non-bot link click, regardless of the per-cycle
+# search_topic. This makes Phase 1 fully deterministic; the only remaining
+# Claude session in the cycle is Phase 2b (reply drafting). The bank is
+# exhaustive on attempt 1, so MAX_SCAN_ATTEMPTS is forced to 1 above; the
+# attempt>1 guard here is belt-and-suspenders for the legacy retry loop.
+QUERIES_TMP="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-queries.json"
+if [ "$SCAN_ATTEMPT" -gt 1 ]; then
+    echo "[]" > "$QUERIES_TMP"
+    log "Phase 1 (bank): attempt $SCAN_ATTEMPT no-op (full bank already run on attempt 1)"
+else
+    log "Phase 1 (bank): building qualified query bank from PROJECTS_JSON (deterministic, no Claude)..."
+    echo "$PROJECTS_JSON" | python3 "$REPO_DIR/scripts/qualified_query_bank.py" --from-projects-json > "$QUERIES_TMP" 2>>"$LOG_FILE"
+fi
+fi
+
 QUERIES_COUNT=$(python3 -c "
 import json
 try: print(len(json.load(open('$QUERIES_TMP'))))
