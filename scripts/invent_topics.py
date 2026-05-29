@@ -59,11 +59,9 @@ WINDOW_DAYS = 30  # ledger window the picker reads from
 
 # Retry-loop knobs. Each loop iteration invents ONE topic, drafts queries for
 # it, supply-tests them, logs every attempt, and commits the topic. The loop
-# keeps going (steering Claude away from topics already tried this run) until
-# TARGET topics have CLEARED the supply floor, or MAX_ATTEMPTS iterations are
-# exhausted — then it stops with whatever qualified. Mirrors the Twitter
-# Phase 1 scan retry pattern.
-DEFAULT_TARGET = 3        # qualifying topics (supply >= SUPPLY_FLOOR) wanted per run
+# stops as soon as a single topic clears the supply floor (sum of fresh tweets
+# across its queries >= SUPPLY_FLOOR), or MAX_ATTEMPTS iterations are exhausted.
+DEFAULT_TARGET = 1        # qualifying topics wanted per run (one is enough; supply is the real target)
 DEFAULT_MAX_ATTEMPTS = 5  # hard cap on loop iterations per run (cost guard)
 
 # Supply-test knobs (2026-05-28: invent loop now scans drafted queries before
@@ -796,7 +794,7 @@ def log_attempts(
         return
     try:
         subprocess.run(
-            ["python3", _LOG_ATTEMPTS_PY, "--batch-id", batch_id],
+            ["python3", _LOG_ATTEMPTS_PY, "--batch-id", batch_id, "--kind", "invent"],
             input=json.dumps(rows),
             text=True,
             check=False,
@@ -988,49 +986,91 @@ def main():
     all_rejected: list[dict] = []
     total_proposals_parsed = 0
     last_raw = ""
-    attempts_used = 0
+    attempts_used = 0       # SCANS performed (the only thing that ticks up to max_attempts)
+    claude_calls = 0        # ALL Claude calls, including dupe-only ones (audit/cost)
+    dupe_retries_total = 0  # cumulative count of dupe-only redrafts across the run
     aborted_untested = False
+
+    # When every proposal in a Claude call is a dupe, we don't waste a scan
+    # slot — we immediately re-ask Claude with the growing avoid_topics. To
+    # prevent runaway tokens on a fully-saturated project, cap the number of
+    # CONSECUTIVE dupe-only redrafts before we bail the whole run. Reset on
+    # any non-dupe survivor. The user's explicit rule: dupes should not count.
+    MAX_DUPE_RETRIES_PER_SCAN = 8
+    saturated_bailout = False
 
     def n_qualifying() -> int:
         return sum(1 for p in processed if p.get("qualifies"))
 
-    for attempt in range(1, args.max_attempts + 1):
+    while attempts_used < args.max_attempts:
         if n_qualifying() >= args.target:
             break
-        attempts_used = attempt
 
-        prompt = build_prompt(project, topics_for_project, args.proposals,
-                              avoid_topics=avoid_topics)
-        last_raw = call_claude(prompt)
-        proposals = extract_proposals(last_raw)
-        total_proposals_parsed += len(proposals)
-        print(f"[invent_topics] attempt {attempt}/{args.max_attempts}: "
-              f"proposals parsed={len(proposals)} "
-              f"(qualifying so far={n_qualifying()}/{args.target})",
-              file=sys.stderr)
-        for p in proposals:
-            print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
+        # --- Inner dedup-retry: keep asking Claude until at least one
+        #     proposal survives the dupe check, OR we hit the runaway bound.
+        #     Each iteration is one Claude call; only a SCAN ticks attempts_used.
+        survivors: list[dict] = []
+        dupe_retries = 0
+        while not survivors and dupe_retries < MAX_DUPE_RETRIES_PER_SCAN:
+            prompt = build_prompt(project, topics_for_project, args.proposals,
+                                  avoid_topics=avoid_topics)
+            last_raw = call_claude(prompt)
+            claude_calls += 1
+            proposals = extract_proposals(last_raw)
+            total_proposals_parsed += len(proposals)
+            for p in proposals:
+                avoid_topics.add(p["topic"])
+
+            if not proposals:
+                print(f"[invent_topics] no proposals parsed "
+                      f"(dupe-retry {dupe_retries+1}/{MAX_DUPE_RETRIES_PER_SCAN}; "
+                      f"scans {attempts_used}/{args.max_attempts})",
+                      file=sys.stderr)
+                dupe_retries += 1
+                continue
+
+            committed_plan, rejected = validate_proposals(proposals, working_universe)
+            all_rejected.extend(rejected)
+            for r in rejected:
+                print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
+                      f"{r['topic']!r} ~ {r['neighbor']!r}", file=sys.stderr)
+
+            if committed_plan:
+                survivors = committed_plan
+                print(f"[invent_topics] scan {attempts_used+1}/{args.max_attempts}: "
+                      f"non-dupe proposal(s)={len(survivors)} after "
+                      f"{dupe_retries+1} draft(s) "
+                      f"(qualifying so far={n_qualifying()}/{args.target})",
+                      file=sys.stderr)
+                for p in survivors:
+                    print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
+                          file=sys.stderr)
+                break  # exit dupe-retry loop; proceed to scan
+
+            # All proposals from this Claude call were dupes — re-ask
+            # immediately with avoid_topics now containing them.
+            print(f"  all {len(proposals)} proposal(s) rejected as dupes; "
+                  f"re-drafting (dupe-retry {dupe_retries+1}/{MAX_DUPE_RETRIES_PER_SCAN})",
                   file=sys.stderr)
-            avoid_topics.add(p["topic"])
+            dupe_retries += 1
 
-        if not proposals:
-            # Model returned nothing parseable; retrying with the same
-            # avoid-set is unlikely to help, but the loop cap protects us.
-            print("[invent_topics] no proposals parsed this attempt",
+        dupe_retries_total += dupe_retries
+
+        if not survivors:
+            # Burned MAX_DUPE_RETRIES_PER_SCAN consecutive Claude calls without
+            # a single non-dupe proposal — the project is saturated this hour.
+            print(f"[invent_topics] saturated: {MAX_DUPE_RETRIES_PER_SCAN} consecutive "
+                  f"dupe-only drafts; bailing run with {attempts_used} scan(s) used.",
                   file=sys.stderr)
-            continue
+            saturated_bailout = True
+            break
 
-        # Dedup proposals against the working universe (original + minted).
-        committed_plan, rejected = validate_proposals(proposals, working_universe)
-        all_rejected.extend(rejected)
-        for r in rejected:
-            print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
-                  f"{r['topic']!r} ~ {r['neighbor']!r}", file=sys.stderr)
-
-        for c in committed_plan:
+        # --- Process every non-dupe survivor: scan it, log attempts, commit
+        #     topic. Each scan ticks attempts_used. Stop early on target hit. ---
+        for c in survivors:
             topic = c["topic"]
-            # Add to working_universe immediately so a later attempt won't
-            # re-propose it (it's a real concept now either way).
+            # Add to working_universe immediately so a later draft this run
+            # won't re-propose it (it's a real concept now either way).
             working_universe.add(topic)
 
             # Draft -> dedup queries -> supply-test -> log all attempts.
@@ -1046,13 +1086,16 @@ def main():
                 aborted_untested = True
                 break
 
+            # This was a real supply test — count it against max_attempts.
+            attempts_used += 1
+
             # Fold this topic's tested query cores into the dedup corpus.
             for q in result.get("queries", []):
                 existing_query_cores.add(normalize_query(q))
 
             # ALWAYS commit the tested topic, even at 0 supply.
             ok = commit_topic(project_name, topic, dry_run=args.dry_run)
-            processed.append({**c, **result, "committed": ok, "attempt": attempt})
+            processed.append({**c, **result, "committed": ok, "attempt": attempts_used})
 
             if ok:
                 print(f"  committed: {topic!r} supply={result['supply_total']} "
@@ -1063,6 +1106,8 @@ def main():
                 print(f"  commit FAILED: {topic!r}", file=sys.stderr)
 
             if n_qualifying() >= args.target:
+                break
+            if attempts_used >= args.max_attempts:
                 break
 
         if aborted_untested:
@@ -1084,6 +1129,9 @@ def main():
         "target": args.target,
         "max_attempts": args.max_attempts,
         "attempts_used": attempts_used,
+        "claude_calls": claude_calls,
+        "dupe_retries_total": dupe_retries_total,
+        "saturated_bailout": saturated_bailout,
         "target_met": target_met,
         "aborted_untested": aborted_untested,
         "proposals_parsed": total_proposals_parsed,
@@ -1114,8 +1162,10 @@ def main():
     n_qual = n_qualifying()
     n_committed_topics = sum(1 for p in processed if p.get("committed"))
     print(f"[invent_topics] done. project={project_name!r} "
-          f"attempts={attempts_used}/{args.max_attempts} "
+          f"scans={attempts_used}/{args.max_attempts} "
+          f"claude_calls={claude_calls} dupe_retries={dupe_retries_total} "
           f"target={args.target} target_met={target_met} "
+          f"saturated_bailout={saturated_bailout} "
           f"aborted_untested={aborted_untested} "
           f"proposals={total_proposals_parsed} "
           f"topics_committed={n_committed_topics} qualifying={n_qual} "
