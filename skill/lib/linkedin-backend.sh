@@ -54,6 +54,29 @@ fi
 # endpoint. Default 9556 (Mac harness Chrome, separate port from Twitter's 9555).
 export LINKEDIN_CDP_URL="${LINKEDIN_CDP_URL:-http://127.0.0.1:9556}"
 
+# Resolve a Playwright-capable Python for the browser-path SERP search
+# (discover_linkedin_candidates.py CDP-attaches to the harness Chrome via
+# playwright.sync_api). The agent's bare `python3` resolves to whatever is
+# first on PATH, which on this Mac is /opt/homebrew/bin/python3 (3.14) where
+# Playwright is NOT installed -> ModuleNotFoundError. Playwright lives under
+# /opt/homebrew/bin/python3.11 and /usr/bin/python3 (3.9). Pick the first
+# interpreter that can actually import playwright.sync_api and export it so the
+# Phase A browser prompt can shell out via "$LINKEDIN_DISCOVER_PYTHON" instead
+# of the ambiguous bare "python3". Only the browser backend needs this; the
+# unipile path uses the REST API and never imports Playwright.
+if [ -z "${LINKEDIN_DISCOVER_PYTHON:-}" ]; then
+    for _li_py in /opt/homebrew/bin/python3.11 /usr/bin/python3 /opt/homebrew/bin/python3 python3; do
+        if command -v "$_li_py" >/dev/null 2>&1 && \
+           "$_li_py" -c 'from playwright.sync_api import sync_playwright' >/dev/null 2>&1; then
+            export LINKEDIN_DISCOVER_PYTHON="$_li_py"
+            break
+        fi
+    done
+    # Fallback: if none resolved, keep bare python3 so the failure is loud and
+    # obvious in the run log rather than silently substituting a wrong path.
+    export LINKEDIN_DISCOVER_PYTHON="${LINKEDIN_DISCOVER_PYTHON:-python3}"
+fi
+
 # Default harness URL - used by ensure_linkedin_browser_for_backend +
 # cleanup_harness_tabs to decide whether we own this Chrome (and should
 # launch/clean it) or whether it is externally managed (AppMaker, BYO).
