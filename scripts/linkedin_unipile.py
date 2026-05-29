@@ -133,11 +133,13 @@ def _normalize_post(item):
     if isinstance(author, dict):
         author_name = _first(author, "name", "public_name", "full_name")
         author_headline = _first(author, "headline", "occupation", "subtitle")
-        author_id = _first(author, "id", "public_identifier", "provider_id")
+        author_id = _first(author, "id", "provider_id", "public_identifier")
+        author_public_id = _first(author, "public_identifier")
     else:
         author_name = _first(item, "author_name", "actor_name")
         author_headline = None
         author_id = None
+        author_public_id = None
     social_id = _first(item, "social_id", "share_urn", "urn")
     return {
         "social_id": social_id,
@@ -147,19 +149,32 @@ def _normalize_post(item):
         "author_name": author_name,
         "author_headline": author_headline,
         "author_id": author_id,
+        "author_public_id": author_public_id,
+        "author_followers": None,  # filled by _enrich_followers when requested
         "reaction_count": _first(item, "reaction_counter", "reaction_count",
                                  "reactions_count", "likes"),
         "comment_count": _first(item, "comment_counter", "comment_count",
                                 "comments_count"),
+        "repost_count": _first(item, "repost_counter", "repost_count",
+                               "reposts_count", "shares_count"),
+        "is_repost": item.get("is_repost"),
+        # parsed_datetime is the authoritative ISO timestamp; `date` is a
+        # relative string ("now", "5h", "2d") that's harder to score on.
+        "posted_at": _first(item, "parsed_datetime", "date_posted", "created_at"),
         "raw": item,
     }
 
 
 def search_posts(keywords=None, *, url=None, date_posted=None, sort_by="date",
                  content_type=None, author_keywords=None, limit=10, cursor=None,
-                 account_id=None):
+                 account_id=None, with_followers=False):
     """Search LinkedIn posts. Pass keywords= (structured) or url= (paste a
-    LinkedIn search-results URL). Returns {items, cursor, count, raw}."""
+    LinkedIn search-results URL). Returns {items, cursor, count, raw}.
+
+    with_followers=True makes one extra GET /users/{id} per distinct author to
+    fill author_followers (search alone never returns follower count). UniPile
+    is flat-rate, so the extra calls are free; they let the LinkedIn scorer use
+    its author-reach multiplier exactly as the browser path did."""
     cfg = get_config()
     query = {"account_id": account_id or cfg["account_id"], "limit": limit}
     if cursor:
@@ -192,7 +207,87 @@ def search_posts(keywords=None, *, url=None, date_posted=None, sort_by="date",
         items, next_cursor = None, None
     items = items or []
     norm = [_normalize_post(it) for it in items]
+    if with_followers:
+        _enrich_followers(norm, account_id=query["account_id"])
     return {"items": norm, "cursor": next_cursor, "count": len(norm), "raw": resp}
+
+
+def get_profile(identifier, *, account_id=None, timeout=30):
+    """GET /api/v1/users/{identifier} — returns the LinkedIn profile dict
+    (follower_count, connections_count, is_influencer, headline, ...).
+    identifier accepts either the public_identifier (e.g. 'mahendraakula') or
+    the internal provider id (e.g. 'ACoAA...'). Raises UnipileApiError on non-200."""
+    cfg = get_config()
+    path = "/api/v1/users/" + urllib.parse.quote(str(identifier), safe="")
+    status, resp = _request("GET", path,
+                            query={"account_id": account_id or cfg["account_id"]},
+                            timeout=timeout)
+    if status != 200:
+        raise UnipileApiError("profile failed: HTTP %s" % status, status, resp)
+    return resp
+
+
+def _enrich_followers(items, *, account_id=None):
+    """Fill author_followers on each normalized item via get_profile. One call
+    per DISTINCT author (cached), non-fatal: a failed lookup leaves the field
+    None so the scorer falls back to its neutral reach multiplier."""
+    cache = {}
+    for it in items:
+        ident = it.get("author_public_id") or it.get("author_id")
+        if not ident:
+            continue
+        if ident not in cache:
+            try:
+                prof = get_profile(ident, account_id=account_id)
+                cache[ident] = prof.get("follower_count") if isinstance(prof, dict) else None
+            except Exception:
+                cache[ident] = None
+        it["author_followers"] = cache[ident]
+
+
+def _age_hours_from(posted_at):
+    """ISO timestamp → hours since, rounded. None if unparseable."""
+    if not posted_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(posted_at).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return round((datetime.now(timezone.utc) - dt).total_seconds() / 3600.0, 2)
+    except (ValueError, TypeError):
+        return None
+
+
+def to_pipeline_results(items):
+    """Map normalized search items to the candidate shape run-linkedin.sh's
+    Phase A envelope + score_linkedin_candidates.py expect. UniPile returns the
+    post URN directly in social_id, so post_url/activity_id are always present
+    (no click-to-resolve, no namespace guessing like the browser path needs)."""
+    results = []
+    for it in items:
+        social_id = it.get("social_id") or ""
+        m = re.search(r"(\d{16,19})", social_id)
+        activity_id = m.group(1) if m else None
+        post_url = make_our_url(social_id) if social_id else None
+        pub = it.get("author_public_id")
+        author_profile_url = ("https://www.linkedin.com/in/%s/" % pub) if pub else None
+        results.append({
+            "post_url": post_url,
+            "activity_id": activity_id,
+            "all_urns": [activity_id] if activity_id else [],
+            "social_id": social_id or None,
+            "author_name": it.get("author_name"),
+            "author_headline": it.get("author_headline"),
+            "author_profile_url": author_profile_url,
+            "author_followers": it.get("author_followers"),
+            "post_text": it.get("text"),
+            "age_hours": _age_hours_from(it.get("posted_at")),
+            "reactions": int(it.get("reaction_count") or 0),
+            "comments": int(it.get("comment_count") or 0),
+            "reposts": int(it.get("repost_count") or 0),
+            "is_repost": bool(it.get("is_repost")),
+        })
+    return results
 
 
 def _extract_comment_urn(resp):
@@ -241,6 +336,50 @@ def comment_on_post(social_id, text, *, comment_id=None, mentions=None,
         "comment_urn": comment_urn,
         "our_url": make_our_url(social_id, comment_urn),
     }
+
+
+def list_comments(social_id, *, account_id=None, limit=50, cursor=None):
+    """GET /api/v1/posts/{social_id}/comments — read a post's comments back.
+    Used by Phase B to confirm our just-posted comment actually rendered.
+    Returns {items, count, raw}."""
+    if not social_id:
+        raise ValueError("social_id required")
+    cfg = get_config()
+    query = {"account_id": account_id or cfg["account_id"], "limit": limit}
+    if cursor:
+        query["cursor"] = cursor
+    status, resp = _request("GET", "/api/v1/posts/" + social_id + "/comments",
+                            query=query)
+    if status != 200:
+        raise UnipileApiError("list comments failed: HTTP %s" % status, status, resp)
+    if isinstance(resp, dict):
+        items = resp.get("items")
+    elif isinstance(resp, list):
+        items = resp
+    else:
+        items = None
+    items = items or []
+    return {"items": items, "count": len(items), "raw": resp}
+
+
+def comment_exists(social_id, comment_id, *, account_id=None):
+    """True if a comment with comment_id is present on the post. Best-effort
+    read-back proof for Phase B; falls back to False on any lookup error."""
+    if not comment_id:
+        return False
+    try:
+        res = list_comments(social_id, account_id=account_id)
+    except Exception:
+        return False
+    target = str(comment_id)
+    for c in res["items"]:
+        if not isinstance(c, dict):
+            continue
+        for k in ("comment_id", "id", "urn", "social_id"):
+            v = c.get(k)
+            if v is not None and target in str(v):
+                return True
+    return False
 
 
 def accounts():
