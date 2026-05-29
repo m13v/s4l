@@ -970,15 +970,16 @@ def compute_target_distribution(platform, context="posting"):
 # soft: the model anchored on the most-generic-fit style (pattern_recognizer)
 # and over-picked it ~30% of posts even when its target % was the 5% floor.
 # This picker flips the contract: code picks ONE style by weighted sample
-# from the top N by composite score, the prompt assigns that style, and the
-# model only authors the comment. Curation to top N happens dynamically per
-# score, so styles auto-rotate as their click-weighted score shifts. The
+# across all trusted styles (weighted by composite score), the prompt assigns
+# that style, and the model only authors the comment. Higher-scoring styles
+# win proportionally more picks while the whole pool stays eligible, so styles
+# auto-rotate as their click-weighted score shifts. The
 # model can still invent: with probability INVENT_RATE the picker returns
 # mode="invent" and the prompt hands the model the top N as reference
 # material to derive a new style from.
 
 INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
-CURATED_TOP_N = 5   # the model only ever sees one of the top 5 by score
+CURATED_TOP_N = 5   # size of the invent-mode reference list (top 5 by score)
 
 # Additive ~5% branch per platform (2026-05-22, second pass): with this
 # probability, the picker bypasses score-based selection and assigns the
@@ -1095,9 +1096,11 @@ def pick_style_for_post(platform, context="posting",
     log_post / validate_or_register so we can detect drift between the
     assignment and the final logged style.
 
-    Curation is automatic: top_n styles by composite score (clicks*10 +
-    comments*3 + upvotes_net) are eligible. As performance shifts, the
-    curated set rotates. Styles in PLATFORM_POLICY.never are excluded.
+    The scored-use pick samples across ALL trusted styles, weighted by raw
+    composite score (clicks*10 + comments*3 + upvotes_net), so every style
+    keeps a performance-proportional chance and none is frozen out. top_n
+    bounds only the invent-mode reference list. Styles in
+    PLATFORM_POLICY.never are excluded.
     Sidecar candidate styles (status="candidate") are excluded from the
     use path until the promoter graduates them, but stay available as
     invent-mode references once graduated.
@@ -1105,7 +1108,8 @@ def pick_style_for_post(platform, context="posting",
     Args:
         platform: "reddit" | "twitter" | "linkedin" | "github" | "moltbook"
         context: "posting" | "replying"
-        top_n: curation size. Top N styles by score are eligible.
+        top_n: size of the invent-mode reference list (top N by score). The
+               scored-use pick samples across all trusted styles, not just N.
         invent_rate: probability of returning mode="invent" so the model
                      creates a new style from the top N references.
                      Set to 0 to disable invention entirely.
@@ -1174,7 +1178,15 @@ def pick_style_for_post(platform, context="posting",
     # established ones from its first post.
     trusted_rows = [r for r in rows if r.get("trusted")]
     trusted_sorted = sorted(trusted_rows, key=_picker_score, reverse=True)
-    use_pool = trusted_sorted[:top_n]
+    # Use path samples across ALL trusted styles, weighted by raw score
+    # (2026-05-28, per user request). The old top_n cutoff froze out every
+    # style ranked beyond top_n: it could never earn a post back, so its
+    # 30-day sample aged out to n=0 and it dropped from the pool for good.
+    # Now every trusted style keeps a performance-proportional chance; the
+    # highest scorer still wins the most picks, while score-0 styles draw
+    # ~0 via the 0.01 floor below. top_n now bounds ONLY the invent-mode
+    # reference list (reference_pool), not the scored-use pool.
+    use_pool = trusted_sorted
     reference_pool = trusted_sorted[:top_n]
 
     universe = get_all_styles()
@@ -1221,9 +1233,10 @@ def pick_style_for_post(platform, context="posting",
             "picked_at": picked_at,
         }
 
-    # Use path: weighted random sample by raw score. The top N is already a
-    # curated head (filtered by MIN_SAMPLE_SIZE=1 and 30-day recency), so raw
-    # score is the right knob — each style competes on per-post performance.
+    # Use path: weighted random sample by raw score across ALL trusted styles
+    # (filtered by MIN_SAMPLE_SIZE=1 and the 30-day recency window). Linear
+    # score weighting, so each style competes on per-post performance: the
+    # head wins most picks while the tail keeps a proportional, nonzero chance.
     weights = [max(_picker_score(r), 0.01) for r in use_pool]
     total = sum(weights) or 1.0
     pick = rnd.uniform(0.0, total)
