@@ -78,6 +78,17 @@ def _fetch_rows(conn, project=None):
     topic) -> post (upvotes = likes) -> non-bot click count via post_links /
     post_link_clicks. search_attempt_id is required, so candidates posted
     before that column existed are excluded (their query can't be attributed).
+
+    Cross-route guard (2026-05-29): a query only qualifies for the project
+    that ISSUED it. The prep step re-routes a candidate to a different
+    project when the thread fits it better (e.g. a broad invented Podlog
+    query with "codebase" surfaces a Claude Code thread that gets routed to
+    fazm). When that happens posts.project_name follows the new project while
+    a.project_name stays the origin. Without `p.project_name = a.project_name`
+    the origin query would "qualify" into its own bank on a conversion it
+    actually routed away, then get replayed for the wrong product forever.
+    NULL post project is treated as same-project so legacy rows written
+    before project_name was stamped are not dropped.
     """
     sql = """
         SELECT a.project_name,
@@ -96,6 +107,8 @@ def _fetch_rows(conn, project=None):
         ) clk ON clk.post_id = p.id
         WHERE cand.status = 'posted'
           AND p.platform = 'twitter'
+          AND (p.project_name IS NULL
+               OR lower(p.project_name) = lower(a.project_name))
     """
     params = []
     if project:
