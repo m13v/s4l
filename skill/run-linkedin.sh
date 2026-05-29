@@ -433,8 +433,8 @@ JSON_EOF
    - project MUST equal "$LI_PROJECT_NAME" and every search_topic MUST equal
      "$LI_SEARCH_TOPIC". The search_query is the literal phrase you ran.
    - candidates_found is the count of usable candidates that query surfaced
-     (after dropping self-authored / already-engaged). dropped_below_floor:
-     always 0 — the UniPile path applies no virality floor.
+     (after dropping self-authored / already-engaged). dropped_below_floor
+     is always 0: neither path applies a virality floor (Twitter model).
    - candidates contains AT MOST one row (the winner from step 4). It can be
      empty if step 4 found nothing engageable. bash skips Phase B cleanly
      when empty.
@@ -544,9 +544,9 @@ $DUD_QUERIES
          "vertical": "content",
          "query": "<query>",
          "result_count": N,
-         "dropped_below_virality_floor": M,
-         "virality_floor": 5.0,
-         "results": [   // SORTED by velocity_score DESC — top of list = highest score
+         "dropped_below_virality_floor": 0,
+         "virality_floor": null,
+         "results": [   // SORTED by velocity_score DESC, top of list = highest score
            {
              "post_url":           "...|null",
              "activity_id":        "...|null",
@@ -569,12 +569,13 @@ $DUD_QUERIES
          }
        }
 
-   result_count is the POST-floor card count (cards that survived the
-   velocity floor). dropped_below_virality_floor is how many cards the
-   SERP returned but the floor rejected — copy this into queries_used as
-   dropped_below_floor (see envelope shape below). The dashboard reports
-   raw SERP volume as candidates_found + dropped so the operator can tell
-   "SERP returned nothing" apart from "SERP returned weak cards".
+   result_count is ALL cards the SERP returned (Twitter model: no virality
+   floor, nothing is dropped on score). The cards are scored and sorted by
+   velocity_score DESC so the strongest engagement signal sits at the top,
+   but weak cards stay in the list as fallback. dropped_below_virality_floor
+   is always 0 now; copy it into queries_used as dropped_below_floor=0. The
+   dashboard reads raw SERP volume straight off candidates_found, so a query
+   that returns 0 cards still reads as "SERP returned nothing".
 
    New SDUI caveat: post_url and activity_id are null for posts that don't
    embed a quoted/reposted share. That's expected — KEEP these in your
@@ -754,15 +755,13 @@ JSON_EOF
    - project MUST equal "$LI_PROJECT_NAME" and every search_topic MUST
      equal "$LI_SEARCH_TOPIC". The search_topic is the assigned seed; the
      search_query is the literal phrase you ran on LinkedIn.
-   - candidates_found is the POST-floor count (cards that survived the
-     velocity floor — same as the discover script's result_count).
-     dropped_below_floor is the per-query count of cards the SERP returned
-     but the floor rejected — copy it from the discover script's
-     dropped_below_virality_floor field. Use 0 when the discover script
-     didn't report one (zero-result, error, or non-content vertical). The
-     dashboard surfaces raw SERP volume as candidates_found + dropped, so
-     getting this right is what tells "SERP returned nothing" apart from
-     "SERP returned 30 weak cards that all scored under the floor".
+   - candidates_found is ALL cards the SERP returned, same as the discover
+     script's result_count (Twitter model: no virality floor, nothing is
+     dropped on score; cards are sorted by velocity_score DESC). Set
+     dropped_below_floor to 0 for every query: the discover script no longer
+     rejects cards, so its dropped_below_virality_floor is always 0. The
+     dashboard reads raw SERP volume straight off candidates_found, so a
+     query with candidates_found=0 still reads as "SERP returned nothing".
    - candidates contains AT MOST one row (the winner from step 5). It can
      be empty if step 5 found nothing engageable. bash will skip Phase B
      cleanly when empty.
