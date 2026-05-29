@@ -235,8 +235,34 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     posted_resp = api_get("/api/v1/posts/thread-urls", query=_probe_query)
     posted = set((posted_resp.get("data") or {}).get("thread_urls") or [])
 
+    # Get already-SKIPPED (tweet_url, project) pairs for the per-project skip
+    # gate. Claude explicitly rejected these threads for the matched project in
+    # a prior cycle (status='skipped'); since the Phase 2b prompt now reserves
+    # 'rejected' for permanent, thread-intrinsic reasons (transient cap / dedup
+    # / cooldown deferrals are left pending, never skipped), every skipped row
+    # is a genuine rejection safe to suppress from future scans permanently.
+    # Per-project so a thread skipped as fazm stays eligible if a later scan
+    # matches it to a different project. Fail-open: ok_on_404 + try/except so a
+    # missing/unavailable endpoint behaves exactly like the pre-feature cycle
+    # (no skip filtering) instead of crashing Phase 1.
+    skipped_pairs = set()
+    if _twitter_handle:
+        try:
+            _skip_resp = api_get(
+                "/api/v1/twitter-candidates/skipped-urls",
+                query={"our_account": _twitter_handle},
+                ok_on_404=True,
+            )
+            for _pair in (_skip_resp.get("data") or {}).get("pairs") or []:
+                _su = (_pair.get("tweet_url") or "").strip()
+                if _su:
+                    skipped_pairs.add((_su, _pair.get("project")))
+        except SystemExit:
+            skipped_pairs = set()
+
     inserted = updated = skipped = 0
     skipped_fake_id = 0
+    skipped_already_rejected = 0
 
     for tweet in tweets:
         url = (tweet.get("tweet_url") or tweet.get("tweetUrl") or "").strip()
@@ -349,6 +375,20 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
             config,
         )
 
+        # Skip threads Claude already explicitly rejected for THIS project
+        # (status='skipped'). Per-project: a thread skipped as fazm can still be
+        # picked if this scan matched it to a different project, so we key on
+        # (url, project) rather than url alone. Done here (not at the posted
+        # dedup above) because the project isn't resolved until this point.
+        if (url, project) in skipped_pairs:
+            skipped += 1
+            skipped_already_rejected += 1
+            print(
+                f"  [skipped_already_rejected] {project}: {url}",
+                file=sys.stderr,
+            )
+            continue
+
         body = {
             "tweet_url": url,
             "author_handle": tweet.get("handle", ""),
@@ -443,7 +483,7 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # and engagement curves over time. Per user instruction (2026-05-08): never
     # add DELETE-by-age back here, regardless of retention window.
 
-    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id})")
+    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id}, already rejected for project: {skipped_already_rejected})")
 
     # Emit the verdict sidecar for the retry loop's directional feedback. Best
     # effort: never fatal if the path is unwritable, never overwrites the
