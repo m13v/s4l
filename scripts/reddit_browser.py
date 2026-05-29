@@ -346,6 +346,39 @@ def get_browser_and_page(playwright):
     CDP browser would kill the user's visible session.
     """
     _acquire_browser_lock()
+
+    # Preferred: explicit harness CDP endpoint (REDDIT_CDP_URL, set by
+    # skill/lib/reddit-backend.sh -> http://127.0.0.1:9557). When present we
+    # attach DIRECTLY to that URL and skip the ps-based port scan entirely.
+    # This is the reddit-harness migration path (2026-05-29): the whole Reddit
+    # pipeline rides a dedicated browser-harness Chrome on port 9557, profile
+    # ~/.claude/browser-profiles/reddit-harness, mirroring twitter-harness.
+    # Mirrors twitter's TWITTER_CDP_URL direct-attach pattern.
+    cdp_url_env = (os.environ.get("REDDIT_CDP_URL") or "").strip()
+    if cdp_url_env:
+        try:
+            cdp_browser = playwright.chromium.connect_over_cdp(cdp_url_env)
+            # Prefer a context that already carries a live reddit_session; else
+            # fall back to the first context (harness is single-profile, logged in).
+            chosen = None
+            for ctx in cdp_browser.contexts:
+                try:
+                    cookies = ctx.cookies("https://www.reddit.com/")
+                except Exception:
+                    cookies = []
+                if any(c.get("name") == "reddit_session" and c.get("value") for c in cookies):
+                    chosen = ctx
+                    break
+            if chosen is None and cdp_browser.contexts:
+                chosen = cdp_browser.contexts[0]
+            if chosen is not None:
+                page = chosen.new_page()
+                return cdp_browser, page, True
+            # No usable context: do NOT close the CDP browser (would kill the
+            # harness Chrome); just disconnect by falling through.
+        except Exception:
+            pass
+
     cdp_port = find_reddit_cdp_port()
 
     if cdp_port:
