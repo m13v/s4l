@@ -577,7 +577,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         # cycle of wasted Claude work.
         print(f"[post] candidate {cid} reply succeeded but reply_url invalid: {reply_url!r}",
               flush=True)
-        update_candidate(cid, "skipped")
+        update_candidate(cid, "skipped", "no_reply_url_captured")
         return ("skipped", "no_reply_url_captured")
 
     # Insert the post row.
@@ -658,7 +658,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         # Previously this returned 'skipped', which silently hid backend
         # logging outages (e.g. the /api/v1/posts 5000/24h rate-limit cap)
         # behind a benign-looking metric.
-        update_candidate(cid, "skipped")
+        update_candidate(cid, "skipped", "log_post_no_id")
         return ("failed", "log_post_no_id")
 
     # Stamp post_links.post_id for the URLs minted at wrap time. Idempotent;
@@ -815,7 +815,7 @@ def main() -> int:
             outcome, reason = ("failed", "exception")
             cid = c.get("candidate_id")
             if isinstance(cid, int):
-                update_candidate(cid, "failed")
+                update_candidate(cid, "skipped", "exception")
         if outcome == "posted":
             posted += 1
         elif outcome == "skipped":
