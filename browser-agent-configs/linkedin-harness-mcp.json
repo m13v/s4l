@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "linkedin-harness": {
+      "type": "stdio",
+      "command": "__HOME__/.local/bin/uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--with",
+        "mcp",
+        "__HOME__/.claude/mcp-servers/browser-harness/server.py"
+      ],
+      "env": {
+        "PATH": "__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "BU_NAME": "linkedin-harness",
+        "BH_PORT": "9556",
+        "BH_PROFILE_NAME": "browser-harness-linkedin"
+      }
+    }
+  }
+}
