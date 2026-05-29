@@ -1847,9 +1847,13 @@ def scrape_thread_followups(thread_url, scroll_count=3):
                 _refresh_browser_lock()
 
             followups = [t for t in all_tweets if t.get('tweet_id') != anchor_tweet_id]
+            # First article on a permalink page is the conversation root (OP).
+            # Already scraped above — capture for free for thread_author_handle.
+            root_author = (all_tweets[0].get('handle') or '').lstrip('@') if all_tweets else ''
             return {
                 "thread_url": thread_url,
                 "anchor_tweet_id": anchor_tweet_id,
+                "root_author": root_author,
                 "followups": followups,
                 "total": len(followups),
             }
@@ -1936,10 +1940,14 @@ def scrape_many_thread_followups(thread_urls, scroll_count=3, per_url_delay_ms=2
                         _refresh_browser_lock()
 
                     followups = [t for t in collected if t.get('tweet_id') != anchor_tweet_id]
+                    # First article on a permalink page is the conversation root (OP).
+                    # Already scraped above — capture for free for thread_author_handle.
+                    root_author = (collected[0].get('handle') or '').lstrip('@') if collected else ''
                     print(f"[thread_followups] {url}: {len(followups)} candidate follow-ups", file=sys.stderr)
                     results.append({
                         "thread_url": url,
                         "anchor_tweet_id": anchor_tweet_id,
+                        "root_author": root_author,
                         "followups": followups,
                     })
                 except Exception as e:
