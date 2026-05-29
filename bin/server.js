@@ -15912,9 +15912,10 @@ function renderDmStats(payload) {
 // Search Topics: per-topic intelligence at the layer ABOVE search queries.
 // Twitter rows come from twitter_search_attempts.search_topic (set by
 // pick_search_topic.py since 2026-05-26 + backfilled from candidates).
-// Reddit rows come from reddit_search_attempts.seed. LinkedIn + GitHub don\u2019t
-// have a topic concept at the attempt layer; the endpoint returns
-// platform_supported=false when those are pinned in the filter pill.
+// LinkedIn rows come from linkedin_search_attempts.search_topic. Reddit rows
+// come from reddit_search_attempts.seed. GitHub doesn't have a topic concept
+// at the attempt layer; the endpoint returns platform_supported=false when
+// unsupported platforms are pinned in the filter pill.
 let _searchTopicsStatsTableState = { sortField: 'posts_made', sortDir: 'desc', filters: {} };
 function renderSearchTopicsStats(payload) {
   const body = document.getElementById('search-topics-stats-body');
@@ -15927,7 +15928,7 @@ function renderSearchTopicsStats(payload) {
   }
   if (payload && payload.platform_supported === false) {
     if (totalEl) totalEl.textContent = 'n/a';
-    body.innerHTML = '<div class="style-stats-empty">This platform doesn\u2019t track topics at the attempt layer (Twitter and Reddit do).</div>';
+    body.innerHTML = '<div class="style-stats-empty">This platform doesn\u2019t track topics at the attempt layer (Twitter, LinkedIn, and Reddit do).</div>';
     return;
   }
   const rows = (payload && payload.rows) || [];
