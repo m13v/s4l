@@ -260,9 +260,13 @@ def search_queries(project: str, q: str = "", limit: int = 200) -> dict:
         `core` is the normalized form (operators stripped) for dedup compares.
     """
     limit = max(1, min(int(limit or 200), 1000))
+    # Request the full distinct set from the route (its own 5000 cap is fine)
+    # so the substring filter runs against ALL queries, not just the first
+    # alphabetical slice. Otherwise queries starting with 'w' get cut off
+    # when limit*5 = 50 and the project has hundreds of cores.
     try:
         resp = api_get("/api/v1/twitter-search-attempts/distinct-queries",
-                       {"project": project, "limit": str(min(limit * 5, 5000))})
+                       {"project": project, "limit": "5000"})
     except SystemExit as e:
         return {"error": f"api_get failed: {e}"}
     queries = ((resp or {}).get("data") or {}).get("queries") or []
