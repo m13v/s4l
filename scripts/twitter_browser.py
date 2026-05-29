@@ -704,7 +704,27 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         pass
                 page.wait_for_timeout(15000 if nav_attempt == 1 else 8000)
 
-                page_text = page.text_content("main") or ""
+                # `wait_until="load"` fires before Twitter's SPA mounts the
+                # <main> app shell, so "loaded" != "rendered". Explicitly gate
+                # on <main> attaching. If it never mounts (rate-limit
+                # interstitial, error page, logged-out shell, or a stalled SPA)
+                # DO NOT let text_content("main") raise a bare TimeoutError that
+                # crashes the whole script with no_reply_json and no diagnostics.
+                # Swallow it, log the actual URL (rate-limit vs logout triage),
+                # and fall through to the nudge + re-nav; on the final miss the
+                # reply_box-None path reaches _dump_reply_failure_diag below.
+                try:
+                    page.wait_for_selector("main", state="attached", timeout=20000)
+                    page_text = page.text_content("main", timeout=5000) or ""
+                except Exception:
+                    page_text = ""
+                    try:
+                        cur_url = page.url
+                    except Exception:
+                        cur_url = "<unknown>"
+                    print(f"[reply_to_tweet] <main> not rendered on "
+                          f"nav_attempt={nav_attempt} (url={cur_url!r}); "
+                          f"nudging + re-navigating", file=sys.stderr)
                 if "this page doesn't exist" in page_text.lower():
                     tweet_not_found = True
                     break
