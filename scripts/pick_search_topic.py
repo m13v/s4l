@@ -33,15 +33,23 @@ a real shot.
    base(score>0)  = log_e(score + 1) + 1.0
    base(score==0) = COLD_TOPIC_WEIGHT (= 0.15)
 
-2026-05-27: base weight is adjusted by two layered factors that read
-from twitter_search_attempts (via the supply join in
-top_search_topics._query_twitter) so the picker distinguishes topics
-that were tried-and-failed from topics that were never tried at all.
-Math lives in _compute_weight; concretely:
+2026-05-28: base weight is adjusted by ONE of a few mutually-exclusive
+factors reading from twitter_candidates (posts/clicks) and
+twitter_search_attempts (the supply join in
+top_search_topics._query_twitter). Math lives in _compute_weight;
+concretely:
 
-     - attempts_n == 0           → return base unchanged
-     - 0 supply across N tries   → base * SUPPLY_DEAD_WEIGHT (0.3x)
-     - else                      → base * conversion (posts/attempt)
+     - attempts_n == 0              → return base unchanged
+     - 0 supply across N tries      → base * SUPPLY_DEAD_WEIGHT (0.3x)
+     - posted_n >= MIN_POSTS_FOR_FIT→ base * clicks-per-post fit (CTR)
+     - else, has clicks             → return base (thin-supply winner)
+     - else, no clicks              → base * conversion (posts/attempt)
+
+The CTR factor (3rd branch) replaced a flat posts/attempt conversion on
+2026-05-28: supply and clicks turned out anti-correlated on NightOwl, so
+rewarding posting VOLUME kept high-post/low-click noise magnets in
+rotation. Clicks-per-post demotes them without touching thin-supply click
+winners.
 
 Floor at base*DEAD_FLOOR_FRACTION so no topic ever locks out entirely;
 we always keep a small retest probability in case X's firehose or our
@@ -165,40 +173,74 @@ SUPPLY_DEAD_WEIGHT = 0.3
 # A single dry attempt isn't evidence; 3 in a row across a 30d window is.
 MIN_ATTEMPTS_FOR_SUPPLY_VERDICT = 3
 
+# 2026-05-28 click-efficiency gate (replaces the posts-per-attempt
+# conversion for topics that have posted enough to judge). Empirically
+# (NightOwl 30d) supply and clicks are ANTI-correlated: the best-supply
+# topics ("Laravel observability" 96 tweets/20 posts, "Laravel monitoring"
+# 83 tweets/30 posts) earn the FEWEST clicks (1 and 4), while the click
+# winner ("Laravel Horizon" 78 clicks) has thin/spiky supply (9 tweets,
+# 1 post). The old conversion = posts/attempts REWARDED posting volume, so
+# those noise-magnet topics kept full weight and kept burning comment budget
+# for ~0 clicks. Click-efficiency (clicks per posted candidate) demotes them
+# while leaving thin-supply click winners untouched.
+#
+# MIN_POSTS_FOR_FIT: posts needed before clicks-per-post is a real sample.
+# Below this we can't tell a low-CTR noise magnet from an unlucky small
+# sample, so we don't apply the CTR penalty (see _compute_weight branch 2/3).
+MIN_POSTS_FOR_FIT = 5
+# TARGET_CLICKS_PER_POST: the clicks-per-post at which a topic earns full
+# weight (fit factor caps at 1.0). Topics below it are scaled down
+# proportionally; topics at/above it are all treated as "efficient enough"
+# and ranked among themselves by base (total-click) weight. 0.5 = "we want
+# at least 1 click per 2 posted comments." Cleanly separates NightOwl's
+# performers (>=0.67 CTR) from its noise magnets (<=0.18 CTR).
+TARGET_CLICKS_PER_POST = 0.5
+
 
 def _compute_weight(r):
     """Final weighted-sampling weight for one pool row.
 
-    Three layered factors, applied in order:
+    base, then ONE of four mutually-exclusive adjustments:
 
     1. base = log(composite_score+1)+1 (positive performance), or
               COLD_TOPIC_WEIGHT (=0.15) when never scored. Log-smoothing
               compresses the right-skewed composite distribution so the
               top performer lands around 20-30%, not 90%+.
 
-    2. supply gate: if attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT and
-       tweets_found_total == 0, X is just not returning tweets for this
-       topic. Apply a mild 0.3x rather than the heavy conversion math —
-       supply failure is partly outside our control, so the topic stays
-       on the bench for occasional retest.
+    Untried topics (attempts_n == 0) return base unchanged, so cold topics
+    keep full exploration weight. Then, for topics with attempts:
 
-    3. conversion: posts per attempt, Laplace-smoothed
-       (posted_n + 1) / (attempts_n + 1). Capped at 1.0 so we don't BOOST
-       above base. Heavy penalty for topics that surface supply but
-       never convert to posts (the "got 10 attempts, 50 tweets, 0 posts"
-       FIT failure — our prompts/criteria aren't working for this topic).
+    2. supply-dead backstop: attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT
+       and tweets_found_total == 0 → X just isn't returning tweets. Mild
+       0.3x (supply failure is partly external), kept for occasional retest.
 
-    Untried topics (attempts_n == 0) skip both #2 and #3 and return base
-    unchanged, so cold topics still get full exploration weight.
+    3. click-efficiency (posted_n >= MIN_POSTS_FOR_FIT): weight by
+       clicks-per-post, capped at 1.0 via TARGET_CLICKS_PER_POST. This is
+       the 2026-05-28 change. The OLD conversion (posts/attempts) rewarded
+       posting VOLUME, so noise-magnet topics that post a lot and earn ~0
+       clicks ("Laravel observability": 20 posts, 1 click) kept full weight.
+       Clicks-per-post demotes them. NOTE: clicks are partly counted in base
+       already (composite = clicks*100 + ...), so this is value (base) x
+       efficiency (CTR) by design, not double-counting: total clicks set the
+       ceiling, CTR decides how much of it the topic keeps.
+
+    4. conversion (posted_n < MIN_POSTS_FOR_FIT): too few posts to judge CTR.
+       Topics with real clicks on a small sample (thin-supply winners like
+       "Laravel Horizon": 1 post, 78 clicks) keep full base — do NOT penalize
+       them for the low post-rate that thin supply forces. Topics with zero
+       clicks fall back to posts-per-attempt, Laplace-smoothed and capped at
+       1.0, so a topic searched many times that rarely converts to a post
+       (surface-and-skip noise, or supply too thin to post) is penalized.
 
     A floor of base*DEAD_FLOOR_FRACTION ensures no topic drops to zero
     weight: we always want some chance to retest a stale dud in case
-    supply/fit changes (X firehose shifts, project description evolves).
+    supply/fit/CTR changes (X firehose shifts, project description evolves).
     """
     score = float(r.get("composite_score") or 0)
     posted_n = int(r.get("posted_n") or 0)
     attempts_n = int(r.get("attempts_n") or 0)
     tweets_found_total = int(r.get("tweets_found_total") or 0)
+    clicks_total = int(r.get("clicks_total") or 0)
 
     if score > 0:
         base = math.log(score + 1.0) + 1.0
@@ -213,6 +255,14 @@ def _compute_weight(r):
         and attempts_n >= MIN_ATTEMPTS_FOR_SUPPLY_VERDICT
     ):
         return max(base * DEAD_FLOOR_FRACTION, base * SUPPLY_DEAD_WEIGHT)
+
+    if posted_n >= MIN_POSTS_FOR_FIT:
+        click_eff = clicks_total / posted_n
+        fit = min(1.0, click_eff / TARGET_CLICKS_PER_POST)
+        return max(base * DEAD_FLOOR_FRACTION, base * fit)
+
+    if clicks_total > 0:
+        return base
 
     conversion = min(1.0, (posted_n + 1.0) / (attempts_n + 1.0))
     return max(base * DEAD_FLOOR_FRACTION, base * conversion)
