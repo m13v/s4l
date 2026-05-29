@@ -180,7 +180,7 @@ def match_project(tweet_text, search_topic, config):
     return None
 
 
-def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
+def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_sidecar=None):
     """Score and upsert tweet candidates into DB.
 
     If batch_id is provided, also populates T0 engagement columns and tags
@@ -192,6 +192,18 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
     rather than fanning out (batch_id, project_name) across every query the
     batch ran for that project (2026-05-21 bug fix).
 
+    If scored_sidecar is provided, writes per-query verdict tallies to that
+    JSON path so run-twitter-cycle.sh can build the directional
+    TRIED_QUERIES_JSON for the next retry attempt's prompt (2026-05-28
+    retry-feedback loop). Shape:
+        {query_string: {raw, kept_after_age, kept_after_skip}, ...}
+    raw = tweets fed to upsert_candidates from the enrich step
+    kept_after_age = tweets surviving the FRESHNESS_HOURS_DISCOVER cap
+    kept_after_skip = tweets that made it through to api_post insert
+    Never raises if the path isn't writable; the verdict step falls back to
+    raw == kept_after_age (no all_aged_out distinction) when the sidecar is
+    missing.
+
     Migrated 2026-05-18 to call the s4l.ai HTTP API:
       - dedup probe -> GET /api/v1/posts/thread-urls?platform=twitter
       - per-tweet upsert -> POST /api/v1/twitter-candidates
@@ -200,6 +212,18 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
         (default 18h window; never deletes rows — status flip only)
     """
     attempts_map = attempts_map or {}
+    # Per-query tally for the scored sidecar. We seed `raw` upfront so a query
+    # whose every tweet was dropped (stale, fabricated, ceiling) still shows
+    # up with raw>0, kept_after_age=0 -> all_aged_out verdict instead of
+    # silently disappearing into the kept_after_skip=0 branch.
+    sidecar = {}
+    if scored_sidecar:
+        for _t in tweets:
+            _q = (_t.get("query") or "").strip()
+            if not _q:
+                continue
+            ent = sidecar.setdefault(_q, {"raw": 0, "kept_after_age": 0, "kept_after_skip": 0})
+            ent["raw"] += 1
     # Get already-posted thread URLs for dedup. Scope per-account so the mk0r
     # VM running as @matt_diak doesn't skip a tweet that @m13v_ posted on
     # (or vice versa). Falls back to unscoped when the resolver can't pin a
@@ -282,6 +306,16 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
                 flush=True,
             )
             continue
+
+        # Tally kept_after_age for the verdict sidecar BEFORE the ceiling-D
+        # cap below. all_aged_out means "the freshness gate killed everything";
+        # ceiling-D is a quality filter that fires after age. Keeping the
+        # tallies separate prevents D-cycle queries from looking like aged-out
+        # to the next retry's drafter.
+        if scored_sidecar:
+            _q_age = (tweet.get("query") or "").strip()
+            if _q_age and _q_age in sidecar:
+                sidecar[_q_age]["kept_after_age"] += 1
 
         # Variant D (2026-05-25): 2k-view ceiling cap on parent thread.
         # Bucket analysis on 250+ mature posts showed view-share collapses
@@ -366,6 +400,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
         try:
             api_post("/api/v1/twitter-candidates", body)
             inserted += 1
+            if scored_sidecar:
+                _q_kept = (tweet.get("query") or "").strip()
+                if _q_kept and _q_kept in sidecar:
+                    sidecar[_q_kept]["kept_after_skip"] += 1
             try:
                 _tweet_iso = body.get("tweet_posted_at") or body.get("tweet_created_at") or ""
                 _disc_iso = body.get("discovered_at") or body.get("created_at") or ""
@@ -406,6 +444,24 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None):
     # add DELETE-by-age back here, regardless of retention window.
 
     print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id})")
+
+    # Emit the verdict sidecar for the retry loop's directional feedback. Best
+    # effort: never fatal if the path is unwritable, never overwrites the
+    # cycle's other state.
+    if scored_sidecar:
+        try:
+            with open(scored_sidecar, "w") as fh:
+                json.dump(sidecar, fh)
+            print(
+                f"scored_sidecar: wrote {len(sidecar)} query verdicts -> {scored_sidecar}",
+                file=sys.stderr,
+            )
+        except OSError as e:
+            print(
+                f"scored_sidecar: could not write {scored_sidecar}: {e}",
+                file=sys.stderr,
+            )
+
     return inserted
 
 
@@ -420,6 +476,14 @@ def main():
              "log_twitter_search_attempts.py --attempts-out. When provided, "
              "stamps twitter_candidates.search_attempt_id per tweet so the "
              "dashboard can attribute posts to the exact discovering query.",
+    )
+    parser.add_argument(
+        "--scored-sidecar",
+        help="Path to write per-query verdict tallies for the retry loop "
+             "feedback (2026-05-28). Shape: {query: {raw, kept_after_age, "
+             "kept_after_skip}, ...}. Consumed by run-twitter-cycle.sh to "
+             "build the directional TRIED_QUERIES_JSON for the next attempt's "
+             "drafter prompt.",
     )
     args = parser.parse_args()
 
@@ -476,7 +540,13 @@ def main():
                 file=sys.stderr,
             )
 
-    upsert_candidates(tweets, config, batch_id=args.batch_id, attempts_map=attempts_map)
+    upsert_candidates(
+        tweets,
+        config,
+        batch_id=args.batch_id,
+        attempts_map=attempts_map,
+        scored_sidecar=args.scored_sidecar,
+    )
 
 
 if __name__ == "__main__":
