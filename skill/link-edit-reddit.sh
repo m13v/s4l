@@ -19,6 +19,9 @@ export SA_CYCLE_ID="$BATCH_ID"
 # (engage-reddit, dm-replies-reddit, post-reddit) during the long
 # generate_page.py / WebFetch / DB phases of each post.
 source "$(dirname "$0")/lock.sh"
+# reddit-harness backend (2026-05-29). Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS,
+# exports REDDIT_CDP_URL=:9557, provides ensure_reddit_browser_for_backend.
+source "$(dirname "$0")/lib/reddit-backend.sh"
 acquire_lock "link-edit-reddit" 5400
 
 # Load secrets
@@ -85,7 +88,9 @@ You are the Social Autoposter Reddit link-edit bot.
 
 Read $SKILL_FILE for the full workflow. Execute the Reddit link-edit phase only.
 
-CRITICAL: ALL browser calls MUST use mcp__reddit-agent__* tools (e.g. mcp__reddit-agent__browser_navigate, mcp__reddit-agent__browser_run_code). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a reddit-agent call is blocked or times out, wait 30s and retry the same agent (up to 3 times). If still blocked, skip that post.
+$BROWSER_INSTRUCTIONS
+
+CRITICAL - Browser agent rule: ONLY use the browser tool described in the BROWSER BACKEND block above (mcp__reddit-harness__bh_run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, mcp__reddit-agent__*, or mcp__macos-use__* tools. If a bh_run call is blocked or times out, wait 30s and retry (up to 3 times). If still blocked, skip that post.
 
 CRITICAL: This is a single-shot run. NEVER call ScheduleWakeup, CronCreate, CronDelete, CronList, EnterPlanMode, EnterWorktree, or any deferred-execution / scheduling tool. You MUST complete or skip every post in this one run; do not defer work to "a future run". If you hit a hard block, mark the post SKIPPED via step 9 and move on to the next post.
 
@@ -182,10 +187,13 @@ PROMPT_EOF
 log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py pre-flight acquire failed; proceeding (claude will retry per-post)."
-ensure_browser_healthy "reddit"
+if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+    ensure_browser_healthy "reddit"
+fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
-gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit link-edit claude exited with code $?"
+gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-reddit" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 # Belt-and-suspenders: if claude exited without releasing the lock (e.g.
