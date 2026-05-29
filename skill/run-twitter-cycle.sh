@@ -651,7 +651,16 @@ ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 # cap is hit before target, proceed with whatever we have (even 1 candidate
 # is better than 0). When BATCH_COUNT is still 0 after the loop, the
 # post-loop empty_batch branch fires.
-MAX_SCAN_ATTEMPTS=5
+# DEFAULT Phase 1 is the deterministic qualified-query bank (no Claude): the
+# bank replays every historically qualified query for the picked project in a
+# single pass, so there is nothing to "retry-draft" and one attempt is enough.
+# The legacy LLM-draft path (TWITTER_PHASE1_LLM_DRAFT=1) keeps the 5-attempt
+# retry loop, because LLM queries frequently return empty and need re-drafting.
+if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
+    MAX_SCAN_ATTEMPTS=5
+else
+    MAX_SCAN_ATTEMPTS=1
+fi
 RETRY_TARGET=5
 SCAN_ATTEMPT=0
 BATCH_COUNT=0
@@ -804,6 +813,8 @@ export SCAN_TWEETS_FILE
 # Output downstream is identical: $RAW_FILE + $QUERIES_FILE feed the scorer
 # and twitter_search_attempts logger the same way as before.
 #
+if [ "${TWITTER_PHASE1_LLM_DRAFT:-0}" = "1" ]; then
+# === LLM QUERY-DRAFT PATH (legacy, behind TWITTER_PHASE1_LLM_DRAFT=1) ========
 log "Lean Phase 1: drafting queries (no browser tools)..."
 
 QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
