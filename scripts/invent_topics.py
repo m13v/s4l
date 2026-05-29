@@ -1372,6 +1372,73 @@ def main():
           f"rejected={len(all_rejected)} elapsed={elapsed}s",
           file=sys.stderr)
 
+    # --- Surface this run in the dashboard's Status > Job History tab via
+    #     log_run.py + run_monitor.log. Skip on dry-run so smoke tests don't
+    #     leak fake rows into the dashboard. ----------------------------------
+    if not args.dry_run:
+        _emit_run_monitor_row(
+            project_name=project_name,
+            processed=processed,
+            attempts_used=attempts_used,
+            aborted_untested=aborted_untested,
+            saturated_bailout=saturated_bailout,
+            elapsed_sec=elapsed,
+        )
+
+
+def _emit_run_monitor_row(
+    project_name: str,
+    processed: list[dict],
+    attempts_used: int,
+    aborted_untested: bool,
+    saturated_bailout: bool,
+    elapsed_sec: float,
+) -> None:
+    """Call scripts/log_run.py so the invent run lands in run_monitor.log and
+    the dashboard's Status > Job History tab surfaces it under the
+    'Invent Topics' filter pill. Best-effort: any failure is logged and
+    swallowed — we never want a dashboard-write hiccup to mask the actual
+    run output."""
+    # Per-topic query counts (the integer next to each topic in the result
+    # column, joined with '+' for the qpt= segment).
+    qpt = [int(p.get("queries_tested", 0)) for p in processed]
+    queries_total = sum(qpt)
+    queries_w_supply = sum(
+        1
+        for p in processed
+        for attempt in (p.get("attempts") or [])
+        if (attempt.get("tweets_found") or 0) > 0
+    )
+    topics_invented = len(processed)
+    n_qual = sum(1 for p in processed if p.get("qualifies"))
+    # Skipped = topics tested but didn't qualify. Failed = 1 iff the run
+    # aborted partway (browser drop); harmless 0 otherwise.
+    skipped = max(topics_invented - n_qual, 0)
+    failed = 1 if aborted_untested else 0
+    invent_kv = ",".join([
+        f"project={project_name}",
+        f"topics={topics_invented}",
+        f"queries={queries_total}",
+        f"queries_w_supply={queries_w_supply}",
+        f"qpt={'+'.join(str(x) for x in qpt) if qpt else '0'}",
+    ])
+    log_run_py = os.path.join(_REPO_DIR, "scripts", "log_run.py")
+    cmd = [
+        "/opt/homebrew/bin/python3.11", log_run_py,
+        "--script", "invent_topics",
+        "--posted", str(topics_invented),
+        "--skipped", str(skipped),
+        "--failed", str(failed),
+        "--cost", "0",  # claude -p inherits cost tracking; not surfaced per-call
+        "--elapsed", str(int(elapsed_sec)),
+        "--invent", invent_kv,
+    ]
+    try:
+        subprocess.run(cmd, check=False, timeout=30,
+                       capture_output=True, text=True)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"[invent_topics] log_run.py emit failed: {exc}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
