@@ -17,8 +17,8 @@
 #   chosen candidate (already in linkedin_candidates), navigate straight to
 #   the URL, defensively re-check engaged-ids, draft using the project's
 #   voice block + engagement styles + top performers report, post via
-#   mcp__linkedin-agent, verify (network + DOM), log via log_post.py, mark
-#   the candidate row 'posted' (or 'skipped' on rejection), STOP.
+#   the linkedin-harness MCP (bh_run), verify (DOM + screenshot), log via
+#   log_post.py, mark the candidate row 'posted' (or 'skipped'), STOP.
 #
 # Differences vs the pre-2026-04-29 shape:
 #   - Phase A extracts ENGAGEMENT (not just URN); we don't fly blind anymore
@@ -32,10 +32,10 @@ set -euo pipefail
 # Transport backend selector (2026-05-28). Two interchangeable paths for the
 # only two browser touchpoints (Phase A SERP search, Phase B comment-post):
 #   unipile (DEFAULT) — UniPile REST API via scripts/linkedin_unipile.py.
-#                       No headed Chrome, no linkedin-agent MCP, no browser
+#                       No headed Chrome, no harness MCP, no browser
 #                       lock, no killswitch (the killswitch guards the headed
 #                       LinkedIn session, which this path never touches).
-#   browser           — the original headed-Chrome path via mcp__linkedin-agent.
+#   browser           — headed-Chrome path via the linkedin-harness MCP (bh_run).
 # Everything ELSE (project pick, query drafting, SERP-quality rating, dedup,
 # velocity/virality scoring, voice composition, URL wrapping, log_post.py
 # logging, candidate marking) is byte-for-byte identical across both paths.
@@ -82,6 +82,13 @@ echo "=== LinkedIn Post Run: $(date) (batch=$BATCH_ID) ===" | tee "$LOG_FILE"
 # does not need the lock. So we acquire just before each Claude phase and
 # release immediately after.
 source "$REPO_DIR/skill/lock.sh"
+# Browser backend bootstrap (linkedin-harness). Sets MCP_CONFIG_FILE,
+# BROWSER_INSTRUCTIONS, exports LINKEDIN_CDP_URL (so discover_linkedin_candidates.py
+# CDP-attaches to the harness Chrome on 9556), and provides
+# ensure_linkedin_browser_for_backend. Only the LINKEDIN_BACKEND=browser path
+# uses these; the unipile (default) path has no browser. Migrated off the
+# deprecated linkedin-agent MCP on 2026-05-29 (mirrors the Twitter migration).
+source "$REPO_DIR/skill/lib/linkedin-backend.sh"
 
 # Idempotent run_monitor.log emitter wired into a chained EXIT/INT/TERM/HUP
 # trap. Without this, SIGTERM landing between Phase B post (where Claude has
@@ -445,15 +452,17 @@ JSON_EOF
 Then say '## Phase A: envelope written' and STOP.
 
 CRITICAL: Use ONLY the Bash tool plus the linkedin_unipile.py / linkedin_url.py
-scripts. There is NO browser in this path — NEVER attempt mcp__linkedin-agent
-tools (they are not loaded) and never try to navigate a webpage.
+scripts. There is NO browser in this path — NEVER attempt any browser MCP
+tools (none are loaded) and never try to navigate a webpage.
 CRITICAL: Run exactly 8 search queries this run. Not 2, not 4, not 6. Eight.
 CRITICAL: NEVER use em dashes anywhere.
 PROMPT_EOF
 else
-# ----- Phase A prompt: headed-Chrome browser backend (mcp__linkedin-agent) -----
+# ----- Phase A prompt: headed-Chrome browser backend (linkedin-harness) -----
 cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter LinkedIn discovery + scoring scout (Phase A).
+
+$BROWSER_INSTRUCTIONS
 
 Your job: use the pre-selected project and assigned search_topic, draft 8
 DYNAMIC LinkedIn search queries from that one topic, browse each query's
@@ -505,28 +514,27 @@ $DUD_QUERIES
    LinkedIn rate budget (40/24h, 150/30d) accommodates this fine; rate
    caps are not the bottleneck, candidate quality is.
 
-3. PRIME the linkedin-agent MCP browser ONCE before the per-query loop.
-   The Playwright MCP server launches Chrome lazily on the first browser
-   tool call; without this step the discover script tries to CDP-attach to
-   a dead port and returns mcp_not_running.
-   3pre. mcp__linkedin-agent__browser_navigate to https://www.linkedin.com/
-         (one navigation; this brings Chrome up and writes a fresh port to
-         DevToolsActivePort).
-   3pre-check. If the resulting URL contains /uas/login or /checkpoint/,
-         the persistent session is dead. Write an empty envelope (no
-         queries_used, no candidates) and STOP. The user must re-auth the
-         linkedin-agent profile interactively before the next run.
+3. PRIME the harness browser ONCE before the per-query loop. This confirms
+   the harness Chrome is up and the session is alive before the discover
+   script CDP-attaches to it.
+   3pre. Navigate (per the BROWSER BACKEND block) to https://www.linkedin.com/
+         (one navigation), then take a screenshot and Read it.
+   3pre-check. If the resulting URL contains /uas/login or /checkpoint/, or the
+         screenshot shows a login / captcha / verify-you-are-human page, the
+         persistent session is dead. Print SESSION_INVALID, write an empty
+         envelope (no queries_used, no candidates) and STOP. The user must
+         re-auth the harness LinkedIn Chrome interactively before the next run.
 
 4. For EACH query, shell out via the Bash tool:
 
        SOCIAL_AUTOPOSTER_LINKEDIN_SEARCH=1 python3 \\
          $REPO_DIR/scripts/discover_linkedin_candidates.py content "<query>"
 
-   The script CDP-attaches to the linkedin-agent MCP's already-running
-   Chrome (same cookies/session/fingerprint, no second browser), navigates
-   the SERP, extracts every visible card, and prints a JSON envelope to
-   stdout. Do NOT call mcp__linkedin-agent__browser_navigate or
-   browser_run_code for discovery — the script handles both.
+   The script CDP-attaches to the SAME harness Chrome (LINKEDIN_CDP_URL is
+   already exported to the harness port; same cookies/session/fingerprint, no
+   second browser), navigates the SERP, extracts every visible card, and prints
+   a JSON envelope to stdout. Do NOT drive the browser yourself for discovery —
+   the script handles navigation and extraction.
 
    Result shape on success:
 
@@ -660,12 +668,13 @@ $DUD_QUERIES
 
    5a. The winner's SERP card has a clickable timestamp / "Feed post"
        title link that opens the canonical post detail. Click it ONCE
-       via mcp__linkedin-agent__browser_click on the matching card.
+       (per the BROWSER BACKEND block: locate the matching card via
+       getBoundingClientRect, then click_at_xy on its timestamp/title link).
        (Use the post_text first ~60 chars to disambiguate which card
        on the SERP is the winner.) Click on exactly one card per run.
 
    5b. After the navigation settles, read the resulting page URL via
-       mcp__linkedin-agent__browser_evaluate(() => location.href).
+       the BROWSER BACKEND block's run-code equivalent (bh_run js("""return location.href""")).
        Match /urn:li:(activity|share|ugcPost):(\\d{16,19})/ — capture
        BOTH the URN type (activity / share / ugcPost) and the numeric.
 
@@ -678,12 +687,13 @@ $DUD_QUERIES
          activity_id = <NUM>            (bare numeric, for engaged-id check)
 
        If your click in 5a did NOT navigate (page still shows the SERP
-       URL), fall back to the 3-dot menu → "Copy link to post" route:
-         - browser_click on the 3-dot control menu of the winner card
-         - browser_click on the "Copy link to post" menu item
-         - read the URL from clipboard via browser_evaluate +
-           navigator.clipboard.readText() (may fail with permission denied
-           in headed Chrome — try Bash 'pbpaste' as a backup)
+       URL), fall back to the 3-dot menu → "Copy link to post" route
+       (all clicks via click_at_xy per the BROWSER BACKEND block):
+         - click the 3-dot control menu of the winner card
+         - click the "Copy link to post" menu item
+         - read the URL from clipboard via the run-code equivalent
+           (bh_run js("""return await navigator.clipboard.readText()""")) (may fail
+           with permission denied in headed Chrome — try Bash 'pbpaste' as a backup)
          - the slug encodes the URN type: parse /-(activity|share|ugcPost)-(\\d{16,19})/
            from the URL. Build canonical exactly as above using the captured TYPE.
          - Example: https://www.linkedin.com/posts/SLUG-share-7455...-pkG-...
@@ -774,9 +784,9 @@ JSON_EOF
 
 Then say '## Phase A: envelope written' and STOP.
 
-CRITICAL: Use ONLY mcp__linkedin-agent__* tools. NEVER click the comment
-textbox. NEVER call createComment. NEVER navigate to a post-compose flow.
-Phase B does all of that.
+CRITICAL: Use ONLY the browser tool described in the BROWSER BACKEND block
+(mcp__linkedin-harness__bh_run). NEVER click the comment textbox. NEVER call
+createComment. NEVER navigate to a post-compose flow. Phase B does all of that.
 CRITICAL: Run exactly 8 search queries this run. Not 2, not 4, not 6. Eight.
 Wider net = better odds of one ICP-fit hit. The rate budget can absorb it.
 CRITICAL: NEVER use em dashes anywhere.
@@ -785,7 +795,7 @@ fi
 
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
   # UniPile path: no headed browser, so no linkedin-browser lock, no
-  # ensure_browser_healthy, no linkedin-agent MCP, no PreToolUse hook lockfile.
+  # ensure_browser_healthy, no harness MCP, no PreToolUse hook lockfile.
   # --strict-mcp-config with NO --mcp-config loads zero MCP servers, leaving
   # the default Bash tool the agent uses to shell out to linkedin_unipile.py.
   set +e
@@ -807,10 +817,10 @@ else
   # <60s stale (tail-flush window), producing $8.91 empty-envelope runs.
   # 2026-05-01: false-positive hardened by env-var bypass + pgrep alive check.
   acquire_lock "linkedin-browser" 3600
-  ensure_browser_healthy "linkedin"
+  ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
   set +e
-  "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
+  "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
   PA_RC=${PIPESTATUS[0]}
   set -e
 
@@ -1180,17 +1190,19 @@ $STYLES_BLOCK
 CRITICAL: ONE post only. If anything fails, STOP — do NOT pick another candidate.
 CRITICAL: Use ONLY the Bash tool plus linkedin_unipile.py / log_post.py /
 dm_short_links.py / linkedin_url.py. There is NO browser; NEVER attempt
-mcp__linkedin-agent tools (they are not loaded).
+any browser MCP tools (none are loaded).
 CRITICAL: NEVER use em dashes.
 PROMPT_EOF
 else
-# ----- Phase B prompt: headed-Chrome browser backend (mcp__linkedin-agent) -----
+# ----- Phase B prompt: headed-Chrome browser backend (linkedin-harness) -----
 cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter (Phase B). Your job: post ONE comment on a
 pre-selected LinkedIn post (already chosen + scored by Phase A), verify it
 landed, log it. STOP. Do NOT search for other candidates.
 
 Read $SKILL_FILE for tone and content rules.
+
+$BROWSER_INSTRUCTIONS
 
 ## Pre-selected candidate (from Phase A — DO NOT rediscover)
 - Project: **$PA_PROJECT**
@@ -1217,10 +1229,11 @@ $STYLES_BLOCK
 
 ## Workflow
 
-1. Navigate to $PA_URL via mcp__linkedin-agent__browser_navigate.
+1. Navigate to $PA_URL (per the BROWSER BACKEND block).
 
-   1a. URN-NAMESPACE FALLBACK. After navigation, take a browser_snapshot.
-       If the snapshot contains the markers 'Post not found' OR 'This post
+   1a. URN-NAMESPACE FALLBACK. After navigation, read the page DOM/text (per the
+       BROWSER BACKEND block: bh_run js("""return document.body.innerText""") or a
+       screenshot). If it contains the markers 'Post not found' OR 'This post
        was deleted or removed' OR 'this content isn'\''t available', the
        URN namespace in $PA_URL may be wrong (activity/share/ugcPost are
        DIFFERENT namespaces with different numeric IDs — Phase A may have
@@ -1233,10 +1246,11 @@ $STYLES_BLOCK
              - https://www.linkedin.com/feed/update/urn:li:share:$PA_ACTIVITY_ID/
              - https://www.linkedin.com/feed/update/urn:li:ugcPost:$PA_ACTIVITY_ID/
              - https://www.linkedin.com/feed/update/urn:li:activity:$PA_ACTIVITY_ID/
-           (skip whichever you already tried). browser_navigate to each;
-           after each, browser_snapshot; if the post-not-found markers are
-           absent AND a comment editor / post body renders, that URL is
-           the correct one — adopt it and continue from step 2.
+           (skip whichever you already tried). Navigate to each (per the
+           BROWSER BACKEND block); after each, read the DOM/text the same way;
+           if the post-not-found markers are absent AND a comment editor / post
+           body renders, that URL is the correct one — adopt it and continue
+           from step 2.
          * If ALL THREE namespaces hit post-not-found markers, the post
            genuinely no longer exists. Mark candidate skipped:
              python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
@@ -1268,24 +1282,30 @@ $STYLES_BLOCK
    and save wrap_result.minted_session as MINTED_SESSION. Otherwise use the
    original draft and set MINTED_SESSION to empty.
 
-4. Post the comment via mcp__linkedin-agent (find textbox, click, type, submit)
-   using the (possibly wrapped) text from step 3b.
+4. Post the comment via the BROWSER BACKEND block: scroll to the comment
+   editor, click it (click_at_xy on the contenteditable box), type_text the
+   (possibly wrapped) text from step 3b, then click the Post/Comment submit
+   button (click_at_xy). The contenteditable box is the trickiest element —
+   after clicking, capture a screenshot and Read it to confirm the caret is in
+   the editor before typing.
 
-5. POST-SUBMIT VERIFICATION (mandatory).
-   5a. mcp__linkedin-agent__browser_network_requests with:
-         filter: 'normCommentsCreate|normComments|contentcreation|socialActions'
-         requestBody: true
-         static: false
-       Save response verbatim as NETWORK_RESPONSE.
-   5b. Walk NETWORK_RESPONSE for every 16-19 digit URN, dedupe with the
-       seed URN list above into ALL_POST_URNS (comma-separated).
-   5c. mcp__linkedin-agent__browser_take_screenshot for the toast.
-   5d. mcp__linkedin-agent__browser_snapshot (depth 12). Check:
+5. POST-SUBMIT VERIFICATION (mandatory). The harness has NO network-capture
+   tool, and reading /voyager or socialActions traffic is a flagged pattern —
+   verify visually + via the rendered DOM only.
+   5a. Harvest URNs from the rendered DOM (NOT from network). Read every
+       16-19 digit URN present on the page:
+         bh_run js("""return JSON.stringify(Array.from(document.querySelectorAll('[data-id],[data-urn],[href]')).map(e=>e.getAttribute('data-id')||e.getAttribute('data-urn')||e.getAttribute('href')).join(' ').match(/urn:li:(?:activity|share|ugcPost|comment):[0-9]{16,19}/g)||[])""")
+       Dedupe the result with the seed URN list above into ALL_POST_URNS
+       (comma-separated). Set NETWORK_RESPONSE to a short DOM/toast summary
+       string (there is no real network payload to capture).
+   5b. Capture a screenshot (bh_run print(capture_screenshot())) and Read the PNG
+       to check for a toast.
+   5c. Read the DOM (bh_run js("""...""")) and check:
          (a) comment count went up by at least 1
          (b) a fresh comment by 'Matthew Diakonov' / 'You' is rendered
          (c) NO 'could not be created' toast
          (d) editor textbox cleared
-   5e. SUCCESS = all four pass. REJECTED = toast present OR count unchanged.
+   5d. SUCCESS = all four pass. REJECTED = toast present OR count unchanged.
 
 6. If REJECTED, do NOT call the success log path. Mark candidate skipped:
      python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
@@ -1325,14 +1345,15 @@ $STYLES_BLOCK
          --minted-session "\$MINTED_SESSION" --post-id "\$LOG_POST_ID"
 
 CRITICAL: ONE post only. If anything fails, STOP — do NOT pick another candidate.
-CRITICAL: Use ONLY mcp__linkedin-agent__* tools.
+CRITICAL: Use ONLY the browser tool described in the BROWSER BACKEND block
+(mcp__linkedin-harness__bh_run).
 CRITICAL: NEVER use em dashes.
 PROMPT_EOF
 fi
 
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
   # UniPile Phase B: comment via REST, no headed browser. No linkedin-browser
-  # lock, no ensure_browser_healthy, no linkedin-agent MCP, no hook lockfile.
+  # lock, no ensure_browser_healthy, no harness MCP, no hook lockfile.
   # --strict-mcp-config with NO --mcp-config = Bash-only tool surface; the
   # agent shells out to linkedin_unipile.py comment/comments.
   set +e
@@ -1348,10 +1369,10 @@ else
 # linkedin cycle's Phase A) grabbed it in the meantime, this acquire blocks
 # until they release; the FIFO ticket queue in lock.sh guarantees fairness.
 acquire_lock "linkedin-browser" 3600
-ensure_browser_healthy "linkedin"
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 set +e
-"$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseB" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
+"$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
 PB_RC=${PIPESTATUS[0]}
 set -e
 
