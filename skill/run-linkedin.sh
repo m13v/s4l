@@ -229,6 +229,229 @@ DUD_QUERIES=$(python3 "$REPO_DIR/scripts/top_dud_linkedin_queries.py" --project 
 PHASE_A_OUT=$(mktemp /tmp/sa-run-linkedin-phaseA-XXXXXX)
 PHASE_A_PROMPT=$(mktemp /tmp/sa-run-linkedin-phaseA-prompt-XXXXXX)
 
+if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
+# ----- Phase A prompt: UniPile REST backend (no browser) -----
+cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
+You are the Social Autoposter LinkedIn discovery + scoring scout (Phase A),
+running on the UniPile REST backend (no browser, no headed Chrome).
+
+Your job: use the pre-selected project and assigned search_topic, draft 8
+DYNAMIC LinkedIn search queries from that one topic, run each through the
+UniPile search CLI, extract engagement metrics, rate SERP quality, pick the
+single best candidate, write a structured JSON envelope to $PHASE_A_OUT, and
+STOP. Do NOT draft a comment. Do NOT post anything. Phase B handles drafting
++ posting using whatever you write to the candidates list.
+
+## Pre-selected project and assigned topic
+$PROJECT_PICK_JSON
+
+Assigned project: $LI_PROJECT_NAME
+Assigned search_topic: $LI_SEARCH_TOPIC
+
+## Today's distribution (context only; the project is already picked)
+$PROJECT_DIST
+
+## Top-performing historical queries for this project/topic
+STYLE inspiration only - do NOT reuse them verbatim. LinkedIn SERPs shift
+daily, so reusing exact phrasing is wasteful. Mine them for the angle/keyword
+combo that worked, then craft something new.
+$TOP_QUERIES
+
+## DUD queries to AVOID for this project/topic
+Do NOT redraft any of these phrasings. They have been flat or audience-wrong
+recently. 'zero_results' means LinkedIn rejected the keywords;
+'low_serp_quality' means results came back but were influencer slop /
+off-target audience.
+$DUD_QUERIES
+
+## Workflow
+
+1. Use ONLY this assigned project and search_topic. Do NOT pick another
+   project, do NOT switch topics, and do NOT iterate through the project list.
+
+2. Draft 8 search queries for the assigned topic. Each query should:
+   - Be 2-4 words (LinkedIn search hates long phrases)
+   - Target practitioners, not influencers (no "expert tips", "thought
+     leadership", or buzzwordy phrasing)
+   - Be FRESH - different from the dud list, different angle from the
+     top-performers list (steal the recipe, change the dish)
+   - Map directly to the assigned search_topic
+   - Cover DIFFERENT facets / pains / personas of the ICP - not 4 reskins
+     of the same query. Wider net = higher chance of one ICP-fit hit.
+
+   Run exactly 8 queries this run. More surface area beats narrow targeting:
+   most queries return slop, so the 2-3 that survive should reach you with
+   real candidates.
+
+3. For EACH query, shell out via the Bash tool (ONE line, no browser):
+
+       python3 $REPO_DIR/scripts/linkedin_unipile.py search --keywords "<query>" --date-posted past_week --sort-by date --with-followers --pipeline --limit 8
+
+   This calls the UniPile REST API (a server-hosted LinkedIn session on the
+   same account; there is NO local browser to prime or navigate) and prints a
+   JSON envelope to stdout:
+
+       {
+         "ok": true,
+         "query": "<query>",
+         "result_count": N,
+         "cursor": "...|null",
+         "results": [
+           {
+             "post_url":           "https://www.linkedin.com/feed/update/urn:li:<ns>:<num>/",
+             "activity_id":        "<num>",
+             "all_urns":           ["<num>"],
+             "social_id":          "urn:li:<ns>:<num>",
+             "author_name":        "...",
+             "author_headline":    "...|null",
+             "author_profile_url": "https://www.linkedin.com/in/<slug>/|null",
+             "author_followers":   <int|null>,
+             "post_text":          "...",
+             "age_hours":          <float|null>,
+             "reactions":          <int>,
+             "comments":           <int>,
+             "reposts":            <int>,
+             "is_repost":          <bool>
+           }, ...
+         ]
+       }
+
+   UniPile returns the post URN directly in social_id / post_url /
+   activity_id, with the CORRECT namespace (activity / share / ugcPost). There
+   is NO click-to-resolve step and NO URN-namespace guessing — copy these
+   fields through verbatim.
+
+   Failure handling: if a query prints "ok": false, or an object with an
+   "error" / error "response" field (HTTP 401 / 429 / 5xx), treat it like a
+   zero-result query — record it in queries_used with candidates_found=0 and
+   serp_quality_score=null, then continue to the next query. If the VERY FIRST
+   query returns an auth error (HTTP 401 missing_credentials), the UniPile
+   session is dead: write the envelope with whatever queries_used you have and
+   candidates: [], then STOP.
+
+   3a. RATE THE SERP QUALITY 0-10 for THIS query, based on:
+       - Practitioner ratio: judge from author_headline AND author_followers
+         (low-follower / hands-on builders > influencer-tier accounts).
+       - Topic fit: do the post_text excerpts actually match the project domain?
+       - Freshness: median age_hours of results (lower = better).
+       - 0-3 = useless slop, 4-5 = mixed, 6-8 = mostly relevant, 9-10 = goldmine.
+
+   3b. SKIP candidates authored by Matthew Diakonov / linkedin.com/in/m13v/.
+
+   3c. Dedup against engaged history. Gather the activity_id of every
+       candidate across all queries into one comma-separated list, then run
+       ONCE via Bash:
+         python3 $REPO_DIR/scripts/linkedin_url.py --check-engaged-ids 'id1,id2,id3'
+       Exit code 0 means at least one is already engaged; use the script's
+       output to drop any candidate whose activity_id is already engaged.
+
+4. PICK THE SINGLE BEST CANDIDATE across all queries.
+   - The UniPile results are NOT pre-scored. Weigh engagement
+     (reactions + 2*comments + 3*reposts) against age_hours yourself: a post
+     with 40 reactions in 3 hours beats 60 reactions in 5 days. Favor recent
+     posts with real, non-trivial engagement.
+
+   - LEAN TOWARD POSTING. The bar is: "would commenting here be embarrassing
+     or off-message for the project?" NOT "is this a perfect ICP fit?"
+     A mediocre but on-topic comment costs around twenty cents; a missed real
+     fit costs the entire cycle (roughly fifteen dollars). Favor the post.
+
+   - HARD-REJECT (these are the only auto-disqualifiers):
+       1. Direct competitor: the author or their company sells a product that
+          competes with the project. Name the competing product in your
+          rationale. Vague competitor vibes are NOT enough.
+       2. Recruiter / job-ad post: body is "we're hiring", "open role", a job
+          description, or a careers-page link.
+       3. Off-topic content: politics, personal milestones, unrelated
+          industry, news commentary not tied to the project's domain.
+       4. Author is m13v / Matthew Diakonov. (Already filtered earlier.)
+
+   - SOFT SIGNALS (do NOT auto-reject on these alone):
+       * Author on a brand/company page (author_profile_url null but
+         author_name present): engageable IF the post topic is on-message.
+       * Adjacent persona / not the perfect ICP buyer: fine if the topic
+         resonates with the project's wedge.
+       * Lower follower count / "no-name" author: irrelevant to whether we
+         should comment; practitioners with smaller audiences are often
+         higher-quality targets than influencers.
+       * Some buzzwords / hype framing: tolerable if the underlying post-topic
+         is a real practitioner pain.
+
+   - NAME THE VERDICT EXPLICITLY in your rationale: which hard-reject category
+     fired (1/2/3/4), or "soft fit, posting." Do not write "ICP mismatch"
+     without naming which category.
+
+   - One winner. Not a ranked list. Not a top-3.
+
+5. Write the envelope to $PHASE_A_OUT with the winner (and ONLY the winner —
+   discard runners-up, they are noise that will not be reused) and STOP:
+
+\`\`\`bash
+cat > $PHASE_A_OUT <<JSON_EOF
+{
+  "project": "$LI_PROJECT_NAME",
+  "search_topic": "$LI_SEARCH_TOPIC",
+  "language": "en",
+  "queries_used": [
+    {"query": "ai agents production",   "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 4, "serp_quality_score": 7.5, "dropped_below_floor": 0},
+    {"query": "macos automation tools", "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 0, "serp_quality_score": null, "dropped_below_floor": 0},
+    {"query": "claude code workflow",   "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 6, "serp_quality_score": 5.0, "dropped_below_floor": 0}
+  ],
+  "candidates": [
+    {
+      "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:NUMERIC/",
+      "activity_id": "NUMERIC",
+      "all_urns": ["NUMERIC"],
+      "author_name": "First Last",
+      "author_headline": "Headline | role | company (may be null)",
+      "author_profile_url": "https://www.linkedin.com/in/SLUG/",
+      "author_followers": 2124,
+      "post_text": "post body, no newlines, no double quotes, no backticks",
+      "age_hours": 6.5,
+      "reactions": 42,
+      "comments": 7,
+      "reposts": 3,
+      "search_topic": "$LI_SEARCH_TOPIC",
+      "search_query": "ai agents production",
+      "language": "en",
+      "serp_quality_score": 7.5
+    }
+  ]
+}
+JSON_EOF
+\`\`\`
+
+   - queries_used MUST contain ONE row per query you ran (including
+     zero-result ones — that is the whole point of the dud-learning).
+   - project MUST equal "$LI_PROJECT_NAME" and every search_topic MUST equal
+     "$LI_SEARCH_TOPIC". The search_query is the literal phrase you ran.
+   - candidates_found is the count of usable candidates that query surfaced
+     (after dropping self-authored / already-engaged). dropped_below_floor:
+     always 0 — the UniPile path applies no virality floor.
+   - candidates contains AT MOST one row (the winner from step 4). It can be
+     empty if step 4 found nothing engageable. bash skips Phase B cleanly
+     when empty.
+   - The winner row MUST copy post_url, activity_id, and author_followers
+     VERBATIM from the chosen search result. Do NOT rebuild or rewrite the URN
+     namespace — UniPile already returned the correct one. Do NOT null out
+     author_followers; it is a real number on this path and the scorer uses it.
+   - candidates must NOT include posts you already engaged on or self-authored.
+   - author_headline is optional on output; pass through whatever the search
+     returned (may be null).
+   - post_text must be safe to embed in a bash double-quoted string. Strip
+     backticks, double quotes, and newlines before writing. Truncate to ~500
+     chars before writing into the envelope.
+
+Then say '## Phase A: envelope written' and STOP.
+
+CRITICAL: Use ONLY the Bash tool plus the linkedin_unipile.py / linkedin_url.py
+scripts. There is NO browser in this path — NEVER attempt mcp__linkedin-agent
+tools (they are not loaded) and never try to navigate a webpage.
+CRITICAL: Run exactly 8 search queries this run. Not 2, not 4, not 6. Eight.
+CRITICAL: NEVER use em dashes anywhere.
+PROMPT_EOF
+else
+# ----- Phase A prompt: headed-Chrome browser backend (mcp__linkedin-agent) -----
 cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter LinkedIn discovery + scoring scout (Phase A).
 
@@ -558,34 +781,47 @@ CRITICAL: Run exactly 8 search queries this run. Not 2, not 4, not 6. Eight.
 Wider net = better odds of one ICP-fit hit. The rate budget can absorb it.
 CRITICAL: NEVER use em dashes anywhere.
 PROMPT_EOF
+fi
 
-# Acquire linkedin-browser ONLY for the Phase A Claude run. The shell lock
-# (skill/lock.sh) is FIFO-queued, so if a peer pipeline (dm-replies-linkedin,
-# audit-linkedin, link-edit-linkedin, or our own prior cycle's Phase B) is
-# mid-run, this BLOCKS and polls until release rather than skipping. That
-# matches the run-twitter-cycle.sh + run-reddit-search.sh behaviour.
-#
-# run_claude.sh auto-exports SA_PIPELINE_LOCKED=1 + SA_PIPELINE_PLATFORM,
-# which the PreToolUse hook (~/.claude/hooks/linkedin-agent-lock.sh) honors
-# to skip the cross-session block check. Without that bypass, the hook
-# previously rejected our Claude session if the prior cycle's JSONL was
-# <60s stale (tail-flush window), producing $8.91 empty-envelope runs.
-# 2026-05-01: false-positive hardened by env-var bypass + pgrep alive check.
-acquire_lock "linkedin-browser" 3600
-ensure_browser_healthy "linkedin"
+if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
+  # UniPile path: no headed browser, so no linkedin-browser lock, no
+  # ensure_browser_healthy, no linkedin-agent MCP, no PreToolUse hook lockfile.
+  # --strict-mcp-config with NO --mcp-config loads zero MCP servers, leaving
+  # the default Bash tool the agent uses to shell out to linkedin_unipile.py.
+  set +e
+  "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
+  PA_RC=${PIPESTATUS[0]}
+  set -e
+  rm -f "$PHASE_A_PROMPT"
+else
+  # Acquire linkedin-browser ONLY for the Phase A Claude run. The shell lock
+  # (skill/lock.sh) is FIFO-queued, so if a peer pipeline (dm-replies-linkedin,
+  # audit-linkedin, link-edit-linkedin, or our own prior cycle's Phase B) is
+  # mid-run, this BLOCKS and polls until release rather than skipping. That
+  # matches the run-twitter-cycle.sh + run-reddit-search.sh behaviour.
+  #
+  # run_claude.sh auto-exports SA_PIPELINE_LOCKED=1 + SA_PIPELINE_PLATFORM,
+  # which the PreToolUse hook (~/.claude/hooks/linkedin-agent-lock.sh) honors
+  # to skip the cross-session block check. Without that bypass, the hook
+  # previously rejected our Claude session if the prior cycle's JSONL was
+  # <60s stale (tail-flush window), producing $8.91 empty-envelope runs.
+  # 2026-05-01: false-positive hardened by env-var bypass + pgrep alive check.
+  acquire_lock "linkedin-browser" 3600
+  ensure_browser_healthy "linkedin"
 
-set +e
-"$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
-PA_RC=${PIPESTATUS[0]}
-set -e
+  set +e
+  "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
+  PA_RC=${PIPESTATUS[0]}
+  set -e
 
-release_lock "linkedin-browser"
-# Defense-in-depth: explicitly clear the hook-layer lockfile so the next
-# pipeline cycle's PreToolUse never sees a stale entry from us. The
-# run_claude.sh exit trap already does this in the happy path; this
-# repeat is harmless and covers SIGKILL of run_claude.sh.
-rm -f "$HOME/.claude/linkedin-agent-lock.json"
-rm -f "$PHASE_A_PROMPT"
+  release_lock "linkedin-browser"
+  # Defense-in-depth: explicitly clear the hook-layer lockfile so the next
+  # pipeline cycle's PreToolUse never sees a stale entry from us. The
+  # run_claude.sh exit trap already does this in the happy path; this
+  # repeat is harmless and covers SIGKILL of run_claude.sh.
+  rm -f "$HOME/.claude/linkedin-agent-lock.json"
+  rm -f "$PHASE_A_PROMPT"
+fi
 
 # ===== Validate Phase A envelope + run Python ingest steps =====
 if [ "$PA_RC" -ne 0 ] || [ ! -s "$PHASE_A_OUT" ]; then
@@ -794,6 +1030,13 @@ else
   # share/ugcPost, Phase B's URN-type fallback (below) will recover.
   PA_URL="https://www.linkedin.com/feed/update/urn:li:activity:${PA_ACTIVITY_ID}/"
 fi
+
+# The UniPile comment endpoint addresses a post by its social_id (the
+# urn:li:<ns>:<num> embedded in the canonical URL), not the bare numeric.
+# Extract it from PA_URL so Phase B's UniPile branch can POST to
+# /posts/{social_id}/comments. Harmless/unused for the browser path.
+_pa_url_tail="${PA_URL#*/feed/update/}"
+PA_SOCIAL_ID="${_pa_url_tail%/}"
 
 echo "Phase A: chose project=$PA_PROJECT topic='$PA_SEARCH_TOPIC' activity=$PA_ACTIVITY_ID velocity=$PA_VELOCITY query='$PA_QUERY'" | tee -a "$LOG_FILE"
 
