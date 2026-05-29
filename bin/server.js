@@ -3429,7 +3429,7 @@ async function _collectSerpDetailsFromDb(run) {
        k.product, k.keyword, k.slug, k.status, k.page_url, k.notes,
        k.score, k.signal1, k.signal2, k.signal3,
        COALESCE(k.completed_at, k.scored_at, k.updated_at) AS event_at,
-       cs.total_cost_usd, cs.duration_ms, cs.session_id
+       cs.orchestrator_cost_usd AS total_cost_usd, cs.duration_ms, cs.session_id
      FROM seo_keywords k
      LEFT JOIN claude_sessions cs ON cs.session_id = k.claude_session_id
      WHERE COALESCE(k.source, '') NOT IN ('top_page', 'roundup')
@@ -3467,7 +3467,7 @@ async function _collectGscDetailsFromDb(run) {
        q.product, q.query, q.page_slug, q.page_url, q.status,
        q.impressions, q.clicks, q.position, q.notes,
        COALESCE(q.completed_at, q.updated_at) AS event_at,
-       cs.total_cost_usd, cs.session_id
+       cs.orchestrator_cost_usd AS total_cost_usd, cs.session_id
      FROM gsc_queries q
      LEFT JOIN claude_sessions cs ON cs.session_id = q.claude_session_id
      WHERE COALESCE(q.completed_at, q.updated_at) >= $1
@@ -3506,7 +3506,7 @@ async function _collectRoundupDetailsFromDb(run) {
     `SELECT
        k.product, k.keyword, k.slug, k.status, k.page_url, k.notes,
        COALESCE(k.completed_at, k.updated_at) AS event_at,
-       cs.total_cost_usd, cs.session_id
+       cs.orchestrator_cost_usd AS total_cost_usd, cs.session_id
      FROM seo_keywords k
      LEFT JOIN claude_sessions cs ON cs.session_id = k.claude_session_id
      WHERE k.source = 'roundup'
