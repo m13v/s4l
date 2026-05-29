@@ -344,7 +344,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 1. Craft a natural public reply based on the human's instructions. Public replies are visible to everyone, so keep them appropriate for a public audience: friendly, helpful, concise, and on-brand. The instruction text typically asks you to share a link, so include it naturally in the public reply.
 2. Navigate to \`public_target_url\` on the correct platform and post the public reply:
    - **Reddit** (mcp__reddit-agent__* tools): navigate, click reply on the target comment, type, submit. Capture the resulting comment URL.
-   - **LinkedIn** (mcp__linkedin-agent__* tools): navigate to the post, expand to find the target comment, reply, capture URL.
+   - **LinkedIn** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556): use bh_run('goto_url("POST_URL"); wait_for_load()') to navigate, then bh_run scripts to expand the target comment and reply (click_at_xy on the computed center of the contenteditable box, type_text, then click the Reply/Post button; never press Enter). See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting comment URL.
    - **X/Twitter** (mcp__twitter-harness__bh_run tool, CDP-driven real Chrome on port 9555): use bh_run('goto_url("TWEET_URL"); wait_for_load()') to navigate, then bh_run scripts to click the reply button, type, and post. See lib/twitter-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting status URL.
 3. Insert a fresh \`replies\` row capturing the public reply (use the \`their_comment_id\` from \`public_target_comment_id\` so the dedup index does not collide; if null, synthesize a unique id like \`hr_<REPLY_ID>_pub\`):
    \`\`\`bash
@@ -360,7 +360,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 1. Craft a natural DM based on the human's instructions and the conversation context.
 2. Navigate to the conversation on the correct platform using \`chat_url\` (or find the conversation with their_author).
    - **Reddit Chat** (mcp__reddit-agent__* tools)
-   - **LinkedIn Messages** (mcp__linkedin-agent__* tools)
+   - **LinkedIn Messages** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556)
    - **X/Twitter DMs** (mcp__twitter-harness__bh_run tool), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
 3. Type and send the crafted DM.
 4. Log the outbound message (log what you ACTUALLY SENT, not the human's instructions). Pass --verified ONLY when the browser tool returned verified=true. If verification failed, log nothing and let the next cycle retry; never pass --verified speculatively:
@@ -454,7 +454,7 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "reddit" ]; then
     TOOL_RULE_REDDIT="- Reddit Chat: use Python CDP scripts (scripts/reddit_browser.py) for scanning/reading, fall back to mcp__reddit-agent__* for chat SPA operations"
 fi
 if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "linkedin" ]; then
-    TOOL_RULE_LINKEDIN="- LinkedIn Messages: use mcp__linkedin-agent__* tools ONLY. Do NOT call /voyager/api/ endpoints, do NOT run Python CDP scripts against LinkedIn."
+    TOOL_RULE_LINKEDIN="- LinkedIn Messages: use the mcp__linkedin-harness__bh_run tool ONLY (CDP-driven real Chrome on port 9556). Do NOT call /voyager/api/ endpoints, do NOT run raw Python CDP scripts against LinkedIn. See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table."
 fi
 if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; then
     TOOL_RULE_TWITTER="- X/Twitter DMs: use Python CDP scripts (scripts/twitter_browser.py) ONLY"
@@ -544,20 +544,20 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "linkedin" ]; then
     IFS= read -r -d '' PHASE_B_BLOCK <<'PHASE_B_EOF' || true
 ## PHASE B: Scan LinkedIn Messages for new messages
 
-CRITICAL: use mcp__linkedin-agent__* tools for ALL LinkedIn browser work. Do NOT call /voyager/api/ endpoints. Do NOT open individual post permalinks to scrape; stay inside the messaging UI.
+CRITICAL: use the mcp__linkedin-harness__bh_run tool for ALL LinkedIn browser work (CDP-driven real Chrome on port 9556). Do NOT call /voyager/api/ endpoints. Do NOT open individual post permalinks to scrape; stay inside the messaging UI. See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table.
 
-1. Navigate to https://www.linkedin.com/messaging/ using mcp__linkedin-agent__browser_navigate.
-   Take a browser_snapshot. If the page is a login/checkpoint/verification challenge, STOP and print SESSION_INVALID, do not attempt to log in.
+1. Navigate to https://www.linkedin.com/messaging/ : bh_run('new_tab("https://www.linkedin.com/messaging/"); wait_for_load()').
+   Capture a screenshot (bh_run('print(capture_screenshot())')) and Read it. If the page is a login/checkpoint/verification challenge, STOP and print SESSION_INVALID, do not attempt to log in.
 
-2. Extract the FULL list of conversations (read AND unread) with a single mcp__linkedin-agent__browser_run_code call. We need every visible thread's URL so we can backfill chat_url for historical DM rows, not just the unread cohort:
+2. Extract the FULL list of conversations (read AND unread) with a single bh_run js() call. We need every visible thread's URL so we can backfill chat_url for historical DM rows, not just the unread cohort:
 
-   ```javascript
-   async (page) => {
+   bh_run('''
+   print(js("""
      const items = [];
      const threads = document.querySelectorAll('a.msg-conversation-listitem__link, a[href*="/messaging/thread/"]');
      for (const a of threads) {
        const href = a.getAttribute('href') || '';
-       if (!/messaging\/thread\//.test(href)) continue;
+       if (!href.includes('/messaging/thread/')) continue;
        const container = a.closest('li, article') || a;
        const unreadBadge = container.querySelector('.notification-badge--show, [aria-label*="unread" i], [data-test-unread]');
        const text = (container.innerText || '').trim();
@@ -571,8 +571,8 @@ CRITICAL: use mcp__linkedin-agent__* tools for ALL LinkedIn browser work. Do NOT
        });
      }
      return JSON.stringify(items);
-   }
-   ```
+   """))
+   ''')
 
    Save the entire returned array (not just unread) to /tmp/linkedin_threads.json, then backfill chat URLs for any existing DM row still missing one (uses `author=partner`, `chat_url=thread_url`):
    ```bash
@@ -581,8 +581,8 @@ CRITICAL: use mcp__linkedin-agent__* tools for ALL LinkedIn browser work. Do NOT
    ```
 
 3. For each thread where unread is true:
-   a. Navigate to thread_url (mcp__linkedin-agent__browser_navigate).
-   b. Take a browser_snapshot. Read the last ~5 messages. Determine which are inbound vs from us.
+   a. Navigate to thread_url: bh_run('goto_url("THREAD_URL"); wait_for_load()').
+   b. Capture a screenshot and Read it. Read the last ~5 messages. Determine which are inbound vs from us.
    c. Identify the sender from the partner name.
    d. Ensure a DM row exists (idempotent, auto-links their prior LinkedIn comment engagement if any):
       ```bash
