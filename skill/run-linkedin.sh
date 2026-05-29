@@ -1328,7 +1328,20 @@ CRITICAL: ONE post only. If anything fails, STOP — do NOT pick another candida
 CRITICAL: Use ONLY mcp__linkedin-agent__* tools.
 CRITICAL: NEVER use em dashes.
 PROMPT_EOF
+fi
 
+if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
+  # UniPile Phase B: comment via REST, no headed browser. No linkedin-browser
+  # lock, no ensure_browser_healthy, no linkedin-agent MCP, no hook lockfile.
+  # --strict-mcp-config with NO --mcp-config = Bash-only tool surface; the
+  # agent shells out to linkedin_unipile.py comment/comments.
+  set +e
+  "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseB" --strict-mcp-config --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
+  PB_RC=${PIPESTATUS[0]}
+  set -e
+  rm -f "$PHASE_B_PROMPT"
+  rm -f "$PHASE_A_OUT"
+else
 # Re-acquire linkedin-browser for Phase B. The lock was released after
 # Phase A so peer pipelines could use the browser during our DB-ingest /
 # candidate-pick / styles-prep window (~1-3s). If a peer (or a parallel
@@ -1347,6 +1360,7 @@ release_lock "linkedin-browser"
 rm -f "$HOME/.claude/linkedin-agent-lock.json"
 rm -f "$PHASE_B_PROMPT"
 rm -f "$PHASE_A_OUT"
+fi
 
 # ===== Persist run-level summary =====
 # Same logic that used to live inline now lives in
