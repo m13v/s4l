@@ -1399,8 +1399,7 @@ def _emit_run_monitor_row(
     'Invent Topics' filter pill. Best-effort: any failure is logged and
     swallowed — we never want a dashboard-write hiccup to mask the actual
     run output."""
-    # Per-topic query counts (the integer next to each topic in the result
-    # column, joined with '+' for the qpt= segment).
+    # Per-topic query counts (parallel array to topic_names; joined with '+').
     qpt = [int(p.get("queries_tested", 0)) for p in processed]
     queries_total = sum(qpt)
     queries_w_supply = sum(
@@ -1415,13 +1414,32 @@ def _emit_run_monitor_row(
     # aborted partway (browser drop); harmless 0 otherwise.
     skipped = max(topics_invented - n_qual, 0)
     failed = 1 if aborted_untested else 0
+
+    # topic_names: parallel-to-qpt array of the actual topics committed this
+    # run. Encode each name so it can't break the run_monitor.log segment
+    # parser: replace spaces with '+', strip the four chars that have
+    # structural meaning in the log line (',', ';', '=', '|'). Decoded
+    # client-side in server.js. Empty list = no topics committed = no per-
+    # topic pills get rendered (e.g. saturated runs).
+    def _encode_topic_name(t: str) -> str:
+        encoded = (t or "").strip().replace(" ", "+")
+        for ch in (",", ";", "=", "|"):
+            encoded = encoded.replace(ch, "")
+        return encoded
+
+    topic_names = [_encode_topic_name(p.get("topic", "")) for p in processed]
+    topic_names = [t for t in topic_names if t]
+    topic_names_segment = (
+        f",topic_names={';'.join(topic_names)}" if topic_names else ""
+    )
+
     invent_kv = ",".join([
         f"project={project_name}",
         f"topics={topics_invented}",
         f"queries={queries_total}",
         f"queries_w_supply={queries_w_supply}",
         f"qpt={'+'.join(str(x) for x in qpt) if qpt else '0'}",
-    ])
+    ]) + topic_names_segment
     log_run_py = os.path.join(_REPO_DIR, "scripts", "log_run.py")
     cmd = [
         "/opt/homebrew/bin/python3.11", log_run_py,
