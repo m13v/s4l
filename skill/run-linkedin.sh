@@ -600,17 +600,23 @@ if ! python3 -c "import json,sys; json.load(open('$PHASE_A_OUT'))" 2>/dev/null; 
 fi
 
 PA_PROJECT=$(python3 -c "import json; print(json.load(open('$PHASE_A_OUT')).get('project',''))" 2>/dev/null || echo "")
+PA_PROJECT="$LI_PROJECT_NAME"
+PA_SEARCH_TOPIC=$(python3 -c "import json; print(json.load(open('$PHASE_A_OUT')).get('search_topic',''))" 2>/dev/null || echo "")
+PA_SEARCH_TOPIC="$LI_SEARCH_TOPIC"
 
 # Ingest queries_used into linkedin_search_attempts (one row per query, dud-aware).
-python3 -c "
+LI_PROJECT_NAME="$LI_PROJECT_NAME" LI_SEARCH_TOPIC="$LI_SEARCH_TOPIC" python3 -c "
+import os
 import json
 env = json.load(open('$PHASE_A_OUT'))
-project = env.get('project','')
+project = os.environ.get('LI_PROJECT_NAME') or env.get('project','')
+search_topic = os.environ.get('LI_SEARCH_TOPIC') or env.get('search_topic','')
 out = []
 for q in env.get('queries_used') or []:
     out.append({
         'query': q.get('query',''),
         'project': project,
+        'search_topic': search_topic,
         'candidates_found': q.get('candidates_found') or 0,
         'serp_quality_score': q.get('serp_quality_score'),
         'dropped_below_floor': q.get('dropped_below_floor') or 0,
@@ -622,17 +628,20 @@ import sys; json.dump(out, sys.stdout)
 # Stamp serp_quality_score onto each candidate from its parent query so the
 # scoring upsert has the per-row signal even though SERP quality is judged
 # per-query.
-python3 -c "
+LI_PROJECT_NAME="$LI_PROJECT_NAME" LI_SEARCH_TOPIC="$LI_SEARCH_TOPIC" python3 -c "
+import os
 import json
 env = json.load(open('$PHASE_A_OUT'))
 quality_by_query = {q.get('query',''): q.get('serp_quality_score') for q in env.get('queries_used') or []}
-project = env.get('project','')
+project = os.environ.get('LI_PROJECT_NAME') or env.get('project','')
+search_topic = os.environ.get('LI_SEARCH_TOPIC') or env.get('search_topic','')
 lang = env.get('language','en')
 cands = []
 for c in env.get('candidates') or []:
     if not isinstance(c, dict):
         continue
-    c.setdefault('matched_project', project)
+    c['matched_project'] = project
+    c['search_topic'] = search_topic
     c.setdefault('language', lang)
     if c.get('serp_quality_score') is None:
         c['serp_quality_score'] = quality_by_query.get(c.get('search_query',''))
@@ -644,48 +653,74 @@ import sys; json.dump(cands, sys.stdout)
 # We try the freshest batch first so a high-velocity post we just discovered
 # wins over an older pending row that didn't get posted last cycle. If the
 # fresh batch has zero usable rows (everything we saw was already engaged),
-# fall back to the broader pending pool — that pool would otherwise just
-# expire after MAX_AGE_HOURS without ever being attempted.
-PA_PICK=$(python3 -c "
-import json, sys
-sys.path.insert(0, '$REPO_DIR/scripts')
+# fall back only inside the same pre-picked project/topic. A cycle should
+# never post an older candidate from some other project just because the
+# fresh search returned nothing.
+PA_PICK=$(REPO_DIR="$REPO_DIR" BATCH_ID="$BATCH_ID" LI_PROJECT_NAME="$LI_PROJECT_NAME" LI_SEARCH_TOPIC="$LI_SEARCH_TOPIC" python3 - <<'PY' 2>/dev/null || echo "{}"
+import json
+import os
+import sys
+
+repo = os.environ["REPO_DIR"]
+batch_id = os.environ["BATCH_ID"]
+project = os.environ.get("LI_PROJECT_NAME", "")
+search_topic = os.environ.get("LI_SEARCH_TOPIC", "")
+
+sys.path.insert(0, os.path.join(repo, "scripts"))
 import db as dbmod
+from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
+
 conn = dbmod.get_conn()
-row = conn.execute('''
+ensure_search_topic_schema(conn)
+select_cols = """
     SELECT post_url, activity_id, all_urns, author_name, author_profile_url,
-           post_text, language, matched_project, velocity_score, search_query
-    FROM linkedin_candidates
-    WHERE status='pending' AND batch_id=%s
-    ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
-    LIMIT 1
-''', ['$BATCH_ID']).fetchone()
+           post_text, language, matched_project, velocity_score, search_query,
+           search_topic
+      FROM linkedin_candidates
+"""
+row = conn.execute(
+    select_cols + """
+     WHERE status='pending'
+       AND batch_id=%s
+       AND LOWER(COALESCE(matched_project, '')) = LOWER(%s)
+       AND LOWER(COALESCE(search_topic, '')) = LOWER(%s)
+     ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
+     LIMIT 1
+    """,
+    [batch_id, project, search_topic],
+).fetchone()
 if not row:
-    row = conn.execute('''
-        SELECT post_url, activity_id, all_urns, author_name, author_profile_url,
-               post_text, language, matched_project, velocity_score, search_query
-        FROM linkedin_candidates
-        WHERE status='pending' AND age_hours <= 96
-        ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
-        LIMIT 1
-    ''').fetchone()
+    row = conn.execute(
+        select_cols + """
+         WHERE status='pending'
+           AND age_hours <= 96
+           AND LOWER(COALESCE(matched_project, '')) = LOWER(%s)
+           AND LOWER(COALESCE(search_topic, '')) = LOWER(%s)
+         ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
+         LIMIT 1
+        """,
+        [project, search_topic],
+    ).fetchone()
 conn.close()
 if not row:
     print(json.dumps({}))
 else:
     out = {
-        'post_url': row[0],
-        'activity_id': row[1],
-        'all_urns': row[2] or '',
-        'author_name': row[3] or '',
-        'author_profile_url': row[4] or '',
-        'post_text': (row[5] or ''),
-        'language': row[6] or 'en',
-        'project': row[7] or '$PA_PROJECT',
-        'velocity_score': float(row[8] or 0),
-        'search_query': row[9] or '',
+        "post_url": row[0],
+        "activity_id": row[1],
+        "all_urns": row[2] or "",
+        "author_name": row[3] or "",
+        "author_profile_url": row[4] or "",
+        "post_text": (row[5] or ""),
+        "language": row[6] or "en",
+        "project": row[7] or project,
+        "velocity_score": float(row[8] or 0),
+        "search_query": row[9] or "",
+        "search_topic": row[10] or search_topic,
     }
     print(json.dumps(out))
-" 2>/dev/null || echo "{}")
+PY
+)
 
 PA_URL=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('post_url',''))")
 PA_ACTIVITY_ID=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('activity_id',''))")
@@ -697,13 +732,15 @@ PA_LANG=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.std
 PA_TITLE_HINT=$(echo "$PA_PICK" | python3 -c "import json,sys; v=json.load(sys.stdin).get('post_text',''); print((v or '').split('\\n')[0])")
 PA_VELOCITY=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('velocity_score',0))")
 PA_QUERY=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('search_query',''))")
+PA_SEARCH_TOPIC=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('search_topic',''))")
+[ -z "$PA_SEARCH_TOPIC" ] && PA_SEARCH_TOPIC="$LI_SEARCH_TOPIC"
 [ -z "${PA_PROJECT:-}" ] && PA_PROJECT=$(echo "$PA_PICK" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project',''))")
 
 # ===== If no candidate, exit cleanly =====
 # Path D: Phase A's LLM is responsible for clicking-into-best to capture the
 # URN, so every row reaching this gate must already have a numeric URN.
 if [ -z "$PA_ACTIVITY_ID" ] || [ -z "$PA_URL" ]; then
-  echo "Phase A: no postable candidate after scoring (project='$PA_PROJECT'). Skipping Phase B." | tee -a "$LOG_FILE"
+  echo "Phase A: no postable candidate after scoring (project='$PA_PROJECT' topic='$PA_SEARCH_TOPIC'). Skipping Phase B." | tee -a "$LOG_FILE"
   rm -f "$PHASE_A_OUT"
   ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
   _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
@@ -744,7 +781,7 @@ else
   PA_URL="https://www.linkedin.com/feed/update/urn:li:activity:${PA_ACTIVITY_ID}/"
 fi
 
-echo "Phase A: chose project=$PA_PROJECT activity=$PA_ACTIVITY_ID velocity=$PA_VELOCITY query='$PA_QUERY'" | tee -a "$LOG_FILE"
+echo "Phase A: chose project=$PA_PROJECT topic='$PA_SEARCH_TOPIC' activity=$PA_ACTIVITY_ID velocity=$PA_VELOCITY query='$PA_QUERY'" | tee -a "$LOG_FILE"
 
 # Look up the chosen project's full config (only this one).
 PROJECT_FULL=$(python3 -c "
