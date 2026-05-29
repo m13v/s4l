@@ -2,13 +2,13 @@
 """
 log_linkedin_search_attempts.py
 
-Insert one row per (query, project, candidates_found, serp_quality_score,
-dropped_below_floor) into linkedin_search_attempts. Reads a JSON array on
+Insert one row per (query, project, search_topic, candidates_found,
+serp_quality_score, dropped_below_floor) into linkedin_search_attempts. Reads a JSON array on
 stdin shaped like:
 
     [
-      {"query": "...", "project": "fazm",   "candidates_found": 0, "serp_quality_score": 1.5, "dropped_below_floor": 0},
-      {"query": "...", "project": "mediar", "candidates_found": 7, "serp_quality_score": 8.0, "dropped_below_floor": 3},
+      {"query": "...", "project": "fazm",   "search_topic": "AI agents", "candidates_found": 0, "serp_quality_score": 1.5, "dropped_below_floor": 0},
+      {"query": "...", "project": "mediar", "search_topic": "RPA replacement", "candidates_found": 7, "serp_quality_score": 8.0, "dropped_below_floor": 3},
       ...
     ]
 
@@ -34,6 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
 
 
 def main():
@@ -60,12 +61,14 @@ def main():
         return 0
 
     conn = dbmod.get_conn()
+    ensure_search_topic_schema(conn)
     inserted = 0
     for r in rows:
         if not isinstance(r, dict):
             continue
         query = (r.get("query") or "").strip()
         project = (r.get("project") or "").strip() or None
+        search_topic = (r.get("search_topic") or "").strip() or None
         candidates_found = r.get("candidates_found")
         try:
             candidates_found = int(candidates_found if candidates_found is not None else 0)
@@ -86,11 +89,11 @@ def main():
         conn.execute(
             """
             INSERT INTO linkedin_search_attempts
-                (query, project_name, candidates_found, serp_quality_score,
+                (query, project_name, search_topic, candidates_found, serp_quality_score,
                  candidates_dropped_below_floor, batch_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            [query, project, candidates_found, serp, dropped, args.batch_id],
+            [query, project, search_topic, candidates_found, serp, dropped, args.batch_id],
         )
         inserted += 1
     conn.commit()
