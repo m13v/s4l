@@ -1842,16 +1842,30 @@ async function enrichPostCommentsTwitterRuns(runs) {
         projectsList.push(proj);
       }
     };
-    // Experiment variant (A/B/C) for this run. Primary source: any candidate
-    // row tied to ownBatchId carries cycle_variant (Phase 1 stamps it after
-    // discovery). Fallback: recompute from sha1(ownBatchId) % 3 so scan-only
-    // / aborted cycles still surface the right bucket.
+    // Experiment variant (A/B/C/D) for this run. A run executes exactly ONE
+    // variant, but Phase 0 salvage pulls OLD pending rows from prior cycles
+    // (which ran other variants) into this batch and rewrites their batch_id
+    // WITHOUT rewriting their cycle_variant. So a single batch ends up holding
+    // a mix of variants and the old "grab the first row's cycle_variant" logic
+    // mislabeled most runs (e.g. a Variant-D run showing "A" because an 'A'
+    // salvaged row happened to iterate first). Fix (2026-05-29): derive the
+    // run variant ONLY from FRESH rows — candidates this cycle actually
+    // discovered (discoveredMs >= startMs - 30min, the same salvage signature
+    // used for salvagePosted below) — and take the mode. Fallback to
+    // sha1(ownBatchId) % N so scan-only / aborted cycles still surface a bucket.
     let runVariant = null;
+    const freshVariantTally = Object.create(null);
     for (const c of candNorm) {
       if (!ownBatchId || c.batch_id !== ownBatchId) continue;
       candidatesPassed++;
       recordProject(c.matched_project);
-      if (!runVariant && c.cycle_variant) runVariant = c.cycle_variant;
+      // Only fresh (non-salvaged) rows vote for this run's variant. A salvaged
+      // row's cycle_variant reflects the cycle that ORIGINALLY discovered it,
+      // not this run, so it must not influence the label.
+      const isSalvagedForVariant = c.discoveredMs != null && c.discoveredMs < startMs - 30 * 60 * 1000;
+      if (!isSalvagedForVariant && c.cycle_variant) {
+        freshVariantTally[c.cycle_variant] = (freshVariantTally[c.cycle_variant] || 0) + 1;
+      }
       if (c.status === 'posted') {
         posted++;
         if (c.virality_score != null && Number.isFinite(c.virality_score)) {
@@ -1881,6 +1895,19 @@ async function enrichPostCommentsTwitterRuns(runs) {
           salvagePosted++;
         }
       } else if (c.status === 'expired') expired++;
+    }
+    // Mode of the fresh-row variant tally = the variant THIS cycle actually
+    // ran. Ties (rare; only if discovery straddled the 30-min window) break by
+    // higher count then lexical order for determinism. Left null when no fresh
+    // row carried a variant (scan-only / pure-salvage cycle) so the
+    // experiment_variant fallback recomputes from the batch id.
+    {
+      let best = null, bestN = 0;
+      for (const v of Object.keys(freshVariantTally)) {
+        const n = freshVariantTally[v];
+        if (n > bestN || (n === bestN && best != null && v < best)) { best = v; bestN = n; }
+      }
+      runVariant = best;
     }
     // Inline median (no helper exists yet in this file). Returns null on
     // empty input so the pill is suppressed for runs that posted nothing.
