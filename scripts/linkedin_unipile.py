@@ -18,11 +18,13 @@ CLI:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 COMMENT_CHAR_LIMIT = 1250  # LinkedIn comment limit, enforced by UniPile too.
 DATE_POSTED_VALUES = ("past_24h", "past_week", "past_month")
