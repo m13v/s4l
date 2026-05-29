@@ -302,8 +302,30 @@ def sweep_orphan_browser_processes(name: str) -> None:
     if not name.endswith("-browser"):
         return
     platform = name[: -len("-browser")]
-    profile_marker = f"browser-profiles/{platform}"
     agent_marker = f"{platform}-agent.json"
+
+    def _udd_is_platform_profile(cmd_str: str) -> bool:
+        """True only when --user-data-dir points at the EXACT browser-profiles/<platform>
+        dir (or a subdir of it), NOT a sibling like browser-profiles/<platform>-harness.
+
+        The old test (`f"browser-profiles/{platform}" in cmd`) was a plain substring
+        match, so for platform="reddit" it also matched "browser-profiles/reddit-harness"
+        and swept the persistent reddit-harness Chrome (launched detached -> ppid=1) on
+        every single lock acquire. That is exactly what kept killing the harness mid-cycle
+        during the 2026-05-29 migration. Compare the first path component after
+        "browser-profiles/" against the platform name instead.
+        """
+        marker = "user-data-dir="
+        idx = cmd_str.find(marker)
+        if idx == -1:
+            return False
+        val = cmd_str[idx + len(marker):].split(" ", 1)[0].strip().strip('"').strip("'")
+        key = "browser-profiles/"
+        j = val.find(key)
+        if j == -1:
+            return False
+        seg = val[j + len(key):].split("/", 1)[0]
+        return seg == platform
 
     try:
         r = subprocess.run(
@@ -323,7 +345,7 @@ def sweep_orphan_browser_processes(name: str) -> None:
         pid_s, ppid_s, cmd = parts
         if ppid_s != "1":
             continue
-        if "user-data-dir=" in cmd and profile_marker in cmd:
+        if "user-data-dir=" in cmd and _udd_is_platform_profile(cmd):
             try:
                 chrome_pids.append(int(pid_s))
             except ValueError:
