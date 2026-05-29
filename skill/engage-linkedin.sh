@@ -4,10 +4,11 @@
 # Phase B: Respond to pending LinkedIn replies (Claude-driven, OAuth API for posting).
 # Called by launchd every 3 hours.
 #
-# IMPORTANT: all LinkedIn browser work goes through the linkedin-agent MCP, driven
-# by Claude (the LLM). Do NOT re-introduce Python Playwright scrapers, Voyager API
-# calls (/voyager/api/*), comment-page scroll+expand loops, or programmatic
-# re-login flows. See CLAUDE.md "LinkedIn: flagged patterns to avoid" for why.
+# IMPORTANT: all LinkedIn browser work goes through the linkedin-harness MCP
+# (bh_run, CDP-driven real Chrome on port 9556), driven by Claude (the LLM).
+# Do NOT re-introduce Python Playwright scrapers, Voyager API calls
+# (/voyager/api/*), comment-page scroll+expand loops, or programmatic re-login
+# flows. See CLAUDE.md "LinkedIn: flagged patterns to avoid" for why.
 
 set -euo pipefail
 
@@ -29,6 +30,11 @@ fi
 # run_claude.sh invocations (Phase A discovery, Phase B reply). Everything
 # between (DB cleanup, pending pull, top performers, styles) is pure DB/CPU.
 source "$(dirname "$0")/lock.sh"
+# Browser backend bootstrap (linkedin-harness). Sets MCP_CONFIG_FILE,
+# BROWSER_INSTRUCTIONS, exports LINKEDIN_CDP_URL, and provides
+# ensure_linkedin_browser_for_backend. Migrated off the deprecated
+# linkedin-agent MCP on 2026-05-29 (mirrors the Twitter harness migration).
+source "$(dirname "$0")/lib/linkedin-backend.sh"
 
 # Load secrets
 # shellcheck source=/dev/null
@@ -38,7 +44,7 @@ REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 BATCH_SIZE=500
-MCP_CONFIG="$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json"
+MCP_CONFIG="$MCP_CONFIG_FILE"
 
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
@@ -77,12 +83,14 @@ You are the Social Autoposter LinkedIn discovery bot.
 
 Read $SKILL_FILE for content rules (tone, anti-AI detection, no em dashes).
 
+$BROWSER_INSTRUCTIONS
+
 ## Task: Discover new LinkedIn replies and mentions from the notifications page
 
-CRITICAL - Browser agent rule: ONLY use mcp__linkedin-agent__* tools (e.g. mcp__linkedin-agent__browser_navigate, mcp__linkedin-agent__browser_snapshot, mcp__linkedin-agent__browser_run_code). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
-CRITICAL: If a browser agent tool call is blocked or times out, wait 30 seconds and retry the same agent. Repeat up to 3 times. If still blocked, stop.
+CRITICAL - Browser agent rule: ONLY use the browser tool described in the BROWSER BACKEND block above (mcp__linkedin-harness__bh_run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
+CRITICAL: If a browser tool call is blocked or times out, wait 30 seconds and retry. Repeat up to 3 times. If still blocked, stop.
 CRITICAL: Do NOT open individual post permalinks to fetch comment text. Everything we need is on the notifications page. Opening per-comment permalinks is a flagged scraping pattern.
-CRITICAL: Do NOT call any /voyager/api/ endpoint, do NOT fetch() from the linkedin.com session. Use only UI navigation (browser_navigate, browser_snapshot, browser_run_code).
+CRITICAL: Do NOT call any /voyager/api/ endpoint, do NOT fetch() from the linkedin.com session. Use only UI navigation (the navigate/snapshot/run-code equivalents in the BROWSER BACKEND block).
 
 EXCLUSIONS - do NOT engage with these accounts:
 - Excluded authors: $EXCLUDED_AUTHORS
@@ -108,61 +116,62 @@ psql "\$DATABASE_URL" -t -A -c "SELECT id, our_url FROM posts WHERE platform='li
 \`\`\`
 
 ### Step 4: Navigate to LinkedIn notifications and verify session
-Use mcp__linkedin-agent__browser_navigate to go to https://www.linkedin.com/notifications/
+Navigate (per the BROWSER BACKEND block) to https://www.linkedin.com/notifications/
 
-Take a browser_snapshot and verify the page is the notifications feed (not a login/checkpoint page). If you see login, captcha, or a verification challenge, STOP immediately and print: SESSION_INVALID — do not attempt to log in. Exit.
+Take a snapshot/screenshot and verify the page is the notifications feed (not a login/checkpoint page). If you see login, captcha, or a verification challenge, STOP immediately and print: SESSION_INVALID — do not attempt to log in. Exit.
 
 ### Step 5: Load more notifications
 Scroll the page down a few times to lazy-load notifications. If a "Show more results" button is visible, click it — up to 5 times total, with a pause of 2-3 seconds between clicks. Stop if the button disappears.
 
 ### Step 6: Extract actionable notifications from the notifications page DOM
-Use mcp__linkedin-agent__browser_run_code with this JS (single evaluate — do NOT navigate to any other URL):
+Run this DOM-extraction JS via the BROWSER BACKEND block's run-code equivalent
+(bh_run with js("""...""")). It is a single read of the already-loaded page — do
+NOT navigate to any other URL. The js() helper runs the body in page context and
+returns the result, so pass exactly this body (it ends with \`return\`):
 
 \`\`\`javascript
-async (page) => {
-  const actionable = [];
-  const actionablePhrases = [
-    'replied to your comment',
-    'mentioned you in a comment',
-    'mentioned you in this',
-    'commented on your post',
-    'commented on your update',
-  ];
+const actionable = [];
+const actionablePhrases = [
+  'replied to your comment',
+  'mentioned you in a comment',
+  'mentioned you in this',
+  'commented on your post',
+  'commented on your update',
+];
 
-  for (const article of document.querySelectorAll('article')) {
-    const text = (article.innerText || '').toLowerCase();
-    const matched = actionablePhrases.find(p => text.includes(p));
-    if (!matched) continue;
+for (const article of document.querySelectorAll('article')) {
+  const text = (article.innerText || '').toLowerCase();
+  const matched = actionablePhrases.find(p => text.includes(p));
+  if (!matched) continue;
 
-    const strong = article.querySelector('strong');
-    const author = strong ? strong.textContent.trim() : 'unknown';
+  const strong = article.querySelector('strong');
+  const author = strong ? strong.textContent.trim() : 'unknown';
 
-    const link = article.querySelector('a[href*="commentUrn"]') ||
-                 article.querySelector('a[href*="replyUrn"]') ||
-                 article.querySelector('a[href*="feed/update"]');
-    const href = link ? link.getAttribute('href') : null;
-    if (!href) continue;
+  const link = article.querySelector('a[href*="commentUrn"]') ||
+               article.querySelector('a[href*="replyUrn"]') ||
+               article.querySelector('a[href*="feed/update"]');
+  const href = link ? link.getAttribute('href') : null;
+  if (!href) continue;
 
-    // Extract activity ID and commentUrn from the href
-    const activityMatch = href.match(/urn:li:activity:(\d+)/);
-    const activityId = activityMatch ? activityMatch[1] : null;
-    const commentUrnMatch = href.match(/commentUrn=([^&]+)/);
-    const commentUrn = commentUrnMatch ? decodeURIComponent(commentUrnMatch[1]) : null;
+  // Extract activity ID and commentUrn from the href
+  const activityMatch = href.match(/urn:li:activity:(\d+)/);
+  const activityId = activityMatch ? activityMatch[1] : null;
+  const commentUrnMatch = href.match(/commentUrn=([^&]+)/);
+  const commentUrn = commentUrnMatch ? decodeURIComponent(commentUrnMatch[1]) : null;
 
-    // Best-effort snippet: text inside the article, minus the author header
-    const snippet = (article.innerText || '').replace(/\s+/g, ' ').trim();
+  // Best-effort snippet: text inside the article, minus the author header
+  const snippet = (article.innerText || '').replace(/\s+/g, ' ').trim();
 
-    actionable.push({
-      type: matched,
-      author,
-      href: href.startsWith('http') ? href : ('https://www.linkedin.com' + href),
-      activity_id: activityId,
-      comment_urn: commentUrn,
-      snippet,
-    });
-  }
-  return JSON.stringify(actionable);
+  actionable.push({
+    type: matched,
+    author,
+    href: href.startsWith('http') ? href : ('https://www.linkedin.com' + href),
+    activity_id: activityId,
+    comment_urn: commentUrn,
+    snippet,
+  });
 }
+return JSON.stringify(actionable);
 \`\`\`
 
 ### Step 7: For each extracted notification, decide whether to insert
@@ -205,7 +214,7 @@ PROMPT_EOF
 # SA_PIPELINE_LOCKED=1 + SA_PIPELINE_PLATFORM so the PreToolUse hook
 # (~/.claude/hooks/linkedin-agent-lock.sh) skips the cross-session block check.
 acquire_lock "linkedin-browser" 3600
-ensure_browser_healthy "linkedin"
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase A claude exited with code $?"
 
@@ -276,6 +285,8 @@ You are the Social Autoposter LinkedIn engagement bot.
 
 Read $SKILL_FILE for the full workflow, content rules, and platform details.
 
+$BROWSER_INSTRUCTIONS
+
 EXCLUSIONS - do NOT engage with these accounts (skip and mark as 'skipped' with reason 'excluded_author'):
 - Excluded authors: $EXCLUDED_AUTHORS
 - Excluded LinkedIn profiles: $EXCLUDED_LINKEDIN
@@ -314,8 +325,8 @@ linkedin.com/in/jane-doe-123/, pass jane-doe-123):
 Then mark the current reply skipped with a clear reason:
   python3 \$REPO_DIR/scripts/reply_db.py skipped REPLY_ID "blocklist_added:HANDLE"
 
-CRITICAL - Browser agent rule: ONLY use mcp__linkedin-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
-CRITICAL: If a browser agent tool call is blocked or times out, DO NOT fall back to any other browser tool. Wait 30 seconds and retry the same agent. Repeat up to 3 times.
+CRITICAL - Browser agent rule: ONLY use the browser tool described in the BROWSER BACKEND block above (mcp__linkedin-harness__bh_run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools.
+CRITICAL: If a browser tool call is blocked or times out, DO NOT fall back to any other browser tool. Wait 30 seconds and retry. Repeat up to 3 times.
 CRITICAL: TECHNICAL FAILURES ARE NOT TERMINAL. If after retries the action still failed for any technical reason (browser blocked, MCP timeout, page rendering issue, linkedin.com unreachable, linkedin_api.py 5xx), DO NOT call reply_db.py skipped. Leave the row in 'processing' status and move on to the next pending item. The next engage run's start-of-script cleanup resets stuck 'processing' rows back to 'pending' and retries automatically.
 CRITICAL: ONLY call reply_db.py skipped for content/policy reasons (e.g., light_acknowledgment, drive_by_self_promo, hostile_user, off_topic, troll, excluded_author). NEVER skip for technical browser/network failures: those must be retry-able.
 CRITICAL: Do NOT call /voyager/api/ endpoints. Posting goes through linkedin_api.py (OAuth api.linkedin.com). Browser is the fallback only.
@@ -370,8 +381,8 @@ MANDATORY reply flow for every item:
   Step 2: NAVIGATE TO THE THREAD AND READ CONTEXT (mandatory, do NOT skip).
           Do NOT draft a reply from the notification snippet alone — the snippet
           is truncated and lacks the parent post content + sibling replies.
-          a) mcp__linkedin-agent__browser_navigate to their_comment_url
-          b) mcp__linkedin-agent__browser_snapshot (depth 8) to read:
+          a) Navigate (per the BROWSER BACKEND block) to their_comment_url
+          b) Snapshot/screenshot (per the BROWSER BACKEND block) to read:
              - the FULL parent post text (our original post if this is on our thread)
              - the immediate ancestor of their_comment_id
              - sibling replies (so you don't repeat what someone else already said)
@@ -417,28 +428,26 @@ For LinkedIn replies - use the OAuth API first:
          --text "YOUR_REPLY_TEXT"
      Use the printed string going forward. No DB write happens. Safe to run
      unconditionally (no-op when YOUR_REPLY_TEXT contains zero URLs).
-   - Navigate to their_comment_url via mcp__linkedin-agent__browser_navigate
-   - browser_snapshot to find the comment, click Reply, type the (UTM-wrapped) text, submit
+   - Navigate to their_comment_url (per the BROWSER BACKEND block)
+   - Snapshot/screenshot to find the comment, click Reply (click_at_xy on the Reply control), type the (UTM-wrapped) text, submit
    - Do NOT aggressively scroll-and-expand comments; if the comment isn't visible after a normal scroll, mark as 'skipped' with reason 'comment_not_found'
 4. If both API and browser fail, mark as 'skipped' with reason 'comment_not_found'.
 
 5. POST-SUBMIT VERIFICATION (mandatory, BROWSER-FALLBACK PATH ONLY).
    If you posted via the OAuth API in step 2 and got {"ok": true}, SKIP this
    block entirely — the API response is the verification. Run this block ONLY
-   when step 3's browser fallback was used.
-   5a. mcp__linkedin-agent__browser_network_requests with:
-         filter: 'normCommentsCreate|normComments|contentcreation|socialActions'
-         requestBody: true
-         static: false
-       Save response verbatim as NETWORK_RESPONSE.
-   5b. mcp__linkedin-agent__browser_take_screenshot for the toast / submit feedback.
-   5c. mcp__linkedin-agent__browser_snapshot (depth 12). Check:
-         (a) reply count under their_comment went up by at least 1
-         (b) a fresh comment by 'Matthew Diakonov' / 'You' is rendered under their_comment
-         (c) NO 'could not be created' / 'try again' / 'something went wrong' toast
-         (d) reply editor textbox cleared
-   5d. SUCCESS = all four pass. REJECTED = toast present OR count unchanged
-       OR our reply not visible in DOM.
+   when step 3's browser fallback was used. Verify visually + via DOM (the
+   harness has no network-capture tool; do NOT try to read /voyager or socialActions
+   network traffic — that is a flagged pattern anyway):
+   5a. Capture a screenshot (bh_run print(capture_screenshot())) and Read the PNG to
+       check for a toast / submit feedback.
+   5b. Read the DOM via the BROWSER BACKEND block's run-code equivalent (bh_run with
+       js("""...""")) and check:
+         (a) a fresh comment by 'Matthew Diakonov' / 'You' is rendered under their_comment
+         (b) NO 'could not be created' / 'try again' / 'something went wrong' toast text
+         (c) reply editor textbox cleared (empty contenteditable)
+   5c. SUCCESS = (a) passes with no toast. REJECTED = error toast present OR our
+       reply not visible in the DOM.
 6. If REJECTED, do NOT call reply_db.py replied. Mark soft-blocked:
      python3 $REPO_DIR/scripts/reply_db.py skipped ID "soft_blocked: <verbatim toast or 'quiet_fail_count_unchanged'>"
    Then STOP this row and move to the next pending reply.
@@ -453,7 +462,7 @@ PROMPT_EOF
     # styles-prep window (~1-3s). FIFO ticket queue in lock.sh ensures
     # fairness if a peer or parallel cycle grabbed it in the meantime.
     acquire_lock "linkedin-browser" 3600
-    ensure_browser_healthy "linkedin"
+    ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
     gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
 
