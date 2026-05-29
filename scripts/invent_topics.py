@@ -311,8 +311,53 @@ Strict requirements:
 
 # --- Claude invocation ------------------------------------------------------
 
-def call_claude(prompt: str, timeout_sec: int = 300) -> str:
+# Path to the MCP server that exposes search/stats/submit tools for the
+# in-session topic + query lookups. Kept beside this file so the launchd job
+# always finds it.
+_MCP_SERVER_PY = os.path.join(_REPO_DIR, "scripts", "invent_mcp_server.py")
+
+# Tool names the topic round is allowed to call. Claude Code's --allowed-tools
+# accepts the `mcp__<server-name>__<tool>` form for MCP-provided tools.
+# `invent-tools` is the name we passed to FastMCP() in the server.
+_TOPIC_TOOLS = [
+    "mcp__invent-tools__search_topics",
+    "mcp__invent-tools__get_topic_stats",
+    "mcp__invent-tools__submit_topic",
+]
+# Query round may also probe history if it wants to (read-only).
+_QUERY_TOOLS = [
+    "mcp__invent-tools__search_queries",
+    "mcp__invent-tools__get_query_stats",
+]
+
+
+def _write_mcp_config_file() -> str:
+    """Write a temporary MCP config JSON pointing at our invent-tools server
+    and return its path. claude -p --mcp-config <file> will spawn the server
+    as a subprocess over stdio."""
+    cfg = {
+        "mcpServers": {
+            "invent-tools": {
+                "command": "/opt/homebrew/bin/python3.11",
+                "args": [_MCP_SERVER_PY],
+            }
+        }
+    }
+    fd, path = tempfile.mkstemp(prefix="invent-mcp-", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f)
+    return path
+
+
+def call_claude(prompt: str, timeout_sec: int = 300,
+                allowed_tools: list[str] | None = None) -> str:
     """Run a single `claude -p` invocation and return its text output.
+
+    When `allowed_tools` is non-empty the call goes through the invent-tools
+    MCP server (search/stats/submit) and the model can call those tools
+    in-session before producing its final response. The Jaccard dedup runs
+    on the SERVER inside submit_topic, so a near-dupe surfaces as a
+    tool-call error Claude can react to instead of a silent post-hoc kill.
 
     Inherits the global model from ~/.claude/settings.json per the
     project's "single source of truth" convention (do NOT hardcode
@@ -322,13 +367,30 @@ def call_claude(prompt: str, timeout_sec: int = 300) -> str:
     model = os.environ.get("CLAUDE_MODEL")
     if model:
         cmd += ["--model", model]
-    proc = subprocess.run(
-        cmd,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        timeout=timeout_sec,
-    )
+    mcp_cfg_path = None
+    if allowed_tools:
+        mcp_cfg_path = _write_mcp_config_file()
+        # --strict-mcp-config: ignore any user-level MCP config so test runs
+        # never pick up the operator's personal MCP servers by accident.
+        # --allowed-tools: explicit allow-list so Claude can't reach for any
+        # other tool (Read/Bash/etc) it might infer from its default kit.
+        cmd += ["--mcp-config", mcp_cfg_path,
+                "--strict-mcp-config",
+                "--allowed-tools", ",".join(allowed_tools)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+        )
+    finally:
+        if mcp_cfg_path:
+            try:
+                os.remove(mcp_cfg_path)
+            except OSError:
+                pass
     if proc.returncode != 0:
         raise SystemExit(
             f"claude -p exited {proc.returncode}: {proc.stderr[:500]}"
