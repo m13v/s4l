@@ -65,7 +65,22 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
                 sys.stderr.write("[reddit_browser_fetch] no CDP contexts on harness\n")
                 return None, 0
             ctx = browser.contexts[0]
-            page = ctx.new_page()
+            # Reuse an existing tab instead of new_page() on every fetch. new_page()
+            # steals OS focus each call (there are many discovery fetches per cycle,
+            # so this churned the user's focus constantly); navigating a background
+            # tab does not. Prefer a tab already on reddit.com; else pages[0]; else
+            # create one. Mirrors reddit_browser / twitter_browser tab reuse. The
+            # page is left OPEN for the next fetch (cleanup_harness_tabs trims to one
+            # at cycle start).
+            page = None
+            for pg in ctx.pages:
+                if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                    page = pg
+                    break
+            if page is None and ctx.pages:
+                page = ctx.pages[0]
+            if page is None:
+                page = ctx.new_page()
             # Load the matching host root so the subsequent fetch() is same-origin
             # (no CORS between www/old) and carries the logged-in session.
             try:
@@ -100,16 +115,14 @@ def browser_get_json(url, cdp_url=None, timeout_ms=25000):
             sys.stderr.write(f"[reddit_browser_fetch] error: {e}\n")
             return None, 0
         finally:
-            # Close ONLY our ephemeral page; never the shared harness browser/
-            # context. Calling browser.close() on a connect_over_cdp browser can
-            # terminate the real Chrome (see reddit_browser.py warning), so we do
-            # NOT close it. The sync_playwright() context exit disconnects the CDP
-            # client cleanly without killing the remote browser.
-            try:
-                if page is not None:
-                    page.close()
-            except Exception:
-                pass
+            # Do NOT close the page: it is a REUSED tab, and closing it forces the
+            # next fetch to new_page() which steals OS focus. Leaving it open lets
+            # the next fetch reuse it (cleanup_harness_tabs trims to one at cycle
+            # start). Also never close the connect_over_cdp browser/context: that can
+            # terminate the real harness Chrome (see reddit_browser.py warning). The
+            # sync_playwright() context exit disconnects the CDP client cleanly
+            # without killing the remote browser.
+            pass
 
 
 def main(argv):
