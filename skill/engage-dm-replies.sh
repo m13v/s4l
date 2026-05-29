@@ -1333,7 +1333,7 @@ fi
 # per-MCP-call heartbeat proxy wired through their MCP configs yet.
 log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
-    linkedin) acquire_lock "linkedin-browser" 3600; ensure_browser_healthy "linkedin" ;;
+    linkedin) acquire_lock "linkedin-browser" 3600; ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) ;;
     reddit)
         # Reddit: brief pre-flight acquire+ensure+release ONLY. Per-DM
         # acquire/release happens inside the Claude prompt.
@@ -1346,7 +1346,7 @@ case "${PLATFORM:-all}" in
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
     all)
         acquire_lock "linkedin-browser" 3600
-        ensure_browser_healthy "linkedin"
+        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend )
         # Reddit: brief pre-flight only (same as the `reddit` branch above).
         log "Reddit pre-flight: brief acquire + ensure_browser_healthy + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
@@ -1452,6 +1452,7 @@ if ! $NEEDS_CLAUDE && { [ -z "$PLATFORM" ] || [ "$PLATFORM" = "linkedin" ]; }; t
     #      tripping pipefail+set -e and silently killing the script — the
     #      bug that hid behind every prior "log frozen at precheck" run).
     LI_PRECHECK=$(SOCIAL_AUTOPOSTER_LINKEDIN_PRECHECK=1 \
+        LINKEDIN_CDP_URL="${LINKEDIN_CDP_URL:-http://127.0.0.1:9556}" \
         PYTHONPATH="$HOME/Library/Python/3.9/lib/python/site-packages" \
         /usr/bin/python3 "$REPO_DIR/scripts/linkedin_browser.py" unread-dms 2>"$LI_PRECHECK_STDERR") \
         && LI_EXIT=0 || LI_EXIT=$?
