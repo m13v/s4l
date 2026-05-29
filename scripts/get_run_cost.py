@@ -4,7 +4,9 @@
 Two modes:
 
 1) Cycle mode (preferred): `--cycle-id rdcycle-...`
-   Sums total_cost_usd for every row stamped with this cycle_id. Accurate
+   Sums orchestrator_cost_usd (native SDK billing) for every row stamped with
+   this cycle_id. This is the authoritative Anthropic bill, NOT the inflated
+   transcript-derived estimate (total_cost_usd) we used to report. Accurate
    even when multiple cycles of the same script overlap in wall-clock time
    (run-reddit-search.sh, run-twitter-cycle.sh double-fork their work so
    stacked cycles are normal).
@@ -109,7 +111,7 @@ def _fetch_via_db(*, cycle_id, since, scripts):
     conn = dbmod.get_conn()
     if cycle_id:
         cur = conn.execute(
-            """SELECT COALESCE(SUM(total_cost_usd), 0),
+            """SELECT COALESCE(SUM(orchestrator_cost_usd), 0),
                       COALESCE(SUM(subagent_cost_usd), 0),
                       COALESCE(SUM(task_call_count), 0),
                       COALESCE(SUM(subagent_count), 0)
@@ -121,7 +123,7 @@ def _fetch_via_db(*, cycle_id, since, scripts):
         since_ts = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
         placeholders = ','.join(['%s'] * len(scripts))
         cur = conn.execute(
-            f"""SELECT COALESCE(SUM(total_cost_usd), 0),
+            f"""SELECT COALESCE(SUM(orchestrator_cost_usd), 0),
                        COALESCE(SUM(subagent_cost_usd), 0),
                        COALESCE(SUM(task_call_count), 0),
                        COALESCE(SUM(subagent_count), 0)
