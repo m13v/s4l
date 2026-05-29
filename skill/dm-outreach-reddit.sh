@@ -24,6 +24,11 @@ export SA_CYCLE_ID="$BATCH_ID"
 # link-edit-reddit, post-reddit) during the DB scan, prompt build, and
 # HTTP PATCH update phases of each DM row.
 source "$(dirname "$0")/lock.sh"
+# reddit-harness backend (2026-05-29). Sets MCP_CONFIG_FILE (reddit-harness MCP),
+# BROWSER_INSTRUCTIONS (bh_run tool surface + translation table), exports
+# REDDIT_CDP_URL=:9557, and provides ensure_reddit_browser_for_backend.
+# Source after lock.sh, before acquire_lock / claude -p.
+source "$(dirname "$0")/lib/reddit-backend.sh"
 acquire_lock "dm-outreach-reddit" 2700
 
 # Load secrets
@@ -91,17 +96,7 @@ You are the Social Autoposter Reddit DM outreach bot.
 
 Read $SKILL_FILE for content rules (tone, anti-AI detection, no em dashes).
 
-## MCP TOOL LOADING (do this FIRST, before anything else)
-
-Claude 2.1.140+ defers MCP tools behind ToolSearch. The reddit-agent server is configured but its tools (mcp__reddit-agent__browser_*) will NOT appear automatically. You MUST load them explicitly before any browser call, or the run will burn \$50-90 in orchestrator cost rediscovering this every cycle (verified outages 2026-05-13 11:09 and 11:25).
-
-STEP 0 (mandatory, first action of the run): call ToolSearch with this exact query to load all reddit-agent tools by name:
-
-  ToolSearch(query="select:mcp__reddit-agent__browser_navigate,mcp__reddit-agent__browser_snapshot,mcp__reddit-agent__browser_click,mcp__reddit-agent__browser_type,mcp__reddit-agent__browser_press_key,mcp__reddit-agent__browser_evaluate,mcp__reddit-agent__browser_wait_for,mcp__reddit-agent__browser_tabs,mcp__reddit-agent__browser_take_screenshot,mcp__reddit-agent__browser_close", max_results=15)
-
-If ToolSearch returns the schemas, proceed. If it returns empty AFTER one retry with a 15-second wait, the MCP server failed to start. Exit immediately (DO NOT keep thinking). Report "MCP_INIT_FAILED reddit-agent server did not surface tools after ToolSearch select; aborting to avoid orchestrator cost burn." That early exit saves \$50+ per failed run.
-
-NEVER use keyword searches like ToolSearch("mcp reddit") or ToolSearch("+playwright"). Those return nothing for deferred-MCP servers and waste time.
+$BROWSER_INSTRUCTIONS
 
 ## Task: Send Reddit DMs to continue comment conversations
 
@@ -167,9 +162,9 @@ For each DM row, BEFORE you compose or send, do this in order:
      \`python3 $REPO_DIR/scripts/dm_outreach_helper.py patch --id DM_ID --status error --skip-reason reddit_browser_busy --claude-session-id $CLAUDE_SESSION_ID\`
    - If "ERROR", same handling as BUSY: mark error, move on. Do NOT call browser tools without the lock — collisions on the same chrome profile crash both runs.
 
-2. Fetch the prospect's Reddit profile with mcp__reddit-agent__* tools:
+2. Fetch the prospect's Reddit profile with the browser backend (mcp__reddit-harness__bh_run, see BROWSER BACKEND block above):
    - Navigate to https://www.reddit.com/user/THEIR_AUTHOR/
-   - browser_snapshot. Pull:
+   - Read the page (snapshot / capture_screenshot per the translation table). Pull:
      - the profile bio/tagline (text under their name)
      - karma numbers (post + comment karma)
      - a 1-2 line summary of their most recent 3-5 posts/comments (titles + subreddits)
@@ -197,7 +192,7 @@ For each DM row, BEFORE you compose or send, do this in order:
 
 5. If ANY entry in icp_matches has label=disqualified, skip the send: run \`python3 scripts/dm_conversation.py mark-skipped --dm-id DM_ID --reason "disqualified: PROJECT - SHORT_NOTES"\` and move on. \`icp_miss\` alone does NOT gate; send when every project scored miss. Only explicit \`disqualified\` blocks the opener.
 
-## How to send DMs on Reddit (use mcp__reddit-agent__* tools):
+## How to send DMs on Reddit (use the browser backend, mcp__reddit-harness__bh_run):
 1. Navigate to https://www.reddit.com/message/compose/?to=THEIR_AUTHOR
 2. Reddit uses Chat now. Fill in subject (2-4 casual words) and body.
 3. Submit. The send_dm / compose_dm tool returns a JSON object with an
