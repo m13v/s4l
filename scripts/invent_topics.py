@@ -374,6 +374,9 @@ def call_claude(prompt: str, timeout_sec: int = 300,
     model = os.environ.get("CLAUDE_MODEL")
     if model:
         cmd += ["--model", model]
+    # When the parent process is in dry-run mode it sets INVENT_DRY_RUN=1
+    # in its own env at startup; claude -p inherits it, which propagates to
+    # the MCP server, which short-circuits submit_topic without POSTing.
     mcp_cfg_path = None
     if allowed_tools:
         mcp_cfg_path = _write_mcp_config_file()
@@ -658,6 +661,102 @@ def harness_alive(port: int = CDP_PORT, timeout: float = 2.0) -> bool:
 
 # --- Query drafting (Claude) ------------------------------------------------
 
+# Per-project ledger cache so build_query_prompt doesn't fetch top-queries +
+# dud-queries + invented-queries from scratch on every topic in a single run.
+_QUERY_LEDGER_CACHE: dict[str, str] = {}
+
+
+def _build_query_ledger(project_name: str) -> str:
+    """Fetch the per-query performance ledger for the project and format it
+    as a markdown table bucketed STRONG / DECENT / WEAK / INVENTED / DUD.
+
+    Sources:
+      - /api/v1/twitter-search-attempts/top-queries  → posted-engagement winners
+      - /api/v1/twitter-search-attempts/invented-queries → supply-only winners
+      - /api/v1/twitter-search-attempts/dud-queries  → zero-supply queries
+        (avoid paraphrasing — they fail at the source, not the framing)
+
+    Cached per project for the lifetime of the process so multiple topics in
+    one run share one fetch. Returns "" on fetch failure (best-effort
+    enrichment; the prompt still works without it).
+    """
+    if project_name in _QUERY_LEDGER_CACHE:
+        return _QUERY_LEDGER_CACHE[project_name]
+
+    try:
+        top_resp = api_get("/api/v1/twitter-search-attempts/top-queries",
+                           {"project": project_name, "limit": "50"})
+        invent_resp = api_get("/api/v1/twitter-search-attempts/invented-queries",
+                              {"project": project_name, "min_supply": "1",
+                               "limit": "30"})
+        dud_resp = api_get("/api/v1/twitter-search-attempts/dud-queries",
+                           {"project": project_name, "limit": "20"})
+    except SystemExit as exc:
+        print(f"[invent_topics] query-ledger fetch failed: {exc}",
+              file=sys.stderr)
+        _QUERY_LEDGER_CACHE[project_name] = ""
+        return ""
+
+    top_rows = ((top_resp or {}).get("data") or {}).get("rows") or []
+    invent_rows = ((invent_resp or {}).get("data") or {}).get("queries") or []
+    dud_rows = ((dud_resp or {}).get("data") or {}).get("rows") or []
+
+    # Bucket top rows by clicks_per_post — same verdict the topic ledger uses.
+    strong, decent, weak = [], [], []
+    for r in top_rows:
+        posts = r.get("posts") or r.get("posted_n") or 0
+        clicks = r.get("clicks_total") or 0
+        if posts <= 0:
+            continue
+        cpp = clicks / posts
+        if cpp >= 1.0:
+            strong.append(r)
+        elif cpp >= 0.3:
+            decent.append(r)
+        else:
+            weak.append(r)
+
+    def _fmt_top(r: dict) -> str:
+        q = (r.get("query") or "")[:110]
+        return (f"- `{q}` posts {r.get('posts', r.get('posted_n', 0))}, "
+                f"likes {r.get('likes_total', 0)}, "
+                f"clicks {r.get('clicks_total', 0)}")
+
+    parts: list[str] = []
+    if strong:
+        parts.append(f"\n### STRONG queries ({len(strong)} total, "
+                     f"showing top {min(len(strong), 10)}; clicks_per_post >= 1.0)")
+        for r in strong[:10]:
+            parts.append(_fmt_top(r))
+    if decent:
+        parts.append(f"\n### DECENT queries ({len(decent)} total, "
+                     f"showing top {min(len(decent), 10)}; clicks_per_post >= 0.3)")
+        for r in decent[:10]:
+            parts.append(_fmt_top(r))
+    if weak:
+        parts.append(f"\n### WEAK queries ({len(weak)} total, "
+                     f"showing top {min(len(weak), 6)}; posted but low engagement)")
+        for r in weak[:6]:
+            parts.append(_fmt_top(r))
+    if invent_rows:
+        parts.append(f"\n### INVENTED queries ({len(invent_rows)} total; "
+                     f"surfaced supply but no posts yet)")
+        for r in invent_rows[:10]:
+            q = (r.get("query") or "")[:110]
+            parts.append(f"- `{q}` supply {r.get('supply', 0)}, "
+                         f"attempts {r.get('attempts', 0)}")
+    if dud_rows:
+        parts.append(f"\n### DUD queries ({len(dud_rows)} total, "
+                     f"showing top {min(len(dud_rows), 10)}) — DO NOT paraphrase")
+        for r in dud_rows[:10]:
+            q = (r.get("query") or "")[:110]
+            parts.append(f"- `{q}` attempts {r.get('attempts', 0)}")
+
+    out = "\n".join(parts) if parts else ""
+    _QUERY_LEDGER_CACHE[project_name] = out
+    return out
+
+
 def build_query_prompt(
     project: dict,
     topic: str,
@@ -665,8 +764,11 @@ def build_query_prompt(
     avoid_queries: set[str] | None = None,
 ) -> str:
     """Prompt Claude to draft N distinct X/Twitter advanced-search queries for
-    one invented topic. `avoid_queries` carries cores already drafted/tried so a
-    refill attempt steers away from them."""
+    one invented topic. Includes a per-query performance ledger (STRONG /
+    DECENT / WEAK / INVENTED / DUD with posts/clicks/likes/supply stats) so
+    the model can pattern-match against what's working for this project
+    instead of drafting in the dark. `avoid_queries` carries cores already
+    drafted/tried this run so a refill steers away from them."""
     name = project.get("name", "")
     description = project.get("description", "")
     excludes = project.get("excludes_for_search") or project.get("excludes") or []
@@ -686,6 +788,19 @@ def build_query_prompt(
             f"{avoid_lines}\n"
         )
 
+    ledger = _build_query_ledger(name)
+    ledger_block = ""
+    if ledger:
+        ledger_block = (
+            "\n## Per-query performance ledger for this project\n\n"
+            "The queries below have been tried; use their performance to "
+            "shape your N drafts. Mimic the operator structure of STRONG/"
+            "DECENT queries when the angle fits the topic; pattern-match "
+            "INVENTED queries that already surfaced supply; AVOID the "
+            "phrasings in WEAK and DUD.\n"
+            f"{ledger}\n"
+        )
+
     return f"""You are drafting X (Twitter) advanced-search queries to find FRESH threads where project **{name}** could reply with product fit.
 
 ## Project
@@ -696,7 +811,7 @@ def build_query_prompt(
 **{topic}**
 
 Draft **exactly {n_queries}** DISTINCT search queries that probe this topic from different angles, so together they maximize the chance of surfacing fresh, on-topic tweets.
-{excludes_block}{avoid_block}
+{excludes_block}{avoid_block}{ledger_block}
 ## Query rules
 - Each query targets the topic above but varies the angle/phrasing/breadth so the {n_queries} don't overlap.
 - You MAY use X operators: `min_faves:N`, `OR` (inside parentheses), quoted phrases, `-excludeterm`, `lang:en`.
@@ -1030,6 +1145,11 @@ def main():
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS,
                     help="Ledger window passed to /api/v1/topic-funnel")
     args = ap.parse_args()
+
+    # Propagate dry-run into the spawned claude -p / MCP server subprocess
+    # tree so submit_topic short-circuits without POSTing during smoke tests.
+    if args.dry_run:
+        os.environ["INVENT_DRY_RUN"] = "1"
 
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     t0 = time.time()
