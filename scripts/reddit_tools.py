@@ -71,13 +71,52 @@ def _wait_if_needed():
         time.sleep(wait)
 
 
+def _fetch_via_browser(url):
+    """Fetch a Reddit URL through the reddit-harness logged-in Chrome.
+
+    Returns the raw response body (str) on HTTP 200, else None so the caller
+    falls back to urllib. This is the 2026-05-29 transport swap: Reddit began
+    403ing urllib/curl on *.json from residential IPs on 2026-05-28, but a
+    same-origin fetch() from inside the logged-in harness browser returns 200.
+
+    Gated by REDDIT_FETCH_BACKEND: default ("harness") uses the browser first;
+    set REDDIT_FETCH_BACKEND=urllib to force the legacy path (e.g. for debugging).
+    Also short-circuits to None when REDDIT_CDP_URL is unset AND no harness is
+    expected, so plain `urllib`-only environments are unaffected.
+    """
+    if os.environ.get("REDDIT_FETCH_BACKEND", "harness").lower() == "urllib":
+        return None
+    try:
+        from reddit_browser_fetch import browser_get_json
+    except Exception as e:
+        sys.stderr.write(f"[reddit_tools] browser fetch unavailable ({e}); urllib fallback\n")
+        return None
+    try:
+        body, status = browser_get_json(url)
+        if status == 200 and body:
+            return body
+        sys.stderr.write(f"[reddit_tools] browser fetch status={status} for {url[:80]}; urllib fallback\n")
+    except Exception as e:
+        sys.stderr.write(f"[reddit_tools] browser fetch error ({e}); urllib fallback\n")
+    return None
+
+
 def _do_request(url):
     """Make a Reddit API request with rate limit handling.
 
-    On 429: raises RateLimitedError immediately if the reset would require
-    a long wait (>15s). Short waits are absorbed inline.
+    Primary transport is the reddit-harness browser (see _fetch_via_browser);
+    urllib is the silent fallback. On 429 (urllib path): raises RateLimitedError
+    immediately if the reset would require a long wait, else absorbs short waits.
     """
     _wait_if_needed()
+    # Browser-first (bypasses Reddit's urllib 403 wall). Falls through to urllib
+    # if the harness is down or returns a non-200.
+    _body = _fetch_via_browser(url)
+    if _body is not None:
+        try:
+            return json.loads(_body)
+        except Exception:
+            sys.stderr.write(f"[reddit_tools] browser body not JSON for {url[:80]}; urllib fallback\n")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         resp = urllib.request.urlopen(req, timeout=20)
@@ -119,6 +158,19 @@ def batch_fetch_info(thing_ids, user_agent=USER_AGENT):
         ids_str = ",".join(chunk)
         url = f"https://old.reddit.com/api/info.json?id={ids_str}"
         _wait_if_needed()
+        # Browser-first transport (Reddit 403s urllib on *.json). urllib fallback.
+        _body = _fetch_via_browser(url)
+        if _body is not None:
+            try:
+                data = json.loads(_body)
+                for child in data.get("data", {}).get("children", []):
+                    cd = child.get("data", {})
+                    name = cd.get("name")
+                    if name:
+                        results[name] = cd
+                continue
+            except Exception:
+                sys.stderr.write("[reddit_tools] browser info.json not JSON; urllib fallback\n")
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
         try:
             resp = urllib.request.urlopen(req, timeout=30)
@@ -552,12 +604,15 @@ def _html_postable_check(thread_url):
     try:
         url = thread_url.replace("www.reddit.com", "old.reddit.com").rstrip("/") + "/"
         _wait_if_needed()
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        resp = urllib.request.urlopen(req, timeout=15)
-        remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
-        reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
-        _write_ratelimit(remaining, reset)
-        html = resp.read().decode("utf-8", errors="ignore")
+        # Browser-first transport (Reddit 403s urllib). urllib fallback below.
+        html = _fetch_via_browser(url)
+        if html is None:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            resp = urllib.request.urlopen(req, timeout=15)
+            remaining = float(resp.headers.get("X-Ratelimit-Remaining", 100))
+            reset = float(resp.headers.get("X-Ratelimit-Reset", 0))
+            _write_ratelimit(remaining, reset)
+            html = resp.read().decode("utf-8", errors="ignore")
         # Scope the lock check to the post header only. r/Entrepreneur (and
         # similar subs) sticky an AutoMod comment that is itself locked,
         # rendering `<span class="locked-tagline">locked comment</span>`
