@@ -29,11 +29,25 @@
 
 set -euo pipefail
 
+# Transport backend selector (2026-05-28). Two interchangeable paths for the
+# only two browser touchpoints (Phase A SERP search, Phase B comment-post):
+#   unipile (DEFAULT) — UniPile REST API via scripts/linkedin_unipile.py.
+#                       No headed Chrome, no linkedin-agent MCP, no browser
+#                       lock, no killswitch (the killswitch guards the headed
+#                       LinkedIn session, which this path never touches).
+#   browser           — the original headed-Chrome path via mcp__linkedin-agent.
+# Everything ELSE (project pick, query drafting, SERP-quality rating, dedup,
+# velocity/virality scoring, voice composition, URL wrapping, log_post.py
+# logging, candidate marking) is byte-for-byte identical across both paths.
+# Override per-run: LINKEDIN_BACKEND=browser ~/social-autoposter/skill/run-linkedin.sh
+LINKEDIN_BACKEND="${LINKEDIN_BACKEND:-unipile}"
+
 # LinkedIn killswitch (2026-05-27): refuse to run if a prior fire detected
 # session compromise (http_999, authwall, throttle, li_at cleared).
 # State: ~/.claude/social-autoposter/linkedin.killswitch
 # Clear: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear
-if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+# Only gates the browser backend — UniPile has no headed session to compromise.
+if [ "$LINKEDIN_BACKEND" = "browser" ] && [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
     echo "[$(date +%H:%M:%S)] LINKEDIN_KILLSWITCH active. Aborting LinkedIn pipeline."
     echo "  Re-auth LinkedIn in harness Chrome, then: python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear"
     exit 0
