@@ -804,6 +804,8 @@ if [ -n "${PA_AUTHOR_NAME:-}" ]; then
     AUTHOR_HISTORY_BLOCK=$(python3 "$REPO_DIR/scripts/author_history_block.py" --platform linkedin --author "$PA_AUTHOR_NAME" --days 30 --limit 5 2>>"$LOG_FILE" || true)
 fi
 
+PA_SEARCH_TOPIC_ARG=$(python3 -c "import shlex,sys; print(shlex.quote(sys.argv[1]))" "$PA_SEARCH_TOPIC")
+
 # Allow Chrome's profile lockfile to release between phases.
 sleep 3
 
@@ -826,6 +828,7 @@ Read $SKILL_FILE for tone and content rules.
 - Post title hint: $PA_TITLE_HINT
 - Language: $PA_LANG
 - Velocity score: $PA_VELOCITY (Phase A picked this as the top candidate)
+- Search topic that guided discovery: '$PA_SEARCH_TOPIC'
 - Search query that surfaced it: '$PA_QUERY'
 
 $AUTHOR_HISTORY_BLOCK
@@ -921,6 +924,7 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --rejection-reason 'TOAST: <verbatim toast text or quiet-fail>' \\
        --network-response 'NETWORK_RESPONSE'
@@ -936,6 +940,7 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --urns 'ALL_POST_URNS')
      echo "\$LOG_RESULT"
