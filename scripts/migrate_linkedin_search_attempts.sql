@@ -19,11 +19,15 @@ CREATE TABLE IF NOT EXISTS linkedin_search_attempts (
     id                  SERIAL PRIMARY KEY,
     query               TEXT NOT NULL,
     project_name        TEXT,
+    search_topic        TEXT,
     candidates_found    INTEGER NOT NULL DEFAULT 0,
     serp_quality_score  DOUBLE PRECISION,           -- 0-10, LLM-rated SERP fit
     batch_id            TEXT,
     ran_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE linkedin_search_attempts
+    ADD COLUMN IF NOT EXISTS search_topic TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_lsa_ran_at
     ON linkedin_search_attempts(ran_at DESC);
@@ -35,3 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_lsa_dud_lookup
 CREATE INDEX IF NOT EXISTS idx_lsa_low_quality
     ON linkedin_search_attempts(project_name, serp_quality_score, ran_at DESC)
     WHERE serp_quality_score IS NOT NULL AND serp_quality_score < 4.0;
+
+CREATE INDEX IF NOT EXISTS idx_lsa_search_topic
+    ON linkedin_search_attempts(project_name, search_topic, ran_at DESC)
+    WHERE search_topic IS NOT NULL;
