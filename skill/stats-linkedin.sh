@@ -80,7 +80,7 @@ PYTHON_BIN="/opt/homebrew/bin/python3"
 SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
-MAX_SCROLLS=300           # Reduced from 1000 on 2026-05-27 after the runaway-+-session-revoke event. 56 records / fire is the healthy cap; even at 5 ticks/record this is ample headroom while shrinking the runaway envelope by 3.3x.
+MAX_SCROLLS=400           # 2026-05-28 set to 400 per user direction; natural stagnant>=8 bail should fire well before this (~tick 150). Safety ceiling, not target. Previous: 300 (auto-commit) <- 1000 (runaway 2026-05-27).
 SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via SAPS_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
 
 if [ -z "${DATABASE_URL:-}" ]; then
