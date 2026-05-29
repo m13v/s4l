@@ -5972,9 +5972,15 @@ async function handleApi(req, res) {
         "FROM aggregate_stats_daily " +
         "WHERE day >= CURRENT_DATE - INTERVAL '" + days + " days'"
       : '';
+    // When aggregate_stats_daily is unioned in (all-platforms, no-project view),
+    // don't also recover first-snapshot baselines for the days it already covers,
+    // or those April backfill days would be double-counted.
+    const baselineAggGuard = includeAggregate
+      ? " AND posted_day NOT IN (SELECT day FROM aggregate_stats_daily)"
+      : '';
     const q =
       "WITH per_post_daily AS (" +
-        "SELECT pvd.post_id, pvd.day, pvd." + metricCol + " AS metric, " +
+        "SELECT pvd.post_id, pvd.day, p.posted_at::date AS posted_day, pvd." + metricCol + " AS metric, " +
           "LAG(pvd." + metricCol + ") OVER (PARTITION BY pvd.post_id ORDER BY pvd.day) AS prev_metric " +
         "FROM post_views_daily pvd " +
         "JOIN posts p ON p.id = pvd.post_id " +
@@ -5984,7 +5990,20 @@ async function handleApi(req, res) {
           platformFilter + projectFilter +
       "), per_post AS (" +
         "SELECT day, SUM(GREATEST(metric - prev_metric, 0))::bigint AS metric_gained " +
-        "FROM per_post_daily WHERE prev_metric IS NOT NULL GROUP BY day" +
+        "FROM per_post_daily WHERE prev_metric IS NOT NULL GROUP BY day " +
+        // Recover each post's FIRST snapshot, which the LAG delta above drops
+        // (prev_metric IS NULL). For a heavily-posting account this is most of
+        // the daily reach. Attribute the first reading to the post's published
+        // day, but only when first-snapshotted within 2 days of posting so a
+        // long-unsnapshotted backlog can't dump weeks of views onto one day.
+        "UNION ALL " +
+        "SELECT posted_day AS day, SUM(GREATEST(metric, 0))::bigint AS metric_gained " +
+        "FROM per_post_daily " +
+        "WHERE prev_metric IS NULL AND posted_day IS NOT NULL " +
+          "AND (day - posted_day) BETWEEN 0 AND 2 " +
+          "AND posted_day >= CURRENT_DATE - INTERVAL '" + days + " days'" +
+          baselineAggGuard + " " +
+        "GROUP BY posted_day" +
       "), merged AS (" +
         "SELECT day, metric_gained FROM per_post " +
         aggregateUnion +
