@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # link-edit-linkedin.sh — Edit high-performing LinkedIn comments to append a project link.
-# LinkedIn is edited via the linkedin-agent browser (three-dot menu -> Edit).
+# LinkedIn is edited via the linkedin-harness browser (three-dot menu -> Edit).
 # LinkedIn posts are eligible regardless of upvotes because upvote tracking is unreliable there.
 # Called by launchd (com.m13v.social-link-edit-linkedin) every 6 hours.
 
@@ -24,8 +24,13 @@ export SA_CYCLE_ID="$BATCH_ID"
 
 # Browser-profile lock first (shared with other linkedin pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
+# Browser backend bootstrap (linkedin-harness). Sets MCP_CONFIG_FILE,
+# BROWSER_INSTRUCTIONS, exports LINKEDIN_CDP_URL, and provides
+# ensure_linkedin_browser_for_backend. Migrated off the deprecated
+# mcp__linkedin-agent Playwright MCP to the CDP-driven harness Chrome (port 9556).
+source "$(dirname "$0")/lib/linkedin-backend.sh"
 acquire_lock "linkedin-browser" 3600
-ensure_browser_healthy "linkedin"
+ensure_linkedin_browser_for_backend
 acquire_lock "link-edit-linkedin" 5400
 
 # Load secrets
@@ -90,9 +95,11 @@ PROMPT_FILE=$(mktemp)
 cat > "$PROMPT_FILE" <<PROMPT_EOF
 You are the Social Autoposter LinkedIn link-edit bot.
 
+$BROWSER_INSTRUCTIONS
+
 Read $SKILL_FILE for the full workflow. Execute the LinkedIn link-edit phase only.
 
-CRITICAL: ALL browser calls MUST use mcp__linkedin-agent__* tools (e.g. mcp__linkedin-agent__browser_navigate). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a linkedin-agent call is blocked or times out, wait 30s and retry the same agent (up to 3 times). If still blocked, skip that post.
+CRITICAL: ALL browser calls MUST use the mcp__linkedin-harness__bh_run tool (the BROWSER BACKEND block above; follow its translation table for any Playwright-style step). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a bh_run call is blocked or times out, wait 30s and retry (up to 3 times). If still blocked, skip that post.
 
 CRITICAL: This is a single-shot run. NEVER call ScheduleWakeup, CronCreate, CronDelete, CronList, EnterPlanMode, EnterWorktree, or any deferred-execution / scheduling tool. You MUST complete or skip every post in this one run; do not defer work to "a future run". If you hit a hard block, mark the post SKIPPED via step 9 and move on to the next post.
 
@@ -129,7 +136,7 @@ Process ALL of them. For each post:
        --project PROJECT_NAME
    Parse the JSON output. Use \`text\` (URL replaced with /r/<code>) as the FINAL LINK_TEXT for steps 6 and 7. Keep \`minted_session\` for step 8. If wrap returns ok=false, log the error and skip this post (do NOT post a raw URL).
 6. Append the wrapped LINK_TEXT to our_content with a blank line separator.
-7. Navigate to the post URL via the linkedin-agent browser, find our comment, click the three-dot menu on it, click "Edit", append the wrapped link text to the existing content, save, verify.
+7. Navigate to the post URL via the bh_run browser (new_tab/goto_url + wait_for_load), find our comment, click the three-dot menu on it (click_at_xy), click "Edit", append the wrapped link text to the existing content (click the edit box then type_text), save, then verify with capture_screenshot + Read the PNG.
 8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_ab_skip vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py and the Reddit link-edit pipeline does) and backfill short-link attribution:
    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
@@ -142,7 +149,8 @@ Process ALL of them. For each post:
     psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
 PROMPT_EOF
 
-gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-linkedin" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: LinkedIn link-edit claude exited with code $?"
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "link-edit-linkedin" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: LinkedIn link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='linkedin' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
