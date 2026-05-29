@@ -39,8 +39,10 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -51,17 +53,51 @@ from pick_project import load_config, pick_projects  # noqa: E402
 
 
 PROJECTS_PER_RUN = 1
-DEFAULT_PROPOSALS = 4
+DEFAULT_PROPOSALS = 1    # topics invented per loop iteration (one-topic-at-a-time)
 SIMILARITY_THRESHOLD = 0.6  # Jaccard threshold above which we reject as near-dupe
 WINDOW_DAYS = 30  # ledger window the picker reads from
 
-# Retry-loop knobs. Invention re-asks Claude (steering it away from
-# already-tried topics) until it has committed TARGET genuinely-new,
-# non-dupe topics or exhausts MAX_ATTEMPTS — then proceeds with whatever
-# survived. Mirrors the Twitter Phase 1 scan retry pattern. Without the
-# loop a high-dupe batch could net zero new topics for the hour.
-DEFAULT_TARGET = 3       # how many NEW non-dupe topics we want committed per run
-DEFAULT_MAX_ATTEMPTS = 5  # hard cap on Claude calls per run (cost guard)
+# Retry-loop knobs. Each loop iteration invents ONE topic, drafts queries for
+# it, supply-tests them, logs every attempt, and commits the topic. The loop
+# keeps going (steering Claude away from topics already tried this run) until
+# TARGET topics have CLEARED the supply floor, or MAX_ATTEMPTS iterations are
+# exhausted — then it stops with whatever qualified. Mirrors the Twitter
+# Phase 1 scan retry pattern.
+DEFAULT_TARGET = 3        # qualifying topics (supply >= SUPPLY_FLOOR) wanted per run
+DEFAULT_MAX_ATTEMPTS = 5  # hard cap on loop iterations per run (cost guard)
+
+# Supply-test knobs (2026-05-28: invent loop now scans drafted queries before
+# committing, mirroring the cycle's Phase 1 freshness gate).
+QUERIES_PER_TOPIC = 5     # distinct queries drafted + scanned per invented topic
+SUPPLY_FLOOR = 3          # min SUM of fresh tweets across a topic's queries to "qualify"
+FRESHNESS_HOURS = 6       # freshness window each query is scanned at (matches discover)
+CDP_PORT = 9555           # managed Chrome the twitter-harness drives
+LOCK_TIMEOUT_SEC = 600    # how long the supply-test helper waits for twitter-browser lock
+
+_REPO_DIR = os.path.expanduser("~/social-autoposter")
+_SUPPLY_TEST_SH = os.path.join(_REPO_DIR, "skill", "invent-supply-test.sh")
+_LOG_ATTEMPTS_PY = os.path.join(_REPO_DIR, "scripts", "log_twitter_search_attempts.py")
+
+
+# --- Query normalization (copied verbatim from qualified_query_bank.normalize
+#     so this module needs NO direct DB import — all reads go through the API).
+#     Strips per-cycle operators so phrasings that differ only by freshness or
+#     min_faves collapse to one core for dedup. -------------------------------
+
+def normalize_query(q: str) -> str:
+    """Strip per-cycle operators so two queries that differ only by
+    since:/min_faves:/filter: collapse to the same core for dedup."""
+    q = (q or "").lower()
+    for pat in (
+        r"\bsince:\S+", r"\buntil:\S+",
+        r"\bsince_time:\S+", r"\buntil_time:\S+",
+        r"\bmin_faves:\d+", r"\bmin_retweets:\d+", r"\bmin_replies:\d+",
+        r"\b-?filter:\S+", r"\blang:\S+",
+    ):
+        q = re.sub(pat, "", q)
+    q = re.sub(r'[()"]', "", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
 
 
 # --- Tokenization for cheap similarity --------------------------------------
@@ -481,6 +517,381 @@ def write_audit(payload: dict, dry_run: bool = False) -> None:
         print(f"[invent_topics] audit POST failed: {exc}", file=sys.stderr)
     except Exception as exc:
         print(f"[invent_topics] audit POST exception: {exc}", file=sys.stderr)
+
+
+# --- Harness liveness -------------------------------------------------------
+
+def harness_alive(port: int = CDP_PORT, timeout: float = 2.0) -> bool:
+    """Cheap TCP probe of the managed Chrome's CDP port.
+
+    The supply test is meaningless if the browser the harness drives isn't up:
+    every scan would return 0 and we'd commit real topics as false 'duds'. So
+    the loop checks this BEFORE spending Claude tokens on query drafting, and
+    treats a mid-run drop as 'untested' (abort, retry next hour) rather than
+    'zero supply'.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+# --- Query drafting (Claude) ------------------------------------------------
+
+def build_query_prompt(
+    project: dict,
+    topic: str,
+    n_queries: int,
+    avoid_queries: set[str] | None = None,
+) -> str:
+    """Prompt Claude to draft N distinct X/Twitter advanced-search queries for
+    one invented topic. `avoid_queries` carries cores already drafted/tried so a
+    refill attempt steers away from them."""
+    name = project.get("name", "")
+    description = project.get("description", "")
+    excludes = project.get("excludes_for_search") or project.get("excludes") or []
+    excludes_block = ""
+    if isinstance(excludes, list) and excludes:
+        excludes_block = (
+            "\n## Mandatory exclude terms for this project\n\n"
+            "Append these as `-term` to EVERY query (they filter known noise):\n"
+            f"{' '.join('-' + str(e) for e in excludes)}\n"
+        )
+
+    avoid_block = ""
+    if avoid_queries:
+        avoid_lines = "\n".join(f"- {q}" for q in sorted(avoid_queries))
+        avoid_block = (
+            "\n## Already tried — do NOT repeat or trivially re-phrase these\n\n"
+            f"{avoid_lines}\n"
+        )
+
+    return f"""You are drafting X (Twitter) advanced-search queries to find FRESH threads where project **{name}** could reply with product fit.
+
+## Project
+- Name: {name}
+- Description: {description}
+
+## Topic to cover
+**{topic}**
+
+Draft **exactly {n_queries}** DISTINCT search queries that probe this topic from different angles, so together they maximize the chance of surfacing fresh, on-topic tweets.
+{excludes_block}{avoid_block}
+## Query rules
+- Each query targets the topic above but varies the angle/phrasing/breadth so the {n_queries} don't overlap.
+- You MAY use X operators: `min_faves:N`, `OR` (inside parentheses), quoted phrases, `-excludeterm`, `lang:en`.
+- Do NOT include `since:`, `until:`, `since_time:`, or `until_time:` — the freshness window ({FRESHNESS_HOURS}h) is applied automatically downstream.
+- Mix breadth: at least one broad query (few/no operators) and at least one tighter query (e.g. `min_faves:5` or a quoted phrase) so we measure supply at multiple precision levels.
+- Keep each query realistic — phrasing real users would actually tweet, not keyword salad.
+
+## Output format
+Return STRICT JSON only, no prose:
+
+```json
+{{"queries": ["query one", "query two", "... exactly {n_queries} total ..."]}}
+```"""
+
+
+def extract_queries(claude_text: str, n_expected: int) -> list[str]:
+    """Pull the queries[] array out of Claude's output (fenced or bare JSON)."""
+    text = (claude_text or "").strip()
+    if not text:
+        return []
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = m.group(1) if m else None
+    if candidate is None:
+        start = text.find("{")
+        candidate = text[start:] if start >= 0 else None
+    if not candidate:
+        return []
+    env = None
+    try:
+        env = json.loads(candidate)
+    except json.JSONDecodeError:
+        # Trim trailing prose to the matching brace.
+        depth = 0
+        for i, ch in enumerate(candidate):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        env = json.loads(candidate[: i + 1])
+                    except json.JSONDecodeError:
+                        env = None
+                    break
+    if not isinstance(env, dict):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in env.get("queries") or []:
+        if not isinstance(q, str):
+            continue
+        q = q.strip()
+        core = normalize_query(q)
+        if not q or not core or core in seen:
+            continue
+        seen.add(core)
+        out.append(q)
+    return out[:n_expected] if n_expected else out
+
+
+# --- Query dedup against history (via API) ----------------------------------
+
+def load_existing_query_cores(project_name: str) -> set[str]:
+    """Normalized cores of every query ever attempted for this project.
+
+    Reads /api/v1/twitter-search-attempts/distinct-queries (no direct DB).
+    Returns an empty set on API failure so a transient read error degrades to
+    'no dedup' rather than crashing the invocation (we'd rather re-test a
+    duplicate query than skip inventing entirely)."""
+    try:
+        resp = api_get(
+            "/api/v1/twitter-search-attempts/distinct-queries",
+            query={"project": project_name},
+        )
+    except SystemExit as exc:
+        print(f"[invent_topics] distinct-queries read failed for "
+              f"{project_name!r}: {exc} (proceeding without query dedup)",
+              file=sys.stderr)
+        return set()
+    queries = ((resp or {}).get("data") or {}).get("queries") or []
+    return {normalize_query(q) for q in queries if q}
+
+
+def dedup_queries(
+    drafted: list[str],
+    existing_cores: set[str],
+) -> tuple[list[str], list[str]]:
+    """Split drafted queries into (new, already_tried) by normalized core."""
+    new: list[str] = []
+    dupes: list[str] = []
+    seen = set(existing_cores)
+    for q in drafted:
+        core = normalize_query(q)
+        if core in seen:
+            dupes.append(q)
+        else:
+            new.append(q)
+            seen.add(core)
+    return new, dupes
+
+
+# --- Supply test (browser-harness via lock helper) --------------------------
+
+def supply_test(
+    project_name: str,
+    topic: str,
+    queries: list[str],
+    freshness_hours: int = FRESHNESS_HOURS,
+    lock_timeout: int = LOCK_TIMEOUT_SEC,
+) -> tuple[bool, list[dict]]:
+    """Scan each query at `freshness_hours` via the lock+harness helper.
+
+    Returns (tested, results) where results is
+    [{"query": q, "tweets_found": n}, ...] in the SAME order as `queries`.
+
+    tested=False means the helper produced NO scan records (lock timeout, or
+    the browser went down) — the caller must NOT treat that as zero supply.
+    """
+    if not queries:
+        return True, []
+    qpayload = [
+        {"project": project_name, "query": q, "search_topic": topic}
+        for q in queries
+    ]
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", prefix="invent-queries-", delete=False
+    ) as qf:
+        json.dump(qpayload, qf)
+        queries_path = qf.name
+    scan_out = tempfile.NamedTemporaryFile(
+        suffix=".jsonl", prefix="invent-scan-", delete=False
+    ).name
+
+    try:
+        subprocess.run(
+            ["bash", _SUPPLY_TEST_SH, queries_path, scan_out,
+             str(freshness_hours), str(lock_timeout)],
+            check=False,
+            timeout=lock_timeout + 600,  # helper's own lock wait + scan headroom
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[invent_topics] supply-test helper timed out for topic "
+              f"{topic!r}", file=sys.stderr)
+        _safe_unlink(queries_path)
+        _safe_unlink(scan_out)
+        return False, []
+
+    # Parse per-query scan records. scan() writes one record per call even on
+    # zero tweets, so an empty file means the scan loop never ran (untested).
+    found_by_core: dict[str, int] = {}
+    records = 0
+    try:
+        with open(scan_out) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                records += 1
+                core = normalize_query(rec.get("query", ""))
+                found_by_core[core] = len(rec.get("tweets") or [])
+    except OSError:
+        records = 0
+
+    _safe_unlink(queries_path)
+    _safe_unlink(scan_out)
+
+    if records == 0:
+        return False, []
+
+    results = [
+        {"query": q, "tweets_found": int(found_by_core.get(normalize_query(q), 0))}
+        for q in queries
+    ]
+    return True, results
+
+
+def _safe_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+# --- Attempt logging (via log_twitter_search_attempts.py -> route) ----------
+
+def log_attempts(
+    project_name: str,
+    topic: str,
+    results: list[dict],
+    batch_id: str,
+    dry_run: bool = False,
+) -> None:
+    """Log every scanned query (dud + hit) to twitter_search_attempts via the
+    existing logger script, which POSTs to /api/v1/twitter-search-attempts.
+
+    All attempts are logged on purpose — duds are the anti-list signal and the
+    topic's supply record, per the user's 'log all attempts' rule."""
+    if not results:
+        return
+    rows = [
+        {
+            "query": r["query"],
+            "project": project_name,
+            "tweets_found": r["tweets_found"],
+            "search_topic": topic,
+        }
+        for r in results
+    ]
+    if dry_run:
+        print(f"[dry-run] would log {len(rows)} attempts for topic {topic!r} "
+              f"(batch={batch_id})", file=sys.stderr)
+        return
+    try:
+        subprocess.run(
+            ["python3", _LOG_ATTEMPTS_PY, "--batch-id", batch_id],
+            input=json.dumps(rows),
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[invent_topics] log_attempts timed out for topic {topic!r}",
+              file=sys.stderr)
+
+
+# --- Per-topic pipeline: draft -> dedup -> scan -> log ----------------------
+
+def process_topic(
+    project: dict,
+    topic: str,
+    existing_query_cores: set[str],
+    batch_id: str,
+    dry_run: bool = False,
+) -> dict:
+    """Run the full draft->dedup->supply-test->log pipeline for one topic.
+
+    Returns a result dict with: queries_drafted, queries_tested, attempts
+    (list of {query, tweets_found}), supply_total, tested (bool), qualifies
+    (bool). `tested=False` signals the browser was unavailable — the caller
+    should abort the run rather than treat the topic as a dud.
+    """
+    project_name = project.get("name", "")
+
+    # 1. Draft queries.
+    qprompt = build_query_prompt(project, topic, QUERIES_PER_TOPIC)
+    raw = call_claude(qprompt)
+    drafted = extract_queries(raw, QUERIES_PER_TOPIC)
+    print(f"  [{topic}] drafted {len(drafted)} queries", file=sys.stderr)
+
+    # 2. Dedup against history; refill ONCE if dedup drops us below target.
+    new_q, dupes = dedup_queries(drafted, existing_query_cores)
+    if dupes:
+        print(f"  [{topic}] dropped {len(dupes)} already-tried queries",
+              file=sys.stderr)
+    if len(new_q) < QUERIES_PER_TOPIC and drafted:
+        tried_cores = existing_query_cores | {normalize_query(q) for q in drafted}
+        refill_prompt = build_query_prompt(
+            project, topic, QUERIES_PER_TOPIC,
+            avoid_queries={normalize_query(q) for q in drafted},
+        )
+        refill_raw = call_claude(refill_prompt)
+        refill = extract_queries(refill_raw, QUERIES_PER_TOPIC)
+        more_new, _ = dedup_queries(refill, tried_cores)
+        for q in more_new:
+            if len(new_q) >= QUERIES_PER_TOPIC:
+                break
+            new_q.append(q)
+        print(f"  [{topic}] refill added {min(len(more_new), QUERIES_PER_TOPIC)} "
+              f"queries (now {len(new_q)})", file=sys.stderr)
+
+    queries = new_q[:QUERIES_PER_TOPIC]
+
+    # 3. Supply-test.
+    if dry_run:
+        # No browser work in dry-run; report the plan only.
+        print(f"  [dry-run] [{topic}] would scan {len(queries)} queries at "
+              f"{FRESHNESS_HOURS}h", file=sys.stderr)
+        return {
+            "topic": topic, "queries_drafted": len(drafted),
+            "queries_tested": len(queries), "attempts": [],
+            "supply_total": 0, "tested": True, "qualifies": False,
+            "queries": queries,
+        }
+
+    tested, results = supply_test(project_name, topic, queries)
+    if not tested:
+        return {
+            "topic": topic, "queries_drafted": len(drafted),
+            "queries_tested": len(queries), "attempts": [],
+            "supply_total": 0, "tested": False, "qualifies": False,
+            "queries": queries,
+        }
+
+    supply_total = sum(r["tweets_found"] for r in results)
+    qualifies = supply_total >= SUPPLY_FLOOR
+    for r in results:
+        print(f"    scan q={r['query'][:48]!r} -> {r['tweets_found']} fresh",
+              file=sys.stderr)
+    print(f"  [{topic}] supply_total={supply_total} "
+          f"(floor={SUPPLY_FLOOR}) qualifies={qualifies}", file=sys.stderr)
+
+    # 4. Log all attempts (dud + hit).
+    log_attempts(project_name, topic, results, batch_id, dry_run=dry_run)
+
+    return {
+        "topic": topic, "queries_drafted": len(drafted),
+        "queries_tested": len(queries), "attempts": results,
+        "supply_total": supply_total, "tested": True, "qualifies": qualifies,
+        "queries": queries,
+    }
 
 
 # --- Main -------------------------------------------------------------------
