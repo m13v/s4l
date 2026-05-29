@@ -44,6 +44,9 @@ trap 'rc=$?; echo "SCRIPT DIED line=$LINENO cmd=\"$BASH_COMMAND\" exit=$rc" | te
 # before the Claude/MCP step that drives the browser, so peers can use the
 # profile during our pre-Claude research + prompt build.
 source "$REPO_DIR/skill/lock.sh"
+# reddit-harness backend (2026-05-29). Sets MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS,
+# exports REDDIT_CDP_URL=:9557, provides ensure_reddit_browser_for_backend.
+source "$REPO_DIR/skill/lib/reddit-backend.sh"
 acquire_lock "reddit-threads" 600
 
 # Load engagement styles.
@@ -266,7 +269,10 @@ export CLAUDE_SESSION_ID=$(uuidgen | tr 'A-Z' 'a-z')
 log "Acquiring reddit-browser lease (TTL 90s, MCP-proxy heartbeated)..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 600 --ttl 90 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease (peer pipelines may collide)."
-ensure_browser_healthy "reddit"
+if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+    ensure_browser_healthy "reddit"
+fi
 
 # NOTE 2026-05-07: removed broken pre-flight Chrome health check (commit
 # 971844d, 2026-05-04). Intent was to short-circuit before Claude drafted for
@@ -287,7 +293,9 @@ ensure_browser_healthy "reddit"
 CLAUDE_TMP=$(mktemp)
 set +e
 if [ "$RETRY_MODE" = "1" ]; then
-"$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are RETRYING a previously-aborted thread for the ${PROJECT} project as u/${POST_ACCOUNT}.
+"$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are RETRYING a previously-aborted thread for the ${PROJECT} project as u/${POST_ACCOUNT}.
+
+$BROWSER_INSTRUCTIONS
 
 ## CRITICAL: This is a RETRY. The title and body are PRE-WRITTEN and FINAL.
 DO NOT redraft. DO NOT research. DO NOT browse the subreddit. DO NOT pick a topic.
@@ -349,7 +357,7 @@ CRITICAL: If a browser call times out, wait 30s and retry up to 3 times.
 CRITICAL: This is a RETRY of a \$4-24 sunk-cost draft. Do NOT redraft, do NOT research." > "$CLAUDE_TMP" 2>&1
 CLAUDE_RC=$?
 else
-"$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are posting an ORIGINAL thread to ${SUBREDDIT} for the ${PROJECT} project as u/${POST_ACCOUNT}.
+"$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are posting an ORIGINAL thread to ${SUBREDDIT} for the ${PROJECT} project as u/${POST_ACCOUNT}.
 
 ## Config & Rules
 Read $SKILL_FILE for content rules and anti-AI-detection checklist.
