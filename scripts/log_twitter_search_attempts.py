@@ -49,6 +49,12 @@ def main():
         help="Optional path; if set, write JSON list of "
              "[{query, project, attempt_id}, ...] for the scorer to consume.",
     )
+    # kind: which pipeline drafted these attempts. 'cycle' (default) preserves
+    # back-compat for every existing caller (run-twitter-cycle.sh + friends).
+    # invent_topics.py passes --kind invent so qualified_query_bank can union
+    # the proven invented set into the Phase 1 bank.
+    p.add_argument("--kind", default="cycle", choices=("cycle", "invent"),
+                   help="Pipeline lane writing these attempts.")
     args = p.parse_args()
 
     raw = sys.stdin.read().strip()
@@ -100,6 +106,7 @@ def main():
                 "project_name": project,
                 "tweets_found": tweets_found,
                 "batch_id": args.batch_id,
+                "kind": args.kind,
             }
             if search_topic:
                 payload["search_topic"] = search_topic
