@@ -253,12 +253,43 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
                 query={"our_account": _twitter_handle},
                 ok_on_404=True,
             )
-            for _pair in (_skip_resp.get("data") or {}).get("pairs") or []:
-                _su = (_pair.get("tweet_url") or "").strip()
-                if _su:
-                    skipped_pairs.add((_su, _pair.get("project")))
-        except SystemExit:
+            if _skip_resp.get("_not_found"):
+                # 404: endpoint not deployed yet. Explicit so a 0-pair gate is
+                # never mistaken for "loaded the set, nothing matched".
+                print(
+                    f"[skip_gate] fail-open: skipped-urls endpoint 404 "
+                    f"(not deployed) our_account={_twitter_handle}; "
+                    f"skip filter inactive this cycle",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                for _pair in (_skip_resp.get("data") or {}).get("pairs") or []:
+                    _su = (_pair.get("tweet_url") or "").strip()
+                    if _su:
+                        skipped_pairs.add((_su, _pair.get("project")))
+        except SystemExit as _skip_err:
+            # http_api raises SystemExit on terminal HTTP failure (e.g. a 429
+            # rate-limit, which is a 4xx). Fail open: an empty set means the
+            # gate is inert this cycle rather than crashing Phase 1. Logged
+            # explicitly so an inert gate is distinguishable from a real
+            # no-match (both otherwise show "already rejected for project: 0").
             skipped_pairs = set()
+            print(
+                f"[skip_gate] fail-open: skipped-urls fetch failed "
+                f"({_skip_err}); skip filter inactive this cycle",
+                file=sys.stderr,
+                flush=True,
+            )
+    # Always emit the loaded size so every cycle self-documents whether the
+    # gate had real data (N>0) or fell open (N=0). Pairs with N>0 is the
+    # positive proof that the check ran against the live skipped set.
+    print(
+        f"[skip_gate] loaded {len(skipped_pairs)} skipped (url,project) pairs "
+        f"for our_account={_twitter_handle or '(unresolved)'}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     inserted = updated = skipped = 0
     skipped_fake_id = 0
