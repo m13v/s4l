@@ -1624,11 +1624,16 @@ For each chosen candidate:
    - link_slug (string, REQUIRED when has_landing_pages=true; OMIT otherwise): kebab-case, alphanumeric+hyphens only, max 50 chars.
    - search_topic (string, REQUIRED): the EXACT 'Search query' value from this candidate's block above. Copy verbatim. Do not paraphrase, normalise, or trim. The shell stamps this onto posts.search_topic so the next cycle's Phase 1 can rank which topics convert (clicks per post) and evolve the universe accordingly.
 
-5. ACCOUNT FOR EVERY PRE-SCORED CANDIDATE: every Candidate ID listed in the PRE-SCORED CANDIDATES section above MUST appear in EXACTLY ONE of the two output arrays this cycle:
-   - 'candidates' (every on-brand pick, no cap) per step 4 above, OR
-   - 'rejected' with a SHORT one-line reason explaining why this thread is not worth replying to (off-topic for the matched project, toxic / hateful, low-quality / spam, audience mismatch, near-duplicate of something we already replied to, etc.). Reason must be <=200 chars, plain text, no quotes.
-   It is fine for 'candidates' to be empty if no thread is on-brand; in that case every candidate id goes into 'rejected'. The reverse (every id in 'candidates', none in 'rejected') is also allowed when every thread is genuinely on-brand.
-   Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you forgot.
+5. CLASSIFY EVERY PRE-SCORED CANDIDATE into ONE of THREE outcomes. There is NO post cap and NO per-project quota: post EVERY thread you judge genuinely on-brand.
+   (a) 'candidates' — an on-brand pick you are replying to this cycle (step 4 above). No cap.
+   (b) 'rejected' — ONLY for a PERMANENT, thread-intrinsic reason this thread should NEVER be replied to for the matched project: off-topic for the project, toxic / hateful, low-quality / spam / promo / shill, audience or ICP mismatch, our own account, or stale. Reason must be <=200 chars, plain text, no quotes. CRITICAL: the shell marks every 'rejected' entry status='skipped', and a skipped (thread, project) is filtered out of ALL future scans for this account PERMANENTLY. Only reject things that will never be a good fit.
+   (c) OMIT from BOTH arrays — for a TIMING-ONLY reason where the thread itself is fine but you are simply not posting to it right NOW. Omitting keeps it 'pending' so a later cycle can re-judge it. ALWAYS omit (NEVER reject) when your only reason is one of:
+       - you preferred a stronger candidate this cycle (there is no cap, so ideally just post this one too; if you still defer, omit it),
+       - it is a near-duplicate of another thread you are already picking THIS cycle,
+       - you already engaged this author / a similar thread this cycle and want to avoid back-to-back over-engagement.
+       These are DEFERRALS, not rejections. Putting any of them in 'rejected' would permanently blacklist a thread that is actually fine. Do NOT do that.
+   It is fine for 'candidates' to be empty (nothing on-brand) and fine for 'rejected' to be empty (nothing permanently unsuitable).
+   Do NOT update twitter_candidates yourself; the shell will mark every entry of 'rejected' as status='skipped' with the reason, and Phase 0 will salvage anything you omit or forget.
 
 5a. SELF-IMPROVING PROJECT-WIDE EXCLUSION LIST (optional, on rejected entries only):
     When you put a candidate in 'rejected' BECAUSE of a stable, recurring CLASS of false-positive (not a one-off bad tweet), you MAY include a 'proposed_excludes' array of 1-3 specific keywords. If you do, the pipeline will (after a 2-distinct-batch activation gate) automatically append \`-keyword\` to ALL future Twitter searches for the matched_project, project-wide and persistent. This is the ONLY upstream block against the entire class of false-positive that a tighter Phase 1 query alone cannot prevent.
