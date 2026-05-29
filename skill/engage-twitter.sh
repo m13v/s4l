@@ -325,29 +325,35 @@ MANDATORY reply flow for every item:
           Do this BEFORE Step 4, since the typed text in Step 4c must include
           the suffix. The literal text rule is the entire point: never paraphrase
           or reformat the suffix.
-  Step 3b: UTM-WRAP ANY URL IN YOUR_REPLY_TEXT. Mandatory for Tier 2/3 replies
+  Step 3b: SHORT-LINK ANY URL IN YOUR_REPLY_TEXT. Mandatory for Tier 2/3 replies
            that drop a brand URL (runner.now, agora.xyz, podlog.io, fazm.ai,
            usenightowl.com, etc.). The browser type path has NO Python
            wrap layer, so a bare URL would be posted as-is and we lose all
-           per-post attribution. Run, in bash:
-             python3 \$REPO_DIR/scripts/dm_short_links.py utm-text \\
+           per-post click attribution. Mint a real /r/<code> short link the
+           SAME way the post/link-edit pipelines do, in bash:
+             WRAP_RESULT=\$(python3 \$REPO_DIR/scripts/dm_short_links.py wrap-post-text \\
                --platform twitter \\
                --project RESOLVED_PROJECT_NAME \\
-               --text "YOUR_REPLY_TEXT"
-           This rewrites every URL in the text to its UTM-tagged form
-           (utm_source=s4l, utm_term=twitter, utm_campaign=<slug>) and
-           prints the result on stdout. Use that printed string as
-           YOUR_REPLY_TEXT going forward. No DB write happens — the URL
-           itself carries attribution. If YOUR_REPLY_TEXT contains zero URLs
-           (Tier 1, default case), the helper is a no-op and the text comes
-           back unchanged, so it is safe to run unconditionally.
+               --text "YOUR_REPLY_TEXT")
+           RESOLVED_PROJECT_NAME must be the EXACT \`name\` field from config.json
+           (case-sensitive; e.g. "fazm" lowercase, "Cyrano", "WhatsApp MCP").
+           Parse the JSON output (\`{ok, text, minted_session, ...}\`):
+             - Use \`text\` (every URL replaced with a /r/<code> short link on
+               the project's own domain) as YOUR_REPLY_TEXT going forward; this
+               is what you type in Step 4.
+             - Save \`minted_session\` as MINTED_SESSION for the Step 5b backfill.
+           If \`ok\` is false, log the error and SKIP this reply (leave it to be
+           reset to 'pending' on the next run); do NOT type a bare URL. If
+           YOUR_REPLY_TEXT contains zero URLs (Tier 1, default case),
+           wrap-post-text is a no-op: it returns the text unchanged and
+           minted_session is null (that's fine), carry on and skip Step 5b.
 
   Step 4: Post the reply via the SAME browser session from Step 2 (use the
           tools described in the BROWSER BACKEND block).
           a) Re-snapshot the page to refresh element state.
           b) Find the reply textbox: role="textbox" with name like "Post your reply"
              or "Post text". Click it.
-          c) Type YOUR_REPLY_TEXT (post-Step-3b UTM-wrapped form, post-Step-3a
+          c) Type YOUR_REPLY_TEXT (post-Step-3b short-link-wrapped form, post-Step-3a
              suffix) into that textbox. Do NOT auto-submit; we click the Reply
              button explicitly in step e.
           d) Re-snapshot the page (refs can shift after typing).
@@ -372,6 +378,14 @@ MANDATORY reply flow for every item:
           \`SELECT id FROM replies ORDER BY id DESC LIMIT 1\` if you can't parse it):
             python3 $REPO_DIR/scripts/campaign_bump.py --table replies --id REPLY_ROW_ID --campaign-id CAMPAIGN_ID_TO_BUMP
           If CAMPAIGN_FIRED=0, skip this step entirely.
+  Step 5b: BACKFILL SHORT-LINK ATTRIBUTION. If you minted a short link in Step 3b
+          (MINTED_SESSION is non-empty AND not the string "null"), stamp it onto
+          this reply row now that Step 5 succeeded. The reply id is the same ID
+          you passed to reply_db.py in Step 5:
+            python3 $REPO_DIR/scripts/dm_short_links.py backfill-reply --minted-session MINTED_SESSION --reply-id ID
+          This sets post_links.reply_id so the /r/<code> clicks attribute to this
+          engagement reply (same mechanism link-edit pipelines use via backfill-post).
+          If Step 3b minted nothing (no URL in the reply, MINTED_SESSION null), skip this step.
 If Step 5 fails, the item stays 'processing' and will be reset to 'pending' on the next run.
 If the tweet has been deleted or is unavailable, mark as 'skipped' with reason 'tweet_not_found'.
 
