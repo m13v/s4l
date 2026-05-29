@@ -276,8 +276,7 @@ _sa_emit_run_summary_oneshot() {
         : "${skipped_ct:=0}"
     fi
     cost=$(timeout 10 python3 "$REPO_DIR/scripts/get_run_cost.py" \
-                --since "${RUN_START:-0}" \
-                --scripts "run-twitter-cycle-scan" "run-twitter-cycle-prep" "run-twitter-cycle-post" \
+                --cycle-id "${BATCH_ID}" \
                 2>/dev/null || echo "0.0000")
 
     failed_ct="${EXEC_FAILED:-0}"
@@ -1252,7 +1251,7 @@ if [ "$BATCH_COUNT" = "0" ]; then
         _FAILURE_REASON="empty_batch:1"
     fi
     log "Empty batch after $SCAN_ATTEMPT attempt(s) (reason=$_FAILURE_REASON). Nothing to re-score. Exiting."
-    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
+    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
     python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 1 \
         --salvaged "${SALVAGED:-0}" \
         --queries "${CUMULATIVE_QUERIES:-0}" --duds "${CUMULATIVE_DUDS:-0}" \
@@ -1344,7 +1343,7 @@ if [ -z "$CANDIDATES" ]; then
     # UPDATE atomically and prints the resulting expired_count integer that
     # the EXPIRED_BATCH variable previously got from a second COUNT(*) query.
     EXPIRED_BATCH=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" expire-batch --batch-id "$BATCH_ID" 2>/dev/null || echo 0)
-    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
+    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
     # Not a hard error — batch had candidates but none remained 'pending' after
     # Phase 2a (typically: every row already flipped to posted/skipped/expired
     # by an earlier salvage pass). With the ripening floor removed (2026-05-15),
@@ -1723,7 +1722,7 @@ fi
 if [ "${PLAN_COUNT:-0}" = "0" ]; then
     log "Empty plan from prep step. Exiting cycle without posting (pending rows salvaged next cycle)."
     rm -f "$PLAN_FILE"
-    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "run-twitter-cycle-scan" "run-twitter-cycle-prep" "run-twitter-cycle-post" 2>/dev/null || echo "0.0000")
+    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
     # If the classifier identified a real Anthropic error (any non-empty reason
     # key), log as failed=1 with that reason so the dashboard pill reads
     # "failed: stream_idle_timeout" / "failed: monthly_limit" / etc. Otherwise
