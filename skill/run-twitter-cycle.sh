@@ -111,9 +111,9 @@ FRESHNESS_HOURS=6
 # Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling)
 # so peer cycles don't accidentally expire each other's still-pending rows.
 # Only FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) varies.
-# Weights (2026-05-28): D=50%, A=B=C=~16.67%. hash % 6 with mapping
-# [A,B,C,D,D,D] up-weights D after early signal favored the 2k view cap.
-TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%6; print(['A','B','C','D','D','D'][h])" "$BATCH_ID" 2>/dev/null || echo "A")
+# Weights (2026-05-29): D=70%, C=15%, A=9%, B=6%. hash % 100 with thresholds
+# further up-weights D after the 2k view cap kept outperforming on early signal.
+TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%100; print('D' if h<70 else 'C' if h<85 else 'B' if h<91 else 'A')" "$BATCH_ID" 2>/dev/null || echo "A")
 FRESHNESS_HOURS_DISCOVER=$FRESHNESS_HOURS
 if [ "$TWITTER_CYCLE_VARIANT" = "C" ] || [ "$TWITTER_CYCLE_VARIANT" = "D" ]; then
     FRESHNESS_HOURS_DISCOVER=1
