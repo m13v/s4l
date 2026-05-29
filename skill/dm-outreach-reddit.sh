@@ -227,7 +227,7 @@ DMs/Chat disabled (recipient setting, not a send failure):
    \`\`\`
    Run this even if step 2 (profile fetch) raised, the send threw, or you're skipping the DM. Wrap the per-DM browser block (steps 2 → 7) in a way that step 7.5 ALWAYS executes (mental try/finally). The release is idempotent and safe to call multiple times. Move to the NEXT DM only after the release.
 
-CRITICAL: ALL browser calls MUST use mcp__reddit-agent__* tools. NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a reddit-agent tool call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
+CRITICAL - Browser agent rule: ONLY use the browser tool described in the BROWSER BACKEND block above (mcp__reddit-harness__bh_run). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, mcp__reddit-agent__*, or mcp__macos-use__* tools. If a bh_run call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 PROMPT_EOF
 
 # NOTE: We do NOT acquire reddit-browser at the bash level. Claude itself
@@ -246,10 +246,13 @@ PROMPT_EOF
 log "Pre-flight: sweep orphan reddit-agent Chrome / playwright-mcp before handing off to claude..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
     log "WARNING: reddit_browser_lock.py pre-flight acquire failed; proceeding (claude will retry per-DM)."
-ensure_browser_healthy "reddit"
+if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+    ensure_browser_healthy "reddit"
+fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
-gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-reddit" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit DM outreach claude exited with code $?"
+gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-reddit" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Reddit DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
 # Belt-and-suspenders: if claude exited without releasing the lock (e.g.
