@@ -7998,13 +7998,10 @@ async function handleApi(req, res) {
     })().catch(e => json(res, { error: e.message }, 500));
   }
 
-  // GET /api/search-topics/stats - per-topic intelligence across Twitter +
-  // Reddit (the two platforms that today carry a higher-level topic on each
-  // search attempt: twitter_search_attempts.search_topic, populated by the
-  // 2026-05-26 pick_search_topic.py picker + backfilled from candidates; and
-  // reddit_search_attempts.seed, populated since the seed-rollout). LinkedIn
-  // currently has no topic-level field on its attempts table; rows fall under
-  // "(no topic)" with attempts_with_topic=0 so the section still renders.
+  // GET /api/search-topics/stats - per-topic intelligence across Twitter,
+  // LinkedIn, and Reddit. The topic is the higher-level seed picked before
+  // literal query drafting: twitter_search_attempts.search_topic,
+  // linkedin_search_attempts.search_topic, or reddit_search_attempts.seed.
   //
   // Same shape as /api/search-queries/stats but the grain is search_topic
   // instead of literal query. One row per (platform, topic, project).
@@ -8015,9 +8012,9 @@ async function handleApi(req, res) {
     const rawPlatform = (url.searchParams.get('platform') || '').trim().toLowerCase();
     const platform = (rawPlatform === '' || rawPlatform === 'all') ? '' :
                      (rawPlatform === 'x' ? 'twitter' : rawPlatform);
-    if (platform && platform !== 'twitter' && platform !== 'reddit') {
-      // LinkedIn + github etc don't have a topic concept on their attempts side
-      // today. Return empty rather than error so the section renders cleanly.
+    if (platform && platform !== 'twitter' && platform !== 'linkedin' && platform !== 'reddit') {
+      // GitHub etc don't have a topic concept on their attempts side today.
+      // Return empty rather than error so the section renders cleanly.
       return json(res, { days, rows: [], platform_supported: false });
     }
     const limit = Math.max(1, Math.min(5000, parseInt(url.searchParams.get('limit') || '5000', 10) || 5000));
@@ -8042,6 +8039,14 @@ async function handleApi(req, res) {
         "WHERE ran_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND search_topic IS NOT NULL AND length(trim(search_topic)) > 0 " +
         "UNION ALL " +
+        // LinkedIn: same picker concept as Twitter, with candidates_found
+        // representing post-floor cards from the LinkedIn SERP.
+        "SELECT 'linkedin', search_topic, project_name, " +
+               "candidates_found AS candidates_found, serp_quality_score, ran_at " +
+        "FROM linkedin_search_attempts " +
+        "WHERE ran_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND search_topic IS NOT NULL AND length(trim(search_topic)) > 0 " +
+        "UNION ALL " +
         // Reddit: seed = the higher-level topic concept that drove the query.
         "SELECT 'reddit', seed, project_name, " +
                "candidates_post_filter AS candidates_found, NULL::float8, ran_at " +
@@ -8055,6 +8060,12 @@ async function handleApi(req, res) {
         "SELECT 'twitter' AS platform, c.search_topic AS topic, " +
                "COALESCE(c.matched_project, '(none)') AS project_name, c.post_id " +
         "FROM twitter_candidates c " +
+        "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
+          "AND c.search_topic IS NOT NULL AND length(trim(c.search_topic)) > 0 " +
+        "UNION ALL " +
+        // LinkedIn: candidates carry the assigned search_topic from Phase A.
+        "SELECT 'linkedin', c.search_topic, COALESCE(c.matched_project, '(none)'), c.post_id " +
+        "FROM linkedin_candidates c " +
         "WHERE c.discovered_at >= NOW() - INTERVAL '" + windowHours + " hours' " +
           "AND c.search_topic IS NOT NULL AND length(trim(c.search_topic)) > 0 " +
         "UNION ALL " +
@@ -9925,7 +9936,7 @@ const HTML = `<!DOCTYPE html>
   </details>
   <details class="style-stats-section" id="search-topics-stats" open>
     <summary>
-      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-topics-stats-heading">Search Topics (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-topic stats across Twitter (twitter_search_attempts.search_topic, set by pick_search_topic.py) + Reddit (reddit_search_attempts.seed). LinkedIn + GitHub don\u2019t track a topic concept at the attempt layer. Topic is the higher-level theme the LLM drafts queries from (e.g. \u2018AI phone agent\u2019 \u2192 many literal queries). attempts = times any query from this topic was drafted. candidates_found = total tweets/posts those searches returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this topic that we actually posted to. avg_engagement = comments\u00D73 + upvotes on resulting posts. Honors Window/Platform/Project filters above. Drill into \u2018Search Queries\u2019 below for the literal-phrase granularity within each topic.">i</span></span>
+      <span class="style-stats-title"><span class="style-stats-caret">\u25B6</span><span id="search-topics-stats-heading">Search Topics (last 24 hours)</span><span class="stat-card-info" data-tooltip="Per-topic stats across Twitter (twitter_search_attempts.search_topic), LinkedIn (linkedin_search_attempts.search_topic), and Reddit (reddit_search_attempts.seed). GitHub doesn\u2019t track a topic concept at the attempt layer. Topic is the higher-level theme the LLM drafts queries from (e.g. \u2018AI phone agent\u2019 \u2192 many literal queries). attempts = times any query from this topic was drafted. candidates_found = total tweets/posts those searches returned. dud_rate = % of attempts that returned 0. posts_made = candidates from this topic that we actually posted to. avg_engagement = comments\u00D73 + upvotes on resulting posts. Honors Window/Platform/Project filters above. Drill into \u2018Search Queries\u2019 below for the literal-phrase granularity within each topic.">i</span></span>
       <span class="style-stats-total" id="search-topics-stats-total"></span>
     </summary>
     <div id="search-topics-stats-controls" style="padding:8px 16px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
