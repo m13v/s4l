@@ -372,6 +372,17 @@ def get_browser_and_page(playwright):
             if chosen is None and cdp_browser.contexts:
                 chosen = cdp_browser.contexts[0]
             if chosen is not None:
+                # Reuse an existing tab instead of opening a new one. new_page()
+                # steals OS focus every call (annoying when working in other apps);
+                # navigating a background tab does not. Mirrors twitter_browser.
+                # Prefer a tab already on reddit.com (not login); else pages[0];
+                # else, only if the context has zero tabs, create one. The caller
+                # navigates it and leaves it open (finally blocks don't close CDP tabs).
+                for pg in chosen.pages:
+                    if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                        return cdp_browser, pg, True
+                if chosen.pages:
+                    return cdp_browser, chosen.pages[0], True
                 page = chosen.new_page()
                 return cdp_browser, page, True
             # No usable context: do NOT close the CDP browser (would kill the
@@ -394,6 +405,12 @@ def get_browser_and_page(playwright):
                     for c in cookies
                 )
                 if has_session:
+                    # Reuse an existing tab (no focus-steal); only new_page if none.
+                    for pg in ctx.pages:
+                        if "reddit.com" in (pg.url or "") and "login" not in (pg.url or ""):
+                            return cdp_browser, pg, True
+                    if ctx.pages:
+                        return cdp_browser, ctx.pages[0], True
                     page = ctx.new_page()
                     return cdp_browser, page, True
             try:
@@ -696,10 +713,13 @@ def post_comment(thread_url, text):
             }
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -945,10 +965,13 @@ def reply_to_comment(comment_permalink, text, dm_id=None):
             }
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -1077,10 +1100,13 @@ def edit_comment(comment_permalink, new_text):
             }
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -1183,10 +1209,13 @@ def edit_thread(thread_permalink, new_body):
             }
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -1371,10 +1400,13 @@ def unread_dms():
             return unique
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -1538,10 +1570,13 @@ def read_conversation(chat_url, max_messages=20):
                 return result
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -1818,10 +1853,13 @@ def send_dm(chat_url, message, dm_id=None):
                 }
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -2122,10 +2160,13 @@ def compose_dm(recipient, subject, body):
                 return {"ok": True, "thread_url": page.url}
 
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
@@ -2294,10 +2335,13 @@ def scrape_views(username, max_scrolls=300):
         except Exception as e:
             return {"ok": False, "error": str(e)}
         finally:
+            # Harness (is_cdp) tabs are REUSED across invocations, so never close
+            # the page here: closing it forces the next run to new_page(), which
+            # steals OS focus from whatever app is in front. Mirrors twitter_browser
+            # (only the persistent-context fallback closes). cleanup_harness_tabs at
+            # cycle start bounds tab count to one.
             try:
-                if is_cdp:
-                    page.close()
-                else:
+                if not is_cdp:
                     page.context.close()
             except Exception:
                 pass
