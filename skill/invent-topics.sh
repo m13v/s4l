@@ -22,15 +22,20 @@ LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/invent-topics-$(date +%Y-%m-%d_%H%M%S).log"
 
-# Number of candidate topics to ask Claude for per attempt. Picker validation
-# typically rejects 30-60% of these as dupes/near-dupes, so 4 proposals
-# usually means 1-3 land. Override via INVENT_PROPOSALS_PER_RUN.
-PROPOSALS="${INVENT_PROPOSALS_PER_RUN:-4}"
+# Number of candidate topics to ask Claude for per attempt. One topic per loop
+# matches the new supply-test rhythm: invent ONE topic, draft its queries,
+# supply-test, gate on supply, decide whether to loop again. With the post-
+# 2026-05-29 dupe-retry-doesn't-burn-attempts behavior, asking for more than
+# one is wasteful (a dupe-only Claude call retries cost-free anyway).
+# Override via INVENT_PROPOSALS_PER_RUN.
+PROPOSALS="${INVENT_PROPOSALS_PER_RUN:-1}"
 
-# Retry loop: keep re-asking Claude (steering away from already-tried topics)
-# until TARGET genuinely-new non-dupe topics land or MAX_ATTEMPTS Claude calls
-# are spent, then proceed with whatever survived. Tune via env.
-TARGET="${INVENT_TARGET:-3}"
+# Stop the run as soon as ONE topic clears the supply floor — the qualifying
+# tweet count IS the real target, not "how many topics qualified." A single
+# topic with supply >= SUPPLY_FLOOR fresh tweets is enough; no need to keep
+# burning Claude calls on additional topics that hour. MAX_ATTEMPTS caps the
+# loop only if the project is genuinely dry (no qualifier in N tries).
+TARGET="${INVENT_TARGET:-1}"
 MAX_ATTEMPTS="${INVENT_MAX_ATTEMPTS:-5}"
 
 {
