@@ -949,28 +949,53 @@ def main():
     print(f"[invent_topics] active universe size: {universe_size_before}",
           file=sys.stderr)
 
-    # --- Retry loop: propose -> validate -> commit until TARGET new
-    #     non-dupe topics land or MAX_ATTEMPTS is exhausted. ----------------
+    # --- Probe the managed Chrome BEFORE spending Claude tokens. A down
+    #     browser would make every supply scan return 0 and we'd commit real
+    #     topics as false 'duds'. Dry-run skips the probe (no scans run). ----
+    if not args.dry_run and not harness_alive():
+        print(f"[invent_topics] managed Chrome CDP port {CDP_PORT} is not "
+              f"answering; skipping this run (no tokens spent).",
+              file=sys.stderr)
+        return
+
+    # --- Query-dedup corpus: every distinct query ever tried for this project,
+    #     normalized to cores. Loaded once; process_topic dedups against it and
+    #     we fold each tested topic's queries back in so a later attempt this
+    #     run won't re-draft the same cores. -------------------------------
+    existing_query_cores = load_existing_query_cores(project_name)
+    print(f"[invent_topics] existing query cores for {project_name}: "
+          f"{len(existing_query_cores)}", file=sys.stderr)
+
+    # --- batch_id ties every attempt logged this run together in
+    #     twitter_search_attempts, mirroring the cycle's batch convention. ---
+    batch_id = f"invent-{project_name}-{int(time.time())}"
+
+    # --- Retry loop: invent ONE topic, draft + dedup + supply-test its
+    #     queries, log ALL attempts (dud + hit), ALWAYS commit the topic (even
+    #     at 0 supply — the topic is a real concept; its supply record lives in
+    #     twitter_search_attempts), and count it toward TARGET only if its
+    #     queries cleared SUPPLY_FLOOR. Stop when TARGET qualifying topics land
+    #     or MAX_ATTEMPTS iterations run out. A mid-run browser drop ('tested'
+    #     False) aborts the run rather than committing false duds. -----------
     # working_universe grows as we commit so later attempts dedupe against
     # both the original universe AND topics minted earlier this run.
     working_universe = set(universe)
-    # avoid_topics carries every proposal seen so far (committed or rejected)
-    # back into the next prompt as an explicit do-not-repeat list, so the
-    # model spends each retry exploring genuinely new ground instead of
-    # re-suggesting the same dupes.
+    # avoid_topics carries every proposal seen so far back into the next prompt
+    # as an explicit do-not-repeat list, so each retry explores new ground.
     avoid_topics: set[str] = set()
 
-    committed_actually: list[dict] = []
+    processed: list[dict] = []     # one entry per topic we ran process_topic on
     all_rejected: list[dict] = []
     total_proposals_parsed = 0
     last_raw = ""
     attempts_used = 0
+    aborted_untested = False
 
-    def n_committed() -> int:
-        return sum(1 for c in committed_actually if c.get("committed"))
+    def n_qualifying() -> int:
+        return sum(1 for p in processed if p.get("qualifies"))
 
     for attempt in range(1, args.max_attempts + 1):
-        if n_committed() >= args.target:
+        if n_qualifying() >= args.target:
             break
         attempts_used = attempt
 
@@ -981,40 +1006,69 @@ def main():
         total_proposals_parsed += len(proposals)
         print(f"[invent_topics] attempt {attempt}/{args.max_attempts}: "
               f"proposals parsed={len(proposals)} "
-              f"(committed so far={n_committed()}/{args.target})",
+              f"(qualifying so far={n_qualifying()}/{args.target})",
               file=sys.stderr)
         for p in proposals:
             print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
                   file=sys.stderr)
             avoid_topics.add(p["topic"])
 
-        # Validate against the CURRENT working universe (original + minted).
-        committed_plan, rejected = validate_proposals(proposals, working_universe)
-        all_rejected.extend(rejected)
-        for r in rejected:
-            print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
-                  f"{r['topic']!r} ~ {r['neighbor']!r}",
-                  file=sys.stderr)
-
-        for c in committed_plan:
-            ok = commit_topic(project_name, c["topic"], dry_run=args.dry_run)
-            committed_actually.append({**c, "committed": ok, "attempt": attempt})
-            # Add to working_universe regardless of API success so the next
-            # attempt won't re-propose it (it's a real concept now either way).
-            working_universe.add(c["topic"])
-            if ok:
-                print(f"  committed: {c['topic']!r} (neighbor={c['neighbor']!r}, "
-                      f"sim={c['similarity']})", file=sys.stderr)
-            else:
-                print(f"  commit FAILED: {c['topic']!r}", file=sys.stderr)
-
         if not proposals:
             # Model returned nothing parseable; retrying with the same
             # avoid-set is unlikely to help, but the loop cap protects us.
             print("[invent_topics] no proposals parsed this attempt",
                   file=sys.stderr)
+            continue
 
-    target_met = n_committed() >= args.target
+        # Dedup proposals against the working universe (original + minted).
+        committed_plan, rejected = validate_proposals(proposals, working_universe)
+        all_rejected.extend(rejected)
+        for r in rejected:
+            print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
+                  f"{r['topic']!r} ~ {r['neighbor']!r}", file=sys.stderr)
+
+        for c in committed_plan:
+            topic = c["topic"]
+            # Add to working_universe immediately so a later attempt won't
+            # re-propose it (it's a real concept now either way).
+            working_universe.add(topic)
+
+            # Draft -> dedup queries -> supply-test -> log all attempts.
+            result = process_topic(project, topic, existing_query_cores,
+                                   batch_id, dry_run=args.dry_run)
+
+            # A False 'tested' means the browser dropped mid-run; do NOT commit
+            # this topic as a dud. Abort and let the next hourly run retry.
+            if not result.get("tested", False):
+                print(f"[invent_topics] supply test UNTESTED for {topic!r} "
+                      f"(browser unavailable); aborting run without committing.",
+                      file=sys.stderr)
+                aborted_untested = True
+                break
+
+            # Fold this topic's tested query cores into the dedup corpus.
+            for q in result.get("queries", []):
+                existing_query_cores.add(normalize_query(q))
+
+            # ALWAYS commit the tested topic, even at 0 supply.
+            ok = commit_topic(project_name, topic, dry_run=args.dry_run)
+            processed.append({**c, **result, "committed": ok, "attempt": attempt})
+
+            if ok:
+                print(f"  committed: {topic!r} supply={result['supply_total']} "
+                      f"qualifies={result['qualifies']} "
+                      f"(neighbor={c['neighbor']!r}, sim={c['similarity']})",
+                      file=sys.stderr)
+            else:
+                print(f"  commit FAILED: {topic!r}", file=sys.stderr)
+
+            if n_qualifying() >= args.target:
+                break
+
+        if aborted_untested:
+            break
+
+    target_met = n_qualifying() >= args.target
 
     # --- Audit row (via API; no local file) ---
     elapsed = round(time.time() - t0, 2)
@@ -1023,6 +1077,7 @@ def main():
         "elapsed_sec": elapsed,
         "project": project_name,
         "pick_method": pick_method,
+        "batch_id": batch_id,
         "ledger_rows_for_project": len(topics_for_project),
         "universe_size_before": universe_size_before,
         "proposals_requested": args.proposals,
@@ -1030,19 +1085,40 @@ def main():
         "max_attempts": args.max_attempts,
         "attempts_used": attempts_used,
         "target_met": target_met,
+        "aborted_untested": aborted_untested,
         "proposals_parsed": total_proposals_parsed,
-        "committed": committed_actually,
+        "supply_floor": SUPPLY_FLOOR,
+        "queries_per_topic": QUERIES_PER_TOPIC,
+        "freshness_hours": FRESHNESS_HOURS,
+        "processed": [
+            {
+                "topic": p["topic"],
+                "committed": p.get("committed"),
+                "qualifies": p.get("qualifies"),
+                "supply_total": p.get("supply_total"),
+                "queries_drafted": p.get("queries_drafted"),
+                "queries_tested": p.get("queries_tested"),
+                "attempt": p.get("attempt"),
+                "neighbor": p.get("neighbor"),
+                "similarity": p.get("similarity"),
+                "attempts": p.get("attempts"),
+            }
+            for p in processed
+        ],
         "rejected": all_rejected,
         "dry_run": args.dry_run,
         "raw_response_head": (last_raw or "")[:500],
     }
     write_audit(audit_payload, dry_run=args.dry_run)
 
-    n_new = n_committed()
+    n_qual = n_qualifying()
+    n_committed_topics = sum(1 for p in processed if p.get("committed"))
     print(f"[invent_topics] done. project={project_name!r} "
           f"attempts={attempts_used}/{args.max_attempts} "
           f"target={args.target} target_met={target_met} "
-          f"proposals={total_proposals_parsed} committed={n_new} "
+          f"aborted_untested={aborted_untested} "
+          f"proposals={total_proposals_parsed} "
+          f"topics_committed={n_committed_topics} qualifying={n_qual} "
           f"rejected={len(all_rejected)} elapsed={elapsed}s",
           file=sys.stderr)
 
