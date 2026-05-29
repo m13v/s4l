@@ -44,6 +44,15 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
+from http_api import api_get  # noqa: E402
+
+
+# Default: also include the invent pipeline's proven supply set (queries
+# invent_topics.py drafted + supply-tested that surfaced fresh tweets but
+# never produced a posted candidate, so the bank's JOIN to twitter_candidates
+# can't see them). Disable with --no-invented for debugging.
+INVENT_MIN_SUPPLY = 3   # mirrors SUPPLY_FLOOR in invent_topics.py
+INVENT_FETCH_LIMIT = 200
 
 
 def normalize(q: str) -> str:
@@ -143,6 +152,46 @@ def build_bank(conn, project, min_likes=1, min_clicks=1, limit=None):
     return bank
 
 
+def fetch_invented_queries(project: str, min_supply: int = INVENT_MIN_SUPPLY,
+                           limit: int = INVENT_FETCH_LIMIT) -> list[dict]:
+    """Fetch invent_topics.py's proven-supply queries for a project via the
+    /api/v1/twitter-search-attempts/invented-queries route. NOT a direct DB
+    read — keeps the invent pipeline's persistence behind the API the same
+    way log_twitter_search_attempts.py does on the write side.
+
+    Returns bank-shaped rows (likes/clicks/posts=0, plus supply/attempts).
+    Drops any whose normalized core already exists in `existing_cores` (caller
+    handles dedup against the posted-engagement bank).
+    """
+    try:
+        resp = api_get(
+            "/api/v1/twitter-search-attempts/invented-queries",
+            {"project": project, "min_supply": min_supply, "limit": limit},
+        )
+    except SystemExit as e:
+        print(f"qualified_query_bank: invented-queries fetch failed for "
+              f"{project!r}: {e}", file=sys.stderr)
+        return []
+    data = (resp or {}).get("data") or {}
+    return list(data.get("queries") or [])
+
+
+def merge_invented(bank: list[dict], invented: list[dict]) -> list[dict]:
+    """Append invented queries to the bank, skipping any whose normalized core
+    already appears in the posted-engagement bank (proven > unproven; same
+    core won't surface twice). Invented entries land at the end — they sort
+    naturally below proven ones because clicks/likes/posts are 0."""
+    existing_cores = {normalize(b["query"]) for b in bank}
+    appended = []
+    for inv in invented:
+        core = normalize(inv.get("query", ""))
+        if not core or core in existing_cores:
+            continue
+        existing_cores.add(core)
+        appended.append(inv)
+    return bank + appended
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", help="Project name (config.json casing).")
@@ -159,6 +208,13 @@ def main():
                          "field, i.e. run-twitter-cycle.sh's PROJECTS_JSON) on stdin and "
                          "emit the COMBINED bank for every project, shaped like the lean "
                          "Phase 1 $QUERIES_TMP. This is the cycle integration entrypoint.")
+    ap.add_argument("--no-invented", action="store_true",
+                    help="Skip the invented-queries merge (proven-engagement only). "
+                         "Useful for debugging the posted-candidates path in isolation.")
+    ap.add_argument("--invent-min-supply", type=int, default=INVENT_MIN_SUPPLY,
+                    help=f"Min sum(tweets_found) for an invented query to enter the "
+                         f"bank tail (default {INVENT_MIN_SUPPLY}, matches "
+                         f"invent_topics.py SUPPLY_FLOOR).")
     args = ap.parse_args()
 
     db.load_env()
@@ -178,8 +234,14 @@ def main():
             if not name:
                 continue
             bank = build_bank(conn, name, args.min_likes, args.min_clicks, args.limit)
+            proven_size = len(bank)
+            if not args.no_invented:
+                invented = fetch_invented_queries(name, args.invent_min_supply)
+                bank = merge_invented(bank, invented)
             combined.extend(bank)
-            print(f"qualified_query_bank: project={name!r} -> {len(bank)} queries",
+            invent_added = len(bank) - proven_size
+            print(f"qualified_query_bank: project={name!r} -> {proven_size} proven "
+                  f"+ {invent_added} invented = {len(bank)} queries",
                   file=sys.stderr)
         json.dump(combined, sys.stdout)
         print()
@@ -205,10 +267,17 @@ def main():
         return 2
 
     bank = build_bank(conn, args.project, args.min_likes, args.min_clicks, args.limit)
+    proven_size = len(bank)
+    if not args.no_invented:
+        invented = fetch_invented_queries(args.project, args.invent_min_supply)
+        bank = merge_invented(bank, invented)
+    invent_added = len(bank) - proven_size
     json.dump(bank, sys.stdout)
     print()
-    print(f"qualified_query_bank: {len(bank)} queries for project={args.project!r} "
-          f"(min_likes={args.min_likes} OR min_clicks={args.min_clicks}"
+    print(f"qualified_query_bank: {proven_size} proven + {invent_added} invented = "
+          f"{len(bank)} queries for project={args.project!r} "
+          f"(min_likes={args.min_likes} OR min_clicks={args.min_clicks}, "
+          f"invent_min_supply={args.invent_min_supply}"
           f"{', limit=' + str(args.limit) if args.limit else ''})",
           file=sys.stderr)
     return 0
