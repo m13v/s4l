@@ -527,7 +527,7 @@ $DUD_QUERIES
 
 4. For EACH query, shell out via the Bash tool:
 
-       SOCIAL_AUTOPOSTER_LINKEDIN_SEARCH=1 python3 \\
+       SOCIAL_AUTOPOSTER_LINKEDIN_SEARCH=1 $LINKEDIN_DISCOVER_PYTHON \\
          $REPO_DIR/scripts/discover_linkedin_candidates.py content "<query>"
 
    The script CDP-attaches to the SAME harness Chrome (LINKEDIN_CDP_URL is
