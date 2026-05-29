@@ -51,7 +51,16 @@ from http_api import api_get  # noqa: E402
 # invent_topics.py drafted + supply-tested that surfaced fresh tweets but
 # never produced a posted candidate, so the bank's JOIN to twitter_candidates
 # can't see them). Disable with --no-invented for debugging.
-INVENT_MIN_SUPPLY = 3   # mirrors SUPPLY_FLOOR in invent_topics.py
+#
+# Floor=1 is intentional and NOT the same as invent's SUPPLY_FLOOR=3:
+#   - invent's SUPPLY_FLOOR=3 = per-TOPIC stop condition (sum across the
+#     topic's 5 queries must hit 3 for the invent loop to halt early).
+#   - INVENT_MIN_SUPPLY=1 = per-QUERY bank-inclusion gate ("any query that
+#     surfaced at least one fresh tweet deserves at least one cycle shot").
+# Conflating the two silently filters out single-tweet winners — the user
+# explicitly wants every non-zero-supply query reused, and zero-supply
+# queries persisted (which they are) but not reused.
+INVENT_MIN_SUPPLY = 1
 INVENT_FETCH_LIMIT = 200
 
 
