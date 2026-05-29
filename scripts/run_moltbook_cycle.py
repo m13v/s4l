@@ -533,7 +533,7 @@ def main():
         _conn = psycopg2.connect(os.environ['DATABASE_URL'])
         _cur = _conn.cursor()
         _cur.execute(
-            "SELECT COALESCE(total_cost_usd, 0) FROM claude_sessions WHERE session_id = %s",
+            "SELECT COALESCE(orchestrator_cost_usd, 0) FROM claude_sessions WHERE session_id = %s",
             (claude_session_id,),
         )
         _row = _cur.fetchone()
