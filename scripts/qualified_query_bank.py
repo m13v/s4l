@@ -154,10 +154,38 @@ def main():
                     help="Cap the bank to the top-N strongest queries (safety budget).")
     ap.add_argument("--all", action="store_true",
                     help="Debug: print per-project bank sizes instead of one project's queries.")
+    ap.add_argument("--from-projects-json", action="store_true",
+                    help="Read the picked-projects JSON array (objects with a 'name' "
+                         "field, i.e. run-twitter-cycle.sh's PROJECTS_JSON) on stdin and "
+                         "emit the COMBINED bank for every project, shaped like the lean "
+                         "Phase 1 $QUERIES_TMP. This is the cycle integration entrypoint.")
     args = ap.parse_args()
 
     db.load_env()
     conn = db.get_conn()
+
+    if args.from_projects_json:
+        try:
+            projects = json.loads(sys.stdin.read() or "[]")
+        except json.JSONDecodeError as e:
+            print(f"qualified_query_bank: bad PROJECTS_JSON on stdin: {e}", file=sys.stderr)
+            json.dump([], sys.stdout)
+            print()
+            return 1
+        combined = []
+        for p in projects:
+            name = (p or {}).get("name") if isinstance(p, dict) else None
+            if not name:
+                continue
+            bank = build_bank(conn, name, args.min_likes, args.min_clicks, args.limit)
+            combined.extend(bank)
+            print(f"qualified_query_bank: project={name!r} -> {len(bank)} queries",
+                  file=sys.stderr)
+        json.dump(combined, sys.stdout)
+        print()
+        print(f"qualified_query_bank: combined bank = {len(combined)} queries across "
+              f"{len(projects)} project(s)", file=sys.stderr)
+        return 0
 
     if args.all:
         rows = _fetch_rows(conn, None)
