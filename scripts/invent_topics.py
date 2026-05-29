@@ -230,11 +230,18 @@ def build_prompt(
     n_proposals: int,
     avoid_topics: set[str] | None = None,
 ) -> str:
-    """Assemble the Claude prompt for one proposal attempt.
+    """Assemble the Claude prompt for one tool-using topic invention session.
 
-    `avoid_topics` carries topics already proposed earlier in THIS run
-    (committed or rejected as dupes) so the retry loop steers the model
-    away from re-suggesting them. Empty/None on the first attempt.
+    This version of the prompt gives Claude the invent-tools MCP suite
+    (search_topics / get_topic_stats / submit_topic) so dedup runs IN-SESSION
+    instead of post-hoc. The ledger snapshot is still included as a quick
+    overview, but Claude is expected to use the tools to verify against the
+    full universe before submitting. submit_topic returns a tool-call error
+    on near-dupes, so Claude can react and propose a different angle without
+    a new session.
+
+    `avoid_topics` carries topics already proposed earlier in THIS run.
+    Empty/None when the outer loop is on its first session.
     """
     name = project.get("name", "")
     description = project.get("description", "")
@@ -246,67 +253,67 @@ def build_prompt(
     if avoid_topics:
         avoid_lines = "\n".join(f"- {t}" for t in sorted(avoid_topics))
         avoid_block = (
-            "\n## Already proposed this run — DO NOT repeat or paraphrase these\n\n"
-            "An earlier attempt this run already suggested the topics below; "
-            "they were either committed or rejected as dupes. Propose something "
-            "genuinely different from ALL of them:\n\n"
+            "\n## Already proposed earlier this run — DO NOT repeat or paraphrase\n\n"
+            "An earlier session this run already suggested the topics below "
+            "(committed OR rejected as dupes). Stay clear of these:\n\n"
             f"{avoid_lines}\n"
         )
 
-    return f"""You are inventing new Twitter search_topic seeds for project **{name}**.
+    return f"""You are inventing ONE new Twitter search_topic seed for project **{name}**.
 
-A topic is a short concept phrase (2-6 words typically) that we use to draft Twitter search queries. Good topics: surface fresh, on-topic threads where our reply has product fit. Bad topics: too generic (returns noise), too narrow (zero supply), or too similar to an existing topic that already covers it.
+A topic is a short concept phrase (2-6 words typically) used to draft Twitter search queries downstream. Good topics surface fresh, on-topic threads where our reply has product fit. Bad topics are too generic (noise), too narrow (zero supply), or paraphrases of existing topics.
 
 ## Project context
-
 - Name: {name}
 - Description: {description}
 - Voice: {voice}
 
-## Existing topic ledger (last 30 days)
-
-The full universe currently has {len(topics)} topics in five performance buckets.
+## Performance ledger snapshot (top 12 per bucket; full universe has {len(topics)} topics)
 
 {table}
+
+## Tools available — USE THEM before submitting
+
+You have THREE tools exposed by the `invent-tools` MCP server. The ledger above is a snapshot; for ground truth and full coverage, call the tools.
+
+1. **search_topics(project, q="", limit=200)** — search the FULL active topic universe. Use a short substring (e.g. `q="agent"`) to scan everything adjacent to your candidate before you commit. Empty `q` returns the whole list.
+2. **get_topic_stats(project, topic)** — pull the topic-funnel row for any specific topic (attempts, supply, candidates, posted, likes, clicks, verdict). Use this when search_topics shows an adjacent topic and you need to know if it's STRONG (propose ADJACENT angle) or WEAK/DUD (AVOID neighborhood).
+3. **submit_topic(project, topic, rationale)** — submit your final topic. The tool runs Jaccard dedup against the full universe ON THE SERVER. If your topic is a near-dupe it returns `ok: false` with the offending neighbor and similarity score. PROPOSE A DIFFERENT ANGLE and try again. When it returns `ok: true`, the topic is committed.
+
+## Ledger bucket guide
+- **STRONG** (clicks_per_post >= 1.0): audience converts. Invent ADJACENT angles, not paraphrases.
+- **DECENT** (>= 0.3): solid signal. Same as strong, lower peak.
+- **WEAK** (posted but few clicks): audience doesn't convert. AVOID this neighborhood.
+- **DUD** (>=3 attempts, zero candidates): no Twitter supply. DON'T paraphrase — they fail at the source level.
+- **UNTRIED** (no attempts in 30d): unknown. Read carefully before proposing nearby.
 {avoid_block}
-## Your task
+## Workflow (follow strictly)
+1. Pick a candidate gap angle you think is genuinely new.
+2. Call `search_topics(project="{name}", q="<one-word probe from your candidate>")` to scan the neighborhood.
+3. For the 1-2 closest existing topics, call `get_topic_stats(project="{name}", topic="<the topic>")` to read their verdict.
+4. Based on what you find: keep your candidate if the gap is real, or pivot to a different angle.
+5. Call `submit_topic(project="{name}", topic="<2-6 words, lowercase>", rationale="<≤30 words, why this gap>")`.
+6. If `ok: false` (dupe error): use the `neighbor` field to pivot, then call submit_topic again with a genuinely different topic. Up to 5 submission attempts per session.
+7. When a submission returns `ok: true`, STOP and answer with the final JSON envelope below.
 
-Propose **exactly {n_proposals}** NEW topic phrases to add to the universe. Each must:
+## Required final answer
 
-1. Be in the project's domain (see description above)
-2. NOT be an exact match or near-paraphrase of any existing topic in the universe
-3. Probe a GAP — fill an angle the current list doesn't cover. Examples of good gaps: adjacent verticals, longer-tail phrases, fresh angles on the value prop, specific competitor names not yet in the list, timely/seasonal angles
-4. Be plausible as something real users tweet about (i.e. would yield results in Twitter advanced search)
-
-## How to use the ledger to inform your inventions
-
-- **STRONG topics** (clicks_per_post >= 1.0): the audience around these is converting. Propose ADJACENT angles in the same neighborhood, not paraphrases.
-- **DECENT topics** (clicks_per_post >= 0.3): also good signal. Same as strong, just less peak.
-- **WEAK topics** (posted but few/no clicks): audience doesn't convert. AVOID this neighborhood; if you must propose nearby, change the angle entirely.
-- **DUD topics** (>=3 attempts, zero candidates): no Twitter supply. DON'T propose paraphrases of these — they fail at the source level, not the framing.
-- **UNTRIED topics** (zero attempts in 30d): may already cover what you'd invent. Read these carefully before proposing.
-
-## Output format
-
-Return STRICT JSON only, no prose before or after:
+After a successful submit_topic call, end your response with EXACTLY this JSON (no prose around it):
 
 ```json
-{{
-  "proposals": [
-    {{
-      "topic": "the new topic phrase, lowercase, 2-6 words",
-      "rationale": "one sentence explaining which gap this fills and why it's distinct from existing universe topics"
-    }},
-    ... exactly {n_proposals} entries ...
-  ]
-}}
+{{"submitted_topic": "the topic you successfully submitted, verbatim", "rationale": "your rationale, verbatim"}}
 ```
 
-Strict requirements:
-- Lowercase topic strings (the picker normalizes anyway, but be consistent)
+If you cannot find a non-dupe topic after several submit attempts and the project is genuinely saturated, end with:
+
+```json
+{{"submitted_topic": null, "reason": "short explanation, e.g. 'tried X, Y, Z all dupes; project saturated this hour'"}}
+```
+
+Strict topic constraints (enforced by submit_topic too):
+- Lowercase, 2-6 words
 - No quotes inside topic strings
-- The topic field MUST be a phrase, NOT a full Twitter query (no `min_faves:`, no `-filter:replies`, no `since:` operators — those are added at query-draft time downstream)
-- Each rationale ≤ 30 words"""
+- NO Twitter operators (no `min_faves:`, `-filter:replies`, `since:` — those are added at query-draft time downstream)"""
 
 
 # --- Claude invocation ------------------------------------------------------
@@ -457,6 +464,58 @@ def extract_proposals(claude_text: str) -> list[dict]:
             continue
         cleaned.append({"topic": topic, "rationale": rationale})
     return cleaned
+
+
+def extract_submitted_topic(claude_text: str) -> dict | None:
+    """Parse Claude's final envelope from the tool-using topic session.
+
+    Looks for the LAST JSON object in the response containing a
+    `submitted_topic` field. Returns:
+      - {"topic": "...", "rationale": "..."} on a successful submission
+      - {"topic": None, "reason": "..."} on a saturated session
+      - None if the envelope is missing or malformed (caller treats as bailout)
+    """
+    text = (claude_text or "").strip()
+    if not text:
+        return None
+    # Walk all fenced JSON blocks first, then any bare {...} blocks; take the
+    # LAST that contains "submitted_topic" so trailing prose from the tool
+    # iteration doesn't shadow the final answer.
+    candidates: list[str] = []
+    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
+        candidates.append(m.group(1))
+    # Fallback: scan balanced braces for any unfenced JSON
+    depth, start = 0, -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    candidates.append(text[start:i + 1])
+                    start = -1
+    last_ok: dict | None = None
+    for blob in candidates:
+        try:
+            env = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(env, dict) or "submitted_topic" not in env:
+            continue
+        topic_val = env.get("submitted_topic")
+        if topic_val is None:
+            last_ok = {"topic": None,
+                       "reason": (env.get("reason") or "").strip()}
+        else:
+            topic = (str(topic_val) or "").strip().lower()
+            if not topic:
+                continue
+            last_ok = {"topic": topic,
+                       "rationale": (env.get("rationale") or "").strip()}
+    return last_ok
 
 
 # --- Validation -------------------------------------------------------------
@@ -1044,21 +1103,14 @@ def main():
     # as an explicit do-not-repeat list, so each retry explores new ground.
     avoid_topics: set[str] = set()
 
-    processed: list[dict] = []     # one entry per topic we ran process_topic on
-    all_rejected: list[dict] = []
-    total_proposals_parsed = 0
+    processed: list[dict] = []     # one entry per topic we supply-tested
+    all_rejected: list[dict] = []  # filled by submit_topic dupe errors reported by Claude
+    total_proposals_parsed = 0     # kept for audit compatibility; counts successful submits
     last_raw = ""
     attempts_used = 0       # SCANS performed (the only thing that ticks up to max_attempts)
-    claude_calls = 0        # ALL Claude calls, including dupe-only ones (audit/cost)
-    dupe_retries_total = 0  # cumulative count of dupe-only redrafts across the run
+    claude_calls = 0        # ALL Claude sessions (tool calls hidden inside each session)
+    dupe_retries_total = 0  # kept for audit compatibility; always 0 in MCP-session mode
     aborted_untested = False
-
-    # When every proposal in a Claude call is a dupe, we don't waste a scan
-    # slot — we immediately re-ask Claude with the growing avoid_topics. To
-    # prevent runaway tokens on a fully-saturated project, cap the number of
-    # CONSECUTIVE dupe-only redrafts before we bail the whole run. Reset on
-    # any non-dupe survivor. The user's explicit rule: dupes should not count.
-    MAX_DUPE_RETRIES_PER_SCAN = 8
     saturated_bailout = False
 
     def n_qualifying() -> int:
@@ -1068,111 +1120,77 @@ def main():
         if n_qualifying() >= args.target:
             break
 
-        # --- Inner dedup-retry: keep asking Claude until at least one
-        #     proposal survives the dupe check, OR we hit the runaway bound.
-        #     Each iteration is one Claude call; only a SCAN ticks attempts_used.
-        survivors: list[dict] = []
-        dupe_retries = 0
-        while not survivors and dupe_retries < MAX_DUPE_RETRIES_PER_SCAN:
-            prompt = build_prompt(project, topics_for_project, args.proposals,
-                                  avoid_topics=avoid_topics)
-            last_raw = call_claude(prompt)
-            claude_calls += 1
-            proposals = extract_proposals(last_raw)
-            total_proposals_parsed += len(proposals)
-            for p in proposals:
-                avoid_topics.add(p["topic"])
+        # --- ONE tool-using Claude session per scan slot. Inside this session
+        #     Claude can call search_topics / get_topic_stats to explore, and
+        #     submit_topic to commit. submit_topic runs Jaccard dedup on the
+        #     server, so near-dupes surface as in-session tool errors Claude
+        #     reacts to — no post-hoc kill, no dupe-retry-doesn't-count
+        #     bookkeeping needed in Python. The session ends when Claude
+        #     emits the final JSON envelope with `submitted_topic`. -----------
+        prompt = build_prompt(project, topics_for_project, args.proposals,
+                              avoid_topics=avoid_topics)
+        last_raw = call_claude(prompt, allowed_tools=_TOPIC_TOOLS)
+        claude_calls += 1
 
-            if not proposals:
-                print(f"[invent_topics] no proposals parsed "
-                      f"(dupe-retry {dupe_retries+1}/{MAX_DUPE_RETRIES_PER_SCAN}; "
-                      f"scans {attempts_used}/{args.max_attempts})",
-                      file=sys.stderr)
-                dupe_retries += 1
-                continue
+        envelope = extract_submitted_topic(last_raw)
+        if envelope is None:
+            print(f"[invent_topics] session returned no parseable envelope; "
+                  f"raw head: {(last_raw or '')[:200]!r}", file=sys.stderr)
+            saturated_bailout = True
+            break
 
-            committed_plan, rejected = validate_proposals(proposals, working_universe)
-            all_rejected.extend(rejected)
-            for r in rejected:
-                print(f"  reject ({r['reject_reason']} sim={r['similarity']}): "
-                      f"{r['topic']!r} ~ {r['neighbor']!r}", file=sys.stderr)
-
-            if committed_plan:
-                survivors = committed_plan
-                print(f"[invent_topics] scan {attempts_used+1}/{args.max_attempts}: "
-                      f"non-dupe proposal(s)={len(survivors)} after "
-                      f"{dupe_retries+1} draft(s) "
-                      f"(qualifying so far={n_qualifying()}/{args.target})",
-                      file=sys.stderr)
-                for p in survivors:
-                    print(f"  proposal: {p['topic']!r} — {p['rationale'][:80]}",
-                          file=sys.stderr)
-                break  # exit dupe-retry loop; proceed to scan
-
-            # All proposals from this Claude call were dupes — re-ask
-            # immediately with avoid_topics now containing them.
-            print(f"  all {len(proposals)} proposal(s) rejected as dupes; "
-                  f"re-drafting (dupe-retry {dupe_retries+1}/{MAX_DUPE_RETRIES_PER_SCAN})",
-                  file=sys.stderr)
-            dupe_retries += 1
-
-        dupe_retries_total += dupe_retries
-
-        if not survivors:
-            # Burned MAX_DUPE_RETRIES_PER_SCAN consecutive Claude calls without
-            # a single non-dupe proposal — the project is saturated this hour.
-            print(f"[invent_topics] saturated: {MAX_DUPE_RETRIES_PER_SCAN} consecutive "
-                  f"dupe-only drafts; bailing run with {attempts_used} scan(s) used.",
+        if envelope.get("topic") is None:
+            # Claude self-reported saturation (tried N submits, all dupes).
+            reason = envelope.get("reason") or "(no reason given)"
+            print(f"[invent_topics] saturated: claude session reports "
+                  f"no non-dupe available — {reason}",
                   file=sys.stderr)
             saturated_bailout = True
             break
 
-        # --- Process every non-dupe survivor: scan it, log attempts, commit
-        #     topic. Each scan ticks attempts_used. Stop early on target hit. ---
-        for c in survivors:
-            topic = c["topic"]
-            # Add to working_universe immediately so a later draft this run
-            # won't re-propose it (it's a real concept now either way).
-            working_universe.add(topic)
+        topic = envelope["topic"]
+        rationale = envelope.get("rationale", "")
+        total_proposals_parsed += 1
+        avoid_topics.add(topic)
+        working_universe.add(topic)
+        print(f"[invent_topics] scan {attempts_used+1}/{args.max_attempts}: "
+              f"submitted {topic!r} (qualifying so far={n_qualifying()}/{args.target})",
+              file=sys.stderr)
+        print(f"  rationale: {rationale[:120]}", file=sys.stderr)
 
-            # Draft -> dedup queries -> supply-test -> log all attempts.
-            result = process_topic(project, topic, existing_query_cores,
-                                   batch_id, dry_run=args.dry_run)
+        # The topic is ALREADY in project_search_topics via the submit_topic
+        # tool — do not re-commit. Now draft queries + supply-test.
+        result = process_topic(project, topic, existing_query_cores,
+                               batch_id, dry_run=args.dry_run)
 
-            # A False 'tested' means the browser dropped mid-run; do NOT commit
-            # this topic as a dud. Abort and let the next hourly run retry.
-            if not result.get("tested", False):
-                print(f"[invent_topics] supply test UNTESTED for {topic!r} "
-                      f"(browser unavailable); aborting run without committing.",
-                      file=sys.stderr)
-                aborted_untested = True
-                break
+        # A False 'tested' means the browser dropped mid-run; abort the run
+        # and let the next hourly retry it. The topic stays committed (it's a
+        # real concept either way), but we don't fabricate a supply verdict.
+        if not result.get("tested", False):
+            print(f"[invent_topics] supply test UNTESTED for {topic!r} "
+                  f"(browser unavailable); aborting run.", file=sys.stderr)
+            aborted_untested = True
+            break
 
-            # This was a real supply test — count it against max_attempts.
-            attempts_used += 1
+        # This was a real supply test — count it against max_attempts.
+        attempts_used += 1
 
-            # Fold this topic's tested query cores into the dedup corpus.
-            for q in result.get("queries", []):
-                existing_query_cores.add(normalize_query(q))
+        # Fold this topic's tested query cores into the dedup corpus.
+        for q in result.get("queries", []):
+            existing_query_cores.add(normalize_query(q))
 
-            # ALWAYS commit the tested topic, even at 0 supply.
-            ok = commit_topic(project_name, topic, dry_run=args.dry_run)
-            processed.append({**c, **result, "committed": ok, "attempt": attempts_used})
+        processed.append({
+            "topic": topic,
+            "rationale": rationale,
+            **result,
+            "committed": True,  # submit_topic already wrote it
+            "attempt": attempts_used,
+        })
 
-            if ok:
-                print(f"  committed: {topic!r} supply={result['supply_total']} "
-                      f"qualifies={result['qualifies']} "
-                      f"(neighbor={c['neighbor']!r}, sim={c['similarity']})",
-                      file=sys.stderr)
-            else:
-                print(f"  commit FAILED: {topic!r}", file=sys.stderr)
+        print(f"  supply={result['supply_total']} qualifies={result['qualifies']}",
+              file=sys.stderr)
 
-            if n_qualifying() >= args.target:
-                break
-            if attempts_used >= args.max_attempts:
-                break
-
-        if aborted_untested:
+        if n_qualifying() >= args.target:
             break
 
     target_met = n_qualifying() >= args.target
