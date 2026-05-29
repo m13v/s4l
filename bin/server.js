@@ -628,7 +628,11 @@ const RUN_MONITOR_PATH = path.join(LOG_DIR, 'run_monitor.log');
 // reply_db.py call) blocklisted a counterparty mid-cycle. Velocity-auto
 // rows are excluded inside log_run.py — those fire on every reply and
 // would flood the pill.
-const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+scanned=(\d+))?(?:\s+changed=(\d+))?(?:\s+views_refreshed=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?(?:\s+escape_hatch=(\d+))?(?:\s+escape_hatch_details=([^\s|]+))?/;
+// `invent=` segment carries the invent-topics hourly job stats (project,
+// topics_invented, queries_total, queries_with_supply, qpt). Tails after
+// scan= so existing log lines (no invent= token) still parse via the
+// preceding optional groups. Added 2026-05-29.
+const RUN_LINE_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*(\S+)\s*\|\s*posted=(\d+)\s+skipped=(\d+)\s+failed=(\d+)(?:\s+replies_refreshed=(\d+))?(?:\s+checked=(\d+)\s+updated=(\d+)\s+removed=(\d+))?(?:\s+unavailable=(\d+))?(?:\s+not_found=(\d+))?(?:\s+scanned=(\d+))?(?:\s+changed=(\d+))?(?:\s+views_refreshed=(\d+))?(?:\s+salvaged=(\d+))?(?:\s+discover=([^\s|]+))?(?:\s+scan=([^\s|]+))?(?:\s+invent=([^\s|]+))?\s+cost=\$([\d.]+)\s+elapsed=(\d+)s(?:\s+failure_reasons=([^\s|]+))?(?:\s+skip_reasons=([^\s|]+))?(?:\s+escape_hatch=(\d+))?(?:\s+escape_hatch_details=([^\s|]+))?/;
 
 // posts.platform is lowercase; UI labels are capitalized.
 const PLATFORM_LABELS = {
@@ -687,6 +691,11 @@ const STANDALONE_JOBS = {
   daily_report: { job_type: 'report', job_label: 'Daily Report' },
   deploy_status: { job_type: 'report', job_label: 'Deploy Status' },
   precompute_stats: { job_type: 'report', job_label: 'Precompute Stats' },
+  // Invent Topics: hourly cron (com.m13v.social-invent-topics) that picks one
+  // project, invents new Twitter search_topic seeds via the MCP-tool Claude
+  // session, supply-tests their queries. result.invent carries the per-run
+  // stats (project, topics, queries, queries_w_supply, qpt[]).
+  invent_topics: { job_type: 'invent', job_label: 'Invent Topics' },
 };
 
 // Scripts that still run on schedule (and may log to run_monitor.log) but
@@ -777,7 +786,7 @@ function parseRunMonitorLog(maxLines) {
   for (const line of tail) {
     const m = line.match(RUN_LINE_RE);
     if (!m) continue;
-    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, scannedRaw, changedRaw, viewsRefreshedRaw, salvaged, discoverStr, scanStr, cost, elapsed, failureReasonsStr, skipReasonsStr, escapeHatchStr, escapeHatchDetailsStr] = m;
+    const [, ts, script, posted, skipped, failed, repliesRefreshed, checked, updated, removed, unavailable, notFound, scannedRaw, changedRaw, viewsRefreshedRaw, salvaged, discoverStr, scanStr, inventStr, cost, elapsed, failureReasonsStr, skipReasonsStr, escapeHatchStr, escapeHatchDetailsStr] = m;
     if (JOB_HISTORY_HIDDEN_SCRIPTS.has(script)) continue;
     // log_run.py writes naive local-wallclock time (strftime without tz), so
     // `new Date(ts)` in node interprets it as local on the server. That is
@@ -840,6 +849,29 @@ function parseRunMonitorLog(maxLines) {
         if (Number.isFinite(n) && n >= 0) scan[k.trim()] = n;
       }
     }
+    // Parse "project=fazm,topics=3,queries=15,queries_w_supply=1,qpt=5+5+5"
+    // into a structured invent object. Mixed types: `project` stays as a
+    // string, `qpt` (queries-per-topic) is split on '+' into an int list,
+    // everything else is parsed as an int. Renders as the result-column
+    // pills on Invent Topics rows in the Status > Job History tab.
+    const invent = {};
+    if (inventStr) {
+      for (const part of inventStr.split(',')) {
+        const [k, v] = part.split('=');
+        if (!k || v == null) continue;
+        const key = k.trim();
+        if (key === 'project') {
+          invent.project = v.trim();
+        } else if (key === 'qpt') {
+          invent.qpt = v.split('+')
+            .map(x => parseInt(x, 10))
+            .filter(x => Number.isFinite(x) && x >= 0);
+        } else {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n) && n >= 0) invent[key] = n;
+        }
+      }
+    }
     // Parse "handle1:bot,handle2:engagement_loop" -> [{handle, classification}, ...].
     // Sorted by classification then handle for stable tooltip ordering. The
     // count comes from the dedicated escape_hatch=N capture so the pill stays
@@ -891,6 +923,8 @@ function parseRunMonitorLog(maxLines) {
         salvaged: salvaged ? parseInt(salvaged, 10) : 0,
         discover, // {} when no `discover=` segment was present on the line
         scan, // {} when no `scan=` segment was present on the line
+        invent, // {} when no `invent=` segment was present (carries project,
+                // topics, queries, queries_w_supply, qpt:[int,int,...]).
         cost_usd: parseFloat(cost),
         failure_reasons: failureReasons,
         skip_reasons: skipReasons,
@@ -9863,6 +9897,7 @@ const HTML = `<!DOCTYPE html>
           <button type="button" class="style-stats-pill" data-value="seo_top_posts">SEO Top Posts</button>
           <button type="button" class="style-stats-pill" data-value="seo_weekly_roundup">SEO Roundup</button>
           <button type="button" class="style-stats-pill" data-value="seo_expire">SEO Expire</button>
+          <button type="button" class="style-stats-pill" data-value="invent">Invent Topics</button>
           <button type="button" class="style-stats-pill" data-value="report">Report</button>
           <button type="button" class="style-stats-pill" data-value="other">Other</button>
         </div>
@@ -10726,6 +10761,36 @@ function renderResult(run) {
   const pill = (label, n, _color) =>
     '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
     label + ' <span style="color: var(--text);font-weight:600;">' + n + '</span></span>';
+  // Invent Topics rows: result column shows project picked, topics invented,
+  // queries total + queries-with-supply, and per-topic query counts so an
+  // operator can read at a glance "fazm: 3 topics / 15 queries (5+5+5) /
+  // 1 surfaced supply" without opening the log. invent={} for any pre-2026-05-29
+  // run_monitor.log lines or hand-authored test rows; falls back to the
+  // generic pills in that case.
+  if (run.job_type === 'invent' && r.invent && Object.keys(r.invent).length) {
+    const inv = r.invent;
+    const project = (inv.project || '—');
+    const topics = inv.topics || 0;
+    const queries = inv.queries || 0;
+    const qWithSupply = inv.queries_w_supply || 0;
+    const qpt = Array.isArray(inv.qpt) ? inv.qpt : [];
+    const projectPill =
+      '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+      'project <span style="color: var(--text);font-weight:600;">' + project + '</span></span>';
+    const qptPill = qpt.length
+      ? ('<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);" ' +
+         'title="Queries per topic (one number per invented topic, in order)">' +
+         'per topic <span style="color: var(--text);font-weight:600;">' +
+         qpt.join('+') + '</span></span>')
+      : '';
+    return (
+      projectPill +
+      pill('topics', topics) +
+      pill('queries', queries) +
+      qptPill +
+      pill('with supply', qWithSupply)
+    );
+  }
   if (r.type === 'link-edit') {
     return (
       pill('touched', r.total, 'var(--text)') +
