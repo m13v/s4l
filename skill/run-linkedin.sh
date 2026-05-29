@@ -1068,6 +1068,123 @@ sleep 3
 
 # ===== Phase B: compose + post + verify + log =====
 PHASE_B_PROMPT=$(mktemp /tmp/sa-run-linkedin-phaseB-prompt-XXXXXX)
+if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
+# ----- Phase B prompt: UniPile REST backend (no browser) -----
+cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
+You are the Social Autoposter (Phase B), running on the UniPile REST backend
+(no browser). Your job: post ONE comment on a pre-selected LinkedIn post
+(already chosen + scored by Phase A) via the UniPile API, verify it landed by
+reading the post's comments back, log it. STOP. Do NOT search for other
+candidates.
+
+Read $SKILL_FILE for tone and content rules.
+
+## Pre-selected candidate (from Phase A — DO NOT rediscover)
+- Project: **$PA_PROJECT**
+- Thread URL: $PA_URL
+- Post social_id (UniPile comment target): $PA_SOCIAL_ID
+- Activity URN (numeric): $PA_ACTIVITY_ID
+- All URNs already seen: $PA_ALL_URNS
+- Author: $PA_AUTHOR_NAME ($PA_AUTHOR_URL)
+- Post excerpt: $PA_EXCERPT
+- Post title hint: $PA_TITLE_HINT
+- Language: $PA_LANG
+- Velocity score: $PA_VELOCITY (Phase A picked this as the top candidate)
+- Search topic that guided discovery: '$PA_SEARCH_TOPIC'
+- Search query that surfaced it: '$PA_QUERY'
+
+$AUTHOR_HISTORY_BLOCK
+
+## Project config
+$PROJECT_FULL
+
+## Top performers feedback (use to pick a comment angle)
+$TOP_REPORT
+
+$STYLES_BLOCK
+
+## Workflow
+
+1. Defensive engaged-id re-check. Run via Bash:
+     python3 $REPO_DIR/scripts/linkedin_url.py --check-engaged-ids '$PA_ACTIVITY_ID'
+   If exit code 0 (already engaged), mark the candidate skipped:
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+   then STOP with '## Already engaged (defensive catch in Phase B)'.
+
+2. Pick the engagement style that best fits the post + project's voice block
+   (apply voice.tone, never violate voice.never, mirror voice.examples if
+   present). Reply in $PA_LANG.
+   NEVER use em dashes.
+
+2b. Wrap any URLs in your draft before posting. Run:
+     WRAP_RESULT=\$(python3 $REPO_DIR/scripts/dm_short_links.py wrap-post-text \\
+       --text "YOUR_COMMENT_TEXT" --platform linkedin --project '$PA_PROJECT')
+   If wrap_result.ok is true: use wrap_result.text as the final comment text
+   and save wrap_result.minted_session as MINTED_SESSION. Otherwise use the
+   original draft and set MINTED_SESSION to empty.
+
+3. Post the comment via the UniPile API (use the possibly-wrapped text from 2b):
+     COMMENT_RESULT=\$(python3 $REPO_DIR/scripts/linkedin_unipile.py comment --social-id '$PA_SOCIAL_ID' --text "YOUR_COMMENT_TEXT")
+     echo "\$COMMENT_RESULT"
+   The command prints JSON {ok, status, response, comment_urn, our_url} and
+   exits 0 iff ok. A successful post is status 200 or 201 with
+   response.object == "CommentSent" and (usually) a numeric response.comment_id.
+
+4. POST-SUBMIT VERIFICATION (mandatory). Extract ok + comment_id:
+     COMMENT_OK=\$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ok'))" "\$COMMENT_RESULT" 2>/dev/null || echo "False")
+     COMMENT_ID=\$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); r=d.get('response') or {}; print(r.get('comment_id') or '')" "\$COMMENT_RESULT" 2>/dev/null || echo "")
+   Then read the comment back from the post to PROVE it rendered:
+     python3 $REPO_DIR/scripts/linkedin_unipile.py comments --social-id '$PA_SOCIAL_ID' --contains-id "\$COMMENT_ID"
+   This command exits 0 iff our comment_id is present in the post's comment list.
+     SUCCESS  = COMMENT_OK is "True" AND (the read-back exited 0, OR COMMENT_ID
+                was empty but COMMENT_RESULT showed status 201 / object CommentSent).
+     REJECTED = ok false, non-2xx status, or an error response object.
+
+5. If REJECTED, do NOT call the success log path. Mark candidate skipped:
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+   Then ledger the soft-block:
+     python3 $REPO_DIR/scripts/log_post.py --rejected \\
+       --platform linkedin \\
+       --thread-url '$PA_URL' \\
+       --our-content 'YOUR_COMMENT_TEXT' \\
+       --project '$PA_PROJECT' \\
+       --thread-author '$PA_AUTHOR_NAME' \\
+       --thread-title '$PA_TITLE_HINT' \\
+       --engagement-style STYLE_YOU_CHOSE \\
+       --search-topic $PA_SEARCH_TOPIC_ARG \\
+       --language '$PA_LANG' \\
+       --rejection-reason 'UNIPILE: <verbatim status + response.object/error from COMMENT_RESULT>' \\
+       --network-response "\$COMMENT_RESULT"
+   Then STOP with '## Comment soft-blocked, ledgered'.
+
+6. If SUCCESS, log the post and mark candidate posted:
+     LOG_RESULT=\$(python3 $REPO_DIR/scripts/log_post.py \\
+       --platform linkedin \\
+       --thread-url '$PA_URL' \\
+       --our-url '$PA_URL' \\
+       --our-content 'YOUR_COMMENT_TEXT' \\
+       --project '$PA_PROJECT' \\
+       --thread-author '$PA_AUTHOR_NAME' \\
+       --thread-title '$PA_TITLE_HINT' \\
+       --engagement-style STYLE_YOU_CHOSE \\
+       --search-topic $PA_SEARCH_TOPIC_ARG \\
+       --language '$PA_LANG' \\
+       --urns '$PA_ACTIVITY_ID')
+     echo "\$LOG_RESULT"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='posted', posted_at=NOW() WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     If MINTED_SESSION is non-empty: extract post_id from LOG_RESULT and backfill:
+       LOG_POST_ID=\$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('post_id',''))" "\$LOG_RESULT" 2>/dev/null || echo "")
+       [ -n "\$LOG_POST_ID" ] && python3 $REPO_DIR/scripts/dm_short_links.py backfill-post \\
+         --minted-session "\$MINTED_SESSION" --post-id "\$LOG_POST_ID"
+
+CRITICAL: ONE post only. If anything fails, STOP — do NOT pick another candidate.
+CRITICAL: Use ONLY the Bash tool plus linkedin_unipile.py / log_post.py /
+dm_short_links.py / linkedin_url.py. There is NO browser; NEVER attempt
+mcp__linkedin-agent tools (they are not loaded).
+CRITICAL: NEVER use em dashes.
+PROMPT_EOF
+else
+# ----- Phase B prompt: headed-Chrome browser backend (mcp__linkedin-agent) -----
 cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter (Phase B). Your job: post ONE comment on a
 pre-selected LinkedIn post (already chosen + scored by Phase A), verify it
