@@ -135,32 +135,81 @@ _sa_emit_run_summary_oneshot() {
 trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
 
 # ===== Phase A: discovery + scoring =====
+python3 "$REPO_DIR/scripts/linkedin_search_topic_schema.py" 2>>"$LOG_FILE" || true
+
 PROJECT_DIST=$(python3 "$REPO_DIR/scripts/pick_project.py" --platform linkedin --distribution 2>/dev/null || echo "(distribution unavailable)")
 
-# Slim project list: name + description + qualification + search_topics.
-# Phase A needs search_topics so the LLM can draft per-project queries.
-# search_topics is read from the DB via project_topics.topics_for_project
-# (config.json is seed-only, post 2026-05-27 migration).
-PROJECTS_SLIM_JSON=$(python3 -c "
-import json, os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
-from project_topics import topics_for_project
-config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
-slim = {}
-for p in config.get('projects', []):
-    if 'linkedin' in (p.get('platforms_disabled') or []):
-        continue
-    rec = {k: p[k] for k in ('name','description','qualification') if k in p}
-    rec['search_topics'] = list(topics_for_project(p.get('name') or ''))
-    slim[p['name']] = rec
-print(json.dumps(slim, indent=2))
-" 2>/dev/null || echo "{}")
+# Mirror Twitter's ownership boundary: Python picks exactly one project and
+# one project_search_topics row before Claude drafts literal LinkedIn queries.
+set +e
+PROJECT_PICK_JSON=$(REPO_DIR="$REPO_DIR" python3 - <<'PY' 2>>"$LOG_FILE"
+import json
+import os
+import sys
 
-# Top-performing historical queries (positive signal, last 30d).
-TOP_QUERIES=$(python3 "$REPO_DIR/scripts/top_linkedin_queries.py" --limit 15 --window-days 30 2>/dev/null || echo "[]")
+repo = os.environ["REPO_DIR"]
+sys.path.insert(0, os.path.join(repo, "scripts"))
 
-# Dud queries to AVOID redrafting (zero-result OR low-SERP, last 7d).
-DUD_QUERIES=$(python3 "$REPO_DIR/scripts/top_dud_linkedin_queries.py" --limit 30 --window-days 7 2>/dev/null || echo "[]")
+from pick_project import load_config, pick_project
+from pick_search_topic import pick_topic_for_project
+
+project = pick_project(load_config(), platform="linkedin")
+if not project:
+    raise SystemExit("no LinkedIn-eligible project with active search_topics")
+
+name = project.get("name") or ""
+assignment = pick_topic_for_project(name, platform="linkedin")
+topic = (assignment.get("search_topic") or "").strip()
+if not topic:
+    raise SystemExit(f"no search_topic picked for project={name!r}")
+
+out = {
+    "name": name,
+    "description": project.get("description", ""),
+    "qualification": project.get("qualification", ""),
+    "search_topic": topic,
+    "picked_weight_pct": assignment.get("picked_weight_pct"),
+    "topic_assignment": assignment,
+    "reference_topics": assignment.get("reference_topics") or [],
+}
+print(json.dumps(out, indent=2))
+PY
+)
+PICK_RC=$?
+set -e
+
+if [ "$PICK_RC" -ne 0 ] || [ -z "${PROJECT_PICK_JSON:-}" ]; then
+  echo "Phase A: project/search_topic picker failed. Skipping LinkedIn run." | tee -a "$LOG_FILE"
+  ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
+  _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
+  python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 0 --failed 1 --cost "$_COST" --elapsed "$ELAPSED" || true
+  _SA_RUN_SUMMARY_EMITTED=1
+  echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
+  exit 0
+fi
+
+LI_PROJECT_NAME=$(printf '%s' "$PROJECT_PICK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('name',''))")
+LI_SEARCH_TOPIC=$(printf '%s' "$PROJECT_PICK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('search_topic',''))")
+
+if [ -z "$LI_PROJECT_NAME" ] || [ -z "$LI_SEARCH_TOPIC" ]; then
+  echo "Phase A: project/search_topic picker returned an incomplete assignment. Skipping LinkedIn run." | tee -a "$LOG_FILE"
+  ELAPSED=$(( $(date +%s) - RUN_START_EPOCH ))
+  _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START_EPOCH" --scripts "run-linkedin-phaseA" "run-linkedin-phaseB" 2>/dev/null || echo "0.0000")
+  python3 "$REPO_DIR/scripts/log_run.py" --script post_linkedin --posted 0 --skipped 0 --failed 1 --cost "$_COST" --elapsed "$ELAPSED" || true
+  _SA_RUN_SUMMARY_EMITTED=1
+  echo "=== Run complete: $(date) ===" | tee -a "$LOG_FILE"
+  exit 0
+fi
+
+echo "Phase A: picked project=$LI_PROJECT_NAME search_topic='$LI_SEARCH_TOPIC'" | tee -a "$LOG_FILE"
+
+# Top-performing historical queries for this exact project/topic
+# (positive signal, last 30d).
+TOP_QUERIES=$(python3 "$REPO_DIR/scripts/top_linkedin_queries.py" --project "$LI_PROJECT_NAME" --search-topic "$LI_SEARCH_TOPIC" --limit 15 --window-days 30 2>/dev/null || echo "[]")
+
+# Dud queries to AVOID redrafting for this exact project/topic
+# (zero-result OR low-SERP, last 7d).
+DUD_QUERIES=$(python3 "$REPO_DIR/scripts/top_dud_linkedin_queries.py" --project "$LI_PROJECT_NAME" --search-topic "$LI_SEARCH_TOPIC" --limit 30 --window-days 7 2>/dev/null || echo "[]")
 
 # BSD mktemp on macOS only substitutes XXXXXX at the end of the template.
 PHASE_A_OUT=$(mktemp /tmp/sa-run-linkedin-phaseA-XXXXXX)
@@ -169,45 +218,48 @@ PHASE_A_PROMPT=$(mktemp /tmp/sa-run-linkedin-phaseA-prompt-XXXXXX)
 cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
 You are the Social Autoposter LinkedIn discovery + scoring scout (Phase A).
 
-Your job: pick ONE project, draft 8 DYNAMIC search queries informed by
-historical performance, browse each query's LinkedIn SERP, extract
-engagement metrics for every visible candidate post, write a structured
-JSON envelope to $PHASE_A_OUT, and STOP. Do NOT draft a comment. Do NOT
-post anything. Phase B handles drafting + posting using whatever you write
-to the candidates list.
+Your job: use the pre-selected project and assigned search_topic, draft 8
+DYNAMIC LinkedIn search queries from that one topic, browse each query's
+LinkedIn SERP, extract engagement metrics for every visible candidate post,
+write a structured JSON envelope to $PHASE_A_OUT, and STOP. Do NOT draft a
+comment. Do NOT post anything. Phase B handles drafting + posting using
+whatever you write to the candidates list.
 
-## Project candidates (only LinkedIn-eligible projects shown)
-$PROJECTS_SLIM_JSON
+## Pre-selected project and assigned topic
+$PROJECT_PICK_JSON
 
-## Today's distribution (prefer underrepresented projects)
+Assigned project: $LI_PROJECT_NAME
+Assigned search_topic: $LI_SEARCH_TOPIC
+
+## Today's distribution (context only; the project is already picked)
 $PROJECT_DIST
 
-## Top-performing historical queries (last 30 days, sorted by posts produced)
-These are STYLE inspiration only — do NOT reuse them verbatim. LinkedIn
+## Top-performing historical queries for this project/topic
+These are STYLE inspiration only - do NOT reuse them verbatim. LinkedIn
 SERPs shift daily, so reusing the exact same phrasing is wasteful. Mine
 them for the angle/keyword combo that worked, then craft something new.
 $TOP_QUERIES
 
-## DUD queries to AVOID (last 7 days, zero-result or low-SERP-quality)
+## DUD queries to AVOID for this project/topic
 Do NOT redraft any of these phrasings. They have been flat or
-audience-wrong recently. Note the 'reason' field — 'zero_results' means
+audience-wrong recently. Note the 'reason' field - 'zero_results' means
 LinkedIn rejected the keywords; 'low_serp_quality' means results came
 back but were influencer slop / off-target audience.
 $DUD_QUERIES
 
 ## Workflow
 
-1. Pick ONE underrepresented project from the distribution that has a
-   plausible content fit. Do NOT iterate through many projects.
+1. Use ONLY this assigned project and search_topic. Do NOT pick another
+   project, do NOT switch topics, and do NOT iterate through the project list.
 
-2. Draft 8 search queries for the chosen project. Each query should:
+2. Draft 8 search queries for the assigned topic. Each query should:
    - Be 2-4 words (LinkedIn search hates long phrases)
    - Target practitioners, not influencers (no "expert tips", "thought
      leadership", or buzzwordy phrasing)
-   - Be FRESH — different from the dud list, different angle from the
+   - Be FRESH - different from the dud list, different angle from the
      top-performers list (steal the recipe, change the dish)
-   - Map to the project's search_topics
-   - Cover DIFFERENT facets / pains / personas of the ICP — not 4 reskins
+   - Map directly to the assigned search_topic
+   - Cover DIFFERENT facets / pains / personas of the ICP - not 4 reskins
      of the same query. Wider net = higher chance of one ICP-fit hit.
 
    Run 8 queries this run. More surface area beats narrow targeting:
@@ -418,12 +470,13 @@ $DUD_QUERIES
 \`\`\`bash
 cat > $PHASE_A_OUT <<JSON_EOF
 {
-  "project": "PROJECT_NAME",
+  "project": "$LI_PROJECT_NAME",
+  "search_topic": "$LI_SEARCH_TOPIC",
   "language": "en",
   "queries_used": [
-    {"query": "ai agents production",   "candidates_found": 4, "serp_quality_score": 7.5, "dropped_below_floor": 2},
-    {"query": "macos automation tools", "candidates_found": 0, "serp_quality_score": null, "dropped_below_floor": 0},
-    {"query": "claude code workflow",   "candidates_found": 6, "serp_quality_score": 5.0, "dropped_below_floor": 9}
+    {"query": "ai agents production",   "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 4, "serp_quality_score": 7.5, "dropped_below_floor": 2},
+    {"query": "macos automation tools", "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 0, "serp_quality_score": null, "dropped_below_floor": 0},
+    {"query": "claude code workflow",   "search_topic": "$LI_SEARCH_TOPIC", "candidates_found": 6, "serp_quality_score": 5.0, "dropped_below_floor": 9}
   ],
   "candidates": [
     {
@@ -439,6 +492,7 @@ cat > $PHASE_A_OUT <<JSON_EOF
       "reactions": 42,
       "comments": 7,
       "reposts": 3,
+      "search_topic": "$LI_SEARCH_TOPIC",
       "search_query": "ai agents production",
       "language": "en",
       "serp_quality_score": 7.5
@@ -450,6 +504,9 @@ JSON_EOF
 
    - queries_used MUST contain ONE row per query you ran (including
      zero-result ones — that is the whole point of the dud-learning).
+   - project MUST equal "$LI_PROJECT_NAME" and every search_topic MUST
+     equal "$LI_SEARCH_TOPIC". The search_topic is the assigned seed; the
+     search_query is the literal phrase you ran on LinkedIn.
    - candidates_found is the POST-floor count (cards that survived the
      velocity floor — same as the discover script's result_count).
      dropped_below_floor is the per-query count of cards the SERP returned
