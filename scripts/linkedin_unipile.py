@@ -2,7 +2,7 @@
 """Reusable UniPile LinkedIn functions for the post-commenting pipeline.
 
 Scope is deliberately narrow: SEARCH posts + COMMENT on a post. No stats, no
-DMs, no reactions. These are the units the engagement pipeline reuses.
+DMs, no reactions. These are the units the LinkedIn post-comments pipeline reuses.
 
 Credentials resolve env-first, keychain-second:
   UNIPILE_DSN          | keychain "unipile-dsn"                      e.g. api45.unipile.com:17570
