@@ -136,28 +136,49 @@ def run_subprocess(cmd: list[str], timeout_sec: int = 600) -> tuple[int, str, st
         return (-1, e.stdout or "", f"TIMEOUT after {timeout_sec}s")
 
 
-def update_candidate(cid: int, status: str) -> None:
-    """Flip candidate status (skipped/failed/etc) via the HTTP API.
+def update_candidate(cid: int, status: str, reason: str | None = None) -> None:
+    """Flip candidate status (skipped/posted/expired) via the HTTP API.
 
     Server-side WHERE: `status != 'posted'` so we never stomp the posted
     state — mirrors the old psql guard exactly. The route returns 404 when
     the row IS already posted (or absent); we treat that as success here
     since the caller's intent ("don't retry this row") is already met.
+
+    IMPORTANT: the DB CHECK constraint twitter_candidates_status_check only
+    allows pending/posted/skipped/expired. There is NO 'failed' status — a
+    reply that fails (timeout, exception, missing reply_url, lost log row)
+    is recorded as 'skipped' with a descriptive skip_reason so the row is
+    not retried (re-trying a landed reply double-posts on x.com). The
+    run-summary 'failed' count is derived from each post_one() return value,
+    NOT from the DB status, so the dashboard signal is unaffected. Writing
+    'failed' here used to 500 against the check constraint on every failure.
+
+    When status='skipped' and a reason is given, route through the
+    mark_skipped action so skip_reason + skipped_at are stamped; otherwise
+    use the generic set_status override.
     """
     if status == "posted":
         # Caller will set post_id separately on success path; here we just
         # mark intermediate states.
         return
     try:
+        if status == "skipped" and reason:
+            payload = {
+                "id": int(cid),
+                "action": "mark_skipped",
+                "reason": str(reason)[:500],
+            }
+        else:
+            payload = {"id": int(cid), "action": "set_status", "status": status}
         resp = api_patch(
             "/api/v1/twitter-candidates/by-id",
-            {"id": int(cid), "action": "set_status", "status": status},
+            payload,
             ok_on_404=True,
         )
         if resp.get("_not_found"):
             # Either row was already posted (allow_overwrite_posted=false
-            # default blocks it) or it doesn't exist. Either way, no further
-            # action is needed.
+            # default blocks it / mark_skipped only touches pending) or it
+            # doesn't exist. Either way, no further action is needed.
             return
     except SystemExit as e:
         print(f"[post] candidate {cid} status update failed: {e}", flush=True)
@@ -525,10 +546,13 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         reason = parsed.get("error") or "no_reply_json"
         print(f"[post] candidate {cid} reply failed: {reason}", flush=True)
         if reason in ("rate_limited", "tweet_not_found", "reply_box_not_found"):
-            update_candidate(cid, "skipped")
+            update_candidate(cid, "skipped", reason)
             return ("skipped", reason)
-        # everything else (incl. timeout, parse errors) -> failed
-        update_candidate(cid, "failed")
+        # everything else (incl. timeout, parse errors): the reply did NOT
+        # land, so mark skipped (NOT a DB 'failed' status — that violates the
+        # check constraint) with the reason, but report 'failed' to the run
+        # summary so the dashboard reflects the real failure.
+        update_candidate(cid, "skipped", reason if reason else "reply_failed")
         return ("failed", reason if reason else "unknown")
 
     reply_url = parsed.get("reply_url") or ""
