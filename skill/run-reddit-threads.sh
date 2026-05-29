@@ -315,10 +315,10 @@ Flair target (if known from prior attempt): ${PENDING_FLAIR}
 
 ## Workflow
 
-1. Navigate to https://old.reddit.com/${SUBREDDIT}/submit?selftext=true via mcp__reddit-agent__browser_navigate.
+1. Navigate to https://old.reddit.com/${SUBREDDIT}/submit?selftext=true (bh_run: goto_url + wait_for_load).
 
-2. Fill the title and body using the exact saved strings above. If the locator hits the
-   md-container wrapper div, fall back to browser_evaluate:
+2. Fill the title and body using the exact saved strings above. Use js() to set the values
+   directly (most reliable on old.reddit's md-container wrapper):
      document.querySelector('textarea[name=\"title\"]').value = TITLE;
      document.querySelector('textarea[name=\"title\"]').dispatchEvent(new Event('input',{bubbles:true}));
      document.querySelector('textarea[name=\"text\"]').value = BODY;
@@ -350,14 +350,16 @@ Flair target (if known from prior attempt): ${PENDING_FLAIR}
    unless the submit step itself returned a forbidden/403 error.
 
 CRITICAL: NEVER use em dashes.
-CRITICAL: Use ONLY mcp__reddit-agent__* tools.
-CRITICAL: If mcp__reddit-agent__* tools are NOT available in this session (you cannot find them as deferred or callable), return JSON immediately with permalink=null and abort_reason='mcp_browser_unavailable'. DO NOT spawn Python, shell, headless or headed Playwright as a fallback. DO NOT use any other browser MCP. The pipeline depends on reddit-agent specifically; any other browser path violates project rules and CHECK-aborts a second Chrome on the locked profile (incident 2026-05-04 08:27).
-CRITICAL: Close browser tabs after each navigation (browser_tabs action 'close').
+CRITICAL: Use ONLY the browser tool described in the BROWSER BACKEND block above (mcp__reddit-harness__bh_run).
+CRITICAL: If mcp__reddit-harness__bh_run is NOT available in this session (you cannot find it as deferred or callable), return JSON immediately with permalink=null and abort_reason='mcp_browser_unavailable'. DO NOT spawn Python, shell, headless or headed Playwright as a fallback. DO NOT use mcp__reddit-agent__*, mcp__playwright-extension__*, or any other browser MCP. The pipeline depends on the reddit-harness backend specifically.
+CRITICAL: Reuse the SAME tab via goto_url for sequential navigation (the harness keeps one real tab); do NOT open a fresh tab per step.
 CRITICAL: If a browser call times out, wait 30s and retry up to 3 times.
 CRITICAL: This is a RETRY of a \$4-24 sunk-cost draft. Do NOT redraft, do NOT research." > "$CLAUDE_TMP" 2>&1
 CLAUDE_RC=$?
 else
 "$REPO_DIR/scripts/run_claude.sh" "run-reddit-threads" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" -p --output-format json --json-schema "$RESULT_SCHEMA" "You are posting an ORIGINAL thread to ${SUBREDDIT} for the ${PROJECT} project as u/${POST_ACCOUNT}.
+
+$BROWSER_INSTRUCTIONS
 
 ## Config & Rules
 Read $SKILL_FILE for content rules and anti-AI-detection checklist.
@@ -395,10 +397,9 @@ ${TOP_POSTS}
    - For Vipassana: read relevant page.tsx under the guide dir
    Pull 1-2 concrete, specific details from the source code or docs to anchor the post. Generic posts get ignored.
 
-2. BROWSE THE SUBREDDIT: Navigate to https://old.reddit.com/${SUBREDDIT}/hot using mcp__reddit-agent__browser_navigate.
+2. BROWSE THE SUBREDDIT: Navigate to https://old.reddit.com/${SUBREDDIT}/hot (bh_run: goto_url + wait_for_load).
    - Read 3-5 recent thread titles and their top comments to absorb community tone, vocabulary, and what topics are getting engagement right now.
    - Note any recurring themes or hot-button issues the community cares about today.
-   - Close the tab.
    This shapes your post to sound like it belongs in the current conversation, not like a scheduled drop.
 
 3. Pick a topic from the threads.topic_angles list (in the context block above) that:
@@ -421,20 +422,18 @@ ${TOP_POSTS}
    - VARY YOUR CLOSERS: check how recent posts ended (shown after |ENDING| above). Use a DIFFERENT ending pattern. Banned closers: 'curious if anyone', 'anyone else', 'thoughts?', 'has anyone'. Sometimes end with a statement, sometimes mid-thought, sometimes a specific (not generic) question.
    - VARY CAPITALIZATION: do NOT lowercase every sentence start. Mix it naturally: some sentences capitalized, some not. Uniform all-lowercase is a known AI tell.
 
-5. SUBREDDIT RULES CHECK via mcp__reddit-agent__browser_navigate to https://old.reddit.com/${SUBREDDIT}/about/rules
+5. SUBREDDIT RULES CHECK (bh_run: goto_url to https://old.reddit.com/${SUBREDDIT}/about/rules + wait_for_load)
    - If strict no-self-promo and our post would read promotional, ABORT. Set abort_reason and permalink=null.
    - Note whether flair is required.
-   - Close the tab.
 
    PERMANENT_BLOCK DECISION (always set this field):
    - permanent_block = TRUE if the sub has a STANDING rule that rejects every post we could ever make from this account: bans all software/website/AI posts (mod-pinned), link-only sub, approved-submitters-only, account is banned from this sub, no-self-promo with zero exceptions for our category. ALSO set TRUE on submit-time forbidden / 403.
    - permanent_block = FALSE if the issue is specific to THIS post (recent topic was already covered, this title is too promotional, you chose to abort to be safe but the sub itself does accept posts of this type, transient browser/network error, repetition concern).
    - When in doubt, FALSE. False positives are cheap (we just retry the sub later); false negatives waste a Claude run cost (\$1.50-3.50 USD) every time we re-pick the same dead-end sub.
 
-6. POST via mcp__reddit-agent__*:
-   - Navigate to https://old.reddit.com/${SUBREDDIT}/submit?selftext=true
-   - Fill title and body. If Playwright locator hits the md-container wrapper div, fall back to:
-     browser_evaluate with:
+6. POST (bh_run):
+   - Navigate to https://old.reddit.com/${SUBREDDIT}/submit?selftext=true (goto_url + wait_for_load)
+   - Fill title and body. Set the values directly via js() (most reliable on the md-container wrapper):
        document.querySelector('textarea[name=\"title\"]').value = TITLE;
        document.querySelector('textarea[name=\"title\"]').dispatchEvent(new Event('input',{bubbles:true}));
        document.querySelector('textarea[name=\"text\"]').value = BODY;
@@ -445,7 +444,7 @@ ${TOP_POSTS}
      Use the visible text/structure described below.
      a. After the post body is typed, look for a group labeled around 'choose a flair'.
         Inside it is a button whose visible text is exactly 'select' (lowercase).
-        Click that button via mcp__reddit-agent__browser_click using its ref or text='select'.
+        Compute its center coords from getBoundingClientRect via js(), then click_at_xy(x, y).
      b. A modal opens. Header is 'select flair'. Body is a <ul> of <li> rows; each <li>
         is a clickable flair option (cursor: pointer). There is no .flairoption class.
         Find the <li> whose text matches the right flair (e.g. 'Meta / Discussion',
@@ -474,9 +473,9 @@ ${TOP_POSTS}
 8. Return your structured JSON output. Every field in the schema is required. Fill permalink with the actual URL if posted, or null if aborted.
 
 CRITICAL: NEVER use em dashes.
-CRITICAL: Use ONLY mcp__reddit-agent__* tools.
-CRITICAL: If mcp__reddit-agent__* tools are NOT available in this session (you cannot find them as deferred or callable), return JSON immediately with permalink=null and abort_reason='mcp_browser_unavailable'. DO NOT spawn Python, shell, headless or headed Playwright as a fallback. DO NOT use any other browser MCP. The pipeline depends on reddit-agent specifically; any other browser path violates project rules and CHECK-aborts a second Chrome on the locked profile (incident 2026-05-04 08:27). The shell wrapper persists your draft to pending_threads on abort, so a clean ABORT-SAFE return preserves the work.
-CRITICAL: Close browser tabs after each navigation (browser_tabs action 'close').
+CRITICAL: Use ONLY the browser tool described in the BROWSER BACKEND block above (mcp__reddit-harness__bh_run).
+CRITICAL: If mcp__reddit-harness__bh_run is NOT available in this session (you cannot find it as deferred or callable), return JSON immediately with permalink=null and abort_reason='mcp_browser_unavailable'. DO NOT spawn Python, shell, headless or headed Playwright as a fallback. DO NOT use mcp__reddit-agent__*, mcp__playwright-extension__*, or any other browser MCP. The pipeline depends on the reddit-harness backend specifically. The shell wrapper persists your draft to pending_threads on abort, so a clean ABORT-SAFE return preserves the work.
+CRITICAL: Reuse the SAME tab via goto_url for sequential navigation (the harness keeps one real tab); do NOT open a fresh tab per step.
 CRITICAL: If a browser call times out, wait 30s and retry up to 3 times." > "$CLAUDE_TMP" 2>&1
 CLAUDE_RC=$?
 fi  # end RETRY_MODE branch
