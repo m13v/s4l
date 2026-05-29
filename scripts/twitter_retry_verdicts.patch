@@ -1,0 +1,116 @@
+--- a/skill/run-twitter-cycle.sh
++++ b/skill/run-twitter-cycle.sh
+@@ -850,8 +850,16 @@
+ ALREADY-ENGAGED TWEET IDS (last 48h) — the Python scraper skips these regardless, but knowing them helps you avoid drafting a query that would predominantly surface dead candidates:
+ $ENGAGED_TWEET_IDS
+
+-THIS-CYCLE QUERIES ALREADY TRIED (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters) — do NOT repeat any of these phrasings or close variants. If non-empty, prior attempts returned too few survivors after the freshness gate + scorer dedupe; broaden, switch operator set, or drop a tier of min_faves:
++THIS-CYCLE QUERIES ALREADY TRIED with per-query outcomes (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters). Do NOT repeat any of these phrasings or close variants. Read each entry's \`verdict\` field and respond directionally:
++- \`dead_supply\` (raw_tweets=0): BROADEN. Drop one -term exclude, shorten the OR group, or lower min_faves one tier. The phrasing was too narrow for X's index.
++- \`all_aged_out\` (raw>0, kept_after_age=0): topic is supply-limited at this freshness window. Pick a structurally adjacent topic; do NOT rephrase the same one.
++- \`all_engaged_or_skipped\` (kept_after_age>0, kept_after_skip=0): query phrasing is fine, but this topic has been engaged on past cycles. Pick a different topic.
++- \`found_some\` (kept_after_skip>0 but below target): query is on-target. Raise min_faves one tier OR add a semantic constraint to lift quality, do NOT broaden.
++
+ $TRIED_QUERIES_JSON
+
+ Query guidelines:
+@@ -1032,21 +1040,82 @@
+ CUMULATIVE_DUDS=$((CUMULATIVE_DUDS + DUDS_TOTAL))
+ CUMULATIVE_TWEETS_PULLED=$((CUMULATIVE_TWEETS_PULLED + TWEETS_PULLED))
+
+-# Snapshot this iteration's queries into TRIED_QUERIES_JSON BEFORE
+-# log_twitter_search_attempts.py deletes QUERIES_FILE. Used in the next
+-# iteration's prompt to tell the model which phrasings it has already burned.
++# Snapshot this iteration's queries WITH per-query verdicts into
++# TRIED_QUERIES_JSON BEFORE log_twitter_search_attempts.py deletes QUERIES_FILE.
++# Verdicts come from joining QUERIES_FILE (drafted queries) with SCAN_TWEETS_FILE
++# (raw scrape per query) and the BATCH_COUNT delta this attempt (kept_after_skip).
++# kept_after_age vs kept_after_skip distinction requires the scorer to expose
++# its freshness-gate counts; until that lands, kept_after_age == raw_tweets
++# (assume the freshness gate kept everything) so the verdict collapses to
++# dead_supply | all_engaged_or_skipped | found_some. The all_aged_out branch
++# activates once scripts/score_twitter_candidates.py writes
++# /tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-scored.json with the per-query
++# pre/post-age counts.
+ if [ -f "$QUERIES_FILE" ]; then
+-    TRIED_QUERIES_JSON=$(python3 -c "
+-import json, sys
+-cur = json.loads(sys.argv[1] or '[]')
++    TRIED_QUERIES_JSON=$(python3 - \
++        "$TRIED_QUERIES_JSON" "$QUERIES_FILE" "$SCAN_TWEETS_FILE" \
++        "/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-scored.json" \
++        "$BATCH_COUNT_BEFORE_ATTEMPT" "$BATCH_COUNT" <<'PY' 2>/dev/null || echo "$TRIED_QUERIES_JSON"
++import json, os, sys
++from collections import Counter
++cur = json.loads(sys.argv[1] or '[]')
++queries_path = sys.argv[2]
++scan_path = sys.argv[3]
++scored_path = sys.argv[4]
+ try:
+-    new = json.load(open(sys.argv[2]))
++    new = json.load(open(queries_path))
+     if not isinstance(new, list):
+         new = []
+ except Exception:
+     new = []
++
++# raw_tweets per query from SCAN_TWEETS_FILE (one JSONL record per scan call)
++raw_by_query = Counter()
++if os.path.exists(scan_path):
++    with open(scan_path) as fh:
++        for line in fh:
++            try:
++                rec = json.loads(line)
++            except Exception:
++                continue
++            q = (rec.get('query') or '').strip()
++            n = len(rec.get('tweets') or [])
++            if q:
++                raw_by_query[q] += n
++
++# kept_after_age per query from scorer sidecar (optional; until scorer emits it,
++# we assume kept_after_age == raw_tweets which collapses all_aged_out away)
++age_by_query = {}
++if os.path.exists(scored_path):
++    try:
++        scored = json.load(open(scored_path))
++        for q, counts in (scored or {}).items():
++            age_by_query[q.strip()] = int(counts.get('kept_after_age') or 0)
++    except Exception:
++        pass
++
++# kept_after_skip is the cycle-level delta this attempt, split evenly across
++# queries since the scorer doesn't tag survivors by source query upstream.
++# Acceptable approximation: we mostly care about zero vs nonzero per attempt.
++try:
++    delta = max(0, int(sys.argv[6]) - int(sys.argv[5]))
++except Exception:
++    delta = 0
++share = (delta / max(1, len(new))) if new else 0
++
++for entry in new:
++    q = (entry.get('query') or '').strip()
++    raw = raw_by_query.get(q, 0)
++    kept_age = age_by_query.get(q, raw)
++    kept_skip = int(round(share)) if raw > 0 else 0
++    if raw == 0:
++        verdict = 'dead_supply'
++    elif kept_age == 0:
++        verdict = 'all_aged_out'
++    elif kept_skip == 0:
++        verdict = 'all_engaged_or_skipped'
++    else:
++        verdict = 'found_some'
++    entry['raw_tweets'] = raw
++    entry['kept_after_age'] = kept_age
++    entry['kept_after_skip'] = kept_skip
++    entry['verdict'] = verdict
++
+ cur.extend(new)
+ print(json.dumps(cur))
+-" "$TRIED_QUERIES_JSON" "$QUERIES_FILE" 2>/dev/null || echo "$TRIED_QUERIES_JSON")
++PY
++)
+ fi
+
+ # Log every drafted query (incl. zero-result ones) to twitter_search_attempts
