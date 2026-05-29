@@ -5,8 +5,10 @@
       "command": "/usr/bin/python3",
       "args": [
         "__HOME__/social-autoposter/scripts/mcp_lock_proxy.py",
-        "--lock-name", "reddit-browser",
-        "--ttl", "90",
+        "--lock-name",
+        "reddit-browser",
+        "--ttl",
+        "90",
         "--",
         "npx",
         "@playwright/mcp@latest",
@@ -43,6 +45,23 @@
       ],
       "env": {
         "PATH": "__HOME__/.local/bin:__NODE_BIN__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    },
+    "linkedin-harness": {
+      "type": "stdio",
+      "command": "__HOME__/.local/bin/uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--with",
+        "mcp",
+        "__HOME__/.claude/mcp-servers/browser-harness/server.py"
+      ],
+      "env": {
+        "PATH": "__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "BU_NAME": "linkedin-harness",
+        "BH_PORT": "9556",
+        "BH_PROFILE_NAME": "browser-harness-linkedin"
       }
     }
   }
