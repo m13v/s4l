@@ -154,6 +154,7 @@ Locked files (do NOT unlock or edit without explicit user instruction):
 - `scripts/engage_reddit.py` (Moltbook context clearing, grounding rule in prompt)
 - `skill/run-reddit-search.sh`, `skill/run-twitter-cycle.sh`, `skill/run-github.sh`, `skill/run-linkedin.sh`
 - `scripts/top_performers.py`, `scripts/post_reddit.py`, `scripts/post_github.py`, `scripts/github_tools.py`
+- `scripts/qualified_query_bank.py`, `scripts/top_search_topics.py` (Twitter Phase 1 query bank + per-topic ranking; both carry the 2026-05-29 cross-route guard: a query/topic is credited to a project ONLY when the resulting post's `posts.project_name` matched the issuing project. Removing the `p.project_name = a.project_name` / `_posted` guards re-opens the bug where a broad invented query for project A that the prep step re-routes to project B gets "qualified" for A on B's conversion.)
 - `scripts/linkedin_api.py`, `scripts/discover_linkedin_candidates.py`, `scripts/score_linkedin_candidates.py`, `scripts/linkedin_browser.py`, `scripts/linkedin_url.py`, `scripts/log_linkedin_search_attempts.py`, `scripts/top_linkedin_queries.py`, `scripts/top_dud_linkedin_queries.py`
 - `seo/generate_page.py`, `seo/escalate.py`, `seo/resume_escalations.py`
 - `scripts/ingest_human_seo_replies.py`, `scripts/scan_dm_candidates.py`
