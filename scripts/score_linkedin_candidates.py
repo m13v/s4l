@@ -39,6 +39,7 @@ mcp__linkedin-agent walk in run-linkedin.sh Phase B):
         "reactions": 42,
         "comments": 7,
         "reposts": 3,
+        "search_topic": "AI agents in production",
         "search_query": "ai agents production",
         "matched_project": "fazm",
         "language": "en",
@@ -65,6 +66,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
+from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
 try:
     from account_resolver import resolve as _resolve_account
 except Exception:
@@ -223,6 +225,7 @@ def _parse_age_hours(cand):
 def upsert_candidates(candidates, batch_id=None):
     """Score and upsert LinkedIn candidates. Returns (inserted, skipped, errors)."""
     conn = dbmod.get_conn()
+    ensure_search_topic_schema(conn)
 
     # Dedupe against already-posted LinkedIn threads (the engaged-id check
     # in run-linkedin.sh covers URN-level dedup, but this catches URL-level
@@ -310,6 +313,7 @@ def upsert_candidates(candidates, batch_id=None):
             velocity,         # engagement_velocity (raw)
             virality,         # velocity_score (post-multiplier)
             float(cand["serp_quality_score"]) if cand.get("serp_quality_score") is not None else None,
+            cand.get("search_topic") or None,
             cand.get("search_query") or None,
             cand.get("matched_project") or None,
             cand.get("language") or "en",
@@ -324,13 +328,13 @@ def upsert_candidates(candidates, batch_id=None):
                      author_followers, post_text, post_posted_at, age_hours,
                      reactions, comments, reposts,
                      engagement_velocity, velocity_score, serp_quality_score,
-                     search_query, matched_project, language,
+                     search_topic, search_query, matched_project, language,
                      status, discovered_at, batch_id)
                 VALUES (%s, %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s,
                         %s, %s, %s,
-                        %s, %s, %s,
+                        %s, %s, %s, %s,
                         'pending', NOW(), %s)
                 ON CONFLICT (post_url) DO UPDATE SET
                     activity_id        = COALESCE(EXCLUDED.activity_id, linkedin_candidates.activity_id),
@@ -347,6 +351,7 @@ def upsert_candidates(candidates, batch_id=None):
                     engagement_velocity= EXCLUDED.engagement_velocity,
                     velocity_score     = EXCLUDED.velocity_score,
                     serp_quality_score = COALESCE(EXCLUDED.serp_quality_score, linkedin_candidates.serp_quality_score),
+                    search_topic       = COALESCE(EXCLUDED.search_topic, linkedin_candidates.search_topic),
                     search_query       = COALESCE(EXCLUDED.search_query, linkedin_candidates.search_query),
                     matched_project    = COALESCE(EXCLUDED.matched_project, linkedin_candidates.matched_project),
                     language           = COALESCE(EXCLUDED.language, linkedin_candidates.language),
