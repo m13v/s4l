@@ -14,6 +14,11 @@
 set -euo pipefail
 
 source "$(dirname "$0")/lock.sh"
+# reddit-harness backend (2026-05-29): exports REDDIT_CDP_URL=:9557 so
+# reddit_browser.py (shelled from engage_reddit.py) attaches to the harness
+# Chrome instead of ps-discovering the reddit-agent profile. Source after
+# lock.sh, before acquire_lock / browser pre-flight.
+source "$(dirname "$0")/lib/reddit-backend.sh"
 acquire_lock "engage-reddit" 0
 
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
@@ -49,8 +54,11 @@ START_TS=$(date +%s)
 # Best-effort: if acquire is BUSY (peer pipeline mid-post), warn and proceed.
 echo "[engage-reddit] Pre-flight: brief reddit-browser acquire + ensure_browser_healthy + release..." | tee -a "$LOG_FILE"
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
-    echo "[engage-reddit] WARNING: pre-flight acquire BUSY; ensure_browser_healthy will run anyway; per-reply acquires inside engage_reddit.py will retry." | tee -a "$LOG_FILE"
-ensure_browser_healthy "reddit"
+    echo "[engage-reddit] WARNING: pre-flight acquire BUSY; harness bootstrap will run anyway; per-reply acquires inside engage_reddit.py will retry." | tee -a "$LOG_FILE"
+if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
+    echo "[engage-reddit] WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit" | tee -a "$LOG_FILE"
+    ensure_browser_healthy "reddit"
+fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 # Belt-and-suspenders trap: free the lease on any exit path. Idempotent.
