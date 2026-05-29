@@ -111,7 +111,9 @@ FRESHNESS_HOURS=6
 # Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling)
 # so peer cycles don't accidentally expire each other's still-pending rows.
 # Only FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) varies.
-TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%4; print('ABCD'[h])" "$BATCH_ID" 2>/dev/null || echo "A")
+# Weights (2026-05-28): D=50%, A=B=C=~16.67%. hash % 6 with mapping
+# [A,B,C,D,D,D] up-weights D after early signal favored the 2k view cap.
+TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%6; print(['A','B','C','D','D','D'][h])" "$BATCH_ID" 2>/dev/null || echo "A")
 FRESHNESS_HOURS_DISCOVER=$FRESHNESS_HOURS
 if [ "$TWITTER_CYCLE_VARIANT" = "C" ] || [ "$TWITTER_CYCLE_VARIANT" = "D" ]; then
     FRESHNESS_HOURS_DISCOVER=1
@@ -540,7 +542,7 @@ for p in projects:
     name = (p.get('name') or '').strip()
     if not name:
         continue
-    rows = run_q(['--limit', '20', '--window-days', '14', '--project', name])
+    rows = run_q(['--limit', '20', '--window-days', '7', '--project', name])
     out[name] = {'project_queries': rows}
 print(json.dumps(out))
 " 2>/dev/null || echo "{}")
@@ -622,94 +624,9 @@ ENGAGED_TWEET_IDS=$(python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" engaged-
 ENGAGED_COUNT=$(echo "$ENGAGED_TWEET_IDS" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
 log "Recently-engaged tweet IDs loaded: $ENGAGED_COUNT (last 48h; scanner will skip them)"
 
-# --- Hook-notice block (harness is the only backend now) --------------------
-# The PreToolUse hook ~/.claude/hooks/twitter-search-since-rewrite.py matches
-# `mcp__twitter-harness__bh_run` and enforces a strict 6-hour freshness window.
-# Single-quoted assignment because the body contains literal backticks the
-# model needs to see verbatim.
-HOOK_NOTICE='STUB ENFORCEMENT — your `mcp__twitter-harness__bh_run` script is hard-pinned by a PreToolUse hook (TWITTER_SCAN_ENFORCE=1) to the canonical `twitter_scan.scan(...)` stub shown in Step 2. The hook REJECTS or REWRITES any deviation: any `goto_url`, `js()`, `new_tab`, URL construction, or scrape logic you try to add gets replaced with the canonical stub before it runs. Freshness is enforced inside scan() itself — it strips any since/until/since_time/until_time from your query, then force-appends `since_time:<freshness_hours-ago-epoch>` to the URL on the Latest tab. Do NOT add date operators to your query (they will be stripped). Do NOT try to scrape outside scan() (the script will be denied). Do NOT investigate empty results — they mean no fresh supply exists in the freshness window; drop the min_faves floor per the zero-result rule below and re-run that one query.'
-
-# --- Anti-debug rule --------------------------------------------------------
-# Phase 1 is a STRAIGHT-LINE scrape, not an exploration. The 17:15 cycle on
-# 2026-05-15 ran 42 minutes with num_turns=37 because Claude saw a 0-result
-# query, assumed X was misbehaving, and spent 30 minutes reverse-engineering
-# our own since: hook + X's scroll virtualization. That's all wasted budget:
-# the hook is documented (see HOOK_NOTICE), scroll behavior doesn't matter
-# (the scrape only reads the initial viewport's 8 tweets), and a 0-result
-# query honestly means there is no fresh supply. Encode "stop debugging,
-# finish the job" as an explicit rule the model can quote back to itself.
-ANTI_DEBUG_RULE='ANTI-DEBUG RULE — Phase 1 is a STRAIGHT-LINE scrape with a HARD 15-minute total budget. You have AT MOST 2 bh_run calls per project (1 for the search, 1 only if the first crashed with a Python error — NOT for retries on empty results). You MUST NOT: investigate X search-operator behavior even if results look surprising; investigate why your `since:` operators got rewritten (see HOOK NOTICE above); try alternate URL forms (top vs latest, with/without -filter:replies, &src= variants, etc.); scroll the page, click anything, or take screenshots to "verify" state; "improve" or rewrite the bh_run script body; re-try a query that returned 0 tweets. If your bh_run returns an empty list, that means no fresh supply exists in the 6h window — that is the CORRECT, EXPECTED outcome for thin queries. Log `tweets_found:0` in queries_used and move on to the next project. Finishing all projects in 8 minutes with several 0-result entries is the SUCCESS state. Spending 30 minutes "debugging" one project is a FAILURE — empty results are the diagnostic, not a bug to fix.'
-
-# --- Step 2 block (harness, hardcoded bh_run script) ------------------------
-# Give Claude the LITERAL script to run, not a Playwright template + a
-# translation table. The mental-translation step costs turns and invites
-# detours: every cycle the model would have to re-derive the bh_run idiom
-# (new_tab vs goto_url, js() triple-quote, tab hygiene) from the translation
-# table. Hardcoding the script collapses that to zero turns of decision-making.
-#
-# `read -r -d ''` rather than `$(cat <<EOF)` because macOS bash 3.2 has a
-# parsing bug: inside `$(...)` it tries to balance parens/quotes in the
-# heredoc body, even with a single-quoted delimiter. The JS arrow-function
-# syntax `(() => {...})()` and apostrophes in prose body would trigger
-# spurious "unexpected EOF" errors. `read -d ''` reads the heredoc directly
-# into the variable with no command substitution, sidestepping the bug.
-# `|| true` because read returns 1 when it hits EOF without the delimiter.
-IFS='' read -r -d '' STEP2_INSTRUCTIONS <<'HARNESS_STEP2_EOF' || true
-## Step 2: Search and extract, RUN EXACTLY THIS STUB, NO IMPROVEMENTS
-
-For EACH project query you drafted, make ONE call to `mcp__twitter-harness__bh_run` with the Python body below. The body is a thin stub that calls the operator-owned `twitter_scan.scan` function. DO NOT write `goto_url`, `js(...)`, `new_tab`, URL construction, scrape loops, or age-gate logic yourself; the operator owns ALL of that inside scan(). The PreToolUse hook is in enforcement mode and WILL REJECT or REWRITE any bh_run script that is not this stub.
-
-Your ONLY freedom is the three quoted keyword arguments. Substitute:
-- `query`: the query string you drafted for this project (with operators).
-- `project`: the project name (e.g. studyly, Podlog, S4L).
-- `search_topic`: the project's ASSIGNED `search_topic` field, pasted VERBATIM. End-to-end attribution joins on this string; do NOT set it equal to the query, do NOT paraphrase the topic, do NOT lowercase or strip operators from it.
-
-`freshness_hours` and `skip_ids` are pre-filled with cycle-correct values; leave them as-is.
-
-```python
-import sys
-sys.path.insert(0, "/Users/matthewdi/social-autoposter/scripts")
-from twitter_scan import scan
-scan(
-    query="YOUR DRAFTED QUERY HERE WITH OPERATORS",
-    project="PROJECT_NAME",
-    search_topic="PASTE THE PROJECT'S ASSIGNED search_topic VERBATIM",
-    freshness_hours=___FRESHNESS_HOURS___,
-    skip_ids=___ENGAGED_IDS___,
-)
-```
-
-What scan() does for you (so you understand the contract; you do not write any of this):
-- Builds the URL with `&f=live` (Latest tab forced; you cannot pick Top).
-- Strips any since/until/since_time/until_time from your query string.
-- Force-appends `since_time:<now - freshness_hours*3600>` to the URL.
-- Navigates the harness Chrome (reuses an existing real tab or opens one).
-- Scrapes up to 8 article cards with the same JS the legacy template used.
-- Drops tweets older than `freshness_hours` and any tweet ID in `skip_ids`.
-- Stamps `search_topic`, `matched_project`, `query` on every kept tweet.
-- Prints the kept tweets as JSON between `###TWEETS_BEGIN###` and `###TWEETS_END###` sentinels.
-
-Output rules:
-
-1. The cycle shell reads scan() output directly from a sidecar file (env `SCAN_TWEETS_FILE`); you do NOT need to read or parse the sentinel-framed JSON scan() prints to stdout. Each bh_run call appends one JSONL record there; the shell aggregates them across all calls in this attempt.
-
-2. Your final `structured_output` only needs to satisfy the schema. Emit `tweets: []` and `queries_used: []` as empty placeholders. The shell uses the sidecar file as ground truth and ignores your arrays unless the sidecar is empty (e.g. every bh_run was denied by the stub-enforcement hook).
-
-3. NEVER make more than one bh_run call per project under normal operation. The only exception: a bh_run that returned a Python traceback (not an empty list) may be retried ONCE with the IDENTICAL script body.
-HARNESS_STEP2_EOF
-
-# Substitute cycle-resolved values for the stub's freshness/skip placeholders.
-# Single-quoted heredoc above prevents shell expansion, so we do it here against
-# the captured variable. Bash 3.2 supports ${var//search/replace}.
-STEP2_INSTRUCTIONS="${STEP2_INSTRUCTIONS//___FRESHNESS_HOURS___/$FRESHNESS_HOURS_DISCOVER}"
-STEP2_INSTRUCTIONS="${STEP2_INSTRUCTIONS//___ENGAGED_IDS___/$ENGAGED_TWEET_IDS}"
-
 
 # --- Phase 1: Claude drafts queries, scrapes tweets -------------------------
 # JSON schema forces structured output. Eliminates the prose-drift failure mode
-# where the scanner summarized instead of dumping the JSON array.
-SCAN_SCHEMA='{"type":"object","properties":{"tweets":{"type":"array","items":{"type":"object","properties":{"handle":{"type":"string"},"text":{"type":"string"},"tweetUrl":{"type":"string"},"datetime":{"type":"string"},"replies":{"type":"integer"},"retweets":{"type":"integer"},"likes":{"type":"integer"},"views":{"type":"integer"},"bookmarks":{"type":"integer"},"search_topic":{"type":"string"},"matched_project":{"type":"string"},"query":{"type":"string"}},"required":["handle","text","tweetUrl","datetime","replies","retweets","likes","views","bookmarks","search_topic","matched_project","query"]}},"queries_used":{"type":"array","items":{"type":"object","properties":{"query":{"type":"string"},"project":{"type":"string"},"tweets_found":{"type":"integer"},"search_topic":{"type":"string"}},"required":["query","project","tweets_found","search_topic"]}}},"required":["tweets","queries_used"]}'
-
 # Lean Phase 1 schema (2026-05-28): the scan session no longer scrapes,
 # it only drafts queries. The Python pipeline runs each query via headless
 # Chrome and writes the tweets directly to SCAN_TWEETS_FILE for the shell.
@@ -767,6 +684,11 @@ UNIVERSE_EXHAUSTED=0
 
 while [ "$SCAN_ATTEMPT" -lt "$MAX_SCAN_ATTEMPTS" ]; do
 SCAN_ATTEMPT=$((SCAN_ATTEMPT + 1))
+# Snapshot the pre-attempt batch size so the verdict step below can compute
+# kept_after_skip as a delta after the scorer finishes this attempt (2026-05-28
+# retry-feedback: turns TRIED_QUERIES_JSON from bare phrasings into per-query
+# verdicts the drafter can use to choose broaden vs narrow vs new-topic).
+BATCH_COUNT_BEFORE_ATTEMPT="${BATCH_COUNT:-0}"
 
 # --- Per-attempt topic (re)pick (2026-05-27) ---------------------------------
 # Attempt 1 keeps the pre-loop topic that PROJECTS_JSON already carries.
@@ -883,46 +805,7 @@ export SCAN_TWEETS_FILE
 # Output downstream is identical: $RAW_FILE + $QUERIES_FILE feed the scorer
 # and twitter_search_attempts logger the same way as before.
 #
-# Dead under this flow (still in the file as scaffolding for rollback):
-#   - $STEP2_INSTRUCTIONS (bh_run stub instruction)
-#   - $HOOK_NOTICE / $ANTI_DEBUG_RULE (no browser session for the model)
-#   - $SCAN_SCHEMA (the old tweets+queries_used schema)
-#   - TWITTER_SCAN_ENFORCE=1 env (no bh_run from this rail)
-#   - The PreToolUse stub-enforcement code in twitter-search-since-rewrite.py
-#     (still wired but never fires for the scan session)
-
 log "Lean Phase 1: drafting queries (no browser tools)..."
-
-# === DEBUG INSTRUMENTATION (2026-05-28) ============================
-# The lean call deterministically fails inside cycle context with 0 bytes
-# of stdout AND nothing captured via 2>&1, even though identical isolated
-# invocations succeed. Split stderr to a side file (so '[skipped]' or
-# wrapper errors land even if stdout is empty) and dump env / ancestry
-# so we can compare cycle vs isolated runtime.
-LEAN_DBG_DIR="/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-lean-debug"
-mkdir -p "$LEAN_DBG_DIR"
-{
-    echo "=== ts=$(date) batch=$BATCH_ID attempt=$SCAN_ATTEMPT pid=$$ ==="
-    echo
-    echo "=== ancestry (this shell + parents) ==="
-    ps -o pid,ppid,pgid,sid,etime,command -p $$ 2>&1
-    if [ -n "${PPID:-}" ]; then ps -o pid,ppid,pgid,sid,etime,command -p $PPID 2>&1; fi
-    echo
-    echo "=== relevant env vars ==="
-    env | grep -iE "claude|api_key|anthropic|model|sa_pipeline|tw_engine|repo_dir|^home=|^path=|^user=|batch_id|freshness|fresh_hours|scan_tweets_file|engaged_tweet" | sort
-    echo
-    echo "=== ulimit -a ==="
-    ulimit -a 2>&1
-    echo
-    echo "=== which claude / which uv ==="
-    which claude 2>&1
-    which uv 2>&1
-    echo
-    echo "=== open fds ==="
-    ls -la /proc/self/fd 2>/dev/null || lsof -p $$ 2>&1 | head -25
-} > "$LEAN_DBG_DIR/env.log" 2>&1
-LEAN_STDERR="$LEAN_DBG_DIR/stderr.log"
-log "[DBG] lean call about to run; env_log=$LEAN_DBG_DIR/env.log stderr_path=$LEAN_STDERR"
 
 QUERIES_OUTPUT=$("$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-queries" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$SCAN_SCHEMA_LEAN" "${TW_ENGINE_PREFIX}You are a Twitter query drafter. Your ONLY job is to draft fresh X advanced-search queries that surface tweets relevant to our projects. You do NOT post, you do NOT call any tools, you do NOT scrape. A separate Python pipeline runs your queries over the same CDP-driven Chrome and applies a strict freshness gate; you only return the query strings.
 
@@ -941,7 +824,20 @@ The picker is asking you to INVENT a brand-new search_topic. Look at the project
 Projects:
 $PROJECTS_JSON
 
-Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Use the structure of YOUR project's gold-tier queries (operators, keyword density, query length) as inspiration; the canonical source for \`min_faves:N\` selection is the PER-PROJECT SUPPLY SIGNAL block below.
+Top past queries FOR THE PROJECT YOU'RE DRAFTING FOR (7-day window, per-project, sorted by clicks DESC first, then composite-scored: clicks×100 + likes + views×0.001). CLICKS ARE THE PRIORITY SIGNAL. Each row carries THREE labels that tell you what to do with it as a reference:
+
+  - \`supply_bucket\`: low (<1 tweet/attempt), medium (1-5), high (>5). Raw supply X returned for this phrasing.
+  - \`conversion_bucket\`: low (<0.2 post_rate), medium (0.2-0.6), high (>=0.6). How often a found tweet survived the draft gate.
+  - \`guidance\`: one of MIMIC, KEEP_STYLE, NARROW, BROADEN — the action to take when drawing from this query.
+  - \`posts_per_attempt\`: posts produced per Phase 1 search invocation; <0.1 means most attempts produce zero survivors.
+
+How to act on \`guidance\`:
+  - MIMIC      — gold tier. Reuse the operator skeleton verbatim, swap only the topic keyword for the picker-assigned topic.
+  - KEEP_STYLE — solid. Use the operator pattern as inspiration; small phrasing tweaks OK.
+  - NARROW     — high supply, low conversion (noisy pond). If you draw from it, ADD specificity: more OR alternates, stricter min_faves, extra -term excludes.
+  - BROADEN    — low supply (query dying or topic running dry). The OPERATORS are dead weight. Shorten to 1-2 keywords, drop OR groups, step min_faves down a tier. Do NOT inherit operators from a BROADEN-tagged row.
+
+The canonical source for \`min_faves:N\` selection is the PER-PROJECT SUPPLY SIGNAL block below.
 $TOP_QUERIES_PER_PROJECT_JSON
 
 TOP-PERFORMING SEARCH TOPICS (conceptual seeds, 14d window) — context for query phrasing only; you draft a query for the picker-assigned topic, you do NOT swap topics here:
@@ -959,11 +855,15 @@ $SUPPLY_SIGNAL_JSON
 ALREADY-ENGAGED TWEET IDS (last 48h) — the Python scraper skips these regardless, but knowing them helps you avoid drafting a query that would predominantly surface dead candidates:
 $ENGAGED_TWEET_IDS
 
-THIS-CYCLE QUERIES ALREADY TRIED (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters) — do NOT repeat any of these phrasings or close variants. If non-empty, prior attempts returned too few survivors after the freshness gate + scorer dedupe; broaden, switch operator set, or drop a tier of min_faves:
+THIS-CYCLE QUERIES ALREADY TRIED with per-query outcomes (attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS, target=$RETRY_TARGET candidates after filters). Do NOT repeat any of these phrasings or close variants. Read each entry's \`verdict\` field and respond directionally (do NOT default to generic "broaden"):
+- \`dead_supply\` (raw_tweets=0): the phrasing returned ZERO tweets from X. BROADEN aggressively: drop one -term exclude, shorten the OR group, or lower min_faves one tier. The query was too narrow for X's index.
+- \`all_aged_out\` (raw>0, kept_after_age=0): topic is supply-limited at the current freshness window; every tweet was older than the cap. Pick a structurally adjacent topic; do NOT rephrase the same one (it will just hit the cap again).
+- \`all_engaged_or_skipped\` (kept_after_age>0, kept_after_skip=0): query phrasing is fine, but the surviving tweets were already engaged on prior cycles. Pick a DIFFERENT topic, not a rephrase.
+- \`found_some\` (kept_after_skip>0 but below target): query is on-target. Raise min_faves one tier OR add a semantic constraint to lift quality. Do NOT broaden.
 $TRIED_QUERIES_JSON
 
 Query guidelines:
-- MANDATORY: every query MUST end with the operator \`since_time:\$(( \$(date +%s) - FRESHNESS_HOURS_DISCOVER * 3600 ))\` copied EXACTLY as written. It is a pre-computed Unix-epoch timestamp; do NOT recalculate or reformat. The Python scraper additionally strips and re-injects this operator at the URL level (so even if you drop it, freshness is enforced); but matching it here keeps the query strings honest in the dashboard.
+- MANDATORY: do NOT add any date or time-window operator to your query (no \`since:\`, \`until:\`, \`since_time:\`, \`until_time:\`). The Python scraper enforces the freshness window at the URL level after you return; any time operator you include is stripped and overwritten. Including raw bash arithmetic, format strings, or placeholder text in place of a real epoch will be sent to X as a literal keyword and produce zero results.
 - MANDATORY EVEN IF YOUR QUERY KEYWORDS DO NOT NAME THE EXCLUDED TOPIC: if a project's \`excludes_for_search\` array is non-empty, append \`-term\` for EVERY listed term to that project's query, verbatim, no exceptions.
 - MANDATORY: pick \`min_faves:N\` per the PER-PROJECT SUPPLY SIGNAL above. If a project has no entry there (new / first cycle), start at min_faves:20.
 - Favor discussions/opinions (people sharing experience, asking questions), not news/promos/giveaways.
@@ -977,19 +877,8 @@ Query guidelines:
 Return ONLY the structured_output JSON with this shape:
 {\"queries\": [{\"project\": \"PROJECT_NAME\", \"query\": \"X advanced search string with operators\", \"search_topic\": \"assigned or invented topic, verbatim\"}, ...]}
 
-One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>"$LEAN_STDERR")
-QUERIES_RC=$?
+One entry per project. Do NOT include tweets, do NOT include tweets_found, do NOT call any tool, do NOT scrape. The shell pipeline runs each query via headless Chrome with a strict freshness gate after you return." 2>&1)
 
-# === DEBUG POST-CALL LOGGING (2026-05-28) ==========================
-log "[DBG] run_claude.sh rc=$QUERIES_RC stdout_len=$(printf '%s' "$QUERIES_OUTPUT" | wc -c | tr -d ' ') stderr_len=$(wc -c < "$LEAN_STDERR" 2>/dev/null | tr -d ' ' || echo 0)"
-if [ -s "$LEAN_STDERR" ]; then
-    log "[DBG] stderr first 1000 chars:"
-    head -c 1000 "$LEAN_STDERR" 2>/dev/null | tr '\n' ' ' | tee -a "$LOG_FILE" >/dev/null
-    echo "" >> "$LOG_FILE"
-fi
-# Save the captured stdout to a side file too, in case the parse path mangles it.
-printf '%s' "$QUERIES_OUTPUT" > "$LEAN_DBG_DIR/stdout.log"
-log "[DBG] full dbg dir: $LEAN_DBG_DIR (env.log, stdout.log, stderr.log)"
 
 # Dump the captured envelope to the cycle log for offline inspection.
 echo "$QUERIES_OUTPUT" >> "$LOG_FILE"
@@ -1152,22 +1041,104 @@ CUMULATIVE_QUERIES=$((CUMULATIVE_QUERIES + QUERIES_TOTAL))
 CUMULATIVE_DUDS=$((CUMULATIVE_DUDS + DUDS_TOTAL))
 CUMULATIVE_TWEETS_PULLED=$((CUMULATIVE_TWEETS_PULLED + TWEETS_PULLED))
 
-# Snapshot this iteration's queries into TRIED_QUERIES_JSON BEFORE
-# log_twitter_search_attempts.py deletes QUERIES_FILE. Used in the next
-# iteration's prompt to tell the model which phrasings it has already burned.
+# Snapshot this iteration's queries WITH per-query verdicts into
+# TRIED_QUERIES_JSON BEFORE log_twitter_search_attempts.py deletes QUERIES_FILE.
+# Verdicts come from joining QUERIES_FILE (drafted queries) with SCAN_TWEETS_FILE
+# (raw scrape per query record) and the BATCH_COUNT delta this attempt
+# (kept_after_skip approximation). kept_after_age comes from the optional
+# scorer sidecar at /tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-scored.json
+# (written by score_twitter_candidates.py --scored-sidecar); when the sidecar
+# is missing we assume kept_after_age == raw_tweets, which collapses the
+# all_aged_out branch into dead_supply / found_some — still useful, just less
+# directional. Output entry shape:
+#   {query, project, search_topic, raw_tweets, kept_after_age,
+#    kept_after_skip, verdict}
+# verdict ∈ {dead_supply, all_aged_out, all_engaged_or_skipped, found_some}.
 if [ -f "$QUERIES_FILE" ]; then
-    TRIED_QUERIES_JSON=$(python3 -c "
-import json, sys
+    TRIED_QUERIES_JSON=$(python3 - \
+        "$TRIED_QUERIES_JSON" "$QUERIES_FILE" "$SCAN_TWEETS_FILE" \
+        "/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-scored.json" \
+        "$BATCH_COUNT_BEFORE_ATTEMPT" "$BATCH_COUNT" <<'PY' 2>/dev/null || echo "$TRIED_QUERIES_JSON"
+import json, os, sys
+from collections import Counter
+
 cur = json.loads(sys.argv[1] or '[]')
+queries_path = sys.argv[2]
+scan_path = sys.argv[3]
+scored_path = sys.argv[4]
 try:
-    new = json.load(open(sys.argv[2]))
+    pre = int(sys.argv[5] or 0)
+except Exception:
+    pre = 0
+try:
+    post = int(sys.argv[6] or 0)
+except Exception:
+    post = 0
+
+try:
+    new = json.load(open(queries_path))
     if not isinstance(new, list):
         new = []
 except Exception:
     new = []
+
+# raw_tweets per query from SCAN_TWEETS_FILE (one JSONL record per scan call).
+# Multiple records can share a query if the harness retried; we sum.
+raw_by_query = Counter()
+if scan_path and os.path.exists(scan_path):
+    with open(scan_path) as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            q = (rec.get('query') or '').strip()
+            n = len(rec.get('tweets') or [])
+            if q:
+                raw_by_query[q] += n
+
+# kept_after_age per query from the scorer sidecar (optional). Falls back to
+# raw_tweets when the sidecar is absent.
+age_by_query = {}
+if scored_path and os.path.exists(scored_path):
+    try:
+        scored = json.load(open(scored_path))
+        for q, counts in (scored or {}).items():
+            age_by_query[(q or '').strip()] = int(counts.get('kept_after_age') or 0)
+    except Exception:
+        pass
+
+# kept_after_skip is the cycle-level delta this attempt. The scorer doesn't
+# tag the per-tweet survivor with its source query upstream, so we split the
+# delta evenly across queries that actually returned raw tweets. We mostly
+# care about zero vs nonzero per query, not the exact split.
+delta = max(0, post - pre)
+queries_with_raw = [e for e in new if raw_by_query.get((e.get('query') or '').strip(), 0) > 0]
+share = (delta / max(1, len(queries_with_raw))) if queries_with_raw else 0
+
+for entry in new:
+    q = (entry.get('query') or '').strip()
+    raw = raw_by_query.get(q, 0)
+    # When sidecar present, trust it; else assume freshness gate passed all raw.
+    kept_age = age_by_query[q] if q in age_by_query else raw
+    kept_skip = int(round(share)) if raw > 0 else 0
+    if raw == 0:
+        verdict = 'dead_supply'
+    elif kept_age == 0:
+        verdict = 'all_aged_out'
+    elif kept_skip == 0:
+        verdict = 'all_engaged_or_skipped'
+    else:
+        verdict = 'found_some'
+    entry['raw_tweets'] = raw
+    entry['kept_after_age'] = kept_age
+    entry['kept_after_skip'] = kept_skip
+    entry['verdict'] = verdict
+
 cur.extend(new)
 print(json.dumps(cur))
-" "$TRIED_QUERIES_JSON" "$QUERIES_FILE" 2>/dev/null || echo "$TRIED_QUERIES_JSON")
+PY
+)
 fi
 
 # Log every drafted query (incl. zero-result ones) to twitter_search_attempts
@@ -1222,6 +1193,7 @@ else
         | python3 "$REPO_DIR/scripts/enrich_twitter_candidates.py" \
         | python3 "$REPO_DIR/scripts/score_twitter_candidates.py" --batch-id "$BATCH_ID" \
             ${ATTEMPTS_FILE:+--attempts "$ATTEMPTS_FILE"} \
+            --scored-sidecar "/tmp/twcycle-${BATCH_ID}-attempt-${SCAN_ATTEMPT}-scored.json" \
         2>&1 | tee -a "$LOG_FILE"
     rm -f "$RAW_FILE" "$ATTEMPTS_FILE"
 fi
