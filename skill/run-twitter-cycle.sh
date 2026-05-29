@@ -778,35 +778,6 @@ PY
 _CURRENT_TOPICS=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; ps=json.load(sys.stdin); print(", ".join((p.get("search_topic") or "?") for p in ps))' 2>/dev/null || echo "")
 log "Phase 1 scan attempt $SCAN_ATTEMPT/$MAX_SCAN_ATTEMPTS (batch=$BATCH_ID, candidates so far=$BATCH_COUNT/$RETRY_TARGET, topic(s)=$_CURRENT_TOPICS)"
 
-# --- X API supply pre-check (2026-05-28) ------------------------------------
-# Before spending ~$0.50 of Opus drafting a query, probe X's near-free
-# counts/recent endpoint for the picked topic over the SAME freshness window
-# the scraper enforces (FRESHNESS_HOURS_DISCOVER). When the topic has ZERO
-# fresh tweets, drafting a query for it can only return 0 candidates, so we
-# skip the Opus draft entirely and rotate: the dead topic is already in
-# TRIED_TOPICS_JSON (snapshotted just above), so attempt N+1's repick excludes
-# it. Cycles are single-project (pick_project.py --count 1), so an all-dry
-# verdict == this project's picked topic is dry -> skip + rotate. This is the
-# thin-niche cost fix (NightOwl-style ~0 fresh tweets/h stops burning
-# ~$2.65/run drafting into an empty pond). The helper FAILS OPEN on any X API
-# error (treats the topic as having supply) so a transient hiccup or a missing
-# token never halts drafting. Freshness is NOT touched here.
-_PRECHECK_JSON=$(python3 "$REPO_DIR/scripts/twitter_supply_precheck.py" \
-    --projects "$PROJECTS_JSON" \
-    --freshness-hours "$FRESHNESS_HOURS_DISCOVER" 2>>"$LOG_FILE" || echo '')
-if [ -n "$_PRECHECK_JSON" ]; then
-    _PRECHECK_ALL_DRY=$(echo "$_PRECHECK_JSON" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("all_dry") else "0")' 2>/dev/null || echo 0)
-    _PRECHECK_SUMMARY=$(echo "$_PRECHECK_JSON" | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-print(", ".join(str(p.get("search_topic") or "(invent)")+"="+str(p.get("count")) for p in d.get("probes",[])))' 2>/dev/null || echo "")
-    log "Phase 1 attempt $SCAN_ATTEMPT: X API supply pre-check (${FRESHNESS_HOURS_DISCOVER}h window) -> ${_PRECHECK_SUMMARY:-n/a}"
-    if [ "$_PRECHECK_ALL_DRY" = "1" ]; then
-        log "  Picked topic dry (0 fresh tweets in ${FRESHNESS_HOURS_DISCOVER}h); SKIPPING Opus draft + rotating topic (no spend)"
-        LAST_PHASE1_REASON="phase1_supply_skip"
-        continue
-    fi
-fi
-
 log "Phase 1: drafting queries and scraping tweets..."
 
 # Shell-side data path. scripts/twitter_scan.scan() appends one JSONL record
