@@ -5,24 +5,29 @@ Usage:
     python3 discover_linkedin_candidates.py <vertical> <query>
         # vertical = people | content | companies
 
-Attaches to the linkedin-agent MCP's already-running Chromium via CDP
-(http://localhost:<port> read from DevToolsActivePort) and reuses its
+Attaches to the already-running LinkedIn Chrome via CDP and reuses its
 existing BrowserContext. Same Chrome process, same cookies, same UA, same
-fingerprint as whatever LinkedIn already trusts from the MCP session.
+fingerprint as whatever LinkedIn already trusts from the live session.
 Opens our own page in that context, navigates to the SERP, runs ONE
 page.evaluate() against the rendered DOM, closes our page, disconnects.
+
+CDP endpoint resolution (see _resolve_cdp_url, 2026-05-29):
+    Lane 1 (preferred): LINKEDIN_CDP_URL — the browser-harness Chrome on
+        :9556, exported by skill/lib/linkedin-backend.sh. The main
+        run-linkedin.sh pipeline now drives that harness Chrome
+        (mcp__linkedin-harness__bh_run) instead of the retired
+        linkedin-agent MCP, so this is the live, logged-in session.
+    Lane 2 (legacy): http://localhost:<port> read from the linkedin-agent
+        MCP's DevToolsActivePort. Kept for running outside the harness.
 
 Read-only DOM scrape: NO Voyager API, NO scroll-and-expand loops, NO
 permalink fan-out, NO clicks/typing, NO programmatic login.
 
 Pre-conditions for this to work:
-    1. The linkedin-agent MCP is currently running and has launched Chrome
-       at least once this session (so DevToolsActivePort exists).
-    2. The MCP's launchOptions.args includes --remote-debugging-port=0;
-       see ~/.claude/browser-agent-configs/linkedin-agent.json. Without
-       this flag Chrome only exposes a CDP pipe inherited by the MCP
-       server and is unreachable from this script.
-    3. The user is logged in inside that browser. We do NOT log in.
+    1. A LinkedIn Chrome is running and reachable via one of the two CDP
+       lanes above (normally the harness Chrome on :9556 launched by
+       ensure_linkedin_browser_for_backend).
+    2. The user is logged in inside that browser. We do NOT log in.
 
 Why CDP attach rather than launch_persistent_context: the previous version
 launched its own Chrome against the shared profile dir. When LinkedIn
@@ -635,6 +640,40 @@ def _read_devtools_port() -> Optional[int]:
         return None
 
 
+def _resolve_cdp_url() -> Optional[str]:
+    """Resolve the CDP endpoint to attach the SERP read to.
+
+    Lane 1 (preferred, 2026-05-29): LINKEDIN_CDP_URL, exported by
+    skill/lib/linkedin-backend.sh to point at the browser-harness Chrome on
+    :9556. The main run-linkedin.sh pipeline now drives that harness Chrome
+    (mcp__linkedin-harness__bh_run) instead of the retired linkedin-agent
+    MCP, so this is the live session whose cookies/fingerprint we want. We
+    probe /json/version with a 1s GET so a stale/unset env falls through
+    cleanly rather than dragging into a noisy connect failure.
+
+    Lane 2 (legacy fallback): the linkedin-agent MCP's DevToolsActivePort
+    file under PROFILE_DIR. Kept so the helper still works when run outside
+    the harness-backed pipeline.
+
+    Returns the CDP base URL (e.g. "http://127.0.0.1:9556") or None when
+    neither lane is reachable.
+    """
+    harness = os.environ.get("LINKEDIN_CDP_URL", "").strip()
+    if harness:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(
+                f"{harness.rstrip('/')}/json/version", timeout=1.0
+            ):
+                return harness.rstrip("/")
+        except Exception:
+            pass  # fall through to the legacy DevToolsActivePort lane
+    port = _read_devtools_port()
+    if port is None:
+        return None
+    return f"http://localhost:{port}"
+
+
 def search(vertical: str, query: str) -> dict:
     """Attach to the linkedin-agent MCP's Chrome via CDP and read one SERP.
 
@@ -656,16 +695,18 @@ def search(vertical: str, query: str) -> dict:
     if not rate.get("ok"):
         return rate
 
-    port = _read_devtools_port()
-    if port is None:
+    cdp_url = _resolve_cdp_url()
+    if cdp_url is None:
         return {
             "ok": False,
             "error": "mcp_not_running",
             "detail": (
-                f"{DEVTOOLS_ACTIVE_PORT} is missing or empty. The "
-                "linkedin-agent MCP must be running and have loaded Chrome "
-                "at least once this session, with --remote-debugging-port=0 "
-                "in its launchOptions.args."
+                "No LinkedIn CDP endpoint reachable. Set LINKEDIN_CDP_URL "
+                "(the browser-harness Chrome on :9556, exported by "
+                "skill/lib/linkedin-backend.sh) and make sure that Chrome is "
+                f"running; or, for the legacy lane, {DEVTOOLS_ACTIVE_PORT} "
+                "must point at a live linkedin-agent MCP Chrome launched with "
+                "--remote-debugging-port."
             ),
         }
 
@@ -685,13 +726,13 @@ def search(vertical: str, query: str) -> dict:
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+            browser = p.chromium.connect_over_cdp(cdp_url)
         except Exception as e:
             _log_search(query, vertical, ok=False, error="cdp_attach_failed")
             return {
                 "ok": False,
                 "error": "cdp_attach_failed",
-                "detail": f"connect_over_cdp(localhost:{port}) failed: {e}",
+                "detail": f"connect_over_cdp({cdp_url}) failed: {e}",
             }
 
         # Reuse the existing context (cookies / UA / fingerprint already set
