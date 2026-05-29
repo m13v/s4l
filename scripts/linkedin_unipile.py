@@ -415,12 +415,26 @@ def _cmd_search(args):
         keywords=args.keywords, url=args.url, date_posted=args.date_posted,
         sort_by=args.sort_by, content_type=args.content_type,
         author_keywords=args.author_keywords, limit=args.limit, cursor=args.cursor,
+        with_followers=args.with_followers,
     )
     if args.raw:
         print(json.dumps(res["raw"], indent=2))
         return 0
+    if args.pipeline:
+        # Candidate shape run-linkedin.sh Phase A consumes directly.
+        out = {
+            "ok": True,
+            "query": args.keywords or args.url or "",
+            "result_count": res["count"],
+            "cursor": res["cursor"],
+            "results": to_pipeline_results(res["items"]),
+        }
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
     slim = [{k: it[k] for k in ("social_id", "author_name", "author_headline",
-                                "reaction_count", "comment_count", "share_url", "text")}
+                                "author_followers", "reaction_count",
+                                "comment_count", "repost_count", "posted_at",
+                                "share_url", "text")}
             for it in res["items"]]
     print(json.dumps({"count": res["count"], "cursor": res["cursor"],
                       "items": slim}, indent=2, ensure_ascii=False))
@@ -431,6 +445,30 @@ def _cmd_comment(args):
     res = comment_on_post(args.social_id, args.text, comment_id=args.reply_to)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res["ok"] else 1
+
+
+def _cmd_profile(args):
+    prof = get_profile(args.identifier)
+    if args.raw:
+        print(json.dumps(prof, indent=2, ensure_ascii=False))
+        return 0
+    keys = ("public_identifier", "first_name", "last_name", "headline",
+            "follower_count", "connections_count", "is_influencer",
+            "is_creator", "is_premium", "network_distance")
+    print(json.dumps({k: prof.get(k) for k in keys}, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_comments(args):
+    if args.contains_id:
+        found = comment_exists(args.social_id, args.contains_id)
+        print(json.dumps({"social_id": args.social_id,
+                          "contains_id": args.contains_id, "found": found}))
+        return 0 if found else 1
+    res = list_comments(args.social_id, limit=args.limit)
+    print(json.dumps({"count": res["count"], "items": res["items"]},
+                     indent=2, ensure_ascii=False))
+    return 0
 
 
 def main(argv=None):
@@ -450,6 +488,10 @@ def main(argv=None):
     s.add_argument("--limit", type=int, default=10)
     s.add_argument("--cursor")
     s.add_argument("--raw", action="store_true", help="print the raw API response")
+    s.add_argument("--with-followers", dest="with_followers", action="store_true",
+                   help="enrich each hit with author follower_count (extra GET per author)")
+    s.add_argument("--pipeline", action="store_true",
+                   help="emit run-linkedin.sh Phase A candidate shape")
 
     c = sub.add_parser("comment", help="comment on a post")
     c.add_argument("--social-id", dest="social_id", required=True,
@@ -457,6 +499,16 @@ def main(argv=None):
     c.add_argument("--text", required=True)
     c.add_argument("--reply-to", dest="reply_to",
                    help="comment_id to reply to an existing comment")
+
+    pr = sub.add_parser("profile", help="fetch a LinkedIn profile (follower_count, ...)")
+    pr.add_argument("identifier", help="public_identifier or provider id")
+    pr.add_argument("--raw", action="store_true", help="print the raw API response")
+
+    cm = sub.add_parser("comments", help="list a post's comments (read-back verify)")
+    cm.add_argument("--social-id", dest="social_id", required=True)
+    cm.add_argument("--limit", type=int, default=50)
+    cm.add_argument("--contains-id", dest="contains_id",
+                    help="exit 0 iff a comment with this comment_id is present")
 
     args = p.parse_args(argv)
     try:
@@ -466,6 +518,10 @@ def main(argv=None):
             return _cmd_search(args)
         if args.cmd == "comment":
             return _cmd_comment(args)
+        if args.cmd == "profile":
+            return _cmd_profile(args)
+        if args.cmd == "comments":
+            return _cmd_comments(args)
     except UnipileConfigError as exc:
         print("CONFIG ERROR: %s" % exc, file=sys.stderr)
         return 2
