@@ -684,7 +684,7 @@ If a script or tool call fails, wait 30 seconds and retry (up to 3 times).
 CRITICAL: Reply in the SAME LANGUAGE as the inbound message. Match the language exactly.
 
 ## CRITICAL FAILURE MODE: platform-agent MCP tools not registered
-If at the START of this run you cannot see ANY of the platform's browser tools available (mcp__twitter-harness__bh_run for Twitter, mcp__reddit-agent__* for Reddit, mcp__linkedin-agent__* for LinkedIn), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
+If at the START of this run you cannot see ANY of the platform's browser tools available (mcp__twitter-harness__bh_run for Twitter, mcp__reddit-agent__* for Reddit, mcp__linkedin-harness__bh_run for LinkedIn), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
 
 Do EXACTLY this:
 1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', 'failed', or anything else. Do NOT call log-outbound, mark-skipped, set-status, mark-inspected, increment-attempts, or any other status-mutating helper. Do NOT write skip_reason on any dms/dm_messages/human_dm_replies row.
@@ -1063,9 +1063,9 @@ Pass DM_ID as the third positional arg so the tool logs to dm_messages with auto
 If CDP returns {ok:false, error:"subreddit_blocked"}, the comment is in a sub on \`subreddit_bans.comment_blocked\` and the tool has already auto-closed the DM (when dm_id was passed). Treat this as a clean SKIP — do NOT fall back to MCP, do NOT flag-human, do NOT retry. Move on to the next conversation.
 If CDP returns {ok:false} with any other non-recoverable error, fall back to mcp__reddit-agent__* browser to type the reply on the post page. On the MCP fallback path, the same Step-4 suffix rule applies — if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is set, append it verbatim at $REDDIT_CAMPAIGN_SAMPLE_RATE before submitting; if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is empty, do nothing extra. **Also: emit \`[reddit-comment-mcp-fallback] dm_id=DM_ID reason="<short>"\` to stderr first, then run the same Pre-send URL wrap step (\`python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT"\`) and use \$WRAPPED_TEXT as the input to browser_type. The wrap is cheap and harmless on URL-free replies; required when any URL is present so click attribution survives.**
 
-**LinkedIn Messages** (mcp__linkedin-agent__* tools ONLY, no Python CDP, no /voyager/api/):
+**LinkedIn Messages** (mcp__linkedin-harness__bh_run tool ONLY, no raw Python CDP, no /voyager/api/. See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table):
 
-0. **Pre-send URL wrap (REQUIRED if YOUR_REPLY_TEXT contains any URL).** LinkedIn types via MCP without a Python pre-pass, so the wrap step that reddit/twitter handle in-process must happen explicitly here:
+0. **Pre-send URL wrap (REQUIRED if YOUR_REPLY_TEXT contains any URL).** LinkedIn types via the harness without a Python pre-pass, so the wrap step that reddit/twitter handle in-process must happen explicitly here:
    \`\`\`bash
    WRAPPED_TEXT=\$(python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT" 2>/tmp/dm_wrap_err)
    if [ \$? -ne 0 ]; then
@@ -1076,12 +1076,12 @@ If CDP returns {ok:false} with any other non-recoverable error, fall back to mcp
      exit 1
    fi
    \`\`\`
-   Use \$WRAPPED_TEXT (NOT YOUR_REPLY_TEXT) as the input to browser_type AND as the \`--content\` for the post-send log-outbound. If YOUR_REPLY_TEXT has no URLs, wrap-text returns it unchanged; running it is still cheap and harmless, so always run it.
-1. mcp__linkedin-agent__browser_navigate to THREAD_URL.
-2. browser_snapshot. If you see login, captcha, or checkpoint, STOP and print SESSION_INVALID. Do not attempt to re-login.
-3. Find the message input by aria-label (typically "Write a message"). Use mcp__linkedin-agent__browser_type to enter \$WRAPPED_TEXT.
-4. Click the Send button (aria-label "Send", role=button) via mcp__linkedin-agent__browser_click. Do NOT press Enter to send (Enter inserts newline in LinkedIn's contenteditable).
-5. browser_snapshot and confirm the message appears in the thread as the newest outbound bubble. If not visible, mark this convo as failed (do not retry more than once per run).
+   Use \$WRAPPED_TEXT (NOT YOUR_REPLY_TEXT) as the text you type via type_text AND as the \`--content\` for the post-send log-outbound. If YOUR_REPLY_TEXT has no URLs, wrap-text returns it unchanged; running it is still cheap and harmless, so always run it.
+1. Navigate to THREAD_URL: bh_run('goto_url("THREAD_URL"); wait_for_load()').
+2. Capture a screenshot (bh_run('print(capture_screenshot())')) and Read it. If you see login, captcha, or checkpoint, STOP and print SESSION_INVALID. Do not attempt to re-login.
+3. Find the message input (contenteditable, aria-label typically "Write a message"). Compute its center from getBoundingClientRect via js(), click_at_xy(X, Y) to focus it, then bh_run('type_text(...)') with \$WRAPPED_TEXT.
+4. Click the Send button (aria-label "Send", role=button): compute its center via js() and bh_run('click_at_xy(X, Y)'). Do NOT press Enter to send (Enter inserts a newline in LinkedIn's contenteditable).
+5. Capture a screenshot and confirm the message appears in the thread as the newest outbound bubble. If not visible, mark this convo as failed (do not retry more than once per run).
 
 **X/Twitter DMs** (Python CDP script, no browser MCP needed):
 \`\`\`bash
@@ -1311,7 +1311,7 @@ DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/all-agents-mcp.json"
 if [ -n "$PLATFORM" ]; then
     case "$PLATFORM" in
         reddit)   DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" ;;
-        linkedin) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/linkedin-agent-mcp.json" ;;
+        linkedin) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/linkedin-harness-mcp.json" ;;
         twitter|x) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json" ;;
     esac
 fi
