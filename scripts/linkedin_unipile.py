@@ -41,12 +41,20 @@ class UnipileApiError(RuntimeError):
         self.response = response
 
 
-def _keychain(service):
+# The live UniPile account lives under matt@mediar.ai. An older (dead) i@m13v.com
+# trial shares the same keychain service names, so we must look up the scoped
+# entry first; an unscoped `-w` returns whichever the keychain orders first
+# (often the stale one). Override with UNIPILE_KEYCHAIN_ACCOUNT.
+KEYCHAIN_ACCOUNT = os.environ.get("UNIPILE_KEYCHAIN_ACCOUNT", "matt@mediar.ai")
+
+
+def _keychain(service, account=None):
+    cmd = ["security", "find-generic-password", "-s", service]
+    if account:
+        cmd += ["-a", account]
+    cmd += ["-w"]
     try:
-        out = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-w"],
-            capture_output=True, text=True, timeout=10,
-        )
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if out.returncode == 0:
             return (out.stdout.strip() or None)
     except Exception:
@@ -54,11 +62,15 @@ def _keychain(service):
     return None
 
 
+def _keychain_any(service):
+    return _keychain(service, KEYCHAIN_ACCOUNT) or _keychain(service)
+
+
 def get_config():
-    dsn = os.environ.get("UNIPILE_DSN") or _keychain("unipile-dsn")
-    api_key = os.environ.get("UNIPILE_API_KEY") or _keychain("unipile-api-key")
+    dsn = os.environ.get("UNIPILE_DSN") or _keychain_any("unipile-dsn")
+    api_key = os.environ.get("UNIPILE_API_KEY") or _keychain_any("unipile-api-key")
     account_id = (os.environ.get("UNIPILE_ACCOUNT_ID")
-                  or _keychain("unipile-account-id-linkedin-m13v"))
+                  or _keychain_any("unipile-account-id-linkedin-m13v"))
     missing = [name for name, val in (
         ("UNIPILE_DSN / keychain:unipile-dsn", dsn),
         ("UNIPILE_API_KEY / keychain:unipile-api-key", api_key),
