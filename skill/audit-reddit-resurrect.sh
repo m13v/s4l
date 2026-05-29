@@ -5,6 +5,11 @@
 set -uo pipefail
 
 source "$(dirname "$0")/lock.sh"
+# reddit-harness backend (2026-05-29): exports REDDIT_CDP_URL=:9557 so the
+# resurrect fetch (stats.py --reddit-resurrect -> reddit_tools.batch_fetch_info
+# -> reddit_browser_fetch) attaches to the harness Chrome instead of 403ing on
+# *.json from this residential IP. Source after lock.sh, before pre-flight.
+source "$(dirname "$0")/lib/reddit-backend.sh"
 # Unified reddit lock (2026-05-10): TTL-aware Python lease. The MCP proxy
 # heartbeats expires_at on every reddit-agent call, so the lease stays held
 # during real browser activity but auto-decays within 90s of idleness.
@@ -15,7 +20,10 @@ _release_reddit_lease() {
 python3 "$REPO_DIR_FOR_LOCK/scripts/reddit_browser_lock.py" acquire --timeout 3600 --ttl 90 2>&1 || \
     echo "WARNING: reddit_browser_lock.py acquire failed; proceeding without lease."
 trap '_release_reddit_lease; _sa_release_locks' EXIT INT TERM HUP
-ensure_browser_healthy "reddit"
+if ! ensure_reddit_browser_for_backend 2>&1; then
+    echo "[audit-reddit-resurrect] WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+    ensure_browser_healthy "reddit"
+fi
 acquire_lock "audit-reddit-resurrect" 3600
 
 # shellcheck source=/dev/null
