@@ -207,6 +207,22 @@ def main():
                              "'seen=100,new=0,excluded=1,unmatched=0'). "
                              "Surfaces as scan-stage pills in the dashboard "
                              "Result column for engage runs.")
+    # Invent-topics hourly job counters. Carries the project picked, how many
+    # topics were invented, how many queries were drafted in total, how many
+    # queries surfaced ANY supply, and the per-topic query counts. Free-form
+    # key=value comma-separated string — keys with integer values are parsed
+    # as ints in the dashboard, `project` is parsed as a string, `qpt` is
+    # parsed as a `+`-separated int list. Example:
+    #   --invent='project=fazm,topics=3,queries=15,queries_w_supply=1,qpt=5+5+5'
+    # Tails after scan= so the bin/server.js positional regex extends
+    # backward-compatibly (the new group is optional).
+    parser.add_argument("--invent", dest="invent", default="",
+                        help="Invent-topics job stats. Comma-separated "
+                             "key=value pairs (e.g. 'project=fazm,topics=3,"
+                             "queries=15,queries_w_supply=1,qpt=5+5+5'). "
+                             "Surfaces as the result-column pills on the "
+                             "Invent Topics rows in the Status > Job History "
+                             "tab.")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -289,6 +305,13 @@ def main():
     scan_raw = (args.scan or "").strip()
     scan_clean = scan_raw.replace("|", "").replace(" ", "")
     scan_segment = f" scan={scan_clean}" if scan_clean else ""
+    # `invent=` segment carries the invent-topics hourly job's per-run counts.
+    # Same sanitization rules as scan=/failure_reasons (strip whitespace + pipe).
+    # Tails after scan= so the bin/server.js positional regex extends
+    # backward-compatibly — old lines with no invent= still parse.
+    invent_raw = (args.invent or "").strip()
+    invent_clean = invent_raw.replace("|", "").replace(" ", "")
+    invent_segment = f" invent={invent_clean}" if invent_clean else ""
     # `escape_hatch=` segment surfaces author_blocklist writes that happened
     # during this run window (LLM-judgment via reply_db.py CLI, or manual
     # operator adds). Auto-detected via the API so callers don't have to
@@ -307,7 +330,7 @@ def main():
     line = (
         f"{timestamp} | {args.script} | "
         f"posted={args.posted} skipped={args.skipped} failed={args.failed}"
-        f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment}{scan_segment} "
+        f"{replies_segment}{stats_segment}{salvaged_segment}{discover_segment}{scan_segment}{invent_segment} "
         f"cost=${args.cost:.2f} elapsed={args.elapsed:.0f}s{model_suffix}{failure_segment}{skip_segment}{escape_hatch_segment}"
     )
 
