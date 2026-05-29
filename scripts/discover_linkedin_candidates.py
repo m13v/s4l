@@ -99,19 +99,16 @@ from score_linkedin_candidates import calculate_velocity_score  # noqa: E402
 
 DEVTOOLS_ACTIVE_PORT = os.path.join(PROFILE_DIR, "DevToolsActivePort")
 
-# Hard virality floor for content-vertical SERP candidates. Phase A's LLM
-# picker has historically chosen 1/0/0 fresh posts (virality ~1.0) over
-# stronger 4-19 reaction alternatives because the prompt told it to apply
-# judgment on top of raw signal. Filtering below this floor BEFORE the LLM
-# sees the list constrains the choice to candidates that already cleared a
-# real engagement bar. virality = velocity * reach_mult * age_decay *
-# (1 + disc_bonus); see score_linkedin_candidates.calculate_velocity_score.
-# 2026-05-01: lowered 20.0 -> 5.0. Niche projects (studyly med-school,
-# paperback-expert RIA, Cyrano multifamily security) routinely had ALL
-# SERP cards cut at 20 because their audiences don't push 20 engagement/hr.
-# Floor=5 keeps the worst slop out while letting niche posts through; the
-# Phase A LLM applies ICP judgment on top.
-CONTENT_VIRALITY_FLOOR = 5.0
+# Virality (velocity * reach_mult * age_decay * (1 + disc_bonus); see
+# score_linkedin_candidates.calculate_velocity_score) is a RANKING signal,
+# not a cutoff. Aligned with the Twitter model (2026-05-29): score every
+# SERP card, sort by velocity_score DESC so the Phase A picker sees the
+# strongest candidates first, and NEVER drop a card on virality. The picker
+# prompt already steers toward the top of the sorted list and leans toward
+# posting, so the old hard floor only caused zero-post cycles on quiet
+# topics where every card scored low (e.g. niche backend-dev SERPs). Twitter
+# (score_twitter_candidates.py) keeps every candidate the same way: "no cap,
+# no cutoff: this only ever raises a score, never removes a candidate."
 
 # Search rate-limit budget removed 2026-05-01 per user instruction. The
 # linkedin_browser_searches table is kept so daily/monthly volumes remain
@@ -811,22 +808,17 @@ def search(vertical: str, query: str) -> dict:
             except json.JSONDecodeError:
                 results = []
 
-            dropped_below_floor = 0
             if vertical == "content":
-                kept = []
                 for r in results:
                     velocity, virality, age_clamped = calculate_velocity_score(r)
                     r["engagement_velocity"] = velocity
                     r["velocity_score"] = virality
                     r["age_hours_clamped"] = age_clamped
-                    if virality < CONTENT_VIRALITY_FLOOR:
-                        dropped_below_floor += 1
-                        continue
-                    kept.append(r)
-                # Sort survivors by velocity_score DESC so Phase A's LLM
-                # sees the strongest candidates at the top of the list.
-                kept.sort(key=lambda x: x.get("velocity_score") or 0, reverse=True)
-                results = kept
+                # Twitter model: rank, never drop. Sort by velocity_score DESC
+                # so the Phase A picker sees the strongest candidates first and
+                # takes from the top; weak cards stay eligible as fallback so
+                # quiet topics still yield a comment instead of zero-posting.
+                results.sort(key=lambda x: x.get("velocity_score") or 0, reverse=True)
 
             _log_search(query, vertical, ok=True, error=None)
             return {
@@ -835,8 +827,8 @@ def search(vertical: str, query: str) -> dict:
                 "vertical": vertical,
                 "query": query,
                 "result_count": len(results),
-                "dropped_below_virality_floor": dropped_below_floor,
-                "virality_floor": CONTENT_VIRALITY_FLOOR if vertical == "content" else None,
+                "dropped_below_virality_floor": 0,
+                "virality_floor": None,
                 "results": results,
                 "rate_budget": {
                     "daily_used": rate.get("daily_used"),
