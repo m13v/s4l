@@ -190,21 +190,38 @@ def _query_twitter(conn, project, window_days, limit):
         params.append(project)
     params.append(int(limit))
 
+    # Cross-route guard (2026-05-29): the prep step can re-route a candidate to
+    # a different project than the one whose query surfaced it (e.g. a broad
+    # invented Podlog query with "codebase" surfaces a Claude Code thread that
+    # gets routed to fazm). When that happens posts.project_name is the NEW
+    # project but twitter_candidates.matched_project (our GROUP key here) stays
+    # the origin, because the mark_posted API route does not rewrite it.
+    # Counting that post's conversion (posts/clicks/likes/views) under the
+    # origin project would credit a conversion that actually happened on a
+    # different product, nudging pick_search_topic to favour the wrong topic.
+    # So every POSTED-conversion aggregate requires the post's project to match
+    # the candidate's matched_project. NULL post project is treated as
+    # same-project so legacy rows (project_name stamped later) are not dropped.
+    # Skip/attempt signals are NOT guarded: they are discovery facts, not
+    # project-routed conversions.
+    _posted = ("c.status='posted' AND (p.project_name IS NULL "
+               "OR LOWER(p.project_name) = LOWER(c.matched_project))")
+
     sql = f"""
         WITH cand_agg AS (
             SELECT c.search_topic AS search_topic,
                    c.matched_project AS project_name,
-                   COUNT(DISTINCT c.post_id) FILTER (WHERE c.status='posted' AND c.post_id IS NOT NULL) AS posts,
-                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
+                   COUNT(DISTINCT c.post_id) FILTER (WHERE {_posted} AND c.post_id IS NOT NULL) AS posts,
+                   COUNT(DISTINCT c.id) FILTER (WHERE {_posted}) AS posted_n,
                    COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
-                   AVG(c.virality_score) FILTER (WHERE c.status='posted')                            AS avg_virality_posted,
+                   AVG(c.virality_score) FILTER (WHERE {_posted})                                 AS avg_virality_posted,
                    AVG(c.virality_score) FILTER (WHERE c.status IN ('skipped','expired','failed'))   AS avg_virality_skipped,
-                   COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) AS views_total,
-                   COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0) AS likes_total,
-                   COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
-                   (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
-                    + COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0)
-                    + COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) * 0.001) AS composite_score,
+                   COALESCE(SUM(p.views)   FILTER (WHERE {_posted}), 0) AS views_total,
+                   COALESCE(SUM(p.upvotes) FILTER (WHERE {_posted}), 0) AS likes_total,
+                   COUNT(plc.id) FILTER (WHERE {_posted} AND plc.is_bot = false) AS clicks_total,
+                   (COUNT(plc.id) FILTER (WHERE {_posted} AND plc.is_bot = false) * 100
+                    + COALESCE(SUM(p.upvotes) FILTER (WHERE {_posted}), 0)
+                    + COALESCE(SUM(p.views)   FILTER (WHERE {_posted}), 0) * 0.001) AS composite_score,
                    MAX(c.posted_at) AS last_posted
               FROM twitter_candidates c
               LEFT JOIN posts            p   ON p.id = c.post_id
