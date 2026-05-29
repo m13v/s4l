@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS linkedin_candidates (
     engagement_velocity     DOUBLE PRECISION NOT NULL DEFAULT 0,
     velocity_score          DOUBLE PRECISION NOT NULL DEFAULT 0,
     serp_quality_score      DOUBLE PRECISION,       -- 0-10, denormalised per query
+    search_topic            TEXT,                   -- assigned project-level topic seed
     search_query            TEXT,
     matched_project         TEXT,
     language                TEXT,
@@ -47,6 +48,9 @@ CREATE TABLE IF NOT EXISTS linkedin_candidates (
     draft_engagement_style  TEXT,
     drafted_at              TIMESTAMP WITH TIME ZONE
 );
+
+ALTER TABLE linkedin_candidates
+    ADD COLUMN IF NOT EXISTS search_topic TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_lc_status_score
     ON linkedin_candidates(status, velocity_score DESC);
@@ -64,3 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_lc_drafted_at
 CREATE INDEX IF NOT EXISTS idx_lc_search_query
     ON linkedin_candidates(search_query, discovered_at DESC)
     WHERE search_query IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_lc_search_topic
+    ON linkedin_candidates(search_topic, discovered_at DESC)
+    WHERE search_topic IS NOT NULL;
