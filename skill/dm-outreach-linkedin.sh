@@ -25,8 +25,13 @@ export SA_CYCLE_ID="$BATCH_ID"
 
 # Browser-profile lock first (shared with other linkedin pipelines), then pipeline lock.
 source "$(dirname "$0")/lock.sh"
+# Browser backend bootstrap (linkedin-harness). Sets MCP_CONFIG_FILE,
+# BROWSER_INSTRUCTIONS, exports LINKEDIN_CDP_URL, and provides
+# ensure_linkedin_browser_for_backend. Migrated off the deprecated
+# mcp__linkedin-agent Playwright MCP to the CDP-driven harness Chrome (port 9556).
+source "$(dirname "$0")/lib/linkedin-backend.sh"
 acquire_lock "linkedin-browser" 3600
-ensure_browser_healthy "linkedin"
+ensure_linkedin_browser_for_backend
 acquire_lock "dm-outreach-linkedin" 2700
 
 # Load secrets
@@ -115,6 +120,8 @@ PROMPT_FILE=$(mktemp)
 cat > "$PROMPT_FILE" <<PROMPT_EOF
 You are the Social Autoposter LinkedIn DM outreach bot.
 
+$BROWSER_INSTRUCTIONS
+
 Read $SKILL_FILE for content rules (tone, anti-AI detection, no em dashes).
 
 ## Task: Send LinkedIn messages to continue comment conversations
@@ -163,14 +170,14 @@ $PROJECTS_QUALIFICATION
 
 ## Pre-send profile fetch + ICP pre-check (MANDATORY per DM, no filter)
 
-For each DM row, BEFORE you compose or send, do this in order. USE mcp__linkedin-agent__* tools ONLY; NEVER call /voyager/api/; NEVER run Python CDP scripts against LinkedIn.
+For each DM row, BEFORE you compose or send, do this in order. USE the bh_run tool from the BROWSER BACKEND block ONLY (follow its translation table for any Playwright-style step below); NEVER call /voyager/api/; NEVER run Python CDP scripts against LinkedIn.
 
 1. Look at the row's \`target_project\`. If it's NULL, set icp_precheck=unknown with notes="no_target_project" and proceed to step 4 — but still try to capture profile basics.
 
 2. Fetch the prospect's LinkedIn profile:
    - From the original comment thread (r.their_comment_url), click into THEIR_AUTHOR's profile link, OR
    - Search LinkedIn for THEIR_AUTHOR from the messaging UI once you have them open.
-   - browser_snapshot on their profile header. Extract: headline, current company, current role, a short summary of their About/experience top section, and (if visible) 1-2 recent posts/activity items.
+   - Read their profile header DOM (bh_run with js(...) per the translation table, or capture_screenshot + Read the PNG). Extract: headline, current company, current role, a short summary of their About/experience top section, and (if visible) 1-2 recent posts/activity items.
    - If you hit a login/checkpoint, STOP and print SESSION_INVALID; do NOT attempt to log in.
    - If the profile is private or shows only a minimal header, record what you can and note "profile_limited".
 
@@ -198,14 +205,14 @@ For each DM row, BEFORE you compose or send, do this in order. USE mcp__linkedin
 
 5. If ANY entry in icp_matches has label=disqualified, skip the send: run \`python3 scripts/dm_conversation.py mark-skipped --dm-id DM_ID --reason "disqualified: PROJECT - SHORT_NOTES"\` and move on. \`icp_miss\` alone does NOT gate; send when every project scored miss. Only explicit \`disqualified\` blocks the opener.
 
-## How to send messages on LinkedIn (use mcp__linkedin-agent__* tools):
-1. Navigate to https://www.linkedin.com/messaging/
+## How to send messages on LinkedIn (use the bh_run tool):
+1. Navigate to https://www.linkedin.com/messaging/ (bh_run: new_tab/goto_url + wait_for_load)
 2. Start new message to THEIR_AUTHOR
-3. Type and send the message.
+3. Type and send the message. Click the message box (click_at_xy) then type_text; click the Send button via click_at_xy. Do NOT press Enter (Enter inserts a newline in LinkedIn's contenteditable).
 
 ## After each DM:
 
-Inspect the linkedin-agent send result. There are exactly three outcomes:
+Inspect the send result (capture_screenshot + Read the PNG to confirm the message appeared in the thread). There are exactly three outcomes:
 
 (A) The message was actually delivered (you saw it appear in the thread, no error toast)  ->  mark sent via the verified gateway:
   CLAUDE_SESSION_ID=$CLAUDE_SESSION_ID python3 $REPO_DIR/scripts/dm_send_log.py \\
