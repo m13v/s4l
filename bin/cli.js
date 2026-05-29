@@ -53,6 +53,7 @@ const BROWSER_AGENT_CONFIGS = [
   'linkedin-agent-mcp.json',
   'linkedin-agent.json',
   'twitter-harness-mcp.json',
+  'linkedin-harness-mcp.json',
   'all-agents-mcp.json',
 ];
 
