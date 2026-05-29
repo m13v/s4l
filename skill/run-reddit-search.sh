@@ -41,6 +41,14 @@ log "=== Reddit Search Post Run: $(date) ==="
 
 source "$REPO_DIR/skill/lock.sh"
 
+# Reddit-harness backend (2026-05-29 migration): Reddit started 403ing urllib/
+# curl on *.json from residential IPs, so the whole Reddit pipeline now rides a
+# dedicated browser-harness Chrome on port 9557 (profile reddit-harness),
+# mirroring twitter-harness. Sourcing this exports REDDIT_CDP_URL so every child
+# Python proc (reddit_tools.py discovery fetch, reddit_browser.py posting) attaches
+# directly to the harness instead of ps-scanning for the reddit-agent MCP Chrome.
+source "$REPO_DIR/skill/lib/reddit-backend.sh"
+
 LIMIT=10
 EXCLUDE=""
 TOTAL_POSTED=0
@@ -219,10 +227,18 @@ export SA_CYCLE_ID="$BATCH_ID"
 # per-post lease still gets that protection. Pre-flight is best-effort: if
 # acquire is BUSY (peer pipeline mid-post), warn and proceed; Python per-row
 # acquire will retry inside the for loop.
-log "Pre-flight: brief reddit-browser acquire + ensure_browser_healthy + release..."
+log "Pre-flight: brief reddit-browser acquire + harness bootstrap + release..."
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
-    log "WARNING: pre-flight acquire BUSY; ensure_browser_healthy will run anyway; per-row acquires inside post_reddit.py will retry."
-ensure_browser_healthy "reddit"
+    log "WARNING: pre-flight acquire BUSY; harness bootstrap will run anyway; per-row acquires inside post_reddit.py will retry."
+# reddit-harness bootstrap: probe + launch the dedicated harness Chrome on port
+# 9557 (profile reddit-harness) if down, then clean leftover tabs. Replaces the
+# old ensure_browser_healthy "reddit" ps-scan-for-MCP-Chrome path; the harness is
+# the single browser the whole Reddit pipeline now rides (REDDIT_CDP_URL points
+# every child Python proc at it). Falls back to ensure_browser_healthy on failure.
+if ! ensure_reddit_browser_for_backend 2>&1 | tee -a "$LOG_FILE"; then
+    log "WARNING: reddit-harness bootstrap failed; falling back to ensure_browser_healthy reddit"
+    ensure_browser_healthy "reddit"
+fi
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
 # --- Phase 0: hard-expire stale pending rows + salvage truly-orphaned rows ---
