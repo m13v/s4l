@@ -278,7 +278,8 @@ def fetch_thread_engagement_snapshot(cid: int) -> str | None:
     return json.dumps(snap, separators=(",", ":"))
 
 
-def update_candidate_posted(cid: int, post_id: int) -> None:
+def update_candidate_posted(cid: int, post_id: int,
+                            matched_project=None, search_topic=None) -> None:
     """Mark the candidate posted via /api/v1/twitter-candidates/by-id.
 
     Re-stamps batch_id to the executing cycle's BATCH_ID alongside the
@@ -289,6 +290,16 @@ def update_candidate_posted(cid: int, post_id: int) -> None:
     while 171505 was queued behind 173005's 42-min Phase 1 lock-hold).
     When BATCH_ID env is unset (manual replays, ad-hoc runs), fall back to
     leaving batch_id alone so we never NULL-out a live attribution.
+
+    Cross-route writeback (2026-05-29): the Phase 2b prep step can re-route a
+    candidate to a better-fitting project than the Phase 1 query that surfaced
+    it. matched_project carries the project the post actually landed on; it is
+    sent on EVERY post (not just re-routes) so twitter_candidates.matched_project
+    always equals posts.project_name. search_topic is the plan's topic, which is
+    "" on a re-route (the by-id route clears "" to NULL, because the origin
+    query's topic does not belong to the routed project). Both are honoured by
+    the by-id route as of 2026-05-29; older deploys ignore unknown body fields
+    harmlessly, so this is safe to ship ahead of the route.
     """
     body = {
         "id": int(cid),
@@ -298,6 +309,12 @@ def update_candidate_posted(cid: int, post_id: int) -> None:
     batch_id = (os.environ.get("BATCH_ID") or "").strip()
     if batch_id:
         body["batch_id"] = batch_id
+    if matched_project:
+        body["matched_project"] = matched_project
+    # Send even when empty: "" tells the route to CLEAR search_topic to NULL on
+    # a re-route. Only omit when the caller passed nothing at all (None).
+    if search_topic is not None:
+        body["search_topic"] = search_topic
     try:
         api_patch("/api/v1/twitter-candidates/by-id", body)
     except SystemExit as e:
@@ -657,7 +674,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     if out:
         print(f"[post][mark-self-reply.stdout] {out}", flush=True)
 
-    update_candidate_posted(cid, post_id)
+    update_candidate_posted(cid, post_id,
+                            matched_project=project, search_topic=search_topic)
     print(f"[post] candidate {cid} posted as {reply_url} (post_id={post_id})",
           flush=True)
 
