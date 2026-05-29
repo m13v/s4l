@@ -274,6 +274,122 @@ def _query_twitter(conn, project, window_days, limit):
     ]
 
 
+def _query_linkedin(conn, project, window_days, limit):
+    """LinkedIn-specific path: mirrors Twitter's topic supply/conversion split.
+
+    LinkedIn attempts log both the assigned search_topic and the literal query.
+    For picker weighting, the topic is the durable unit: attempts measure supply
+    and candidate rows measure whether that supply converted into posted or
+    skipped opportunities.
+    """
+    try:
+        from linkedin_search_topic_schema import ensure as ensure_linkedin_schema
+        ensure_linkedin_schema(conn)
+    except Exception:
+        pass
+
+    where_proj_c = ""
+    where_proj_a = ""
+    params = [str(window_days)]
+    if project:
+        where_proj_c = "AND LOWER(c.matched_project) = LOWER(%s)"
+        params.append(project)
+    params.append(str(window_days))
+    if project:
+        where_proj_a = "AND LOWER(a.project_name) = LOWER(%s)"
+        params.append(project)
+    params.append(int(limit))
+
+    sql = f"""
+        WITH cand_agg AS (
+            SELECT c.search_topic AS search_topic,
+                   c.matched_project AS project_name,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posts,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status='posted') AS posted_n,
+                   COUNT(DISTINCT c.id) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS skipped_n,
+                   AVG(c.velocity_score) FILTER (WHERE c.status='posted')                          AS avg_virality_posted,
+                   AVG(c.velocity_score) FILTER (WHERE c.status IN ('skipped','expired','failed')) AS avg_virality_skipped,
+                   COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) AS views_total,
+                   COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0) AS likes_total,
+                   COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) AS clicks_total,
+                   (COUNT(plc.id) FILTER (WHERE c.status='posted' AND plc.is_bot = false) * 100
+                    + COALESCE(SUM(p.upvotes) FILTER (WHERE c.status='posted'), 0)
+                    + COALESCE(SUM(p.views)   FILTER (WHERE c.status='posted'), 0) * 0.001
+                    + COALESCE(AVG(c.velocity_score) FILTER (WHERE c.status='posted'), 0)) AS composite_score,
+                   MAX(c.posted_at) AS last_posted
+              FROM linkedin_candidates c
+              LEFT JOIN posts            p   ON p.id = c.post_id
+              LEFT JOIN post_links       pl  ON pl.post_id = c.post_id
+              LEFT JOIN post_link_clicks plc ON plc.code = pl.code
+             WHERE c.discovered_at > NOW() - (%s || ' days')::interval
+               AND c.search_topic IS NOT NULL
+               AND c.search_topic <> ''
+               {where_proj_c}
+             GROUP BY c.search_topic, c.matched_project
+        ),
+        attempt_agg AS (
+            SELECT a.search_topic AS search_topic,
+                   a.project_name AS project_name,
+                   COUNT(*)::int AS attempts_n,
+                   COALESCE(SUM(COALESCE(a.candidates_found, 0)
+                                + COALESCE(a.candidates_dropped_below_floor, 0)), 0)::int
+                                AS tweets_found_total,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(a.candidates_found, 0)
+                           + COALESCE(a.candidates_dropped_below_floor, 0) = 0
+                   )::int AS zero_supply_attempts
+              FROM linkedin_search_attempts a
+             WHERE a.ran_at > NOW() - (%s || ' days')::interval
+               AND a.search_topic IS NOT NULL
+               AND a.search_topic <> ''
+               {where_proj_a}
+             GROUP BY a.search_topic, a.project_name
+        )
+        SELECT COALESCE(c.search_topic, a.search_topic) AS search_topic,
+               COALESCE(c.project_name, a.project_name) AS project_name,
+               COALESCE(c.posts, 0) AS posts,
+               COALESCE(c.posted_n, 0) AS posted_n,
+               COALESCE(c.skipped_n, 0) AS skipped_n,
+               COALESCE(c.avg_virality_posted, 0) AS avg_virality_posted,
+               COALESCE(c.avg_virality_skipped, 0) AS avg_virality_skipped,
+               COALESCE(c.views_total, 0) AS views_total,
+               COALESCE(c.likes_total, 0) AS likes_total,
+               COALESCE(c.clicks_total, 0) AS clicks_total,
+               COALESCE(c.composite_score, 0) AS composite_score,
+               c.last_posted,
+               COALESCE(a.attempts_n, 0) AS attempts_n,
+               COALESCE(a.tweets_found_total, 0) AS tweets_found_total,
+               COALESCE(a.zero_supply_attempts, 0) AS zero_supply_attempts
+          FROM cand_agg c
+          FULL OUTER JOIN attempt_agg a
+            ON c.search_topic = a.search_topic
+           AND c.project_name = a.project_name
+         ORDER BY clicks_total DESC, composite_score DESC, posts DESC, last_posted DESC NULLS LAST
+         LIMIT %s
+    """
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "search_topic": r[0],
+            "project": r[1],
+            "posts": int(r[2] or 0),
+            "posted_n": int(r[3] or 0),
+            "skipped_n": int(r[4] or 0),
+            "avg_virality_posted": round(float(r[5] or 0), 2),
+            "avg_virality_skipped": round(float(r[6] or 0), 2),
+            "views_total": int(r[7] or 0),
+            "likes_total": int(r[8] or 0),
+            "clicks_total": int(r[9] or 0),
+            "composite_score": round(float(r[10] or 0), 2),
+            "last_used": r[11].isoformat() if r[11] else None,
+            "attempts_n": int(r[12] or 0),
+            "tweets_found_total": int(r[13] or 0),
+            "zero_supply_attempts": int(r[14] or 0),
+        }
+        for r in rows
+    ]
+
+
 def _query_posts(conn, project, platform, window_days, limit):
     """Non-reddit path (github + fallback): posts-based, posts.platform filter.
 
@@ -340,6 +456,8 @@ def query(project=None, platform=None, window_days=30, limit=10):
             results = _query_reddit(conn, project, window_days, limit)
         elif plat == "twitter":
             results = _query_twitter(conn, project, window_days, limit)
+        elif plat == "linkedin":
+            results = _query_linkedin(conn, project, window_days, limit)
         else:
             results = _query_posts(conn, project, platform, window_days, limit)
     finally:
@@ -351,6 +469,7 @@ def format_text(results, project=None, platform=None, window_days=30):
     plat = (platform or "").lower()
     is_reddit = plat == "reddit"
     is_twitter = plat == "twitter"
+    is_linkedin = plat == "linkedin"
     if not results:
         return (
             f"(no search_topic data yet in the last {window_days}d"
@@ -367,6 +486,8 @@ def format_text(results, project=None, platform=None, window_days=30):
         header += ", ranked by clicks_total DESC then composite (clicks×100 + comments + upvotes))"
     elif is_twitter:
         header += ", ranked by clicks_total DESC then composite (clicks×100 + likes + views×0.001))"
+    elif is_linkedin:
+        header += ", ranked by clicks_total DESC then composite (clicks×100 + likes + views×0.001 + velocity))"
     else:
         header += ", ranked by clicks_total DESC then composite (clicks×100 + comments×3 + upvotes))"
     lines = [header]
@@ -388,7 +509,7 @@ def format_text(results, project=None, platform=None, window_days=30):
             "High Δskip + few posts = query is on-rank but off-topic — reword. "
             "Low Δskip + few posts = dead supply, drop the seed.)"
         )
-    elif is_twitter:
+    elif is_twitter or is_linkedin:
         lines.append(
             f"  {'clicks':>6} {'views':>7} {'likes':>5} "
             f"{'posts':>5} {'pN':>3} {'sN':>3} "
@@ -403,7 +524,7 @@ def format_text(results, project=None, platform=None, window_days=30):
         lines.append(
             "  (Vpost = avg virality_score on posted rows; "
             "Vskip = avg virality_score on skipped/expired/failed rows. "
-            "High Vskip + few posts = topic finds viral noise we keep skipping — reword. "
+            "High Vskip + few posts = topic finds viral noise we keep skipping - reword. "
             "Low Vskip + few posts = dead supply, drop the seed.)"
         )
     else:
