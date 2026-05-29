@@ -70,9 +70,10 @@ log "DSN=$UNIPILE_DSN  dry_run=$([ "$DO_POST" -eq 1 ] && echo no || echo YES)"
 log "Step 1: probing credentials (/accounts)..."
 if ! python3 "$PY" probe 2>>"$LOG_FILE" | tee -a "$LOG_FILE"; then
     log "CREDENTIAL PROBE FAILED. UniPile rejected the API key (see above)."
-    log "Fix: refresh the UniPile trial/subscription on i@m13v.com, then store the"
-    log "     new key:  security add-generic-password -U -s unipile-api-key -a i@m13v.com -w '<KEY>'"
-    log "     and DSN:   security add-generic-password -U -s unipile-dsn -a i@m13v.com -w 'apiNN.unipile.com:PORT'"
+    log "Fix: the live account is matt@mediar.ai (the i@m13v.com trial is dead). Refresh the"
+    log "     subscription if needed, then store the key under the mediar-scoped entry:"
+    log "     security add-generic-password -U -s unipile-api-key -a matt@mediar.ai -w '<KEY>'"
+    log "     and DSN:   security add-generic-password -U -s unipile-dsn -a matt@mediar.ai -w 'apiNN.unipile.com:PORT'"
     exit 1
 fi
 
