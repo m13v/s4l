@@ -17,9 +17,11 @@
 #   ./engage-linkedin-unipile.sh --keywords "..." --text "nice breakdown" --post
 #   ./engage-linkedin-unipile.sh --social-id "urn:li:activity:NNN" --text "..." --post
 #
-# DSN note: keychain "unipile-dsn" currently holds a stale trial DSN
-# (api42...). The connected m13v account lives on api45.unipile.com:17570, so we
-# default UNIPILE_DSN to that here (override by exporting UNIPILE_DSN).
+# Creds note: the live UniPile account is under matt@mediar.ai (keychain entries
+# scoped to that account; DSN api45.unipile.com:17570, account_id
+# wHDpysUnRbm7Q0lvyv9pQQ). An older i@m13v.com trial shares the same service
+# names but is dead. linkedin_unipile.py reads the mediar-scoped entry; we also
+# pin UNIPILE_DSN here as a belt-and-suspenders default (override by exporting it).
 
 set -euo pipefail
 
