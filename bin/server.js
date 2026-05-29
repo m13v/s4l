@@ -849,11 +849,13 @@ function parseRunMonitorLog(maxLines) {
         if (Number.isFinite(n) && n >= 0) scan[k.trim()] = n;
       }
     }
-    // Parse "project=fazm,topics=3,queries=15,queries_w_supply=1,qpt=5+5+5"
-    // into a structured invent object. Mixed types: `project` stays as a
-    // string, `qpt` (queries-per-topic) is split on '+' into an int list,
-    // everything else is parsed as an int. Renders as the result-column
-    // pills on Invent Topics rows in the Status > Job History tab.
+    // Parse the invent= segment into a structured object. Mixed types:
+    //   project        → string (e.g. "fazm")
+    //   qpt            → int[]  (queries-per-topic, parallel to topic_names)
+    //   topic_names    → string[] (decoded back to spaces, parallel to qpt;
+    //                              encoded as `;`-separated with '+' for spaces
+    //                              so the segment regex doesn't choke on commas)
+    //   everything else → int   (topics, queries, queries_w_supply)
     const invent = {};
     if (inventStr) {
       for (const part of inventStr.split(',')) {
@@ -866,6 +868,10 @@ function parseRunMonitorLog(maxLines) {
           invent.qpt = v.split('+')
             .map(x => parseInt(x, 10))
             .filter(x => Number.isFinite(x) && x >= 0);
+        } else if (key === 'topic_names') {
+          invent.topic_names = v.split(';')
+            .map(s => s.replace(/\+/g, ' ').trim())
+            .filter(Boolean);
         } else {
           const n = parseInt(v, 10);
           if (Number.isFinite(n) && n >= 0) invent[key] = n;
@@ -10761,12 +10767,12 @@ function renderResult(run) {
   const pill = (label, n, _color) =>
     '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
     label + ' <span style="color: var(--text);font-weight:600;">' + n + '</span></span>';
-  // Invent Topics rows: result column shows project picked, topics invented,
-  // queries total + queries-with-supply, and per-topic query counts so an
-  // operator can read at a glance "fazm: 3 topics / 15 queries (5+5+5) /
-  // 1 surfaced supply" without opening the log. invent={} for any pre-2026-05-29
-  // run_monitor.log lines or hand-authored test rows; falls back to the
-  // generic pills in that case.
+  // Invent Topics rows: result column shows project picked, each invented
+  // topic as its own pill with the per-topic query count annotated inline,
+  // then the run totals (queries / with supply). topic_names[] and qpt[]
+  // are parallel arrays from invent_topics.py. If topic_names is missing
+  // (pre-2026-05-29 rows or a saturated run that didn't commit anything)
+  // we fall back to the aggregate-only pill set so the row still reads.
   if (run.job_type === 'invent' && r.invent && Object.keys(r.invent).length) {
     const inv = r.invent;
     const project = (inv.project || '—');
@@ -10774,9 +10780,36 @@ function renderResult(run) {
     const queries = inv.queries || 0;
     const qWithSupply = inv.queries_w_supply || 0;
     const qpt = Array.isArray(inv.qpt) ? inv.qpt : [];
+    const topicNames = Array.isArray(inv.topic_names) ? inv.topic_names : [];
+    const escapeHtml = (s) => String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
     const projectPill =
       '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
-      'project <span style="color: var(--text);font-weight:600;">' + project + '</span></span>';
+      'project <span style="color: var(--text);font-weight:600;">' + escapeHtml(project) + '</span></span>';
+    let topicPills = '';
+    if (topicNames.length) {
+      // Per-topic pill: topic-name followed by N (the queries-drafted count
+      // from qpt[i]). Each topic gets a tooltip with the same description so
+      // hover surfaces the meaning. No queries-aggregate or topics-count
+      // pill needed when names are present — they're implicit from the row.
+      topicPills = topicNames.map((name, i) => {
+        const count = qpt[i] != null ? qpt[i] : 0;
+        const safe = escapeHtml(name);
+        return ('<span title="' + count + ' queries drafted for this topic" ' +
+                'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+                safe + ' <span style="color: var(--text);font-weight:600;">' + count + '</span></span>');
+      }).join('');
+      return (
+        projectPill +
+        topicPills +
+        pill('queries', queries) +
+        pill('with supply', qWithSupply)
+      );
+    }
+    // Fallback for rows without topic_names: aggregate pills only.
     const qptPill = qpt.length
       ? ('<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);" ' +
          'title="Queries per topic (one number per invented topic, in order)">' +
