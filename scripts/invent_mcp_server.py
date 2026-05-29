@@ -227,6 +227,16 @@ def submit_topic(project: str, topic: str, rationale: str = "") -> dict:
                 "neighbor": best_neighbor, "similarity": round(best_sim, 3),
                 "error": "near_dupe"}
 
+    # Honor invent_topics.py --dry-run. The parent process exports
+    # INVENT_DRY_RUN=1 before spawning claude -p, which inherits into this
+    # MCP server. We still want the dedup verdict and the "ok" path to fire
+    # so Claude's session flow is identical to prod — we just skip the POST.
+    if os.environ.get("INVENT_DRY_RUN") == "1":
+        return {"ok": True, "topic": topic_norm,
+                "neighbor": best_neighbor or "",
+                "similarity": round(best_sim, 3),
+                "dry_run": True}
+
     # Non-dupe → commit via API.
     try:
         api_post("/api/v1/project-search-topics", body={
