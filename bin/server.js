@@ -3116,7 +3116,7 @@ const _PHASE_FAMILY = {
   dm_replies_reddit:    ['engage-dm-replies'],
   link_edit_reddit:     ['link-edit-reddit'],
   // Twitter
-  post_twitter:         ['run-twitter-cycle-scan', 'run-twitter-cycle-prep'],
+  post_twitter:         ['run-twitter-cycle-queries', 'run-twitter-cycle-scan', 'run-twitter-cycle-prep'],
   engage_twitter:       ['engage-twitter-phaseB'],
   thread_twitter:       ['run-twitter-threads'],
   dm_outreach_twitter:  ['dm-outreach-twitter'],
