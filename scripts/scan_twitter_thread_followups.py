@@ -150,7 +150,7 @@ def run_browser_scrape(urls, scroll_count=3):
             pass
 
 
-def insert_followup(followup, parent_reply_id, post_id, parent_depth):
+def insert_followup(followup, parent_reply_id, post_id, parent_depth, root_author=None):
     """Insert one follow-up row via /api/v1/replies. Returns True if inserted,
     False if skipped (own handle, missing required fields, or 409 duplicate)."""
     tweet_id = followup.get("tweet_id") or ""
@@ -161,22 +161,26 @@ def insert_followup(followup, parent_reply_id, post_id, parent_depth):
         return False
     if handle.lower() == OUR_HANDLE.lower():
         return False
-    resp = api_post(
-        "/api/v1/replies",
-        {
-            "post_id": post_id,
-            "platform": "x",
-            "their_comment_id": tweet_id,
-            "their_author": handle,
-            "their_content": text,
-            "their_comment_url": url,
-            "depth": (parent_depth or 1) + 1,
-            "status": "pending",
-            "parent_reply_id": parent_reply_id,
-            "our_account": OUR_HANDLE,
-        },
-        ok_on_conflict=True,
-    )
+    body = {
+        "post_id": post_id,
+        "platform": "x",
+        "their_comment_id": tweet_id,
+        "their_author": handle,
+        "their_content": text,
+        "their_comment_url": url,
+        "depth": (parent_depth or 1) + 1,
+        "status": "pending",
+        "parent_reply_id": parent_reply_id,
+        "our_account": OUR_HANDLE,
+    }
+    # OP of the thread our reply lives in, scraped for free from the conversation
+    # page (twitter_browser.scrape_many_thread_followups). Always set when known,
+    # including when the OP is the replier — that equality is the "OP replied"
+    # signal the analytic needs.
+    root_author = (root_author or "").lstrip("@")
+    if root_author:
+        body["thread_author_handle"] = root_author
+    resp = api_post("/api/v1/replies", body, ok_on_conflict=True)
     if (resp.get("error") or {}).get("code") == "duplicate_reply":
         return False
     return True
@@ -216,6 +220,7 @@ def main():
     for r in results:
         thread_url = r.get("thread_url") or ""
         anchor_id = r.get("anchor_tweet_id") or anchor_id_from_url(thread_url)
+        root_author = (r.get("root_author") or "").lstrip("@")
         meta = url_to_meta.get(thread_url)
         if not meta:
             continue
@@ -249,11 +254,11 @@ def main():
                 skip_existing += 1
                 continue
             if args.dry_run:
-                print(f"  [DRY] @{handle} (tid={tid}) parent_reply={parent_reply_id} depth={(parent_depth or 1) + 1}: {(fu.get('text') or '')[:80]}")
+                print(f"  [DRY] @{handle} (tid={tid}) op=@{root_author or '?'} parent_reply={parent_reply_id} depth={(parent_depth or 1) + 1}: {(fu.get('text') or '')[:80]}")
                 new_count += 1
                 known_ids.add(tid)
                 continue
-            inserted = insert_followup(fu, parent_reply_id, post_id, parent_depth)
+            inserted = insert_followup(fu, parent_reply_id, post_id, parent_depth, root_author=root_author)
             if inserted:
                 new_count += 1
                 known_ids.add(tid)
