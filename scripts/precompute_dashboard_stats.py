@@ -3,8 +3,8 @@
 
 Writes atomic JSON snapshots under ~/social-autoposter/skill/cache/:
   - funnel_stats_<N>d.json  for N in {1, 7, 14, 30, 90}   (Top -> Pages + funnel)
-  - activity_stats_24h.json                                (Activity tab counts)
-  - style_stats_24h.json                                   (Style tab, all/all)
+  - activity_stats_<H>h.json for H in {24, 168, 336, 720} (Activity tab counts)
+  - style_stats_<H>h.json    for H in {24, 168, 336, 720} (Style tab, all/all)
 
 Run on a launchd timer (see com.m13v.social-precompute-stats.plist). The
 /api/funnel/stats, /api/activity/stats, and /api/style/stats endpoints in
@@ -283,15 +283,23 @@ def main():
     print(f"=== precompute_dashboard_stats: {started} ===")
     overall_t0 = time.time()
 
-    try:
-        precompute_activity(24)
-    except Exception as e:
-        print(f"  activity FAILED: {e}", file=sys.stderr)
-
-    try:
-        precompute_style(24)
-    except Exception as e:
-        print(f"  style FAILED: {e}", file=sys.stderr)
+    # Activity + style snapshots, one per Stats-tab window pill
+    # (24h / 7d / 14d / 30d = 24 / 168 / 336 / 720 hours). The dashboard's
+    # readSnapshotCached gate rejects anything older than 15 min, so every
+    # window must refresh every cycle or it falls through to the live query
+    # (the 15-way activity UNION costs ~15s under load and blocks Node's
+    # single event loop, freezing the whole dashboard). Pre-2026-05-30 only
+    # 24h was precomputed, so 7d/14d/30d hit the live path on every switch.
+    STATS_WINDOW_HOURS = (24, 168, 336, 720)
+    for h in STATS_WINDOW_HOURS:
+        try:
+            precompute_activity(h)
+        except Exception as e:
+            print(f"  activity hours={h} FAILED: {e}", file=sys.stderr)
+        try:
+            precompute_style(h)
+        except Exception as e:
+            print(f"  style hours={h} FAILED: {e}", file=sys.stderr)
 
     # Funnel snapshots: one per window the dashboard pills can show.
     #
