@@ -20234,32 +20234,44 @@ function saStartApp() {
     setTimeout(_warmStatsDetails, 1500);
   }
   // Background preload of all stats-tab window sizes (24h / 7d / 14d / 30d).
-  // On page load only the active window is fetched. Switching to any other
-  // window pill triggers a cold miss and shows "Loading..." even though the
-  // server has the data ready as a snapshot. This warm-up fires 3s after init
-  // (after the active-window fetch settles) and silently populates the client-
-  // side SWR cache for every other window so pill switches become instant.
-  // Only warms activity, cohort, and style (the three fast sections). Funnel
-  // is deliberately excluded: it can take 53s cold and isn't pill-switchable
-  // in the same way.
+  // On page load only the active window is fetched. Without this, every first
+  // switch to another window triggers a cold miss and shows "Loading..." even
+  // though the server has snapshot data ready (<200ms). Fires 3s after init
+  // so active-window fetches settle first. Only warms activity, cohort, and
+  // style (the three fast <200ms sections). Funnel is excluded because its cold
+  // path runs project_stats_json.py (~53s) and shouldn't block the preload.
+  // Results are stored directly in the client SWR cache (_statsClientCache);
+  // no DOM render fires so the visible tab is not disturbed.
   setTimeout(() => {
     const allWindows = Object.keys(STATS_WINDOWS);
     for (const w of allWindows) {
       if (w === _statsWindow) continue; // already loaded by saStartApp
-      const savedWindow = _statsWindow;
-      // Temporarily override the window getter so the loaders fetch for w.
-      // We swap _statsWindow, call the loaders (which read currentStatsWindow()),
-      // then restore _statsWindow immediately. The loaders are async and capture
-      // their own `hours`/`days` at call time before any await, so the swap is
-      // safe and does NOT affect the visible UI (no loading spinners fire because
-      // the client cache will be cold but haveStale is false and there's no
-      // force=true; the loaders check force=undefined which is falsy, so they
-      // won't clear existing DOM content).
-      _statsWindow = w;
-      try { loadActivityStats(); } catch {}
-      try { loadCohortStats(); } catch {}
-      try { loadStyleStats(); } catch {}
-      _statsWindow = savedWindow;
+      const win = STATS_WINDOWS[w];
+      if (!win) continue;
+      const hours = win.hours;
+      const days  = win.days;
+      const cacheKeyA = hours + '|all|all';
+      const cacheKeyC = hours + '|all|all'; // cohort uses same shape
+      const cacheKeyS = hours + '|all|all'; // style too
+      // Skip if already cached (e.g. user navigated to this window already)
+      if (!statsCacheGetEntry('activity', cacheKeyA)) {
+        fetch('/api/activity/stats?hours=' + hours)
+          .then(r => r.json())
+          .then(data => { if (data && !data.error) statsCacheSet('activity', cacheKeyA, data); })
+          .catch(() => {});
+      }
+      if (!statsCacheGetEntry('cohort', cacheKeyC)) {
+        fetch('/api/cohort/stats?hours=' + hours)
+          .then(r => r.json())
+          .then(data => { if (data && !data.error) statsCacheSet('cohort', cacheKeyC, data); })
+          .catch(() => {});
+      }
+      if (!statsCacheGetEntry('style', cacheKeyS)) {
+        fetch('/api/style/stats?hours=' + hours)
+          .then(r => r.json())
+          .then(data => { if (data && !data.error) statsCacheSet('style', cacheKeyS, { stats: data, meta: {} }); })
+          .catch(() => {});
+      }
     }
   }, 3000);
 }
