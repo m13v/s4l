@@ -355,8 +355,23 @@ def unread_dms() -> dict:
             }
 
         page = None
+        _reused_page = False
         try:
-            page = context.new_page()
+            # Reuse an existing harness tab instead of spawning a throwaway one
+            # (mirrors reddit_browser). new_page() also steals OS focus every
+            # call. Prefer a tab already on linkedin.com (not login/checkpoint),
+            # else the first open page; only new_page() when the context has no
+            # usable tab. A reused tab is left open in the finally below so the
+            # next consumer can reuse it too.
+            for pg in context.pages:
+                u = pg.url or ""
+                if "linkedin.com" in u and "login" not in u and "checkpoint" not in u:
+                    page, _reused_page = pg, True
+                    break
+            if page is None and context.pages:
+                page, _reused_page = context.pages[0], True
+            if page is None:
+                page = context.new_page()
             try:
                 page.goto(
                     "https://www.linkedin.com/messaging/",
@@ -505,9 +520,10 @@ def unread_dms() -> dict:
 
         finally:
             # CDP-attach branch: NEVER close the context — that would
-            # terminate the harness Chrome we just attached to. Only
-            # close the page we opened.
-            if page is not None:
+            # terminate the harness Chrome we just attached to. Only close a
+            # page WE created; if we reused an existing tab, leave it open so
+            # the next consumer can reuse it (tab-reuse convention).
+            if page is not None and not _reused_page:
                 try:
                     page.close()
                 except Exception:
