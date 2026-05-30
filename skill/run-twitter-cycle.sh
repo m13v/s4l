@@ -1736,7 +1736,7 @@ log "Phase 2b-prep complete. plan_count=$PLAN_COUNT"
 # 30-90s behind the very `engage-twitter` / next `run-twitter-cycle` we just
 # handed the lock to. We keep the lock through 2b-gen instead and skip the
 # dance entirely.
-GEN_RATE_RAW="${TWITTER_PAGE_GEN_RATE:-0.30}"
+GEN_RATE_RAW="${TWITTER_PAGE_GEN_RATE:-0.0}"
 GEN_IS_NOOP=false
 case "$GEN_RATE_RAW" in
   0|0.0|0.00|0.000|"") GEN_IS_NOOP=true ;;
