@@ -736,9 +736,15 @@ STYLE_CAP_PCT = 50.0
 # Recency window for the picker target distribution. Lifetime aggregation
 # drifted too far from current performance reality (e.g. 2025 wins from
 # pattern_recognizer kept it in the pool even after 2026's audience shift).
-# 30 days keeps n>=50 per active style on Reddit/Twitter while letting the
-# pool track the live algorithm. Set RECENCY_DAYS=0 to fall back to lifetime.
-RECENCY_DAYS = 30
+# 2026-05-29: tightened 30 -> 7 days across all platforms (per user). The 30d
+# window lagged badly: pattern_recognizer showed 963 posts / 24% volume at 30d
+# but only 6 posts at 7d because the picker had already abandoned it; the 30d
+# snapshot kept dragging dead historical volume. 7 days tracks the live picker
+# much more tightly. Tradeoff: tail styles drop below the n>=50 density the 30d
+# window held, so they fall back on the explore floor sooner, and low-volume /
+# scrape-lagged platforms (LinkedIn) may cold-start to an equal split until 7d
+# of data accumulates. Set RECENCY_DAYS=0 to fall back to lifetime.
+RECENCY_DAYS = 7
 
 
 def _fetch_style_stats(platform, days=None):
@@ -752,7 +758,7 @@ def _fetch_style_stats(platform, days=None):
     top_performers report ranks on. Returns {} on any error (API unreachable,
     missing env, cold start).
 
-    Recency: `days` overrides the module-level RECENCY_DAYS (default 30).
+    Recency: `days` overrides the module-level RECENCY_DAYS (default 7).
     Pass days=0 for lifetime aggregation.
 
     Routes through the social-autoposter-website API (no direct DB access)
@@ -1016,7 +1022,7 @@ def _human_derived_rate(platform):
 # Credibility shrinkage was removed 2026-05-25 (per user instruction): we
 # don't favor or penalize styles by post-count, only by per-post performance.
 # Existence floor is MIN_SAMPLE_SIZE=1 (defined above): n=0 ghost registry
-# rows are excluded, single-post inventions count. RECENCY_DAYS=30 remains
+# rows are excluded, single-post inventions count. RECENCY_DAYS=7 remains
 # the only freshness gate.
 
 
