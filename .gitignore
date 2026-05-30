@@ -114,6 +114,12 @@ skill/logs-archive/
 # Generated LinkedIn comments snapshot (root-level scratch)
 /linkedin-comments-snapshot.json
 
+# LinkedIn engage/scan runtime data dumps
+scripts/_pending_dump.json
+scripts/li_*.json
+scripts/li_*.txt
+scripts/tmp_li_scan/
+
 # Media files — never commit/push from any depth in this repo.
 # Video
 *.mp4
