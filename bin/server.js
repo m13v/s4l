@@ -20571,6 +20571,77 @@ python3 scripts/tiktok/oauth_helper.py exchange '${esc(code)}'</pre><p style="co
   return `<!doctype html><html><head><meta charset="utf-8"><title>TikTok OAuth callback &middot; Meditation Fellow Studio</title><meta name="robots" content="noindex"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 24px;color: #18181b;background: #fff;line-height:1.5}h1{font-size:24px;font-weight:600;margin:0 0 24px;letter-spacing:-0.01em}code{font-family:ui-monospace,SFMono-Regular,monospace;background: #f4f4f5;padding:1px 6px;border-radius:4px;font-size:0.9em}</style></head><body><h1>TikTok OAuth callback</h1>${banner}${codeBox}${meta}${next}</body></html>`;
 }
 
+// --- Background cache warmers ---
+// The dashboard's heavy tabs (Status "Job history", Trends per-day charts,
+// Experiments) compute live on first hit and block the single Node event loop:
+// job-runs up to ~16s, funnel-per-day ~7.5s (python HogQL spawn), experiments
+// ~5s. The per-request caches above make REPEAT views instant, but the first
+// view per window (or after a cache expires) still pays the full cost — which
+// is exactly the "switching filters hangs" the operator sees. These warmers
+// self-fetch the standard default views on a timer so the caches are already
+// hot when the operator switches. Local-operator dashboard only: in CLIENT_MODE
+// (Cloud Run, multi-tenant, auth-gated) self-fetches would 403 on admin-only
+// endpoints and the serving model is different, so we skip warming entirely.
+
+function _selfGet(host, port, reqPath, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (code) => { if (!done) { done = true; resolve(code); } };
+    const r = http.get({ host, port, path: reqPath }, (resp) => {
+      resp.on('data', () => {}); // drain so the socket frees
+      resp.on('end', () => finish(resp.statusCode || 0));
+      resp.on('error', () => finish(0));
+    });
+    r.on('error', () => finish(0));
+    r.setTimeout(timeoutMs || 120000, () => { try { r.destroy(); } catch {} finish(0); });
+  });
+}
+
+// Sequential self-fetch: never fire all warm requests at once (funnel spawns a
+// python child per call; job-runs blocks the loop). One at a time keeps the
+// warm pass from starving real requests.
+async function _warmSequential(host, port, paths, timeoutMs) {
+  for (const reqPath of paths) {
+    try { await _selfGet(host, port, reqPath, timeoutMs); } catch {}
+  }
+}
+
+// Trends + Experiments: async-DB / child-process heavy but NOT main-thread
+// blocking, so safe to warm frequently. Default all/all views, standard
+// timelines. Keeps the 5-min per-request caches hot (warm interval < TTL).
+async function warmTrendsAndExperiments(host, port) {
+  const paths = ['/api/experiments'];
+  const metrics = ['views', 'upvotes', 'comments', 'clicks', 'posts', 'bookings'];
+  for (const d of [7, 14, 30, 90]) {
+    for (const m of metrics) paths.push(`/api/${m}/per-day?days=${d}`);
+    paths.push(`/api/funnel/per-day?days=${d}`);
+    paths.push(`/api/cost/per-day?days=${d}`);
+  }
+  await _warmSequential(host, port, paths, 120000);
+}
+
+// Job history: the cost-breakdown pass is O(runs*sessions) synchronous JS, so a
+// recompute briefly blocks the loop. Warmed on a slower cadence (and backed by
+// a 10-min cache) so that blocking spike is rare. Windows mirror the Status-tab
+// pills (24h / 7d / 14d / 30d = 24 / 168 / 336 / 720 hours).
+async function warmJobRunsCache(host, port) {
+  const paths = [24, 168, 336, 720].map(h => `/api/job-runs?hours=${h}`);
+  await _warmSequential(host, port, paths, 120000);
+}
+
+function startDashboardWarmers(host, port) {
+  if (auth.CLIENT_MODE) return; // local operator dashboard only
+  const safe = (fn) => () => { try { fn(host, port).catch(() => {}); } catch {} };
+  // Initial warm shortly after boot (staggered so they don't pile up).
+  setTimeout(safe(warmTrendsAndExperiments), 6000);
+  setTimeout(safe(warmJobRunsCache), 12000);
+  // Re-warm before the per-request caches expire. Trends/experiments use 5-min
+  // caches -> refresh every 4 min. Job-runs uses a 10-min cache -> every 8 min.
+  setInterval(safe(warmTrendsAndExperiments), 4 * 60 * 1000);
+  setInterval(safe(warmJobRunsCache), 8 * 60 * 1000);
+  console.log('[warmer] dashboard cache warmers started (job-history, trends, experiments)');
+}
+
 // --- Server ---
 
 const server = http.createServer((req, res) => {
@@ -20622,6 +20693,9 @@ function tryListen(port, maxAttempts = 10) {
       const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
       try { execSync(`${cmd} http://localhost:${actualPort}`, { stdio: 'ignore' }); } catch {}
     }
+    // Start background cache warmers so the heavy Status/Trends/Experiments
+    // tabs serve instantly on first switch instead of recomputing live.
+    try { startDashboardWarmers(host, actualPort); } catch (e) { console.error('[warmer] start failed:', e && e.message || e); }
   });
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE' && maxAttempts > 1) {
