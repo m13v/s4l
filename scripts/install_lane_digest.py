@@ -210,15 +210,12 @@ from gmail_dwd_client import gmail_for  # type: ignore
 
 subject = f"[install-lane] {severity} {datetime.date.today().isoformat()}"
 
-# Send policy: only email on WARN/FAIL, to cut daily noise on green days.
-# EXCEPTION: keep one OK "I'm still alive" heartbeat on Mondays so the
-# dead-man's-switch survives — a missing WARN/FAIL email could otherwise
-# mean either "all healthy" OR "cron/DWD itself is broken", which are
-# indistinguishable without a periodic OK beat. Set SEND_OK_ALWAYS=1 to
-# restore the old every-day behavior.
+# Send policy: only email on WARN/FAIL. Green/OK days are silent.
+# NOTE: this removes the dead-man's-switch — a silent day now means EITHER
+# "all healthy" OR "cron/DWD itself broke", which are indistinguishable.
+# Set SEND_OK_ALWAYS=1 to restore the old every-day OK heartbeat.
 send_ok_always = os.environ.get("SEND_OK_ALWAYS") == "1"
-is_monday = datetime.date.today().weekday() == 0
-should_send = (severity != "OK") or send_ok_always or is_monday
+should_send = (severity != "OK") or send_ok_always
 
 if should_send:
     client = gmail_for("i@m13v.com")
@@ -235,6 +232,6 @@ if should_send:
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
     print(f"sent: {subject}")
 else:
-    print(f"skipped (OK, not Monday): {subject}")
+    print(f"skipped (OK): {subject}")
 
 sys.exit(0 if severity == "OK" else 1)
