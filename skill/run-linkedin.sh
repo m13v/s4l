@@ -39,8 +39,11 @@ set -euo pipefail
 # Everything ELSE (project pick, query drafting, SERP-quality rating, dedup,
 # velocity/virality scoring, voice composition, URL wrapping, log_post.py
 # logging, candidate marking) is byte-for-byte identical across both paths.
-# Override per-run: LINKEDIN_BACKEND=browser ~/social-autoposter/skill/run-linkedin.sh
-LINKEDIN_BACKEND="${LINKEDIN_BACKEND:-unipile}"
+# Override per-run: LINKEDIN_BACKEND=unipile ~/social-autoposter/skill/run-linkedin.sh
+# Default is browser (linkedin-harness): the UniPile-hosted LinkedIn session
+# disconnects on its own (503 no_client_session) and silently zeroes out every
+# discovery cycle, so harness (real headed Chrome) is the reliable default.
+LINKEDIN_BACKEND="${LINKEDIN_BACKEND:-browser}"
 
 # LinkedIn killswitch (2026-05-27): refuse to run if a prior fire detected
 # session compromise (http_999, authwall, throttle, li_at cleared).
