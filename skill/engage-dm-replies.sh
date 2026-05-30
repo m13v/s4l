@@ -65,6 +65,18 @@ source "$(dirname "$0")/lock.sh"
 # DM_MCP_CONFIG (different variable) so no conflict.
 source "$(dirname "$0")/lib/twitter-backend.sh"
 
+# Reddit backend lib (2026-05-29 harness migration): exports REDDIT_CDP_URL=:9557
+# so the Python CDP helpers (scripts/reddit_browser.py send-dm/reply/unread-dms)
+# attach to the dedicated reddit-harness Chrome instead of the retired
+# reddit-agent (port 9222). Also provides ensure_reddit_browser_for_backend
+# (launches harness Chrome on 9557 + tab cleanup). Like twitter-backend it sets
+# MCP_CONFIG_FILE + BROWSER_INSTRUCTIONS, but this script drives the prompt off
+# DM_MCP_CONFIG (set per-platform below) and inlines its own per-platform browser
+# instructions, so those side-effect vars are unused here. Capture the reddit
+# harness prompt block under its own name for the Reddit MCP-fallback section.
+source "$(dirname "$0")/lib/reddit-backend.sh"
+REDDIT_BROWSER_INSTRUCTIONS="$BROWSER_INSTRUCTIONS"
+
 # Skip cleanly if a foreign playwright-mcp wrapper for THIS platform is alive
 # (interactive Fazm Dev / IDE / another cron). Avoids the Chrome SingletonLock
 # crash cascade — see dm-outreach-twitter.sh and engage-twitter.sh.
@@ -1310,7 +1322,7 @@ PROMPT_EOF
 DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/all-agents-mcp.json"
 if [ -n "$PLATFORM" ]; then
     case "$PLATFORM" in
-        reddit)   DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/reddit-agent-mcp.json" ;;
+        reddit)   DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/reddit-harness-mcp.json" ;;
         linkedin) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/linkedin-harness-mcp.json" ;;
         twitter|x) DM_MCP_CONFIG="$HOME/.claude/browser-agent-configs/twitter-harness-mcp.json" ;;
     esac
@@ -1337,10 +1349,10 @@ case "${PLATFORM:-all}" in
     reddit)
         # Reddit: brief pre-flight acquire+ensure+release ONLY. Per-DM
         # acquire/release happens inside the Claude prompt.
-        log "Reddit pre-flight: brief acquire + ensure_browser_healthy + release..."
+        log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
-            log "WARNING: reddit pre-flight acquire BUSY; ensure_browser_healthy will run anyway; per-DM acquires inside the prompt will retry."
-        ensure_browser_healthy "reddit"
+            log "WARNING: reddit pre-flight acquire BUSY; ensure_reddit_browser_for_backend will run anyway; per-DM acquires inside the prompt will retry."
+        ensure_reddit_browser_for_backend
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         ;;
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
@@ -1348,10 +1360,10 @@ case "${PLATFORM:-all}" in
         acquire_lock "linkedin-browser" 3600
         ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend )
         # Reddit: brief pre-flight only (same as the `reddit` branch above).
-        log "Reddit pre-flight: brief acquire + ensure_browser_healthy + release..."
+        log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
             log "WARNING: reddit pre-flight acquire BUSY; per-DM acquires inside the prompt will retry."
-        ensure_browser_healthy "reddit"
+        ensure_reddit_browser_for_backend
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
         acquire_lock "twitter-browser" 3600
         ensure_twitter_browser_for_backend
