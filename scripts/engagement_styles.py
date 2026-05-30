@@ -724,13 +724,20 @@ PLATFORM_POLICY = {
 # excluded from the use_pool by this floor.
 MIN_SAMPLE_SIZE = 1
 
-# Target-distribution tuning knobs (used by compute_target_distribution).
-# WEIGHT_EXPONENT > 1 sharpens the distribution toward the winner.
-# STYLE_FLOOR_PCT guarantees every non-never style still gets tested.
-# STYLE_CAP_PCT prevents a runaway winner from starving the rest.
-WEIGHT_EXPONENT = 2.0
-STYLE_FLOOR_PCT = 5.0
-STYLE_CAP_PCT = 50.0
+# Legacy target-distribution knobs. UNUSED since 2026-05-29: the picker
+# (pick_style_for_post) samples on raw _picker_score with no exponent / floor /
+# cap, and compute_target_distribution now reports that same true pick
+# probability instead of a sharpened-floored-capped target. These only ever
+# shaped the DISPLAY, which diverged hard from what actually got picked. Kept
+# defined (not deleted) so any external import doesn't break.
+WEIGHT_EXPONENT = 2.0   # (legacy, unused)
+STYLE_FLOOR_PCT = 5.0   # (legacy, unused)
+STYLE_CAP_PCT = 50.0    # (legacy, unused)
+
+# Picker weight floor: mirrors max(_picker_score(r), 0.01) in
+# pick_style_for_post so a score-0 trusted style still draws a tiny nonzero
+# pick chance instead of being frozen out entirely.
+PICK_FLOOR = 0.01
 
 
 # Recency window for the picker target distribution. Lifetime aggregation
@@ -792,9 +799,9 @@ def _fetch_style_stats(platform, days=None):
 
 # Composite style score, mirroring scripts/top_performers.py SCORE_SQL:
 # a real human click outweighs 10 upvotes of vibes, comments sit in the
-# middle. The picker weights styles by this score (sharpened by
-# WEIGHT_EXPONENT) so the style that actually drives clicks wins the
-# distribution, not the one that merely accumulates passive likes.
+# middle. The picker weights styles LINEARLY by this score (no exponent,
+# no shrinkage) so the style that actually drives clicks wins proportionally
+# more picks, not the one that merely accumulates passive likes.
 CLICK_WEIGHT = 10.0
 COMMENT_WEIGHT = 3.0
 
@@ -879,26 +886,35 @@ def get_dynamic_tiers(platform, context="posting"):
 
 
 def compute_target_distribution(platform, context="posting"):
-    """Compute per-style target pick% using a sharpened click-weighted score.
+    """Per-style pick probability, mirroring the live picker exactly.
 
-    Returns a list of dicts sorted by target pct DESC:
+    Returns a list of dicts sorted by pct DESC:
         [{"style", "pct", "n", "avg_up", "avg_cm", "avg_clicks", "score",
           "trusted", "is_candidate", "weight"}]
 
-    Policy:
+    `pct` is the probability that pick_style_for_post() assigns this style to a
+    given post, so the UI / snapshot now matches what actually happens:
       - Styles in PLATFORM_POLICY[platform].never are excluded.
-      - The per-style score is clicks*10 + comments*3 + upvotes_net, the
-        same composite scripts/top_performers.py ranks posts on. A real
-        human click is the ground-truth conversion signal; upvotes are
-        passive vibes. (Pre-2026-05-15 this used avg_upvotes alone, which
-        disagreed with every click-aware surface in the repo.)
-      - Styles with N >= MIN_SAMPLE_SIZE get weight = score ** WEIGHT_EXPONENT.
-      - Styles with N < MIN_SAMPLE_SIZE (incl. zero) get STYLE_FLOOR_PCT only
-        so noisy small-n styles (e.g. n=1 with a lucky viral post) don't
-        dominate.
-      - STYLE_FLOOR_PCT is applied to every remaining style so nothing hits 0%.
-      - STYLE_CAP_PCT caps the top style; overflow redistributes pro-rata.
-      - Cold start (no trusted data): equal share across non-never styles.
+      - score = clicks*10 + comments*3 + upvotes_net (the top_performers
+        composite). A real human click is the ground-truth conversion signal;
+        upvotes are passive vibes.
+      - The scored-use path (probability = 1 - INVENT_RATE - human_derived_rate)
+        samples across TRUSTED styles weighted LINEARLY by max(score,PICK_FLOOR)
+        — the exact weights pick_style_for_post() builds. So a trusted style's
+        pct = scored_use_fraction * max(score,PICK_FLOOR) / sum_trusted_weights.
+      - Non-trusted styles (n=0 ghost registry rows) are never on the use path,
+        so pct = 0. They can still surface via the invent-mode reference list.
+      - The leftover INVENT_RATE + human_derived_rate (~10%) is NOT attributed
+        to any fixed style (invent mints a new one, human_derived picks the
+        latest synthesized row), so trusted pcts sum to scored_use_fraction*100.
+      - Cold start (no trusted data): the picker always invents, so we show an
+        equal share across the non-never explore universe.
+
+    2026-05-29: replaced the legacy floor/cap/exponent target math
+    (WEIGHT_EXPONENT / STYLE_FLOOR_PCT / STYLE_CAP_PCT). That predated the
+    2026-05-28 switch to raw linear score sampling in pick_style_for_post and
+    diverged hard: with ~56 styles the 5% floor over-subscribed to ~245% and
+    zeroed the real winners, so the displayed % bore no relation to picks.
     """
     never = set(PLATFORM_POLICY.get(platform, {}).get("never", []))
     universe = get_all_styles()
@@ -906,7 +922,7 @@ def compute_target_distribution(platform, context="posting"):
     stats = _fetch_style_stats(platform)
 
     rows = []
-    trusted_total = 0.0
+    trusted_weight_sum = 0.0
     for style in candidates:
         s = stats.get(style)
         n = int(s["n"]) if s else 0
@@ -914,15 +930,14 @@ def compute_target_distribution(platform, context="posting"):
         avg_cm = float(s.get("avg_cm", 0.0)) if s else 0.0
         avg_clicks = float(s.get("avg_clicks", 0.0)) if s else 0.0
         score = _style_score(s) if s else 0.0
-        # Every style with N >= MIN_SAMPLE_SIZE is trusted; the two-tier
-        # candidate/active gate was removed 2026-05-22 and picker shrinkage
-        # was removed 2026-05-25. The MIN_SAMPLE_SIZE=1 floor below excludes
-        # only n=0 ghost styles (registry rows with no posts in the 30d
-        # window); single-post inventions count.
+        # Trusted = at least one real post in the recency window
+        # (MIN_SAMPLE_SIZE=1 excludes only n=0 ghost registry rows). The
+        # picker's use-path weight is max(_picker_score, PICK_FLOOR) with NO
+        # exponent and NO sample-size shrinkage, so we mirror it verbatim.
         trusted = (s is not None and n >= MIN_SAMPLE_SIZE)
-        weight = (score ** WEIGHT_EXPONENT) if trusted else 0.0
+        weight = max(score, PICK_FLOOR) if trusted else 0.0
         if trusted:
-            trusted_total += weight
+            trusted_weight_sum += weight
         rows.append({"style": style, "n": n, "avg_up": avg_up,
                      "avg_cm": avg_cm, "avg_clicks": avg_clicks,
                      "score": score, "trusted": trusted,
@@ -932,41 +947,31 @@ def compute_target_distribution(platform, context="posting"):
     if not rows:
         return []
 
-    # Cold start: no trusted data. Equal share across all non-never styles.
-    if trusted_total <= 0:
+    # Cold start: no trusted data -> the picker always invents. Show an equal
+    # share across the explore universe (the invent-mode reference pool).
+    if trusted_weight_sum <= 0:
         share = 100.0 / len(rows)
         for r in rows:
             r["pct"] = share
         rows.sort(key=lambda r: r["style"])
         return rows
 
-    # Raw score%: weight / total. Explore styles stay at 0.
+    # Scored-use fraction: the picker spends INVENT_RATE on invention and
+    # _human_derived_rate(platform) on the latest human-derived style BEFORE
+    # the scored sample runs, so trusted styles share only the remainder.
+    scored_use_fraction = max(
+        0.0, 1.0 - INVENT_RATE - _human_derived_rate(platform)
+    )
     for r in rows:
-        r["pct"] = (r["weight"] / trusted_total) * 100.0 if r["trusted"] else 0.0
+        if r["trusted"]:
+            r["pct"] = (
+                (r["weight"] / trusted_weight_sum)
+                * scored_use_fraction * 100.0
+            )
+        else:
+            r["pct"] = 0.0
 
-    # Apply floor: every style gets at least STYLE_FLOOR_PCT.
-    # Redistribute remaining mass pro-rata among styles that were already above floor.
-    below = [r for r in rows if r["pct"] < STYLE_FLOOR_PCT]
-    above = [r for r in rows if r["pct"] >= STYLE_FLOOR_PCT]
-    floored_total = STYLE_FLOOR_PCT * len(below)
-    remaining = max(0.0, 100.0 - floored_total)
-    above_sum = sum(r["pct"] for r in above) or 1.0
-    for r in below:
-        r["pct"] = STYLE_FLOOR_PCT
-    for r in above:
-        r["pct"] = (r["pct"] / above_sum) * remaining
-
-    # Apply cap: top style can't exceed STYLE_CAP_PCT. Overflow redistributes
-    # pro-rata among others (their current pct as the weight).
     rows.sort(key=lambda r: r["pct"], reverse=True)
-    if rows and rows[0]["pct"] > STYLE_CAP_PCT:
-        overflow = rows[0]["pct"] - STYLE_CAP_PCT
-        rows[0]["pct"] = STYLE_CAP_PCT
-        others = rows[1:]
-        others_sum = sum(r["pct"] for r in others) or 1.0
-        for r in others:
-            r["pct"] += overflow * (r["pct"] / others_sum)
-
     return rows
 
 
