@@ -47,7 +47,9 @@ log "=== GitHub Link Edit Run: $(date) ==="
 # Tunable via env var so cadence sweeps don't need code changes. 0.0
 # disables page-gen entirely (link insertion still happens with plain URL);
 # 1.0 restores 100% page-gen.
-LINK_EDIT_GITHUB_PAGE_GEN_RATE="${LINK_EDIT_GITHUB_PAGE_GEN_RATE:-0.30}"
+# DEFAULT 0.0: GitHub no longer generates custom SEO pages — every eligible
+# post goes through the wrap-an-existing-link route (homepage + short link).
+LINK_EDIT_GITHUB_PAGE_GEN_RATE="${LINK_EDIT_GITHUB_PAGE_GEN_RATE:-0.0}"
 PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_GITHUB_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
 log "A/B gate: LINK_EDIT_GITHUB_PAGE_GEN_RATE=$LINK_EDIT_GITHUB_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
 
