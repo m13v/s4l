@@ -77,7 +77,7 @@ def _page_gen_rate() -> float:
     # default rate gives Twitter a higher share of full landing pages while
     # still leaving 70% on the cheap path for budget reasons. See chat note
     # 2026-05-07 "link suffix pipeline rewrite".
-    raw = os.environ.get("TWITTER_PAGE_GEN_RATE", "0.30")
+    raw = os.environ.get("TWITTER_PAGE_GEN_RATE", "0.0")
     try:
         v = float(raw)
     except ValueError:
