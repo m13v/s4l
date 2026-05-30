@@ -2371,11 +2371,13 @@ def main():
                         help="Cap the number of parent threads polled per run (default 1000). "
                              "fxtwitter is paced at 1 req/sec so 1000 threads ~= 16.7 min. "
                              "0 means unlimited.")
-    parser.add_argument("--twitter-threads-stale-hours", type=int, default=20,
+    parser.add_argument("--twitter-threads-stale-hours", type=int, default=5,
                         help="Skip threads whose latest snapshot is younger than this many "
-                             "hours (default 20, so each thread ends up with ~1 snapshot/day "
-                             "at steady state). Set lower for finer-grained curves; higher "
-                             "to save fxtwitter quota.")
+                             "hours (default 5, matching the active-post and top-reply refresh "
+                             "cadence so the dashboard's parent-thread column stays as fresh as "
+                             "our own reply). The per-run cap (--twitter-threads-max) keeps "
+                             "fxtwitter load bounded and prioritises the most recently-commented "
+                             "threads. Set higher to save fxtwitter quota at the cost of staleness.")
     parser.add_argument("--stats-summary", default=None,
                         help="Write a small JSON file with per-platform stats refresh "
                              "counts ({platform: {refreshed, removed}}) so stats.sh "
