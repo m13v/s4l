@@ -19335,7 +19335,8 @@ async function saveProjectWeight(inp) {
     // Pull fresh totals + target % from the server, but preserve the row
     // order so the just-edited row stays where the operator saw it. The
     // order will be refreshed on header click or the ↻ refresh button.
-    _projectStatusLoading = false;
+    // Request-versioning in loadProjectStatus guarantees this reload wins over
+    // any background refresh that's mid-flight, so the new weight always lands.
     loadProjectStatus(true, { preserveOrder: true });
   } catch (e) {
     inp.value = String(original);
@@ -19350,8 +19351,6 @@ async function saveProjectWeight(inp) {
 async function refreshAllData() {
   const icon = document.getElementById('global-refresh-icon');
   if (icon) { icon.style.transition = 'transform 0.6s'; icon.style.transform = 'rotate(360deg)'; setTimeout(() => { icon.style.transition = ''; icon.style.transform = ''; }, 700); }
-  // Reset loading guards so force-refresh always fires
-  _projectStatusLoading = false;
   // Reload everything for the active tab + status-tab sections
   const activeTab = document.querySelector('.tab.active');
   const tab = activeTab ? activeTab.dataset.tab : 'stats';
