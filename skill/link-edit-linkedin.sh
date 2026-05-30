@@ -56,15 +56,15 @@ log "=== LinkedIn Link Edit Run: $(date) ==="
 
 # A/B gate: per-post deterministic coin flip for the page-gen lane. Mirrors
 # scripts/twitter_gen_links.py's TWITTER_PAGE_GEN_RATE behavior and the
-# Reddit link-edit pipeline's LINK_EDIT_REDDIT_PAGE_GEN_RATE. 0.30 means
-# ~30% of eligible posts get a brand-new SEO landing page built inline via
-# Claude + git push; the other ~70% fall through to the project's homepage
-# with link_source='plain_url_ab_skip'. Per-post hash via Postgres
-# hashtext() so the same post stays in the same lane across cron retries.
-# Tunable via env var so cadence sweeps don't need code changes. 0.0
-# disables page-gen entirely (link insertion still happens with plain URL);
-# 1.0 restores 100% page-gen.
-LINK_EDIT_LINKEDIN_PAGE_GEN_RATE="${LINK_EDIT_LINKEDIN_PAGE_GEN_RATE:-0.30}"
+# Reddit link-edit pipeline's LINK_EDIT_REDDIT_PAGE_GEN_RATE. Default is now
+# 0.0 (2026-05-29 policy: stop generating new SEO landing pages from link-edit;
+# every eligible post falls through to the project's homepage with
+# link_source='plain_url_ab_skip' and still gets the /r/<code> short-link wrap
+# for attribution). Per-post hash via Postgres hashtext() so the same post
+# stays in the same lane across cron retries. Tunable via env var so cadence
+# sweeps don't need code changes. 0.0 disables page-gen entirely (link
+# insertion still happens with plain URL); 1.0 restores 100% page-gen.
+LINK_EDIT_LINKEDIN_PAGE_GEN_RATE="${LINK_EDIT_LINKEDIN_PAGE_GEN_RATE:-0.0}"
 PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_LINKEDIN_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
 log "A/B gate: LINK_EDIT_LINKEDIN_PAGE_GEN_RATE=$LINK_EDIT_LINKEDIN_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
 
