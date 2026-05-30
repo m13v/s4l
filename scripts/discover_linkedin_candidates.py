@@ -746,8 +746,22 @@ def search(vertical: str, query: str) -> dict:
         context = browser.contexts[0]
 
         page = None
+        _reused_page = False
         try:
-            page = context.new_page()
+            # Reuse an existing harness tab instead of spawning a throwaway one
+            # (mirrors reddit_browser / linkedin_browser). Prefer a tab already
+            # on linkedin.com (not login/checkpoint), else the first open page;
+            # only new_page() when the context has no usable tab. A reused tab
+            # is left open in the finally below so the next consumer reuses it.
+            for pg in context.pages:
+                u = pg.url or ""
+                if "linkedin.com" in u and "login" not in u and "checkpoint" not in u:
+                    page, _reused_page = pg, True
+                    break
+            if page is None and context.pages:
+                page, _reused_page = context.pages[0], True
+            if page is None:
+                page = context.new_page()
             try:
                 page.goto(
                     search_url,
@@ -839,10 +853,11 @@ def search(vertical: str, query: str) -> dict:
             }
 
         finally:
-            # Close ONLY our page, never the context or the browser. The
-            # MCP keeps owning the Chrome instance and its existing pages.
+            # Close ONLY a page WE created, never the context or the browser.
+            # The MCP keeps owning the Chrome instance and its existing pages.
+            # A reused tab is left open so the next consumer can reuse it.
             try:
-                if page is not None:
+                if page is not None and not _reused_page:
                     page.close()
             except Exception:
                 pass
