@@ -1072,6 +1072,18 @@ fi
 
 PA_SEARCH_TOPIC_ARG=$(python3 -c "import shlex,sys; print(shlex.quote(sys.argv[1]))" "$PA_SEARCH_TOPIC")
 
+# ===== Link-tail decision (Twitter-style) =====
+# LinkedIn comments are engagement-only by default; the drafting prompt never
+# emits a URL, so wrap-post-text (which only short-links URLs already present)
+# is a no-op and our comments carry no link. Mirror the Twitter "link tail":
+# resolve the project's clean landing URL, A/B-gate it, and when the arm is
+# 'link' have Phase B append ONE CTA bridge sentence ending in that URL via
+# link_tail.py (then wrap-post-text short-links it). Control arm posts no link.
+LINK_URL=$(python3 -c "import json,sys; p=json.loads(sys.argv[1]); print((p.get('website') or p.get('url') or '').strip())" "$PROJECT_FULL")
+LINKEDIN_TAIL_LINK_RATE="${LINKEDIN_TAIL_LINK_RATE:-0.25}"
+TAIL_DECISION=$(python3 -c "import random,sys; url=sys.argv[1].strip(); rate=float(sys.argv[2]); print('link' if (url and random.random()<rate) else 'no_link')" "$LINK_URL" "$LINKEDIN_TAIL_LINK_RATE")
+echo "[link-tail] project=$PA_PROJECT url=$LINK_URL rate=$LINKEDIN_TAIL_LINK_RATE decision=$TAIL_DECISION" | tee -a "$LOG_FILE"
+
 # Allow Chrome's profile lockfile to release between phases.
 sleep 3
 
@@ -1124,6 +1136,24 @@ $STYLES_BLOCK
    (apply voice.tone, never violate voice.never, mirror voice.examples if
    present). Reply in $PA_LANG.
    NEVER use em dashes.
+
+2a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
+       TAIL_LINK_DECISION = '$TAIL_DECISION'
+       LINK_URL           = '$LINK_URL'
+    If TAIL_LINK_DECISION is 'link' AND LINK_URL is non-empty, append ONE short
+    CTA bridge sentence ending in LINK_URL to your draft. Run via Bash:
+       TAIL_RESULT=\$(python3 $REPO_DIR/scripts/link_tail.py \\
+         --reply-text "YOUR_COMMENT_TEXT" \\
+         --link-url '$LINK_URL' \\
+         --thread-text "$PA_EXCERPT" \\
+         --project '$PA_PROJECT' \\
+         --platform linkedin)
+       echo "\$TAIL_RESULT"
+    Parse {ok, text}. If ok is true, REPLACE your draft with tail_result.text
+    (it now ends in the URL); that becomes YOUR_COMMENT_TEXT for every step
+    below. If ok is false, keep your original draft (no link this run).
+    If TAIL_LINK_DECISION is 'no_link' OR LINK_URL is empty, SKIP this step and
+    do NOT add any URL yourself (this is the control arm).
 
 2b. Wrap any URLs in your draft before posting. Run:
      WRAP_RESULT=\$(python3 $REPO_DIR/scripts/dm_short_links.py wrap-post-text \\
@@ -1273,6 +1303,24 @@ $STYLES_BLOCK
    block (apply voice.tone, never violate voice.never, mirror voice.examples
    if present). Reply in $PA_LANG.
    NEVER use em dashes.
+
+3a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
+       TAIL_LINK_DECISION = '$TAIL_DECISION'
+       LINK_URL           = '$LINK_URL'
+    If TAIL_LINK_DECISION is 'link' AND LINK_URL is non-empty, append ONE short
+    CTA bridge sentence ending in LINK_URL to your draft. Run via Bash:
+       TAIL_RESULT=\$(python3 $REPO_DIR/scripts/link_tail.py \\
+         --reply-text "YOUR_COMMENT_TEXT" \\
+         --link-url '$LINK_URL' \\
+         --thread-text "$PA_EXCERPT" \\
+         --project '$PA_PROJECT' \\
+         --platform linkedin)
+       echo "\$TAIL_RESULT"
+    Parse {ok, text}. If ok is true, REPLACE your draft with tail_result.text
+    (it now ends in the URL); that becomes YOUR_COMMENT_TEXT for every step
+    below. If ok is false, keep your original draft (no link this run).
+    If TAIL_LINK_DECISION is 'no_link' OR LINK_URL is empty, SKIP this step and
+    do NOT add any URL yourself (this is the control arm).
 
 3b. Wrap any URLs in your draft before typing. Run:
      WRAP_RESULT=\$(python3 $REPO_DIR/scripts/dm_short_links.py wrap-post-text \\
