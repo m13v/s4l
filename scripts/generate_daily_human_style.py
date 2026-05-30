@@ -119,6 +119,42 @@ def load_existing_style_names(conn):
     return names
 
 
+def already_generated_recently(conn, platform, hours=20):
+    """True if a human_derived style for `platform` was already created in the
+    last `hours`.
+
+    Idempotency guard. The daily cron fires ONCE at 16:00 PDT, so any second
+    human_derived row for the same platform inside ~20h is a duplicate, e.g. a
+    launchd catch-up run after the Mac woke from sleep, a manual rerun, or a
+    double-fire. Without this guard nothing stopped repeated invocations from
+    each minting a fresh style: on 2026-05-28 the synthesizer was invoked 4x
+    and inserted 4 twitter styles (peer_imperative, utility_for_reader_link,
+    build_in_public_artifact, proof_of_claim_link). The contract is "invent no
+    more than we consume" => at most one human_derived style per platform per
+    day.
+
+    Fails OPEN (returns False) on any DB error so a transient blip never
+    silently kills the daily run.
+    """
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM engagement_styles_registry "
+            "WHERE kind = 'human_derived' AND platform = %s "
+            "AND generated_at >= NOW() - (%s || ' hours')::INTERVAL "
+            "LIMIT 1",
+            (platform, str(hours)),
+        )
+        hit = cur.fetchone() is not None
+        cur.close()
+        return hit
+    except Exception as e:
+        sys.stderr.write(
+            f"[generate_daily_human_style] platform={platform} idempotency "
+            f"check failed ({e}); proceeding (fail-open)\n"
+        )
+        return False
+
+
 def build_prompt(platform, replies, reserved_names):
     lines = []
     lines.append(
@@ -314,6 +350,16 @@ def synthesize_for_platform(conn, platform, reserved, dry_run=False):
     summary logging; raises only on genuinely fatal errors (e.g. Claude
     wrapper crash). Insufficient-data is a soft skip.
     """
+    # Idempotency: at most ONE human_derived style per platform per day. Skip
+    # before spending a Claude call if today's style already exists (rerun,
+    # launchd catch-up, double-fire). dry_run bypasses so prompts stay
+    # inspectable.
+    if not dry_run and already_generated_recently(conn, platform):
+        sys.stderr.write(
+            f"[generate_daily_human_style] platform={platform} already has a "
+            f"human_derived style from the last 20h; skipping (idempotent).\n"
+        )
+        return {"platform": platform, "status": "skipped_already_today"}
     replies = fetch_top_human_replies(conn, platform)
     if len(replies) < MIN_REPLIES:
         sys.stderr.write(
