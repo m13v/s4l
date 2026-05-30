@@ -2105,7 +2105,15 @@ def refresh_twitter_replies(db, quiet=False):
     `db` is accepted for orchestrator signature compatibility but the
     function makes no direct SQL calls — every read/write is HTTP.
     """
-    FRESH_WINDOW = timedelta(days=7)
+    # Tiered freshness so reply-to-replies don't rot on a flat 7-day cadence.
+    # Recent replies (<=14d) still accrue likes/views, so they refresh on the
+    # same ~6h cadence as our posts and top replies. Older replies have settled,
+    # so a slow 7-day gate keeps fxtwitter load bounded. Age is derived from the
+    # tweet's snowflake ID (no extra server field needed).
+    FRESH_WINDOW_RECENT = timedelta(hours=6)
+    FRESH_WINDOW_SETTLED = timedelta(days=7)
+    RECENT_AGE_CUTOFF = timedelta(days=14)
+    TWITTER_SNOWFLAKE_EPOCH_MS = 1288834974657
     now_utc = datetime.now(timezone.utc)
 
     rows = _http_list_twitter_replies_to_refresh()
@@ -2123,10 +2131,22 @@ def refresh_twitter_replies(db, quiet=False):
                 eu = None
         else:
             eu = eu_raw
+        # Pick the freshness window by reply age (snowflake-derived). Recent
+        # replies refresh fast; settled ones stay on the slow cadence.
+        fresh_window = FRESH_WINDOW_SETTLED
+        _idm = re.search(r'/status/(\d+)', url or '')
+        if _idm:
+            try:
+                _created_ms = (int(_idm.group(1)) >> 22) + TWITTER_SNOWFLAKE_EPOCH_MS
+                _age = now_utc - datetime.fromtimestamp(_created_ms / 1000.0, timezone.utc)
+                if _age <= RECENT_AGE_CUTOFF:
+                    fresh_window = FRESH_WINDOW_RECENT
+            except (ValueError, OverflowError, OSError):
+                pass
         if eu:
             if eu.tzinfo is None:
                 eu = eu.replace(tzinfo=timezone.utc)
-            if now_utc - eu < FRESH_WINDOW:
+            if now_utc - eu < fresh_window:
                 skipped_fresh += 1
                 continue
 
