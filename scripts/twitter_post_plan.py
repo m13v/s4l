@@ -564,6 +564,23 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # + thread author removed), sorted by likes DESC, capped at 3.
     top_replies = parsed.get("top_replies") or []
 
+    # Auto-like outcome (reply_to_tweet likes the parent tweet after the reply
+    # lands). Log pass/fail to the cycle log so we have a record on our end.
+    # A like failure is non-fatal: the reply already landed.
+    like_result = parsed.get("like_result") or {}
+    if parsed.get("liked"):
+        print(
+            f"[like] candidate {cid} parent tweet liked "
+            f"(already_liked={like_result.get('already_liked', False)})",
+            flush=True,
+        )
+    else:
+        print(
+            f"[like] candidate {cid} parent tweet NOT liked: "
+            f"{like_result.get('error', 'unknown')}",
+            flush=True,
+        )
+
     if not reply_url or not REPLY_URL_RE.match(reply_url):
         # Reply was likely sent (browser action returned ok=True with verified)
         # but the URL capture in twitter_browser.py couldn't pin it down — CDP
