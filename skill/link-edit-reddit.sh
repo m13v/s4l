@@ -54,7 +54,9 @@ log "=== Reddit Link Edit Run: $(date) ==="
 # we'd risk shipping two different lanes for the same post on consecutive
 # runs and burn budget. Tunable via env var so cadence sweeps don't need
 # code changes. 0.0 disables page-gen; 1.0 restores 100% page-gen.
-LINK_EDIT_REDDIT_PAGE_GEN_RATE="${LINK_EDIT_REDDIT_PAGE_GEN_RATE:-0.30}"
+# DEFAULT 0.0: Reddit no longer generates custom SEO pages — every eligible
+# post goes through the wrap-an-existing-link route (homepage + /r/<code>).
+LINK_EDIT_REDDIT_PAGE_GEN_RATE="${LINK_EDIT_REDDIT_PAGE_GEN_RATE:-0.0}"
 PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_REDDIT_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
 log "A/B gate: LINK_EDIT_REDDIT_PAGE_GEN_RATE=$LINK_EDIT_REDDIT_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
 
