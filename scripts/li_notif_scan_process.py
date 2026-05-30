@@ -168,6 +168,19 @@ def main():
 
     if not DRY_RUN:
         conn.commit()
+        # atomic post-commit verification in the same process
+        vcur = conn.cursor()
+        vcur.execute(
+            "SELECT id, post_id, their_author, status FROM replies "
+            "WHERE platform='linkedin' AND their_comment_id = ANY(%s) "
+            "ORDER BY id;",
+            ([k for k in []] or [it.get("comment_urn") for it in items],),
+        )
+        verify_rows = vcur.fetchall()
+        vcur.close()
+        print("=== POST-COMMIT VERIFY: %d reply rows for scanned URNs ===" % len(verify_rows))
+        for vr in verify_rows:
+            print("  reply id=%s post_id=%s author=%s status=%s" % vr)
     cur.close()
     conn.close()
 
