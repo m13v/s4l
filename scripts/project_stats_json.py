@@ -435,27 +435,103 @@ def _ph_batch_counts(api_key, project_id, domains, after_iso):
     # column in this batch (cta_clicks, schedule_clicks, get_started_clicks,
     # cross_product_clicks, email_signups all count unique users). A visitor
     # bouncing between /pricing and /docs still counts as 1.
-    pv_total = _count_by_host("event = '$pageview'", distinct_key="distinct_id")
-    cta_total = _count_by_host("event = 'cta_click'", distinct_key="distinct_id")
+    #
+    # PERF/RATE-LIMIT: PostHog throttles the (shared) personal API key
+    # org-wide on the /query endpoint (429 "throttled"). The five
+    # unique-visitor counts that all dedupe on distinct_id are folded into
+    # ONE grouped query (bucketed by event via multiIf) instead of five
+    # separate HogQL calls. Email signups stay on their own query because
+    # they dedupe on coalesce(email, distinct_id), a different key. This
+    # halves the per-bucket request count, which is what was blowing the
+    # rate limit when all windows/buckets fired at once.
+    def _multi_count_by_host():
+        bucket_expr = (
+            "multiIf("
+            "event = '$pageview', 'pv', "
+            "event = 'cta_click', 'cta', "
+            "event = 'schedule_click', 'sched', "
+            f"event IN {_GET_STARTED_EVENTS}, 'gs', "
+            "'cross')"
+        )
+        q = (
+            f"SELECT properties.$host AS host, {bucket_expr} AS bkt, "
+            "count(DISTINCT distinct_id) AS c FROM events "
+            "WHERE event IN ('$pageview', 'cta_click', 'schedule_click', "
+            "'cross_product_click', 'get_started_click', 'download_click', "
+            "'cta_get_started_clicked') "
+            f"AND properties.$host IN ({in_list}) "
+            f"AND timestamp >= toDateTime('{after_str}') "
+            "GROUP BY host, bkt"
+        )
+        rows = _hogql(api_key, project_id, q)
+        out = {"pv": {}, "cta": {}, "sched": {}, "gs": {}, "cross": {}}
+        for r in (rows or []):
+            host = r[0] if len(r) > 0 else None
+            bkt = r[1] if len(r) > 1 else None
+            cnt = int(r[2]) if len(r) > 2 else 0
+            if host and bkt in out:
+                out[bkt][host] = cnt
+        return out
+
+    _counts = _multi_count_by_host()
+    pv_total = _counts["pv"]
+    cta_total = _counts["cta"]
+    sched_total = _counts["sched"]
+    # Get Started = unique users who took the conversion action, not raw clicks.
+    get_started_total = _counts["gs"]
+    cross_product_total = _counts["cross"]
+    # Email signups: client `newsletter_subscribed` is ad-blocker-lossy
+    # (~57% capture). Server-side `newsletter_subscribed_server` is ground
+    # truth. Count both with DISTINCT email so a client + server pair for the
+    # same submission collapses to one. Kept as its own query (distinct key
+    # differs from the distinct_id batch above).
     signup_total = _count_by_host(
         _SIGNUP_CLAUSE,
         distinct_key="coalesce(properties.email, distinct_id)",
     )
-    sched_total = _count_by_host("event = 'schedule_click'", distinct_key="distinct_id")
-    # Get Started = unique users who took the conversion action, not raw clicks.
-    # A user iterating on the same project (multiple prompts, multiple
-    # download retries, multiple install button presses in a session) is
-    # still one conversion. Mirrors the signup_total dedup pattern above.
-    get_started_total = _count_by_host(
-        f"event IN {_GET_STARTED_EVENTS}",
-        distinct_key="distinct_id",
-    )
-    cross_product_total = _count_by_host("event = 'cross_product_click'", distinct_key="distinct_id")
 
+    # Per-page breakdowns. The big $pageview scan keeps its own large cap;
+    # the three low-volume conversion breakdowns (signup/sched/get_started,
+    # all distinct_id) fold into one grouped-by-event query for the same
+    # rate-limit reason as the counts above.
     top_pv = _top_pages_by_host("event = '$pageview'", row_cap=5000)
-    top_signup = _top_pages_by_host(_SIGNUP_CLAUSE, row_cap=500)
-    top_sched = _top_pages_by_host("event = 'schedule_click'", row_cap=500)
-    top_get_started = _top_pages_by_host(f"event IN {_GET_STARTED_EVENTS}", row_cap=500)
+
+    def _multi_top_pages_small():
+        bucket_expr = (
+            "multiIf("
+            "event = 'schedule_click', 'sched', "
+            f"event IN {_GET_STARTED_EVENTS}, 'gs', "
+            "'signup')"
+        )
+        q = (
+            f"SELECT properties.$host AS host, properties.$pathname AS path, "
+            f"{bucket_expr} AS bkt, count(DISTINCT distinct_id) AS c FROM events "
+            "WHERE event IN ('schedule_click', 'newsletter_subscribed', "
+            "'newsletter_subscribed_server', 'get_started_click', "
+            "'download_click', 'cta_get_started_clicked') "
+            f"AND properties.$host IN ({in_list}) "
+            f"AND timestamp >= toDateTime('{after_str}') "
+            "GROUP BY host, path, bkt ORDER BY c DESC LIMIT 1500"
+        )
+        rows = _hogql(api_key, project_id, q)
+        out = {
+            "signup": {d: {} for d in safe_domains},
+            "sched": {d: {} for d in safe_domains},
+            "gs": {d: {} for d in safe_domains},
+        }
+        for r in (rows or []):
+            host = r[0] if len(r) > 0 else None
+            path = r[1] if len(r) > 1 and r[1] else "/"
+            bkt = r[2] if len(r) > 2 else None
+            cnt = int(r[3]) if len(r) > 3 else 0
+            if bkt in out and host in out[bkt]:
+                out[bkt][host][path] = cnt
+        return out
+
+    _tp = _multi_top_pages_small()
+    top_signup = _tp["signup"]
+    top_sched = _tp["sched"]
+    top_get_started = _tp["gs"]
 
     cta_details_by_host = {d: [] for d in safe_domains}
     if any(v > 0 for v in cta_total.values()):
