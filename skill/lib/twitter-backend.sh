@@ -65,17 +65,21 @@ these helpers pre-imported:
   press_key(key),                           # e.g. "Enter", "Tab", "Escape"
   scroll(direction, amount), cdp(method, **params)
 
-TAB HYGIENE (IMPORTANT): Reuse the SAME tab for sequential same-domain navigation.
-Use new_tab() ONLY for the very first navigation OR when you need to keep an old tab
-open in parallel. For each subsequent query / page / scan, use goto_url() so the
-existing tab is reused. Opening a fresh tab for every query leaks tabs over time and
-exhausts per-process Chrome resources.
+TAB HYGIENE (IMPORTANT): A placeholder tab ALWAYS already exists when you start
+(pre-flight leaves exactly one tab open). REUSE IT: use goto_url() for your VERY FIRST
+navigation as well as every subsequent one, so the existing tab is navigated in place.
+Call new_tab() ONLY as a fallback when no usable tab exists (goto_url errors because
+there is no active page) OR when you genuinely need a second tab open in parallel.
+Opening a fresh tab on first navigation orphans the placeholder and leaks a tab every
+cycle, which exhausts per-process Chrome resources.
 
 TRANSLATION TABLE - wherever this prompt mentions a Playwright-style tool, do the
 following with bh_run instead:
 
-  browser_navigate(url)           ->  First navigation: bh_run('new_tab("URL"); wait_for_load()')
-                                       Subsequent navigations (same session): bh_run('goto_url("URL"); wait_for_load()')
+  browser_navigate(url)           ->  Reuse the existing tab (default, incl. first nav):
+                                       bh_run('goto_url("URL"); wait_for_load()')
+                                       Fallback only if no tab exists / parallel tab needed:
+                                       bh_run('new_tab("URL"); wait_for_load()')
   browser_snapshot                ->  bh_run('print(js("""..."""))') to read DOM as structured data,
                                        OR bh_run('print(capture_screenshot())') + Read the PNG
   browser_run_code(js)            ->  bh_run('print(js("""<the JS expression>"""))')
