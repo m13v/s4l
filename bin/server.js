@@ -7542,6 +7542,14 @@ async function handleApi(req, res) {
         "ttr.tr_retweets AS top_reply_retweets, " +
         "ttr.tr_views AS top_reply_views, " +
         "ttr.tr_author AS top_reply_author, " +
+        // 2026-05-31: latest LIVE parent-thread snapshot (thread_snapshots,
+        // appended ~every 6h by refresh_twitter_threads). Preferred over the
+        // frozen thread_engagement T0 JSON in the render so the Thread column
+        // reflects how the parent tweet actually grew after we commented.
+        "tsnap.s_views AS thread_live_views, " +
+        "tsnap.s_likes AS thread_live_likes, " +
+        "tsnap.s_replies AS thread_live_replies, " +
+        "tsnap.s_at AS thread_live_at, " +
         "'post'::text AS row_kind " +
       "FROM posts LEFT JOIN campaigns c ON c.id = posts.campaign_id " +
       // pl rollup: legacy `total_clicks` reads the post_links.clicks integer
@@ -7580,6 +7588,16 @@ async function handleApi(req, res) {
         "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
         "LIMIT 1" +
       ") ttr ON true " +
+      // 2026-05-31: newest live parent-thread snapshot for this comment's
+      // parent tweet. Keyed on thread_url so root posts (thread_url = our_url,
+      // never snapshotted) fall through to the frozen thread_engagement JSON.
+      "LEFT JOIN LATERAL (" +
+        "SELECT views AS s_views, likes AS s_likes, replies AS s_replies, captured_at AS s_at " +
+        "FROM thread_snapshots " +
+        "WHERE thread_url = posts.thread_url AND COALESCE(is_deleted, false) = false " +
+        "ORDER BY captured_at DESC NULLS LAST " +
+        "LIMIT 1" +
+      ") tsnap ON true " +
       "WHERE " + whereParts.join(' AND ') + " " +
       "ORDER BY upvotes DESC NULLS LAST, comments_count DESC NULLS LAST, views DESC NULLS LAST " +
       "LIMIT " + limit;
@@ -7628,6 +7646,13 @@ async function handleApi(req, res) {
         "ttr2.tr_retweets AS top_reply_retweets, " +
         "ttr2.tr_views AS top_reply_views, " +
         "ttr2.tr_author AS top_reply_author, " +
+        // 2026-05-31: live parent-thread snapshot, same as the posts branch
+        // but keyed on parent.thread_url (the OG thread this reply-to-reply
+        // lives in). Column order MUST match the posts branch for the UNION.
+        "tsnap2.s_views AS thread_live_views, " +
+        "tsnap2.s_likes AS thread_live_likes, " +
+        "tsnap2.s_replies AS thread_live_replies, " +
+        "tsnap2.s_at AS thread_live_at, " +
         "'reply'::text AS row_kind " +
       "FROM replies r2 " +
       "LEFT JOIN posts parent ON parent.id = r2.post_id " +
@@ -7639,6 +7664,13 @@ async function handleApi(req, res) {
         "ORDER BY COALESCE(likes, likes_at_capture, 0) DESC, rank_at_capture ASC " +
         "LIMIT 1" +
       ") ttr2 ON true " +
+      "LEFT JOIN LATERAL (" +
+        "SELECT views AS s_views, likes AS s_likes, replies AS s_replies, captured_at AS s_at " +
+        "FROM thread_snapshots " +
+        "WHERE thread_url = parent.thread_url AND COALESCE(is_deleted, false) = false " +
+        "ORDER BY captured_at DESC NULLS LAST " +
+        "LIMIT 1" +
+      ") tsnap2 ON true " +
       "WHERE " + repliesWhere.join(' AND ') + " " +
       "ORDER BY r2.upvotes DESC NULLS LAST, r2.comments_count DESC NULLS LAST, r2.views DESC NULLS LAST " +
       "LIMIT " + limit;
@@ -16855,6 +16887,13 @@ function renderTopPosts(payload) {
       top_reply_retweets: p.top_reply_retweets == null ? null : Number(p.top_reply_retweets),
       top_reply_views:    p.top_reply_views    == null ? null : Number(p.top_reply_views),
       top_reply_author:   p.top_reply_author || '',
+      // Live parent-thread snapshot (preferred over thread_engagement T0 in
+      // the Thread column formatter). Null when the parent has no snapshot
+      // yet (e.g. root posts, or a parent not yet polled by the thread cron).
+      thread_live_views:   p.thread_live_views   == null ? null : Number(p.thread_live_views),
+      thread_live_likes:   p.thread_live_likes   == null ? null : Number(p.thread_live_likes),
+      thread_live_replies: p.thread_live_replies == null ? null : Number(p.thread_live_replies),
+      thread_live_at:      p.thread_live_at || null,
     };
   });
   _topTableHandle = mountSortableTable({
@@ -17014,24 +17053,44 @@ function renderTopPosts(payload) {
       // our biggest replies-into-huge-threads).
       { key: 'thread_views',   label: 'Thread',   type: 'numeric', align: 'left',  widthPct: 8,
         accessor: r => {
+          // Sort on the live parent-thread views when we have a snapshot;
+          // fall back to the frozen T0 views otherwise.
+          if (r.thread_live_views != null) return Number(r.thread_live_views) || 0;
           const te = r.thread_engagement;
           if (!te || typeof te !== 'object') return 0;
           return Number(te.views) || 0;
         },
         formatter: (_v, r) => {
           const isTw = r.platform === 'twitter' || r.platform === 'x';
-          const te = r.thread_engagement;
-          if (!isTw || !te || typeof te !== 'object') {
+          const te = (r.thread_engagement && typeof r.thread_engagement === 'object') ? r.thread_engagement : null;
+          // hasLive: a newest thread_snapshots row exists for this parent
+          // (refresh_twitter_threads, ~6h cadence). Preferred over the
+          // discovery-time thread_engagement JSON so the column shows how
+          // the parent tweet actually grew after we commented.
+          const hasLive = r.thread_live_views != null || r.thread_live_likes != null || r.thread_live_replies != null;
+          if (!isTw || (!hasLive && !te)) {
             return '<div class="top-stats-cell"><span class="top-stats-bit"><span class="top-stats-k">\u2014</span></span></div>';
           }
-          const likes    = te.likes    == null ? '\u2014' : fmt(te.likes);
-          const replies  = te.replies  == null ? '\u2014' : fmt(te.replies);
-          const views    = te.views    == null ? '\u2014' : fmt(te.views);
-          // T0 snapshot tooltip: be explicit that this is frozen at
-          // discovery time, not live, so the operator doesn't read it
-          // as "the parent grew to X" when it's just the moment we found
-          // the thread.
-          const tip = 'Parent tweet stats snapshot at discovery time (not live-refreshed)';
+          // Per-field: prefer live, fall back to the frozen T0 value.
+          const pick = (liveVal, t0Val) => {
+            if (hasLive && liveVal != null) return fmt(liveVal);
+            if (t0Val != null) return fmt(t0Val);
+            return '\u2014';
+          };
+          const likes   = pick(r.thread_live_likes,   te ? te.likes   : null);
+          const replies = pick(r.thread_live_replies, te ? te.replies : null);
+          const views   = pick(r.thread_live_views,   te ? te.views   : null);
+          let tip;
+          if (hasLive) {
+            let agoTxt = '';
+            if (r.thread_live_at) {
+              const h = (Date.now() - new Date(r.thread_live_at).getTime()) / 3.6e6;
+              agoTxt = h < 1 ? ' (last polled <1h ago)' : ' (last polled ' + Math.round(h) + 'h ago)';
+            }
+            tip = 'Parent tweet stats, live-refreshed' + agoTxt;
+          } else {
+            tip = 'Parent tweet stats snapshot at discovery time (not yet live-refreshed)';
+          }
           const parts = [
             '<span class="top-stats-bit" title="' + escapeHtml(tip) + '"><span class="top-stats-k">likes</span>' + likes + '</span>',
             '<span class="top-stats-bit"><span class="top-stats-k">replies</span>' + replies + '</span>',
