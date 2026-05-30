@@ -43,7 +43,8 @@ PER_SCRIPT_CAP_SEC = {
     # link-edit-twitter.sh retired 2026-05-07 (link embedded in primary reply
     # by twitter_post_plan.py + suffix wrap; no separate sweep needed).
     ("link-edit-reddit.sh", None): 120 * 60,
-    ("link-edit-linkedin.sh", None): 120 * 60,
+    # link-edit-linkedin.sh retired 2026-05-29 (link embedded in original comment
+    # at composition by run-linkedin.sh + engage-linkedin.sh; no separate sweep).
     ("link-edit-moltbook.sh", None): 120 * 60,
     ("link-edit-github.sh", None): 120 * 60,
     ("precompute-stats.sh", None): 120 * 60,
@@ -129,8 +130,7 @@ SCRIPT_LABELS = {
     "dm-outreach-twitter.sh": "dm_outreach_twitter",
     "dm-outreach-linkedin.sh": "dm_outreach_linkedin",
     "dm-outreach-reddit.sh": "dm_outreach_reddit",
-    # link-edit-twitter.sh retired 2026-05-07.
-    "link-edit-linkedin.sh": "link_edit_linkedin",
+    # link-edit-twitter.sh retired 2026-05-07; link-edit-linkedin.sh retired 2026-05-29.
     "link-edit-moltbook.sh": "link_edit_moltbook",
     "link-edit-reddit.sh": "link_edit_reddit",
     "link-edit-github.sh": "link_edit_github",
