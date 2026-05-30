@@ -247,6 +247,9 @@ DUD_QUERIES=$(python3 "$REPO_DIR/scripts/top_dud_linkedin_queries.py" --project 
 PHASE_A_OUT=$(mktemp /tmp/sa-run-linkedin-phaseA-XXXXXX)
 PHASE_A_PROMPT=$(mktemp /tmp/sa-run-linkedin-phaseA-prompt-XXXXXX)
 
+# --- DORMANT unipile branch: OFF by default (see header). Reached ONLY with an
+# --- explicit LINKEDIN_BACKEND=unipile override, which still 503s until the
+# --- UniPile account is manually reconnected. Presence here != in use.
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
 # ----- Phase A prompt: UniPile REST backend (no browser) -----
 cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
@@ -803,6 +806,9 @@ CRITICAL: NEVER use em dashes anywhere.
 PROMPT_EOF
 fi
 
+# --- DORMANT unipile branch: OFF by default (see header). Reached ONLY with an
+# --- explicit LINKEDIN_BACKEND=unipile override, which still 503s until the
+# --- UniPile account is manually reconnected. Presence here != in use.
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
   # UniPile path: no headed browser, so no linkedin-browser lock, no
   # ensure_browser_healthy, no harness MCP, no PreToolUse hook lockfile.
@@ -1100,6 +1106,9 @@ sleep 3
 
 # ===== Phase B: compose + post + verify + log =====
 PHASE_B_PROMPT=$(mktemp /tmp/sa-run-linkedin-phaseB-prompt-XXXXXX)
+# --- DORMANT unipile branch: OFF by default (see header). Reached ONLY with an
+# --- explicit LINKEDIN_BACKEND=unipile override, which still 503s until the
+# --- UniPile account is manually reconnected. Presence here != in use.
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
 # ----- Phase B prompt: UniPile REST backend (no browser) -----
 cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
@@ -1409,6 +1418,9 @@ CRITICAL: NEVER use em dashes.
 PROMPT_EOF
 fi
 
+# --- DORMANT unipile branch: OFF by default (see header). Reached ONLY with an
+# --- explicit LINKEDIN_BACKEND=unipile override, which still 503s until the
+# --- UniPile account is manually reconnected. Presence here != in use.
 if [ "$LINKEDIN_BACKEND" = "unipile" ]; then
   # UniPile Phase B: comment via REST, no headed browser. No linkedin-browser
   # lock, no ensure_browser_healthy, no harness MCP, no hook lockfile.
