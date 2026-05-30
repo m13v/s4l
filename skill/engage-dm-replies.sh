@@ -355,7 +355,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 
 1. Craft a natural public reply based on the human's instructions. Public replies are visible to everyone, so keep them appropriate for a public audience: friendly, helpful, concise, and on-brand. The instruction text typically asks you to share a link, so include it naturally in the public reply.
 2. Navigate to \`public_target_url\` on the correct platform and post the public reply:
-   - **Reddit** (mcp__reddit-agent__* tools): navigate, click reply on the target comment, type, submit. Capture the resulting comment URL.
+   - **Reddit** (mcp__reddit-harness__bh_run tool, CDP-driven real Chrome on port 9557): use bh_run('goto_url("COMMENT_URL"); wait_for_load()') to navigate, then bh_run scripts to click reply on the target comment, type, submit (click_at_xy on the computed center of the textarea, type_text, then click the Comment/Save button). See lib/reddit-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting comment URL.
    - **LinkedIn** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556): use bh_run('goto_url("POST_URL"); wait_for_load()') to navigate, then bh_run scripts to expand the target comment and reply (click_at_xy on the computed center of the contenteditable box, type_text, then click the Reply/Post button; never press Enter). See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting comment URL.
    - **X/Twitter** (mcp__twitter-harness__bh_run tool, CDP-driven real Chrome on port 9555): use bh_run('goto_url("TWEET_URL"); wait_for_load()') to navigate, then bh_run scripts to click the reply button, type, and post. See lib/twitter-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting status URL.
 3. Insert a fresh \`replies\` row capturing the public reply (use the \`their_comment_id\` from \`public_target_comment_id\` so the dedup index does not collide; if null, synthesize a unique id like \`hr_<REPLY_ID>_pub\`):
@@ -371,7 +371,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 
 1. Craft a natural DM based on the human's instructions and the conversation context.
 2. Navigate to the conversation on the correct platform using \`chat_url\` (or find the conversation with their_author).
-   - **Reddit Chat** (mcp__reddit-agent__* tools)
+   - **Reddit Chat** (mcp__reddit-harness__bh_run tool, CDP-driven real Chrome on port 9557)
    - **LinkedIn Messages** (mcp__linkedin-harness__bh_run tool, CDP-driven real Chrome on port 9556)
    - **X/Twitter DMs** (mcp__twitter-harness__bh_run tool), if encrypted DM passcode dialog appears, enter: $TWITTER_DM_PASSCODE
 3. Type and send the crafted DM.
@@ -463,7 +463,7 @@ TOOL_RULE_REDDIT=""
 TOOL_RULE_LINKEDIN=""
 TOOL_RULE_TWITTER=""
 if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "reddit" ]; then
-    TOOL_RULE_REDDIT="- Reddit Chat: use Python CDP scripts (scripts/reddit_browser.py) for scanning/reading, fall back to mcp__reddit-agent__* for chat SPA operations"
+    TOOL_RULE_REDDIT="- Reddit Chat: use Python CDP scripts (scripts/reddit_browser.py, which attach to the reddit-harness Chrome on port 9557 via REDDIT_CDP_URL) for scanning/reading, fall back to the mcp__reddit-harness__bh_run tool for chat SPA operations. See lib/reddit-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table. Do NOT use mcp__reddit-agent__* (retired)."
 fi
 if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "linkedin" ]; then
     TOOL_RULE_LINKEDIN="- LinkedIn Messages: use the mcp__linkedin-harness__bh_run tool ONLY (CDP-driven real Chrome on port 9556). Do NOT call /voyager/api/ endpoints, do NOT run raw Python CDP scripts against LinkedIn. See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table."
@@ -543,7 +543,7 @@ counting (event_id dedup will block it but don't even try).
       ```
 
 For every Reddit chat room flagged as needs_reply by the `pending` query,
-open it in the reddit-agent browser only to SEND a reply — not to read.
+open it in the reddit-harness browser only to SEND a reply — not to read.
 The conversation history is available via:
    ```bash
    python3 scripts/dm_conversation.py history --dm-id DM_ID
@@ -661,7 +661,7 @@ PHASE_C_EOF
 fi
 
 # Precompute the active reddit campaign suffix + sample_rate so the prompt
-# can inline the literal text. If the LLM falls back to mcp__reddit-agent__*
+# can inline the literal text. If the LLM falls back to mcp__reddit-harness__bh_run
 # (skipping the CDP path that injects the suffix at the tool layer), the
 # literal value lets it append the suffix by hand at the documented rate.
 # When no active campaign exists, both vars resolve to empty strings and the
@@ -696,7 +696,7 @@ If a script or tool call fails, wait 30 seconds and retry (up to 3 times).
 CRITICAL: Reply in the SAME LANGUAGE as the inbound message. Match the language exactly.
 
 ## CRITICAL FAILURE MODE: platform-agent MCP tools not registered
-If at the START of this run you cannot see ANY of the platform's browser tools available (mcp__twitter-harness__bh_run for Twitter, mcp__reddit-agent__* for Reddit, mcp__linkedin-harness__bh_run for LinkedIn), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
+If at the START of this run you cannot see ANY of the platform's browser tools available (mcp__twitter-harness__bh_run for Twitter, mcp__reddit-harness__bh_run for Reddit, mcp__linkedin-harness__bh_run for LinkedIn), OR every browser call fails with "MCP server not connected" / "no such tool" / similar, this is a transient infrastructure failure (Chrome profile collision, wedged MCP wrapper, lock acquired but profile still held by another process). It is NOT an error condition for the conversations in the queue.
 
 Do EXACTLY this:
 1. Make NO database changes. Do NOT mark any row as 'error', 'skipped', 'failed', or anything else. Do NOT call log-outbound, mark-skipped, set-status, mark-inspected, increment-attempts, or any other status-mutating helper. Do NOT write skip_reason on any dms/dm_messages/human_dm_replies row.
@@ -1037,18 +1037,18 @@ LOCK_OUT=\$(python3 ~/social-autoposter/scripts/reddit_browser_lock.py acquire -
 - If \`LOCK_OUT\` starts with "OK", you hold the lease. Proceed to Step 4.
 - If "BUSY", a peer reddit pipeline owns the browser and didn't release within 10 min. Treat as a TRANSIENT skip: log nothing, do NOT call Step 4, move on to the NEXT DM. The conversation stays pending and the next launchd cycle will retry. Do NOT attempt Step 4 without the lease; collisions on the same Chrome profile crash both runs.
 
-The reddit-agent MCP wrapper auto-heartbeats expires_at on every MCP browser call (PreToolUse / PostToolUse hooks), and \`scripts/reddit_browser.py\` heartbeats on every CDP subprocess, so you do NOT need to manually heartbeat. Just acquire before Step 4's first browser call for the DM and release in Step 5.5 below.
+\`scripts/reddit_browser.py\` heartbeats the lease on every CDP subprocess, so on the PRIMARY (Python CDP) path you do NOT need to manually heartbeat. The mcp__reddit-harness__bh_run fallback does NOT auto-heartbeat (the harness MCP has no lock-proxy wrapper, unlike the retired reddit-agent), so keep any bh_run fallback brief: a single compose + send completes well within the 90s TTL. Just acquire before Step 4's first browser call for the DM and release in Step 5.5 below.
 
 ### Step 4: Send the reply
 
 Reddit dms split into two surfaces (pick by whether \`chat_url\` is set on the dms row):
 
-**Reddit Chat** (chat_url set; true DM — try CDP first, fall back to mcp__reddit-agent__* browser):
+**Reddit Chat** (chat_url set; true DM — try CDP first, fall back to mcp__reddit-harness__bh_run browser):
 \`\`\`bash
 cd ~/social-autoposter && python3 scripts/reddit_browser.py send-dm "CHAT_URL" "YOUR_REPLY_TEXT" DM_ID
 \`\`\`
 Pass the conversation's DM_ID as the third positional arg so the tool can self-log the outbound (some rows have empty chat_url which would otherwise miss). The tool may append a campaign suffix to the message before typing; trust its return — \`message_sent\` is what was actually delivered.
-If the CDP script returns {ok:false} (Reddit Chat SPA may not render via CDP), fall back to using mcp__reddit-agent__* browser tools. **The CDP path wraps URLs into /r/<code> automatically; the MCP fallback bypasses that wrap, so any project URL in the reply must be wrapped here explicitly or click attribution is lost. A 7d audit found 41 real-DM messages mentioning project URLs and ZERO of them produced a minted short link, almost entirely traceable to this fallback gap.** **STDERR_FALLBACK_MARKER (REQUIRED FIRST STEP):** before doing anything else on the MCP fallback path, emit a single line to stderr exactly: \`[reddit-chat-mcp-fallback] dm_id=DM_ID reason="<short>"\`. This is the only stable trace we have for fallback frequency; cron logs are grepped for this marker.
+If the CDP script returns {ok:false} (Reddit Chat SPA may not render via CDP), fall back to using the mcp__reddit-harness__bh_run tool (CDP-driven real Chrome on port 9557; see lib/reddit-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table). **The CDP path wraps URLs into /r/<code> automatically; the MCP fallback bypasses that wrap, so any project URL in the reply must be wrapped here explicitly or click attribution is lost. A 7d audit found 41 real-DM messages mentioning project URLs and ZERO of them produced a minted short link, almost entirely traceable to this fallback gap.** **STDERR_FALLBACK_MARKER (REQUIRED FIRST STEP):** before doing anything else on the MCP fallback path, emit a single line to stderr exactly: \`[reddit-chat-mcp-fallback] dm_id=DM_ID reason="<short>"\`. This is the only stable trace we have for fallback frequency; cron logs are grepped for this marker.
 
 0. **Pre-send URL wrap (REQUIRED if YOUR_REPLY_TEXT contains any URL, bare-domain shorthands like fazm.ai included).** Run the same wrap CLI the LinkedIn flow uses:
    \`\`\`bash
@@ -1073,7 +1073,7 @@ cd ~/social-autoposter && python3 scripts/reddit_browser.py reply "COMMENT_PERMA
 \`\`\`
 Pass DM_ID as the third positional arg so the tool logs to dm_messages with auto-attribution. The tool injects the active campaign suffix at \`sample_rate\`; \`reply_text\` in the JSON return is what was actually posted. \`COMMENT_PERMALINK\` is the inbound comment URL on reddit.com (the tool normalizes to old.reddit.com internally).
 If CDP returns {ok:false, error:"subreddit_blocked"}, the comment is in a sub on \`subreddit_bans.comment_blocked\` and the tool has already auto-closed the DM (when dm_id was passed). Treat this as a clean SKIP — do NOT fall back to MCP, do NOT flag-human, do NOT retry. Move on to the next conversation.
-If CDP returns {ok:false} with any other non-recoverable error, fall back to mcp__reddit-agent__* browser to type the reply on the post page. On the MCP fallback path, the same Step-4 suffix rule applies — if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is set, append it verbatim at $REDDIT_CAMPAIGN_SAMPLE_RATE before submitting; if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is empty, do nothing extra. **Also: emit \`[reddit-comment-mcp-fallback] dm_id=DM_ID reason="<short>"\` to stderr first, then run the same Pre-send URL wrap step (\`python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT"\`) and use \$WRAPPED_TEXT as the input to browser_type. The wrap is cheap and harmless on URL-free replies; required when any URL is present so click attribution survives.**
+If CDP returns {ok:false} with any other non-recoverable error, fall back to the mcp__reddit-harness__bh_run tool (CDP-driven real Chrome on port 9557; see lib/reddit-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table) to type the reply on the post page. On the MCP fallback path, the same Step-4 suffix rule applies — if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is set, append it verbatim at $REDDIT_CAMPAIGN_SAMPLE_RATE before submitting; if $REDDIT_CAMPAIGN_SUFFIX_LITERAL is empty, do nothing extra. **Also: emit \`[reddit-comment-mcp-fallback] dm_id=DM_ID reason="<short>"\` to stderr first, then run the same Pre-send URL wrap step (\`python3 scripts/dm_short_links.py wrap-text --dm-id DM_ID --text "YOUR_REPLY_TEXT"\`) and use \$WRAPPED_TEXT as the input to browser_type. The wrap is cheap and harmless on URL-free replies; required when any URL is present so click attribution survives.**
 
 **LinkedIn Messages** (mcp__linkedin-harness__bh_run tool ONLY, no raw Python CDP, no /voyager/api/. See lib/linkedin-backend.sh BROWSER_INSTRUCTIONS for the Playwright -> bh_run translation table):
 
