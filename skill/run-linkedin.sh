@@ -1349,6 +1349,28 @@ $STYLES_BLOCK
    and save wrap_result.minted_session as MINTED_SESSION. Otherwise use the
    original draft and set MINTED_SESSION to empty.
 
+3c. AUTO-LIKE the main post (mandatory, deterministic, FAIL-SOFT). Before you
+    comment, react Like to the post itself, mirroring the Twitter pipeline
+    (every successful engagement also likes the parent). This is fail-soft: a
+    like failure must NEVER block or fail the comment. If it doesn't work in
+    two tries, log 'auto-like skipped' and proceed straight to step 4.
+    Primary (deterministic) path via the BROWSER BACKEND block:
+      bh_run js("""return (() => { const btn = document.querySelector('button.react-button__trigger, .feed-shared-social-action-bar button[aria-label*=Like]'); if(!btn) return JSON.stringify({ok:false, reason:'no_button'}); const pressed = (btn.getAttribute('aria-pressed')||'').toLowerCase(); if(pressed==='true') return JSON.stringify({ok:true, already_liked:true}); btn.click(); return JSON.stringify({ok:true, clicked:true}); })()""")
+    Parse the JSON:
+      - ok:true, already_liked:true  → post was already liked, do nothing.
+      - ok:true, clicked:true        → liked. Optionally screenshot to confirm
+                                       the reaction bar shows the filled Like.
+      - ok:false (no_button)         → the deterministic selector missed.
+                                       Fallback ONCE: capture a screenshot, Read
+                                       it, locate the post's Like button (the
+                                       leftmost action under the post body, NOT
+                                       a Like on any comment), and click_at_xy
+                                       it. If still not found, skip the like.
+    NEVER click Like on a comment or on a different post; only the main
+    pre-selected post. NEVER un-like (the aria-pressed guard prevents toggling
+    an already-liked post off). Record AUTO_LIKE = liked | already | skipped
+    for your final summary, then continue to step 4 regardless of outcome.
+
 4. Post the comment via the BROWSER BACKEND block: scroll to the comment
    editor, click it (click_at_xy on the contenteditable box), type_text the
    (possibly wrapped) text from step 3b, then click the Post/Comment submit
