@@ -13317,31 +13317,30 @@ function currentStatsProject() {
 // users can't queue overlapping reloads across rapid pill clicks.
 async function reloadStatsTabSections() {
   document.body.classList.add('sa-stats-busy');
+  // Only the three fast stats sections (activity, cohort, style) are awaited
+  // inside allSettled so sa-stats-busy is released as soon as they finish
+  // (~200ms with warm snapshots). The <details>-gated sections (funnel, dm,
+  // search-topics, search-queries, subreddit) are fired as fire-and-forget
+  // because funnel can take up to 53s (cold Python run via project_stats_json.py)
+  // and blocking the pill interactions for that long makes the whole stats tab
+  // appear hung (sa-stats-busy disables pointer-events on ALL pill rows).
   const pending = [
     loadActivityStats(),
     loadCohortStats(),
     loadStyleStats(),
   ];
-  // daily-metrics chart now lives on its own Trends tab with its own filter
-  // bar; intentionally NOT reloaded on stats-tab window/platform/project
-  // of the filter bar.
+  // Fire the <details>-gated sections without adding to allSettled.
+  // Each has its own _*Loading mutex so concurrent calls are safe.
   const funnelEl = document.getElementById('funnel-stats');
-  if (funnelEl && funnelEl.open) {
-    // Always refetch when a filter pill changes — the cached payload was
-    // built against the *previous* platform/window and rendering it would
-    // contradict the engagement-style table above it. loadFunnelStats's
-    // own (loadKey) check still keeps redundant fetches off when nothing
-    // actually changed.
-    pending.push(loadFunnelStats(true));
-  }
+  if (funnelEl && funnelEl.open) loadFunnelStats(true);
   const dmEl = document.getElementById('dm-stats');
-  if (dmEl && dmEl.open) pending.push(loadDmStats(true));
+  if (dmEl && dmEl.open) loadDmStats(true);
   const stEl = document.getElementById('search-topics-stats');
-  if (stEl && stEl.open) pending.push(loadSearchTopicsCurrentView(true));
+  if (stEl && stEl.open) loadSearchTopicsCurrentView(true);
   const sqEl = document.getElementById('search-queries-stats');
-  if (sqEl && sqEl.open) pending.push(loadSearchQueriesStats(true));
+  if (sqEl && sqEl.open) loadSearchQueriesStats(true);
   const subEl = document.getElementById('subreddit-stats');
-  if (subEl && subEl.open) pending.push(loadSubredditStats(true));
+  if (subEl && subEl.open) loadSubredditStats(true);
   try { await Promise.allSettled(pending); }
   finally { document.body.classList.remove('sa-stats-busy'); }
 }
@@ -20234,6 +20233,35 @@ function saStartApp() {
   } else {
     setTimeout(_warmStatsDetails, 1500);
   }
+  // Background preload of all stats-tab window sizes (24h / 7d / 14d / 30d).
+  // On page load only the active window is fetched. Switching to any other
+  // window pill triggers a cold miss and shows "Loading..." even though the
+  // server has the data ready as a snapshot. This warm-up fires 3s after init
+  // (after the active-window fetch settles) and silently populates the client-
+  // side SWR cache for every other window so pill switches become instant.
+  // Only warms activity, cohort, and style (the three fast sections). Funnel
+  // is deliberately excluded: it can take 53s cold and isn't pill-switchable
+  // in the same way.
+  setTimeout(() => {
+    const allWindows = Object.keys(STATS_WINDOWS);
+    for (const w of allWindows) {
+      if (w === _statsWindow) continue; // already loaded by saStartApp
+      const savedWindow = _statsWindow;
+      // Temporarily override the window getter so the loaders fetch for w.
+      // We swap _statsWindow, call the loaders (which read currentStatsWindow()),
+      // then restore _statsWindow immediately. The loaders are async and capture
+      // their own `hours`/`days` at call time before any await, so the swap is
+      // safe and does NOT affect the visible UI (no loading spinners fire because
+      // the client cache will be cold but haveStale is false and there's no
+      // force=true; the loaders check force=undefined which is falsy, so they
+      // won't clear existing DOM content).
+      _statsWindow = w;
+      try { loadActivityStats(); } catch {}
+      try { loadCohortStats(); } catch {}
+      try { loadStyleStats(); } catch {}
+      _statsWindow = savedWindow;
+    }
+  }, 3000);
 }
 window.saStartApp = saStartApp;
 
