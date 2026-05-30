@@ -72,10 +72,9 @@ source "$(dirname "$0")/lib/twitter-backend.sh"
 # (launches harness Chrome on 9557 + tab cleanup). Like twitter-backend it sets
 # MCP_CONFIG_FILE + BROWSER_INSTRUCTIONS, but this script drives the prompt off
 # DM_MCP_CONFIG (set per-platform below) and inlines its own per-platform browser
-# instructions, so those side-effect vars are unused here. Capture the reddit
-# harness prompt block under its own name for the Reddit MCP-fallback section.
+# instructions, so those side-effect vars (MCP_CONFIG_FILE, BROWSER_INSTRUCTIONS)
+# are unused here; only REDDIT_CDP_URL + ensure_reddit_browser_for_backend matter.
 source "$(dirname "$0")/lib/reddit-backend.sh"
-REDDIT_BROWSER_INSTRUCTIONS="$BROWSER_INSTRUCTIONS"
 
 # Skip cleanly if a foreign playwright-mcp wrapper for THIS platform is alive
 # (interactive Fazm Dev / IDE / another cron). Avoids the Chrome SingletonLock
@@ -1028,7 +1027,7 @@ Never send the booking link twice. If \`booking_link_sent_at\` is not NULL, Step
 
 **Reddit only.** Skip this step entirely for LinkedIn and Twitter DMs.
 
-Before driving any reddit-agent browser tool (MCP or Python CDP) for THIS DM, acquire the reddit-browser lease. The lease is held only around THIS DM's Step 4 + Step 5; the next DM acquires its own. Peer reddit pipelines (run-reddit-search post phase, engage-reddit, link-edit-reddit, dm-outreach-reddit) can use the browser between our DMs.
+Before driving any reddit browser tool (mcp__reddit-harness__bh_run or the Python CDP scripts) for THIS DM, acquire the reddit-browser lease. The lease is held only around THIS DM's Step 4 + Step 5; the next DM acquires its own. Peer reddit pipelines (run-reddit-search post phase, engage-reddit, link-edit-reddit, dm-outreach-reddit) can use the browser between our DMs.
 
 \`\`\`bash
 LOCK_OUT=\$(python3 ~/social-autoposter/scripts/reddit_browser_lock.py acquire --timeout 600 --ttl 90 2>&1)
