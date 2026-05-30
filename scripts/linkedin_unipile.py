@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Reusable UniPile LinkedIn functions for the post-commenting pipeline.
 
-Scope is deliberately narrow: SEARCH posts + COMMENT on a post. No stats, no
-DMs, no reactions. These are the units the LinkedIn post-comments pipeline reuses.
+Scope: SEARCH posts + COMMENT on a post + REACT (like) to a post. No stats,
+no DMs. The COMMENT path auto-likes the parent post by default (also_like),
+mirroring the Twitter proactive-comment path. These are the units the LinkedIn
+post-comments pipeline reuses.
 
 Credentials resolve env-first, keychain-second:
   UNIPILE_DSN          | keychain "unipile-dsn"                      e.g. api45.unipile.com:17570
@@ -14,6 +16,7 @@ CLI:
   python3 linkedin_unipile.py search --keywords "ai agents" --date-posted past_week --limit 5
   python3 linkedin_unipile.py search --url "https://www.linkedin.com/search/results/posts/?keywords=..."
   python3 linkedin_unipile.py comment --social-id "urn:li:activity:7332661864792854528" --text "..."
+  python3 linkedin_unipile.py react   --social-id "urn:li:activity:7332661864792854528"
 """
 import argparse
 import json
@@ -304,11 +307,49 @@ def _extract_comment_urn(resp):
     return None
 
 
+REACTION_TYPES = ("like", "celebrate", "support", "love", "insightful", "funny")
+
+
+def react_to_post(social_id, *, reaction_type="like", comment_id=None,
+                  account_id=None):
+    """Add a reaction (default 'like') to a post or one of its comments.
+
+    UniPile endpoint: POST /api/v1/posts/reaction with a flat body carrying
+    post_id (the post's social_id), account_id, and reaction_type. Pass
+    comment_id to react to a specific comment instead of the post itself.
+    Returns {ok, status, response}."""
+    if not social_id:
+        raise ValueError("social_id required")
+    if reaction_type not in REACTION_TYPES:
+        raise ValueError("reaction_type must be one of %s (got %r)"
+                         % (", ".join(REACTION_TYPES), reaction_type))
+    cfg = get_config()
+    body = {
+        "account_id": account_id or cfg["account_id"],
+        "post_id": social_id,
+        "reaction_type": reaction_type,
+    }
+    if comment_id:
+        body["comment_id"] = comment_id
+    status, resp = _request("POST", "/api/v1/posts/reaction", body=body)
+    # LinkedIn happily 201s when you re-like something already liked, so any
+    # 2xx (and the non-error object) is success.
+    ok = status in (200, 201) and not (isinstance(resp, dict)
+                                       and resp.get("object") == "error")
+    return {"ok": ok, "status": status, "response": resp}
+
+
 def comment_on_post(social_id, text, *, comment_id=None, mentions=None,
-                    account_id=None):
+                    account_id=None, also_like=True):
     """Comment on a post identified by its social_id (urn:li:activity:...).
     comment_id replies to an existing comment; mentions uses {{0}} placeholders.
-    Returns {ok, status, response, comment_urn, our_url}."""
+
+    also_like=True (default) auto-likes the parent post right after a successful
+    comment, mirroring the Twitter proactive-comment path. The like is fail-soft:
+    a reaction error can NEVER fail the comment. The outcome is carried back in
+    the `liked` / `like_result` keys for the caller to log.
+
+    Returns {ok, status, response, comment_urn, our_url, liked, like_result}."""
     if not social_id:
         raise ValueError("social_id required")
     if not text or not text.strip():
@@ -329,12 +370,26 @@ def comment_on_post(social_id, text, *, comment_id=None, mentions=None,
     ok = status in (200, 201) and not (isinstance(resp, dict)
                                        and resp.get("object") == "error")
     comment_urn = _extract_comment_urn(resp)
+
+    # Auto-like the parent post on every successful comment. Wrapped so a like
+    # failure can NEVER fail the comment itself; the outcome rides out in
+    # like_result for the caller to log.
+    like_result = {"ok": False, "error": "not_attempted"}
+    if ok and also_like:
+        try:
+            like_result = react_to_post(social_id, reaction_type="like",
+                                        account_id=account_id)
+        except Exception as exc:  # noqa: BLE001 - like must never break commenting
+            like_result = {"ok": False, "error": str(exc)}
+
     return {
         "ok": ok,
         "status": status,
         "response": resp,
         "comment_urn": comment_urn,
         "our_url": make_our_url(social_id, comment_urn),
+        "liked": bool(like_result.get("ok")),
+        "like_result": like_result,
     }
 
 
@@ -442,7 +497,15 @@ def _cmd_search(args):
 
 
 def _cmd_comment(args):
-    res = comment_on_post(args.social_id, args.text, comment_id=args.reply_to)
+    res = comment_on_post(args.social_id, args.text, comment_id=args.reply_to,
+                          also_like=not args.no_like)
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+    return 0 if res["ok"] else 1
+
+
+def _cmd_react(args):
+    res = react_to_post(args.social_id, reaction_type=args.reaction_type,
+                        comment_id=args.comment_id)
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res["ok"] else 1
 
@@ -499,6 +562,16 @@ def main(argv=None):
     c.add_argument("--text", required=True)
     c.add_argument("--reply-to", dest="reply_to",
                    help="comment_id to reply to an existing comment")
+    c.add_argument("--no-like", dest="no_like", action="store_true",
+                   help="skip the automatic parent-post like (on by default)")
+
+    rx = sub.add_parser("react", help="like/react to a post (or a comment)")
+    rx.add_argument("--social-id", dest="social_id", required=True,
+                    help="urn:li:activity:... (the post's social_id)")
+    rx.add_argument("--reaction-type", dest="reaction_type", default="like",
+                    choices=REACTION_TYPES)
+    rx.add_argument("--comment-id", dest="comment_id",
+                    help="react to a specific comment instead of the post")
 
     pr = sub.add_parser("profile", help="fetch a LinkedIn profile (follower_count, ...)")
     pr.add_argument("identifier", help="public_identifier or provider id")
@@ -518,6 +591,8 @@ def main(argv=None):
             return _cmd_search(args)
         if args.cmd == "comment":
             return _cmd_comment(args)
+        if args.cmd == "react":
+            return _cmd_react(args)
         if args.cmd == "profile":
             return _cmd_profile(args)
         if args.cmd == "comments":
