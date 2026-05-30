@@ -9962,7 +9962,7 @@ const HTML = `<!DOCTYPE html>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="project-status-heading">Project Status (last 24h)</span></span>
       <span class="style-stats-total" id="project-status-total"></span>
-      <button id="project-status-refresh" onclick="event.preventDefault();event.stopPropagation();_projectStatusLoading=false;loadProjectStatus(true);" style="margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border: 1px solid var(--border-color,#444);border-radius:4px;background: transparent;color: var(--text-muted,#aaa);" title="Refresh">↻</button>
+      <button id="project-status-refresh" onclick="event.preventDefault();event.stopPropagation();loadProjectStatus(true);" style="margin-left:8px;padding:2px 8px;font-size:11px;cursor:pointer;border: 1px solid var(--border-color,#444);border-radius:4px;background: transparent;color: var(--text-muted,#aaa);" title="Refresh">↻</button>
     </summary>
     <div id="project-status-body">
       <div class="style-stats-empty">Loading…</div>
@@ -18999,7 +18999,13 @@ const PROJECT_STATUS_PLATFORM_LABELS = {
   reddit: 'Reddit', twitter: 'Twitter', linkedin: 'LinkedIn',
   moltbook: 'MoltBook', github: 'GitHub', instagram: 'Instagram',
 };
-let _projectStatusLoading = false;
+// Monotonic request token for project-status reloads. Each call to
+// loadProjectStatus() claims the next seq; only the response whose seq still
+// matches _projectStatusReqSeq is allowed to render. This kills the race where
+// the 60s background refresh (in flight with pre-save data) and the post-save
+// reload resolve out of order and the stale one wins the render, leaving the
+// table showing the old weight even though config.json already persisted.
+let _projectStatusReqSeq = 0;
 let _projectStatusData = null;
 let _projectStatusOrder = null;
 const PROJECT_STATUS_SORT_STORAGE = 'sa.projectStatus.sort.v1';
@@ -19368,18 +19374,21 @@ async function refreshAllData() {
   loadActivity();
 }
 async function loadProjectStatus(force, opts) {
-  if (_projectStatusLoading) return;
   if (saAuthNotReady()) return;
-  _projectStatusLoading = true;
+  // Claim the next request token. Any in-flight reload is now stale: when it
+  // resolves its seq won't match and it will bail without rendering, so the
+  // newest request always wins regardless of network ordering. No boolean
+  // guard, so a post-save reload is never blocked by a background refresh.
+  const myReq = ++_projectStatusReqSeq;
   try {
     const hours = currentStatusWindow().hours;
     const res = await fetch('/api/project/status?hours=' + hours);
     const data = await res.json();
+    if (myReq !== _projectStatusReqSeq) return; // superseded by a newer reload
     renderProjectStatus(data, opts);
   } catch (e) {
+    if (myReq !== _projectStatusReqSeq) return; // superseded; swallow stale error
     renderProjectStatus({ error: String(e && e.message || e) });
-  } finally {
-    _projectStatusLoading = false;
   }
 }
 
