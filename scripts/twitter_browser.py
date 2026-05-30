@@ -5,8 +5,11 @@ Replaces multi-step Claude browser MCP calls with single Python function calls.
 Each function does all browser work internally and returns structured JSON.
 
 Usage:
-    # Reply to a tweet
+    # Reply to a tweet (auto-likes the parent tweet after the reply lands)
     python3 twitter_browser.py reply "https://x.com/user/status/123" "reply text"
+
+    # Like a tweet (standalone; same like the reply path fires automatically)
+    python3 twitter_browser.py like "https://x.com/user/status/123"
 
     # Scan DM inbox for unread conversations
     python3 twitter_browser.py unread-dms
@@ -559,6 +562,86 @@ def _dump_reply_failure_diag(page, tweet_url):
     return diag
 
 
+def _like_first_tweet_on_page(page):
+    """Like the primary (first) tweet currently rendered on the page.
+
+    Operates on an already-open page positioned on a tweet permalink (the
+    parent tweet is the first ``article[data-testid="tweet"]``). Used both by
+    the standalone ``like`` command and inline by ``reply_to_tweet()`` right
+    after a reply lands (the page is still on the thread).
+
+    Strictly scoped to the FIRST article so we like the parent tweet, never a
+    reply below it. Idempotent: if the tweet is already liked (button testid
+    has flipped ``like`` -> ``unlike``) we report already_liked without
+    clicking. Returns one of:
+      {"ok": True,  "liked": True,  "already_liked": False}
+      {"ok": True,  "liked": False, "already_liked": True}
+      {"ok": False, "error": "..."}
+    """
+    try:
+        first_article = page.locator('article[data-testid="tweet"]').first
+        first_article.wait_for(state="visible", timeout=15000)
+
+        # Already liked? The action-bar button testid flips like -> unlike.
+        if first_article.locator('[data-testid="unlike"]').count() > 0:
+            print("[like] parent tweet already liked; nothing to do", file=sys.stderr)
+            return {"ok": True, "liked": False, "already_liked": True}
+
+        like_btn = first_article.locator('[data-testid="like"]')
+        if like_btn.count() == 0:
+            print("[like] no like button found on parent tweet", file=sys.stderr)
+            return {"ok": False, "error": "like_button_not_found"}
+
+        like_btn.first.click()
+        page.wait_for_timeout(1500)
+
+        # Verify the click registered: testid should now be 'unlike'.
+        if first_article.locator('[data-testid="unlike"]').count() > 0:
+            print("[like] parent tweet liked OK", file=sys.stderr)
+            return {"ok": True, "liked": True, "already_liked": False}
+        print("[like] clicked like but unlike state not confirmed", file=sys.stderr)
+        return {"ok": False, "liked": False, "error": "like_unconfirmed"}
+    except Exception as e:
+        print(f"[like] error liking parent tweet: {e}", file=sys.stderr)
+        return {"ok": False, "error": str(e)}
+
+
+def like_tweet(tweet_url):
+    """Standalone: navigate to a tweet and like it (CLI: ``like <tweet_url>``).
+
+    Connects to the running twitter-harness Chrome via CDP (the same logged-in
+    session the reply path uses) so the like comes from our account. Returns
+    the dict from ``_like_first_tweet_on_page`` with ``tweet_url`` attached.
+    """
+    print(f"[twitter_browser] like_tweet called: {tweet_url}", file=sys.stderr)
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            try:
+                page.goto(tweet_url, wait_until="load", timeout=60000)
+            except Exception:
+                try:
+                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_selector(
+                    'article[data-testid="tweet"]', state="attached", timeout=20000
+                )
+            except Exception:
+                return {"ok": False, "error": "tweet_not_rendered", "tweet_url": tweet_url}
+            result = _like_first_tweet_on_page(page)
+            result["tweet_url"] = tweet_url
+            return result
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+
 def reply_to_tweet(tweet_url, text, apply_campaigns=True):
     """Reply to a tweet.
 
@@ -1003,6 +1086,18 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 print(f"[top_replies] scrape failed: {e}", file=sys.stderr)
                 top_replies = []
 
+            # Like the parent tweet we just replied to. Deterministic: fires on
+            # EVERY successful reply. The page is still on the thread, so the
+            # parent is the first article and no extra navigation is needed.
+            # Wrapped so a like failure can NEVER fail the reply itself — we
+            # carry the outcome out in `like_result` for the caller to log.
+            like_result = {"ok": False, "error": "not_attempted"}
+            try:
+                like_result = _like_first_tweet_on_page(page)
+            except Exception as _le:
+                like_result = {"ok": False, "error": str(_le)}
+                print(f"[like] unexpected error in reply_to_tweet: {_le}", file=sys.stderr)
+
             return {
                 "ok": True,
                 "tweet_url": tweet_url,
@@ -1011,6 +1106,8 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 "applied_campaigns": applied_campaigns,
                 "final_text": text,
                 "top_replies": top_replies,
+                "liked": bool(like_result.get("liked") or like_result.get("already_liked")),
+                "like_result": like_result,
             }
 
         finally:
@@ -1976,6 +2073,16 @@ def main():
             )
             sys.exit(1)
         result = reply_to_tweet(sys.argv[2], sys.argv[3])
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "like":
+        if len(sys.argv) < 3:
+            print(
+                "Usage: twitter_browser.py like <tweet_url>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        result = like_tweet(sys.argv[2])
         print(json.dumps(result, indent=2))
 
     elif cmd == "self-reply":
