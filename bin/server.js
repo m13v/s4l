@@ -92,7 +92,9 @@ const JOBS = [
   // in the primary reply by run-twitter-cycle.sh Phase 2b-post
   // (twitter_post_plan.py); campaign suffix in twitter_browser.py also wraps
   // URLs through dm_short_links so any project URL in a suffix attributes too.
-  { label: 'com.m13v.social-link-edit-linkedin', name: 'Link Edit LinkedIn', type: 'Link Edit', platform: 'LinkedIn', script: 'link-edit-linkedin.sh', logPrefix: 'link-edit-linkedin-', plist: 'com.m13v.social-link-edit-linkedin.plist' },
+  // Link Edit LinkedIn retired + file removed 2026-05-29: link is now embedded
+  // in the original comment at composition by run-linkedin.sh (wrap-post-text +
+  // backfill-post) and engage-linkedin.sh, exactly like the Twitter rail.
   { label: 'com.m13v.social-link-edit-moltbook', name: 'Link Edit MoltBook', type: 'Link Edit', platform: 'MoltBook', script: 'link-edit-moltbook.sh', logPrefix: 'link-edit-moltbook-', plist: 'com.m13v.social-link-edit-moltbook.plist' },
   { label: 'com.m13v.social-link-edit-github', name: 'Link Edit GitHub', type: 'Link Edit', platform: 'GitHub', script: 'link-edit-github.sh', logPrefix: 'link-edit-github-', plist: 'com.m13v.social-link-edit-github.plist' },
   // Stats row
@@ -141,7 +143,7 @@ const REQUIRED_LOCKS = {
   'engage-dm-replies-linkedin.sh':  ['linkedin-browser', 'dm-replies-linkedin'],
   'link-edit-reddit.sh':            ['reddit-browser', 'link-edit-reddit'],
   // 'link-edit-twitter.sh' retired + file removed 2026-05-07 (link embedded in primary reply by twitter_post_plan.py + suffix wrap).
-  'link-edit-linkedin.sh':          ['linkedin-browser', 'link-edit-linkedin'],
+  // 'link-edit-linkedin.sh' retired + file removed 2026-05-29 (link embedded in original comment by run-linkedin.sh wrap-post-text + engage-linkedin.sh).
   'link-edit-moltbook.sh':          ['link-edit-moltbook'],
   'link-edit-github.sh':            ['link-edit-github'],
   'stats-reddit.sh':                ['reddit-browser'],
@@ -3194,7 +3196,7 @@ const _PHASE_FAMILY = {
   engage_linkedin:      ['engage-linkedin-phaseA', 'engage-linkedin-phaseB'],
   dm_replies_linkedin:  ['engage-dm-replies'],
   dm_outreach_linkedin: ['dm-outreach-linkedin'],
-  link_edit_linkedin:   ['link-edit-linkedin'],
+  // link_edit_linkedin retired + removed 2026-05-29 (link embedded at composition like Twitter).
   // GitHub
   post_github:          ['post_github'],
   engage_github:        ['engage_github', 'github-engage', 'run-github-cycle'],
