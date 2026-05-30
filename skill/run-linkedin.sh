@@ -31,18 +31,26 @@ set -euo pipefail
 
 # Transport backend selector (2026-05-28). Two interchangeable paths for the
 # only two browser touchpoints (Phase A SERP search, Phase B comment-post):
-#   unipile (DEFAULT) — UniPile REST API via scripts/linkedin_unipile.py.
-#                       No headed Chrome, no harness MCP, no browser
-#                       lock, no killswitch (the killswitch guards the headed
-#                       LinkedIn session, which this path never touches).
-#   browser           — headed-Chrome path via the linkedin-harness MCP (bh_run).
+#   browser (DEFAULT, ACTIVE) — headed-Chrome path via the linkedin-harness
+#                       MCP (bh_run). This is what every real run uses.
+#   unipile (DISABLED / OFF)  — UniPile REST API via scripts/linkedin_unipile.py.
+#                       *** DO NOT ASSUME THIS PATH IS RUNNING. ***
+#                       The UniPile-hosted LinkedIn session is dead (it logs
+#                       itself out and returns 503 no_client_session), which
+#                       silently zeroed out every discovery cycle. It is now
+#                       gated OFF behind the default flip below and is only
+#                       reachable by an explicit LINKEDIN_BACKEND=unipile
+#                       override (which will still 503 until someone manually
+#                       reconnects the UniPile account). All the unipile-branch
+#                       code below (the `if [ "$LINKEDIN_BACKEND" = "unipile" ]`
+#                       blocks, linkedin_unipile.py calls) is DORMANT, kept only
+#                       so the path can be revived later. Seeing it in the file
+#                       does NOT mean it is in use.
 # Everything ELSE (project pick, query drafting, SERP-quality rating, dedup,
 # velocity/virality scoring, voice composition, URL wrapping, log_post.py
 # logging, candidate marking) is byte-for-byte identical across both paths.
-# Override per-run: LINKEDIN_BACKEND=unipile ~/social-autoposter/skill/run-linkedin.sh
-# Default is browser (linkedin-harness): the UniPile-hosted LinkedIn session
-# disconnects on its own (503 no_client_session) and silently zeroes out every
-# discovery cycle, so harness (real headed Chrome) is the reliable default.
+# Override per-run (revives the dormant, currently-broken path):
+#   LINKEDIN_BACKEND=unipile ~/social-autoposter/skill/run-linkedin.sh
 LINKEDIN_BACKEND="${LINKEDIN_BACKEND:-browser}"
 
 # LinkedIn killswitch (2026-05-27): refuse to run if a prior fire detected
@@ -1083,7 +1091,7 @@ PA_SEARCH_TOPIC_ARG=$(python3 -c "import shlex,sys; print(shlex.quote(sys.argv[1
 # 'link' have Phase B append ONE CTA bridge sentence ending in that URL via
 # link_tail.py (then wrap-post-text short-links it). Control arm posts no link.
 LINK_URL=$(python3 -c "import json,sys; p=json.loads(sys.argv[1]); print((p.get('website') or p.get('url') or '').strip())" "$PROJECT_FULL")
-LINKEDIN_TAIL_LINK_RATE="${LINKEDIN_TAIL_LINK_RATE:-0.25}"
+LINKEDIN_TAIL_LINK_RATE="${LINKEDIN_TAIL_LINK_RATE:-0.5}"
 TAIL_DECISION=$(python3 -c "import random,sys; url=sys.argv[1].strip(); rate=float(sys.argv[2]); print('link' if (url and random.random()<rate) else 'no_link')" "$LINK_URL" "$LINKEDIN_TAIL_LINK_RATE")
 echo "[link-tail] project=$PA_PROJECT url=$LINK_URL rate=$LINKEDIN_TAIL_LINK_RATE decision=$TAIL_DECISION" | tee -a "$LOG_FILE"
 
