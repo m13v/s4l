@@ -1667,9 +1667,20 @@ def main():
 
     # One batched fetch per bucket. When a batch fails after retries, mark
     # every domain in that bucket as errored rather than rendering zeros.
+    #
+    # Concurrency is capped low (2) on purpose: PostHog's query endpoint
+    # enforces a short-window burst limit (429 "throttled", recovery 1-12s),
+    # and the personal API key is shared across most buckets. Firing 8
+    # buckets at once (each ~10 sequential HogQL queries) created a
+    # thundering herd that all hit the limiter together, all backed off
+    # together, and re-collided on retry until the 4 attempts were
+    # exhausted, marking whole buckets errored ('err' on the dashboard for
+    # every project sharing them). Two-at-a-time keeps us under the burst
+    # ceiling while the Retry-After-honoring backoff in _hogql absorbs the
+    # occasional 429.
     ph_results = {}
     if buckets:
-        pool_size = max(2, min(8, len(buckets)))
+        pool_size = max(1, min(2, len(buckets)))
         with ThreadPoolExecutor(max_workers=pool_size) as ex:
             futs = {
                 ex.submit(_ph_batch_counts, k, pid, sorted(ds), after): (k, pid, ds)
