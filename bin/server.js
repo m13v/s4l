@@ -3391,6 +3391,61 @@ async function enrichRunsCostBreakdown(runs) {
   }
 }
 
+// Parse + enrich the HISTORICAL job-run list for a window (the ~16s heavy part:
+// 100k-line log parse + 9 enrichment passes + the O(runs*sessions) cost
+// breakdown). Excludes live in-progress pipelines — those are prepended fresh
+// by the /api/job-runs handler so the table stays real-time even on a cache
+// hit. Returns the enriched array (unsorted; caller sorts after prepending).
+async function computeJobRunsHistory(hours, limit) {
+  let runs;
+  if (hours != null) {
+    // run_monitor.log is small (a few thousand lines), so parsing the
+    // whole file is cheap. Time-filter server-side so the client gets
+    // exactly what the Status tab window asked for.
+    const cutoffMs = Date.now() - hours * 3600 * 1000;
+    runs = parseRunMonitorLog(100000).filter(r => {
+      const t = r.started_at ? Date.parse(r.started_at) : NaN;
+      return Number.isFinite(t) && t >= cutoffMs;
+    });
+  } else {
+    const lim = Math.min(Math.max(limit || 100, 1), 500);
+    runs = parseRunMonitorLog(Math.max(lim * 3, 300)).slice(0, lim);
+  }
+  await enrichLinkEditRuns(runs);
+  await enrichEngageRuns(runs);
+  await enrichDMOutreachRuns(runs);
+  await enrichCheckRepliesRuns(runs);
+  await enrichPostCommentsLinkedInRuns(runs);
+  await enrichPostCommentsTwitterRuns(runs);
+  await enrichPostCommentsRedditRuns(runs);
+  await enrichSeoRuns(runs);
+  await enrichRunsCostBreakdown(runs);
+  return runs;
+}
+
+// Window-keyed cache wrapper around computeJobRunsHistory. Concurrent requests
+// for the same cold window share one in-flight promise (stored in the cache
+// slot) so a window switch never kicks off two parallel 16s recomputes.
+function getJobRunsHistory(hours, limit) {
+  const key = hours != null ? ('h' + hours) : ('l' + (limit || 100));
+  const hit = jobRunsCache.get(key);
+  if (hit && Date.now() - hit.at < JOB_RUNS_TTL_MS && hit.value) {
+    return Promise.resolve(hit.value);
+  }
+  if (hit && hit.inflight) return hit.inflight;
+  const inflight = computeJobRunsHistory(hours, limit)
+    .then(runs => { jobRunsCache.set(key, { at: Date.now(), value: runs }); return runs; })
+    .catch(e => {
+      // On failure drop the slot so the next request retries instead of
+      // serving a poisoned inflight promise; fall back to stale value if any.
+      jobRunsCache.delete(key);
+      if (hit && hit.value) return hit.value;
+      throw e;
+    });
+  jobRunsCache.set(key, { at: (hit && hit.at) || 0, value: hit && hit.value, inflight });
+  return inflight;
+}
+
 // DB-backed enrichment uses run.started_at and run.finished_at to define a
 // window, plus a small slack on each side for clock skew between the shell
 // trap that wrote the run_monitor line and the page row's completed_at.
@@ -3574,6 +3629,23 @@ const funnelPerDayCache = new Map();
 // (same per-row attribution model as /api/cost/stats), then sums by the
 // activity timestamp's UTC date. Cached by days|platform|project.
 const costPerDayCache = new Map();
+// Job-runs (Status-tab "Job history"): cached enriched HISTORICAL runs keyed by
+// the window ('h<hours>' or 'l<limit>'). Value shape: { at, value }. Without
+// this, every Status-tab window switch re-parses run_monitor.log (100k lines)
+// and runs ~9 enrichment passes including the O(runs*sessions) cost breakdown —
+// up to 16s per switch that blocks the single Node event loop (the reported
+// "dashboard hang"). Live in-progress pipelines are NOT cached; they are
+// prepended fresh on every request so the table stays real-time. A background
+// warmer (warmJobRunsCache) keeps the standard windows hot. TTL is generous
+// (10 min) because job history doesn't need sub-10-min freshness and a longer
+// TTL means the heavy recompute (which does block the loop) fires less often.
+const jobRunsCache = new Map();
+const JOB_RUNS_TTL_MS = 10 * 60 * 1000;
+// Experiments tab: cached A/B/C/D variant rollup. Value shape: { at, value }.
+// The query joins twitter_candidates -> posts -> click aggregates over 30 days
+// (~4-5s cold) and isn't client-facing, so a 10-min cache is plenty fresh.
+const experimentsCache = new Map();
+const EXPERIMENTS_TTL_MS = 10 * 60 * 1000;
 
 // On-disk snapshots written by scripts/precompute_dashboard_stats.py every
 // ~5 min via launchd com.m13v.social-precompute-stats. When a snapshot is
@@ -5017,35 +5089,20 @@ async function handleApi(req, res) {
       const hoursRaw = url.searchParams.get('hours');
       const hoursNum = hoursRaw != null ? parseInt(hoursRaw, 10) : NaN;
       const hours = Number.isFinite(hoursNum) && hoursNum > 0 ? Math.min(hoursNum, 24 * 90) : null;
-      let runs;
-      if (hours != null) {
-        // run_monitor.log is small (a few thousand lines), so parsing the
-        // whole file is cheap. Time-filter server-side so the client gets
-        // exactly what the Status tab window asked for.
-        const cutoffMs = Date.now() - hours * 3600 * 1000;
-        runs = parseRunMonitorLog(100000).filter(r => {
-          const t = r.started_at ? Date.parse(r.started_at) : NaN;
-          return Number.isFinite(t) && t >= cutoffMs;
-        });
-      } else {
+      let limit = null;
+      if (hours == null) {
         const limitRaw = parseInt(url.searchParams.get('limit') || '100', 10);
-        const limit = Math.min(Math.max(limitRaw, 1), 500);
-        runs = parseRunMonitorLog(Math.max(limit * 3, 300)).slice(0, limit);
+        limit = Math.min(Math.max(limitRaw, 1), 500);
       }
-      await enrichLinkEditRuns(runs);
-      await enrichEngageRuns(runs);
-      await enrichDMOutreachRuns(runs);
-      await enrichCheckRepliesRuns(runs);
-      await enrichPostCommentsLinkedInRuns(runs);
-      await enrichPostCommentsTwitterRuns(runs);
-      await enrichPostCommentsRedditRuns(runs);
-      await enrichSeoRuns(runs);
-      await enrichRunsCostBreakdown(runs);
+      // Serve the expensive enriched HISTORICAL list from the window cache.
+      // Live in-progress pipelines are fetched fresh below so they stay
+      // real-time even on a cache hit.
+      const histRuns = await getJobRunsHistory(hours, limit);
       // Prepend in-progress pipelines so they appear at the top of the table.
       // Always included regardless of the hours window — a long-running job
-      // started before the window is still relevant right now.
-      const running = getRunningPipelines();
-      runs = running.concat(runs);
+      // started before the window is still relevant right now. concat() builds
+      // a fresh array so the cached histRuns is never mutated.
+      let runs = getRunningPipelines().concat(histRuns);
       // Explicit sort by `finished_at` descending (newest-finished first). Rows
       // with no `finished_at` (still running) sort to the top via Infinity.
       // This is the documented contract for the Job history table; do not
@@ -6326,6 +6383,12 @@ async function handleApi(req, res) {
   // to a real table. Admin-only: experimentation state isn't client-facing.
   if (p === '/api/experiments' && req.method === 'GET') {
     if (!req.user.admin) return json(res, { error: 'forbidden' }, 403);
+    {
+      const hit = experimentsCache.get('all');
+      if (hit && Date.now() - hit.at < EXPERIMENTS_TTL_MS) {
+        return json(res, hit.value);
+      }
+    }
     (async () => {
       try {
         // One row per variant, joining candidates -> posts to derive the
@@ -6626,7 +6689,9 @@ async function handleApi(req, res) {
           console.error('[api/experiments] ai-disclosure block failed:', e3 && e3.message || e3);
         }
 
-        json(res, { experiments });
+        const payload = { experiments };
+        experimentsCache.set('all', { at: Date.now(), value: payload });
+        json(res, payload);
       } catch (e) {
         json(res, { error: String(e && e.message || e) }, 500);
       }
