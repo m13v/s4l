@@ -294,11 +294,35 @@ def main():
         print(f"  style FAILED: {e}", file=sys.stderr)
 
     # Funnel snapshots: one per window the dashboard pills can show.
-    for d in (1, 7, 14, 30, 90):
+    #
+    # The job fires every 5 min, but each funnel window re-queries every
+    # PostHog bucket (~10 HogQL queries each). Recomputing all 5 windows
+    # every cycle = ~5x the query burst, which trips PostHog's short-window
+    # rate limiter (429 "throttled") and leaves whole buckets errored ('err'
+    # on the dashboard). The longer windows barely move between 5-min cycles,
+    # so only 1d + 7d refresh every cycle; 14/30/90d refresh at most every
+    # ~25 min (skipped while their snapshot is still fresh). This cuts the
+    # steady-state PostHog query volume by ~3/5 with no meaningful staleness.
+    HEAVY_WINDOW_MIN_AGE_S = 25 * 60
+    # Small gap between window runs so two adjacent window subprocesses don't
+    # stack their bursts back-to-back into the rate limiter.
+    INTER_WINDOW_SLEEP_S = 3
+    windows = (1, 7, 14, 30, 90)
+    for d in windows:
+        if d >= 14:
+            snap_path = os.path.join(CACHE_DIR, f"funnel_stats_{d}d.json")
+            try:
+                age = time.time() - os.path.getmtime(snap_path)
+            except OSError:
+                age = None  # missing -> always compute
+            if age is not None and age < HEAVY_WINDOW_MIN_AGE_S:
+                print(f"  funnel days={d} skipped (snapshot {age/60:.0f}m old < 25m)")
+                continue
         try:
             precompute_funnel(d)
         except Exception as e:
             print(f"  funnel days={d} FAILED: {e}", file=sys.stderr)
+        time.sleep(INTER_WINDOW_SLEEP_S)
 
     # Stamp a marker so ops can see when the last full cycle finished.
     atomic_write_json(
