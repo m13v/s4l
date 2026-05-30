@@ -8,6 +8,7 @@ Keeps project_stats.py untouched (it is chflags uchg-locked).
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -236,13 +237,22 @@ _RETRY_BACKOFF_S = (2.0, 5.0, 12.0)
 _RETRY_AFTER_CAP_S = 30.0
 
 
-def _hogql(api_key, project_id, query, timeout=60, max_attempts=4):
+def _hogql(api_key, project_id, query, timeout=120, max_attempts=4):
     """Run a HogQL query against /api/projects/{pid}/query/.
 
-    Retries on 429 (throttled) and 5xx. Honors `Retry-After` up to
-    `_RETRY_AFTER_CAP_S`; otherwise uses `_RETRY_BACKOFF_S`. Raises
-    `HogqlError` on permanent failure so callers can mark rows as
-    errored rather than zero.
+    Retries on 429 (throttled), 5xx, and socket read timeouts. Honors
+    `Retry-After` up to `_RETRY_AFTER_CAP_S`; otherwise uses
+    `_RETRY_BACKOFF_S`. Raises `HogqlError` on permanent failure so
+    callers can mark rows as errored rather than zero.
+
+    NOTE: the batched-by-$host queries cover many domains in one scan, so a
+    single query for a large shared PostHog bucket (e.g. pid 330744 with
+    ~18 projects) can run >60s on a cold cache. A socket read timeout
+    surfaces as `socket.timeout`/`TimeoutError`, which is a sibling of
+    `urllib.error.URLError` (both subclass OSError), so it must be caught
+    explicitly; otherwise it escapes this retry loop and the caller marks
+    the entire bucket as errored on the very first slow query, rendering
+    'err' for every project sharing that bucket.
     """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
     body = json.dumps({"query": {"kind": "HogQLQuery", "query": query}}).encode("utf-8")
@@ -276,7 +286,21 @@ def _hogql(api_key, project_id, query, timeout=60, max_attempts=4):
             print(f"  HogQL {e.code} retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s | query={query[:80]}", file=sys.stderr)
             time.sleep(wait)
             continue
+        except (socket.timeout, TimeoutError) as e:
+            # Read timeout on a heavy batched query. Retryable: a retry
+            # often hits a warm cache and returns in time. Caught before
+            # URLError because TimeoutError is NOT a URLError subclass.
+            last_err = f"read timeout after {timeout}s: {e}"
+            if attempt == max_attempts - 1:
+                print(f"  HogQL timeout (>{timeout}s): {e} | query={query[:120]}", file=sys.stderr)
+                break
+            wait = _RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)]
+            print(f"  HogQL timeout retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s | query={query[:80]}", file=sys.stderr)
+            time.sleep(wait)
+            continue
         except urllib.error.URLError as e:
+            # A URLError can also wrap a socket.timeout (e.reason). Treat
+            # those as the retryable timeout case above.
             last_err = f"URLError: {e}"
             if attempt == max_attempts - 1:
                 print(f"  HogQL URLError: {e} | query={query[:120]}", file=sys.stderr)
