@@ -374,7 +374,7 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
 ONLY mark the human reply as sent after every required channel succeeded for it. For \`both\`, that means the public reply landed AND the DM landed. Partial success counts as failure (see error handling below).
 
 \`\`\`bash
-psql "$DATABASE_URL" -c "UPDATE human_dm_replies SET status = 'sent', sent_at = NOW() WHERE id = REPLY_ID"
+cd ~/social-autoposter && python3 scripts/human_dm_replies_helper.py patch --id REPLY_ID --status sent
 cd ~/social-autoposter && python3 scripts/dm_conversation.py set-status --dm-id DM_ID --status active
 \`\`\`
 
@@ -382,7 +382,7 @@ cd ~/social-autoposter && python3 scripts/dm_conversation.py set-status --dm-id 
 
 If any required channel fails, increment the attempts counter and record the reason. Use a short error string (single line, no quotes); for partial \`both\` failures include which side failed:
 \`\`\`bash
-psql "$DATABASE_URL" -c "UPDATE human_dm_replies SET status = 'failed', attempts = attempts + 1, last_error = 'ERROR_REASON' WHERE id = REPLY_ID"
+cd ~/social-autoposter && python3 scripts/human_dm_replies_helper.py patch --id REPLY_ID --status failed --increment-attempts --last-error "ERROR_REASON"
 \`\`\`
 Rows with \`status = 'failed'\` AND \`attempts < 3\` will be picked up automatically on the next Phase 0 run for this platform. After 3 attempts they stay failed and stop retrying, notify the human in the run summary so they can handle manually.
 
@@ -471,15 +471,8 @@ After completing Phase 0 (human replies), proceed with the scanning and auto-rep
 "
 fi
 
-HUMAN_REPLY_KB=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(json_build_object(
-        'platform', platform, 'project', project_name,
-        'their_author', their_author, 'instructions', instructions
-    ))
-    FROM human_dm_replies
-    WHERE status = 'sent'
-    ORDER BY sent_at DESC
-    LIMIT 20;" 2>/dev/null || echo "null")
+# Human Reply Knowledge Base via /api/v1/human-dm-replies?mode=kb (HTTP-only).
+HUMAN_REPLY_KB=$(python3 "$REPO_DIR/scripts/human_dm_replies_helper.py" kb --limit 20 2>/dev/null || echo "")
 
 PHASE_A_BLOCK=""
 if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "reddit" ]; then
