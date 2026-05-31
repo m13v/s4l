@@ -15035,10 +15035,70 @@ async function loadDailyMetrics(opts) {
   } catch (e) {
     // Silent background refresh: keep the visible chart; only surface the
     // error for user-initiated loads.
-    if (!silent && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
+    if (!silent && !prefetch && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
     _removeChartOverlay(chartEl);
     _removeChartOverlay(ratioChartEl);
   }
+}
+
+// ---- Trends idle-prefetch -------------------------------------------------
+// After the active Trends combo renders, gradually warm the memo cache for the
+// other platform/project combos so flipping to any of them is instant. Runs one
+// combo at a time with a gap between fetches (each /api/funnel/per-day spawns a
+// server-side child, so we never fan out in parallel). Nearest-first ordering:
+//   1. current project, every platform
+//   2. current platform, every project
+//   3. the remaining cartesian product
+// A monotonic token cancels an in-flight sweep when a newer one starts (e.g. the
+// user changed filters), and any combo already in the cache is skipped.
+let _trendsPrefetchToken = 0;
+let _trendsPrefetchTimer = null;
+function _trendsPillValues(containerId) {
+  const row = document.getElementById(containerId);
+  if (!row) return ['all'];
+  const vals = Array.from(row.querySelectorAll('.style-stats-pill'))
+    .map(b => b.getAttribute('data-value') || 'all');
+  return vals.length ? vals : ['all'];
+}
+async function _prefetchTrendsCombos() {
+  const myToken = ++_trendsPrefetchToken;
+  const granularity = currentTrendsGranularity();
+  const curPlat = currentTrendsPlatform();
+  const curProj = currentTrendsProject();
+  const platforms = _trendsPillValues('trends-platform-pills');
+  const projects  = _trendsPillValues('trends-project-pills');
+  const seen = new Set();
+  const queue = [];
+  const push = (p, pr) => {
+    const key = p + '|' + pr;
+    if (seen.has(key)) return;
+    seen.add(key);
+    queue.push({ platform: p, project: pr });
+  };
+  platforms.forEach(p => push(p, curProj));      // 1. same project, all platforms
+  projects.forEach(pr => push(curPlat, pr));     // 2. same platform, all projects
+  for (const p of platforms) for (const pr of projects) push(p, pr); // 3. the rest
+  for (const combo of queue) {
+    if (myToken !== _trendsPrefetchToken) return;          // superseded
+    if (granularity !== currentTrendsGranularity()) return; // axis changed
+    const ck = granularity + '|' + (combo.platform || 'all') + '|' + (combo.project || 'all');
+    if (_dailyMetricsCache[ck]) continue;                   // already warm
+    try {
+      await loadDailyMetrics({ prefetch: true, granularity, platform: combo.platform, project: combo.project });
+    } catch {}
+    // Yield between combos so the tab stays responsive and the box isn't flooded.
+    await new Promise(r => setTimeout(r, 450));
+  }
+}
+function _scheduleTrendsPrefetch() {
+  if (_trendsPrefetchTimer) clearTimeout(_trendsPrefetchTimer);
+  // Small delay so the active combo's render + revalidation settle first; then
+  // run during idle time if the browser supports it.
+  _trendsPrefetchTimer = setTimeout(() => {
+    _trendsPrefetchTimer = null;
+    const ric = window.requestIdleCallback || ((fn) => setTimeout(fn, 200));
+    ric(() => { try { _prefetchTrendsCombos(); } catch {} });
+  }, 1500);
 }
 
 // Back-compat shim: earlier versions of this file exposed loadAllPerDayCharts
