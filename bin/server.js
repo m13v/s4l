@@ -14913,7 +14913,11 @@ async function loadDailyMetrics(opts) {
     ]);
     const allFailed = [views, upvotes, comments, clicks, bookings, funnel, cost, posts].every(r => r.failed);
     if (allFailed) {
-      if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
+      // Silent background refresh: leave the existing chart as-is rather than
+      // replacing good data with an error. User-initiated: surface the error.
+      if (!silent && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
+      _removeChartOverlay(chartEl);
+      _removeChartOverlay(ratioChartEl);
       return;
     }
     const intoSeries = (id, rows, key) => {
@@ -14964,7 +14968,11 @@ async function loadDailyMetrics(opts) {
     // fetch in the background.
     try { _perProjectInvalidate(); } catch {}
   } catch (e) {
-    if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
+    // Silent background refresh: keep the visible chart; only surface the
+    // error for user-initiated loads.
+    if (!silent && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (' + escapeHtml(String(e.message || e)) + ').</div>';
+    _removeChartOverlay(chartEl);
+    _removeChartOverlay(ratioChartEl);
   }
 }
 
@@ -20367,7 +20375,9 @@ function saStartApp() {
   setInterval(loadActivityStats, 300000);
   setInterval(loadCohortStats, 300000);
   setInterval(loadStyleStats, 300000);
-  setInterval(loadAllPerDayCharts, 300000);
+  // Background auto-refresh: silent (no loading overlay), swaps in fresh data
+  // when it settles. Loading feedback is reserved for user-initiated refetches.
+  setInterval(() => loadDailyMetrics({ silent: true }), 300000);
   setTimeout(() => {
     // Logs + Settings tabs are admin-only (hidden via body.sa-non-admin);
     // their endpoints are admin-only too, so guard the preload for scoped users.
