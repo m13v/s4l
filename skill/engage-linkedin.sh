@@ -272,12 +272,45 @@ c = json.load(open('$REPO_DIR/config.json'))
 print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) if p.get('voice')}, indent=2))
 " 2>/dev/null || echo "{}")
 
-    # Generate engagement style and content rules from shared module
+    # Engagement-style picker (2026-05-31 LinkedIn alignment to Twitter): pick
+    # ONE assigned style per reply iteration PROGRAMMATICALLY, mirroring
+    # engage-twitter.sh. The picked style flows two places: (1) --style filter
+    # for top_performers.py so the per-style exemplars match the assignment,
+    # (2) saps_render_style_block so the prompt embeds the same assignment. On
+    # invent mode picked_style is empty and top_performers stays unfiltered.
+    # Replaces the legacy generate_styles_block (which discarded the pick and
+    # let the model invent freely).
     source "$REPO_DIR/skill/styles.sh"
-    STYLES_BLOCK=$(generate_styles_block linkedin replying)
+    STYLE_ASSIGN_FILE=$(mktemp -t saps_linkedin_eng_assign_XXXXXX.json)
+    saps_pick_style linkedin replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+    PICKED_STYLE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+    PICKED_MODE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+    STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" linkedin replying)
+    rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true
 
-    # Top performers feedback report (platform-wide)
-    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
+    # Top performers feedback report — filtered to the picked style when in
+    # 'use' mode so the few-shot exemplars match the assignment.
+    if [ -n "$PICKED_STYLE" ]; then
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
+    else
+        TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
+    fi
 
     PHASE_B_PROMPT=$(mktemp)
     cat > "$PHASE_B_PROMPT" <<PROMPT_EOF
@@ -397,10 +430,15 @@ MANDATORY reply flow for every item:
              replied to (more accurate than the truncated our_content in PENDING_DATA).
              If \"project\" is null, we're a guest in someone else's thread; keep
              the existing project_name and follow global content rules.
-  Step 3: Draft the reply using the resolved project's voice + chosen engagement
-          style. Professional but casual. NEVER em dashes. Match parent post language.
+  Step 3: Draft the reply using the resolved project's voice + the ASSIGNED
+          engagement style. This cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}'.
+          In USE mode ($PICKED_MODE=use) apply the assigned style '${PICKED_STYLE}'
+          verbatim; do NOT pick a different style and do NOT invent one. In INVENT
+          mode ($PICKED_MODE=invent) craft a NEW snake_case style name not in the
+          curated block above and pass it as the [engagement_style] arg in Step 5.
+          Professional but casual. NEVER em dashes. Match parent post language.
   Step 4: post reply (OAuth API first, browser fallback)
-  Step 5: python3 reply_db.py replied ID "text" [url] [engagement_style] [is_recommendation]   <- mark AFTER success. engagement_style is TONE; pass is_recommendation="1" only when you mentioned a project (Tier 2/3).
+  Step 5: python3 reply_db.py replied ID "text" [url] [engagement_style] [is_recommendation]   <- mark AFTER success. engagement_style is the style name you applied (in USE mode the assigned '${PICKED_STYLE}'). is_recommendation="1" only when you mentioned a project (Tier 2/3).
 If Step 5 fails, the item stays 'processing' and will be reset to 'pending' on the next run.
 
 For LinkedIn replies - use the OAuth API first:
