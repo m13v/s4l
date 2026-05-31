@@ -231,6 +231,13 @@ def log_rejected(args):
 
     account = args.account or _resolve_default_account(args.platform)
 
+    # Engagement-style enforcement (2026-05-31 LinkedIn alignment): coerce the
+    # model's style back to the picker assignment (USE) or register the
+    # invention (INVENT) before the INSERT, so server-rejected rows record the
+    # same canonical style as successful ones instead of leaking one-off
+    # invented names into the per-style report. See coerce_engagement_style().
+    args.engagement_style = coerce_engagement_style(args)
+
     summary_parts = []
     if args.rejection_reason:
         summary_parts.append(f"REASON: {args.rejection_reason}")
