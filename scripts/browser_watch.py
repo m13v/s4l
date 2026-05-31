@@ -125,7 +125,18 @@ def poll_ports() -> None:
             )
 
 
+def rotate_if_large(max_bytes: int = 10 * 1024 * 1024) -> None:
+    """Keep browser-activity.log bounded: roll to .1 once it passes max_bytes."""
+    try:
+        if ACTIVITY_LOG.exists() and ACTIVITY_LOG.stat().st_size > max_bytes:
+            bak = ACTIVITY_LOG.with_suffix(ACTIVITY_LOG.suffix + ".1")
+            ACTIVITY_LOG.replace(bak)  # atomic; .1 overwritten if present
+    except Exception:
+        pass
+
+
 def main() -> None:
+    rotate_if_large()
     reap_orphans()
     poll_ports()
 
