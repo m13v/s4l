@@ -6352,7 +6352,7 @@ async function handleApi(req, res) {
         const experiments = [{
           id: 'twitter-ripen-freshness-abcd',
           name: 'Twitter ripen + freshness + ceiling (A/B/C/D)',
-          status: 'completed',
+          status: 'shipped',
           winner: 'D',
           started_at: '2026-05-21',
           concluded_at: '2026-05-31',
@@ -10761,12 +10761,9 @@ function fmtElapsed(s) {
   return h + 'h ' + (m % 60) + 'm';
 }
 
-// twitter-ripen-freshness-abc variant defs, baked into the client from the
-// Node-side TWITTER_VARIANT_DEFS so the Experiments tab and the job-history
-// pill describe a variant the same way. JSON.stringify keeps it backslash-free
-// inside this HTML backtick template (any \\n / \\t in here would silently
-// blank the page per the documented HTML-template gotcha).
-const TWITTER_VARIANT_DEFS = ${JSON.stringify(TWITTER_VARIANT_DEFS)};
+// (client-side TWITTER_VARIANT_DEFS removed 2026-05-31 with the rest of the
+// concluded twitter-ripen-freshness A/B/C/D experiment; the job-history
+// per-run variant pill that consumed it is gone.)
 
 function renderResult(run) {
   const r = run.result || {};
