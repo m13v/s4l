@@ -54,6 +54,33 @@ import time
 from typing import Optional
 
 
+def _bh_activity_log(action: str, cdp_url: str) -> None:
+    """Append to the universal browser-activity.log (Python-CDP path coverage).
+
+    The harness MCP server.py logs its own bh_run calls, but these CDP scripts
+    attach via connect_over_cdp and bypass it, so they log here directly.
+    """
+    try:
+        import time as _t
+        import os as _o
+        from pathlib import Path as _P
+        _p = _P(_o.environ.get(
+            "BH_ACTIVITY_LOG",
+            str(_P.home() / ".claude" / "browser-profiles" / "browser-activity.log"),
+        ))
+        _port = (cdp_url or "").rsplit(":", 1)[-1].split("/")[0] or "-"
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        with _p.open("a") as _f:
+            _f.write(
+                f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
+                f"script={_o.path.basename(__file__)} action={action} "
+                f"pid={_o.getpid()} ppid={_o.getppid()} cdp={cdp_url or '-'} "
+                f"port={_port}\n"
+            )
+    except Exception:
+        pass
+
+
 def _is_holder_alive(holder: str) -> bool:
     """Mirror ~/.claude/hooks/linkedin-agent-lock.sh is_holder_alive().
 
@@ -283,6 +310,7 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                     file=sys.stderr,
                     flush=True,
                 )
+                _bh_activity_log("attach_harness", harness_cdp_url)
                 return contexts[0], False
             last_err = RuntimeError("harness CDP attach: zero contexts")
         except Exception as e:
@@ -316,6 +344,7 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                         file=sys.stderr,
                         flush=True,
                     )
+                    _bh_activity_log("attach_legacy", f"http://127.0.0.1:{port}")
                     return contexts[0], False
                 last_err = RuntimeError(
                     f"DevToolsActivePort attach port={port}: zero contexts"
