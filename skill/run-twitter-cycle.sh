@@ -88,36 +88,21 @@ TW_ENGINE_PREFIX=""
 FRESHNESS_HOURS=6
 
 # ----------------------------------------------------------------------------
-# A/B/C/D variant assignment. Deterministic per BATCH_ID so that every step
-# of one cycle (search, scoring, drafting, posting, salvage) sees the same
-# variant. Variants:
-#   A (control, 2026-05-22)      = current logic: 20-min ripen wait + 6h
-#                                  freshness window.
-#   B (no-ripen, 2026-05-22)     = skip the sleep 1200 + fetch_twitter_t1
-#                                  step (saves ~20 min thread->post latency).
-#                                  6h freshness unchanged.
-#   C (no-ripen+1h, 2026-05-22)  = skip ripening AND tighten the Phase 1
-#                                  freshness window to 1h (since_time epoch
-#                                  passed to scan model + hook).
-#   D (C + 2k view cap, 2026-05-25) = same as C, plus score_twitter_candidates
-#                                  drops any tweet with views > 2000 at
-#                                  discovery T0. Tests the hypothesis that
-#                                  high-view threads starve our reply of
-#                                  audience: bucket data shows view-share
-#                                  collapses from 4% on <2k threads to 0.1%
-#                                  on >10k threads. Filter is enforced in
-#                                  scripts/score_twitter_candidates.py by
-#                                  reading TWITTER_CYCLE_VARIANT from env.
-# Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling)
-# so peer cycles don't accidentally expire each other's still-pending rows.
-# Only FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) varies.
-# Weights (2026-05-29): D=70%, C=15%, A=9%, B=6%. hash % 100 with thresholds
-# further up-weights D after the 2k view cap kept outperforming on early signal.
-TWITTER_CYCLE_VARIANT=$(python3 -c "import hashlib, sys; h=int(hashlib.sha1(sys.argv[1].encode()).hexdigest(),16)%100; print('D' if h<70 else 'C' if h<85 else 'B' if h<91 else 'A')" "$BATCH_ID" 2>/dev/null || echo "A")
-FRESHNESS_HOURS_DISCOVER=$FRESHNESS_HOURS
-if [ "$TWITTER_CYCLE_VARIANT" = "C" ] || [ "$TWITTER_CYCLE_VARIANT" = "D" ]; then
-    FRESHNESS_HOURS_DISCOVER=1
-fi
+# EXPERIMENT CONCLUDED 2026-05-31: variant D won the ripen+freshness A/B/C/D
+# test (shipped 2026-05-22, D added 2026-05-25). D = no ripen wait + 1h Phase 1
+# freshness window + drop parent threads with T0 views > 2000. Over the 60-day
+# window D cut thread-age-at-discover p50 to 21 min (vs 173-277 for A/B/C) and
+# led on avg views (91) and avg clicks (0.45), trading post-rate for fresher,
+# higher-converting replies. A/B/C logic has been ripped out; D is now the
+# permanent, hardcoded behavior. The cycle_variant column is still stamped 'D'
+# below so historical analytics keep a consistent label.
+#
+# Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling) so
+# peer cycles don't accidentally expire each other's still-pending rows. Only
+# FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) is tightened to
+# 1h, which was the winning D setting.
+TWITTER_CYCLE_VARIANT=D
+FRESHNESS_HOURS_DISCOVER=1
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER
 # Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
 # uses it in place of its hardcoded 6h default when present.
@@ -137,7 +122,7 @@ fi
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
-log "Variant=$TWITTER_CYCLE_VARIANT (A=ripen+6h, B=no-ripen+6h, C=no-ripen+1h, D=no-ripen+1h+2k_view_cap); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
+log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-05-31); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
 # Three early-exit gates BEFORE we open the DB, set up traps, or touch the
@@ -1245,10 +1230,12 @@ log "  Below target ($BATCH_COUNT/$RETRY_TARGET); $_TRIED_N queries tried so far
 done
 
 # --- Post-loop bookkeeping ---------------------------------------------------
-# Stamp the A/B/C variant onto every candidate in this batch so downstream
-# analytics (post-rate, thread-age-at-discover, lag-after-thread, top-reply
-# ratio) can split by variant. Idempotent: same value would be written if the
-# batch is salvaged into a peer cycle (variant follows the discovering cycle).
+# Stamp cycle_variant='D' onto every candidate in this batch. The A/B/C/D
+# experiment concluded 2026-05-31 (D won); this is now a constant label kept so
+# downstream analytics (post-rate, thread-age-at-discover, lag-after-thread,
+# top-reply ratio) stay continuous with the historical experiment rows.
+# Idempotent: same value would be written if the batch is salvaged into a peer
+# cycle.
 python3 -c "
 import os, psycopg2 as psycopg
 with psycopg.connect(os.environ['DATABASE_URL']) as conn:
