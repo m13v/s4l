@@ -1221,12 +1221,15 @@ $STYLES_BLOCK
    already assigns exactly one). This cycle: mode=$PICKED_MODE
    style='${PICKED_STYLE:-(invent)}'.
    - In USE mode ($PICKED_MODE=use) you MUST apply the assigned style
-     '${PICKED_STYLE}' — do NOT pick a different style and do NOT invent a new
+     '${PICKED_STYLE}' verbatim; do NOT pick a different style, do NOT invent a new
      name. (If your draft drifts, the orchestrator silently coerces it back to
      the assigned name at log time, so just use the assigned one.)
    - In INVENT mode ($PICKED_MODE=invent) you craft a NEW snake_case style name
-     not in the curated block above, fitting the post + project; you will pass
-     its definition via --new-style at log time (step 5/6).
+     not in the curated block above, fitting the post + project. When you log
+     (step 5 rejected / step 6 success), ALSO append this flag to the log_post.py
+     command so the invention registers in engagement_styles_registry:
+       --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
+     (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
    NEVER use em dashes.
@@ -1401,12 +1404,15 @@ $STYLES_BLOCK
    already assigns exactly one). This cycle: mode=$PICKED_MODE
    style='${PICKED_STYLE:-(invent)}'.
    - In USE mode ($PICKED_MODE=use) you MUST apply the assigned style
-     '${PICKED_STYLE}' — do NOT pick a different style and do NOT invent a new
+     '${PICKED_STYLE}' verbatim; do NOT pick a different style, do NOT invent a new
      name. (If your draft drifts, the orchestrator silently coerces it back to
      the assigned name at log time, so just use the assigned one.)
    - In INVENT mode ($PICKED_MODE=invent) you craft a NEW snake_case style name
-     not in the curated block above, fitting the post + project; you will pass
-     its definition via --new-style at log time (step 6/7).
+     not in the curated block above, fitting the post + project. When you log
+     (step 6 rejected / step 7 success), ALSO append this flag to the log_post.py
+     command so the invention registers in engagement_styles_registry:
+       --new-style '{\"description\":\"...\",\"example\":\"...\",\"why_existing_didnt_fit\":\"...\"}'
+     (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
    NEVER use em dashes.
