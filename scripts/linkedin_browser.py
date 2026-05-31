@@ -270,18 +270,21 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
     sent every scrape straight to /authwall and silently masked the real
     failure (the harness was unreachable).
 
-    Strategy now:
+    Strategy now (harness-only, 2026-05-31):
       1. If `LINKEDIN_CDP_URL` env var is set (skill/lib/linkedin-backend.sh
          sets it to http://127.0.0.1:9556), attach to the linkedin-harness
          Chrome via connect_over_cdp. Returns owns_context=False; caller
          closes only the page they opened, never the context.
-      2. Otherwise try the legacy DevToolsActivePort discovery path inside
-         PROFILE_DIR for backwards compatibility with manually-launched
-         linkedin-agent MCP sessions. Same owns_context=False semantics.
-      3. If both attach paths fail, RAISE. Do not launch a sibling Chrome.
+      2. If that attach fails, RAISE. The legacy DevToolsActivePort fallback
+         to the linkedin-agent profile (~/.claude/browser-profiles/linkedin)
+         was REMOVED 2026-05-31: it silently attached to a SECOND Chrome
+         whenever the harness was momentarily unreachable, which is the
+         "two LinkedIn browsers in parallel" bug. The harness Chrome on :9556
+         is now the ONLY allowed LinkedIn browser. Never attach to a sibling
+         profile, never cold-launch.
 
     `prefer_cdp` kept as a kwarg for caller-API stability but no longer
-    has a meaningful False branch (cold-launch is gone).
+    has a meaningful False branch (cold-launch and legacy attach are gone).
 
     Returns:
         (context, owns_context)  # owns_context is always False on success
@@ -321,43 +324,21 @@ def _connect_to_running_or_launch(p, *, prefer_cdp: bool = True):
                 flush=True,
             )
 
-    # Lane 2: legacy DevToolsActivePort attach inside PROFILE_DIR (for a
-    # manually-launched linkedin-agent MCP). NOT a cold launch — this only
-    # attaches to a Chrome that is already running.
-    if prefer_cdp:
-        port = _read_devtools_active_port()
-        if port is not None:
-            try:
-                # Pin to 127.0.0.1; localhost resolves IPv6 first on macOS
-                # and Chrome --remote-debugging-port listens IPv4-only.
-                browser = p.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{port}",
-                    timeout=5000,
-                )
-                contexts = browser.contexts
-                if contexts:
-                    chrome_pid = _pid_listening_on(port)
-                    print(
-                        f"[linkedin_browser] mode=cdp_attach port={port} "
-                        f"chrome_pid={chrome_pid} "
-                        f"profile={PROFILE_DIR}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    _bh_activity_log("attach_legacy", f"http://127.0.0.1:{port}")
-                    return contexts[0], False
-                last_err = RuntimeError(
-                    f"DevToolsActivePort attach port={port}: zero contexts"
-                )
-            except Exception as e:
-                last_err = e
+    # Lane 2 (legacy DevToolsActivePort attach to the linkedin-agent profile
+    # ~/.claude/browser-profiles/linkedin) was REMOVED 2026-05-31. It let the
+    # pipeline silently attach to a SECOND Chrome (the retired linkedin-agent
+    # MCP browser) whenever the harness attach above failed — the root cause
+    # of the "two LinkedIn browsers in parallel" bug. The harness Chrome on
+    # :9556 is now the ONLY allowed LinkedIn browser.
 
-    # No warm Chrome reachable. Fail loudly — never cold-launch.
+    # No warm harness Chrome reachable. Fail loudly — never attach to the
+    # legacy linkedin-agent profile, never cold-launch.
     raise RuntimeError(
-        "linkedin_browser: no warm Chrome reachable. Cold-launch fallback "
-        "was removed 2026-05-27 (would attach to wrong profile and mask "
-        "real failures). Restart the linkedin-harness Chrome (port 9556) "
-        f"and retry. Last error: {last_err}"
+        "linkedin_browser: harness Chrome (port 9556) not reachable via "
+        "LINKEDIN_CDP_URL. Legacy DevToolsActivePort + cold-launch fallbacks "
+        "were removed (they attached to the wrong profile and spawned a "
+        "second browser). Restart the linkedin-harness Chrome and retry. "
+        f"Last error: {last_err}"
     )
 
 
