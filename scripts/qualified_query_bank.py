@@ -258,13 +258,13 @@ def main():
         return 0
 
     if args.all:
-        rows = _fetch_rows(conn, None)
+        rows = _fetch_rows(None)
         per = defaultdict(list)
         for r in rows:
-            per[r[0]].append(r)
+            per[r.get("project_name") or ""].append(r)
         out = []
         for proj in sorted(per):
-            bank = build_bank(conn, proj, args.min_likes, args.min_clicks, args.limit)
+            bank = build_bank(proj, args.min_likes, args.min_clicks, args.limit)
             out.append({"project": proj, "bank_size": len(bank)})
         json.dump(out, sys.stdout, indent=2)
         print()
@@ -274,7 +274,7 @@ def main():
         print("qualified_query_bank: --project required (or --all)", file=sys.stderr)
         return 2
 
-    bank = build_bank(conn, args.project, args.min_likes, args.min_clicks, args.limit)
+    bank = build_bank(args.project, args.min_likes, args.min_clicks, args.limit)
     proven_size = len(bank)
     if not args.no_invented:
         invented = fetch_invented_queries(args.project, args.invent_min_supply)
