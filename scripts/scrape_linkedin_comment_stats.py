@@ -1360,10 +1360,16 @@ def scrape(
     MCP Chrome via ensure_browser_healthy, producing a kill+reopen
     cadence that LinkedIn anti-bot flagged on 2026-05-06) to a
     CDP-attach via _connect_to_running_or_launch. New tabs land in the
-    existing MCP Chrome's BrowserContext, so cookies/fingerprint match
-    perfectly and no second Chrome process is ever spawned. The
-    launch_persistent_context fallback inside the helper still exists
-    for the cold-MCP case.
+    existing harness Chrome's BrowserContext, so cookies/fingerprint
+    match perfectly and no second Chrome process is ever spawned.
+
+    2026-05-31: harness-only. The helper's Lane 2 fallback (legacy
+    DevToolsActivePort attach to the linkedin-agent profile) and the
+    cold-launch launch_persistent_context path were REMOVED to kill the
+    "two LinkedIn browsers in parallel" bug. _connect_to_running_or_launch
+    now attaches ONLY to the harness Chrome (port 9556 via
+    LINKEDIN_CDP_URL) and raises loudly if it is unreachable. There is no
+    longer any cold-MCP fallback.
 
     2026-05-26: added optional debug_dir. When set, every fire writes
     a forensic bundle (screenshots, html, cookies, console+nav+network
