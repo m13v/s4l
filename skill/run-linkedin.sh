@@ -29,6 +29,32 @@
 
 set -euo pipefail
 
+# ===== Whole-run singleton guard (2026-05-30) =====
+# launchd (com.m13v.social-linkedin) fires this script every 900s (15 min),
+# but a full Phase A + Phase B run takes 20+ min. Without a run-level mutex,
+# two fires overlap and BOTH drive the single linkedin-harness Chrome
+# (port 9556) at once: one run searches SERPs (Phase A) while the other
+# posts a comment (Phase B), yanking the same window back and forth. That is
+# the "two LinkedIns running in parallel" symptom (proven via the browser
+# activity log on 2026-05-30: pids 35789 Phase A + 59215 Phase B alive
+# together, both on 9556). The per-phase locks do NOT prevent this because
+# they release between phases. This guard makes the ENTIRE run a singleton:
+# if a prior run-linkedin.sh is still alive, this fire exits immediately.
+SAPS_LI_RUN_LOCK="/tmp/saps-run-linkedin.lock"
+if mkdir "$SAPS_LI_RUN_LOCK" 2>/dev/null; then
+  echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+else
+  _li_holder="$(cat "$SAPS_LI_RUN_LOCK/pid" 2>/dev/null || echo "")"
+  if [ -n "$_li_holder" ] && kill -0 "$_li_holder" 2>/dev/null; then
+    echo "[run-linkedin] singleton guard: prior full run (pid $_li_holder) still alive; exiting this fire to avoid two drivers on the 9556 Chrome"
+    exit 0
+  fi
+  # holder is dead -> stale lock; reclaim it
+  echo "[run-linkedin] singleton guard: reclaiming stale run lock (dead pid ${_li_holder:-unknown})"
+  rm -rf "$SAPS_LI_RUN_LOCK"
+  mkdir "$SAPS_LI_RUN_LOCK" && echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+fi
+
 # Transport backend selector (2026-05-28). Two interchangeable paths for the
 # only two browser touchpoints (Phase A SERP search, Phase B comment-post):
 #   browser (DEFAULT, ACTIVE) — headed-Chrome path via the linkedin-harness
@@ -164,7 +190,7 @@ _sa_emit_run_summary_oneshot() {
 # Trap chain: lock.sh has already installed _sa_release_locks on
 # EXIT INT TERM HUP. Replace with a chained handler so summary fires first,
 # then locks release. _sa_release_locks remains in scope after sourcing.
-trap '_sa_emit_run_summary_oneshot; _sa_release_locks' EXIT INT TERM HUP
+trap '_sa_emit_run_summary_oneshot; _sa_release_locks; rm -rf "$SAPS_LI_RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
 
 # ===== Phase A: discovery + scoring =====
 python3 "$REPO_DIR/scripts/linkedin_search_topic_schema.py" 2>>"$LOG_FILE" || true
