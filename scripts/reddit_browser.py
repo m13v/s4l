@@ -36,6 +36,29 @@ import sys
 import time
 
 
+def _bh_activity_log(action: str, cdp_url: str) -> None:
+    """Append to the universal browser-activity.log (Python-CDP path coverage)."""
+    try:
+        import time as _t
+        import os as _o
+        from pathlib import Path as _P
+        _p = _P(_o.environ.get(
+            "BH_ACTIVITY_LOG",
+            str(_P.home() / ".claude" / "browser-profiles" / "browser-activity.log"),
+        ))
+        _port = (cdp_url or "").rsplit(":", 1)[-1].split("/")[0] or "-"
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        with _p.open("a") as _f:
+            _f.write(
+                f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
+                f"script={_o.path.basename(__file__)} action={action} "
+                f"pid={_o.getpid()} ppid={_o.getppid()} cdp={cdp_url or '-'} "
+                f"port={_port}\n"
+            )
+    except Exception:
+        pass
+
+
 PROFILE_DIR = os.path.expanduser("~/.claude/browser-profiles/reddit")
 LOCK_FILE = os.path.expanduser("~/.claude/reddit-agent-lock.json")
 LOCK_EXPIRY = 300  # Must match reddit-agent-lock.sh
@@ -358,6 +381,7 @@ def get_browser_and_page(playwright):
     if cdp_url_env:
         try:
             cdp_browser = playwright.chromium.connect_over_cdp(cdp_url_env)
+            _bh_activity_log("attach_harness", cdp_url_env)
             # Prefer a context that already carries a live reddit_session; else
             # fall back to the first context (harness is single-profile, logged in).
             chosen = None
@@ -395,6 +419,7 @@ def get_browser_and_page(playwright):
     if cdp_port:
         try:
             cdp_browser = playwright.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
+            _bh_activity_log("attach_legacy", f"http://localhost:{cdp_port}")
             for ctx in cdp_browser.contexts:
                 try:
                     cookies = ctx.cookies("https://www.reddit.com/")
