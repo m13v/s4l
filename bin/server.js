@@ -14839,19 +14839,30 @@ function _removeChartOverlay(el) {
 // the non-destructive dimmed overlay on BOTH charts.
 async function loadDailyMetrics(opts) {
   const silent = !!(opts && opts.silent);
+  // Prefetch mode warms the memo cache for an INACTIVE filter combo in the
+  // background: it fetches + caches but never touches the visible chart's
+  // globals, overlays, status text, or re-renders. The combo is passed
+  // explicitly via opts.{granularity,platform,project} instead of read from
+  // the pills, so warming "twitter / fazm" never disturbs the "all / all"
+  // view the user is currently looking at.
+  const prefetch = !!(opts && opts.prefetch);
   const chartEl = document.getElementById('daily-metrics-chart');
   const ratioChartEl = document.getElementById('ratio-metrics-chart');
   const headingEl = document.getElementById('daily-metrics-heading');
   const statusEl = document.getElementById('daily-metrics-status');
   const series = {};
-  const granularity = currentTrendsGranularity();
-  const platform = currentTrendsPlatform();
-  const project = currentTrendsProject();
+  const granularity = (opts && opts.granularity) || currentTrendsGranularity();
+  const platform = (opts && opts.platform) || currentTrendsPlatform();
+  const project = (opts && opts.project) || currentTrendsProject();
   const fetchDays = granularity === 'weekly' ? DAILY_METRICS_DAYS_WEEKLY : DAILY_METRICS_DAYS_DAILY;
   const cacheKey = granularity + '|' + (platform || 'all') + '|' + (project || 'all');
+  // Already warm? A background prefetch never refetches an existing combo —
+  // the stale-but-cached entry already makes the switch instant, and the
+  // user-initiated switch revalidates it on its own.
+  if (prefetch && _dailyMetricsCache[cacheKey]) return;
 
   // Update the section heading to reflect current granularity + window.
-  if (headingEl) {
+  if (headingEl && !prefetch) {
     headingEl.textContent = granularity === 'weekly'
       ? 'Weekly Metrics (last ' + Math.round(fetchDays / 7) + ' weeks)'
       : 'Daily Metrics (last ' + fetchDays + ' days)';
@@ -14862,7 +14873,7 @@ async function loadDailyMetrics(opts) {
   // revalidate in the background so the numbers stay current. This is what
   // makes flipping between platforms/projects you've already opened feel
   // instant. Skip for silent (background) calls — those ARE the revalidation.
-  if (!silent) {
+  if (!silent && !prefetch) {
     const cached = _dailyMetricsCache[cacheKey];
     if (cached) {
       _dailyMetricsDays = cached.days;
@@ -14874,6 +14885,8 @@ async function loadDailyMetrics(opts) {
       if (Date.now() - (cached.ts || 0) > DAILY_METRICS_REVALIDATE_MS) {
         setTimeout(() => { loadDailyMetrics({ silent: true }); }, 0);
       }
+      // Keep warming the combos the user is likely to flip to next.
+      try { _scheduleTrendsPrefetch(); } catch {}
       return;
     }
     // First time we're seeing this combo: dim both charts with an overlay so
@@ -14947,7 +14960,7 @@ async function loadDailyMetrics(opts) {
     if (allFailed) {
       // Silent background refresh: leave the existing chart as-is rather than
       // replacing good data with an error. User-initiated: surface the error.
-      if (!silent && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
+      if (!silent && !prefetch && chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Unable to load daily metrics (all endpoints failed).</div>';
       _removeChartOverlay(chartEl);
       _removeChartOverlay(ratioChartEl);
       return;
@@ -14971,6 +14984,7 @@ async function loadDailyMetrics(opts) {
     });
     // Weekly granularity: bucket all series into rolling 7-day windows and
     // swap the axis to per-bucket keys before rendering.
+    let outDays, outSeries;
     if (granularity === 'weekly') {
       const aggregated = {};
       let weekKeys = null;
@@ -14979,27 +14993,34 @@ async function loadDailyMetrics(opts) {
         if (!weekKeys) weekKeys = bucketed.weekKeys;
         aggregated[m.id] = bucketed.weeklyMap;
       });
-      _dailyMetricsDays = weekKeys || [];
-      _dailyMetricsSeries = aggregated;
+      outDays = weekKeys || [];
+      outSeries = aggregated;
     } else {
-      _dailyMetricsDays = dailyAxis;
-      _dailyMetricsSeries = series;
+      outDays = dailyAxis;
+      outSeries = series;
     }
     // Stash a list of failed endpoints so renderDailyMetrics can surface a
     // small "(N timed out)" hint in the status pill rather than silently
     // showing flat zeros for those series.
     const fetchResults = { views, upvotes, comments, clicks, bookings, funnel, cost, posts };
-    _dailyMetricsFailed = Object.keys(fetchResults)
+    const outFailed = Object.keys(fetchResults)
       .filter(k => fetchResults[k].failed)
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
     // Memoize this combo so switching back to it is instant (see the
-    // cache-hit fast path at the top of this function).
+    // cache-hit fast path at the top of this function). This happens for
+    // every successful fetch — active, silent revalidation, AND prefetch.
     _dailyMetricsCache[cacheKey] = {
-      days: _dailyMetricsDays,
-      series: _dailyMetricsSeries,
-      failed: _dailyMetricsFailed,
+      days: outDays,
+      series: outSeries,
+      failed: outFailed,
       ts: Date.now(),
     };
+    // Background prefetch: cache is now warm; never touch the visible chart's
+    // globals or re-render. Done.
+    if (prefetch) return;
+    _dailyMetricsDays = outDays;
+    _dailyMetricsSeries = outSeries;
+    _dailyMetricsFailed = outFailed;
     renderDailyMetrics();
     renderRatioMetrics();
     // Propagate filter changes to the per-project breakdown. Cheap no-op
@@ -15007,6 +15028,10 @@ async function loadDailyMetrics(opts) {
     // hasn't actually changed; otherwise it kicks off a fresh per-project
     // fetch in the background.
     try { _perProjectInvalidate(); } catch {}
+    // Now that the active combo is rendered, idly warm the combos the user is
+    // likely to switch to next (same project across platforms, then same
+    // platform across projects, then the rest) so those switches are instant.
+    try { _scheduleTrendsPrefetch(); } catch {}
   } catch (e) {
     // Silent background refresh: keep the visible chart; only surface the
     // error for user-initiated loads.
