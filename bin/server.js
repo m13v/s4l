@@ -10175,7 +10175,7 @@ const HTML = `<!DOCTYPE html>
       <button type="button" class="style-stats-pill" data-value="weekly">Weekly</button>
     </div>
   </div>
-  <details class="style-stats-section" id="daily-metrics">
+  <details class="style-stats-section" id="daily-metrics" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="daily-metrics-heading">Daily Metrics (last 30 days)</span></span>
       <span class="style-stats-total" id="daily-metrics-status"></span>
@@ -10197,7 +10197,7 @@ const HTML = `<!DOCTYPE html>
       </details>
     </div>
   </details>
-  <details class="style-stats-section" id="ratio-metrics">
+  <details class="style-stats-section" id="ratio-metrics" open>
     <summary>
       <span class="style-stats-title"><span class="style-stats-caret">▶</span><span id="ratio-metrics-heading">Engagement Ratios (last 30 days)</span></span>
       <span class="style-stats-total" id="ratio-metrics-status"></span>
@@ -13675,6 +13675,20 @@ let _dailyMetricsActive = null;
 // to the status pill so the user understands why some series are flat.
 let _dailyMetricsFailed = [];
 
+// Client-side memo cache of fetched Trends data, keyed by
+// "granularity|platform|project". Lets the user flip between
+// previously-viewed filter combos instantly (render from cache, then
+// silently revalidate in the background) instead of refetching 8 endpoints
+// on every switch. We intentionally do NOT eagerly prefetch every
+// platform×project combo: /api/funnel/per-day spawns a Python child per
+// call, so warming hundreds of combos would hammer the box. The combo is
+// cached the first time it's opened; subsequent switches back are instant.
+let _dailyMetricsCache = {};
+// Don't refire a background revalidation if the cached entry is younger than
+// this; rapid back-and-forth toggling stays free. The 5-min auto-refresh and
+// server-side warmers keep entries fresh beyond this window.
+const DAILY_METRICS_REVALIDATE_MS = 30000;
+
 // First-time defaults. Single-series (views) so a new dashboard user lands
 // on a clean column chart with one labeled bar per day rather than 9 series
 // fighting for the same shared scale. Returning users keep whatever they've
@@ -14834,11 +14848,36 @@ async function loadDailyMetrics(opts) {
   const platform = currentTrendsPlatform();
   const project = currentTrendsProject();
   const fetchDays = granularity === 'weekly' ? DAILY_METRICS_DAYS_WEEKLY : DAILY_METRICS_DAYS_DAILY;
+  const cacheKey = granularity + '|' + (platform || 'all') + '|' + (project || 'all');
 
-  // For user-initiated refetches, dim both charts (top + ratios) with an
-  // overlay so toggling granularity / platform / project gives instant visual
-  // feedback. The background auto-refresh stays silent — no overlay, no flicker.
+  // Update the section heading to reflect current granularity + window.
+  if (headingEl) {
+    headingEl.textContent = granularity === 'weekly'
+      ? 'Weekly Metrics (last ' + Math.round(fetchDays / 7) + ' weeks)'
+      : 'Daily Metrics (last ' + fetchDays + ' days)';
+  }
+
+  // Instant switch: if we've already fetched this filter combo, render it from
+  // the client memo cache immediately (no overlay, no blank), then quietly
+  // revalidate in the background so the numbers stay current. This is what
+  // makes flipping between platforms/projects you've already opened feel
+  // instant. Skip for silent (background) calls — those ARE the revalidation.
   if (!silent) {
+    const cached = _dailyMetricsCache[cacheKey];
+    if (cached) {
+      _dailyMetricsDays = cached.days;
+      _dailyMetricsSeries = cached.series;
+      _dailyMetricsFailed = cached.failed || [];
+      renderDailyMetrics();
+      renderRatioMetrics();
+      try { _perProjectInvalidate(); } catch {}
+      if (Date.now() - (cached.ts || 0) > DAILY_METRICS_REVALIDATE_MS) {
+        setTimeout(() => { loadDailyMetrics({ silent: true }); }, 0);
+      }
+      return;
+    }
+    // First time we're seeing this combo: dim both charts with an overlay so
+    // the fetch has instant visual feedback without erasing the prior chart.
     _ensureChartOverlay(chartEl);
     _ensureChartOverlay(ratioChartEl);
     if (statusEl) statusEl.textContent = 'Loading…';
@@ -14851,13 +14890,6 @@ async function loadDailyMetrics(opts) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
     dailyAxis.push(d.toISOString().slice(0, 10));
-  }
-
-  // Update the section heading to reflect current granularity + window.
-  if (headingEl) {
-    headingEl.textContent = granularity === 'weekly'
-      ? 'Weekly Metrics (last ' + Math.round(fetchDays / 7) + ' weeks)'
-      : 'Daily Metrics (last ' + fetchDays + ' days)';
   }
 
   // Each fetch is best-effort. Returning [] on failure means a single broken
@@ -14960,6 +14992,14 @@ async function loadDailyMetrics(opts) {
     _dailyMetricsFailed = Object.keys(fetchResults)
       .filter(k => fetchResults[k].failed)
       .map(k => ({ key: k, timedOut: !!fetchResults[k].timedOut }));
+    // Memoize this combo so switching back to it is instant (see the
+    // cache-hit fast path at the top of this function).
+    _dailyMetricsCache[cacheKey] = {
+      days: _dailyMetricsDays,
+      series: _dailyMetricsSeries,
+      failed: _dailyMetricsFailed,
+      ts: Date.now(),
+    };
     renderDailyMetrics();
     renderRatioMetrics();
     // Propagate filter changes to the per-project breakdown. Cheap no-op
