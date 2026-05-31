@@ -12468,9 +12468,13 @@ async function loadExperiments() {
       // ABC, 50 for the two coin-flip experiments). Shown next to the
       // actual share row above the table so operators can spot drift.
       const expectedWeight = v.weight_pct != null ? v.weight_pct.toFixed(1) + '%' : '\u2014';
+      // Winner row (shipped experiments): mark with text + weight only, no
+      // color, per the dashboard black-and-white rule.
+      const winnerMark = v.is_winner ? ' <span style="font-weight:600;">(winner)</span>' : '';
+      const rowStyle = v.is_winner ? ' style="font-weight:600;"' : '';
       return (
-        '<tr>' +
-          '<td><span class="exp-variant-key">' + v.key + '</span> <span class="exp-variant-label">' + (v.label || '') + '</span><div class="exp-variant-desc">' + (v.desc || '') + '</div></td>' +
+        '<tr' + rowStyle + '>' +
+          '<td><span class="exp-variant-key">' + v.key + '</span> <span class="exp-variant-label">' + (v.label || '') + '</span>' + winnerMark + '<div class="exp-variant-desc">' + (v.desc || '') + '</div></td>' +
           '<td class="num">' + expectedWeight + '</td>' +
           '<td class="num">' + fmtIntK(v.n_candidates) + '</td>' +
           '<td class="num">' + batches + '</td>' +
@@ -12518,6 +12522,18 @@ async function loadExperiments() {
               ' (' + pct.toFixed(1) + '%, ' + fmtIntK(remaining) + ' to go)</span>' +
           '</div>' +
           '<div class="exp-progress-bar"><div class="exp-progress-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
+        '</div>'
+      );
+    } else if (exp.status === 'shipped' && exp.result) {
+      // Concluded experiment: show the outcome narrative instead of the
+      // open-ended "ends when decided" line.
+      const concludedTxt = exp.concluded_at ? new Date(exp.concluded_at).toLocaleDateString() : '';
+      progressHtml = (
+        '<div class="exp-progress">' +
+          '<div class="exp-progress-head">' +
+            '<span class="exp-progress-label">Outcome' + (exp.winner ? ' — winner ' + exp.winner : '') + (concludedTxt ? ' (concluded ' + concludedTxt + ')' : '') + '</span>' +
+          '</div>' +
+          '<div class="exp-progress-nums" style="margin-top:6px;line-height:1.5;">' + exp.result + '</div>' +
         '</div>'
       );
     } else {
