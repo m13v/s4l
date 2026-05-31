@@ -643,17 +643,9 @@ const PLATFORM_LABELS = {
   hackernews: 'HackerNews', youtube: 'YouTube', instagram: 'Instagram',
 };
 
-// twitter-ripen-freshness-abc variant defs (shipped 2026-05-22). Shared between
-// the /api/experiments endpoint (Experiments tab) and the post-comments-twitter
-// row in the job-history pill render so both surfaces describe a variant the
-// same way. When the experiment ends, drop the desc but keep the keys so old
-// history rows still resolve to something readable.
-const TWITTER_VARIANT_DEFS = {
-  A: { label: 'Control',                desc: 'ripen + 6h freshness (legacy)' },
-  B: { label: 'No-ripen',               desc: 'skip 20-min wait + 6h freshness' },
-  C: { label: 'No-ripen + tight',       desc: 'skip 20-min wait + 1h freshness' },
-  D: { label: 'No-ripen + tight + cap', desc: 'C + drop parent threads with T0 views > 2000' },
-};
+// (TWITTER_VARIANT_DEFS removed 2026-05-31: the twitter-ripen-freshness A/B/C/D
+// experiment concluded with D winning. Variant labels for the historical
+// readout now live inline in the frozen Experiments-tab snapshot.)
 
 // twitter-tail-link variant defs (shipped 2026-05-22). Per-post coin flip in
 // twitter_post_plan.py gated by TWITTER_TAIL_LINK_RATE (default 0.5). Variant
@@ -1740,37 +1732,10 @@ async function enrichPostCommentsTwitterRuns(runs) {
     };
   });
 
-  // Deterministic variant fallback: when a run has an ownBatchId but no
-  // candidate rows yet carry cycle_variant (e.g. Phase 1 aborted before
-  // upserting any row, or rows were rolled back), recompute it the same way
-  // skill/run-twitter-cycle.sh does. Keeps the job-history "experiment X"
-  // pill populated for scan-only / aborted cycles.
-  //
-  // Two ship dates:
-  //  - 2026-05-22: A/B/C shipped (sha1(batch_id) % 3 -> 'ABC').
-  //  - 2026-05-25 ~16:58 PDT: D shipped, hash changed to % 4 -> 'ABCD'.
-  // Before the first date, run-twitter-cycle.sh didn't compute the variant
-  // at all (every cycle ran legacy = variant A by today's labels). We refuse
-  // to back-label those runs from the hash because it would mislabel them
-  // as B/C/D — they never actually ran those code paths.
-  const EXPERIMENT_SHIP_MS  = new Date('2026-05-22T00:00:00').getTime();
-  const D_VARIANT_SHIP_MS   = new Date('2026-05-25T16:58:00-07:00').getTime();
-  const variantFromBatchId = (batchId) => {
-    if (!batchId) return null;
-    const batchMs = parseTwitterBatchIdMs(batchId);
-    if (!Number.isFinite(batchMs) || batchMs < EXPERIMENT_SHIP_MS) return null;
-    try {
-      const hex = crypto.createHash('sha1').update(batchId).digest('hex');
-      // Mirror Python's int(hex,16) % N exactly. The 160-bit hash doesn't fit
-      // in a JS Number, so use BigInt for the full-width modulus; truncating
-      // hex digits would silently disagree with the shell-side variant.
-      const n = BigInt('0x' + hex);
-      if (batchMs >= D_VARIANT_SHIP_MS) {
-        return 'ABCD'[Number(n % 4n)];
-      }
-      return 'ABC'[Number(n % 3n)];
-    } catch { return null; }
-  };
+  // (variantFromBatchId helper removed 2026-05-31: it back-computed the
+  // A/B/C/D experiment variant from the batch id to populate the job-history
+  // pill for scan-only/aborted cycles. The experiment concluded — D won and is
+  // now the only logic — so the pill and this fallback were both removed.)
 
   for (const run of txRuns) {
     const startMs = new Date(run.started_at).getTime();
@@ -1844,30 +1809,13 @@ async function enrichPostCommentsTwitterRuns(runs) {
         projectsList.push(proj);
       }
     };
-    // Experiment variant (A/B/C/D) for this run. A run executes exactly ONE
-    // variant, but Phase 0 salvage pulls OLD pending rows from prior cycles
-    // (which ran other variants) into this batch and rewrites their batch_id
-    // WITHOUT rewriting their cycle_variant. So a single batch ends up holding
-    // a mix of variants and the old "grab the first row's cycle_variant" logic
-    // mislabeled most runs (e.g. a Variant-D run showing "A" because an 'A'
-    // salvaged row happened to iterate first). Fix (2026-05-29): derive the
-    // run variant ONLY from FRESH rows — candidates this cycle actually
-    // discovered (discoveredMs >= startMs - 30min, the same salvage signature
-    // used for salvagePosted below) — and take the mode. Fallback to
-    // sha1(ownBatchId) % N so scan-only / aborted cycles still surface a bucket.
-    let runVariant = null;
-    const freshVariantTally = Object.create(null);
+    // (twitter-ripen-freshness A/B/C/D variant labeling removed 2026-05-31 when
+    // the experiment concluded; D is now the only logic. See the frozen
+    // Experiments tab card for the historical per-variant results.)
     for (const c of candNorm) {
       if (!ownBatchId || c.batch_id !== ownBatchId) continue;
       candidatesPassed++;
       recordProject(c.matched_project);
-      // Only fresh (non-salvaged) rows vote for this run's variant. A salvaged
-      // row's cycle_variant reflects the cycle that ORIGINALLY discovered it,
-      // not this run, so it must not influence the label.
-      const isSalvagedForVariant = c.discoveredMs != null && c.discoveredMs < startMs - 30 * 60 * 1000;
-      if (!isSalvagedForVariant && c.cycle_variant) {
-        freshVariantTally[c.cycle_variant] = (freshVariantTally[c.cycle_variant] || 0) + 1;
-      }
       if (c.status === 'posted') {
         posted++;
         if (c.virality_score != null && Number.isFinite(c.virality_score)) {
@@ -1897,19 +1845,6 @@ async function enrichPostCommentsTwitterRuns(runs) {
           salvagePosted++;
         }
       } else if (c.status === 'expired') expired++;
-    }
-    // Mode of the fresh-row variant tally = the variant THIS cycle actually
-    // ran. Ties (rare; only if discovery straddled the 30-min window) break by
-    // higher count then lexical order for determinism. Left null when no fresh
-    // row carried a variant (scan-only / pure-salvage cycle) so the
-    // experiment_variant fallback recomputes from the batch id.
-    {
-      let best = null, bestN = 0;
-      for (const v of Object.keys(freshVariantTally)) {
-        const n = freshVariantTally[v];
-        if (n > bestN || (n === bestN && best != null && v < best)) { best = v; bestN = n; }
-      }
-      runVariant = best;
     }
     // Inline median (no helper exists yet in this file). Returns null on
     // empty input so the pill is suppressed for runs that posted nothing.
@@ -2135,10 +2070,6 @@ async function enrichPostCommentsTwitterRuns(runs) {
       projects_worked: projectsList,
       // A/B/C experiment bucket for this run (twitter-ripen-freshness-abc,
       // shipped 2026-05-22). Primary source is twitter_candidates.cycle_variant
-      // for any row tied to ownBatchId; falls back to sha1(ownBatchId) % 3 so
-      // scan-only / aborted cycles still surface the variant. Rendered next to
-      // `projects` in the job-history result row.
-      experiment_variant: runVariant || variantFromBatchId(ownBatchId),
       styles_used: stylesUsedTx,
       // Force-picked search_topic per project per cycle, set by the Python
       // picker (scripts/pick_search_topic.py) and stamped on
@@ -6391,102 +6322,44 @@ async function handleApi(req, res) {
     }
     (async () => {
       try {
-        // One row per variant, joining candidates -> posts to derive the
-        // post-rate funnel and engagement-on-our-reply. Thread-age-at-discover
-        // p50 uses tweet_posted_at vs discovered_at (we have ~100% coverage on
-        // tweet_posted_at over the experiment window). Engagement is taken from
-        // twitter_candidates.{likes,replies,views} which the stats job refreshes
-        // to T-final values, not the t0/t1 snapshot columns.
-        const rows = await pq(`
-          WITH base AS (
-            SELECT tc.cycle_variant AS variant,
-                   tc.id,
-                   tc.batch_id,
-                   tc.status,
-                   tc.discovered_at,
-                   tc.tweet_posted_at,
-                   tc.posted_at,
-                   tc.post_id,
-                   EXTRACT(EPOCH FROM (tc.discovered_at - tc.tweet_posted_at)) / 60.0 AS thread_age_min,
-                   p.views AS our_views,
-                   p.upvotes AS our_likes,
-                   p.comments_count AS our_replies,
-                   COALESCE(pl.total_clicks, 0) AS our_clicks
-            FROM twitter_candidates tc
-            LEFT JOIN posts p ON p.id = tc.post_id
-            LEFT JOIN (
-              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
-              FROM post_links pl2
-              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
-              WHERE pl2.post_id IS NOT NULL
-              GROUP BY pl2.post_id
-            ) pl ON pl.post_id = tc.post_id
-            WHERE tc.cycle_variant IS NOT NULL
-              AND tc.cycle_variant IN ('A','B','C','D')
-              AND tc.discovered_at > NOW() - INTERVAL '30 days'
-          )
-          SELECT variant,
-                 COUNT(*) AS n_candidates,
-                 COUNT(DISTINCT batch_id) AS n_batches,
-                 COUNT(*) FILTER (WHERE status = 'posted') AS n_posted,
-                 COUNT(*) FILTER (WHERE status = 'skipped') AS n_skipped,
-                 COUNT(*) FILTER (WHERE status = 'expired') AS n_expired,
-                 COUNT(*) FILTER (WHERE status = 'pending') AS n_pending,
-                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY thread_age_min)
-                   FILTER (WHERE thread_age_min IS NOT NULL) AS thread_age_min_p50,
-                 AVG(our_views) FILTER (WHERE status = 'posted') AS avg_views,
-                 AVG(our_likes) FILTER (WHERE status = 'posted') AS avg_likes,
-                 AVG(our_replies) FILTER (WHERE status = 'posted') AS avg_replies,
-                 AVG(our_clicks) FILTER (WHERE status = 'posted') AS avg_clicks,
-                 MIN(discovered_at) AS started_at
-          FROM base
-          GROUP BY variant
-          ORDER BY variant
-        `, []);
-        const variantDefs = TWITTER_VARIANT_DEFS;
-        const variants = ['A', 'B', 'C', 'D'].map(k => {
-          const row = (rows || []).find(r => r.variant === k) || {};
-          const n = Number(row.n_candidates || 0);
-          const posted = Number(row.n_posted || 0);
-          return {
-            key: k,
-            label: variantDefs[k].label,
-            desc: variantDefs[k].desc,
-            n_candidates: n,
-            n_batches: Number(row.n_batches || 0),
-            n_posted: posted,
-            n_skipped: Number(row.n_skipped || 0),
-            n_expired: Number(row.n_expired || 0),
-            n_pending: Number(row.n_pending || 0),
-            post_rate_pct: n > 0 ? (posted / n) * 100 : null,
-            thread_age_min_p50: row.thread_age_min_p50 != null ? Number(row.thread_age_min_p50) : null,
-            avg_views: row.avg_views != null ? Number(row.avg_views) : null,
-            avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
-            avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
-            avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
-            started_at: row.started_at || null,
-          };
-        });
+        // FROZEN SNAPSHOT (experiment concluded 2026-05-31, winner = D).
+        // This was a live cycle_variant query until 2026-05-31; the A/B/C/D
+        // ripen+freshness test ran 2026-05-22..05-31 and D won, so the
+        // pipeline (skill/run-twitter-cycle.sh + score_twitter_candidates.py)
+        // now hardcodes D and no longer assigns variants. The numbers below
+        // are the final 60-day readout taken at conclusion. We keep them as a
+        // static historical card rather than re-querying a now-constant column.
+        const FROZEN_VARIANTS = [
+          { key: 'A', label: 'Control',                desc: 'ripen + 6h freshness (legacy)',                  n_candidates: 1208, n_batches: 177, n_posted: 470, n_skipped: 536, n_expired: 130, thread_age_min_p50: 173, avg_views: 84, avg_likes: 0.4, avg_replies: 0.2, avg_clicks: 0.31 },
+          { key: 'B', label: 'No-ripen',               desc: 'skip 20-min wait + 6h freshness',                n_candidates: 1428, n_batches: 186, n_posted: 643, n_skipped: 633, n_expired: 93,  thread_age_min_p50: 202, avg_views: 57, avg_likes: 0.3, avg_replies: 0.2, avg_clicks: 0.36 },
+          { key: 'C', label: 'No-ripen + tight',       desc: 'skip 20-min wait + 1h freshness',                n_candidates: 1478, n_batches: 175, n_posted: 484, n_skipped: 570, n_expired: 367, thread_age_min_p50: 277, avg_views: 47, avg_likes: 0.3, avg_replies: 0.2, avg_clicks: 0.23 },
+          { key: 'D', label: 'No-ripen + tight + cap', desc: 'C + drop parent threads with T0 views > 2000',   n_candidates: 1918, n_batches: 221, n_posted: 483, n_skipped: 888, n_expired: 326, thread_age_min_p50: 21,  avg_views: 91, avg_likes: 0.4, avg_replies: 0.2, avg_clicks: 0.45 },
+        ];
+        const variants = FROZEN_VARIANTS.map(v => ({
+          ...v,
+          n_pending: 0,
+          post_rate_pct: v.n_candidates > 0 ? (v.n_posted / v.n_candidates) * 100 : null,
+          weight_pct: null,           // assignment retired; no live traffic split
+          is_winner: v.key === 'D',
+          started_at: '2026-05-21',
+        }));
         const totals = variants.reduce((acc, v) => {
           acc.n_candidates += v.n_candidates;
           acc.n_posted += v.n_posted;
           acc.n_batches += v.n_batches;
           return acc;
         }, { n_candidates: 0, n_posted: 0, n_batches: 0 });
-        const startedAt = variants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
-        // Assignment weights (2026-05-28 reweight): skill/run-twitter-cycle.sh uses
-        // hash(BATCH_ID) % 6 with mapping [A,B,C,D,D,D], so D gets 50% and A/B/C
-        // each get ~16.67%. Up-weighted D after early signal favored the 2k view cap.
-        // No fixed cap on total batches; experiment ends when we decide.
-        variants.forEach(v => { v.weight_pct = (v.key === 'D') ? 50.0 : (100.0 / 6); });
         const experiments = [{
           id: 'twitter-ripen-freshness-abcd',
           name: 'Twitter ripen + freshness + ceiling (A/B/C/D)',
-          status: 'running',
-          started_at: startedAt,
+          status: 'completed',
+          winner: 'D',
+          started_at: '2026-05-21',
+          concluded_at: '2026-05-31',
           hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate. D additionally drops parent threads with T0 views > 2000 — view-share collapses on large threads, so capping reach should improve posted-quality (avg_views, avg_clicks) relative to C.',
+          result: 'D won: thread-age-at-discover p50 dropped to 21 min (vs 173-277 for A/B/C) while leading on avg views (91) and avg clicks (0.45). Trades post-rate (25% vs 45% for B) for fresher, higher-converting replies. Shipped permanently 2026-05-31; A/B/C logic removed from the pipeline.',
           primary_metric: 'thread_age_min_p50',
-          progress: null,  // no fixed target
+          progress: null,
           totals,
           variants,
         }];
@@ -11193,23 +11066,11 @@ function renderResult(run) {
             + r.projects_worked.join(', ')
             + '</span></span>'
           : '') +
-        (r.experiment_variant
-          ? (function () {
-              const v = r.experiment_variant;
-              const def = TWITTER_VARIANT_DEFS[v] || null;
-              const desc = def ? def.desc : '';
-              const label = def ? def.label : '';
-              const tooltip = 'twitter-ripen-freshness-abc'
-                + (label ? ' — ' + v + ' ' + label : '')
-                + (desc ? ': ' + desc : '');
-              return '<span title="' + tooltip.replace(/"/g, '&quot;')
-                + '" style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
-                + 'experiment '
-                + '<span style="color: var(--text);font-weight:600;">'
-                + v + (desc ? ': ' + desc : '')
-                + '</span></span>';
-            })()
-          : '') +
+        // Per-run experiment-variant pill removed 2026-05-31: the
+        // twitter-ripen-freshness A/B/C/D test concluded (D won) and the
+        // pipeline no longer assigns variants, so every new run would just
+        // show "experiment D" forever. Historical variant context now lives
+        // only on the (frozen) Experiments tab card.
         (Array.isArray(r.styles_used) && r.styles_used.length
           ? '<span style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">'
             + 'styles '
