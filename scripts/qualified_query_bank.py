@@ -43,7 +43,6 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db  # noqa: E402
 from http_api import api_get  # noqa: E402
 
 
@@ -80,13 +79,20 @@ def normalize(q: str) -> str:
     return q
 
 
-def _fetch_rows(conn, project=None):
+def _fetch_rows(project=None):
     """One row per posted candidate of a project, with likes + non-bot clicks.
 
-    Joins: candidate(status=posted) -> search_attempt (for the raw query +
-    topic) -> post (upvotes = likes) -> non-bot click count via post_links /
-    post_link_clicks. search_attempt_id is required, so candidates posted
-    before that column existed are excluded (their query can't be attributed).
+    Migrated 2026-05-30 off direct DB (db.get_conn) onto the HTTP lane:
+    GET /api/v1/twitter-search-attempts/qualified-rows[?project=...]. The route
+    mirrors the legacy JOIN exactly, including the cross-route guard below, and
+    returns one dict per posted candidate: {project_name, query, topic, likes,
+    clicks}. There is intentionally NO direct-DB fallback.
+
+    Legacy joins (now server-side): candidate(status=posted) -> search_attempt
+    (for the raw query + topic) -> post (upvotes = likes) -> non-bot click count
+    via post_links / post_link_clicks. search_attempt_id is required, so
+    candidates posted before that column existed are excluded (their query can't
+    be attributed).
 
     Cross-route guard (2026-05-29): a query only qualifies for the project
     that ISSUED it. The prep step re-routes a candidate to a different
@@ -99,42 +105,25 @@ def _fetch_rows(conn, project=None):
     NULL post project is treated as same-project so legacy rows written
     before project_name was stamped are not dropped.
     """
-    sql = """
-        SELECT a.project_name,
-               a.query,
-               COALESCE(a.search_topic, cand.search_topic, p.search_topic, '') AS topic,
-               COALESCE(p.upvotes, 0)        AS likes,
-               COALESCE(clk.nonbot, 0)       AS clicks
-        FROM twitter_candidates cand
-        JOIN twitter_search_attempts a ON a.id = cand.search_attempt_id
-        JOIN posts p ON p.id = cand.post_id
-        LEFT JOIN (
-            SELECT pl.post_id, COUNT(*) AS nonbot
-            FROM post_links pl
-            JOIN post_link_clicks plc ON plc.code = pl.code AND NOT plc.is_bot
-            GROUP BY pl.post_id
-        ) clk ON clk.post_id = p.id
-        WHERE cand.status = 'posted'
-          AND p.platform = 'twitter'
-          AND (p.project_name IS NULL
-               OR lower(p.project_name) = lower(a.project_name))
-    """
-    params = []
-    if project:
-        sql += " AND a.project_name = %s"
-        params.append(project)
-    return conn.execute(sql, tuple(params)).fetchall()
+    query = {"project": project} if project else None
+    resp = api_get("/api/v1/twitter-search-attempts/qualified-rows", query)
+    data = (resp or {}).get("data") or {}
+    return list(data.get("rows") or [])
 
 
-def build_bank(conn, project, min_likes=1, min_clicks=1, limit=None):
-    rows = _fetch_rows(conn, project)
+def build_bank(project, min_likes=1, min_clicks=1, limit=None):
+    rows = _fetch_rows(project)
     # group by normalized core
     cores = defaultdict(lambda: {
         "raw_variants": defaultdict(lambda: {"likes": 0, "clicks": 0}),
         "topics": defaultdict(int),
         "likes": 0, "clicks": 0, "posts": 0,
     })
-    for proj, query, topic, likes, clicks in rows:
+    for row in rows:
+        query = row.get("query") or ""
+        topic = row.get("topic") or ""
+        likes = int(row.get("likes") or 0)
+        clicks = int(row.get("clicks") or 0)
         core = normalize(query)
         if not core:
             continue
@@ -239,9 +228,6 @@ def main():
                          f"invent_topics.py SUPPLY_FLOOR).")
     args = ap.parse_args()
 
-    db.load_env()
-    conn = db.get_conn()
-
     if args.from_projects_json:
         try:
             projects = json.loads(sys.stdin.read() or "[]")
@@ -255,7 +241,7 @@ def main():
             name = (p or {}).get("name") if isinstance(p, dict) else None
             if not name:
                 continue
-            bank = build_bank(conn, name, args.min_likes, args.min_clicks, args.limit)
+            bank = build_bank(name, args.min_likes, args.min_clicks, args.limit)
             proven_size = len(bank)
             if not args.no_invented:
                 invented = fetch_invented_queries(name, args.invent_min_supply)
