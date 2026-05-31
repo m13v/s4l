@@ -9671,6 +9671,13 @@ const HTML = `<!DOCTYPE html>
   .views-chart-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
   .views-chart-axis span { white-space: nowrap; }
   .views-chart-empty { padding: 24px 20px; color: var(--text-secondary); font-size: 13px; text-align: center; }
+  /* Non-destructive loading state for user-initiated Trends refetches (filter
+     toggles, manual refresh): a dimmed overlay sits on top of the existing
+     chart instead of blanking it to "Loading…". The background 5-min auto
+     refresh passes { silent: true } and shows NO overlay at all — it just
+     swaps in fresh data when the fetch settles. The render functions replace
+     innerHTML on completion, which removes the overlay automatically. */
+  .chart-loading-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-panel, #fff); opacity: 0.78; color: var(--text-secondary); font-size: 13px; z-index: 4; pointer-events: none; border-radius: 6px; }
 
   /* Combined daily-metrics line chart (stats tab, above filters). Legend
      pills double as series toggles: click to hide/show a line, Y-axis
@@ -14793,8 +14800,33 @@ function _bucketWeekly(days, byDay) {
   return { weekKeys, weeklyMap };
 }
 
-async function loadDailyMetrics() {
+// Append a dimmed loading overlay on top of a chart container without wiping
+// its current contents (so the stale chart stays visible while a refetch is in
+// flight). Idempotent: never stacks two overlays. The render functions replace
+// the container's innerHTML on completion, which clears the overlay for free.
+function _ensureChartOverlay(el) {
+  if (!el) return;
+  if (el.querySelector(':scope > .chart-loading-overlay')) return;
+  const ov = document.createElement('div');
+  ov.className = 'chart-loading-overlay';
+  ov.textContent = 'Loading\u2026';
+  el.appendChild(ov);
+}
+function _removeChartOverlay(el) {
+  if (!el) return;
+  const ov = el.querySelector(':scope > .chart-loading-overlay');
+  if (ov) ov.remove();
+}
+
+// opts.silent === true: background auto-refresh. Fetch + re-render with NO
+// loading overlay and NO destructive error states — the existing chart stays
+// untouched until fresh data arrives, then swaps in instantly. User-initiated
+// calls (filter toggles, manual refresh, tab open) leave silent falsy and get
+// the non-destructive dimmed overlay on BOTH charts.
+async function loadDailyMetrics(opts) {
+  const silent = !!(opts && opts.silent);
   const chartEl = document.getElementById('daily-metrics-chart');
+  const ratioChartEl = document.getElementById('ratio-metrics-chart');
   const headingEl = document.getElementById('daily-metrics-heading');
   const statusEl = document.getElementById('daily-metrics-status');
   const series = {};
@@ -14803,14 +14835,14 @@ async function loadDailyMetrics() {
   const project = currentTrendsProject();
   const fetchDays = granularity === 'weekly' ? DAILY_METRICS_DAYS_WEEKLY : DAILY_METRICS_DAYS_DAILY;
 
-  // Show a loading state immediately on every (re)fetch, so toggling
-  // granularity / platform / project gives instant visual feedback even
-  // before the API responses come back. Without this, the previously
-  // rendered chart sits frozen until all 5 endpoints settle, which on a
-  // weekly switch can be a few hundred ms with zero indication anything
-  // is happening.
-  if (chartEl) chartEl.innerHTML = '<div class="views-chart-empty">Loading…</div>';
-  if (statusEl) statusEl.textContent = 'Loading…';
+  // For user-initiated refetches, dim both charts (top + ratios) with an
+  // overlay so toggling granularity / platform / project gives instant visual
+  // feedback. The background auto-refresh stays silent — no overlay, no flicker.
+  if (!silent) {
+    _ensureChartOverlay(chartEl);
+    _ensureChartOverlay(ratioChartEl);
+    if (statusEl) statusEl.textContent = 'Loading…';
+  }
 
   // Prebuild the daily axis (end-exclusive so last entry is today UTC).
   const today = new Date();
