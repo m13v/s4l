@@ -85,6 +85,29 @@ import time
 import urllib.parse
 from typing import Optional
 
+
+def _bh_activity_log(action: str, cdp_url: str) -> None:
+    """Append to the universal browser-activity.log (Python-CDP path coverage)."""
+    try:
+        import time as _t
+        import os as _o
+        from pathlib import Path as _P
+        _p = _P(_o.environ.get(
+            "BH_ACTIVITY_LOG",
+            str(_P.home() / ".claude" / "browser-profiles" / "browser-activity.log"),
+        ))
+        _port = (cdp_url or "").rsplit(":", 1)[-1].split("/")[0] or "-"
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        with _p.open("a") as _f:
+            _f.write(
+                f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] pycdp "
+                f"script={_o.path.basename(__file__)} action={action} "
+                f"pid={_o.getpid()} ppid={_o.getppid()} cdp={cdp_url or '-'} "
+                f"port={_port}\n"
+            )
+    except Exception:
+        pass
+
 # Reuse the lock helper + login-URL detector from linkedin_browser. We share
 # the lock so concurrent Python helpers (search vs unread-dms) serialize on
 # the same ~/.claude/linkedin-agent-lock.json. PROFILE_DIR also points at
@@ -731,6 +754,8 @@ def search(vertical: str, query: str) -> dict:
                 "error": "cdp_attach_failed",
                 "detail": f"connect_over_cdp({cdp_url}) failed: {e}",
             }
+
+        _bh_activity_log("attach", cdp_url)
 
         # Reuse the existing context (cookies / UA / fingerprint already set
         # by the MCP launch). Never close it — that would kill the MCP's
