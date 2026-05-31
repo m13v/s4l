@@ -6341,7 +6341,7 @@ async function handleApi(req, res) {
           post_rate_pct: v.n_candidates > 0 ? (v.n_posted / v.n_candidates) * 100 : null,
           weight_pct: null,           // assignment retired; no live traffic split
           is_winner: v.key === 'D',
-          started_at: '2026-05-21',
+          started_at: '2026-05-21T12:00:00',   // midday so toLocaleDateString renders the intended calendar day in PT (bare YYYY-MM-DD parses as UTC midnight = prior day in PT)
         }));
         const totals = variants.reduce((acc, v) => {
           acc.n_candidates += v.n_candidates;
@@ -6354,9 +6354,9 @@ async function handleApi(req, res) {
           name: 'Twitter ripen + freshness + ceiling (A/B/C/D)',
           status: 'shipped',
           winner: 'D',
-          started_at: '2026-05-21',
-          concluded_at: '2026-05-31',
-          hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate. D additionally drops parent threads with T0 views > 2000 — view-share collapses on large threads, so capping reach should improve posted-quality (avg_views, avg_clicks) relative to C.',
+          started_at: '2026-05-21T12:00:00',
+          concluded_at: '2026-05-31T12:00:00',
+          hypothesis: 'Skipping the 20-min ripen and tightening discover freshness to 1h cuts thread-age-at-discover (p50 ~181 min on legacy) without hurting post-rate. D additionally drops parent threads with T0 views > 2000; view-share collapses on large threads, so capping reach should improve posted-quality (avg_views, avg_clicks) relative to C.',
           result: 'D won: thread-age-at-discover p50 dropped to 21 min (vs 173-277 for A/B/C) while leading on avg views (91) and avg clicks (0.45). Trades post-rate (25% vs 45% for B) for fresher, higher-converting replies. Shipped permanently 2026-05-31; A/B/C logic removed from the pipeline.',
           primary_metric: 'thread_age_min_p50',
           progress: null,
