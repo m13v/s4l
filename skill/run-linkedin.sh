@@ -1101,9 +1101,48 @@ print(json.dumps(p, indent=2))
 ")
 
 # Phase B inputs (only Phase B needs styles + top performers).
-TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
+# Engagement-style picker (2026-05-31 LinkedIn alignment to Twitter): pick ONE
+# assigned style for this cycle PROGRAMMATICALLY, then hand it to the Claude
+# session instead of letting the post pipeline invent freely (the legacy
+# generate_styles_block path). The picked style flows three places, identical
+# to run-twitter-cycle.sh: (1) --style filter for top_performers.py so the
+# exemplars section shows only posts matching the assigned style, (2)
+# saps_render_style_block so the prompt block embeds the same assignment, (3)
+# --assigned-style/--assigned-mode flags on log_post.py so the post pipeline
+# coerces USE-mode drift back to the assigned name and registers INVENT-mode
+# inventions. On invent mode PICKED_STYLE is empty and top_performers stays
+# unfiltered (model sees the full landscape to invent against).
 source "$REPO_DIR/skill/styles.sh"
-STYLES_BLOCK=$(generate_styles_block linkedin posting)
+STYLE_ASSIGN_FILE=$(mktemp -t saps_linkedin_assign_XXXXXX.json)
+saps_pick_style linkedin posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+PICKED_STYLE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('style') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+PICKED_MODE=$(python3 -c "
+import json
+try:
+    with open('$STYLE_ASSIGN_FILE') as f:
+        d = json.load(f)
+    print(d.get('mode') or 'use')
+except Exception:
+    print('use')
+" 2>/dev/null)
+log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
+
+if [ -n "$PICKED_STYLE" ]; then
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
+else
+    TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
+fi
+STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" linkedin posting)
+# Best-effort cleanup of the assignment tempfile at wrapper exit.
+trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
 
 # Prior-interactions context: surface our last 5 comments on threads by the
 # same author in the past 30 days (soft context — vary angle, don't repeat).
@@ -1178,9 +1217,18 @@ $STYLES_BLOCK
      python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
    then STOP with '## Already engaged (defensive catch in Phase B)'.
 
-2. Pick the engagement style that best fits the post + project's voice block
-   (apply voice.tone, never violate voice.never, mirror voice.examples if
-   present). Reply in $PA_LANG.
+2. Draft the comment using the ASSIGNED engagement style (the style block above
+   already assigns exactly one). This cycle: mode=$PICKED_MODE
+   style='${PICKED_STYLE:-(invent)}'.
+   - In USE mode ($PICKED_MODE=use) you MUST apply the assigned style
+     '${PICKED_STYLE}' — do NOT pick a different style and do NOT invent a new
+     name. (If your draft drifts, the orchestrator silently coerces it back to
+     the assigned name at log time, so just use the assigned one.)
+   - In INVENT mode ($PICKED_MODE=invent) you craft a NEW snake_case style name
+     not in the curated block above, fitting the post + project; you will pass
+     its definition via --new-style at log time (step 5/6).
+   Apply the project's voice block (voice.tone, never violate voice.never,
+   mirror voice.examples if present). Reply in $PA_LANG.
    NEVER use em dashes.
 
 2a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
@@ -1236,6 +1284,8 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --assigned-style '$PICKED_STYLE' \\
+       --assigned-mode '$PICKED_MODE' \\
        --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --rejection-reason 'UNIPILE: <verbatim status + response.object/error from COMMENT_RESULT>' \\
@@ -1252,6 +1302,8 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --assigned-style '$PICKED_STYLE' \\
+       --assigned-mode '$PICKED_MODE' \\
        --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --urns '$PA_ACTIVITY_ID')
@@ -1345,9 +1397,18 @@ $STYLES_BLOCK
      python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
    then STOP with '## Already engaged (defensive catch in Phase B)'.
 
-3. Pick the engagement style that best fits the post + project's voice
-   block (apply voice.tone, never violate voice.never, mirror voice.examples
-   if present). Reply in $PA_LANG.
+3. Draft the comment using the ASSIGNED engagement style (the style block above
+   already assigns exactly one). This cycle: mode=$PICKED_MODE
+   style='${PICKED_STYLE:-(invent)}'.
+   - In USE mode ($PICKED_MODE=use) you MUST apply the assigned style
+     '${PICKED_STYLE}' — do NOT pick a different style and do NOT invent a new
+     name. (If your draft drifts, the orchestrator silently coerces it back to
+     the assigned name at log time, so just use the assigned one.)
+   - In INVENT mode ($PICKED_MODE=invent) you craft a NEW snake_case style name
+     not in the curated block above, fitting the post + project; you will pass
+     its definition via --new-style at log time (step 6/7).
+   Apply the project's voice block (voice.tone, never violate voice.never,
+   mirror voice.examples if present). Reply in $PA_LANG.
    NEVER use em dashes.
 
 3a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
@@ -1433,6 +1494,8 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --assigned-style '$PICKED_STYLE' \\
+       --assigned-mode '$PICKED_MODE' \\
        --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --rejection-reason 'TOAST: <verbatim toast text or quiet-fail>' \\
@@ -1449,6 +1512,8 @@ $STYLES_BLOCK
        --thread-author '$PA_AUTHOR_NAME' \\
        --thread-title '$PA_TITLE_HINT' \\
        --engagement-style STYLE_YOU_CHOSE \\
+       --assigned-style '$PICKED_STYLE' \\
+       --assigned-mode '$PICKED_MODE' \\
        --search-topic $PA_SEARCH_TOPIC_ARG \\
        --language '$PA_LANG' \\
        --urns 'ALL_POST_URNS')
