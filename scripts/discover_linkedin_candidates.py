@@ -671,27 +671,26 @@ def _resolve_cdp_url() -> Optional[str]:
     probe /json/version with a 1s GET so a stale/unset env falls through
     cleanly rather than dragging into a noisy connect failure.
 
-    Lane 2 (legacy fallback): the linkedin-agent MCP's DevToolsActivePort
-    file under PROFILE_DIR. Kept so the helper still works when run outside
-    the harness-backed pipeline.
+    Lane 2 (legacy DevToolsActivePort attach to the linkedin-agent profile
+    under PROFILE_DIR) was REMOVED 2026-05-31. It silently sent the SERP read
+    to a SECOND Chrome (the retired linkedin-agent MCP browser) whenever the
+    harness was momentarily unreachable — the "two LinkedIn browsers in
+    parallel" bug. The harness Chrome on :9556 is now the ONLY allowed target.
 
-    Returns the CDP base URL (e.g. "http://127.0.0.1:9556") or None when
-    neither lane is reachable.
+    Returns the harness CDP base URL (e.g. "http://127.0.0.1:9556") or None
+    when LINKEDIN_CDP_URL is unset or the harness is unreachable.
     """
     harness = os.environ.get("LINKEDIN_CDP_URL", "").strip()
-    if harness:
-        import urllib.request
-        try:
-            with urllib.request.urlopen(
-                f"{harness.rstrip('/')}/json/version", timeout=1.0
-            ):
-                return harness.rstrip("/")
-        except Exception:
-            pass  # fall through to the legacy DevToolsActivePort lane
-    port = _read_devtools_port()
-    if port is None:
+    if not harness:
         return None
-    return f"http://localhost:{port}"
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"{harness.rstrip('/')}/json/version", timeout=1.0
+        ):
+            return harness.rstrip("/")
+    except Exception:
+        return None
 
 
 def search(vertical: str, query: str) -> dict:
