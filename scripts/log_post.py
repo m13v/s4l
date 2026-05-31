@@ -63,6 +63,21 @@ from db import load_env
 from twitter_account import resolve_handle as resolve_twitter_handle
 from version import read_version as read_autoposter_version
 
+# Engagement-style enforcement (2026-05-31 LinkedIn alignment): the LinkedIn
+# post path goes straight through log_post.py (no candidate/plan pipeline like
+# Twitter's twitter_post_plan.py), so the picker-coercion engine has to live
+# here. When the caller passes --assigned-style/--assigned-mode (sourced from
+# saps_pick_style in run-linkedin.sh), we call validate_or_register exactly
+# like twitter_post_plan.py::post_one so (a) USE-mode drift coerces back to the
+# assigned style and (b) INVENT-mode inventions land in
+# engagement_styles_registry via the /api/v1/engagement-styles/registry POST.
+# Soft import so the post path still runs if the module is unavailable; we fall
+# back to the raw --engagement-style string in that case.
+try:
+    from engagement_styles import validate_or_register  # noqa: E402
+except Exception:
+    validate_or_register = None  # type: ignore[assignment]
+
 URN_ID_RE = re.compile(r"\b(\d{16,19})\b")
 
 
@@ -248,6 +263,28 @@ def main():
     parser.add_argument("--engagement-style", default=None,
                         help="Tone style (e.g. critic, storyteller). Separate from "
                              "--is-recommendation, which is intent.")
+    parser.add_argument("--assigned-style", default=None,
+                        help="The engagement style the programmatic picker "
+                             "(saps_pick_style / pick_style_for_post) assigned for "
+                             "this post. When present alongside --assigned-mode, "
+                             "log_post runs validate_or_register so USE-mode drift "
+                             "is coerced back to this name and INVENT-mode names "
+                             "register in engagement_styles_registry. Mirrors "
+                             "Twitter's --assigned-style on log_draft.py. Empty on "
+                             "INVENT mode (picker assigns no concrete name).")
+    parser.add_argument("--assigned-mode", default=None,
+                        help="Picker mode for this post: 'use' (a concrete style "
+                             "was assigned, drift coerces back) or 'invent' (model "
+                             "creates a new snake_case style + --new-style block). "
+                             "Drives validate_or_register's enforcement branch.")
+    parser.add_argument("--new-style", default=None,
+                        help="JSON object describing a model-invented style, REQUIRED "
+                             "iff --assigned-mode=invent and --engagement-style is a "
+                             "new name not in the registry. Shape mirrors "
+                             "engagement_styles.py::_REQUIRED_NEW_STYLE_FIELDS: "
+                             "{description, example, why_existing_didnt_fit, "
+                             "note?}. Passed through to validate_or_register so the "
+                             "invention lands in engagement_styles_registry.")
     parser.add_argument("--search-topic", default=None,
                         help="Topic seed from the project's search_topics list "
                              "(or a model-invented variant) that surfaced this "
@@ -330,6 +367,61 @@ def main():
         sys.exit(1)
 
     account = args.account or _resolve_default_account(args.platform)
+
+    # Engagement-style enforcement (2026-05-31 LinkedIn alignment). When the
+    # caller passed the picker assignment (--assigned-style/--assigned-mode),
+    # run validate_or_register exactly like twitter_post_plan.py::post_one:
+    # USE-mode drift coerces back to the assigned name; INVENT-mode +
+    # well-formed --new-style registers the invention in
+    # engagement_styles_registry. The coerced/registered style replaces
+    # args.engagement_style for the INSERT below. Never let a registry/API
+    # hiccup block the post — fall back to the raw model style on any error.
+    if (validate_or_register is not None and args.engagement_style
+            and (args.assigned_style or args.assigned_mode)):
+        new_style_block = None
+        if args.new_style:
+            try:
+                parsed = json.loads(args.new_style)
+                if isinstance(parsed, dict):
+                    new_style_block = parsed
+            except json.JSONDecodeError as e:
+                print(json.dumps({
+                    "warning": "NEW_STYLE_PARSE_FAILED",
+                    "message": f"could not parse --new-style JSON: {e}",
+                }), file=sys.stderr)
+        raw_style = args.engagement_style.strip()
+        decision = {
+            "engagement_style": raw_style,
+            **({"new_style": new_style_block} if new_style_block else {}),
+        }
+        try:
+            coerced_style, action = validate_or_register(
+                decision,
+                source_post={
+                    "platform": args.platform,
+                    "post_url": args.our_url,
+                    "post_id": None,
+                    "model": None,
+                },
+                assigned_style=(args.assigned_style or None),
+                assigned_mode=(args.assigned_mode or None),
+            )
+        except Exception as e:
+            print(f"[log_post] validate_or_register raised {e!r}; "
+                  f"falling back to raw style={raw_style!r}", file=sys.stderr)
+            coerced_style, action = raw_style, "rejected"
+        if action == "coerced" and coerced_style != raw_style:
+            print(f"[log_post] engagement_style coerced {raw_style!r} -> "
+                  f"{coerced_style!r} (assigned={args.assigned_style!r})",
+                  file=sys.stderr)
+        elif action == "registered":
+            print(f"[log_post] registered new engagement_style "
+                  f"{coerced_style!r} into engagement_styles_registry",
+                  file=sys.stderr)
+        # coerced_style is None only on "rejected" (unknown style, no usable
+        # new_style). Keep the raw style in that case so the post still logs
+        # with a non-null style rather than dropping the field.
+        args.engagement_style = (coerced_style or raw_style or "").strip() or None
 
     # LinkedIn: same post surfaces under multiple URL shapes (/feed/update/
     # vs /posts/...-share-...) with different numeric URNs. Canonicalize
