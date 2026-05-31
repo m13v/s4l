@@ -1,0 +1,5 @@
+the "don't generate it" point is the part most people skip past. a generated AGENTS.md is mostly the model's own defaults written back to itself, so you end up paying tokens every turn for lines that change nothing.
+
+hand-written files rot the same way over time. they grow, and a good chunk ends up restating behavior the model already does by default. the audit worth running isn't whether it's complete, it's which lines actually fire and change the output vs which are just default-restatement at a token cost.
+
+we built a free analyzer that scores exactly that on a file you paste in: https://ccmd.dev
