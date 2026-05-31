@@ -241,16 +241,12 @@ fi
 # process replies targeted at that platform. Empty PLATFORM = all platforms
 # (manual runs). This prevents parallel platform cycles from racing on the
 # same rows and clobbering each other's status updates.
-HR_PLATFORM_FILTER="1=1"
+HR_PLATFORM_ARG=""
 if [ -n "$PLATFORM" ]; then
-    _HR_P="$PLATFORM"
-    # Twitter rows are inconsistently labeled 'x' vs 'twitter' across legacy
-    # ingestions; treat them as one platform for the queue filter.
-    if [ "$_HR_P" = "x" ] || [ "$_HR_P" = "twitter" ]; then
-        HR_PLATFORM_FILTER="h.platform IN ('x','twitter')"
-    else
-        HR_PLATFORM_FILTER="h.platform = '$_HR_P'"
-    fi
+    # Pass the platform straight through to /api/v1/human-dm-replies, which
+    # folds 'x'/'twitter' into one platform server-side (matches the legacy
+    # filter). Empty PLATFORM = all platforms (manual runs).
+    HR_PLATFORM_ARG="--platform $PLATFORM"
 fi
 
 # Ingest any human replies that have landed in the i@m13v.com inbox since the
@@ -262,30 +258,20 @@ python3 "$REPO_DIR/scripts/ingest_human_dm_replies.py" 2>&1 | while IFS= read -r
     log "  [ingest] $_line"
 done || true
 
-HUMAN_REPLIES=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT h.id, h.dm_id, h.platform, h.their_author, h.instructions,
-               h.reply_channel, h.public_reply_id,
-               d.chat_url, d.reply_id, d.post_id,
-               h.project_name, h.attempts,
-               r.their_comment_url AS public_target_url,
-               r.their_comment_id  AS public_target_comment_id,
-               r.our_reply_url     AS our_prior_public_reply_url,
-               r.post_id           AS public_target_post_id,
-               p.thread_url        AS public_target_post_url
-        FROM human_dm_replies h
-        JOIN dms d ON d.id = h.dm_id
-        LEFT JOIN replies r ON r.id = d.reply_id
-        LEFT JOIN posts   p ON p.id = COALESCE(r.post_id, d.post_id)
-        WHERE (h.status = 'pending' OR (h.status = 'failed' AND h.attempts < 3))
-          AND $HR_PLATFORM_FILTER
-        ORDER BY h.created_at ASC
-    ) q;" 2>&1)
-# If psql errored, surface it loudly instead of silently treating as "no replies"
-if echo "$HUMAN_REPLIES" | grep -qE '^(ERROR|FATAL|psql:)'; then
-    log "Phase 0: psql error querying pending human replies:"
-    log "$HUMAN_REPLIES"
-    HUMAN_REPLIES="null"
+# Pending + retry queue via /api/v1/human-dm-replies (HTTP-only, no direct DB).
+# Helper prints a JSON array when rows exist and nothing when none, so the
+# guard below falls through to the "no replies" branch exactly like psql's
+# NULL -> empty string did. Non-array output (an API/transport error) is
+# logged loudly and treated as "no replies" instead of being silently parsed.
+_HR_OUT=$(python3 "$REPO_DIR/scripts/human_dm_replies_helper.py" pending $HR_PLATFORM_ARG 2>&1)
+if printf '%s' "$_HR_OUT" | head -c1 | grep -q '\['; then
+    HUMAN_REPLIES="$_HR_OUT"
+else
+    if [ -n "$_HR_OUT" ]; then
+        log "Phase 0: human-dm-replies pending fetch issue (treating as no replies):"
+        log "$_HR_OUT"
+    fi
+    HUMAN_REPLIES=""
 fi
 
 if [ "$HUMAN_REPLIES" != "null" ] && [ -n "$HUMAN_REPLIES" ]; then
@@ -328,8 +314,9 @@ Before drafting any message, check whether the human's instruction is actually a
 If the instruction text clearly matches one of these intents (use judgment, the human writes casually), DO NOT send anything on any channel. Instead:
 
 \`\`\`bash
-# Mark the human reply row as cancelled so it never retries
-psql "\$DATABASE_URL" -c "UPDATE human_dm_replies SET status = 'cancelled', sent_at = NOW(), last_error = 'human reclassified: <SHORT_REASON>' WHERE id = REPLY_ID"
+# Mark the human reply row as cancelled so it never retries (sent_at is
+# auto-stamped server-side on the cancelled transition)
+cd ~/social-autoposter && python3 scripts/human_dm_replies_helper.py patch --id REPLY_ID --status cancelled --last-error "human reclassified: <SHORT_REASON>"
 
 # Optionally update the underlying conversation if the intent says so:
 #   - "disqualify"/"block"/"spam"  → set-status disqualified
@@ -359,11 +346,14 @@ The \`public_target_url\` field is THEIR public comment that originally led to t
    - **X/Twitter** (mcp__twitter-harness__bh_run tool, CDP-driven real Chrome on port 9555): use bh_run('goto_url("TWEET_URL"); wait_for_load()') to navigate, then bh_run scripts to click the reply button, type, and post. See lib/twitter-backend.sh BROWSER_INSTRUCTIONS for the full Playwright -> bh_run translation table. Capture the resulting status URL.
 3. Insert a fresh \`replies\` row capturing the public reply (use the \`their_comment_id\` from \`public_target_comment_id\` so the dedup index does not collide; if null, synthesize a unique id like \`hr_<REPLY_ID>_pub\`):
    \`\`\`bash
-   psql "$DATABASE_URL" -t -A -c "INSERT INTO replies (post_id, platform, their_comment_id, their_author, their_content, their_comment_url, our_reply_content, our_reply_url, depth, status, replied_at) VALUES (PUBLIC_TARGET_POST_ID_OR_NULL, 'PLATFORM', 'COMMENT_ID', 'THEIR_AUTHOR', NULL, 'PUBLIC_TARGET_URL', 'CRAFTED_PUBLIC_REPLY', 'OUR_NEW_PUBLIC_REPLY_URL', 2, 'replied', NOW()) RETURNING id"
+   # Prints the new replies.id to stdout. Include --post-id only when
+   # PUBLIC_TARGET_POST_ID is not null; omit it otherwise. A duplicate
+   # their_comment_id returns the existing row's id (no error).
+   cd ~/social-autoposter && python3 scripts/human_dm_replies_helper.py insert-public-reply --platform PLATFORM --comment-id COMMENT_ID --author THEIR_AUTHOR --comment-url PUBLIC_TARGET_URL --our-content "CRAFTED_PUBLIC_REPLY" --our-url OUR_NEW_PUBLIC_REPLY_URL --depth 2 --post-id PUBLIC_TARGET_POST_ID
    \`\`\`
 4. Stamp the \`replies.id\` back onto the human instruction so the dashboard can pair them:
    \`\`\`bash
-   psql "$DATABASE_URL" -c "UPDATE human_dm_replies SET public_reply_id = NEW_REPLY_ID WHERE id = REPLY_ID"
+   cd ~/social-autoposter && python3 scripts/human_dm_replies_helper.py patch --id REPLY_ID --public-reply-id NEW_REPLY_ID
    \`\`\`
 
 ### Step C. If \`reply_channel\` is \`dm\` or \`both\`: deliver the DM
