@@ -143,11 +143,21 @@ log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-0
 #    lifts and the next post-expiry fire succeeds, run_claude.sh clears
 #    the stamp automatically.
 #
-# 3. Parallel-cycle cap: max 4 concurrent run-twitter-cycle.sh. Post
-#    2026-04-30 the launchd wrapper double-forks and no longer suppresses
-#    overlapping fires; without this cap, sustained back-to-back cycles
-#    that each take 25-45 min wall-clock can stack 5-6 deep and trigger
-#    the same memory pressure that caused the 19:26 jetsam.
+# 3. Single-cycle gate: exactly 1 concurrent run-twitter-cycle.sh, enforced
+#    HERE in the script itself so EVERY launch path is covered — the launchd
+#    singleton wrapper's snapshot copy, the MCP draft_cycle tool's direct
+#    `bash skill/run-twitter-cycle.sh`, and any manual/agent invocation all
+#    run this preflight and compete for the same /tmp/sa-twitter-cycle-slot-1
+#    mkdir lock. History: 2026-05-03 introduced this as a max-4 cap; on
+#    2026-05-22 we added run-twitter-cycle-singleton.sh to enforce one-at-a-
+#    time, but that wrapper only governs the launchd path and never kills
+#    (per user instruction), so out-of-band literal launches (MCP/manual)
+#    sailed past it while this cap still permitted 4. On 2026-06-01 a launchd
+#    studyly cycle + an out-of-band fazm cycle overlapped, fought over the
+#    twitter-browser lock, and the fazm one got watchdog-killed (logged as
+#    phase2b_silent). Cutting the cap to 1 unifies the gate across all paths.
+#    The slot's dead-holder GC (kill -0 in preflight.sh) still reclaims slots
+#    orphaned by SIGKILL/OOM, so a crashed cycle never wedges the gate.
 #
 # preflight.sh exposes a small set of helpers; we call them in order
 # (cheapest first) so a fast-path skip (already-blocked) doesn't even
@@ -156,7 +166,7 @@ source "$REPO_DIR/scripts/preflight.sh"
 SA_PREFLIGHT_SCRIPT="run-twitter-cycle"
 preflight_skip_if_claude_blocked
 preflight_skip_if_jetsam_pressure
-preflight_acquire_slot_or_skip "twitter-cycle" 4
+preflight_acquire_slot_or_skip "twitter-cycle" 1
 
 # Source lock helpers (functions only, no lock acquired here). Phase 0 + the
 # project/queries setup below run lock-free against DB and config files;
