@@ -1,19 +1,20 @@
-// Setup / first-run state for the social-autoposter MCP.
+// Setup / multi-project config for the social-autoposter MCP.
 //
-// Two jobs:
-//   1. A persistent state file so the MCP knows on EVERY boot whether setup is
-//      done, which project it configured, and when. This is the guardrail the
-//      action tools check before doing anything.
-//   2. Writing the collected project ("brain": website, what it does, who to
-//      target, brand voice) into config.json projects[] — the pipeline's single
-//      source of truth — so drafting actually uses it.
+// Source of truth = config.json projects[] (the pipeline reads it). Readiness is
+// DERIVED per-project from whether its required fields are present, never stored
+// as a boolean (so the saved config and the reported status can't disagree).
+//
+// The only thing persisted outside config.json is a small scoping list: which
+// project names were set up via THIS install. That list exists so (a) multi-
+// project disambiguation works and (b) we don't surface unrelated projects that
+// happen to live in config.json. It is NOT the source of truth for readiness.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { REPO_DIR } from "./repo.js";
 
-// Per-install state lives outside the repo so it survives repo edits/updates.
+// Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
   process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
@@ -23,8 +24,8 @@ const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 export const CONFIG_PATH =
   process.env.SAPS_CONFIG_PATH || path.join(REPO_DIR, "config.json");
 
-// Fields the X drafting prompts genuinely consume. Required ones must be present
-// before we let any action tool run; recommended ones improve draft quality.
+// Fields the X drafting prompts genuinely consume. Required ones must all be
+// present before a project is "ready"; recommended ones improve draft quality.
 export const REQUIRED_FIELDS = [
   "name",
   "website",
@@ -39,45 +40,65 @@ export const RECOMMENDED_FIELDS = [
   "content_guardrails",
 ] as const;
 
+// name is the key (identifies the project); everything else is optional so
+// setup can fill fields incrementally across several calls.
 export interface ProjectInput {
   name: string;
-  website: string;
-  description: string;
-  icp: string;
-  voice: string;
+  website?: string;
+  description?: string;
+  icp?: string;
+  voice?: string;
   differentiator?: string;
   search_topics?: string[] | string;
   get_started_link?: string;
   content_guardrails?: string;
 }
 
-export interface SetupState {
-  configured: boolean;
-  project?: string;
-  completed_at?: string;
-  config_path?: string;
+// ---------------------------------------------------------------------------
+// Scoping list (which projects this install manages). NOT readiness truth.
+// ---------------------------------------------------------------------------
+interface ScopeState {
+  projects: string[];
+  last_project?: string;
 }
 
-export function getSetupState(): SetupState {
+function readScope(): ScopeState {
   try {
-    if (!fs.existsSync(STATE_PATH)) return { configured: false };
-    const s = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8")) as SetupState;
-    // Self-heal: if the state claims configured but the project vanished from
-    // config.json, treat setup as incomplete again.
-    if (s.configured && s.project && !projectExists(s.project)) {
-      return { configured: false, project: s.project };
+    if (!fs.existsSync(STATE_PATH)) return { projects: [] };
+    const s = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8")) as Record<string, unknown>;
+    // New shape.
+    if (Array.isArray(s.projects)) {
+      return { projects: s.projects as string[], last_project: s.last_project as string | undefined };
     }
-    return s;
+    // Migrate old single-project shape { configured, project }.
+    if (typeof s.project === "string") {
+      return { projects: [s.project], last_project: s.project };
+    }
+    return { projects: [] };
   } catch {
-    return { configured: false };
+    return { projects: [] };
   }
 }
 
-function writeState(s: SetupState): void {
+function writeScope(s: ScopeState): void {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2) + "\n", "utf-8");
 }
 
+export function managedProjects(): string[] {
+  return readScope().projects;
+}
+
+export function recordManagedProject(name: string): void {
+  const s = readScope();
+  if (!s.projects.includes(name)) s.projects.push(name);
+  s.last_project = name;
+  writeScope(s);
+}
+
+// ---------------------------------------------------------------------------
+// config.json read + project upsert.
+// ---------------------------------------------------------------------------
 interface ConfigFile {
   projects?: Array<Record<string, unknown>>;
   [k: string]: unknown;
@@ -92,8 +113,7 @@ function readConfig(): ConfigFile {
 
 export function projectExists(name: string): boolean {
   try {
-    const cfg = readConfig();
-    return (cfg.projects || []).some((p) => p.name === name);
+    return (readConfig().projects || []).some((p) => p.name === name);
   } catch {
     return false;
   }
@@ -108,30 +128,31 @@ function normalizeTopics(t: string[] | string | undefined): string[] | undefined
     .filter(Boolean);
 }
 
-// The fields the user actually supplies via setup. These are the ONLY fields we
-// ever write onto an existing project (so we never clobber weight, platform,
-// links, github, etc. on a project that already exists in config.json).
-function userFields(input: ProjectInput): Record<string, unknown> {
-  const fields: Record<string, unknown> = {
-    name: input.name,
-    website: input.website,
-    description: input.description,
-    icp: input.icp,
-    voice: input.voice,
+// The fields the user actually supplies via setup. Only fields that are present
+// AND non-empty get written, so an incremental call merges just what it carries
+// and never blanks an existing field or clobbers weight/platform/links/github.
+// name is always included (it's the match key).
+function userFields(input: Partial<ProjectInput>): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  const setStr = (k: keyof ProjectInput) => {
+    const v = input[k];
+    if (v != null && String(v).trim() !== "") fields[k] = v;
   };
-  if (input.differentiator) fields.differentiator = input.differentiator;
+  if (input.name != null) fields.name = input.name;
+  setStr("website");
+  setStr("description");
+  setStr("icp");
+  setStr("voice");
+  setStr("differentiator");
   const topics = normalizeTopics(input.search_topics);
   if (topics && topics.length) fields.search_topics = topics;
-  if (input.get_started_link) fields.get_started_link = input.get_started_link;
-  if (input.content_guardrails) fields.content_guardrails = input.content_guardrails;
+  setStr("get_started_link");
+  setStr("content_guardrails");
   return fields;
 }
 
 // A brand-new project entry: user fields plus the defaults a fresh X-rail
-// project needs. voice_relationship defaults to "first_party" (the customer
-// posts for their OWN product; drives get_voice_relationship_rule prompt voice)
-// and platform=twitter scopes the install to the X rail. These defaults are
-// applied ONLY on create, never on update.
+// project needs. Applied ONLY on create, never on update.
 export function buildProjectEntry(input: ProjectInput): Record<string, unknown> {
   return {
     weight: 10,
@@ -141,25 +162,28 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
   };
 }
 
-// Upsert the project into config.json projects[] (match by name) and mark setup
-// complete in the state file. Backs up config.json first.
-export function applySetup(input: ProjectInput): { project: string; created: boolean } {
+// Upsert the project into config.json projects[] (match by name), incrementally
+// merging only the supplied fields, and record it as managed by this install.
+// Backs up config.json first. Does NOT require all fields — readiness is checked
+// separately, so a project can be filled out over several calls.
+export function applySetup(input: ProjectInput): {
+  project: string;
+  created: boolean;
+  ready: boolean;
+  missing_required: string[];
+} {
   const cfg = readConfig();
   cfg.projects = cfg.projects || [];
   const idx = cfg.projects.findIndex((p) => p.name === input.name);
   let created: boolean;
   if (idx >= 0) {
-    // Update: merge ONLY the user-supplied fields. Never touch defaults
-    // (weight, platform, voice_relationship) or any other existing field, so a
-    // project that already exists in config.json keeps its real configuration.
+    // Update: merge ONLY supplied fields; keep every other existing field.
     cfg.projects[idx] = { ...cfg.projects[idx], ...userFields(input) };
     created = false;
   } else {
-    // Create: full entry with X-rail defaults.
     cfg.projects.push(buildProjectEntry(input));
     created = true;
   }
-  // Backup before writing.
   if (fs.existsSync(CONFIG_PATH)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     fs.copyFileSync(CONFIG_PATH, `${CONFIG_PATH}.bak-${stamp}`);
@@ -167,37 +191,26 @@ export function applySetup(input: ProjectInput): { project: string; created: boo
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 
-  writeState({
-    configured: true,
-    project: input.name,
-    completed_at: new Date().toISOString(),
-    config_path: CONFIG_PATH,
-  });
-  return { project: input.name, created };
+  recordManagedProject(input.name);
+  const missing = missingForProject(input.name) ?? [];
+  return { project: input.name, created, ready: missing.length === 0, missing_required: missing };
 }
 
-// Which required fields are missing from a partial input (for status reporting).
-export function missingRequired(partial: Partial<ProjectInput>): string[] {
-  return REQUIRED_FIELDS.filter((f) => {
-    const v = partial[f];
-    return v == null || String(v).trim() === "";
-  });
-}
+// ---------------------------------------------------------------------------
+// Readiness (derived from config.json, never stored).
+// ---------------------------------------------------------------------------
 
 // Which required fields are missing on the persisted project in config.json.
-// Used by status mode so it reflects what's actually saved, not the call args.
 // Returns null when the named project can't be found/read.
 export function missingForProject(name: string | undefined): string[] | null {
   if (!name) return null;
   try {
-    const cfg = readConfig();
-    const proj = (cfg.projects || []).find((p) => p.name === name);
+    const proj = (readConfig().projects || []).find((p) => p.name === name);
     if (!proj) return null;
     return REQUIRED_FIELDS.filter((f) => {
       const v = proj[f];
       if (v == null) return true;
       if (typeof v === "string") return v.trim() === "";
-      // Non-empty objects/arrays (e.g. structured voice) count as present.
       if (Array.isArray(v)) return v.length === 0;
       if (typeof v === "object") return Object.keys(v).length === 0;
       return false;
@@ -207,24 +220,78 @@ export function missingForProject(name: string | undefined): string[] | null {
   }
 }
 
-export interface SetupGate {
+export interface ProjectStatus {
+  name: string;
+  in_config: boolean;
+  ready: boolean;
+  missing_required: string[];
+}
+
+export function projectStatus(name: string): ProjectStatus {
+  const missing = missingForProject(name);
+  if (missing === null) {
+    return { name, in_config: false, ready: false, missing_required: [...REQUIRED_FIELDS] };
+  }
+  return { name, in_config: true, ready: missing.length === 0, missing_required: missing };
+}
+
+// Status of every project this install manages.
+export function listManagedProjectStatus(): ProjectStatus[] {
+  return managedProjects().map(projectStatus);
+}
+
+export function hasReadyProject(): boolean {
+  return listManagedProjectStatus().some((s) => s.ready);
+}
+
+// ---------------------------------------------------------------------------
+// Gate the action tools call to resolve + validate the target project.
+// ---------------------------------------------------------------------------
+export interface Resolved {
   ok: boolean;
-  state: SetupState;
+  project?: string;
   message?: string;
 }
 
-// The guardrail action tools call before doing anything.
-export function requireSetup(): SetupGate {
-  const state = getSetupState();
-  if (state.configured) return { ok: true, state };
-  return {
-    ok: false,
-    state,
-    message:
-      "Setup required: this install has no project configured yet. Run the `setup` tool " +
-      "first. To set up, collect from the user: their website URL, a short description of " +
-      "what the product does, who their target audience/customer is (icp), their preferred " +
-      "brand voice/tone, and optionally their main call-to-action link and any topics worth " +
-      "monitoring on X. Then call `setup` with those fields.",
-  };
+const SETUP_REQUIRED_MESSAGE =
+  "No project is set up yet. Run the `setup` tool first: collect from the user their website " +
+  "URL, what the product does (description), who to target (icp), and brand voice/tone, then " +
+  "call setup with a short name plus those fields. You can set up multiple products; each is " +
+  "configured independently and you fill the fields incrementally.";
+
+export function resolveProject(requested?: string): Resolved {
+  if (requested) {
+    const st = projectStatus(requested);
+    if (!st.in_config) {
+      return {
+        ok: false,
+        message:
+          `Project '${requested}' isn't set up yet. Run setup with name='${requested}' plus its ` +
+          `website, description, icp, and voice.`,
+      };
+    }
+    if (!st.ready) {
+      return {
+        ok: false,
+        message:
+          `Project '${requested}' still needs: ${st.missing_required.join(", ")}. Ask the user ` +
+          `for those and call setup again with name='${requested}'.`,
+      };
+    }
+    return { ok: true, project: requested };
+  }
+  const statuses = listManagedProjectStatus();
+  const ready = statuses.filter((s) => s.ready).map((s) => s.name);
+  if (ready.length === 1) return { ok: true, project: ready[0] };
+  if (ready.length > 1) {
+    return {
+      ok: false,
+      message: `Multiple projects are set up (${ready.join(", ")}). Tell me which one to use (pass the project name).`,
+    };
+  }
+  const partial = statuses.filter((s) => !s.ready).map((s) => s.name);
+  if (partial.length) {
+    return { ok: false, message: `No project is fully set up yet. Finish setup for: ${partial.join(", ")}.` };
+  }
+  return { ok: false, message: SETUP_REQUIRED_MESSAGE };
 }
