@@ -25,6 +25,16 @@ import {
   type Plan,
   type PlanCandidate,
 } from "./repo.js";
+import {
+  applySetup,
+  getSetupState,
+  requireSetup,
+  missingRequired,
+  REQUIRED_FIELDS,
+  RECOMMENDED_FIELDS,
+  CONFIG_PATH,
+  type ProjectInput,
+} from "./setup.js";
 
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
@@ -165,6 +175,101 @@ async function postApproved(batchId: string, plan: Plan) {
   };
 }
 
+// ---- setup: first-run config (the "brain": project, website, voice) -------
+// Run this FIRST. The action tools refuse until it's done. Call with no
+// project fields (or status:true) to check status / see what to collect; call
+// with the fields to write the project into config.json and mark setup done.
+server.registerTool(
+  "setup",
+  {
+    title: "Set up this install",
+    description:
+      "Run this FIRST, before any drafting or autopilot. Configures the single project this " +
+      "install posts for: its website, what it does (description), who to target (icp), and " +
+      "brand voice. Call with status:true (or no fields) to see current setup status and what " +
+      "to collect from the user. Once you've gathered the user's website, product description, " +
+      "target audience, and brand voice, call setup again WITH those fields to finish. The " +
+      "draft_cycle, autopilot, and get_stats tools refuse to run until setup is complete.",
+    inputSchema: {
+      status: z.boolean().optional(),
+      name: z
+        .string()
+        .optional()
+        .describe("Short machine slug for the project, e.g. 'nicia' (lowercase, no spaces)"),
+      website: z.string().optional().describe("The product's website URL"),
+      description: z.string().optional().describe("What the product does, 1-3 sentences"),
+      icp: z
+        .string()
+        .optional()
+        .describe("Ideal customer / target audience to engage on X"),
+      voice: z.string().optional().describe("Brand voice / tone for the replies"),
+      differentiator: z
+        .string()
+        .optional()
+        .describe("What makes it different from alternatives (recommended)"),
+      search_topics: z
+        .union([z.array(z.string()), z.string()])
+        .optional()
+        .describe("Topics/keywords to monitor on X (comma-separated or array)"),
+      get_started_link: z
+        .string()
+        .optional()
+        .describe("Primary call-to-action link (signup / get started)"),
+      content_guardrails: z
+        .string()
+        .optional()
+        .describe("Anything the posts must avoid saying / claiming"),
+    },
+  },
+  async (args) => {
+    const state = getSetupState();
+    const hasCoreFields = !!(args.name && args.website && args.description);
+
+    // Status / discovery mode: no real fields supplied, or explicitly asked.
+    if (args.status === true || !hasCoreFields) {
+      const missing = missingRequired(args as Partial<ProjectInput>);
+      return jsonContent({
+        configured: state.configured,
+        project: state.project ?? null,
+        completed_at: state.completed_at ?? null,
+        config_path: CONFIG_PATH,
+        required_fields: REQUIRED_FIELDS,
+        recommended_fields: RECOMMENDED_FIELDS,
+        missing_required: missing,
+        next_step: state.configured
+          ? "Setup is complete. To reconfigure, call setup again with updated fields."
+          : "Collect the required fields from the user (website, description, icp, voice, and a " +
+            "short name), then call setup again with them. Ask conversationally; don't dump a form.",
+      });
+    }
+
+    // Apply mode: validate required, then write the project + mark complete.
+    const missing = missingRequired(args as Partial<ProjectInput>);
+    if (missing.length) {
+      return jsonContent({
+        ok: false,
+        error: "missing_required_fields",
+        missing_required: missing,
+        note: "Ask the user for these, then call setup again with the full set.",
+      });
+    }
+    try {
+      const result = applySetup(args as ProjectInput);
+      return jsonContent({
+        ok: true,
+        project: result.project,
+        action: result.created ? "created" : "updated",
+        config_path: CONFIG_PATH,
+        note:
+          `Setup complete. Project '${result.project}' is now in config.json and this install ` +
+          `is configured. You can now run draft_cycle, autopilot, and get_stats.`,
+      });
+    } catch (e) {
+      return textContent(`Setup failed: ${(e as Error).message}`);
+    }
+  }
+);
+
 // ---- draft_cycle: the whole manual loop in one tool -----------------------
 server.registerTool(
   "draft_cycle",
@@ -179,7 +284,11 @@ server.registerTool(
     },
   },
   async ({ project }) => {
-    const drafted = await produceDrafts(project);
+    const gate = requireSetup();
+    if (!gate.ok) return textContent(gate.message!);
+    // Default to the project this install was set up for.
+    const proj = project ?? gate.state.project;
+    const drafted = await produceDrafts(proj);
     if (drafted.blocked || !drafted.batchId) {
       return textContent(drafted.blocked ?? "No drafts produced.");
     }
@@ -224,6 +333,10 @@ server.registerTool(
     },
   },
   async ({ action }) => {
+    if (action !== "status") {
+      const gate = requireSetup();
+      if (!gate.ok) return textContent(gate.message!);
+    }
     const uid = process.getuid ? process.getuid() : 0;
     if (action === "status") {
       const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
@@ -273,8 +386,11 @@ server.registerTool(
     },
   },
   async ({ days, project }) => {
+    const gate = requireSetup();
+    if (!gate.ok) return textContent(gate.message!);
+    const proj = project ?? gate.state.project;
     const args = ["--posts-only", "--platform", "twitter", "--days", String(days)];
-    if (project) args.push("--project", project);
+    if (proj) args.push("--project", proj);
     const res = await runPython("scripts/project_stats_json.py", args, { timeoutMs: 120_000 });
     if (res.code !== 0) {
       return textContent(`stats failed (exit ${res.code}):\n${res.stderr || res.stdout}`);
