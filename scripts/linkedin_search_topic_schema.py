@@ -1,56 +1,47 @@
 #!/usr/bin/env python3
-"""Ensure LinkedIn discovery tables carry the assigned search_topic.
+"""LinkedIn discovery search_topic columns: now a graceful no-op.
 
-The LinkedIn post-comments pipeline now mirrors Twitter's split between:
+The LinkedIn post-comments pipeline mirrors Twitter's split between:
 
 * search_topic: the project-level concept picked once per cycle
 * search_query: the literal LinkedIn search phrase drafted from that topic
 
-This helper keeps older installs from failing when the new columns are first
-used by the pipeline.
+These columns (linkedin_candidates.search_topic, linkedin_search_attempts.
+search_topic) and their indexes now exist permanently in the production
+schema, which is authoritative. As of the 2026-06-01 HTTP-API migration this
+process no longer holds a DATABASE_URL, so there is nothing for it to migrate.
+
+We keep the DDL below as documentation of the expected shape, but ensure() is
+now a no-op so the run-linkedin.sh callsites (standalone invocation + the
+PA_PICK import) keep working without any direct DB access.
 """
 
-import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-
-
+# Documented expected schema. Applied once, server-side, when these columns
+# were first introduced; retained here only as a reference of the shape.
 DDL = [
-    """
-    ALTER TABLE linkedin_candidates
-        ADD COLUMN IF NOT EXISTS search_topic TEXT
-    """,
-    """
-    ALTER TABLE linkedin_search_attempts
-        ADD COLUMN IF NOT EXISTS search_topic TEXT
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_lc_search_topic
-        ON linkedin_candidates(search_topic, discovered_at DESC)
-        WHERE search_topic IS NOT NULL
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_lsa_search_topic
-        ON linkedin_search_attempts(project_name, search_topic, ran_at DESC)
-        WHERE search_topic IS NOT NULL
-    """,
+    "ALTER TABLE linkedin_candidates "
+    "ADD COLUMN IF NOT EXISTS search_topic TEXT",
+    "ALTER TABLE linkedin_search_attempts "
+    "ADD COLUMN IF NOT EXISTS search_topic TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_lc_search_topic "
+    "ON linkedin_candidates(search_topic, discovered_at DESC) "
+    "WHERE search_topic IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_lsa_search_topic "
+    "ON linkedin_search_attempts(project_name, search_topic, ran_at DESC) "
+    "WHERE search_topic IS NOT NULL",
 ]
 
 
-def ensure(conn):
-    for sql in DDL:
-        conn.execute(sql)
-    conn.commit()
+def ensure(conn=None):
+    """No-op. The production schema is authoritative; the search_topic
+    columns and indexes already exist. Accepts an optional conn argument
+    for backward compatibility with old callers, and ignores it."""
+    return None
 
 
 def main():
-    conn = dbmod.get_conn()
-    try:
-        ensure(conn)
-    finally:
-        conn.close()
     return 0
 
 
