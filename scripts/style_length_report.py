@@ -175,11 +175,17 @@ def overall(rows, targets):
     if not rows:
         return {}
     lens = sorted(r["clen"] for r in rows)
-    # target per row (so the weighted target reflects the style mix we posted)
-    tlist = [targets.get(r["style"]) for r in rows]
+    # target per row (so the weighted target reflects the style mix we posted):
+    # snapshot when present, else live registry target.
+    tlist = [
+        (r["snap_target"] if r["snap_target"] else targets.get(r["style"]))
+        for r in rows
+    ]
     tlist = [t for t in tlist if t is not None]
+    snap_n = sum(1 for r in rows if r["snap_target"])
     return {
         "n": len(rows),
+        "snap_n": snap_n,
         "realized_p50": pct(lens, 50),
         "realized_avg": round(sum(lens) / len(lens)),
         "target_p50_weighted": pct(sorted(tlist), 50) if tlist else None,
@@ -191,7 +197,8 @@ def render_table(report, ov, platform, days):
     lines = []
     lines.append(
         f"Style length report  platform={platform}  window={days}d  "
-        f"comments={ov.get('n', 0)}"
+        f"comments={ov.get('n', 0)}  "
+        f"snapshotted={ov.get('snap_n', 0)} (rest fall back to live target)"
     )
     if ov:
         lines.append(
@@ -208,17 +215,18 @@ def render_table(report, ov, platform, days):
                 f"({ratio:.1f}x)"
             )
     lines.append("")
-    hdr = (f"{'style':28} {'n':>5} {'tgt':>5} {'p25':>5} {'p50':>5} "
-           f"{'p75':>5} {'avg':>5} {'delta':>6} {'views':>7} {'likes':>6}")
+    hdr = (f"{'style':28} {'n':>5} {'snap':>5} {'tgt':>5} {'p25':>5} "
+           f"{'p50':>5} {'p75':>5} {'avg':>5} {'delta':>6} {'views':>7} "
+           f"{'likes':>6}")
     lines.append(hdr)
     lines.append("-" * len(hdr))
     for r in report:
         tgt = "?" if r["target_chars"] is None else str(r["target_chars"])
         delta = "" if r["delta"] is None else f"{r['delta']:+d}"
         lines.append(
-            f"{r['style'][:28]:28} {r['n']:>5} {tgt:>5} {r['p25']:>5} "
-            f"{r['p50']:>5} {r['p75']:>5} {r['avg']:>5} {delta:>6} "
-            f"{r['avg_views']:>7} {r['avg_likes']:>6}"
+            f"{r['style'][:28]:28} {r['n']:>5} {r['snap_n']:>5} {tgt:>5} "
+            f"{r['p25']:>5} {r['p50']:>5} {r['p75']:>5} {r['avg']:>5} "
+            f"{delta:>6} {r['avg_views']:>7} {r['avg_likes']:>6}"
         )
     return "\n".join(lines)
 
