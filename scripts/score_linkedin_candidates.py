@@ -221,36 +221,42 @@ def _parse_age_hours(cand):
     return None
 
 
-def upsert_candidates(candidates, batch_id=None):
-    """Score and upsert LinkedIn candidates. Returns (inserted, skipped, errors)."""
-    conn = dbmod.get_conn()
-    ensure_search_topic_schema(conn)
+def _fetch_posted_urls():
+    """Return the set of normalized LinkedIn thread URLs we've already posted
+    on, scoped per-account when an account name is configured (falls back to
+    unscoped for legacy single-account behavior).
 
+    Migrated 2026-06-01 from a direct `SELECT thread_url FROM posts` to the
+    s4l.ai HTTP API (GET /api/v1/posts/thread-urls).
+    """
+    _li_name = _resolve_account("linkedin")
+    resp = api_get(
+        "/api/v1/posts/thread-urls",
+        query={"platform": "linkedin", "our_account": _li_name},
+    )
+    urls = (resp.get("data") or {}).get("thread_urls") or []
+    posted = set()
+    for u in urls:
+        norm = _normalize_post_url(u)
+        if norm:
+            posted.add(norm)
+    return posted
+
+
+def upsert_candidates(candidates, batch_id=None):
+    """Score and upsert LinkedIn candidates. Returns (inserted, skipped, errors).
+
+    Migrated 2026-06-01 from direct psycopg2 INSERT...ON CONFLICT to the s4l.ai
+    HTTP API (POST /api/v1/linkedin-candidates, which mirrors the upsert
+    server-side). The dedup-against-posted query moved to
+    GET /api/v1/posts/thread-urls. Scoring stays client-side (pure Python).
+    """
     # Dedupe against already-posted LinkedIn threads (the engaged-id check
     # in run-linkedin.sh covers URN-level dedup, but this catches URL-level
-    # dupes too in case someone hand-feeds candidates). Scoped per-account
-    # so multiple LinkedIn personas don't block each other; falls back to
-    # unscoped when no name is configured (legacy single-account behavior).
-    posted_urls = set()
-    _li_name = _resolve_account("linkedin")
-    if _li_name:
-        rows = conn.execute(
-            "SELECT thread_url FROM posts "
-            "WHERE platform='linkedin' AND thread_url IS NOT NULL "
-            "  AND our_account = %s",
-            [_li_name],
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT thread_url FROM posts "
-            "WHERE platform='linkedin' AND thread_url IS NOT NULL"
-        ).fetchall()
-    for row in rows:
-        norm = _normalize_post_url(row[0])
-        if norm:
-            posted_urls.add(norm)
+    # dupes too in case someone hand-feeds candidates).
+    posted_urls = _fetch_posted_urls()
 
-    inserted = updated = skipped = errors = 0
+    inserted = skipped = errors = 0
 
     for cand in candidates:
         if not isinstance(cand, dict):
@@ -296,106 +302,61 @@ def upsert_candidates(candidates, batch_id=None):
         else:
             all_urns_str = str(all_urns)
 
-        params = [
-            post_url,
-            cand.get("activity_id") or None,
-            all_urns_str or None,
-            cand.get("author_name") or None,
-            cand.get("author_profile_url") or None,
-            int(cand.get("author_followers") or 0) or None,
-            (cand.get("post_text") or "") or None,
-            post_posted_at,
-            age_clamped,
-            int(cand.get("reactions") or 0),
-            int(cand.get("comments") or 0),
-            int(cand.get("reposts") or 0),
-            velocity,         # engagement_velocity (raw)
-            virality,         # velocity_score (post-multiplier)
-            float(cand["serp_quality_score"]) if cand.get("serp_quality_score") is not None else None,
-            cand.get("search_topic") or None,
-            cand.get("search_query") or None,
-            cand.get("matched_project") or None,
-            cand.get("language") or "en",
-            batch_id,
-        ]
+        payload = {
+            "post_url": post_url,
+            "activity_id": cand.get("activity_id") or None,
+            "all_urns": all_urns_str or None,
+            "author_name": cand.get("author_name") or None,
+            "author_profile_url": cand.get("author_profile_url") or None,
+            "author_followers": int(cand.get("author_followers") or 0) or None,
+            "post_text": (cand.get("post_text") or "") or None,
+            "post_posted_at": post_posted_at,
+            "age_hours": age_clamped,
+            "reactions": int(cand.get("reactions") or 0),
+            "comments": int(cand.get("comments") or 0),
+            "reposts": int(cand.get("reposts") or 0),
+            "engagement_velocity": velocity,   # raw
+            "velocity_score": virality,        # post-multiplier
+            "serp_quality_score": (
+                float(cand["serp_quality_score"])
+                if cand.get("serp_quality_score") is not None else None
+            ),
+            "search_topic": cand.get("search_topic") or None,
+            "search_query": cand.get("search_query") or None,
+            "matched_project": cand.get("matched_project") or None,
+            "language": cand.get("language") or "en",
+            "batch_id": batch_id,
+        }
 
         try:
-            conn.execute(
-                """
-                INSERT INTO linkedin_candidates
-                    (post_url, activity_id, all_urns, author_name, author_profile_url,
-                     author_followers, post_text, post_posted_at, age_hours,
-                     reactions, comments, reposts,
-                     engagement_velocity, velocity_score, serp_quality_score,
-                     search_topic, search_query, matched_project, language,
-                     status, discovered_at, batch_id)
-                VALUES (%s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s, %s,
-                        'pending', NOW(), %s)
-                ON CONFLICT (post_url) DO UPDATE SET
-                    activity_id        = COALESCE(EXCLUDED.activity_id, linkedin_candidates.activity_id),
-                    all_urns           = COALESCE(EXCLUDED.all_urns, linkedin_candidates.all_urns),
-                    author_name        = COALESCE(EXCLUDED.author_name, linkedin_candidates.author_name),
-                    author_profile_url = COALESCE(EXCLUDED.author_profile_url, linkedin_candidates.author_profile_url),
-                    author_followers   = COALESCE(EXCLUDED.author_followers, linkedin_candidates.author_followers),
-                    post_text          = COALESCE(EXCLUDED.post_text, linkedin_candidates.post_text),
-                    post_posted_at     = COALESCE(EXCLUDED.post_posted_at, linkedin_candidates.post_posted_at),
-                    age_hours          = EXCLUDED.age_hours,
-                    reactions          = EXCLUDED.reactions,
-                    comments           = EXCLUDED.comments,
-                    reposts            = EXCLUDED.reposts,
-                    engagement_velocity= EXCLUDED.engagement_velocity,
-                    velocity_score     = EXCLUDED.velocity_score,
-                    serp_quality_score = COALESCE(EXCLUDED.serp_quality_score, linkedin_candidates.serp_quality_score),
-                    search_topic       = COALESCE(EXCLUDED.search_topic, linkedin_candidates.search_topic),
-                    search_query       = COALESCE(EXCLUDED.search_query, linkedin_candidates.search_query),
-                    matched_project    = COALESCE(EXCLUDED.matched_project, linkedin_candidates.matched_project),
-                    language           = COALESCE(EXCLUDED.language, linkedin_candidates.language),
-                    -- 'posted' and 'skipped' are terminal decisions and must NOT
-                    -- be reset on re-discovery. Mirrors the twitter_candidates fix
-                    -- shipped 2026-05-22 for the zombie-pending bug: re-discovery
-                    -- within the freshness window otherwise clobbers a Claude skip
-                    -- decision back to 'pending', so Phase 0 salvage keeps re-pulling
-                    -- the same row every cycle until hard-expire mercy-kills it.
-                    status             = CASE
-                                            WHEN linkedin_candidates.status IN ('posted', 'skipped') THEN linkedin_candidates.status
-                                            ELSE 'pending'
-                                         END,
-                    batch_id           = COALESCE(EXCLUDED.batch_id, linkedin_candidates.batch_id)
-                """,
-                params,
-            )
+            # The endpoint mirrors the ON CONFLICT (post_url) DO UPDATE upsert:
+            # COALESCE-bumps discovery fields, overwrites engagement metrics,
+            # and preserves terminal statuses ('posted'/'skipped') while
+            # resetting everything else to 'pending'.
+            api_post("/api/v1/linkedin-candidates", payload)
             inserted += 1
-        except Exception as e:
+        except SystemExit as e:
             print(f"  Error inserting {post_url}: {e}", file=sys.stderr)
-            try:
-                conn._conn.rollback()
-            except Exception:
-                pass
             errors += 1
             continue
 
-    conn.commit()
-    expire_and_prune(conn)
-    conn.close()
+    expire_and_prune()
     return inserted, skipped, errors
 
 
-def expire_and_prune(conn):
+def expire_and_prune(_conn=None):
     """Flip stale pending rows to 'expired'. We do NOT prune terminal rows
     by age (per user instruction 2026-05-08); every linkedin_candidates row
     is kept forever so we can audit skip reasons, engagement dynamics, and
     project routing across time. Function name kept for caller compatibility.
+
+    Migrated 2026-06-01 to POST /api/v1/linkedin-candidates/expire-stale.
+    The optional _conn arg is ignored (legacy signature compatibility).
     """
-    conn.execute(
-        f"UPDATE linkedin_candidates SET status='expired' "
-        f"WHERE status='pending' "
-        f"AND discovered_at < NOW() - INTERVAL '{int(EXPIRE_PENDING_AFTER_HOURS)} hours'"
+    api_post(
+        "/api/v1/linkedin-candidates/expire-stale",
+        {"hours": int(EXPIRE_PENDING_AFTER_HOURS)},
     )
-    conn.commit()
 
 
 def main():
@@ -409,9 +370,7 @@ def main():
     args = parser.parse_args()
 
     if args.expire_only:
-        conn = dbmod.get_conn()
-        expire_and_prune(conn)
-        conn.close()
+        expire_and_prune()
         if not args.quiet:
             print("Expired/pruned old linkedin_candidates")
         return 0
