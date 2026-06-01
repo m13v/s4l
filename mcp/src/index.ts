@@ -30,6 +30,7 @@ import {
   getSetupState,
   requireSetup,
   missingRequired,
+  missingForProject,
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   CONFIG_PATH,
@@ -227,7 +228,13 @@ server.registerTool(
 
     // Status / discovery mode: no real fields supplied, or explicitly asked.
     if (args.status === true || !hasCoreFields) {
-      const missing = missingRequired(args as Partial<ProjectInput>);
+      // Report missing against what's actually saved (the configured project in
+      // config.json), falling back to the call args only when nothing is set up
+      // yet. Avoids the bug where a bare status call reported every required
+      // field as "missing" despite a complete config.
+      const missing = state.configured
+        ? missingForProject(state.project) ?? missingRequired(args as Partial<ProjectInput>)
+        : missingRequired(args as Partial<ProjectInput>);
       return jsonContent({
         configured: state.configured,
         project: state.project ?? null,
