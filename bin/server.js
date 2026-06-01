@@ -6423,13 +6423,22 @@ async function handleApi(req, res) {
             acc.n_posted += v.n_posted;
             return acc;
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
-          // Assignment weights: TWITTER_TAIL_LINK_RATE (default 0.5) is the
-          // fraction assigned to the 'link' arm; rest go to 'no_link'. The
-          // env var isn't surfaced live to the dashboard, so we bake the
-          // default here; if the rate is ever changed in production update
-          // the values below to match.
+          // Assignment weights read LIVE from .env so the dashboard never
+          // shows a stale hardcoded split. TWITTER_TAIL_LINK_RATE is the
+          // fraction assigned to the 'link' arm; the rest go to 'no_link'.
+          // Falls back to 0.5 only if the var is absent/unparseable. The
+          // "Weight" column shows this configured intent; the "Actual share"
+          // row above the table shows what was really posted, so any drift
+          // between intended and observed split is visible at a glance.
+          const tlRate = (() => {
+            const raw = (loadEnv().TWITTER_TAIL_LINK_RATE || '').trim();
+            const n = Number(raw);
+            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
+          })();
+          const tlWeightLink = Math.round(tlRate * 1000) / 10;
+          const tlWeightNoLink = Math.round((1 - tlRate) * 1000) / 10;
           tlVariants.forEach(v => {
-            v.weight_pct = v.key === 'link' ? 50 : 50;
+            v.weight_pct = v.key === 'link' ? tlWeightLink : tlWeightNoLink;
           });
           const tlStartedAt = tlVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
           experiments.push({
