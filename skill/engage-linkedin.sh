@@ -123,20 +123,19 @@ EXCLUSIONS - do NOT engage with these accounts:
 
 ### Step 1: Load existing reply comment IDs (dedup)
 \`\`\`bash
-source ~/social-autoposter/.env
-psql "\$DATABASE_URL" -t -A -c "SELECT their_comment_id FROM replies WHERE platform='linkedin';"
+python3 ~/social-autoposter/scripts/li_discovery.py comment-ids
 \`\`\`
 Skip any notification whose comment URN is already in this list.
 
 ### Step 2: Load author+post pairs we already engaged with
 \`\`\`bash
-psql "\$DATABASE_URL" -t -A -c "SELECT DISTINCT r.their_author || '|||' || p.our_url FROM replies r JOIN posts p ON r.post_id = p.id WHERE r.platform='linkedin' AND r.status IN ('replied','pending','processing');"
+python3 ~/social-autoposter/scripts/li_discovery.py engaged-pairs
 \`\`\`
 Skip any notification whose (author, post) pair is already here. One reply per author per thread.
 
 ### Step 3: Load our LinkedIn posts for matching
 \`\`\`bash
-psql "\$DATABASE_URL" -t -A -c "SELECT id, our_url FROM posts WHERE platform='linkedin' AND status='active';"
+python3 ~/social-autoposter/scripts/li_discovery.py posts
 \`\`\`
 
 ### Step 4: Navigate to LinkedIn notifications and verify session
@@ -204,12 +203,17 @@ For each item:
 - If comment_urn is in the Step 1 dedup list: skip (already_tracked)
 - If author matches an excluded account or is our own: skip (excluded_author / own_account)
 - Build author_post_key = author + '|||' + our_url-for-this-post. If this pair is in the Step 2 list: skip (author_already_engaged)
-- Find matching post_id from Step 3 by activity_id in the our_url. If none: create one via INSERT (use PROJECT_NAME matched from config.json projects[].topics against the post topic, thread_url = https://www.linkedin.com/feed/update/urn:li:activity:\$ACTIVITY_ID/, our_url same).
+- Find matching post_id from Step 3 by activity_id in the our_url. If none: create one (use PROJECT_NAME matched from config.json projects[].topics against the post topic):
+\`\`\`bash
+python3 ~/social-autoposter/scripts/li_discovery.py create-post --activity-id "ACTIVITY_ID" --project "PROJECT_NAME" --author "AUTHOR"
+\`\`\`
+This prints the post id (reusing the existing row on duplicate). Use that id as POST_ID below.
 
 Insert the reply:
 \`\`\`bash
-psql "\$DATABASE_URL" -c "INSERT INTO replies (post_id, platform, their_comment_id, their_author, their_content, their_comment_url, depth, status) VALUES (POST_ID, 'linkedin', 'COMMENT_URN', 'AUTHOR', 'SNIPPET', 'HREF', 1, 'pending');"
+python3 ~/social-autoposter/scripts/li_discovery.py insert-reply --post-id POST_ID --comment-urn "COMMENT_URN" --author "AUTHOR" --content "SNIPPET" --href "HREF"
 \`\`\`
+Prints the new reply id, or "duplicate" / "gated:<reason>" (both are non-fatal, just move to the next item).
 
 ### Step 8: Summary
 Print:
@@ -258,36 +262,29 @@ rm -f "$PHASE_A_PROMPT"
 # ═══════════════════════════════════════════════════════
 
 # Reset any 'processing' items older than 2 hours back to 'pending'
-RESET_COUNT=$(psql "$DATABASE_URL" -t -A -c "
-    UPDATE replies SET status='pending'
-    WHERE platform='linkedin' AND status='processing' AND processing_at < NOW() - INTERVAL '2 hours'
-    RETURNING id;" | wc -l | tr -d ' ')
+RESET_COUNT=$(li_reset_processing 2)
 [ "$RESET_COUNT" -gt 0 ] && log "Phase B: Reset $RESET_COUNT stuck 'processing' LinkedIn items back to pending"
 
-PENDING_COUNT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='linkedin' AND status='pending';")
+PENDING_COUNT=$(li_reply_count pending)
 
 if [ "$PENDING_COUNT" -eq 0 ]; then
     log "Phase B: No pending LinkedIn replies. Done!"
 else
     log "Phase B: $PENDING_COUNT pending LinkedIn replies to process"
 
-    PENDING_DATA=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT json_agg(q) FROM (
-            SELECT r.id, r.platform, r.their_author,
-                   r.their_content as their_content,
-                   r.their_comment_url, r.their_comment_id, r.depth,
-                   p.thread_title as thread_title,
-                   p.thread_url, p.our_content as our_content, p.our_url,
-                   CASE WHEN p.thread_url = p.our_url THEN 1 ELSE 0 END as is_our_original_post,
-                   p.project_name
-            FROM replies r
-            JOIN posts p ON r.post_id = p.id
-            WHERE r.platform='linkedin' AND r.status='pending'
-            ORDER BY
-                CASE WHEN p.thread_url = p.our_url THEN 0 ELSE 1 END,
-                r.discovered_at ASC
-            LIMIT $BATCH_SIZE
-        ) q;")
+    # Pull the full pending batch via the next-pending endpoint (no DATABASE_URL).
+    # The route applies the same ordering the old json_agg query used (our own
+    # posts first, then oldest discovered_at) and returns {replies:[...]}. We
+    # extract the array so PENDING_DATA stays the same JSON shape the prompt
+    # consumed before the migration.
+    PENDING_DATA=$("$PY_BIN" -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from http_api import api_get
+resp = api_get('/api/v1/replies/next-pending', {'platform': 'linkedin', 'limit': int('$BATCH_SIZE')})
+rows = (resp.get('data') or {}).get('replies') or []
+print(json.dumps(rows))
+" 2>/dev/null || echo "[]")
 
     # Per-project voice map (so each reply can be drafted in the matched project's voice)
     PROJECTS_VOICE_JSON=$(python3 -c "
@@ -430,8 +427,7 @@ NEVER use psql directly for reply status updates.
 
 ### Project tracking on replies
 When you recommend a project in a reply (Tier 2 or Tier 3), set project_name on the reply:
-  source ~/social-autoposter/.env
-  psql "\$DATABASE_URL" -c "UPDATE replies SET project_name='PROJECT_NAME' WHERE id=REPLY_ID;"
+  python3 $REPO_DIR/scripts/reply_db.py set_project REPLY_ID "PROJECT_NAME"
 
 MANDATORY reply flow for every item:
   Step 1: python3 reply_db.py processing ID      <- mark BEFORE posting
@@ -446,10 +442,9 @@ MANDATORY reply flow for every item:
           c) Extract the activity_id (the long numeric string after \`urn:li:activity:\`)
              from the URL or comment URN. Resolve it:
                python3 $REPO_DIR/scripts/lookup_post.py linkedin ACTIVITY_ID
-             If the response has a non-null \"project\", that's our post — OVERRIDE
+             If the response has a non-null \"project\", that's our post, OVERRIDE
              the reply row and use that project's voice for drafting:
-               source ~/social-autoposter/.env
-               psql "\$DATABASE_URL" -c "UPDATE replies SET project_name='RESOLVED_PROJECT' WHERE id=REPLY_ID;"
+               python3 $REPO_DIR/scripts/reply_db.py set_project REPLY_ID "RESOLVED_PROJECT"
              Use the returned \"our_content\" as the FULL text of the post being
              replied to (more accurate than the truncated our_content in PENDING_DATA).
              If \"project\" is null, we're a guest in someone else's thread; keep
