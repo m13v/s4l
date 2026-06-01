@@ -1669,6 +1669,55 @@ def _http_dispatch(args):
         print(json.dumps(keep, default=str))
         return True
 
+    if cmd == "find":
+        resp = http_api.api_get("/api/v1/dms/find", query={"author": args.author})
+        rows = (resp.get("data") or {}).get("matches") or []
+        if not rows:
+            print(f"No DMs found matching '{args.author}'")
+            return True
+        for r in rows:
+            ma = r.get("last_message_at") or ""
+            # API returns ISO 'YYYY-MM-DDTHH:MM:...'; DB path printed '%m/%d %H:%M'.
+            ts = (str(ma)[5:16].replace("T", " ").replace("-", "/")) if ma else "never"
+            print(f"  DM #{r['id']} [{r.get('platform')}] {r.get('their_author')} - "
+                  f"{r.get('status')}/{r.get('conversation_status')} T{r.get('tier') or 1} "
+                  f"({r.get('message_count')} msgs, last: {ts})")
+            if r.get("chat_url"):
+                print(f"    URL: {r['chat_url']}")
+        return True
+
+    if cmd == "summary":
+        resp = http_api.api_get("/api/v1/dms/summary")
+        s = (resp.get("data") or {}).get("summary") or {}
+        print("=== DM Pipeline Summary ===")
+        print(f"  Conversations: {s.get('total', 0)} total ({s.get('sent', 0)} sent, {s.get('skipped', 0)} skipped)")
+        print(f"  Unique authors: {s.get('unique_authors', 0)}")
+        print(f"  Status: {s.get('needs_reply', 0)} needs_reply, {s.get('active', 0)} active, "
+              f"{s.get('converted', 0)} converted, {s.get('stale', 0)} stale")
+        print(f"  Tiers: {s.get('tier2', 0)} at T2, {s.get('tier3', 0)} at T3")
+        print(f"  Messages: {s.get('total_messages', 0)} total ({s.get('outbound', 0)} outbound, "
+              f"{s.get('inbound', 0)} inbound)")
+        print(f"  Reply rate: {s.get('conversations_with_replies', 0)}/{s.get('sent', 0)} "
+              f"conversations have inbound replies")
+        print()
+        return True
+
+    if cmd == "send-escalation-email":
+        resp = http_api.api_post(
+            f"/api/v1/dms/{dm_id}/send-escalation-email", {}, ok_on_404=True
+        )
+        if resp.get("_not_found"):
+            print(f"ERROR: DM #{dm_id} not found")
+            return True
+        data = resp.get("data") or {}
+        if data.get("status_warning"):
+            print(f"WARNING: DM #{dm_id} is '{data.get('conversation_status')}', not 'needs_human'. Sending anyway.")
+        if data.get("email_sent"):
+            print(f"  Escalation email sent for DM #{dm_id}")
+        else:
+            print(f"  WARNING: escalation email not sent for DM #{dm_id} (no RESEND_API_KEY on server, or send failed)")
+        return True
+
     return False
 
 
