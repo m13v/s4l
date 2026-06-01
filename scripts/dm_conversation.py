@@ -1324,6 +1324,216 @@ def set_icp_precheck(conn, dm_id, label, project, notes=None):
     print(f"  Upserted icp_matches[{project}]={label} for DM #{dm_id}{suffix}")
 
 
+def _http_link_wrap_guard(dm_id, content):
+    """Pure-Python (no DB) link-wrap guard, mirroring log_outbound's pre-pass.
+
+    Returns True if an unwrapped project URL is present (caller must abort the
+    log and print already happened here). Returns False when content is clean
+    or the classifier could not load.
+    """
+    try:
+        from dm_short_links import _classify_url, _load_projects, _URL_RE, _TRAILING_PUNCT
+        _wrap_check_projects = _load_projects()
+        for m in _URL_RE.finditer(content or ""):
+            raw_url = m.group(0).rstrip(_TRAILING_PUNCT)
+            if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', raw_url, re.IGNORECASE):
+                continue
+            kind, matched = _classify_url(raw_url, _wrap_check_projects)
+            if kind != 'other':
+                print(f"  LINK BLOCKED: DM #{dm_id} content contains unwrapped {kind} URL "
+                      f"({raw_url[:80]}) for project {matched!r}. Re-send via the wrap-text "
+                      f"helper (python3 scripts/dm_short_links.py wrap-text --dm-id {dm_id} "
+                      f"--text '...').")
+                return True
+    except Exception as _wrap_err:
+        print(f"  WARNING: link-wrap guard skipped due to error: {_wrap_err}", file=sys.stderr)
+    return False
+
+
+def _http_log_outbound(args):
+    """DB-free log-outbound over the s4l.ai API.
+
+    Preserves log_outbound's behaviour for the LinkedIn/HTTP lane: --verified
+    gate, link-wrap guard, timeline gate, dedup guard, message insert,
+    conversation_status='active'. The reddit-only campaign suffix attribution
+    and dm_links.message_id backfill (driven by WRAP_MINTED_CODES, set only by
+    reddit_browser/twitter_browser) are no-ops on this lane because LinkedIn
+    never mints codes through a Python pre-pass; those rails run on the
+    DB-equipped machine. Returns the process exit behaviour via sys.exit on
+    block (matching the DB path's sys.exit(3))."""
+    import http_api
+
+    dm_id = args.dm_id
+    content = args.content
+
+    if not args.verified:
+        print(f"  VERIFY BLOCKED: refusing to log outbound for DM #{dm_id} without "
+              f"--verified. Pass it only when the browser send tool returned verified=true.")
+        sys.exit(3)
+
+    if _http_link_wrap_guard(dm_id, content):
+        sys.exit(3)
+
+    resp = http_api.api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+    if resp.get("_not_found"):
+        print(f"  ERROR: DM #{dm_id} not found")
+        sys.exit(3)
+    row = (resp.get("data") or {}).get("dm") or {}
+
+    # Timeline gate (mirror log_outbound:194-201).
+    cur_count = row.get("message_count") or 0
+    qual_status = row.get("qualification_status") or "pending"
+    icp_list = row.get("icp_matches") or []
+    if cur_count >= 3 and qual_status == "pending" and not icp_list:
+        print(f"  TIMELINE BLOCKED: DM #{dm_id} is at msg {cur_count} with qualification_status=pending and empty icp_matches.")
+        print(f"  Run Step 2.4 (set-icp-precheck for every project in $PROJECTS) before logging this outbound.")
+        print(f"  If nothing in $PROJECTS plausibly fits this prospect, call set-qualification --status disqualified --notes 'reason' and retry.")
+        sys.exit(3)
+
+    # Dedup guard: block if the last message is already outbound.
+    msgs = (http_api.api_get(f"/api/v1/dms/{dm_id}/messages", {"limit": 1000}).get("data") or {}).get("messages") or []
+    if msgs and msgs[-1].get("direction") == "outbound":
+        print(f"  DEDUP BLOCKED: Last message to {row.get('their_author')} (DM #{dm_id}) was already outbound. Skipping.")
+        sys.exit(3)
+
+    config = load_config()
+    author = args.author or get_our_account(config, row.get("platform"))
+    claude_session_id = os.environ.get("CLAUDE_SESSION_ID") or None
+
+    http_api.api_post(
+        f"/api/v1/dms/{dm_id}/messages",
+        {
+            "direction": "outbound",
+            "author": author,
+            "content": content,
+            "claude_session_id": claude_session_id,
+            "bump_to_needs_reply": False,
+        },
+    )
+    # log_outbound sets conversation_status='active' on every outbound.
+    http_api.api_patch(f"/api/v1/dms/{dm_id}", {"conversation_status": "active"})
+
+    print(f"  Logged outbound to {row.get('their_author')} (DM #{dm_id})")
+    return True
+
+
+def _http_dispatch(args):
+    """Route DB-free commands through the s4l.ai HTTP API.
+
+    Returns True when the command was handled (caller should return), False
+    when the command is not yet wired for the no-DATABASE_URL lane (caller
+    falls through to the clear "needs DB" error). Each branch prints the exact
+    same stdout the DB path emits so downstream shell parsing is unchanged.
+    """
+    import http_api
+
+    cmd = args.command
+    dm_id = getattr(args, "dm_id", None)
+
+    if cmd == "mark-skipped":
+        http_api.api_patch(
+            f"/api/v1/dms/{dm_id}",
+            {"status": "skipped", "only_if_status": "pending", "skip_reason": args.reason},
+        )
+        print(f"  Set status=skipped (reason: {args.reason}) for DM #{dm_id}")
+        return True
+
+    if cmd == "set-icp-precheck":
+        body = {"project": args.project, "label": args.label}
+        if args.notes is not None:
+            body["notes"] = args.notes
+        http_api.api_post(f"/api/v1/dms/{dm_id}/icp-precheck", body)
+        suffix = f" (notes: {args.notes[:60]}...)" if args.notes else ""
+        print(f"  Upserted icp_matches[{args.project}]={args.label} for DM #{dm_id}{suffix}")
+        return True
+
+    if cmd == "set-tier":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"tier": args.tier})
+        print(f"  Set tier={args.tier} for DM #{dm_id}")
+        return True
+
+    if cmd == "set-status":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"conversation_status": args.status})
+        print(f"  Set conversation_status={args.status} for DM #{dm_id}")
+        return True
+
+    if cmd == "set-interest":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"interest_level": args.interest})
+        print(f"  Set interest_level={args.interest} for DM #{dm_id}")
+        return True
+
+    if cmd == "set-mode":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"mode": args.mode})
+        print(f"  Set mode={args.mode} for DM #{dm_id}")
+        return True
+
+    if cmd == "set-project":
+        body = {"project_name": args.project}
+        if getattr(args, "append", False):
+            body["target_projects_add"] = args.project
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", body)
+        extra = " (appended to target_projects)" if getattr(args, "append", False) else ""
+        print(f"  Set project_name={args.project} for DM #{dm_id}{extra}")
+        return True
+
+    if cmd == "set-target-project":
+        http_api.api_patch(
+            f"/api/v1/dms/{dm_id}",
+            {"target_project": args.project, "target_projects_add": args.project},
+        )
+        print(f"  Set target_project={args.project} for DM #{dm_id} (target_projects union extended)")
+        return True
+
+    if cmd == "set-qualification":
+        body = {"qualification_status": args.status}
+        if args.notes is not None:
+            body["qualification_notes"] = args.notes
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", body)
+        suffix = f" (notes: {args.notes[:60]}...)" if args.notes else ""
+        print(f"  Set qualification_status={args.status} for DM #{dm_id}{suffix}")
+        return True
+
+    if cmd == "mark-booking-sent":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"booking_link_sent_at_now": True})
+        print(f"  Set booking_link_sent_at=NOW() for DM #{dm_id}")
+        return True
+
+    if cmd == "mark-inspected":
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"last_inspected_at_now": True})
+        print(f"  Marked DM #{dm_id} inspected at NOW()")
+        return True
+
+    if cmd == "set-url":
+        resp = http_api.api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+        if resp.get("_not_found"):
+            print(f"  ERROR: DM #{dm_id} not found")
+            return True
+        platform = ((resp.get("data") or {}).get("dm") or {}).get("platform")
+        clean = _valid_chat_url(platform, args.url)
+        if args.url and not clean:
+            print(f"  ERROR: '{args.url[:120]}' is not a valid {platform} DM-thread URL; refusing to save.")
+            print(f"         Expected shapes: reddit=/chat/room/!..., x=/i/chat/..., linkedin=/messaging/thread/...")
+            sys.exit(2)
+        http_api.api_patch(f"/api/v1/dms/{dm_id}", {"chat_url": clean})
+        print(f"  Set chat_url for DM #{dm_id}")
+        return True
+
+    if cmd == "log-inbound":
+        body = {"direction": "inbound", "author": args.author, "content": args.content}
+        if getattr(args, "message_at", None):
+            body["message_at"] = args.message_at
+        if getattr(args, "event_id", None):
+            body["event_id"] = args.event_id
+        http_api.api_post(f"/api/v1/dms/{dm_id}/messages", body)
+        print(f"  Logged inbound from {args.author} (DM #{dm_id})")
+        return True
+
+    if cmd == "log-outbound":
+        return _http_log_outbound(args)
+
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="DM conversation tracker")
     sub = parser.add_subparsers(dest="command")
@@ -1462,6 +1672,23 @@ def main():
         return
 
     dbmod.load_env()
+
+    # DB-free lane: when no DATABASE_URL is configured (e.g. a freshly onboarded
+    # dev machine with only the s4l.ai HTTP API reachable), route through the
+    # HTTP endpoints. On a DB-equipped machine this branch is skipped entirely,
+    # so the reddit/twitter rails keep their full DB-side behaviour (campaign
+    # suffix attribution, dm_links backfill) unchanged.
+    if not os.environ.get("DATABASE_URL"):
+        if _http_dispatch(args):
+            return
+        print(
+            f"ERROR: '{args.command}' is not yet wired for the no-DATABASE_URL "
+            f"(HTTP) lane. Run this command on a DB-equipped machine, or extend "
+            f"_http_dispatch in dm_conversation.py.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     conn = dbmod.get_conn()
 
     if args.command == "log-outbound":
