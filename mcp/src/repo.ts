@@ -5,7 +5,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -19,7 +18,15 @@ export const REPO_DIR =
 // Python used by the pipeline (psycopg2 etc). Override per-install.
 export const PYTHON = process.env.SAPS_PYTHON || "python3";
 
-export const TMP_DIR = os.tmpdir();
+// The locked pipeline script (run-twitter-cycle.sh) writes the draft plan to a
+// HARDCODED /tmp path (`PLAN_FILE="/tmp/twitter_cycle_plan_<batch>.json"`), and the
+// `DRAFT_ONLY_PLAN=` marker the wrapper parses is rooted at /tmp too. We MUST read
+// and write plans from the same directory. os.tmpdir() is NOT /tmp on macOS (it
+// honors $TMPDIR, e.g. /var/folders/.../T, or /tmp/claude-501 inside Claude Code),
+// which silently stranded every draft and made draft_cycle always report
+// "No drafts in batch ...". Default to /tmp to match the script; allow an explicit
+// override for non-standard installs.
+export const TMP_DIR = process.env.SAPS_TMP_DIR || "/tmp";
 
 export interface RunResult {
   code: number;
