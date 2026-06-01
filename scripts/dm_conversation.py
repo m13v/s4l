@@ -1883,133 +1883,19 @@ def main():
 
     dbmod.load_env()
 
-    # DB-free lane: when no DATABASE_URL is configured (e.g. a freshly onboarded
-    # dev machine with only the s4l.ai HTTP API reachable), route through the
-    # HTTP endpoints. On a DB-equipped machine this branch is skipped entirely,
-    # so the reddit/twitter rails keep their full DB-side behaviour (campaign
-    # suffix attribution, dm_links backfill) unchanged.
-    if not os.environ.get("DATABASE_URL"):
-        if _http_dispatch(args):
-            return
-        print(
-            f"ERROR: '{args.command}' is not yet wired for the no-DATABASE_URL "
-            f"(HTTP) lane. Run this command on a DB-equipped machine, or extend "
-            f"_http_dispatch in dm_conversation.py.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    conn = dbmod.get_conn()
-
-    if args.command == "log-outbound":
-        ok = log_outbound(conn, args.dm_id, args.content, args.author,
-                          verified=args.verified)
-        if not ok:
-            sys.exit(3)
-    elif args.command == "ensure-dm":
-        dm_id, created, linked_reply_id = ensure_dm(
-            conn, args.platform, args.author,
-            chat_url=args.chat_url, lookback_hours=args.lookback_hours,
-        )
-        print(f"DM_ID={dm_id}")
-        if created:
-            if linked_reply_id:
-                print(f"  created (linked to replies.id={linked_reply_id})")
-            else:
-                print("  created (no matching replies row within lookback, reply_id/post_id NULL)")
-        else:
-            print("  existing")
-    elif args.command == "log-inbound":
-        log_inbound(conn, args.dm_id, args.author, args.content,
-                    message_at=args.message_at, event_id=args.event_id)
-    elif args.command == "history":
-        show_history(conn, args.dm_id)
-    elif args.command == "pending":
-        show_pending(conn)
-    elif args.command == "find":
-        find_by_author(conn, args.author)
-    elif args.command == "summary":
-        show_summary(conn)
-    elif args.command == "set-url":
-        set_chat_url(conn, args.dm_id, args.url)
-    elif args.command == "backfill-urls":
-        raw = open(args.file).read() if args.file else sys.stdin.read()
-        try:
-            records = json.loads(raw)
-        except Exception as e:
-            print(f"ERROR: could not parse JSON input: {e}", file=sys.stderr)
-            sys.exit(2)
-        if isinstance(records, dict):
-            for k in ("conversations", "threads", "dms", "items"):
-                if k in records and isinstance(records[k], list):
-                    records = records[k]
-                    break
-        if not isinstance(records, list):
-            print("ERROR: expected a JSON array of {author, chat_url} records", file=sys.stderr)
-            sys.exit(2)
-        backfill_urls(conn, args.platform, records)
-    elif args.command == "filter-inbox":
-        raw = open(args.file).read() if args.file else sys.stdin.read()
-        try:
-            records = json.loads(raw)
-        except Exception as e:
-            print(f"ERROR: could not parse JSON input: {e}", file=sys.stderr)
-            sys.exit(2)
-        if isinstance(records, dict):
-            for k in ("conversations", "threads", "dms", "items"):
-                if k in records and isinstance(records[k], list):
-                    records = records[k]
-                    break
-            else:
-                # Some scanners wrap a single thread; treat as 0 records, not an error.
-                if records.get("ok") is False:
-                    records = []
-        if not isinstance(records, list):
-            print("ERROR: expected a JSON array of thread records", file=sys.stderr)
-            sys.exit(2)
-        filter_inbox(conn, args.platform, records)
-    elif args.command == "mark-inspected":
-        mark_inspected(conn, args.dm_id)
-    elif args.command == "set-tier":
-        set_tier(conn, args.dm_id, args.tier)
-    elif args.command == "set-status":
-        set_status(conn, args.dm_id, args.status)
-    elif args.command == "set-interest":
-        set_interest(conn, args.dm_id, args.interest)
-    elif args.command == "set-mode":
-        set_mode(conn, args.dm_id, args.mode)
-    elif args.command == "flag-human":
-        flag_human(conn, args.dm_id, args.reason)
-    elif args.command == "show-flagged":
-        show_flagged(conn)
-    elif args.command == "send-escalation-email":
-        row = conn.execute("""
-            SELECT platform, their_author, human_reason, conversation_status
-            FROM dms WHERE id = %s
-        """, (args.dm_id,)).fetchone()
-        if not row:
-            print(f"ERROR: DM #{args.dm_id} not found")
-        elif row["conversation_status"] != "needs_human":
-            print(f"WARNING: DM #{args.dm_id} is '{row['conversation_status']}', not 'needs_human'. Sending anyway.")
-            _send_escalation_email(conn, args.dm_id, row["platform"], row["their_author"],
-                                   row["human_reason"] or "(no reason stored)")
-        else:
-            _send_escalation_email(conn, args.dm_id, row["platform"], row["their_author"],
-                                   row["human_reason"] or "(no reason stored)")
-    elif args.command == "set-project":
-        set_project(conn, args.dm_id, args.project, append=getattr(args, "append", False))
-    elif args.command == "set-target-project":
-        set_target_project(conn, args.dm_id, args.project, append=getattr(args, "append", False))
-    elif args.command == "set-qualification":
-        set_qualification(conn, args.dm_id, args.status, args.notes)
-    elif args.command == "mark-booking-sent":
-        mark_booking_sent(conn, args.dm_id)
-    elif args.command == "mark-skipped":
-        mark_skipped(conn, args.dm_id, args.reason)
-    elif args.command == "set-icp-precheck":
-        set_icp_precheck(conn, args.dm_id, args.label, args.project, args.notes)
-
-    conn.close()
+    # HTTP-only lane: every command routes through the s4l.ai HTTP API. The
+    # direct-Postgres lane was removed 2026-06-01 — there is NO database-driven
+    # path any more, not as primary, not as fallback. DATABASE_URL, if present
+    # in the environment, is deliberately ignored; all reads/writes go through
+    # _http_dispatch against /api/v1/*.
+    if _http_dispatch(args):
+        return
+    print(
+        f"ERROR: '{args.command}' is not wired for the HTTP API lane. "
+        f"Extend _http_dispatch in dm_conversation.py — there is no DB fallback.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 if __name__ == "__main__":
