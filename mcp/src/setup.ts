@@ -108,27 +108,37 @@ function normalizeTopics(t: string[] | string | undefined): string[] | undefined
     .filter(Boolean);
 }
 
-// Build a config.json project entry from the collected input. voice_relationship
-// is forced to "first_party" because a customer is posting for their OWN product
-// (drives the get_voice_relationship_rule() prompt voice). platform=twitter
-// scopes this install to the X rail.
-export function buildProjectEntry(input: ProjectInput): Record<string, unknown> {
-  const entry: Record<string, unknown> = {
+// The fields the user actually supplies via setup. These are the ONLY fields we
+// ever write onto an existing project (so we never clobber weight, platform,
+// links, github, etc. on a project that already exists in config.json).
+function userFields(input: ProjectInput): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
     name: input.name,
-    weight: 10,
-    platform: "twitter",
     website: input.website,
     description: input.description,
     icp: input.icp,
     voice: input.voice,
-    voice_relationship: "first_party",
   };
-  if (input.differentiator) entry.differentiator = input.differentiator;
+  if (input.differentiator) fields.differentiator = input.differentiator;
   const topics = normalizeTopics(input.search_topics);
-  if (topics && topics.length) entry.search_topics = topics;
-  if (input.get_started_link) entry.get_started_link = input.get_started_link;
-  if (input.content_guardrails) entry.content_guardrails = input.content_guardrails;
-  return entry;
+  if (topics && topics.length) fields.search_topics = topics;
+  if (input.get_started_link) fields.get_started_link = input.get_started_link;
+  if (input.content_guardrails) fields.content_guardrails = input.content_guardrails;
+  return fields;
+}
+
+// A brand-new project entry: user fields plus the defaults a fresh X-rail
+// project needs. voice_relationship defaults to "first_party" (the customer
+// posts for their OWN product; drives get_voice_relationship_rule prompt voice)
+// and platform=twitter scopes the install to the X rail. These defaults are
+// applied ONLY on create, never on update.
+export function buildProjectEntry(input: ProjectInput): Record<string, unknown> {
+  return {
+    weight: 10,
+    platform: "twitter",
+    voice_relationship: "first_party",
+    ...userFields(input),
+  };
 }
 
 // Upsert the project into config.json projects[] (match by name) and mark setup
@@ -136,15 +146,17 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
 export function applySetup(input: ProjectInput): { project: string; created: boolean } {
   const cfg = readConfig();
   cfg.projects = cfg.projects || [];
-  const entry = buildProjectEntry(input);
   const idx = cfg.projects.findIndex((p) => p.name === input.name);
   let created: boolean;
   if (idx >= 0) {
-    // Merge: keep any existing extra fields, override with the new values.
-    cfg.projects[idx] = { ...cfg.projects[idx], ...entry };
+    // Update: merge ONLY the user-supplied fields. Never touch defaults
+    // (weight, platform, voice_relationship) or any other existing field, so a
+    // project that already exists in config.json keeps its real configuration.
+    cfg.projects[idx] = { ...cfg.projects[idx], ...userFields(input) };
     created = false;
   } else {
-    cfg.projects.push(entry);
+    // Create: full entry with X-rail defaults.
+    cfg.projects.push(buildProjectEntry(input));
     created = true;
   }
   // Backup before writing.
