@@ -77,12 +77,16 @@ def fetch_rail_rows(conn, rail, days):
     table, text_col, time_col, plats, statuses, views_col, likes_col = rail
     plat_ph = ",".join(["%s"] * len(plats))
     stat_ph = ",".join(["%s"] * len(statuses))
+    # target_chars is the per-post SNAPSHOT (frozen at post time). NULL on rows
+    # predating the snapshot wiring; summarize() falls back to the live registry
+    # target for those so coverage degrades gracefully.
     sql = f"""
         SELECT
             COALESCE(engagement_style, '(none)')          AS style,
             LENGTH(TRIM({text_col}))                       AS clen,
             COALESCE({views_col}, 0)                       AS views,
-            COALESCE({likes_col}, 0)                       AS likes
+            COALESCE({likes_col}, 0)                       AS likes,
+            target_chars                                   AS snap_target
         FROM {table}
         WHERE platform IN ({plat_ph})
           AND status   IN ({stat_ph})
@@ -96,7 +100,8 @@ def fetch_rail_rows(conn, rail, days):
     cur.close()
     return [
         {"style": r[0], "clen": int(r[1]), "views": int(r[2]),
-         "likes": int(r[3])}
+         "likes": int(r[3]),
+         "snap_target": int(r[4]) if r[4] is not None else None}
         for r in rows
     ]
 
@@ -140,10 +145,19 @@ def summarize(rows, targets):
         lens = sorted(x["clen"] for x in items)
         n = len(items)
         med = pct(lens, 50)
-        target = targets.get(style)
+        # Headline target: the per-post snapshot median when any row carries one
+        # (frozen, drift-proof, the true "what we told it to aim for"), else the
+        # live registry target as fallback. snap_n shows how many rows are on
+        # the snapshot path yet.
+        snaps = sorted(x["snap_target"] for x in items if x["snap_target"])
+        if snaps:
+            target = pct(snaps, 50)
+        else:
+            target = targets.get(style)
         out.append({
             "style": style,
             "n": n,
+            "snap_n": len(snaps),
             "target_chars": target,
             "p25": pct(lens, 25),
             "p50": med,
