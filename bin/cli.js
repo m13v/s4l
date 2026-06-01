@@ -774,6 +774,7 @@ function update() {
   // and the candidate-style sidecar gets merged (preserves VM-side candidates).
   installPythonDeps();
   removeLegacyEngagementStylesSidecar();
+  installMcp();
 
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
