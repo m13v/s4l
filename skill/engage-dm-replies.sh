@@ -108,11 +108,9 @@ SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 DM_SCRIPT="$REPO_DIR/scripts/dm_conversation.py"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
-
+# HTTP-only: this pipeline routes every read/write through the s4l.ai HTTP API
+# (scripts/*_helper.py -> /api/v1/*). The direct-Postgres lane was removed
+# 2026-06-01; DATABASE_URL is deliberately ignored, no psql, no fallback.
 mkdir -p "$LOG_DIR"
 LOG_SUFFIX=""
 [ -n "$PLATFORM" ] && LOG_SUFFIX="-$PLATFORM"
@@ -173,59 +171,14 @@ fi
 # direction='inbound', author='__click_signal__', content='[CLICK_SIGNAL] ...'.
 # That makes them surface here on the same `last_in > last_out` rail as typed
 # replies, with no special branching.
-PENDING_CONVOS=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT d.id as dm_id, d.platform, d.their_author, d.tier,
-               d.chat_url, d.their_content as original_comment,
-               CASE WHEN d.chat_url IS NOT NULL THEN 'real_dm'
-                    ELSE 'public_comment_chain' END as surface,
-               r.their_comment_url as origin_public_comment_url,
-               r.our_reply_url as our_prior_public_reply_url,
-               d.comment_context, d.project_name, d.target_project,
-               d.qualification_status, d.qualification_notes,
-               d.booking_link_sent_at, d.mode,
-               pr.headline as prospect_headline,
-               pr.bio as prospect_bio,
-               pr.company as prospect_company,
-               pr.role as prospect_role,
-               pr.recent_activity as prospect_recent_activity,
-               pr.notes as prospect_notes,
-               last_in.content as last_inbound_msg,
-               last_in.message_at as inbound_at,
-               (SELECT COUNT(*) FROM dm_messages WHERE dm_id = d.id) as total_messages,
-               (SELECT json_agg(json_build_object(
-                   'direction', m.direction,
-                   'content', m.content,
-                   'author', m.author
-               ) ORDER BY m.message_at ASC)
-               FROM dm_messages m WHERE m.dm_id = d.id) as conversation_history
-        FROM dms d
-        LEFT JOIN prospects pr ON pr.id = d.prospect_id
-        LEFT JOIN replies r ON r.id = d.reply_id
-        JOIN LATERAL (
-            SELECT content, message_at FROM dm_messages
-            WHERE dm_id = d.id AND direction = 'inbound'
-            ORDER BY message_at DESC LIMIT 1
-        ) last_in ON true
-        LEFT JOIN LATERAL (
-            SELECT message_at FROM dm_messages
-            WHERE dm_id = d.id AND direction = 'outbound'
-            ORDER BY message_at DESC LIMIT 1
-        ) last_out ON true
-        WHERE d.conversation_status IN ('active', 'needs_reply')
-          AND d.conversation_status != 'needs_human'
-          AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW())
-          AND d.status = 'sent'
-          AND $PLATFORM_SQL_FILTER
-          AND (d.chat_url IS NOT NULL
-               OR EXISTS (SELECT 1 FROM dm_messages mo
-                          WHERE mo.dm_id = d.id AND mo.direction = 'outbound'))
-          AND (last_out.message_at IS NULL OR last_in.message_at > last_out.message_at)
-        ORDER BY
-            d.tier DESC,
-            last_in.message_at ASC
-        LIMIT 30
-    ) q;" 2>/dev/null || echo "null")
+# HTTP-only via /api/v1/dms/engage?mode=pending (scripts/dm_engage_helper.py).
+# The helper prints the JSON array of rows when any exist, else the literal
+# string 'null' (matching psql's `json_agg(...) -> NULL` echoed as "null"), so
+# the guard below is unchanged. Platform filter (x/twitter fold, equality
+# otherwise, no-platform => all) is applied server-side.
+PENDING_PLAT_ARG=""
+[ -n "$PLATFORM" ] && PENDING_PLAT_ARG="--platform $PLATFORM"
+PENDING_CONVOS=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" pending $PENDING_PLAT_ARG --limit 30 2>/dev/null || echo "null")
 
 if [ "$PENDING_CONVOS" = "null" ] || [ -z "$PENDING_CONVOS" ]; then
     log "No conversations needing replies. Checking platforms for new inbound messages..."
@@ -437,10 +390,7 @@ print(' '.join(parts))
 fi
 
 # Get list of known Reddit DM authors to match against chat rooms
-KNOWN_REDDIT_AUTHORS=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT string_agg(their_author, ', ')
-    FROM dms
-    WHERE platform='reddit' AND status='sent' AND conversation_status='active';" 2>/dev/null || echo "")
+KNOWN_REDDIT_AUTHORS=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" reddit-authors 2>/dev/null || echo "")
 
 # Pre-build tool-rule lines and per-platform phase sections OUTSIDE the outer
 # heredoc. bash 3.2 (the macOS system bash) mis-parses nested `$(if cond; then
@@ -648,18 +598,10 @@ fi
 # literal value lets it append the suffix by hand at the documented rate.
 # When no active campaign exists, both vars resolve to empty strings and the
 # prompt's "if empty, do nothing extra" branch fires.
-REDDIT_CAMPAIGN_SUFFIX_LITERAL=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT suffix FROM campaigns
-    WHERE status='active' AND (',' || platforms || ',') LIKE '%,reddit,%'
-      AND max_posts_total IS NOT NULL AND posts_made < max_posts_total
-      AND suffix IS NOT NULL AND suffix <> ''
-    ORDER BY id LIMIT 1;" 2>/dev/null | tr -d '\n' || echo "")
-REDDIT_CAMPAIGN_SAMPLE_RATE=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT COALESCE(sample_rate, 1.000) FROM campaigns
-    WHERE status='active' AND (',' || platforms || ',') LIKE '%,reddit,%'
-      AND max_posts_total IS NOT NULL AND posts_made < max_posts_total
-      AND suffix IS NOT NULL AND suffix <> ''
-    ORDER BY id LIMIT 1;" 2>/dev/null | tr -d '\n' || echo "")
+# HTTP-only via /api/v1/campaigns (scripts/dm_engage_helper.py). Both helper
+# subcommands write with no trailing newline (matching the old `tr -d '\n'`).
+REDDIT_CAMPAIGN_SUFFIX_LITERAL=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" reddit-campaign-suffix 2>/dev/null || echo "")
+REDDIT_CAMPAIGN_SAMPLE_RATE=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" reddit-campaign-sample-rate 2>/dev/null || echo "")
 
 PHASE_A_PROMPT=$(mktemp)
 cat > "$PHASE_A_PROMPT" <<PROMPT_EOF
@@ -1378,34 +1320,13 @@ GATE_REASON=""
 # silently skipped every fresh inbound (bug surfaced 2026-04-30 with 4 warm
 # leads stuck unanswered for hours/days).
 needs_reply_count_for() {
-    # Accept either 'twitter' or 'x' as the platform name; the dms table
-    # stores X rows as platform='x' but the rest of this script uses 'twitter'.
-    # Pre-2026-05-13 the gate normalized x→twitter and queried platform='twitter'
-    # which matched zero rows; combined with the absence of a Twitter live
-    # precheck this silently skipped every X inbound DM for 13 days. Match
-    # both column values to be safe.
+    # HTTP-only via /api/v1/dms/engage?mode=needs_reply. The endpoint folds
+    # 'x'/'twitter' into one platform server-side (matches the legacy
+    # PLATFORM_SQL_FILTER), so passing either is safe. Prints an integer, or
+    # '?' on transport failure (the gate treats '?' as "don't trust, wake
+    # Claude" just like the old psql-error path did).
     local plat="$1"
-    local sql_filter
-    case "$plat" in
-        twitter|x) sql_filter="d.platform IN ('x','twitter')" ;;
-        *) sql_filter="d.platform = '$plat'" ;;
-    esac
-    psql "$DATABASE_URL" -tA -c "
-        SELECT COUNT(*) FROM dms d
-        WHERE $sql_filter
-          AND d.conversation_status IN ('active', 'needs_reply')
-          AND (d.snoozed_until IS NULL OR d.snoozed_until <= NOW())
-          AND EXISTS (
-            SELECT 1 FROM dm_messages m
-            WHERE m.dm_id = d.id
-              AND m.direction='inbound'
-              AND m.message_at > COALESCE(
-                (SELECT MAX(m2.message_at) FROM dm_messages m2
-                 WHERE m2.dm_id=d.id AND m2.direction='outbound'),
-                'epoch'::timestamp
-              )
-          );
-    " 2>/dev/null | tr -d ' \n' || echo "?"
+    python3 "$REPO_DIR/scripts/dm_engage_helper.py" needs-reply --platform "$plat" 2>/dev/null | tr -d ' \n' || echo "?"
 }
 
 # DB-side check across in-scope platforms.
@@ -1638,17 +1559,7 @@ esac
 # ═══════════════════════════════════════════════════════
 # Cleanup
 # ═══════════════════════════════════════════════════════
-DM_SUMMARY=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_build_object(
-        'total_convos', (SELECT COUNT(*) FROM dms WHERE conversation_status='active'),
-        'total_messages', (SELECT COUNT(*) FROM dm_messages),
-        'inbound', (SELECT COUNT(*) FROM dm_messages WHERE direction='inbound'),
-        'outbound', (SELECT COUNT(*) FROM dm_messages WHERE direction='outbound'),
-        'tier1', (SELECT COUNT(*) FROM dms WHERE tier=1 AND conversation_status='active'),
-        'tier2', (SELECT COUNT(*) FROM dms WHERE tier=2 AND conversation_status='active'),
-        'tier3', (SELECT COUNT(*) FROM dms WHERE tier=3 AND conversation_status='active'),
-        'stale', (SELECT COUNT(*) FROM dms WHERE conversation_status='stale')
-    );" 2>/dev/null || echo "{}")
+DM_SUMMARY=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" summary 2>/dev/null || echo "{}")
 
 log "DM pipeline summary: $DM_SUMMARY"
 
@@ -1657,24 +1568,12 @@ log "DM pipeline summary: $DM_SUMMARY"
 # skipped = conversations currently marked stale (per-platform, cumulative snapshot)
 dm_counts_for() {
     local plat="$1"
-    # 2026-05-14: normalize x↔twitter the same way the gate query does
-    # (see line ~1357). The dms table stores X rows as platform='x', so
-    # passing plat='twitter' here used to match zero rows and the dashboard
-    # showed `posted 0 skipped 0` on every cycle even when 11+ DMs flew. The
-    # gate side was fixed on 2026-05-13; this site was missed.
-    local sql_filter
-    case "$plat" in
-        twitter|x) sql_filter="d.platform IN ('x','twitter')" ;;
-        *)         sql_filter="d.platform = '$plat'" ;;
-    esac
-    psql "$DATABASE_URL" -t -A -c "
-        SELECT
-            (SELECT COUNT(*) FROM dm_messages m JOIN dms d ON d.id=m.dm_id
-             WHERE m.direction='outbound' AND $sql_filter
-               AND m.message_at >= to_timestamp($RUN_START)),
-            (SELECT COUNT(*) FROM dms d WHERE $sql_filter
-               AND d.conversation_status='stale');
-    " 2>/dev/null | tr '|' ' '
+    # HTTP-only via /api/v1/dms/engage?mode=run_counts. The endpoint folds
+    # 'x'/'twitter' server-side (the dms table stores X rows as platform='x')
+    # and counts outbound messages since RUN_START + current stale convos. The
+    # helper prints 'POSTED STALE' (space-separated) so the `read -r` below is
+    # unchanged.
+    python3 "$REPO_DIR/scripts/dm_engage_helper.py" run-counts --platform "$plat" --since "$RUN_START" 2>/dev/null
 }
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
 _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --since "$RUN_START" --scripts "engage-dm-replies" 2>/dev/null || echo "0.0000")
