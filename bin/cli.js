@@ -24,6 +24,7 @@ const COPY_TARGETS = [
   'setup',
   'browser-agent-configs',
   'mcp-servers',
+  'mcp',
 ];
 
 const ENV_TEMPLATE = `# social-autoposter environment variables
@@ -702,6 +703,7 @@ function init() {
 
   installPythonDeps();
   removeLegacyEngagementStylesSidecar();
+  installMcp();
 
   // Remove stale skill/SKILL.md if it exists (SKILL.md lives at repo root only)
   const skillMd = path.join(DEST, 'skill', 'SKILL.md');
@@ -822,6 +824,36 @@ function installPythonDeps() {
   if (pw.status !== 0) {
     console.warn('  WARNING: playwright install chromium failed — run manually:');
     console.warn('    python3 -m playwright install chromium');
+  }
+}
+
+// Set up the social-autoposter MCP server (the X/Twitter draft/autopilot/stats
+// surface for Claude Desktop + Claude Code). The package ships a prebuilt
+// mcp/dist/, so we only install the runtime deps (@modelcontextprotocol/sdk +
+// zod) and register the server into both clients. REPO_DIR auto-resolves to
+// ~/social-autoposter (mcp/../..) so no env wiring is needed beyond what
+// install.mjs pins. Idempotent; safe on both init and update.
+function installMcp() {
+  const mcpDest = path.join(DEST, 'mcp');
+  if (!fs.existsSync(path.join(mcpDest, 'package.json'))) {
+    console.warn('  WARNING: mcp/ missing from install — skipping MCP setup');
+    return;
+  }
+  console.log('  installing MCP runtime deps (npm install --omit=dev in mcp/)');
+  const npmRes = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+    cwd: mcpDest,
+    stdio: 'inherit',
+  });
+  if (npmRes.status !== 0) {
+    console.warn('  WARNING: npm install in mcp/ failed — run manually:');
+    console.warn('    (cd ~/social-autoposter/mcp && npm install --omit=dev)');
+    return;
+  }
+  console.log('  registering social-autoposter MCP with Claude Desktop + Claude Code');
+  const reg = spawnSync('node', ['install.mjs'], { cwd: mcpDest, stdio: 'inherit' });
+  if (reg.status !== 0) {
+    console.warn('  WARNING: MCP client registration failed — run manually:');
+    console.warn('    (cd ~/social-autoposter/mcp && node install.mjs)');
   }
 }
 
