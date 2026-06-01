@@ -1850,33 +1850,42 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         # Visibility-only path. Never fail discover because of it.
         print(f"[project_excludes] WARN: active-excludes log failed: {e}", file=sys.stderr)
 
-    # 2026-05-19: discover is SCAN-ONLY (opaque mode: model picks queries,
-    # runs searches, never sees thread content, outputs DONE). No drafting
-    # happens here. The picker therefore does NOT fire in discover — it
-    # fires once at the start of the draft phase, where the only Claude
-    # call that actually writes a comment lives. This matches Twitter's
-    # shape: scan → ripen → engage (engage = single drafting call where
-    # the picker assigns the style and the prompt enforces it).
+    # 2026-06-01: discover is now FULLY PROGRAMMATIC (no Claude session).
+    # Previously discover burned an entire Claude session in OPAQUE mode just
+    # to pick query phrasings and fire reddit_tools.py search calls whose
+    # results Claude never even saw (the dump_dir harvest below is what
+    # actually feeds candidates). Query selection + search execution are both
+    # deterministic, so we now build the query bank in Python (mirroring the
+    # Twitter cycle: scan = deterministic Python, Claude only enters at draft)
+    # and run each search via reddit_tools.cmd_search directly. The picker
+    # (engagement style) still fires once at the start of the draft phase —
+    # the only Claude call that actually writes a comment.
     #
-    # top_performers is also unfiltered here on purpose. Discover doesn't
-    # consume per-style exemplars (no drafting); the report is shown to
-    # the search-query picker as light context for "what topics have
-    # historically converted". Style filtering moves to the draft call.
-    top_report = get_top_performers(project_name)
-    recent_comments = get_recent_comments()
-    top_topics_report = get_top_search_topics(project_name, platform="reddit")
-    dud_queries_report = get_dud_reddit_queries(project_name)
-    omitted_topics_report = get_omitted_reddit_topics(project_name)
-    prompt = build_discover_prompt(project, config, args.limit, top_report, recent_comments,
-                                   top_topics_report=top_topics_report,
-                                   dud_queries_report=dud_queries_report,
-                                   omitted_topics_report=omitted_topics_report)
+    # reddit_query_bank pulls proven query phrasings from
+    # /api/v1/search-topics/ranked?platform=reddit (on Reddit the harvested
+    # search_topic IS the raw query string) ranked clicks-first, then appends
+    # config.json seeds for cold-start coverage, deduped by normalized core.
+    import reddit_query_bank as _rqb
+    max_searches = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "6") or "6")
+    bank = _rqb.build_bank(project_name, limit=max_searches)
+    queries = [(b.get("query") or "").strip() for b in bank if (b.get("query") or "").strip()]
+    n_proven = sum(1 for b in bank if b.get("source") == "proven")
+    n_seed = len(bank) - n_proven
+    print(f"[discover_bank] project={project_name} queries={len(queries)} "
+          f"proven={n_proven} seed={n_seed} cap={max_searches} :: {queries}")
 
     if args.dry_run:
         print(f"=== DRY RUN discover (project={project_name}) ===")
-        print(prompt)
+        for i, q in enumerate(queries, 1):
+            print(f"  {i}. {q}")
         print("=== END DRY RUN ===")
         return {"project_name": project_name, "decisions": [], "cost": 0.0, "dry_run": True}
+
+    if not queries:
+        print(f"[post_reddit] discover: no queries for project={project_name} "
+              f"(empty bank: no proven queries and no config seeds)")
+        return {"project_name": project_name, "decisions": [], "cost": 0.0,
+                "error": "no_queries"}
 
     plan_batch_id = f"reddit-discover-{project_name}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     os.environ["SAPS_REDDIT_PROJECT"] = project_name
@@ -1894,20 +1903,46 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     dump_dir = _tempfile.mkdtemp(prefix=f"reddit-discover-{project_name}-")
     os.environ["SAPS_REDDIT_DUMP_DIR"] = dump_dir
 
-    print(f"[post_reddit] Starting discover session (limit={args.limit}, timeout={args.timeout}s, dump_dir={dump_dir})")
+    print(f"[post_reddit] Starting programmatic discover "
+          f"(queries={len(queries)}, limit={args.limit}, dump_dir={dump_dir})")
+    import reddit_tools as _rt
+    import types as _types
     start = time.time()
+    searches_ok = 0
     try:
-        ok, output, usage = run_claude(prompt, timeout=args.timeout)
+        for q in queries:
+            sargs = _types.SimpleNamespace(
+                query=q,
+                limit=int(args.limit or 25),
+                sort="relevance",
+                time="week",
+                subreddits=None,
+            )
+            try:
+                _rt.cmd_search(sargs)  # writes result-*.json into dump_dir
+                searches_ok += 1
+            except SystemExit as se:
+                # cmd_search may sys.exit on a hard rate-limit / stop. Halt the
+                # loop but KEEP whatever already dumped (harvested below).
+                print(f"[post_reddit] discover search halted on {q!r}: "
+                      f"SystemExit({getattr(se, 'code', '?')})")
+                break
+            except Exception as e:
+                # One bad query (transient 500, parse error) must not kill the
+                # whole discover. Skip it and continue with the rest of the bank.
+                print(f"[post_reddit] discover search failed for {q!r}: {e}",
+                      file=sys.stderr)
     finally:
         # Always unset so a subsequent (non-discover) reddit_tools call in
         # this process doesn't accidentally inherit dump mode.
         os.environ.pop("SAPS_REDDIT_DUMP_DIR", None)
     elapsed = time.time() - start
-    print(f"[post_reddit] Discover finished in {elapsed:.0f}s (${usage['cost_usd']:.4f})")
+    print(f"[post_reddit] Discover ran {searches_ok}/{len(queries)} searches "
+          f"in {elapsed:.0f}s ($0.0000)")
 
-    # Harvest the dump dir BEFORE checking the Claude exit code: even if
-    # Claude crashed mid-run, any searches it completed before the crash
-    # produced dump files we should still feed to ripen.
+    # Harvest the dump dir: every cmd_search call that returned threads wrote a
+    # result-*.json. Even if a later query halted the loop, earlier searches'
+    # dumps are still valid candidates.
     candidates = []
     seen_urls = set()
     dump_files = sorted(_glob.glob(os.path.join(dump_dir, "result-*.json")))
@@ -1942,19 +1977,20 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     except Exception:
         pass
 
-    if not ok:
-        print(f"[post_reddit] Discover FAILED: {output[:300]}")
-        # If Claude crashed but we have harvested candidates, keep them.
-        # Only fall through to claude_failed when we got nothing.
-        if not candidates:
-            return {"project_name": project_name, "decisions": [], "cost": usage["cost_usd"],
-                    "error": "claude_failed"}
+    # Zero successful searches AND nothing harvested = real search-layer
+    # failure (rate-limit / all queries 500'd). Return an error so the runner
+    # counts it failed (rc 5). If searches ran but simply found no fresh
+    # threads, candidates is empty WITHOUT an error → rc 6 (skipped).
+    if searches_ok == 0 and not candidates:
+        print(f"[post_reddit] Discover FAILED: 0/{len(queries)} searches succeeded, "
+              f"no candidates harvested")
+        return {"project_name": project_name, "decisions": [], "cost": 0.0,
+                "error": "no_search_results"}
 
     print(f"[post_reddit] Discover harvested {len(candidates)} candidate(s) from dump dir")
     if not candidates:
-        print(f"[post_reddit] No candidates dumped — Claude may have skipped searches. Last 10 lines of output:")
-        for line in output.strip().split("\n")[-10:]:
-            print(f"  {line}")
+        print(f"[post_reddit] No candidates dumped — {searches_ok}/{len(queries)} "
+              f"searches ran but returned no fresh threads")
 
     # --- Topical-overlap scoring + top-N cap (replaces the old ripen momentum
     # gate, retired 2026-06-01 to align with the Twitter pipeline which dropped
@@ -2025,7 +2061,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 print(f"[post_reddit] WARNING: seed backfill failed: {e}", file=sys.stderr)
 
     return {"project_name": project_name, "decisions": selected,
-            "cost": usage["cost_usd"], "session_id": usage.get("session_id"),
+            "cost": 0.0, "session_id": None,
             "phase": "discover"}
 
 
