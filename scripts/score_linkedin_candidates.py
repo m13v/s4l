@@ -65,8 +65,7 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
+from http_api import api_get, api_post
 try:
     from account_resolver import resolve as _resolve_account
 except Exception:
