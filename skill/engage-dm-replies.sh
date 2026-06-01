@@ -150,20 +150,11 @@ for p in c.get('projects', []):
 # Find conversations needing replies (platform-filtered)
 # ═══════════════════════════════════════════════════════
 
-# Build platform filter for SQL
-PLATFORM_SQL_FILTER="1=1"
-if [ -n "$PLATFORM" ]; then
-    P="$PLATFORM"
-    # The dms table stores Twitter rows as platform='x', but historical rows or
-    # the linkedin sidebar may also write 'twitter'. Pre-2026-05-13 this branch
-    # had `[ "$P" = "x" ] && P="twitter"` which silently flipped every query
-    # to platform='twitter' and matched ZERO rows for X. That's bug A in the
-    # 2026-05-01..05-13 inbound-DM cliff. Match both values to be safe.
-    case "$P" in
-        twitter|x) PLATFORM_SQL_FILTER="d.platform IN ('x','twitter')" ;;
-        *) PLATFORM_SQL_FILTER="d.platform = '$P'" ;;
-    esac
-fi
+# Platform filtering is now applied server-side by /api/v1/dms/engage (it folds
+# 'x'/'twitter' into one platform, equality otherwise, and treats an absent
+# platform as "all"). The old client-side PLATFORM_SQL_FILTER string was
+# removed with the psql lane on 2026-06-01; $PLATFORM is passed straight to the
+# helper subcommands instead.
 
 # Get conversations where the last message is inbound (they replied OR a backend
 # signal like a short-link click landed as a synthetic inbound row). Click signals
@@ -1591,8 +1582,7 @@ if [ -z "$PLATFORM" ] || [ "$PLATFORM" = "twitter" ] || [ "$PLATFORM" = "x" ]; t
 fi
 
 # Report flagged conversations needing human attention (emails already sent per-DM during flagging)
-FLAGGED_COUNT=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT COUNT(*) FROM dms WHERE conversation_status = 'needs_human';" 2>/dev/null || echo "0")
+FLAGGED_COUNT=$(python3 "$REPO_DIR/scripts/dm_engage_helper.py" flagged-count 2>/dev/null || echo "0")
 
 if [ "$FLAGGED_COUNT" -gt 0 ] 2>/dev/null; then
     log "ACTION REQUIRED: $FLAGGED_COUNT conversations flagged for human attention (escalation emails already sent per-DM)"
