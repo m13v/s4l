@@ -386,6 +386,16 @@ def main():
                              "'no_link' (reply posted without any link tail). "
                              "NULL for non-Twitter posts and rows pre-dating "
                              "the experiment. Stored in posts.tail_link_variant.")
+    parser.add_argument("--target-chars", type=int, default=None,
+                        help="Snapshot of the assigned engagement style's "
+                             "target comment length (chars) at post time. "
+                             "Frozen onto posts.target_chars so "
+                             "style_length_report can compare realized-vs-target "
+                             "length immune to later registry drift. Resolved by "
+                             "the caller (twitter_post_plan.py) from the final "
+                             "coerced style via the registry. NULL leaves the "
+                             "column empty; the report falls back to the live "
+                             "registry target for NULL rows.")
     parser.add_argument("--urns", default=None,
                         help="LinkedIn-only: comma- or whitespace-separated list "
                              "of 16-19 digit URN IDs that identify this post "
@@ -492,6 +502,8 @@ def main():
         body["link_source"] = args.link_source
     if args.tail_link_variant:
         body["tail_link_variant"] = args.tail_link_variant
+    if args.target_chars:
+        body["target_chars"] = args.target_chars
     if args.thread_engagement:
         body["thread_engagement"] = args.thread_engagement
     # autoposter_version: stamped on every write so we can attribute
