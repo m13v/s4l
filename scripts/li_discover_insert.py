@@ -156,24 +156,26 @@ def main():
             counts["author_already_engaged"] += 1
             continue
 
-        # Insert reply
-        cur.execute(
-            """
-            INSERT INTO replies (post_id, platform, their_comment_id, their_author,
-                                 their_content, their_comment_url, depth, status)
-            VALUES (%s, 'linkedin', %s, %s, %s, %s, 1, 'pending')
-            ON CONFLICT DO NOTHING
-            """,
-            (post_id, comment_urn, author, snippet, href),
+        # Insert reply (find-or-create; 409 duplicate is fine, the gate may
+        # also return 200 with reply:null which we treat as discovered-then-gated).
+        api_post(
+            "/api/v1/replies",
+            {
+                "platform": "linkedin",
+                "post_id": post_id,
+                "their_comment_id": comment_urn,
+                "their_author": author,
+                "their_content": snippet,
+                "their_comment_url": href,
+                "depth": 1,
+                "status": "pending",
+            },
+            ok_on_conflict=True,
         )
-        conn.commit()
 
         existing.add(comment_urn)
         engaged.add(pair_key)
         counts["discovered"] += 1
-
-    cur.close()
-    conn.close()
 
     print(json.dumps(counts, indent=2))
 
