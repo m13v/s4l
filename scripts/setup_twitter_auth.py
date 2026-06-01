@@ -250,6 +250,51 @@ def _has_session_quick() -> bool:
             pass
 
 
+def _show_window_and_open_login() -> bool:
+    """Make the managed Chrome window VISIBLE + focused and land it on the X login
+    page, so the user can sign in by hand (the manual-login fallback).
+
+    Why this is needed: the cron pipeline parks this same Chrome OFF-SCREEN
+    (BH_WINDOW_POS 3042,-1032, a multi-monitor placement). If that window is
+    already up when the user runs connect_x, ensure_chrome() short-circuits and
+    the user would have an invisible window with nothing to log into. This mirrors
+    s4l-plugin's bringToFront() discipline: put a real, focused login screen in
+    front of the user. Returns True if we got the page onto x.com/login.
+    """
+    try:
+        ws, send = _attach()
+    except Exception:
+        return False
+    try:
+        # Pull the window on-screen, normal state (undo any off-screen parking).
+        try:
+            win = send("Browser.getWindowForTarget")
+            win_id = (win.get("result", {}) or {}).get("windowId")
+            if win_id is not None:
+                # Two steps: a minimized/parked window must be set normal before
+                # its bounds will stick (macOS clamps otherwise).
+                send("Browser.setWindowBounds",
+                     {"windowId": win_id, "bounds": {"windowState": "normal"}})
+                send("Browser.setWindowBounds",
+                     {"windowId": win_id,
+                      "bounds": {"left": 80, "top": 80, "width": 1100, "height": 900}})
+        except Exception:
+            pass
+        # Land on the real login flow and focus the tab.
+        try:
+            send("Page.enable")
+            send("Page.navigate", {"url": "https://x.com/i/flow/login"})
+            send("Page.bringToFront")
+            return True
+        except Exception:
+            return False
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 # --- Cookie import from the user's everyday browser -------------------------
 
 def _import_from(source: str) -> dict:
@@ -352,15 +397,28 @@ def cmd_connect(args) -> dict:
         except Exception:
             pass
 
-    # 4. Could not establish a valid session automatically.
+    # 4. Could not establish a valid session automatically -> manual login.
+    #    Put a real, focused X login screen in front of the user (the cron
+    #    pipeline may have parked this window off-screen) and tell them to sign
+    #    in by hand, then re-run connect_x. We never ask for their password and
+    #    never hand-decrypt cookies; they log into their own browser themselves.
+    shown = _show_window_and_open_login()
+    note = (
+        "A Chrome window for the autoposter is open at the X login page"
+        + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
+        + " and you are NOT logged in yet. Log in there yourself — username, password, "
+        "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
+        "to confirm and I'll re-check (run connect_x again). The session is saved to the "
+        "autoposter's own profile, so this is a one-time step. "
+        "(Auto-import tried: " + ", ".join(sources) + ".)"
+    )
     return {
         "ok": True,
         "connected": False,
         "state": "needs_login",
         "attempts": attempts,
-        "note": "Couldn't import a valid X session from your browsers. A Chrome window "
-        "for the autoposter is now open: sign in to x.com there once, then run connect_x "
-        "again to confirm. (Tried: " + ", ".join(sources) + ")",
+        "login_window_opened": shown,
+        "note": note,
         "profile_dir": str(PROFILE_DIR),
         "cdp": CDP,
     }
