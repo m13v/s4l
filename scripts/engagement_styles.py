@@ -50,7 +50,7 @@ STYLES = {
             "linkedin": ["strategy", "leadership", "operations"],
         },
         "note": "NEVER just nitpick; offer a non-obvious insight.",
-        "target_chars": 80,
+        "target_chars": 31,
     },
     "storyteller": {
         "description": (
@@ -99,7 +99,7 @@ STYLES = {
             "linkedin": ["industry analysis", "tech leadership"],
         },
         "note": "Authority through pattern recognition, not credentials.",
-        "target_chars": 80,
+        "target_chars": 68,
     },
     "curious_probe": {
         "description": "One specific follow-up question about the most interesting detail. Include 'curious because...' context.",
@@ -110,7 +110,7 @@ STYLES = {
             "linkedin": ["thought leadership", "niche B2B"],
         },
         "note": "ONE question only. Never multiple.",
-        "target_chars": 80,
+        "target_chars": 48,
     },
     "contrarian": {
         "description": "Take a clear opposing position backed by experience.",
@@ -121,7 +121,7 @@ STYLES = {
             "linkedin": ["industry debates", "contrarian leadership"],
         },
         "note": "Must have credible evidence. Empty hot takes get destroyed.",
-        "target_chars": 80,
+        "target_chars": 62,
     },
     "data_point_drop": {
         "description": "Share one specific, believable metric. Let the number do the talking.",
@@ -132,7 +132,7 @@ STYLES = {
             "linkedin": ["results", "case studies"],
         },
         "note": "No links. Numbers must be believable, not impressive.",
-        "target_chars": 60,
+        "target_chars": 38,
     },
     "snarky_oneliner": {
         "description": "Short, sharp, emotionally resonant observation (1 sentence max). Validates a shared frustration.",
@@ -143,7 +143,7 @@ STYLES = {
             "linkedin": [],  # never on LinkedIn
         },
         "note": "NEVER in small/serious subs like r/vipassana. NEVER on LinkedIn.",
-        "target_chars": 45,
+        "target_chars": 44,
     },
     # ── Instagram-native caption styles (2026-05-21) ──
     # Distinct from the reply/comment styles above: these describe the
