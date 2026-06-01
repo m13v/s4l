@@ -119,9 +119,10 @@ def api_get(path: str, query: dict | None = None, ok_on_404: bool = False):
     return _request("GET", path, query=query, ok_on_404=ok_on_404)
 
 
-def api_post(path: str, body: dict, ok_on_conflict: bool = False):
-    """POST body to path. ok_on_conflict=True returns the 409 body."""
-    return _request("POST", path, body=body, ok_on_conflict=ok_on_conflict)
+def api_post(path: str, body: dict, ok_on_conflict: bool = False, ok_on_404: bool = False):
+    """POST body to path. ok_on_conflict=True returns the 409 body;
+    ok_on_404=True returns {_not_found: True} on 404 instead of raising."""
+    return _request("POST", path, body=body, ok_on_conflict=ok_on_conflict, ok_on_404=ok_on_404)
 
 
 def api_patch(path: str, body: dict, ok_on_404: bool = False):
