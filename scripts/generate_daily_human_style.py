@@ -55,6 +55,34 @@ CLAUDE_MODEL_DEFAULT = None     # inherit from settings.json
 RUN_CLAUDE_PATH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 SCRIPT_TAG = "daily-human-style"
 
+# target_chars computed from the live top-human-reply median (the whole point
+# of the human_derived lane: learn the length that actually wins TODAY, not a
+# static seed). Clamped to a sane reply-sized band so an outlier essay-reply or
+# a one-word "this." can't drag the target out of range. IG long-form captions
+# are NOT synthesized here (this lane is reply/comment-shaped), so the ceiling
+# stays tweet-sized.
+TARGET_CHARS_FLOOR = 30
+TARGET_CHARS_CEIL = 300
+DEFAULT_TARGET_CHARS = 80       # used only if median can't be computed
+
+
+def median_reply_chars(replies):
+    """Median char length of the top human replies' content, clamped to the
+    reply-sized band. This is the realized length of what actually won the
+    thread today, so it becomes the style's target_chars: we aim to land where
+    humans land, not where our prompts historically bloated to (~215)."""
+    lengths = sorted(
+        len((r.get("reply_content") or "").strip())
+        for r in replies
+        if (r.get("reply_content") or "").strip()
+    )
+    if not lengths:
+        return DEFAULT_TARGET_CHARS
+    n = len(lengths)
+    mid = n // 2
+    med = lengths[mid] if n % 2 else (lengths[mid - 1] + lengths[mid]) // 2
+    return max(TARGET_CHARS_FLOOR, min(TARGET_CHARS_CEIL, int(med)))
+
 
 def fetch_top_human_replies(conn, platform,
                             limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
@@ -315,13 +343,15 @@ def post_style(style, platform, replies, prompt_chars):
     Returns the parsed response (with style + created keys).
     """
     source_post_ids = [r["id"] for r in replies]
+    target_chars = median_reply_chars(replies)
     window_end = datetime.now(timezone.utc)
     window_start = window_end - timedelta(hours=WINDOW_HOURS)
     gen_log = (
         f"Synthesized {window_end.isoformat(timespec='seconds')} from "
         f"top {len(replies)} human {platform} replies in last "
         f"{WINDOW_HOURS}h. Prompt size: {prompt_chars} chars. "
-        f"Reply id range: {min(source_post_ids)}-{max(source_post_ids)}."
+        f"Reply id range: {min(source_post_ids)}-{max(source_post_ids)}. "
+        f"target_chars={target_chars} (median of source-reply lengths)."
     )
 
     payload = {
@@ -330,6 +360,7 @@ def post_style(style, platform, replies, prompt_chars):
         "example": style["example"],
         "note": style["note"],
         "best_in": style["best_in"],
+        "target_chars": target_chars,
         "kind": "human_derived",
         "platform": platform,
         "first_post_platform": platform,
