@@ -35,6 +35,7 @@ import {
   CONFIG_PATH,
   type ProjectInput,
 } from "./setup.js";
+import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
 
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
@@ -186,15 +187,39 @@ server.registerTool(
   {
     title: "Set up a project",
     description:
-      "Run this FIRST, before any drafting or autopilot. Configures a project this install posts " +
-      "for: its website, what it does (description), who to target (icp), and brand voice. You can " +
-      "set up MULTIPLE products (call once per product, identified by name) and you can fill a " +
-      "project's fields INCREMENTALLY across several calls — pass whatever you have, it merges and " +
-      "tells you what's still missing. Call with status:true (or no name) to list every configured " +
-      "project and its remaining fields. Ask the user conversationally; don't dump a form. The " +
-      "draft_cycle, autopilot, and get_stats tools refuse to run until a project is fully set up.",
+      "Run this FIRST, before any drafting or autopilot. Two jobs:\n" +
+      "1) Configure a project this install posts for: its website, what it does (description), who " +
+      "to target (icp), and brand voice. Set up MULTIPLE products (call once per product, identified " +
+      "by name); fill a project's fields INCREMENTALLY across several calls — pass whatever you have, " +
+      "it merges and tells you what's still missing.\n" +
+      "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
+      "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
+      "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
+      "touched. ALWAYS explain what will happen and get the user's OK first: call with action:'connect_x' " +
+      "(no confirm) to get the explanation, relay it, then call again with action:'connect_x', confirm:true.\n" +
+      "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
+      "whether X is connected. Ask the user conversationally; don't dump a form. The draft_cycle, " +
+      "autopilot, and get_stats tools refuse to run until a project is fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
+      action: z
+        .enum(["connect_x"])
+        .optional()
+        .describe(
+          "connect_x = import/validate your X session in the autoposter's managed browser. " +
+            "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first)."
+        ),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe("Set true with action:'connect_x' to actually run the import after the user has agreed."),
+      x_source: z
+        .string()
+        .optional()
+        .describe(
+          "Optional browser profile to import the X session from, e.g. 'arc:Default', 'chrome:Profile 1'. " +
+            "Default: auto-detect chrome/arc/brave/edge."
+        ),
       name: z
         .string()
         .optional()
@@ -225,12 +250,64 @@ server.registerTool(
     },
   },
   async (args) => {
+    // ---- Connect X/Twitter: import the user's session into our browser ----
+    // Explain-then-confirm: the first call (no confirm) describes exactly what
+    // will happen so the agent can get the user's OK; confirm:true runs it.
+    if (args.action === "connect_x") {
+      if (args.confirm !== true) {
+        // Cheap probe so the explanation reflects current state (no Chrome launch).
+        const cur = await xStatus();
+        if (cur.connected) {
+          return jsonContent({
+            action: "connect_x",
+            already_connected: true,
+            state: cur.state,
+            note: "X is already connected in the autoposter's browser. Nothing to import.",
+          });
+        }
+        return jsonContent({
+          action: "connect_x",
+          requires_confirmation: true,
+          current_state: cur.state,
+          what_will_happen:
+            "To post for you, the autoposter uses its OWN managed Google Chrome (separate from your " +
+            "everyday browser). It needs your logged-in X/Twitter session. If you confirm, it will: " +
+            "(1) start that managed Chrome if it isn't running, (2) copy ONLY your x.com and twitter.com " +
+            "cookies from your everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into it, and " +
+            "(3) verify you're logged in. No other site's cookies are read, and your passwords are never " +
+            "seen. If it can't import a valid session, a Chrome window will open for you to sign in once.",
+          how_to_proceed:
+            "Tell the user the above in your own words and ask if that's OK. If yes, call setup again with " +
+            "action:'connect_x', confirm:true (optionally x_source:'arc:Default' etc. if they use a non-Chrome browser).",
+        });
+      }
+      const r = await xConnect(args.x_source);
+      return jsonContent({
+        action: "connect_x",
+        connected: r.connected,
+        state: r.state,
+        source: r.source,
+        summary: summarizeXAuth(r),
+        note: r.note,
+        attempts: r.attempts,
+        next_step: r.connected
+          ? "X is connected. You can run draft_cycle (and enable autopilot) once a project is fully set up."
+          : r.state === "needs_login"
+            ? "Ask the user to sign in to x.com in the Chrome window that just opened, then call setup " +
+              "action:'connect_x', confirm:true again to confirm."
+            : "X is not connected yet. " + summarizeXAuth(r),
+      });
+    }
+
     // Status / discovery mode: no project name supplied, or explicitly asked.
     if (args.status === true || !args.name) {
       const projects = listManagedProjectStatus();
+      const x = await xStatus();
       return jsonContent({
         configured: projects.some((p) => p.ready),
         projects,
+        x_connected: x.connected,
+        x_state: x.state,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: CONFIG_PATH,
