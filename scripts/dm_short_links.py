@@ -374,32 +374,30 @@ def utm_only_text(*, text: str, platform: str, project_name: str) -> str:
     return _URL_RE.sub(_sub, text)
 
 
-def _dm_row(conn, dm_id: int):
-    cur = conn.execute(
-        "SELECT id, platform, target_project, target_projects, project_name, "
-        "       booking_link_sent_at "
-        "FROM dms WHERE id = %s",
-        (dm_id,),
-    )
-    row = cur.fetchone()
-    if not row:
+def _dm_row(dm_id: int):
+    """Fetch the DM header over HTTP (GET /api/v1/dms/<id>).
+
+    HTTP-only: there is no direct-Postgres path. Raises SystemExit on a miss,
+    matching the prior DB behaviour.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from http_api import api_get
+    resp = api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+    if not resp or not resp.get('ok'):
         raise SystemExit(f"DM #{dm_id} not found")
-    return dict(row)
+    dm = (resp.get('data') or {}).get('dm') or {}
+    if not dm:
+        raise SystemExit(f"DM #{dm_id} not found")
+    return dm
 
 
-def _existing_link(conn, dm_id: int, target_url: str):
-    cur = conn.execute(
-        "SELECT code, target_url, kind FROM dm_links "
-        "WHERE dm_id = %s AND target_url = %s",
-        (dm_id, target_url),
-    )
-    row = cur.fetchone()
-    return dict(row) if row else None
-
-
-def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_name: dict,
+def _mint_one(*, dm_id: int, target_url: str, projects: list, projects_by_name: dict,
               dm: dict) -> dict:
     """Core mint logic, shared by `mint` CLI and `wrap_text` library call.
+
+    HTTP-only: URL classification + UTM/booking target building happen here,
+    then the insert-or-reuse runs server-side via POST /api/v1/dm-links/mint.
+    There is no direct-Postgres path.
 
     Returns one of:
       {ok: True, code, short_url, target_url, kind, project, reused: bool}
@@ -454,86 +452,49 @@ def _mint_one(conn, *, dm_id: int, target_url: str, projects: list, projects_by_
         platform=platform,
     )
 
-    # Idempotent: lookup against the FINAL target_url (post-UTM) since that's
-    # what the unique index (dm_id, target_url) is on. Looking up the bare URL
-    # would miss when a prior mint stored the UTM-stamped form.
-    existing = _existing_link(conn, dm_id, final_target)
-    if not existing and final_target != target_url:
-        # Also check the bare URL form, so a re-wrap that was minted before
-        # we started UTM-stamping a given kind still resolves to the same row.
-        existing = _existing_link(conn, dm_id, target_url)
-
-    if existing:
-        code = existing['code']
-        # Refresh target_url in case UTM/booking_link updated since first mint.
-        conn.execute(
-            "UPDATE dm_links SET target_url = %s WHERE code = %s",
-            (final_target, code),
-        )
-        conn.commit()
-        return {
-            'ok': True,
-            'code': code,
-            'short_url': f"{wrapper_host}/r/{code}",
-            'target_url': final_target,
-            'kind': existing.get('kind') or kind,
-            'project': matched_project,
-            'reused': True,
-        }
-
+    # Insert-or-reuse server-side. The endpoint matches first on the FINAL
+    # target_url (post-UTM, what the unique index (dm_id, target_url) is on),
+    # then on the bare URL (covers rows minted before a given kind started
+    # UTM-stamping). It also stamps dms.booking_link_sent_at for kind='booking'.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from http_api import api_post
+    stamp_booking = bool(kind == 'booking' and not dm.get('booking_link_sent_at'))
     for _ in range(8):
         code = _gen_code()
         try:
-            conn.execute(
-                "INSERT INTO dm_links (code, dm_id, target_url, kind, project_at_mint) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (code, dm_id, final_target, kind, matched_project),
+            resp = api_post(
+                "/api/v1/dm-links/mint",
+                {
+                    "dm_id": dm_id,
+                    "code": code,
+                    "target_url": final_target,
+                    "bare_url": target_url if final_target != target_url else None,
+                    "kind": kind,
+                    "project_at_mint": matched_project,
+                    "stamp_booking": stamp_booking,
+                },
+                ok_on_conflict=True,
             )
-            conn.commit()
-            break
         except Exception as e:
-            # Code collision (PK) → retry with a new code. Other errors → bail.
-            if 'duplicate key' in str(e).lower() and 'dm_links_pkey' in str(e).lower():
-                conn.execute("ROLLBACK")
-                continue
-            # Unique (dm_id, target_url) collision: another mint raced us. Re-read.
-            if 'uq_dm_links_dm_target' in str(e).lower():
-                conn.execute("ROLLBACK")
-                existing2 = _existing_link(conn, dm_id, target_url)
-                if existing2:
-                    return {
-                        'ok': True,
-                        'code': existing2['code'],
-                        'short_url': f"{wrapper_host}/r/{existing2['code']}",
-                        'target_url': existing2['target_url'],
-                        'kind': existing2.get('kind') or kind,
-                        'project': matched_project,
-                        'reused': True,
-                    }
-            raise
-    else:
-        return {'ok': False, 'error': 'code_collision_after_8_tries'}
-
-    # Auto-stamp booking_link_sent_at on first booking-kind wrap. The legacy
-    # mark-booking-sent CLI is still supported but becomes a no-op when this
-    # path already stamped the timestamp.
-    if kind == 'booking' and not dm.get('booking_link_sent_at'):
-        conn.execute(
-            "UPDATE dms SET booking_link_sent_at = NOW() WHERE id = %s "
-            "AND booking_link_sent_at IS NULL",
-            (dm_id,),
-        )
-        conn.commit()
-
-    return {
-        'ok': True,
-        'code': code,
-        'short_url': f"{wrapper_host}/r/{code}",
-        'target_url': final_target,
-        'kind': kind,
-        'project': matched_project,
-        'reused': False,
-    }
+            return {'ok': False, 'error': 'mint_api_unreachable', 'detail': str(e)}
+        if resp and resp.get('ok'):
+            data = resp.get('data') or {}
+            ret_code = data.get('code') or code
+            return {
+                'ok': True,
+                'code': ret_code,
+                'short_url': f"{wrapper_host}/r/{ret_code}",
+                'target_url': final_target,
+                'kind': data.get('kind') or kind,
+                'project': matched_project,
+                'reused': bool(data.get('reused')),
+            }
+        e = (resp or {}).get('error') or {}
+        e_code = e.get('code') if isinstance(e, dict) else None
+        if e_code == 'code_collision':
+            continue  # try another random code
+        return {'ok': False, 'error': e_code or 'mint_api_error'}
+    return {'ok': False, 'error': 'code_collision_after_8_tries'}
 
 
 # ---- Library entry point used by reddit_browser.py / twitter_browser.py ----
@@ -554,72 +515,67 @@ def wrap_text(*, dm_id: int, text: str) -> dict:
 
     projects = _load_projects()
     projects_by_name = {p['name']: p for p in projects}
-    conn = dbmod.get_conn()
-    try:
-        dm = _dm_row(conn, dm_id)
-        seen = {}  # original_url -> wrapped_url (dedup so identical URLs map once)
-        minted_codes = []
-        skipped = []
+    dm = _dm_row(dm_id)
+    seen = {}  # original_url -> wrapped_url (dedup so identical URLs map once)
+    minted_codes = []
+    skipped = []
 
-        # Iterate matches in order, replace each. Trailing punctuation common in
-        # prose ("...github.com/foo.") is stripped from the URL before classify.
-        for m in list(_URL_RE.finditer(text)):
-            raw = m.group(0)
-            stripped = raw.rstrip(_TRAILING_PUNCT)
-            trailing = raw[len(stripped):]
-            if stripped in seen:
-                continue
+    # Iterate matches in order, replace each. Trailing punctuation common in
+    # prose ("...github.com/foo.") is stripped from the URL before classify.
+    for m in list(_URL_RE.finditer(text)):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        trailing = raw[len(stripped):]
+        if stripped in seen:
+            continue
 
-            # If the URL is already a wrapped /r/<code> on one of our domains,
-            # leave it alone. Recognized by path shape /r/<8 chars from alphabet>.
-            if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', stripped, re.IGNORECASE):
-                seen[stripped] = stripped
-                skipped.append({'url': stripped, 'reason': 'already_wrapped'})
-                continue
+        # If the URL is already a wrapped /r/<code> on one of our domains,
+        # leave it alone. Recognized by path shape /r/<8 chars from alphabet>.
+        if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', stripped, re.IGNORECASE):
+            seen[stripped] = stripped
+            skipped.append({'url': stripped, 'reason': 'already_wrapped'})
+            continue
 
-            res = _mint_one(
-                conn,
-                dm_id=dm_id,
-                target_url=stripped,
-                projects=projects,
-                projects_by_name=projects_by_name,
-                dm=dm,
-            )
-            if not res.get('ok'):
-                return {**res, 'ok': False}
-            seen[stripped] = res['short_url']
-            if not res.get('reused'):
-                minted_codes.append(res['code'])
-            elif res.get('code'):
-                # Reused codes still surfaced so callers can backfill message_id.
-                minted_codes.append(res['code'])
+        res = _mint_one(
+            dm_id=dm_id,
+            target_url=stripped,
+            projects=projects,
+            projects_by_name=projects_by_name,
+            dm=dm,
+        )
+        if not res.get('ok'):
+            return {**res, 'ok': False}
+        seen[stripped] = res['short_url']
+        if not res.get('reused'):
+            minted_codes.append(res['code'])
+        elif res.get('code'):
+            # Reused codes still surfaced so callers can backfill message_id.
+            minted_codes.append(res['code'])
 
-        if not seen:
-            return {'ok': True, 'text': text, 'minted_codes': [], 'skipped': skipped}
+    if not seen:
+        return {'ok': True, 'text': text, 'minted_codes': [], 'skipped': skipped}
 
-        # Re-walk the text and substitute. Use the regex again to preserve
-        # trailing punctuation outside the URL (we stripped it before classify).
-        def _sub(m):
-            raw = m.group(0)
-            stripped = raw.rstrip(_TRAILING_PUNCT)
-            trailing = raw[len(stripped):]
-            wrapped = seen.get(stripped, stripped)
-            return wrapped + trailing
+    # Re-walk the text and substitute. Use the regex again to preserve
+    # trailing punctuation outside the URL (we stripped it before classify).
+    def _sub(m):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        trailing = raw[len(stripped):]
+        wrapped = seen.get(stripped, stripped)
+        return wrapped + trailing
 
-        new_text = _URL_RE.sub(_sub, text)
-        return {
-            'ok': True,
-            'text': new_text,
-            'minted_codes': minted_codes,
-            'skipped': skipped,
-        }
-    finally:
-        conn.close()
+    new_text = _URL_RE.sub(_sub, text)
+    return {
+        'ok': True,
+        'text': new_text,
+        'minted_codes': minted_codes,
+        'skipped': skipped,
+    }
 
 
 # ---- Post-link library (parallel rail to DM, table=post_links) ----------
 
-def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
+def _mint_one_post(*, target_url: str, projects: list, platform: str,
                     project_name: str, minted_session: str) -> dict:
     """Core mint logic for public posts. Mirrors _mint_one but writes to
     post_links instead of dm_links, with post_id and reply_id BOTH NULL at
@@ -641,10 +597,8 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
     is ignored for routing -- visitors always land on the destination we baked
     in. Pool depth managed by scripts/mint_external_pool.py.
 
-    Routes DB ops through social-autoposter-website /api/v1/post-links/* so
-    VMs / sandboxes without DATABASE_URL still mint successfully. The `conn`
-    arg is accepted for backward compatibility but ignored. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 to fall back to the direct-DB path.
+    HTTP-only: all DB ops run server-side via /api/v1/post-links/* (mint +
+    claim-pool). There is no direct-Postgres path and no fallback.
     """
     target_url = _ensure_scheme((target_url or '').strip())
     if not target_url or target_url == 'https://':
@@ -674,7 +628,6 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
         platform_norm = 'twitter'
 
     project_cfg = next((p for p in projects if p.get('name') == project_name), None)
-    use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
 
     # UTM URL is the universal fallback — used when short_links_live=false on
     # the project, OR when pool/mint can't produce a /r/<code> for any reason.
@@ -718,49 +671,28 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
         return _utm_fallback('policy')
 
     if project_cfg and project_cfg.get('external_short_links'):
-        # Pool path. Atomically claim the oldest unclaimed pool row.
-        if use_legacy:
-            cur = conn.execute(
-                "SELECT code, target_url FROM post_links "
-                "WHERE project_name = %s AND platform = %s "
-                "  AND post_id IS NULL AND reply_id IS NULL "
-                "  AND minted_session LIKE 'pool:%%' "
-                "ORDER BY minted_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                (project_name, platform_norm),
+        # Pool path. Atomically claim the oldest unclaimed pool row server-side.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_post
+        try:
+            resp = api_post(
+                "/api/v1/post-links/claim-pool",
+                {
+                    "project_name": project_name,
+                    "platform": platform_norm,
+                    "minted_session": minted_session,
+                },
+                ok_on_conflict=True,
             )
-            row = cur.fetchone()
-            if not row:
-                return _utm_fallback('pool_exhausted')
-            row = dict(row)
-            pool_code = row['code']
-            pool_target = row['target_url']
-            conn.execute(
-                "UPDATE post_links SET minted_session = %s WHERE code = %s",
-                (minted_session, pool_code),
-            )
-            conn.commit()
-        else:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from http_api import api_post
-            try:
-                resp = api_post(
-                    "/api/v1/post-links/claim-pool",
-                    {
-                        "project_name": project_name,
-                        "platform": platform_norm,
-                        "minted_session": minted_session,
-                    },
-                    ok_on_conflict=True,
-                )
-            except Exception:
-                return _utm_fallback('api_unreachable')
-            if not resp or not resp.get('ok'):
-                err = (resp or {}).get('error') or {}
-                err_code = err.get('code') if isinstance(err, dict) else None
-                return _utm_fallback(err_code or 'pool_exhausted')
-            data = resp.get('data') or {}
-            pool_code = data.get('code')
-            pool_target = data.get('target_url')
+        except Exception:
+            return _utm_fallback('api_unreachable')
+        if not resp or not resp.get('ok'):
+            err = (resp or {}).get('error') or {}
+            err_code = err.get('code') if isinstance(err, dict) else None
+            return _utm_fallback(err_code or 'pool_exhausted')
+        data = resp.get('data') or {}
+        pool_code = data.get('code')
+        pool_target = data.get('target_url')
         return {
             'ok': True,
             'code': pool_code,
@@ -771,32 +703,6 @@ def _mint_one_post(conn, *, target_url: str, projects: list, platform: str,
         }
 
     # Fresh mint: try up to 8 random codes before giving up on collision.
-    if use_legacy:
-        for _ in range(8):
-            code = _gen_code()
-            try:
-                conn.execute(
-                    "INSERT INTO post_links (code, platform, project_name, "
-                    "       target_url, kind, project_at_mint, minted_session) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (code, platform, project_name, fallback_target, kind,
-                     matched_project, minted_session),
-                )
-                conn.commit()
-                return {
-                    'ok': True,
-                    'code': code,
-                    'short_url': f"{wrapper_host}/r/{code}",
-                    'target_url': fallback_target,
-                    'kind': kind,
-                }
-            except Exception as e:
-                if 'duplicate key' in str(e).lower() and 'post_links_pkey' in str(e).lower():
-                    conn.execute("ROLLBACK")
-                    continue
-                raise
-        return _utm_fallback('code_collision_after_8_tries')
-
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from http_api import api_post
     for _ in range(8):
