@@ -3,10 +3,10 @@ import json
 import os
 import sys
 import re
-import psycopg2
-import psycopg2.extras
 
-DB = os.environ["DATABASE_URL"]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_post
+
 EXCLUDED_AUTHORS = {"louis030195", "louis3195"}
 OWN_NAME = "Matthew Diakonov"
 OWN_HANDLES = {"m13v", "matthew-diakonov"}
@@ -78,10 +78,6 @@ def main():
         "post_created": 0,
     }
 
-    conn = psycopg2.connect(DB)
-    conn.autocommit = False
-    cur = conn.cursor()
-
     for it in items:
         author = (it.get("author") or "").strip()
         comment_urn = it.get("comment_urn")
@@ -125,18 +121,30 @@ def main():
             # dashboard "threads vs comments" filter (server.js /api/top)
             # correctly classifies these as comments under someone else's post.
             thread_author = author or "(unknown)"
-            cur.execute(
-                """
-                INSERT INTO posts (platform, thread_url, thread_author, our_url, our_content, our_account,
-                                   project_name, engagement_style, status, posted_at)
-                VALUES ('linkedin', %s, %s, %s, %s, 'Matthew Diakonov',
-                        'general', 'discovered_via_notification', 'active', NOW())
-                RETURNING id
-                """,
-                (our_url, thread_author, our_url, "[discovered via notification, no original content tracked]"),
+            resp = api_post(
+                "/api/v1/posts",
+                {
+                    "platform": "linkedin",
+                    "thread_url": our_url,
+                    "our_url": our_url,
+                    "our_content": "[discovered via notification, no original content tracked]",
+                    "project": "general",
+                    "thread_author": thread_author,
+                    "our_account": "Matthew Diakonov",
+                    "engagement_style": "discovered_via_notification",
+                    "status": "active",
+                },
+                ok_on_conflict=True,
             )
-            post_id = cur.fetchone()[0]
-            conn.commit()
+            if (resp.get("error") or {}).get("code") == "duplicate_thread":
+                # Post already exists in DB but wasn't in our /tmp/li_posts.txt
+                # local map; reuse the existing row instead of creating a dup.
+                post_id = (resp["error"].get("details") or {}).get("existing_post_id")
+            else:
+                post_id = ((resp.get("data") or {}).get("post") or {}).get("id")
+            if post_id is None:
+                counts["post_not_found_skipped"] += 1
+                continue
             counts["post_created"] += 1
             # Add to in-memory map so subsequent items in same loop reuse it
             for cand in (activity_id, ugc_id):
