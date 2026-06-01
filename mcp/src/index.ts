@@ -21,6 +21,7 @@ import {
   run,
   readPlan,
   writePlan,
+  planPath,
   latestBatchId,
   type Plan,
   type PlanCandidate,
@@ -158,7 +159,7 @@ async function postApproved(batchId: string, plan: Plan) {
   writePlan(approvedBatch, { ...plan, candidates: approved });
   const res = await runPython(
     "scripts/twitter_post_plan.py",
-    ["--plan", path.join(os.tmpdir(), `twitter_cycle_plan_${approvedBatch}.json`)],
+    ["--plan", planPath(approvedBatch)],
     { timeoutMs: 900_000 }
   );
   let summary: unknown = res.stdout.trim();
