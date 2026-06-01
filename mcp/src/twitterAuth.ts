@@ -73,9 +73,13 @@ export function summarizeXAuth(r: XAuthResult): string {
     case "browser_not_running":
       return "The autoposter's X browser isn't running yet.";
     case "needs_login":
+      // Prefer the helper's note: it says whether the login window actually
+      // came to the front and carries the full manual-login instructions.
       return (
-        "Couldn't import a valid X session automatically. A Chrome window is open — " +
-        "sign in to x.com there once, then connect again."
+        r.note ??
+        "Couldn't import a valid X session automatically. A Chrome window is open at " +
+          "the X login page — sign in there yourself (username, password, 2FA), then " +
+          "run connect_x again to confirm."
       );
     case "browser_launch_failed":
       return r.error ?? "Could not start the autoposter browser.";
