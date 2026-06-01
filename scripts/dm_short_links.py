@@ -50,7 +50,9 @@ from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, 'scripts'))
 
-import db as dbmod  # noqa: E402
+# HTTP-only: this module routes every read/write through the s4l.ai HTTP API
+# (scripts/http_api.py). The direct-Postgres lane was removed 2026-06-01; there
+# is no `import db` / get_conn() path any more, not as primary, not as fallback.
 
 CONFIG_PATH = os.path.join(REPO_DIR, 'config.json')
 CODE_ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789'
