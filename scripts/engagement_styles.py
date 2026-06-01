@@ -70,15 +70,10 @@ STYLES = {
             "the VOICE RELATIONSHIP rule, not by this style."
         ),
         "example": (
-            "LANE 1 (disclosed): 'hypothetically, imagine running this for "
-            "a couple of lecture blocks: cheap recorder into whisper into "
-            "gpt into anki. raw prompts get you somewhere around a third "
-            "usable cards before duplicate distractors take over.' "
-            "LANE 2 grounded: 'on a 90-slide deck the rubric scored 81.3 "
-            "vs ~68 field average; the cards weren't the bottleneck, the "
-            "rubric was.' "
-            "LANE 2 pattern-frame: 'the whisper-to-gpt-to-anki setup isn't "
-            "where this breaks. card generation is.'"
+            "hypothetically, ran this for a few lecture blocks: recorder "
+            "into whisper into gpt into anki. raw prompts got a third "
+            "usable cards before duplicates took over. card gen, not "
+            "the pipeline, was the bottleneck."
         ),
         "best_in": {
             "reddit": ["r/startups", "r/Meditation", "r/vipassana"],
@@ -93,7 +88,7 @@ STYLES = {
             "centers') without a Lane 1 opener and without config.json "
             "grounding is the exact failure mode the GROUNDING RULE forbids."
         ),
-        "target_chars": 180,
+        "target_chars": 206,
     },
     "pattern_recognizer": {
         "description": "Name the pattern or phenomenon. Authority through pattern recognition, not credentials.",
