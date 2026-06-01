@@ -2,16 +2,31 @@
 """One-shot processor for the LinkedIn notifications discovery scan.
 
 Reads the saved bh_run extraction output (ACCUMULATED_ACTIONABLE JSON line),
-derives parent activity/ugcPost id from each comment_urn, dedups against the
-replies/posts tables, and inserts new pending replies. Prints the required
-LINKEDIN_SCAN_SUMMARY marker line.
+derives parent activity/ugcPost id from each comment_urn, and inserts new
+pending replies (creating the parent post row when we have not engaged on
+that thread before). Prints the required LINKEDIN_SCAN_SUMMARY marker line.
+
+Migrated 2026-06-01 from raw psycopg2 (os.environ["DATABASE_URL"]) to the
+s4l.ai HTTP API, so it runs on a machine that has no direct DB access. The
+live successor for the regular pipeline is li_discover_insert.py; this stays
+as the historical-extract-file one-shot but now shares the same endpoints.
+
+Dedup is now enforced server-side rather than via bulk pre-reads:
+  - POST /api/v1/posts is idempotent on (platform, thread_url): a duplicate
+    returns 409 duplicate_thread with the existing post id, which we reuse.
+  - POST /api/v1/replies is idempotent on (platform, their_comment_id): a
+    duplicate returns 409, which we count as already-tracked.
+The only read we still do is GET /api/v1/posts (active LinkedIn rows) to map
+a parent activity/ugcPost id onto an existing post row before falling back to
+create-or-reuse.
 """
 import json
 import os
 import re
 import sys
 
-import psycopg2
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_get, api_post
 
 EXTRACT_FILE = "/Users/matthewdi/.claude/projects/-/0152159f-c679-488f-954a-8312a9a58060/tool-results/toolu_01FaaCg5i5D5xp5ELcp1TiVS.txt"
 
@@ -19,18 +34,6 @@ EXCLUDED_AUTHORS = {"louis030195", "louis3195"}
 OWN_NAMES = {"matthew diakonov", "m13v"}
 
 DRY_RUN = "--apply" not in sys.argv
-
-
-def load_env():
-    env_path = os.path.expanduser("~/social-autoposter/.env")
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            v = v.strip().strip('"').strip("'")
-            os.environ.setdefault(k.strip(), v)
 
 
 def load_actionable():
@@ -55,28 +58,27 @@ def parse_parent(comment_urn):
     return ns, parent_id
 
 
+def load_active_posts():
+    """Return list of (id, our_url, thread_url) for active LinkedIn posts.
+
+    Bounded by the endpoint's limit; if a parent post is older than the
+    window it simply will not match here, and the create path falls through
+    to POST /api/v1/posts which 409s on the duplicate (platform, thread_url)
+    and hands back the existing id. Correctness does not depend on this map
+    being exhaustive; it is purely a round-trip saver.
+    """
+    resp = api_get(
+        "/api/v1/posts",
+        {"platform": "linkedin", "status": "active", "limit": 500,
+         "order_by": "id", "order_dir": "desc"},
+    )
+    rows = (resp.get("data") or {}).get("posts") or []
+    return [(r["id"], r.get("our_url"), r.get("thread_url")) for r in rows]
+
+
 def main():
-    load_env()
     items = load_actionable()
-
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-
-    cur.execute("SELECT their_comment_id FROM replies WHERE platform='linkedin';")
-    existing_comment_ids = {r[0] for r in cur.fetchall() if r[0]}
-
-    cur.execute(
-        "SELECT DISTINCT r.their_author || '|||' || p.our_url "
-        "FROM replies r JOIN posts p ON r.post_id = p.id "
-        "WHERE r.platform='linkedin' AND r.status IN ('replied','pending','processing');"
-    )
-    engaged_pairs = {r[0] for r in cur.fetchall() if r[0]}
-
-    cur.execute(
-        "SELECT id, our_url, thread_url FROM posts "
-        "WHERE platform='linkedin' AND status='active';"
-    )
-    posts = cur.fetchall()  # (id, our_url, thread_url)
+    posts = load_active_posts()
 
     counts = dict(scanned=len(items), new=0, already=0, author_engaged=0,
                   excluded=0, own=0, no_urn=0, within_batch_dup=0)
@@ -94,10 +96,6 @@ def main():
         if not comment_urn or not parent_id:
             counts["no_urn"] += 1
             actions.append(("no_comment_urn", author, comment_urn))
-            continue
-        if comment_urn in existing_comment_ids:
-            counts["already"] += 1
-            actions.append(("already_tracked", author, comment_urn))
             continue
         if author_l in EXCLUDED_AUTHORS or any(e in author_l for e in EXCLUDED_AUTHORS):
             counts["excluded"] += 1
@@ -117,14 +115,6 @@ def main():
                 our_url = pu
                 break
 
-        # author+post dedup against existing engaged pairs
-        if our_url:
-            apk = author + "|||" + our_url
-            if apk in engaged_pairs:
-                counts["author_engaged"] += 1
-                actions.append(("author_already_engaged", author, comment_urn))
-                continue
-
         # within-batch dedup: one reply per author per thread
         batch_key = (author_l, parent_id)
         if batch_key in inserted_keys:
@@ -132,57 +122,66 @@ def main():
             actions.append(("within_batch_dup", author, comment_urn))
             continue
 
-        # need a post_id; create one if no match
+        # need a post_id; create one (or reuse via 409) if no match
         if post_id is None:
             thread_url = ("https://www.linkedin.com/feed/update/"
                           "urn:li:%s:%s/" % (ns, parent_id))
             if DRY_RUN:
                 actions.append(("WOULD_CREATE_POST+INSERT", author, comment_urn))
                 post_id = -1  # placeholder for dry run
-            else:
-                cur.execute(
-                    "INSERT INTO posts (platform, thread_url, our_url, "
-                    "our_content, our_account, project_name, engagement_style, "
-                    "status, posted_at) "
-                    "VALUES ('linkedin', %s, %s, %s, %s, 'general', "
-                    "'curious_probe', 'active', NOW()) RETURNING id;",
-                    (thread_url, thread_url,
-                     "[discovered thread, engagement reply pending]",
-                     "Matthew Diakonov"),
-                )
-                post_id = cur.fetchone()[0]
                 our_url = thread_url
+            else:
+                resp = api_post(
+                    "/api/v1/posts",
+                    {
+                        "platform": "linkedin",
+                        "thread_url": thread_url,
+                        "our_url": thread_url,
+                        "our_content": "[discovered thread, engagement reply pending]",
+                        "project": "general",
+                        "thread_author": author or "(unknown)",
+                        "our_account": "Matthew Diakonov",
+                        "engagement_style": "curious_probe",
+                        "status": "active",
+                    },
+                    ok_on_conflict=True,
+                )
+                if (resp.get("error") or {}).get("code") == "duplicate_thread":
+                    post_id = (resp["error"].get("details") or {}).get("existing_post_id")
+                else:
+                    post_id = ((resp.get("data") or {}).get("post") or {}).get("id")
+                our_url = thread_url
+                if post_id is None:
+                    counts["author_engaged"] += 1  # could not resolve a row
+                    actions.append(("post_unresolved", author, comment_urn))
+                    continue
+                # keep the in-memory map fresh for later items this run
+                posts.append((post_id, our_url, thread_url))
 
         if DRY_RUN:
             actions.append(("WOULD_INSERT", author, comment_urn, "post_id=%s" % post_id))
         else:
-            cur.execute(
-                "INSERT INTO replies (post_id, platform, their_comment_id, "
-                "their_author, their_content, their_comment_url, depth, status) "
-                "VALUES (%s, 'linkedin', %s, %s, %s, %s, 1, 'pending');",
-                (post_id, comment_urn, author, snippet, href),
+            resp = api_post(
+                "/api/v1/replies",
+                {
+                    "platform": "linkedin",
+                    "post_id": post_id,
+                    "their_comment_id": comment_urn,
+                    "their_author": author,
+                    "their_content": snippet,
+                    "their_comment_url": href,
+                    "depth": 1,
+                    "status": "pending",
+                },
+                ok_on_conflict=True,
             )
+            if (resp.get("error") or {}).get("code") == "duplicate_reply":
+                counts["already"] += 1
+                actions.append(("already_tracked", author, comment_urn))
+                continue
 
         inserted_keys.add(batch_key)
         counts["new"] += 1
-
-    if not DRY_RUN:
-        conn.commit()
-        # atomic post-commit verification in the same process
-        vcur = conn.cursor()
-        vcur.execute(
-            "SELECT id, post_id, their_author, status FROM replies "
-            "WHERE platform='linkedin' AND their_comment_id = ANY(%s) "
-            "ORDER BY id;",
-            ([k for k in []] or [it.get("comment_urn") for it in items],),
-        )
-        verify_rows = vcur.fetchall()
-        vcur.close()
-        print("=== POST-COMMIT VERIFY: %d reply rows for scanned URNs ===" % len(verify_rows))
-        for vr in verify_rows:
-            print("  reply id=%s post_id=%s author=%s status=%s" % vr)
-    cur.close()
-    conn.close()
 
     print("=== ACTION LOG (%s) ===" % ("DRY RUN" if DRY_RUN else "APPLIED"))
     for a in actions:
