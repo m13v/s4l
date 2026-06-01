@@ -215,76 +215,77 @@ def run(from_json: str,
             "note": "empty_feed",
         }
 
-    dbmod.load_env()
-    db = dbmod.get_conn()
-    try:
-        posts_by_cid = load_engagement_comments(db)
-        if not quiet:
+    posts_by_cid = load_engagement_comments()
+    if not quiet:
+        print(
+            f"[stats] feed_rows={len(feed)} db_posts_w_commentUrn={len(posts_by_cid)}",
+            flush=True,
+        )
+
+    updates = []
+    unmatched = []
+    errors = 0
+
+    for fr in feed:
+        row = posts_by_cid.get(fr["comment_id"])
+        if row is None:
+            unmatched.append(fr["comment_id"])
+            continue
+        try:
+            updates.append(compute_one(row, fr, dry_run=dry_run, quiet=quiet))
+        except Exception as e:
+            errors += 1
+            if not quiet:
+                print(f"  ERROR id={row['id']} {e}", flush=True)
+            continue
+
+    # Counts come from the locally-computed `changed` flags so the totals
+    # match in both dry-run and live mode. The server applies the writes
+    # (UPDATE posts + scan_no_change_count + post_views_daily snapshot) and
+    # returns its own {updated, unchanged}, which equal these.
+    updated   = sum(1 for u in updates if u["changed"])
+    unchanged = sum(1 for u in updates if not u["changed"])
+
+    if not dry_run and updates:
+        resp = api_post("/api/v1/linkedin-engagement-comments", {"updates": updates})
+        srv = resp.get("data") or {}
+        # Trust the server tallies when present; they should match locals.
+        updated   = int(srv.get("updated", updated))
+        unchanged = int(srv.get("unchanged", unchanged))
+
+    total   = len(feed)
+    checked = updated + unchanged
+    skipped = len(unmatched)
+    deleted = 0
+
+    result = {
+        "ok": True,
+        "total":     total,
+        "skipped":   skipped,
+        "checked":   checked,
+        "updated":   updated,
+        "unchanged": unchanged,
+        "deleted":   deleted,
+        "errors":    errors,
+        "unmatched": unmatched,
+    }
+
+    if summary_path:
+        try:
+            with open(summary_path, "w") as f:
+                json.dump({
+                    "refreshed":   updated,
+                    "removed":     deleted,
+                    "unavailable": 0,
+                    "not_found":   len(unmatched),
+                }, f)
+        except Exception as e:
             print(
-                f"[stats] feed_rows={len(feed)} db_posts_w_commentUrn={len(posts_by_cid)}",
-                flush=True,
+                f"WARN: failed to write summary {summary_path}: {e}",
+                file=sys.stderr,
             )
 
-        updated = 0
-        unchanged = 0
-        unmatched = []
-        errors = 0
-
-        for fr in feed:
-            row = posts_by_cid.get(fr["comment_id"])
-            if row is None:
-                unmatched.append(fr["comment_id"])
-                continue
-            try:
-                outcome = apply_one(db, row, fr, dry_run=dry_run, quiet=quiet)
-            except Exception as e:
-                errors += 1
-                if not quiet:
-                    print(f"  ERROR id={row['id']} {e}", flush=True)
-                continue
-            if outcome == "updated":
-                updated += 1
-            elif outcome == "unchanged":
-                unchanged += 1
-
-        if not dry_run:
-            db.commit()
-
-        total   = len(feed)
-        checked = updated + unchanged
-        skipped = len(unmatched)
-        deleted = 0
-
-        result = {
-            "ok": True,
-            "total":     total,
-            "skipped":   skipped,
-            "checked":   checked,
-            "updated":   updated,
-            "unchanged": unchanged,
-            "deleted":   deleted,
-            "errors":    errors,
-            "unmatched": unmatched,
-        }
-
-        if summary_path:
-            try:
-                with open(summary_path, "w") as f:
-                    json.dump({
-                        "refreshed":   updated,
-                        "removed":     deleted,
-                        "unavailable": 0,
-                        "not_found":   len(unmatched),
-                    }, f)
-            except Exception as e:
-                print(
-                    f"WARN: failed to write summary {summary_path}: {e}",
-                    file=sys.stderr,
-                )
-
-        return result
-    finally:
-        db.close()
+    return result
 
 
 def main() -> None:
