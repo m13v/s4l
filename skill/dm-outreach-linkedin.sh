@@ -42,11 +42,6 @@ REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
-
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/dm-outreach-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 
@@ -55,11 +50,28 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 RUN_START=$(date +%s)
 log "=== LinkedIn DM Outreach Run: $(date) ==="
 
+# DB-free since 2026-06-01: all DM state goes through the s4l.ai HTTP API
+# (X-Installation auth). No DATABASE_URL needed.
+PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
+
+# dm_count <status> -> integer count of linkedin dms in that status.
+# Backed by GET /api/v1/dms/counts (same shape as /api/v1/replies/counts).
+dm_count() {
+    "$PY_BIN" -c "
+import sys; sys.path.insert(0, '$REPO_DIR/scripts')
+from http_api import api_get
+resp = api_get('/api/v1/dms/counts', {'platform': 'linkedin'})
+counts = ((resp or {}).get('data') or {}).get('counts') or []
+want = '$1'
+print(next((int(r.get('count', 0)) for r in counts if r.get('status') == want), 0))
+" 2>/dev/null || echo 0
+}
+
 # Scan for new DM candidates first (cheap Python, writes to dms table)
 log "Scanning for DM candidates (all platforms)..."
 (PYTHONUNBUFFERED=1 python3 "$REPO_DIR/scripts/scan_dm_candidates.py" 2>&1 || true) | tee -a "$LOG_FILE"
 
-DM_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE status='pending' AND platform='linkedin';" 2>/dev/null || echo "0")
+DM_PENDING=$(dm_count pending)
 
 if [ "$DM_PENDING" -eq 0 ]; then
     log "No pending LinkedIn DMs"
@@ -69,35 +81,18 @@ fi
 
 log "LinkedIn: $DM_PENDING DMs to send"
 
-DM_DATA=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT d.id, d.platform, d.their_author, d.their_content, d.comment_context,
-               d.target_project, d.prospect_id,
-               r.their_comment_url, r.our_reply_content,
-               p.thread_title, p.our_content as our_post_content,
-               (SELECT json_agg(e) FROM (
-                   SELECT p2.thread_title,
-                          r2.their_content AS their_content,
-                          COALESCE(r2.our_reply_content, '') AS our_reply_content,
-                          r2.status,
-                          r2.depth,
-                          r2.their_comment_url,
-                          r2.replied_at
-                   FROM replies r2
-                   LEFT JOIN posts p2 ON r2.post_id = p2.id
-                   WHERE r2.their_author = d.their_author
-                     AND r2.platform = d.platform
-                     AND r2.id != d.reply_id
-                     AND r2.discovered_at >= NOW() - INTERVAL '60 days'
-                   ORDER BY r2.discovered_at DESC
-                   LIMIT 8
-               ) e) AS other_engagement
-        FROM dms d
-        JOIN replies r ON d.reply_id = r.id
-        JOIN posts p ON d.post_id = p.id
-        WHERE d.status='pending' AND d.platform='linkedin'
-        ORDER BY d.discovered_at ASC
-    ) q;")
+# Pull the pending DM batch + 60-day cross-thread engagement via the
+# outreach-queue endpoint (no DATABASE_URL). The route mirrors the old
+# json_agg join exactly and returns {rows:[...]}. We extract the array so
+# DM_DATA keeps the same JSON shape the prompt consumed before the migration.
+DM_DATA=$("$PY_BIN" -c "
+import json, sys
+sys.path.insert(0, '$REPO_DIR/scripts')
+from http_api import api_get
+resp = api_get('/api/v1/dms/outreach-queue', {'platform': 'linkedin', 'status': 'pending', 'limit': 200})
+rows = (resp.get('data') or {}).get('rows') or []
+print(json.dumps(rows))
+" 2>/dev/null || echo "[]")
 
 # Per-project qualification context for ICP pre-check
 PROJECTS_QUALIFICATION=$(python3 -c "
