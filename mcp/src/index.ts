@@ -27,10 +27,9 @@ import {
 } from "./repo.js";
 import {
   applySetup,
-  getSetupState,
-  requireSetup,
-  missingRequired,
-  missingForProject,
+  resolveProject,
+  hasReadyProject,
+  listManagedProjectStatus,
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   CONFIG_PATH,
@@ -176,27 +175,30 @@ async function postApproved(batchId: string, plan: Plan) {
   };
 }
 
-// ---- setup: first-run config (the "brain": project, website, voice) -------
-// Run this FIRST. The action tools refuse until it's done. Call with no
-// project fields (or status:true) to check status / see what to collect; call
-// with the fields to write the project into config.json and mark setup done.
+// ---- setup: per-project config (the "brain": project, website, voice) -----
+// Run this FIRST. The action tools refuse until at least one project is ready.
+// You can set up MULTIPLE products and fill each project's fields INCREMENTALLY
+// across several calls — readiness is derived from config.json, never a stored
+// flag. Call with status:true (or just no name) to list every project this
+// install manages and what each still needs.
 server.registerTool(
   "setup",
   {
-    title: "Set up this install",
+    title: "Set up a project",
     description:
-      "Run this FIRST, before any drafting or autopilot. Configures the single project this " +
-      "install posts for: its website, what it does (description), who to target (icp), and " +
-      "brand voice. Call with status:true (or no fields) to see current setup status and what " +
-      "to collect from the user. Once you've gathered the user's website, product description, " +
-      "target audience, and brand voice, call setup again WITH those fields to finish. The " +
-      "draft_cycle, autopilot, and get_stats tools refuse to run until setup is complete.",
+      "Run this FIRST, before any drafting or autopilot. Configures a project this install posts " +
+      "for: its website, what it does (description), who to target (icp), and brand voice. You can " +
+      "set up MULTIPLE products (call once per product, identified by name) and you can fill a " +
+      "project's fields INCREMENTALLY across several calls — pass whatever you have, it merges and " +
+      "tells you what's still missing. Call with status:true (or no name) to list every configured " +
+      "project and its remaining fields. Ask the user conversationally; don't dump a form. The " +
+      "draft_cycle, autopilot, and get_stats tools refuse to run until a project is fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
       name: z
         .string()
         .optional()
-        .describe("Short machine slug for the project, e.g. 'nicia' (lowercase, no spaces)"),
+        .describe("Short machine slug for the project, e.g. 'nicia' (lowercase, no spaces). The key that identifies which project to create/update."),
       website: z.string().optional().describe("The product's website URL"),
       description: z.string().optional().describe("What the product does, 1-3 sentences"),
       icp: z
@@ -223,53 +225,43 @@ server.registerTool(
     },
   },
   async (args) => {
-    const state = getSetupState();
-    const hasCoreFields = !!(args.name && args.website && args.description);
-
-    // Status / discovery mode: no real fields supplied, or explicitly asked.
-    if (args.status === true || !hasCoreFields) {
-      // Report missing against what's actually saved (the configured project in
-      // config.json), falling back to the call args only when nothing is set up
-      // yet. Avoids the bug where a bare status call reported every required
-      // field as "missing" despite a complete config.
-      const missing = state.configured
-        ? missingForProject(state.project) ?? missingRequired(args as Partial<ProjectInput>)
-        : missingRequired(args as Partial<ProjectInput>);
+    // Status / discovery mode: no project name supplied, or explicitly asked.
+    if (args.status === true || !args.name) {
+      const projects = listManagedProjectStatus();
       return jsonContent({
-        configured: state.configured,
-        project: state.project ?? null,
-        completed_at: state.completed_at ?? null,
-        config_path: CONFIG_PATH,
+        configured: projects.some((p) => p.ready),
+        projects,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
-        missing_required: missing,
-        next_step: state.configured
-          ? "Setup is complete. To reconfigure, call setup again with updated fields."
-          : "Collect the required fields from the user (website, description, icp, voice, and a " +
-            "short name), then call setup again with them. Ask conversationally; don't dump a form.",
+        config_path: CONFIG_PATH,
+        next_step:
+          projects.length === 0
+            ? "No projects yet. Ask the user about a product (website, what it does, who to target, " +
+              "brand voice), then call setup with a short name plus those fields. Repeat per product."
+            : projects.every((p) => p.ready)
+              ? "All configured projects are ready. Call setup again with a new name to add another product, " +
+                "or with an existing name + updated fields to change one."
+              : "Some projects are missing required fields (see each project's missing_required). Ask the " +
+                "user for those and call setup again with that project's name plus the missing fields.",
       });
     }
 
-    // Apply mode: validate required, then write the project + mark complete.
-    const missing = missingRequired(args as Partial<ProjectInput>);
-    if (missing.length) {
-      return jsonContent({
-        ok: false,
-        error: "missing_required_fields",
-        missing_required: missing,
-        note: "Ask the user for these, then call setup again with the full set.",
-      });
-    }
+    // Apply mode (incremental): merge whatever fields were supplied onto the
+    // named project, then report whether it's now ready or still missing fields.
     try {
       const result = applySetup(args as ProjectInput);
       return jsonContent({
         ok: true,
         project: result.project,
         action: result.created ? "created" : "updated",
+        ready: result.ready,
+        missing_required: result.missing_required,
         config_path: CONFIG_PATH,
-        note:
-          `Setup complete. Project '${result.project}' is now in config.json and this install ` +
-          `is configured. You can now run draft_cycle, autopilot, and get_stats.`,
+        note: result.ready
+          ? `Project '${result.project}' is fully set up. You can now run draft_cycle, autopilot, and ` +
+            `get_stats for it.`
+          : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
+            `Ask the user for those and call setup again with name='${result.project}' and the missing fields.`,
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
@@ -287,14 +279,16 @@ server.registerTool(
       "skip) and post only the approved ones. The entire manual loop in one call: discover " +
       "-> draft -> review -> post. Nothing posts without your approval.",
     inputSchema: {
-      project: z.string().optional(),
+      project: z
+        .string()
+        .optional()
+        .describe("Which configured project to draft for. Optional when only one project is set up; required when several are."),
     },
   },
   async ({ project }) => {
-    const gate = requireSetup();
-    if (!gate.ok) return textContent(gate.message!);
-    // Default to the project this install was set up for.
-    const proj = project ?? gate.state.project;
+    const r = resolveProject(project);
+    if (!r.ok) return textContent(r.message!);
+    const proj = r.project!;
     const drafted = await produceDrafts(proj);
     if (drafted.blocked || !drafted.batchId) {
       return textContent(drafted.blocked ?? "No drafts produced.");
@@ -340,9 +334,12 @@ server.registerTool(
     },
   },
   async ({ action }) => {
-    if (action !== "status") {
-      const gate = requireSetup();
-      if (!gate.ok) return textContent(gate.message!);
+    if (action !== "status" && !hasReadyProject()) {
+      return textContent(
+        "No project is fully set up yet, so autopilot has nothing to post. Run the `setup` tool " +
+          "first. Note: autopilot runs the background cycle across all configured projects; it is " +
+          "not scoped to one project."
+      );
     }
     const uid = process.getuid ? process.getuid() : 0;
     if (action === "status") {
@@ -389,13 +386,16 @@ server.registerTool(
       "Wraps project_stats_json.py. Use to show the user how their posts are performing.",
     inputSchema: {
       days: z.number().int().min(1).max(90).default(7),
-      project: z.string().optional(),
+      project: z
+        .string()
+        .optional()
+        .describe("Which configured project to report on. Optional when only one project is set up; required when several are."),
     },
   },
   async ({ days, project }) => {
-    const gate = requireSetup();
-    if (!gate.ok) return textContent(gate.message!);
-    const proj = project ?? gate.state.project;
+    const r = resolveProject(project);
+    if (!r.ok) return textContent(r.message!);
+    const proj = r.project!;
     const args = ["--posts-only", "--platform", "twitter", "--days", String(days)];
     if (proj) args.push("--project", proj);
     const res = await runPython("scripts/project_stats_json.py", args, { timeoutMs: 120_000 });
