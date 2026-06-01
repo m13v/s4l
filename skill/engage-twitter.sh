@@ -308,7 +308,7 @@ MANDATORY reply flow for every item:
              If \"project\" is null, we're a guest in someone else's thread; keep
              the existing project_name and follow global content rules.
   Step 3: Draft the reply using the resolved project's voice + chosen engagement
-          style. 1-2 sentences. NEVER em dashes. Match parent tweet language.
+          style. One sentence or a tight fragment — aim for under 100 chars. NEVER em dashes. Match parent tweet language.
   Step 3a: ACTIVE CAMPAIGN SUFFIX (MCP fallback, mirrors Reddit's pattern).
           The phase-B reply path goes through the browser typing tool
           (twitter_browser.py reply wedges against the same profile), so
