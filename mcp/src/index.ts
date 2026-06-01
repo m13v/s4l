@@ -314,12 +314,17 @@ server.registerTool(
         next_step:
           projects.length === 0
             ? "No projects yet. Ask the user about a product (website, what it does, who to target, " +
-              "brand voice), then call setup with a short name plus those fields. Repeat per product."
+              "brand voice), then call setup with a short name plus those fields. Repeat per product." +
+              (x.connected ? "" : " X is not connected yet either — also run setup action:'connect_x'.")
             : projects.every((p) => p.ready)
-              ? "All configured projects are ready. Call setup again with a new name to add another product, " +
-                "or with an existing name + updated fields to change one."
+              ? (x.connected
+                  ? "All configured projects are ready and X is connected. Call setup again with a new name " +
+                    "to add another product, or run draft_cycle to post."
+                  : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
+                    "x.com session. Run setup action:'connect_x' to import it from the user's browser.")
               : "Some projects are missing required fields (see each project's missing_required). Ask the " +
-                "user for those and call setup again with that project's name plus the missing fields.",
+                "user for those and call setup again with that project's name plus the missing fields." +
+                (x.connected ? "" : " X is also not connected yet (run setup action:'connect_x')."),
       });
     }
 
@@ -335,8 +340,9 @@ server.registerTool(
         missing_required: result.missing_required,
         config_path: CONFIG_PATH,
         note: result.ready
-          ? `Project '${result.project}' is fully set up. You can now run draft_cycle, autopilot, and ` +
-            `get_stats for it.`
+          ? `Project '${result.project}' is fully set up. Next: connect X so the autoposter can post — ` +
+            `call setup with action:'connect_x' (it explains itself, then run again with confirm:true). ` +
+            `Once X is connected you can run draft_cycle, autopilot, and get_stats.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `Ask the user for those and call setup again with name='${result.project}' and the missing fields.`,
       });
