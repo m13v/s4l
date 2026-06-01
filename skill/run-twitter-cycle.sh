@@ -419,9 +419,16 @@ REPO = os.path.expanduser('~/social-autoposter')
 sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import project_excludes as pe
 
+_pp_args = ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
+            '--platform', 'twitter', '--count', '1', '--json']
+# Manual-mode (MCP draft_cycle) single-project scoping: when SAPS_FORCE_PROJECT
+# is set, force that exact project instead of the weighted-random autopilot
+# pick, so a customer's interactive cycle only ever touches their own project.
+_force_project = os.environ.get('SAPS_FORCE_PROJECT')
+if _force_project:
+    _pp_args += ['--project', _force_project]
 res = subprocess.run(
-    ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
-     '--platform', 'twitter', '--count', '1', '--json'],
+    _pp_args,
     capture_output=True, text=True, timeout=30,
 )
 picked = []
@@ -1753,6 +1760,36 @@ python3 "$REPO_DIR/scripts/twitter_gen_links.py" --plan "$PLAN_FILE" 2>&1 | tee 
 GEN_EXIT=${PIPESTATUS[0]:-1}
 if [ "$GEN_EXIT" -ne 0 ]; then
     log "WARN: twitter_gen_links.py exited $GEN_EXIT, continuing with whatever links it set (per-candidate fallback to plain project URL on gen failure)."
+fi
+
+# --- DRAFT_ONLY gate: stop after drafting for human review (MCP manual mode) -
+# When DRAFT_ONLY=1 the cycle runs scan -> score -> draft -> link-gen, leaves the
+# fully-baked plan (links already stamped into reply_text) at $PLAN_FILE, and
+# STOPS before posting. The social-autoposter MCP draft_cycle tool reads that
+# plan, walks the human through approve/skip per draft, then posts the approved
+# subset via twitter_post_plan.py. Nothing is posted from this script in that
+# mode. The gate sits AFTER 2b-gen on purpose: twitter_post_plan.py does not run
+# link-gen itself, so the plan must already carry baked links before we hand it
+# off. Run with TWITTER_PAGE_GEN_RATE=0 (the default) so gen is a sub-second
+# plain-URL rewrite, not a 10-40 min SEO build, in the interactive path.
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    # Not posting, so the browser lock isn't needed; release it if still held.
+    release_lock "twitter-browser" 2>>"$LOG_FILE" || true
+    rm -f "$HOME/.claude/twitter-browser-lock.json"
+    log "DRAFT_ONLY=1: $PLAN_COUNT draft(s) ready for review at $PLAN_FILE. Stopping before post."
+    # Emit a clean posted=0 run row and suppress the EXIT-trap summary oneshot, so
+    # a draft-only run is NOT mis-synthesized as a phase2b_silent failure (the
+    # trap's fallback would do that for posted=0 with candidates pending).
+    _COST=$(python3 "$REPO_DIR/scripts/get_run_cost.py" --cycle-id "$BATCH_ID" 2>/dev/null || echo "0.0000")
+    python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 0 --salvaged "${SALVAGED:-0}" \
+        --queries "${QUERIES_TOTAL:-0}" --duds "${DUDS_TOTAL:-0}" \
+        --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
+        --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START )) 2>/dev/null || true
+    _SA_RUN_SUMMARY_EMITTED=1
+    # IMPORTANT: do NOT rm -f "$PLAN_FILE" here; the reviewer needs it. Print a
+    # machine-readable marker so the MCP wrapper can locate the plan deterministically.
+    echo "DRAFT_ONLY_PLAN=$PLAN_FILE"
+    exit 0
 fi
 
 # --- Phase 2b-post: re-acquire browser lock and post ------------------------
