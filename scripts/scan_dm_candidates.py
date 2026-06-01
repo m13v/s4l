@@ -546,25 +546,14 @@ def main():
     platforms = PLATFORMS if args.platform == "all" else [args.platform]
     total = 0
 
-    # DB-free lane: no DATABASE_URL -> run the discovery + insert server-side
-    # via the s4l.ai HTTP API. DB-equipped machines keep the direct path.
-    if not os.environ.get("DATABASE_URL"):
-        for platform in platforms:
-            print(f"\nScanning {platform} for DM candidates...")
-            count = scan_platform_http(config, platform, args.max, args.dry_run, max_age_days=args.days)
-            total += count
-        action = "found" if args.dry_run else "queued"
-        print(f"\nDM scan complete: {total} candidates {action} across {', '.join(platforms)}")
-        return total
-
-    conn = dbmod.get_conn()
-
+    # HTTP-only: discovery + insert run server-side via the s4l.ai HTTP API.
+    # The direct-Postgres lane was removed 2026-06-01 — there is no DB path and
+    # no fallback. DATABASE_URL, if present, is ignored.
     for platform in platforms:
         print(f"\nScanning {platform} for DM candidates...")
-        count = scan_platform(conn, config, platform, args.max, args.dry_run, max_age_days=args.days)
+        count = scan_platform_http(config, platform, args.max, args.dry_run, max_age_days=args.days)
         total += count
 
-    conn.close()
     action = "found" if args.dry_run else "queued"
     print(f"\nDM scan complete: {total} candidates {action} across {', '.join(platforms)}")
     return total
