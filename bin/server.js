@@ -9641,9 +9641,9 @@ const HTML = `<!DOCTYPE html>
   .exp-card-hypothesis { margin-top: 4px; font-size: 12px; color: var(--text-secondary); max-width: 720px; line-height: 1.45; }
   .exp-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 11px; color: var(--text-muted); }
   .exp-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-  .exp-status-running { background: var(--accent-panel-bg); color: var(--text); border: 1px solid #7b7b7b; }
-  .exp-status-decided { background: #3a3a3a; color: #fff; }
-  .exp-status-shipped { background: #515151; color: #fff; }
+  .exp-status-running { background: var(--bg-card); color: var(--text); border: 1px solid #000; }
+  .exp-status-decided { background: #000; color: #fff; }
+  .exp-status-shipped { background: #000; color: #fff; }
   .exp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .exp-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border); background: var(--bg); }
   .exp-table th.num, .exp-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -12436,6 +12436,19 @@ async function loadExperiments() {
     container.innerHTML = '<div class="style-stats-empty">No experiments running.</div>';
     return;
   }
+  // Running experiments float to the top; finished ones (decided, then shipped)
+  // sink to the bottom. Stable within each rank (preserves the server's order,
+  // which is roughly newest-first). Same card UI for all — only the status pill
+  // and the bottom-of-list position signal that an experiment has concluded.
+  const EXP_STATUS_RANK = { running: 0, decided: 1, shipped: 2 };
+  experiments
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => {
+      const ra = EXP_STATUS_RANK[a.e.status] != null ? EXP_STATUS_RANK[a.e.status] : 99;
+      const rb = EXP_STATUS_RANK[b.e.status] != null ? EXP_STATUS_RANK[b.e.status] : 99;
+      return ra !== rb ? ra - rb : a.i - b.i;
+    })
+    .forEach((o, idx) => { experiments[idx] = o.e; });
   // Top KPI band: count running/decided/shipped across all experiments.
   const kpiCounts = { running: 0, decided: 0, shipped: 0 };
   experiments.forEach(e => { if (kpiCounts[e.status] != null) kpiCounts[e.status]++; });
