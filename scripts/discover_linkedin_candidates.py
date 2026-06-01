@@ -530,6 +530,16 @@ _SEARCH_JS_CONTENT = r"""
 
     if (!authorName && !authorUrl && !postText) continue;
 
+    // Comment gate: the author restricted commenting to their connections
+    // ("Only connections can comment on this post. You can still react or
+    // share it."). For a 3rd+ degree account the comment editor never renders,
+    // so the post is uncommentable. LinkedIn paints this notice straight into
+    // the card chrome, so we can detect it here (Phase A) and drop the
+    // candidate before it ever reaches the expensive compose/post phase.
+    const commentGated =
+      /only connections can comment on this post|you can still react or share it/i
+        .test(fullItemText);
+
     out.push({
       post_url: activityId
         ? ('https://www.linkedin.com/feed/update/urn:li:' + urnType + ':' + activityId + '/')
@@ -545,7 +555,8 @@ _SEARCH_JS_CONTENT = r"""
       reactions: reactions,
       comments: comments,
       reposts: reposts,
-      age_text: ageText
+      age_text: ageText,
+      comment_gated: commentGated
     });
   }
   return JSON.stringify(out);
@@ -804,7 +815,21 @@ def search(vertical: str, query: str) -> dict:
             except json.JSONDecodeError:
                 results = []
 
+            dropped_comment_gated = 0
             if vertical == "content":
+                # Programmatic comment-gate pre-filter (Phase A). Posts whose
+                # author restricted commenting to connections-only are
+                # uncommentable by a 3rd+ degree account: the comment editor
+                # never renders and a full compose/post cycle ends in
+                # rejected_by_platform. Before this filter ~28% of posts that
+                # reached the comment stage died this way (35/123 since the
+                # 2026-05-29 harness migration). The gate is visible in the
+                # scraped card chrome, so we drop these here and never spend a
+                # Phase B cycle on them. The like-at-comment-time backstop in
+                # the posting agent still catches gates not shown in the card.
+                before = len(results)
+                results = [r for r in results if not r.get("comment_gated")]
+                dropped_comment_gated = before - len(results)
                 for r in results:
                     velocity, virality, age_clamped = calculate_velocity_score(r)
                     r["engagement_velocity"] = velocity
@@ -824,6 +849,7 @@ def search(vertical: str, query: str) -> dict:
                 "query": query,
                 "result_count": len(results),
                 "dropped_below_virality_floor": 0,
+                "dropped_comment_gated": dropped_comment_gated,
                 "virality_floor": None,
                 "results": results,
                 "rate_budget": {
