@@ -16,6 +16,12 @@ Output (JSON, single line):
 
 If no match in the last 30 days of active posts:
     {"project": null}
+
+Migrated 2026-06-01 from raw psycopg2 (db.get_conn) to the s4l.ai HTTP API
+(GET /api/v1/posts/lookup?platform=&post_id=). The platform-native id regex
+match (twitter /status/<id>, linkedin urn:li:activity:<id>) now runs server-
+side; the PLATFORM_PATTERNS table is mirrored there. Runs on a machine with
+no DATABASE_URL.
 """
 
 import json
@@ -24,9 +30,11 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 
 
+# Mirrored server-side in /api/v1/posts/lookup (ID_PATTERNS). Kept here only
+# for input validation / unknown-platform rejection before the round trip.
 PLATFORM_PATTERNS = {
     "twitter": r"/status/{id}([^0-9]|$)",
     "x": r"/status/{id}([^0-9]|$)",
@@ -35,43 +43,25 @@ PLATFORM_PATTERNS = {
 
 
 def lookup(platform, post_id):
-    pattern_template = PLATFORM_PATTERNS.get(platform.lower())
-    if not pattern_template:
+    if platform.lower() not in PLATFORM_PATTERNS:
         return {"project": None, "error": f"unknown platform: {platform}"}
 
     if not re.fullmatch(r"[0-9]+", post_id):
         return {"project": None, "error": "post_id must be digits"}
 
-    db_platform = "twitter" if platform.lower() in ("twitter", "x") else platform.lower()
-    pattern = pattern_template.format(id=post_id)
-
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    try:
-        row = conn.execute(
-            """
-            SELECT project_name, our_content, thread_url, posted_at
-            FROM posts
-            WHERE platform = %s
-              AND status = 'active'
-              AND our_url ~ %s
-              AND posted_at > NOW() - INTERVAL '30 days'
-            ORDER BY posted_at DESC
-            LIMIT 1
-            """,
-            (db_platform, pattern),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
+    resp = api_get(
+        "/api/v1/posts/lookup",
+        {"platform": platform.lower(), "post_id": post_id},
+    )
+    post = (resp.get("data") or {}).get("post")
+    if not post:
         return {"project": None}
 
     return {
-        "project": row[0] if isinstance(row, (list, tuple)) else row["project_name"],
-        "our_content": row[1] if isinstance(row, (list, tuple)) else row["our_content"],
-        "thread_url": row[2] if isinstance(row, (list, tuple)) else row["thread_url"],
-        "posted_at": (row[3] if isinstance(row, (list, tuple)) else row["posted_at"]).isoformat(),
+        "project": post.get("project_name"),
+        "our_content": post.get("our_content"),
+        "thread_url": post.get("thread_url"),
+        "posted_at": post.get("posted_at"),
     }
 
 
