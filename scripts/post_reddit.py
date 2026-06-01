@@ -1740,6 +1740,54 @@ def _propose_excludes_from_rejects(rejects, project_name, batch_id, candidates_b
     return counters
 
 
+# Stopwords stripped before computing query<->thread topical overlap. Kept small
+# and generic: these are the high-frequency English glue words that cause the
+# Reddit `sort=relevance` leak (a chatty natural-language query like "claude
+# artifacts built me a little tool to track my habits" matches an unrelated BORU
+# thread purely on shared words like "me", "to", "my", "a", "little"). We do NOT
+# strip domain words here — only structural filler — so the surviving overlap is
+# a real topical signal.
+_OVERLAP_STOPWORDS = frozenset("""
+a an the and or but if then else of to in on at for with without from by about into
+over under again further is are was were be been being am do does did doing have has
+had having i me my myself we our ours you your yours he him his she her it its they
+them their this that these those what which who whom whose how when where why all any
+both each few more most other some such no nor not only own same so than too very can
+will just dont don't should now get got make made want need like really actually
+something someone anyone everyone thing things stuff lot lots little bit kind sort
+""".split())
+
+# Token must be >=3 chars to count toward overlap (drops "ai" etc.? no — keep 2+
+# but exclude pure stopwords). We use 2 to keep short domain tokens like "db", "os".
+_OVERLAP_MIN_LEN = 2
+
+
+def _overlap_tokens(text):
+    """Lowercase alphanumeric tokens of length >= _OVERLAP_MIN_LEN, minus stopwords."""
+    if not text:
+        return set()
+    toks = re.findall(r"[a-z0-9]+", text.lower())
+    return {t for t in toks if len(t) >= _OVERLAP_MIN_LEN and t not in _OVERLAP_STOPWORDS}
+
+
+def _topical_overlap(query, title, selftext):
+    """Fraction of distinct content tokens in `query` that also appear in the
+    thread's title+selftext. 0.0 = no shared topical token (likely relevance-sort
+    garbage), 1.0 = every query content word is present in the thread.
+
+    This is a *soft signal* used only to rank/prioritize candidates, never to hard-
+    drop them — per the conservative directive, we isolate + surface the garbage
+    rather than silently filtering it.
+    """
+    q = _overlap_tokens(query)
+    if not q:
+        return 0.0
+    body = _overlap_tokens((title or "") + " " + (selftext or ""))
+    if not body:
+        return 0.0
+    return len(q & body) / len(q)
+
+
 def _discover_iteration(args, config, reddit_username, already_picked):
     """DISCOVER phase: search and select threads. No drafting.
 
@@ -1908,11 +1956,54 @@ def _discover_iteration(args, config, reddit_username, already_picked):
         for line in output.strip().split("\n")[-10:]:
             print(f"  {line}")
 
+    # --- Topical-overlap scoring + top-N cap (replaces the old ripen momentum
+    # gate, retired 2026-06-01 to align with the Twitter pipeline which dropped
+    # its inter-phase momentum sleep on 2026-05-31). Reddit's sort=relevance
+    # leaks high-engagement OFF-topic threads that share only structural English
+    # words with a chatty natural-language query (e.g. an on-topic query about a
+    # habit-tracking tool matching an unrelated BORU drama thread). Without the
+    # ripen stage thinning the set over 30 min, we instead sort by a topical-
+    # overlap signal and keep the top N so draft spends its budget on the most
+    # on-topic + active threads. We do NOT hard-drop low-overlap rows: every
+    # harvested candidate is still persisted to the queue for analytics + salvage;
+    # the cap is a soft prioritization only (conservative per user directive —
+    # isolate + surface the garbage in logs rather than silently filtering it).
+    DISCOVER_CAP = int(os.environ.get("SAPS_REDDIT_DISCOVER_CAP", "25") or "25")
+    for c in candidates:
+        ov = _topical_overlap(c.get("search_topic"), c.get("thread_title"), c.get("selftext"))
+        # velocity proxy: comments weighted 4x upvotes, echoing the old ripen
+        # composite (Δup + 4·Δcomments) but on absolute counts since we no longer
+        # sample momentum over a time window.
+        vel = int(c.get("score") or 0) + 4 * int(c.get("num_comments") or 0)
+        c["topical_overlap"] = round(ov, 3)
+        c["velocity"] = vel
+    # Primary sort: overlap desc (on-topic first). Tiebreak: velocity desc.
+    ranked = sorted(candidates, key=lambda c: (c["topical_overlap"], c["velocity"]), reverse=True)
+    selected = ranked[:DISCOVER_CAP] if DISCOVER_CAP > 0 else ranked
+
+    # [discover_harvest] marker: surface the overlap distribution so relevance-sort
+    # garbage is visible in logs. overlap_zero = rows sharing NO content token with
+    # the query = almost certainly leak; if these dominate the harvest we know the
+    # query/search is misfiring without having dropped anything.
+    n_zero = sum(1 for c in candidates if c["topical_overlap"] == 0.0)
+    n_low = sum(1 for c in candidates if 0.0 < c["topical_overlap"] < 0.34)
+    n_mid = sum(1 for c in candidates if 0.34 <= c["topical_overlap"] < 0.67)
+    n_high = sum(1 for c in candidates if c["topical_overlap"] >= 0.67)
+    cut = selected[-1]["topical_overlap"] if selected else 0.0
+    print(f"[discover_harvest] project={project_name} harvested={len(candidates)} "
+          f"selected={len(selected)} cap={DISCOVER_CAP} cutoff_overlap={cut:.3f} "
+          f"overlap_zero={n_zero} low={n_low} mid={n_mid} high={n_high}")
+    for c in selected:
+        print(f"[discover_harvest]   ov={c['topical_overlap']:.2f} vel={c['velocity']:>5} "
+              f"q={(c.get('search_topic') or '')[:40]!r} :: {(c.get('thread_title') or '')[:70]!r}")
+
     # Persist freshly-discovered candidates to reddit_candidates so a
     # transient post failure on a later phase can be retried by the next
     # cycle's Phase 0 salvage. Best-effort: if the queue write fails, the
     # tmpfile flow still works for this cycle, we just lose the salvage
-    # benefit. See module-level _db_upsert_discovered_candidate.
+    # benefit. See module-level _db_upsert_discovered_candidate. We persist
+    # ALL harvested candidates (not just the capped `selected`) so the queue
+    # keeps full history per the no-pruning rule.
     queue_batch = getattr(args, "batch_id", None) or plan_batch_id
     if not args.dry_run and candidates:
         for c in candidates:
@@ -1920,9 +2011,10 @@ def _discover_iteration(args, config, reddit_username, already_picked):
 
     # Backfill seed on reddit_search_attempts rows from this batch so the
     # Search Queries dashboard can join attempts → posts via search_topic.
-    # Use the first candidate's search_topic — LIMIT=1 means one seed/batch.
-    if candidates and plan_batch_id:
-        seed = (candidates[0].get("search_topic") or "").strip()
+    # Use the top-ranked selected candidate's search_topic so the seed reflects
+    # what actually flows into draft.
+    if selected and plan_batch_id:
+        seed = (selected[0].get("search_topic") or "").strip()
         if seed:
             try:
                 api_patch(
@@ -1932,7 +2024,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
             except Exception as e:
                 print(f"[post_reddit] WARNING: seed backfill failed: {e}", file=sys.stderr)
 
-    return {"project_name": project_name, "decisions": candidates,
+    return {"project_name": project_name, "decisions": selected,
             "cost": usage["cost_usd"], "session_id": usage.get("session_id"),
             "phase": "discover"}
 
