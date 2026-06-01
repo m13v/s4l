@@ -59,23 +59,33 @@ interface DraftResult {
   blocked?: string;
 }
 
-async function produceDrafts(_project?: string): Promise<DraftResult> {
-  // TODO(decision): wire scan+draft once the DRAFT_ONLY gate lands.
-  //   (a) unlock run-twitter-cycle.sh, add DRAFT_ONLY=1 that exits after writing
-  //       /tmp/twitter_cycle_plan_<batch>.json, then call it here; or
-  //   (b) drive the scan/score/draft phases directly from this wrapper.
-  // For now, operate on the most recent existing plan if one is present so the
-  // review+post half is fully testable.
+async function produceDrafts(project?: string): Promise<DraftResult> {
+  // Run the real pipeline in DRAFT_ONLY mode: scan -> score -> draft -> link-gen,
+  // then STOP before posting. The script prints `DRAFT_ONLY_PLAN=<path>` and
+  // leaves the plan on disk for us to review + post. SAPS_FORCE_PROJECT scopes
+  // the cycle to one project; TWITTER_PAGE_GEN_RATE=0 keeps link-gen sub-second.
+  const env: NodeJS.ProcessEnv = {
+    DRAFT_ONLY: "1",
+    TWITTER_PAGE_GEN_RATE: "0",
+  };
+  if (project) env.SAPS_FORCE_PROJECT = project;
+  const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
+    env,
+    timeoutMs: 900_000, // scan+draft can take several minutes
+  });
+  // Prefer the explicit marker; fall back to the newest plan file on disk.
+  const marker = /DRAFT_ONLY_PLAN=\/tmp\/twitter_cycle_plan_(.+)\.json/.exec(
+    res.stdout + "\n" + res.stderr
+  );
+  if (marker && marker[1]) return { batchId: marker[1] };
   const existing = latestBatchId();
   if (existing) return { batchId: existing };
   return {
     batchId: null,
     blocked:
-      "Scan+draft is not wired yet: the drafting phase lives in the locked " +
-      "run-twitter-cycle.sh, which posts straight through with no draft-only stop. " +
-      "Decide: (a) unlock it to add a DRAFT_ONLY=1 gate that exits after writing the " +
-      "plan JSON, or (b) drive scan/score/draft phases from this wrapper. Once chosen, " +
-      "draft_cycle will produce a batch, walk you through approve/skip, and post.",
+      `Draft cycle produced no plan (exit ${res.code}). This usually means scan ` +
+      `found no fresh candidates, or the pipeline errored. Tail:\n` +
+      res.stderr.split("\n").slice(-12).join("\n"),
   };
 }
 
