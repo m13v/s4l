@@ -50,6 +50,7 @@ STYLES = {
             "linkedin": ["strategy", "leadership", "operations"],
         },
         "note": "NEVER just nitpick; offer a non-obvious insight.",
+        "target_chars": 80,
     },
     "storyteller": {
         "description": (
@@ -92,6 +93,7 @@ STYLES = {
             "centers') without a Lane 1 opener and without config.json "
             "grounding is the exact failure mode the GROUNDING RULE forbids."
         ),
+        "target_chars": 180,
     },
     "pattern_recognizer": {
         "description": "Name the pattern or phenomenon. Authority through pattern recognition, not credentials.",
@@ -102,6 +104,7 @@ STYLES = {
             "linkedin": ["industry analysis", "tech leadership"],
         },
         "note": "Authority through pattern recognition, not credentials.",
+        "target_chars": 80,
     },
     "curious_probe": {
         "description": "One specific follow-up question about the most interesting detail. Include 'curious because...' context.",
@@ -112,6 +115,7 @@ STYLES = {
             "linkedin": ["thought leadership", "niche B2B"],
         },
         "note": "ONE question only. Never multiple.",
+        "target_chars": 80,
     },
     "contrarian": {
         "description": "Take a clear opposing position backed by experience.",
@@ -122,6 +126,7 @@ STYLES = {
             "linkedin": ["industry debates", "contrarian leadership"],
         },
         "note": "Must have credible evidence. Empty hot takes get destroyed.",
+        "target_chars": 80,
     },
     "data_point_drop": {
         "description": "Share one specific, believable metric. Let the number do the talking.",
@@ -132,6 +137,7 @@ STYLES = {
             "linkedin": ["results", "case studies"],
         },
         "note": "No links. Numbers must be believable, not impressive.",
+        "target_chars": 60,
     },
     "snarky_oneliner": {
         "description": "Short, sharp, emotionally resonant observation (1 sentence max). Validates a shared frustration.",
@@ -142,6 +148,7 @@ STYLES = {
             "linkedin": [],  # never on LinkedIn
         },
         "note": "NEVER in small/serious subs like r/vipassana. NEVER on LinkedIn.",
+        "target_chars": 45,
     },
     # ── Instagram-native caption styles (2026-05-21) ──
     # Distinct from the reply/comment styles above: these describe the
@@ -176,6 +183,7 @@ STYLES = {
             "lesson + 'stop X, start Y' imperative. NO product mention (no "
             "Fazm/Mediar/AppMaker/mk0r/studyly): organic only."
         ),
+        "target_chars": 1800,
     },
     "ig_walkin_storefront_playbook": {
         "description": (
@@ -207,6 +215,7 @@ STYLES = {
             "'mk0r.com' in caption and the mk0r.com footer. project_name='mk0r' "
             "on the row. Fires when TARGET=product AND selected_project=mk0r."
         ),
+        "target_chars": 1800,
     },
     "ig_studyly_failing_student_arc": {
         "description": (
@@ -236,6 +245,7 @@ STYLES = {
             "project_name='studyly'. Lesson is always rereading-is-theater. "
             "Fires when TARGET=product AND selected_project=studyly."
         ),
+        "target_chars": 1650,
     },
 }
 
@@ -294,6 +304,13 @@ def _normalize_entry(entry, default_status="active", default_kind="seed"):
     out.setdefault("example", "")
     out.setdefault("note", "")
     out.setdefault("best_in", {})
+    # Authoritative per-style target comment length. Falls back to the
+    # short-biased default for legacy rows / cold-start entries that predate
+    # the target_chars column.
+    try:
+        out["target_chars"] = int(out.get("target_chars") or DEFAULT_TARGET_CHARS)
+    except (TypeError, ValueError):
+        out["target_chars"] = DEFAULT_TARGET_CHARS
     # kind discriminates origin: 'seed' (hardcoded/top-performer), 'model_invented'
     # (Claude proposed during a posting run), 'human_derived' (synthesized from
     # the daily human-reply digest). Surfaced in the dashboard as a bracket
@@ -362,6 +379,7 @@ def _fetch_registry_styles(force_refresh=False):
             "first_post_url": r.get("first_post_url"),
             "first_post_platform": r.get("first_post_platform"),
             "why_existing_didnt_fit": r.get("why_existing_didnt_fit") or "",
+            "target_chars": r.get("target_chars") or DEFAULT_TARGET_CHARS,
         }
     _REGISTRY_CACHE["rows"] = out
     _REGISTRY_CACHE["ts"] = now
@@ -445,6 +463,7 @@ def _load_human_derived_styles():
             "example": r.get("example") or "",
             "note": r.get("note") or "",
             "best_in": best_in,
+            "target_chars": r.get("target_chars") or DEFAULT_TARGET_CHARS,
         }
     return out
 
@@ -991,6 +1010,13 @@ def compute_target_distribution(platform, context="posting"):
 
 INVENT_RATE = 0.05  # ~1 in 20 posts forces a new-style invention
 CURATED_TOP_N = 5   # size of the invent-mode reference list (top 5 by score)
+
+# Fallback target comment length (chars) for any style that lacks an explicit
+# target_chars (legacy DB rows, cold-start before the registry is reachable).
+# Set just above the top-human-reply median (~74) so the long tail of styles
+# defaults SHORT, not to our historical ~215-char bloat. Mirrors the DB column
+# default in migrations/2026-05-30-engagement-styles-target-chars.sql.
+DEFAULT_TARGET_CHARS = 80
 
 # Additive ~5% branch per platform (2026-05-22, second pass): with this
 # probability, the picker bypasses score-based selection and assigns the
