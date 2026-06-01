@@ -76,7 +76,7 @@ import urllib.parse
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 
 # `urn:li:comment:(urn:li:activity:<parent>,<comment_id>)`
@@ -126,48 +126,46 @@ def load_feed(path: str) -> list[dict]:
     return out
 
 
-def load_engagement_comments(db) -> dict:
+def load_engagement_comments() -> dict:
     """Return {comment_id: {id, our_url, upvotes, comments_count, views}}.
 
     Only includes LinkedIn `posts` rows where `our_url` carries a
     commentUrn (i.e., we can identify OUR comment, not just the parent
     thread). Status='active' OR 'removed' (removed rows still benefit
     from a final-stats read in case they come back).
+
+    Migrated 2026-06-01 to GET /api/v1/linkedin-engagement-comments. The
+    server returns every candidate row; the brittle commentUrn regex
+    (extract_comment_id) stays single-sourced here in Python so the API
+    surface never has to replicate it.
     """
-    cur = db.execute(
-        "SELECT id, our_url, "
-        "       COALESCE(upvotes, 0)        AS upvotes, "
-        "       COALESCE(comments_count, 0) AS comments_count, "
-        "       COALESCE(views, 0)          AS views "
-        "FROM posts "
-        "WHERE platform='linkedin' "
-        "  AND status IN ('active', 'removed') "
-        "  AND our_url IS NOT NULL "
-        "  AND our_url ILIKE '%commentUrn%'"
-    )
+    resp = api_get("/api/v1/linkedin-engagement-comments")
+    rows = (resp.get("data") or {}).get("rows") or []
     out = {}
-    for r in cur.fetchall():
-        parsed = extract_comment_id(r["our_url"])
+    for r in rows:
+        parsed = extract_comment_id(r.get("our_url"))
         if not parsed:
             continue
         _, _, cid = parsed
         out[cid] = {
             "id":             r["id"],
             "our_url":        r["our_url"],
-            "upvotes":        int(r["upvotes"] or 0),
-            "comments_count": int(r["comments_count"] or 0),
-            "views":          int(r["views"] or 0),
+            "upvotes":        int(r.get("upvotes") or 0),
+            "comments_count": int(r.get("comments_count") or 0),
+            "views":          int(r.get("views") or 0),
         }
     return out
 
 
-def apply_one(db, db_row: dict, feed: dict, dry_run: bool, quiet: bool) -> str:
-    """Apply one feed record to one DB row.
+def compute_one(db_row: dict, feed: dict, dry_run: bool, quiet: bool) -> dict:
+    """Compute the update for one feed record against one DB row.
 
-    Returns 'updated' if any tracked field changed, 'unchanged' otherwise.
-    Only overwrites a column when the feed value is non-null (preserves
-    last known value for fresh comments that don't yet have impressions
-    computed by LinkedIn).
+    Returns {post_id, upvotes, comments_count, views, changed}. Only
+    overwrites a column when the feed value is non-null (preserves last
+    known value for fresh comments that don't yet have impressions
+    computed by LinkedIn). The actual write (UPDATE posts +
+    scan_no_change_count maintenance + post_views_daily snapshot) happens
+    server-side when the batch is POSTed.
     """
     new_rxn = feed["reactions"]
     new_imp = feed["impressions"]
@@ -183,38 +181,6 @@ def apply_one(db, db_row: dict, feed: dict, dry_run: bool, quiet: bool) -> str:
         or next_vws != db_row["views"]
     )
 
-    if not dry_run:
-        # Mirror stats.py's Twitter behavior: write stats + always
-        # advance engagement_updated_at + maintain scan_no_change_count.
-        db.execute(
-            "UPDATE posts SET "
-            "   upvotes               = %s, "
-            "   comments_count        = %s, "
-            "   views                 = %s, "
-            "   engagement_updated_at = NOW(), "
-            "   status_checked_at     = NOW(), "
-            "   deletion_detect_count = 0 "
-            "WHERE id = %s",
-            [next_upv, next_cmt, next_vws, db_row["id"]],
-        )
-        if changed:
-            db.execute(
-                "UPDATE posts SET scan_no_change_count = 0 WHERE id = %s",
-                [db_row["id"]],
-            )
-        else:
-            db.execute(
-                "UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id = %s",
-                [db_row["id"]],
-            )
-        # snapshot_post_views is the standard view-history snapshot Twitter
-        # uses; LinkedIn impressions are roughly analogous to tweet views.
-        # Wrapped in try so a missing helper doesn't break the write path.
-        try:
-            dbmod.snapshot_post_views(db, db_row["id"], next_vws)
-        except Exception:
-            pass
-
     if not quiet:
         tag = "UPDATED" if changed else "same"
         if dry_run:
@@ -227,7 +193,13 @@ def apply_one(db, db_row: dict, feed: dict, dry_run: bool, quiet: bool) -> str:
             flush=True,
         )
 
-    return "updated" if changed else "unchanged"
+    return {
+        "post_id":        db_row["id"],
+        "upvotes":        next_upv,
+        "comments_count": next_cmt,
+        "views":          next_vws,
+        "changed":        changed,
+    }
 
 
 def run(from_json: str,
