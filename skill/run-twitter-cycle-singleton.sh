@@ -1,46 +1,38 @@
 #!/bin/bash
-# run-twitter-cycle-singleton.sh — singleton wrapper invoked by launchd.
+# run-twitter-cycle-singleton.sh — launchd entry wrapper for the twitter
+# post-comments cycle.
 #
-# Purpose: enforce ONE running twitter post-comments cycle at any time.
+# CONCURRENCY: this wrapper NO LONGER enforces one-at-a-time. As of 2026-06-01
+# that is handled inside run-twitter-cycle.sh itself via:
+#     preflight_acquire_slot_or_skip "twitter-cycle" 1
+# which EVERY launch path hits (launchd, MCP draft_cycle/autopilot, manual
+# `bash skill/run-twitter-cycle.sh`). The old guard that used to live here
+# (Phase 0 external-cycle detect + the /tmp/sa-twitter-cycle-singleton.lock
+# mkdir claim) only governed the launchd path, never the MCP/manual paths, so
+# it let out-of-band cycles slip through and then conflicted with the in-script
+# gate. It was redundant belt-and-suspenders and is removed. Single source of
+# truth for concurrency is now the preflight slot gate.
 #
-# History: prior to 2026-05-22, run-twitter-cycle-launchd.sh used a Python
-# double-fork (os.setsid) to defeat launchd's natural overlap suppression so
-# up to 4 cycles could stack and serialize through the twitter-browser lock.
-# Net effect: ~50% of every cycle's wall time was spent queued on the lock,
-# and one slow cycle could push three more behind it. The user requested
-# singleton semantics on 2026-05-22.
+# SNAPSHOT (the one load-bearing job left here): copy the cycle script to a temp
+# file and run THAT, so an in-place edit of run-twitter-cycle.sh mid-run (e.g.
+# the auto-commit agent committing a rewrite) cannot corrupt bash's byte-offset
+# execution of a live cycle. run-twitter-cycle.sh hardcodes
+# REPO_DIR="$HOME/social-autoposter" (no $0/BASH_SOURCE), so the /tmp copy
+# resolves the repo identically.
+# 2026-05-28 incident: commit 0ac29141 landed mid-run, byte-offset misaligned,
+# the cycle skipped its unconditional release_lock + Variant-A sleep, then
+# re-acquired its own still-held twitter-browser lock and self-deadlocked.
 #
-# How this wrapper works:
-#   1. EXTERNAL CYCLE DETECT (post 2026-05-22 hardening): pgrep for any
-#      run-twitter-cycle.sh that is NOT a descendant of this wrapper. Covers:
-#        a) orphans from the pre-singleton launchd config (PPID=1 after parent
-#           setsid wrapper exited), and
-#        b) any manual / out-of-band cycle invocations.
-#      If any external cycle is alive, log "skipped: external" and exit 0
-#      WITHOUT killing anything. The next launchd fire (15 min later) re-runs
-#      this check, so we naturally converge to one-at-a-time once the orphan
-#      finishes its work on its own.
-#   2. mkdir-based atomic singleton claim at /tmp/sa-twitter-cycle-singleton.lock
-#      - If lock dir holds a live PID, log "skipped" and exit 0 (launchd is happy).
-#      - If lock dir holds a dead PID, clear it and proceed.
-#   3. Run run-twitter-cycle.sh in the FOREGROUND. The wrapper stays alive for
-#      the full cycle duration (60-90 min), which also engages launchd's built-in
-#      "don't fire while same Label is running" behavior. Belt + suspenders.
-#   4. Trap EXIT to release the singleton lock on any exit path.
-#
-# NEVER KILL: this wrapper does not SIGTERM/SIGKILL any process. Per user
-# instruction 2026-05-22 "I don't want to kill anything, going forward".
-# Convergence to one-at-a-time is via skip-on-detect, not preemption.
+# NEVER KILL: per user instruction 2026-05-22, this wrapper does not
+# SIGTERM/SIGKILL anything. With concurrency now enforced by the slot gate,
+# there is nothing to preempt anyway.
 #
 # Logs:
-#   - /Users/matthewdi/social-autoposter/skill/logs/twitter-cycle-singleton.log
-#     -> tracks singleton skip/start/done lifecycle events.
-#   - launchd stdout/stderr (already configured in the plist) continue to
-#     receive the cycle's own output.
+#   - skill/logs/twitter-cycle-singleton.log -> wrapper start/done + snapshot events
+#   - launchd stdout/stderr (configured in the plist) receive the cycle's output
 
 set -u
 
-LOCK_DIR="/tmp/sa-twitter-cycle-singleton.lock"
 REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
 SINGLETON_LOG="$LOG_DIR/twitter-cycle-singleton.log"
@@ -52,52 +44,15 @@ mkdir -p "$LOG_DIR"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*" >> "$SINGLETON_LOG"; }
 
-# --- Phase 0: external-cycle detect (skip, never kill) -----------------------
-# pgrep -f matches against the full cmdline. The cycle script is invoked as
-# `/bin/bash <repo>/skill/run-twitter-cycle.sh` with no args, so its cmdline
-# ends with `run-twitter-cycle.sh`. The wrapper's own cmdline ends with
-# `run-twitter-cycle-singleton.sh`, so anchoring the pattern with `\.sh$`
-# excludes us. Filter $$ as well as a belt-and-suspenders guard.
-EXTERNAL_CYCLE_PIDS=$(pgrep -f 'skill/run-twitter-cycle\.sh$' 2>/dev/null | grep -v "^$$\$" | tr '\n' ' ' | sed 's/ *$//')
-if [ -n "$EXTERNAL_CYCLE_PIDS" ]; then
-  log "[singleton] skipped: external run-twitter-cycle.sh alive pids=[$EXTERNAL_CYCLE_PIDS] (self=$$, never killing per user instruction)"
-  exit 0
-fi
+# Release the snapshot temp file on any exit path.
+trap 'rm -f "$SNAPSHOT"; log "[wrapper] done pid=$$ rc=${EXIT_CODE:-?}"' EXIT
 
-# Try to atomically claim the singleton slot.
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  HOLDER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
-    log "[singleton] skipped: prior cycle pid=$HOLDER_PID still alive"
-    exit 0
-  fi
-  # Stale lock: holder is gone. Reclaim.
-  log "[singleton] stale lock cleared (dead pid=${HOLDER_PID:-unknown})"
-  rm -rf "$LOCK_DIR"
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "[singleton] could not reclaim lock after clearing stale; aborting"
-    exit 1
-  fi
-fi
-echo "$$" > "$LOCK_DIR/pid"
+log "[wrapper] start pid=$$"
 
-# Release lock on any exit path.
-trap 'rm -rf "$LOCK_DIR"; rm -f "$SNAPSHOT"; log "[singleton] done pid=$$ rc=${EXIT_CODE:-?}"' EXIT
-
-log "[singleton] start pid=$$"
-
-# Snapshot the cycle script to a temp copy and run THAT, so an in-place edit of
-# run-twitter-cycle.sh mid-run (e.g. the auto-commit agent committing a rewrite)
-# cannot corrupt bash's byte-offset execution of a live cycle. run-twitter-cycle.sh
-# hardcodes REPO_DIR="$HOME/social-autoposter" (no $0/BASH_SOURCE), so running the
-# copy from /tmp resolves the repo identically.
-# 2026-05-28 incident: commit 0ac29141 landed mid-run, byte-offset misaligned,
-# the cycle skipped its unconditional release_lock + Variant-A sleep, then
-# re-acquired its own still-held twitter-browser lock and self-deadlocked.
 SNAPSHOT="/tmp/sa-twitter-cycle-snapshot-$$.sh"
 cp "$CYCLE_SCRIPT" "$SNAPSHOT"
 if ! /bin/bash -n "$SNAPSHOT" 2>/dev/null; then
-  log "[singleton] snapshot syntax check failed (caught mid-edit?); aborting, launchd retries in 60s"
+  log "[wrapper] snapshot syntax check failed (caught mid-edit?); aborting, launchd retries next fire"
   exit 1
 fi
 
