@@ -46,10 +46,34 @@ LOG_DIR="$REPO_DIR/skill/logs"
 BATCH_SIZE=500
 MCP_CONFIG="$MCP_CONFIG_FILE"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# DB-free since 2026-06-01: all reply state goes through the s4l.ai HTTP API
+# (X-Installation auth). No DATABASE_URL needed; the helpers below call the API.
+PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
+
+# li_reply_count <status>  -> integer count of linkedin replies in that status.
+# Backed by GET /api/v1/replies/counts (same aggregate reply_db.py status uses).
+li_reply_count() {
+    "$PY_BIN" -c "
+import sys; sys.path.insert(0, '$REPO_DIR/scripts')
+from http_api import api_get
+resp = api_get('/api/v1/replies/counts', {'platform': 'linkedin'})
+counts = ((resp or {}).get('data') or {}).get('counts') or []
+want = '$1'
+print(next((int(r.get('count', 0)) for r in counts if r.get('status') == want), 0))
+" 2>/dev/null || echo 0
+}
+
+# li_reset_processing <older_than_hours>  -> count of rows reset to pending.
+# older_than_hours=0 means no time gate (reset every processing row). Backed by
+# POST /api/v1/replies/reset-stuck.
+li_reset_processing() {
+    "$PY_BIN" -c "
+import sys; sys.path.insert(0, '$REPO_DIR/scripts')
+from http_api import api_post
+resp = api_post('/api/v1/replies/reset-stuck', {'platform': 'linkedin', 'older_than_hours': int('$1')})
+print(((resp or {}).get('data') or {}).get('reset_count', 0))
+" 2>/dev/null || echo 0
+}
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/engage-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
