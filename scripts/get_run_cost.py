@@ -73,14 +73,12 @@ def main():
 
     try:
         sys.path.insert(0, os.path.join(ROOT_DIR, 'scripts'))
-        if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1':
-            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_db(
-                cycle_id=cycle_id, since=args.since, scripts=args.scripts,
-            )
-        else:
-            parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_api(
-                cycle_id=cycle_id, since=args.since, scripts=args.scripts,
-            )
+        # HTTP-only: cost is always read from the s4l.ai HTTP API. The direct
+        # Postgres path (and the SOCIAL_AUTOPOSTER_LEGACY_NEON escape hatch) was
+        # removed 2026-06-01 — no DB path, no fallback.
+        parent_cost, subagent_cost, task_count, subagent_count = _fetch_via_api(
+            cycle_id=cycle_id, since=args.since, scripts=args.scripts,
+        )
         if args.breakdown:
             print(f"{parent_cost:.4f} {subagent_cost:.4f} {task_count} {subagent_count}")
         else:
@@ -102,41 +100,6 @@ def _fetch_via_api(*, cycle_id, since, scripts):
         float(data.get("subagent_cost") or 0),
         int(data.get("task_count") or 0),
         int(data.get("subagent_count") or 0),
-    )
-
-
-def _fetch_via_db(*, cycle_id, since, scripts):
-    import psycopg2  # noqa: F401
-    import db as dbmod
-    conn = dbmod.get_conn()
-    if cycle_id:
-        cur = conn.execute(
-            """SELECT COALESCE(SUM(orchestrator_cost_usd), 0),
-                      COALESCE(SUM(subagent_cost_usd), 0),
-                      COALESCE(SUM(task_call_count), 0),
-                      COALESCE(SUM(subagent_count), 0)
-               FROM claude_sessions
-               WHERE cycle_id = %s""",
-            [cycle_id],
-        )
-    else:
-        since_ts = datetime.fromtimestamp(since, tz=timezone.utc).isoformat()
-        placeholders = ','.join(['%s'] * len(scripts))
-        cur = conn.execute(
-            f"""SELECT COALESCE(SUM(orchestrator_cost_usd), 0),
-                       COALESCE(SUM(subagent_cost_usd), 0),
-                       COALESCE(SUM(task_call_count), 0),
-                       COALESCE(SUM(subagent_count), 0)
-                FROM claude_sessions
-                WHERE script IN ({placeholders}) AND started_at >= %s""",
-            list(scripts) + [since_ts],
-        )
-    row = cur.fetchone()
-    return (
-        float(row[0] or 0),
-        float(row[1] or 0),
-        int(row[2] or 0),
-        int(row[3] or 0),
     )
 
 
