@@ -9,9 +9,9 @@ notification not already tracked.
 import json
 import os
 import sys
-import psycopg2
 
-DB_URL = os.environ["DATABASE_URL"]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_post
 
 EXCLUDED_AUTHORS = {"louis030195", "louis3195"}
 OWN_NAMES = {"Matthew Diakonov", "m13v"}
@@ -64,10 +64,6 @@ def main():
         "post_created": 0,
     }
 
-    conn = psycopg2.connect(DB_URL)
-    conn.autocommit = False
-    cur = conn.cursor()
-
     for n in notifs:
         author = n.get("author") or ""
         comment_urn = n.get("comment_urn")
@@ -94,33 +90,32 @@ def main():
             post_id, our_url = match
         else:
             our_url = f"https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/"
-            cur.execute(
-                """
-                INSERT INTO posts
-                  (platform, thread_url, thread_author, thread_author_handle,
-                   thread_title, thread_content, our_url, our_content, our_account,
-                   source_summary, project_name, engagement_style, feedback_report_used,
-                   status, posted_at)
-                VALUES
-                  ('linkedin', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   FALSE, 'active', NOW())
-                RETURNING id
-                """,
-                (
-                    our_url,                 # thread_url
-                    author,                  # thread_author (best we have)
-                    "",                      # thread_author_handle
-                    "",                      # thread_title
-                    snippet[:500],           # thread_content (best we have)
-                    our_url,                 # our_url
-                    "",                      # our_content (unknown, discovery only)
-                    "matthew-autoposter",    # our_account
-                    "discovered_from_notifications",  # source_summary
-                    "general",               # project_name (topics empty in config)
-                    "discovery",             # engagement_style
-                ),
+            resp = api_post(
+                "/api/v1/posts",
+                {
+                    "platform": "linkedin",
+                    "thread_url": our_url,
+                    "thread_author": author,            # best signal we have
+                    "thread_content": snippet[:500],    # best we have
+                    "our_url": our_url,
+                    "our_content": "[discovered from notifications, no original content tracked]",
+                    "our_account": "matthew-autoposter",
+                    "source_summary": "discovered_from_notifications",
+                    "project": "general",               # topics empty in config
+                    "engagement_style": "discovery",
+                    "status": "active",
+                },
+                ok_on_conflict=True,
             )
-            post_id = cur.fetchone()[0]
+            if (resp.get("error") or {}).get("code") == "duplicate_thread":
+                # Already in DB but not in our /tmp/li_posts.txt local map;
+                # reuse the existing row rather than create a duplicate.
+                post_id = (resp["error"].get("details") or {}).get("existing_post_id")
+            else:
+                post_id = ((resp.get("data") or {}).get("post") or {}).get("id")
+            if post_id is None:
+                counts["no_comment_urn"] += 1
+                continue
             posts.append((post_id, our_url))
             counts["post_created"] += 1
 
@@ -129,22 +124,23 @@ def main():
             counts["author_already_engaged"] += 1
             continue
 
-        cur.execute(
-            """
-            INSERT INTO replies
-              (post_id, platform, their_comment_id, their_author, their_content,
-               their_comment_url, depth, status)
-            VALUES (%s, 'linkedin', %s, %s, %s, %s, 1, 'pending')
-            """,
-            (post_id, comment_urn, author, snippet, href),
+        api_post(
+            "/api/v1/replies",
+            {
+                "platform": "linkedin",
+                "post_id": post_id,
+                "their_comment_id": comment_urn,
+                "their_author": author,
+                "their_content": snippet,
+                "their_comment_url": href,
+                "depth": 1,
+                "status": "pending",
+            },
+            ok_on_conflict=True,
         )
         existing_comments.add(comment_urn)
         existing_pairs.add(pair_key)
         counts["new"] += 1
-
-    conn.commit()
-    cur.close()
-    conn.close()
 
     print(json.dumps(counts, indent=2))
 
