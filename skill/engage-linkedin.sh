@@ -532,20 +532,16 @@ fi
 # Reset any items left in 'processing' after subprocess exit (tech-failure
 # retry path: agent leaves rows here on browser/MCP failure rather than
 # calling reply_db.py skipped, so the next run picks them up automatically).
-POST_RESET=$(psql "$DATABASE_URL" -t -A -c "
-    WITH upd AS (
-        UPDATE replies SET status='pending'
-        WHERE platform='linkedin' AND status='processing'
-        RETURNING id
-    ) SELECT COUNT(*) FROM upd;")
+# older_than_hours=0 resets ALL 'processing' rows regardless of age.
+POST_RESET=$(li_reset_processing 0)
 [ "$POST_RESET" -gt 0 ] && log "Post-run: Reset $POST_RESET 'processing' LinkedIn items back to pending"
 
 # ═══════════════════════════════════════════════════════
 # Cleanup
 # ═══════════════════════════════════════════════════════
-TOTAL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='linkedin' AND status='pending';")
-TOTAL_REPLIED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='linkedin' AND status='replied';")
-TOTAL_SKIPPED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='linkedin' AND status='skipped';")
+TOTAL_PENDING=$(li_reply_count pending)
+TOTAL_REPLIED=$(li_reply_count replied)
+TOTAL_SKIPPED=$(li_reply_count skipped)
 
 log "LinkedIn summary: pending=$TOTAL_PENDING replied=$TOTAL_REPLIED skipped=$TOTAL_SKIPPED"
 
