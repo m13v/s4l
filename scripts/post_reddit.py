@@ -1792,9 +1792,11 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     """DISCOVER phase: search and select threads. No drafting.
 
     Returns {project_name, decisions: [candidates], cost, session_id} where
-    each candidate has thread_url, title, author, search_topic, engagement_style
-    but NO text field. Uses `decisions` key so ripen_reddit_plan.py needs no
-    changes (it reads decisions[].thread_url regardless of text presence).
+    each candidate has thread_url, title, author, search_topic but NO text
+    field (drafting happens in the draft phase). cost is always 0.0 and
+    session_id None: as of 2026-06-01 discover is fully programmatic (Python
+    builds the query bank and runs reddit_tools.cmd_search directly; no Claude
+    session). Uses `decisions` key for downstream-phase compatibility.
     """
     if args.project:
         project = None
