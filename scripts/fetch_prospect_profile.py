@@ -148,6 +148,123 @@ def link_dm(conn, dm_id):
     return prospect_id
 
 
+def _http_upsert(args):
+    """DB-free upsert via POST /api/v1/prospects. Returns prospect_id (int).
+
+    Mirrors upsert_prospect(): we always create-or-update the (platform,author)
+    row and stamp profile_fetched_at only when at least one field was supplied.
+    """
+    from http_api import api_post
+
+    field_map = {
+        "profile_url": args.profile_url,
+        "display_name": args.display_name,
+        "headline": args.headline,
+        "bio": args.bio,
+        "follower_count": args.follower_count,
+        "recent_activity": args.recent_activity,
+        "company": args.company,
+        "role": args.role,
+        "notes": args.notes,
+    }
+    body = {"platform": args.platform, "author": args.author}
+    has_field = False
+    for k, v in field_map.items():
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        body[k] = v
+        has_field = True
+    # Match the DB path: profile_fetched_at is stamped only when a field was set.
+    if has_field:
+        body["profile_fetched_at_now"] = True
+
+    resp = api_post("/api/v1/prospects", body)
+    prospect = (resp.get("data") or {}).get("prospect") or {}
+    return prospect.get("id")
+
+
+def _http_get(args):
+    """DB-free get via GET /api/v1/prospects?platform&author. Returns dict|None."""
+    from http_api import api_get
+
+    resp = api_get(
+        "/api/v1/prospects",
+        query={"platform": args.platform, "author": args.author},
+        ok_on_404=True,
+    )
+    if not resp.get("ok"):
+        return None
+    return (resp.get("data") or {}).get("prospect")
+
+
+def _http_link_dm(dm_id):
+    """DB-free link via GET dms -> GET prospect -> PATCH dms.prospect_id.
+
+    Returns prospect_id (int) or None, printing the same stderr the DB path does.
+    """
+    from http_api import api_get, api_patch
+
+    dm_resp = api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+    if not dm_resp.get("ok"):
+        print(f"ERROR: DM #{dm_id} not found", file=sys.stderr)
+        return None
+    dm = (dm_resp.get("data") or {}).get("dm") or {}
+    platform = dm.get("platform")
+    author = dm.get("their_author")
+
+    p_resp = api_get(
+        "/api/v1/prospects",
+        query={"platform": platform, "author": author},
+        ok_on_404=True,
+    )
+    prospect = (p_resp.get("data") or {}).get("prospect") if p_resp.get("ok") else None
+    if not prospect:
+        print(
+            f"ERROR: no prospect row for {platform}:{author}; run `upsert` first",
+            file=sys.stderr,
+        )
+        return None
+
+    prospect_id = prospect.get("id")
+    api_patch(f"/api/v1/dms/{dm_id}", {"prospect_id": prospect_id})
+    return prospect_id
+
+
+def _http_dispatch(args):
+    """Handle a subcommand over HTTP when DATABASE_URL is absent.
+
+    Prints identical stdout to the DB path. Exits the process on the same
+    conditions (get-miss -> exit 1; link-failure -> exit 1).
+    """
+    from http_api import api_patch
+
+    if args.cmd == "upsert":
+        pid = _http_upsert(args)
+        if args.link_dm is not None:
+            api_patch(f"/api/v1/dms/{args.link_dm}", {"prospect_id": pid})
+        if args.json:
+            out = _http_get(args) or {"id": pid}
+            print(json.dumps(out))
+        else:
+            print(f"prospect_id={pid}")
+        return
+    if args.cmd == "get":
+        row = _http_get(args)
+        if row is None:
+            print("null")
+            sys.exit(1)
+        print(json.dumps(row, indent=2))
+        return
+    if args.cmd == "link":
+        pid = _http_link_dm(args.dm_id)
+        if pid is None:
+            sys.exit(1)
+        print(f"prospect_id={pid} linked to DM #{args.dm_id}")
+        return
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -181,6 +298,14 @@ def main():
     lk.add_argument("--dm-id", type=int, required=True)
 
     args = ap.parse_args()
+
+    # DB-free lane: on a machine with no DATABASE_URL, route every subcommand
+    # through the s4l.ai HTTP API. DB-equipped machines keep the direct path.
+    dbmod.load_env()
+    if not os.environ.get("DATABASE_URL"):
+        _http_dispatch(args)
+        return
+
     conn = dbmod.get_conn()
     try:
         if args.cmd == "upsert":
