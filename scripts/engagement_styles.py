@@ -1352,17 +1352,22 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         _ceil = int(round(_tc * 1.5))
         lines.append("")
         lines.append(
-            f"**HARD LENGTH LIMIT: {_ceil} characters, absolute max. Target ~{_tc}.**\n"
-            f"This is non-negotiable. Count the characters in your comment before "
-            f"you return it. If it exceeds {_ceil} characters, CUT IT DOWN until "
-            f"it fits. The length THIS style wins at is ~{_tc} chars; aim there, "
-            f"and coming in UNDER is always better than over.\n"
+            f"**TARGET LENGTH: ~{_tc} characters. This is the number to hit, not a "
+            f"ceiling to climb to.**\n"
+            f"Your comment should land at roughly {_tc} characters. {_ceil} is the "
+            f"absolute hard cap and anything past it is automatically truncated by "
+            f"the posting pipeline before it goes live, mid-thought, so DO NOT rely "
+            f"on the cap; write to the ~{_tc} target.\n"
+            f"PROCESS: draft the comment, then count its characters. If it is more "
+            f"than ~{_tc}, you wrote too much. Delete clauses, hedges, and setup "
+            f"until it lands near {_tc}. Shorter than the target is always fine; "
+            f"longer is not.\n"
             f"- The top human replies that actually get engagement are fragments "
             f"and single lines, not tidy two-clause sentences. One sharp sentence "
-            f"beats a paragraph every time.\n"
-            f"- The example above demonstrates both TONE and TARGET LENGTH — the "
-            f"example is the same length as the target. Write at that length.\n"
-            f"- This limit is for the COMMENT TEXT ONLY. Any link/CTA the system "
+            f"beats a paragraph every time. When in doubt, cut.\n"
+            f"- The example above IS the length reference: it is written at the "
+            f"target. Match its length, not just its tone.\n"
+            f"- This budget is for the COMMENT TEXT ONLY. Any link/CTA the system "
             f"appends afterward is separate and does not count against your budget, "
             f"so do NOT pad the comment to 'make room' for or to introduce a link. "
             f"Write the comment as if no link will follow."
@@ -1415,7 +1420,7 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         lines.append("  - why_existing_didnt_fit: why none of the above worked here")
         lines.append(
             f"  - target_chars: integer, the comment length this style wins "
-            f"at. Bias SHORT — the top human replies cluster near {DEFAULT_TARGET_CHARS} "
+            f"at. Bias SHORT; the top human replies cluster near {DEFAULT_TARGET_CHARS} "
             f"chars and below. Only go high (150+) if the style is genuinely "
             f"narrative; never propose a target just to fill space."
         )
