@@ -1531,7 +1531,168 @@ def _http_dispatch(args):
     if cmd == "log-outbound":
         return _http_log_outbound(args)
 
+    if cmd == "ensure-dm":
+        body = {"platform": args.platform, "author": args.author}
+        if getattr(args, "chat_url", None):
+            body["chat_url"] = args.chat_url
+        if getattr(args, "lookback_hours", None) is not None:
+            body["lookback_hours"] = args.lookback_hours
+        resp = http_api.api_post("/api/v1/dms/ensure", body)
+        data = resp.get("data") or {}
+        new_id = data.get("dm_id")
+        print(f"DM_ID={new_id}")
+        if data.get("created"):
+            linked = data.get("linked_reply_id")
+            if linked:
+                print(f"  created (linked to replies.id={linked})")
+            else:
+                print("  created (no matching replies row within lookback, reply_id/post_id NULL)")
+        else:
+            print("  existing")
+        return True
+
+    if cmd == "history":
+        resp = http_api.api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+        if resp.get("_not_found"):
+            print(f"DM #{dm_id} not found")
+            return True
+        dm = (resp.get("data") or {}).get("dm") or {}
+        print(f"=== DM #{dm.get('id')} with {dm.get('their_author')} [{dm.get('platform')}] ===")
+        print(f"Status: {dm.get('conversation_status')}  Tier: {dm.get('tier')}  Messages: {dm.get('message_count')}")
+        if dm.get("chat_url"):
+            print(f"Chat URL: {dm['chat_url']}")
+        if dm.get("comment_context"):
+            print(f"Original context: {dm['comment_context'][:200]}...")
+        print()
+        msgs_resp = http_api.api_get(f"/api/v1/dms/{dm_id}/messages")
+        msgs = (msgs_resp.get("data") or {}).get("messages") or []
+        for m in msgs:
+            arrow = ">>" if m.get("direction") == "outbound" else "<<"
+            ma = m.get("message_at") or ""
+            ts = str(ma)[:16].replace("T", " ") if ma else "?"
+            print(f"  {arrow} [{ts}] {m.get('author')}: {m.get('content')}")
+        print()
+        return True
+
+    if cmd == "pending":
+        resp = http_api.api_get("/api/v1/dms/pending")
+        rows = (resp.get("data") or {}).get("pending") or []
+        if not rows:
+            print("No conversations needing reply.")
+            return True
+        print(f"=== {len(rows)} conversations need reply ===\n")
+        for r in rows:
+            tier_label = f"T{r['tier']}" if r.get("tier") else "T1"
+            ma = r.get("last_message_at") or ""
+            ts = str(ma)[5:16].replace("T", " ") if ma else "?"
+            last = (r.get("last_msg") or "")[:100]
+            print(f"  DM #{r['id']} [{r.get('platform')}] {r.get('their_author')} ({tier_label}, {r.get('message_count')} msgs, last: {ts})")
+            print(f"    Last: {last}")
+            if r.get("chat_url"):
+                print(f"    URL: {r['chat_url']}")
+            print()
+        return True
+
+    if cmd == "show-flagged":
+        resp = http_api.api_get("/api/v1/dms/flagged")
+        rows = (resp.get("data") or {}).get("flagged") or []
+        if not rows:
+            print("No conversations flagged for human attention.")
+            return True
+        print(f"=== {len(rows)} conversations need HUMAN attention ===\n")
+        for r in rows:
+            fa = r.get("flagged_at") or ""
+            ts = str(fa)[5:16].replace("T", " ") if fa else "?"
+            last = (r.get("last_msg") or "")[:150]
+            print(f"  DM #{r['id']} [{r.get('platform')}] {r.get('their_author')} (T{r.get('tier') or 1}, {r.get('message_count')} msgs)")
+            print(f"    REASON: {r.get('human_reason')}")
+            print(f"    Flagged: {ts}")
+            print(f"    Last msg ({r.get('last_dir')}): {last}")
+            if r.get("chat_url"):
+                print(f"    URL: {r['chat_url']}")
+            print()
+        return True
+
+    if cmd == "flag-human":
+        resp = http_api.api_post(
+            f"/api/v1/dms/{dm_id}/flag-human", {"reason": args.reason}, ok_on_conflict=True
+        )
+        data = resp.get("data") or {}
+        if data.get("skipped"):
+            print(f"  SKIP flag-human: DM #{dm_id} last message is OUTBOUND. We already replied; ball is in their court. Reason was: {args.reason}")
+            return True
+        print(f"  FLAGGED DM #{dm_id} for human attention: {args.reason}")
+        if data.get("email_sent"):
+            print(f"  Escalation email sent for DM #{dm_id}")
+        else:
+            print(f"  WARNING: escalation email not sent for DM #{dm_id} (no RESEND_API_KEY on server, or send failed)")
+        return True
+
+    if cmd == "backfill-urls":
+        records = _load_records_arg(args)
+        resp = http_api.api_post(
+            "/api/v1/dms/backfill-urls",
+            {"platform": args.platform, "records": records},
+        )
+        stats = (resp.get("data") or {}).get("stats") or {}
+        print(f"  backfill-urls [{args.platform}]: updated={stats.get('updated', 0)} "
+              f"already_set={stats.get('skipped_already_set', 0)} no_match={stats.get('no_match', 0)} "
+              f"invalid={stats.get('skipped_invalid', 0)} ambiguous={stats.get('ambiguous', 0)}")
+        return True
+
+    if cmd == "filter-inbox":
+        records = _load_records_arg(args)
+        resp = http_api.api_post(
+            "/api/v1/dms/filter-inbox",
+            {"platform": args.platform, "records": records},
+        )
+        data = resp.get("data") or {}
+        keep = data.get("keep") or []
+        counters = data.get("counters") or {}
+        norm = "x" if args.platform in ("twitter", "x") else args.platform
+        total_in = data.get("in", len(records))
+        total_keep = data.get("kept", len(keep))
+        print(
+            f"  filter-inbox [{norm}]: in={total_in} kept={total_keep} "
+            f"(unread={counters.get('kept_unread', 0)}, "
+            f"no_db_row={counters.get('kept_no_db_row', 0)}, "
+            f"ambiguous={counters.get('kept_ambiguous', 0)}) "
+            f"skipped={total_in - total_keep} "
+            f"(is_from_us={counters.get('skip_is_from_us', 0)}, "
+            f"we_replied_after={counters.get('skip_we_replied_after', 0)}, "
+            f"recently_inspected={counters.get('skip_recently_inspected', 0)}, "
+            f"needs_human={counters.get('skip_needs_human', 0)}, "
+            f"closed={counters.get('skip_closed', 0)}, "
+            f"invalid_url={counters.get('skip_invalid_url', 0)})",
+            file=sys.stderr,
+        )
+        print(json.dumps(keep, default=str))
+        return True
+
     return False
+
+
+def _load_records_arg(args):
+    """Read a JSON array of records from --file or stdin for the bulk commands
+    (backfill-urls, filter-inbox), matching the DB-path's input handling so the
+    HTTP lane accepts the exact same scanner dumps. Returns a list (possibly
+    empty); exits 2 on unparseable input."""
+    raw = open(args.file).read() if getattr(args, "file", None) else sys.stdin.read()
+    try:
+        records = json.loads(raw)
+    except Exception as e:
+        print(f"ERROR: could not parse JSON input: {e}", file=sys.stderr)
+        sys.exit(2)
+    if isinstance(records, dict):
+        for k in ("conversations", "threads", "dms", "items"):
+            if k in records and isinstance(records[k], list):
+                return records[k]
+        if records.get("ok") is False:
+            return []
+    if not isinstance(records, list):
+        print("ERROR: expected a JSON array of records", file=sys.stderr)
+        sys.exit(2)
+    return records
 
 
 def main():
