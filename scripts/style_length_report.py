@@ -73,13 +73,25 @@ PLATFORM_RAILS = {
 }
 
 
-def fetch_rail_rows(conn, rail, days):
+def fetch_rail_rows(conn, rail, days, core_only=False):
     table, text_col, time_col, plats, statuses, views_col, likes_col = rail
     plat_ph = ",".join(["%s"] * len(plats))
     stat_ph = ",".join(["%s"] * len(statuses))
     # target_chars is the per-post SNAPSHOT (frozen at post time). NULL on rows
     # predating the snapshot wiring; summarize() falls back to the live registry
     # target for those so coverage degrades gracefully.
+    #
+    # core_only: target_chars is enforced on the CORE COMMENT only; the tail
+    # link (a separate sentence + short URL the system appends afterward) is
+    # NOT part of the comment budget. The `posts` rail carries tail_link_variant
+    # ('link' | 'no_link'); restricting to no_link / NULL isolates rows whose
+    # LENGTH() is the pure comment, so realized-vs-target is apples-to-apples.
+    # Rails without that column (replies engage rail) are unaffected.
+    core_clause = ""
+    if core_only and table == "posts":
+        core_clause = (
+            " AND (tail_link_variant IS NULL OR tail_link_variant = 'no_link')"
+        )
     sql = f"""
         SELECT
             COALESCE(engagement_style, '(none)')          AS style,
@@ -93,6 +105,7 @@ def fetch_rail_rows(conn, rail, days):
           AND {time_col} >= NOW() - (%s || ' days')::INTERVAL
           AND {text_col} IS NOT NULL
           AND LENGTH(TRIM({text_col})) > 0
+          {core_clause}
     """
     params = list(plats) + list(statuses) + [str(days)]
     cur = conn.execute(sql, params)
@@ -238,6 +251,11 @@ def main():
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--min-n", type=int, default=1,
                     help="Hide styles with fewer than N comments.")
+    ap.add_argument("--core-only", action="store_true",
+                    help="Exclude link-bearing posts (tail_link_variant='link') "
+                         "so realized length reflects the CORE comment only, not "
+                         "the appended tail-link sentence + URL. twitter/posts "
+                         "rail only.")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -246,7 +264,8 @@ def main():
     try:
         rows = []
         for rail in PLATFORM_RAILS[args.platform]:
-            rows.extend(fetch_rail_rows(conn, rail, args.days))
+            rows.extend(fetch_rail_rows(conn, rail, args.days,
+                                        core_only=args.core_only))
     finally:
         conn.close()
 
