@@ -162,6 +162,57 @@ cleanup_harness_tabs() {
     BH_CLEANUP_PORT=9556 python3 "$HOME/social-autoposter/scripts/cleanup_harness_tabs.py" 2>/dev/null || true
 }
 
+# ===== Cross-pipeline whole-run lock (2026-05-30) =====
+# Only ONE LinkedIn browser pipeline may drive the single linkedin-harness
+# Chrome (port 9556) at a time: run-linkedin, engage-linkedin,
+# dm-outreach-linkedin, audit-linkedin, engage-dm-replies-linkedin,
+# stats-linkedin. Without this, two launchd-fired pipelines interleave (each
+# releases the per-phase `linkedin-browser` FIFO lock between phases), so e.g.
+# run-linkedin Phase B posts a comment while engage drives a SERP, yanking the
+# same window back and forth and leaking tabs between reactive sweeps.
+#
+# Every browser pipeline funnels through ensure_linkedin_browser_for_backend
+# before it touches Chrome, so acquiring here covers ALL of them without
+# editing the (chflags-locked) top-level scripts. Semantics mirror
+# run-linkedin.sh's existing singleton guard:
+#   - try once (mkdir), reclaim if the holder PID is dead
+#   - if a DIFFERENT live pipeline holds it -> exit 0 (skip this fire; the
+#     launchd job retries on its next cadence). No indefinite wait, so the
+#     ordering vs the per-phase FIFO `linkedin-browser` lock can't deadlock.
+#   - idempotent within a process via _LI_PIPELINE_LOCK_HELD so the SECOND
+#     phase-call (e.g. run-linkedin Phase B) does not block on a lock this
+#     same process already owns.
+# No release trap on purpose: a finished pipeline's lock dir is reclaimed by
+# the next pipeline's dead-PID check, exactly like the singleton guard. This
+# avoids clobbering the parent scripts' EXIT/INT/TERM/HUP run_monitor traps.
+_LI_PIPELINE_LOCK_DIR="/tmp/saps-linkedin-pipeline.lock"
+_acquire_linkedin_pipeline_lock() {
+    # Already held by THIS process (re-entry across phases) -> proceed.
+    if [ "${_LI_PIPELINE_LOCK_HELD:-0}" = "1" ]; then
+        return 0
+    fi
+    local _who="${SAPS_PIPELINE_NAME:-$(basename "${0:-linkedin-pipeline}")}"
+    while : ; do
+        if mkdir "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null; then
+            echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
+            echo "$_who" > "$_LI_PIPELINE_LOCK_DIR/holder"
+            export _LI_PIPELINE_LOCK_HELD=1
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$)" >&2
+            return 0
+        fi
+        local _h_pid _h_who
+        _h_pid="$(cat "$_LI_PIPELINE_LOCK_DIR/pid" 2>/dev/null || echo "")"
+        _h_who="$(cat "$_LI_PIPELINE_LOCK_DIR/holder" 2>/dev/null || echo "?")"
+        if [ -z "$_h_pid" ] || ! kill -0 "$_h_pid" 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
+            rm -rf "$_LI_PIPELINE_LOCK_DIR"
+            continue
+        fi
+        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} exiting this fire to avoid two drivers on the 9556 Chrome" >&2
+        exit 0
+    done
+}
+
 _resolve_chrome_bin() {
     # Auto-detect Chrome/Chromium so the same script launches the harness on
     # macOS dev boxes AND Linux VMs. Override with BH_CHROME_BIN.
@@ -194,6 +245,12 @@ ensure_linkedin_browser_for_backend() {
         echo "[$(date +%H:%M:%S)] ERROR: LINKEDIN_CDP_URL=${_ext_url} not reachable. External Chrome must be managed by host." >&2
         return 1
     fi
+    # Cross-pipeline whole-run lock: only one LinkedIn browser pipeline drives
+    # the 9556 harness Chrome at a time. Acquired here (the single chokepoint
+    # every browser pipeline calls) so it covers run/engage/dm/audit/stats
+    # without editing the locked top-level scripts. Skipped above for
+    # externally-managed (AppMaker/BYO) Chrome, which is not ours to serialize.
+    _acquire_linkedin_pipeline_lock
     # Probe + launch harness Chrome on port 9556 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
         echo "[$(date +%H:%M:%S)] LinkedIn harness Chrome down on port 9556, launching..." >&2
