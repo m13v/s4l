@@ -405,6 +405,131 @@ def scan_platform(conn, config, platform, max_candidates, dry_run, max_age_days=
     return inserted
 
 
+def _resolve_twitter_handle_for(platform):
+    """Same x-only multi-account scoping scan_platform() uses. None elsewhere."""
+    if platform != "x":
+        return None
+    try:
+        from twitter_account import resolve_handle as _resolve_twitter_handle
+        return _resolve_twitter_handle()
+    except Exception:
+        return None
+
+
+def scan_platform_http(config, platform, max_candidates, dry_run, max_age_days=None):
+    """DB-free twin of scan_platform().
+
+    The complex discovery JOIN + per-author dedup signals run server-side via
+    POST /api/v1/dm-candidates/discover (the transient/permanent ILIKE pattern
+    lists, owned here, are sent in the body). The remaining config-driven
+    filters (excluded authors, min-word floor, target-project inference) and
+    the max-candidates cap stay client-side, identical to the DB path. Inserts
+    go through POST /api/v1/prospects + POST /api/v1/dm-candidates.
+    """
+    from http_api import api_post
+
+    if platform == "twitter":
+        platform = "x"
+    excluded = get_excluded_authors(config, platform)
+    topic_index = build_project_topic_index(config, platform)
+    age_days = max_age_days if max_age_days is not None else MAX_AGE_DAYS
+    twitter_handle = _resolve_twitter_handle_for(platform)
+
+    resp = api_post(
+        "/api/v1/dm-candidates/discover",
+        {
+            "platform": platform,
+            "age_days": age_days,
+            "cooldown_hours": POST_REPLY_COOLDOWN_HOURS,
+            "twitter_handle": twitter_handle,
+            "transient_patterns": list(TRANSIENT_SKIP_REASON_PATTERNS),
+            "permanent_patterns": list(PERMANENT_SKIP_REASON_PATTERNS),
+            "limit": 2000,
+        },
+    )
+    candidates = (resp.get("data") or {}).get("candidates") or []
+
+    inserted = 0
+    skipped_reasons = {}
+
+    for row in candidates:
+        if inserted >= max_candidates:
+            break
+
+        author = row.get("their_author") or ""
+        content = row.get("their_content") or ""
+
+        if author.lower() in excluded:
+            reason = "excluded_author"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+
+        min_words = MIN_WORDS_BY_PLATFORM.get(platform, MIN_WORDS_DEFAULT)
+        if word_count(content) < min_words:
+            reason = "too_short"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+
+        if (row.get("recent_active") or 0) > 0:
+            reason = "already_dmd_recently"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+        if (row.get("permanent_block") or 0) > 0:
+            reason = "permanently_unreachable_or_disqualified"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+        if (row.get("existing_pending") or 0) > 0:
+            reason = "duplicate_pending_author"
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+            continue
+
+        context = f"Thread: {row.get('thread_title') or 'N/A'}\n"
+        context += f"Their comment: {content}\n"
+        context += f"Our reply: {(row.get('our_reply_content') or '')}"
+
+        target_project = row.get("post_project")
+        if not target_project:
+            target_project = infer_target_project(
+                [row.get("thread_title"), content, row.get("our_reply_content")],
+                topic_index,
+            )
+
+        if dry_run:
+            print(f"  [{platform}] CANDIDATE: {author} (reply #{row.get('reply_id')}) target={target_project}")
+            print(f"    Their comment: {content[:100]}...")
+            print(f"    Our reply: {(row.get('our_reply_content') or '')[:100]}...")
+            print()
+            inserted += 1
+            continue
+
+        prospect = api_post("/api/v1/prospects", {"platform": platform, "author": author})
+        prospect_id = ((prospect.get("data") or {}).get("prospect") or {}).get("id")
+
+        api_post(
+            "/api/v1/dm-candidates",
+            {
+                "platform": platform,
+                "reply_id": row.get("reply_id"),
+                "post_id": row.get("post_id"),
+                "their_author": author,
+                "their_content": content,
+                "comment_context": context,
+                "prospect_id": prospect_id,
+                "target_project": target_project,
+                "transient_patterns": list(TRANSIENT_SKIP_REASON_PATTERNS),
+            },
+        )
+        inserted += 1
+        print(f"  [{platform}] NEW DM candidate: {author} (reply #{row.get('reply_id')}) "
+              f"target={target_project or '-'}: {content[:70]}...")
+
+    if skipped_reasons:
+        skip_summary = ", ".join(f"{k}={v}" for k, v in skipped_reasons.items())
+        print(f"  [{platform}] Skipped: {skip_summary}")
+
+    return inserted
+
+
 def main():
     parser = argparse.ArgumentParser(description="Find users worth DMing based on comment engagement")
     parser.add_argument("--dry-run", action="store_true", help="Print candidates without inserting")
@@ -417,10 +542,22 @@ def main():
 
     config = load_config()
     dbmod.load_env()
-    conn = dbmod.get_conn()
 
     platforms = PLATFORMS if args.platform == "all" else [args.platform]
     total = 0
+
+    # DB-free lane: no DATABASE_URL -> run the discovery + insert server-side
+    # via the s4l.ai HTTP API. DB-equipped machines keep the direct path.
+    if not os.environ.get("DATABASE_URL"):
+        for platform in platforms:
+            print(f"\nScanning {platform} for DM candidates...")
+            count = scan_platform_http(config, platform, args.max, args.dry_run, max_age_days=args.days)
+            total += count
+        action = "found" if args.dry_run else "queued"
+        print(f"\nDM scan complete: {total} candidates {action} across {', '.join(platforms)}")
+        return total
+
+    conn = dbmod.get_conn()
 
     for platform in platforms:
         print(f"\nScanning {platform} for DM candidates...")
