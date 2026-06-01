@@ -28,7 +28,10 @@ from email import message_from_bytes
 from email.policy import default as email_default_policy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+# HTTP-only: dms lookup + human_dm_replies dedup/insert go through the s4l.ai
+# HTTP API (scripts/http_api.py). The direct-Postgres lane was removed
+# 2026-06-01; DATABASE_URL is deliberately ignored, no DB path, no fallback.
+from http_api import api_get, api_post
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -133,9 +136,6 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print what would be ingested, do not touch DB or labels")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
     try:
         service = gmail_service()
     except Exception as e:
@@ -175,10 +175,8 @@ def main():
             skipped += 1
             continue
 
-        dm_row = conn.execute(
-            "SELECT id, platform, their_author, target_project, project_name FROM dms WHERE id = %s",
-            (dm_id,),
-        ).fetchone()
+        dm_resp = api_get(f"/api/v1/dms/{dm_id}", ok_on_404=True)
+        dm_row = (dm_resp.get("data") or {}).get("dm") if dm_resp.get("ok") else None
         if not dm_row:
             print(f"  SKIP {gmail_id}: DM #{dm_id} not found in dms table")
             skipped += 1
@@ -199,43 +197,30 @@ def main():
             ingested += 1
             continue
 
-        # Pre-check: dedup on gmail message id. A partial unique index exists
-        # but ON CONFLICT on a partial index requires matching WHERE clause
-        # syntax which the project's PGConn wrapper doesn't pass through cleanly,
-        # so we just SELECT first.
-        already = conn.execute(
-            "SELECT id FROM human_dm_replies WHERE resend_email_id = %s LIMIT 1",
-            (gmail_id,),
-        ).fetchone()
-        if already:
-            print(f"  SKIP {gmail_id}: already ingested as human_dm_replies #{already['id']}")
-            skipped += 1
-            # Still mark as read so Gmail query excludes it on next run.
-            try:
-                service.users().messages().modify(
-                    userId="me", id=gmail_id,
-                    body={"removeLabelIds": ["UNREAD"]},
-                ).execute()
-            except Exception:
-                pass
-            continue
-
+        # Dedup-on-gmail-id + insert happen server-side in one POST: the
+        # endpoint SELECTs by resend_email_id and returns reused=true if the
+        # reply was already ingested, otherwise inserts status='pending'.
         try:
-            conn.execute(
-                """
-                INSERT INTO human_dm_replies (dm_id, platform, their_author, project_name,
-                                              instructions, email_subject, resend_email_id, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
-                """,
-                (dm_id, dm_row["platform"], dm_row["their_author"], project,
-                 reply_text, subject, gmail_id),
-            )
-            conn.commit()
-        except Exception as e:
+            resp = api_post("/api/v1/human-dm-replies", {
+                "dm_id": dm_id,
+                "platform": dm_row["platform"],
+                "their_author": dm_row["their_author"],
+                "project_name": project,
+                "instructions": reply_text,
+                "email_subject": subject,
+                "resend_email_id": gmail_id,
+            })
+        except SystemExit as e:
             print(f"  ERROR {gmail_id}: insert failed: {e}")
             skipped += 1
             continue
+        data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+        reused = bool(data.get("reused"))
+        if reused:
+            print(f"  SKIP {gmail_id}: already ingested as human_dm_replies #{data.get('id')}")
+            skipped += 1
 
+        # Mark as read in both cases so the Gmail query excludes it next run.
         try:
             service.users().messages().modify(
                 userId="me", id=gmail_id,
@@ -244,7 +229,8 @@ def main():
         except Exception as e:
             print(f"  WARN {gmail_id}: could not mark as read: {e}")
 
-        ingested += 1
+        if not reused:
+            ingested += 1
 
     print(f"Done. Ingested={ingested} skipped={skipped} candidates={len(candidates)}")
 
