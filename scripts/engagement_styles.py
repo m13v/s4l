@@ -1354,14 +1354,24 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         if assignment.get("note"):
             lines.append(f"  Note: {assignment['note']}")
         _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
+        _ceil = int(round(_tc * 1.5))
         lines.append("")
         lines.append(
-            f"**Target length: ~{_tc} characters.** This is the length THIS "
-            f"style wins at, not a budget to fill. Aim to land near {_tc}, not "
-            f"above it; coming in shorter is good. The top human replies that "
-            f"actually get engagement are mostly fragments and single lines, "
-            f"not tidy two-clause sentences. Any hard char cap mentioned "
-            f"elsewhere is a technical ceiling, not your goal."
+            f"**HARD LENGTH LIMIT: {_ceil} characters, absolute max. Target ~{_tc}.**\n"
+            f"This is non-negotiable. Count the characters in your comment before "
+            f"you return it. If it exceeds {_ceil} characters, CUT IT DOWN until "
+            f"it fits. The length THIS style wins at is ~{_tc} chars; aim there, "
+            f"and coming in UNDER is always better than over.\n"
+            f"- The top human replies that actually get engagement are fragments "
+            f"and single lines, not tidy two-clause sentences. One sharp sentence "
+            f"beats a paragraph every time.\n"
+            f"- The example above demonstrates TONE and ANGLE, not length. Do NOT "
+            f"match its length; many of our stored examples are too long. Match "
+            f"its voice in far fewer words.\n"
+            f"- This limit is for the COMMENT TEXT ONLY. Any link/CTA the system "
+            f"appends afterward is separate and does not count against your budget, "
+            f"so do NOT pad the comment to 'make room' for or to introduce a link. "
+            f"Write the comment as if no link will follow."
         )
         lines.append("")
         lines.append(
