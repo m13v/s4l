@@ -184,6 +184,29 @@ export function missingRequired(partial: Partial<ProjectInput>): string[] {
   });
 }
 
+// Which required fields are missing on the persisted project in config.json.
+// Used by status mode so it reflects what's actually saved, not the call args.
+// Returns null when the named project can't be found/read.
+export function missingForProject(name: string | undefined): string[] | null {
+  if (!name) return null;
+  try {
+    const cfg = readConfig();
+    const proj = (cfg.projects || []).find((p) => p.name === name);
+    if (!proj) return null;
+    return REQUIRED_FIELDS.filter((f) => {
+      const v = proj[f];
+      if (v == null) return true;
+      if (typeof v === "string") return v.trim() === "";
+      // Non-empty objects/arrays (e.g. structured voice) count as present.
+      if (Array.isArray(v)) return v.length === 0;
+      if (typeof v === "object") return Object.keys(v).length === 0;
+      return false;
+    });
+  } catch {
+    return null;
+  }
+}
+
 export interface SetupGate {
   ok: boolean;
   state: SetupState;
