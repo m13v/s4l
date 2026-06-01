@@ -413,6 +413,21 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         style = (coerced_style or raw_style or "").strip()
     else:
         style = raw_style
+    # target_chars SNAPSHOT: freeze the assigned style's target comment length
+    # onto this post so style_length_report can compare realized-vs-target
+    # without being fooled by later registry drift (the human_derived
+    # synthesizer retunes targets daily). Resolve from the FINAL coerced style
+    # name via the registry; fall back to DEFAULT_TARGET_CHARS, then to None
+    # (column is nullable; the report falls back to the live target for NULL).
+    target_chars = None
+    if style:
+        try:
+            from engagement_styles import _meta_for, DEFAULT_TARGET_CHARS
+            target_chars = (_meta_for(style) or {}).get("target_chars") or DEFAULT_TARGET_CHARS
+        except Exception as e:
+            print(f"[post] candidate {cid}: target_chars lookup failed ({e}); "
+                  f"leaving NULL", flush=True)
+            target_chars = None
     language = (c.get("language") or "").strip()
     link_source = (c.get("link_source") or "").strip()
     # search_topic flows from twitter_candidates -> Phase 2b prompt
@@ -622,6 +637,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         log_args += ["--account", twitter_handle]
     if style:
         log_args += ["--engagement-style", style]
+    if target_chars:
+        log_args += ["--target-chars", str(target_chars)]
     if language:
         log_args += ["--language", language]
     if link_source:
