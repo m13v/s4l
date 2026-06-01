@@ -299,52 +299,13 @@ def main():
 
     args = ap.parse_args()
 
-    # DB-free lane: on a machine with no DATABASE_URL, route every subcommand
-    # through the s4l.ai HTTP API. DB-equipped machines keep the direct path.
+    # HTTP-only lane: every subcommand routes through the s4l.ai HTTP API. The
+    # direct-Postgres lane was removed 2026-06-01 — there is NO database-driven
+    # path any more, not as primary, not as fallback. DATABASE_URL, if present
+    # in the environment, is deliberately ignored; all reads/writes go through
+    # _http_dispatch against /api/v1/prospects and /api/v1/dms.
     dbmod.load_env()
-    if not os.environ.get("DATABASE_URL"):
-        _http_dispatch(args)
-        return
-
-    conn = dbmod.get_conn()
-    try:
-        if args.cmd == "upsert":
-            fields = {
-                "profile_url": args.profile_url,
-                "display_name": args.display_name,
-                "headline": args.headline,
-                "bio": args.bio,
-                "follower_count": args.follower_count,
-                "recent_activity": args.recent_activity,
-                "company": args.company,
-                "role": args.role,
-                "notes": args.notes,
-            }
-            pid = upsert_prospect(conn, args.platform, args.author, fields)
-            if args.link_dm is not None:
-                conn.execute(
-                    "UPDATE dms SET prospect_id=%s WHERE id=%s",
-                    (pid, args.link_dm),
-                )
-                conn.commit()
-            if args.json:
-                out = get_prospect(conn, args.platform, args.author) or {"id": pid}
-                print(json.dumps(out))
-            else:
-                print(f"prospect_id={pid}")
-        elif args.cmd == "get":
-            row = get_prospect(conn, args.platform, args.author)
-            if row is None:
-                print("null")
-                sys.exit(1)
-            print(json.dumps(row, indent=2))
-        elif args.cmd == "link":
-            pid = link_dm(conn, args.dm_id)
-            if pid is None:
-                sys.exit(1)
-            print(f"prospect_id={pid} linked to DM #{args.dm_id}")
-    finally:
-        conn.close()
+    _http_dispatch(args)
 
 
 if __name__ == "__main__":
