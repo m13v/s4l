@@ -188,43 +188,23 @@ def main():
         print(canonicalize(args.canonicalize))
         return
     if args.check_engaged:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
         ids = extract_ids(args.check_engaged)
-        match = find_existing_engagement(conn, ids)
-        conn.close()
+        match = find_existing_engagement(ids)
         out = {"url": args.check_engaged, "ids": ids, "engaged": bool(match)}
         if match:
-            out["match"] = {
-                "post_id": match[0],
-                "posted_at": str(match[1]),
-                "thread_url": match[2],
-                "our_url": match[3],
-                "our_account": match[4],
-            }
+            out["match"] = match
         print(json.dumps(out, indent=2))
         sys.exit(0 if match else 1)
     if args.check_engaged_ids:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
         # Accept comma, whitespace, or newline separation. Filter to 16-19
         # digit numeric IDs so we don't pollute with ad campaign mcid values
         # or random noise the browser-side walker might pick up.
         raw = re.split(r"[,\s]+", args.check_engaged_ids.strip())
         ids = [v for v in raw if re.fullmatch(r"\d{16,19}", v or "")]
-        match = find_existing_engagement(conn, ids)
-        conn.close()
+        match = find_existing_engagement(ids)
         out = {"ids": ids, "engaged": bool(match)}
         if match:
-            out["match"] = {
-                "post_id": match[0],
-                "posted_at": str(match[1]),
-                "thread_url": match[2],
-                "our_url": match[3],
-                "our_account": match[4],
-            }
+            out["match"] = match
         print(json.dumps(out, indent=2))
         sys.exit(0 if match else 1)
     if args.check_self_author:
@@ -237,12 +217,8 @@ def main():
         }))
         sys.exit(0 if matched else 1)
     if args.list_engaged_ids:
-        import db as dbmod
-        dbmod.load_env()
-        conn = dbmod.get_conn()
-        for v in get_engaged_ids(conn):
+        for v in get_engaged_ids():
             print(v)
-        conn.close()
         return
     parser.print_help()
     sys.exit(2)
