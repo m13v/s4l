@@ -422,8 +422,9 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     target_chars = None
     if style:
         try:
-            from engagement_styles import _meta_for, DEFAULT_TARGET_CHARS
-            target_chars = (_meta_for(style) or {}).get("target_chars") or DEFAULT_TARGET_CHARS
+            from engagement_styles import get_all_styles, DEFAULT_TARGET_CHARS
+            meta = get_all_styles().get(style) or {}
+            target_chars = meta.get("target_chars") or DEFAULT_TARGET_CHARS
         except Exception as e:
             print(f"[post] candidate {cid}: target_chars lookup failed ({e}); "
                   f"leaving NULL", flush=True)
