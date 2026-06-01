@@ -27,6 +27,9 @@ lower; need a wider window to gather enough samples.
 
 Source: linkedin_search_attempts (one row per query per cycle, written by
 run-linkedin.sh after Phase A scrape parses queries_used).
+
+Migrated 2026-06-01 from direct db.py SELECTs to the s4l.ai HTTP API
+(GET /api/v1/linkedin-search-attempts/duds). No DATABASE_URL needed.
 """
 import argparse
 import json
@@ -34,8 +37,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
+from http_api import api_get
 
 
 def main():
@@ -49,59 +51,18 @@ def main():
     p.add_argument("--search-topic", default=None)
     args = p.parse_args()
 
-    conn = dbmod.get_conn()
-    ensure_search_topic_schema(conn)
-    filters = [
-        "ran_at > NOW() - (%s || ' days')::interval",
-        """
-          (
-            candidates_found = 0
-            OR (serp_quality_score IS NOT NULL AND serp_quality_score < %s)
-          )
-        """,
-    ]
-    params = [str(args.window_days), args.low_serp_threshold]
+    query = {
+        "limit": args.limit,
+        "window_days": args.window_days,
+        "low_serp_threshold": args.low_serp_threshold,
+    }
     if args.project:
-        filters.append("LOWER(COALESCE(project_name, '')) = LOWER(%s)")
-        params.append(args.project)
+        query["project"] = args.project
     if args.search_topic:
-        filters.append("LOWER(COALESCE(search_topic, '')) = LOWER(%s)")
-        params.append(args.search_topic)
-    where = " AND ".join(filters)
-    params = [args.low_serp_threshold] + params + [args.limit]
-    rows = conn.execute(
-        f"""
-        SELECT query,
-               COALESCE(project_name, '') AS project,
-               COALESCE(search_topic, '') AS search_topic,
-               COUNT(*) AS attempts,
-               EXTRACT(EPOCH FROM (NOW() - MAX(ran_at)))/3600.0 AS last_ran_h_ago,
-               CASE
-                   WHEN BOOL_AND(candidates_found = 0) THEN 'zero_results'
-                   WHEN AVG(serp_quality_score) < %s THEN 'low_serp_quality'
-                   ELSE 'mixed_dud'
-               END AS reason
-        FROM linkedin_search_attempts
-        WHERE {where}
-        GROUP BY query, COALESCE(project_name, ''), COALESCE(search_topic, '')
-        ORDER BY attempts DESC, MAX(ran_at) DESC
-        LIMIT %s
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+        query["search_topic"] = args.search_topic
 
-    out = [
-        {
-            "query": r[0],
-            "project": r[1],
-            "search_topic": r[2],
-            "attempts": r[3],
-            "last_ran_h_ago": round(float(r[4] or 0), 1),
-            "reason": r[5],
-        }
-        for r in rows
-    ]
+    resp = api_get("/api/v1/linkedin-search-attempts/duds", query)
+    out = (resp.get("data") or {}).get("duds") or []
     json.dump(out, sys.stdout)
     print("", file=sys.stdout)
 
