@@ -86,6 +86,41 @@ except Exception:
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
 
+# Per-style length ceiling = target_chars * this multiplier. Mirrors the
+# value rendered into the draft prompt (get_assigned_style_prompt) so the
+# prompt and the enforcement backstop agree on the hard cap.
+LENGTH_CEIL_MULT = 1.5
+
+
+def enforce_reply_length(text, target_chars):
+    """Hard backstop on drafted comment length (the COMMENT TEXT only, before
+    any link/CTA is appended).
+
+    The draft model consistently overshoots target_chars by 1.5-3x despite the
+    prompt's explicit length instruction (observed across 25 consecutive posts
+    on 2026-06-01: critic 96->232, storyteller 206->335..432, etc.). Prompt
+    wording alone is not load-bearing, so this trims anything past
+    target_chars * LENGTH_CEIL_MULT down to that ceiling, cutting on a sentence
+    boundary when one sits in the back half of the budget, else a word
+    boundary, never mid-word. Returns (text, was_trimmed)."""
+    if not target_chars or target_chars <= 0:
+        return text, False
+    ceil = int(round(target_chars * LENGTH_CEIL_MULT))
+    if len(text) <= ceil:
+        return text, False
+    window = text[:ceil]
+    half = int(ceil * 0.5)
+    # Prefer ending on a sentence boundary inside the back half of the budget.
+    cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if cut >= half:
+        return text[:cut + 1].strip(), True
+    # Else fall back to a word boundary in the back half.
+    sp = window.rfind(" ")
+    if sp >= half:
+        return text[:sp].strip(), True
+    # Pathological single-token blob: hard cut at the ceiling.
+    return window.strip(), True
+
 
 def parse_last_json_object(text):  # -> dict | None; bare hint kept off the signature for Python 3.9 compatibility (PEP 604 union requires 3.10+)
     """Extract the last balanced top-level JSON object from a string.
@@ -443,6 +478,23 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         print(f"[post] candidate {cid}: empty reply_text; skipping", flush=True)
         update_candidate(cid, "skipped")
         return ("skipped", "empty_reply_text")
+
+    # Hard length enforcement (2026-06-01). The draft model overshoots the
+    # per-style target by 1.5-3x even with the prompt's length instruction, so
+    # trim the COMMENT TEXT to the style ceiling here, before the link is
+    # appended. No-op when the draft is already within budget or target_chars
+    # is unknown.
+    if target_chars:
+        _orig_len = len(reply_text)
+        reply_text, _trimmed = enforce_reply_length(reply_text, target_chars)
+        if _trimmed:
+            print(
+                f"[post] candidate {cid}: reply_text {_orig_len} chars exceeded "
+                f"ceiling (target={target_chars}, "
+                f"ceil={int(round(target_chars * LENGTH_CEIL_MULT))}); "
+                f"hard-trimmed to {len(reply_text)} chars",
+                flush=True,
+            )
 
     # Pre-post dedup race guard. See already_posted_to_thread() docstring
     # for the full failure mode this closes (overlapping cycles double-
