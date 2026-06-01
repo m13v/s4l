@@ -43,14 +43,14 @@ from datetime import datetime, timezone
 STYLES = {
     "critic": {
         "description": "Point out what's missing, flawed, or naive. Reframe the problem.",
-        "example": "The part that breaks down is...",
+        "example": "the missing piece is eval. without a way to catch regressions, every 'improvement' is just vibes",
         "best_in": {
             "reddit": ["r/Entrepreneur", "r/smallbusiness", "r/startups"],
             "twitter": ["tech", "startup", "business"],
             "linkedin": ["strategy", "leadership", "operations"],
         },
         "note": "NEVER just nitpick; offer a non-obvious insight.",
-        "target_chars": 31,
+        "target_chars": 96,
     },
     "storyteller": {
         "description": (
@@ -103,14 +103,14 @@ STYLES = {
     },
     "curious_probe": {
         "description": "One specific follow-up question about the most interesting detail. Include 'curious because...' context.",
-        "example": "curious because we ran into something similar...",
+        "example": "how are you handling two agents writing at once? curious because we hit silent overwrites and only a lock fixed it",
         "best_in": {
             "reddit": ["r/startups", "r/SaaS", "niche subs"],
             "twitter": ["niche topics", "founder discussions"],
             "linkedin": ["thought leadership", "niche B2B"],
         },
         "note": "ONE question only. Never multiple.",
-        "target_chars": 48,
+        "target_chars": 114,
     },
     "contrarian": {
         "description": "Take a clear opposing position backed by experience.",
@@ -136,14 +136,14 @@ STYLES = {
     },
     "snarky_oneliner": {
         "description": "Short, sharp, emotionally resonant observation (1 sentence max). Validates a shared frustration.",
-        "example": "(witty one-liner that nails the shared pain)",
+        "example": "the demo always works. that's the whole problem.",
         "best_in": {
             "reddit": ["large subs (500k+ members)"],
             "twitter": ["viral threads", "tech complaints", "industry snark"],
             "linkedin": [],  # never on LinkedIn
         },
         "note": "NEVER in small/serious subs like r/vipassana. NEVER on LinkedIn.",
-        "target_chars": 44,
+        "target_chars": 48,
     },
     # ── Instagram-native caption styles (2026-05-21) ──
     # Distinct from the reply/comment styles above: these describe the
