@@ -404,48 +404,40 @@ case "$DISCOVER_RC" in
     *) log "Discover lane: unexpected rc=$DISCOVER_RC; counting as failed."; TOTAL_FAILED=$((TOTAL_FAILED + 1)) ;;
 esac
 
-# --- Ripen discover (30-min delta gate, all floor-passers flow to draft) ---
+# --- Rank + cap discover output (ripen stage RETIRED 2026-06-01) ---
+# The 30-min ripen momentum gate (ripen_reddit_plan.py: T0 capture → sleep 1800s
+# → T1 repoll → composite Δup+4·Δcomments floor) was removed to align with the
+# Twitter pipeline, which dropped its own inter-phase momentum sleep on
+# 2026-05-31 (variant D won: no wait, just expire→discover+score→draft→post).
+# Two failure modes the ripen stage caused, both fixed by removing it:
+#   1. repoll() had a hard 120s subprocess timeout on T1 re-fetch of the WHOLE
+#      candidate set; at ~75+ candidates it timed out → returned {} → every
+#      candidate dropped → zero posts (S4L 08:15, mk0r 08:30 on 2026-06-01).
+#   2. mature long-tail threads that are genuinely on-topic but not gaining
+#      fresh upvotes in a 30-min window were momentum-starved and dropped
+#      (Podlog 08:00), even though they were the RIGHT threads to comment on.
+# Ranking + capping now happens inside post_reddit.py --phase discover
+# (_discover_iteration): candidates are scored by topical overlap (query vs.
+# thread title+selftext) to fight the sort=relevance leak, then capped to the
+# top SAPS_REDDIT_DISCOVER_CAP (default 25). The final post cap is still
+# enforced by _post_iteration (SAPS_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
+# RIPEN_FILE is kept as a passthrough alias so the draft/cleanup paths below
+# stay unchanged.
 if [ "$HAS_DISCOVER" = "1" ]; then
-    # Floor>=1 (a +1 upvote in 30min is enough signal the thread is alive).
-    # composite = Δup + 4*Δcomments.
-    # 2026-05-08: bumped 600s → 1800s (30 min). 10 min wasn't enough time for
-    # mature long-tail threads to show fresh momentum, killing all 162 ripen
-    # candidates in cycle 17:45 (Δup=0/Δcomm=0 across the board). 30 min gives
-    # genuinely-active threads a wider sampling window, while dead threads
-    # still correctly drop. Trade-off: cycles overlap more (launchd fires every
-    # 15 min); watchdog_hung_runs.py cap for run-reddit-search.sh is 60 min so
-    # this stays well under the kill threshold.
-    # 2026-05-10: top-k cap removed entirely (was disabled with --top-k 0
-    # since 2026-05-08). All floor-passers flow into draft; _post_iteration
-    # enforces the final cap (SAPS_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
-    RIPEN_SLEEP=1800
-    log "Discover lane: ripening (${RIPEN_SLEEP}s delta gate, floor>=1, w_comments=4)..."
-    set +e
-    python3 "$REPO_DIR/scripts/ripen_reddit_plan.py" \
-        --in "$DISCOVER_FILE" \
-        --out "$RIPEN_FILE" \
-        --sleep "$RIPEN_SLEEP" 2>&1 | tee -a "$LOG_FILE"
-    RIPEN_RC=${PIPESTATUS[0]}
-    set -e
-
-    if [ "$RIPEN_RC" != "0" ]; then
-        log "Discover ripen: rc=$RIPEN_RC; falling back to unfiltered discover output."
-        cp "$DISCOVER_FILE" "$RIPEN_FILE"
-    fi
-
+    cp "$DISCOVER_FILE" "$RIPEN_FILE"
     SURVIVORS=$(python3 -c "import json;print(len(json.load(open('$RIPEN_FILE')).get('decisions',[])))" 2>/dev/null || echo 0)
     if [ "$SURVIVORS" = "0" ]; then
-        log "Discover ripen: 0 survivors; skipping discover draft+post."
+        log "Discover lane: 0 candidates after rank+cap; skipping discover draft+post."
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1))
         HAS_DISCOVER=0
     else
-        log "Discover ripen: $SURVIVORS candidate(s) passed delta gate."
+        log "Discover lane: $SURVIVORS candidate(s) ranked + capped (no ripen wait)."
     fi
 fi
 
 # --- Discover draft ---
 if [ "$HAS_DISCOVER" = "1" ]; then
-    log "Discover lane: drafting $SURVIVORS survivor(s)..."
+    log "Discover lane: drafting $SURVIVORS candidate(s)..."
     set +e
     python3 "$REPO_DIR/scripts/post_reddit.py" \
         --phase draft \
