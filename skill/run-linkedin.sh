@@ -152,12 +152,21 @@ _sa_emit_run_summary_oneshot() {
     elapsed=$(( $(date +%s) - ${RUN_START_EPOCH:-$(date +%s)} ))
     window_sec=$(( elapsed + 60 ))
     posted=0
-    if [ -n "${DATABASE_URL:-}" ]; then
-        posted=$(timeout 10 psql "$DATABASE_URL" -t -A -c \
-            "SELECT COUNT(*) FROM posts WHERE platform='linkedin' AND posted_at >= NOW() - interval '$window_sec seconds'" \
-            2>/dev/null | tr -d '[:space:]' || true)
-        [ -z "$posted" ] && posted=0
-    fi
+    posted=$(WINDOW_SEC="$window_sec" timeout 15 python3 - <<'PY' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd(), "scripts"))
+sys.path.insert(0, os.path.expanduser("~/social-autoposter/scripts"))
+try:
+    from http_api import api_get
+    win = int(os.environ.get("WINDOW_SEC") or "0")
+    resp = api_get("/api/v1/posts/count",
+                   {"platform": "linkedin", "within_seconds": win})
+    print(int((resp.get("data") or {}).get("count") or 0))
+except Exception:
+    print(0)
+PY
+)
+    [ -z "$posted" ] && posted=0
     skipped=0
     if [ "$posted" = "0" ] && [ -n "${LOG_FILE:-}" ] && [ -f "${LOG_FILE:-}" ] \
         && grep -qE "PHASE_B_SKIP_POST_UNAVAILABLE|## Already engaged|## Comment soft-blocked" "$LOG_FILE" 2>/dev/null; then
@@ -969,56 +978,36 @@ project = os.environ.get("LI_PROJECT_NAME", "")
 search_topic = os.environ.get("LI_SEARCH_TOPIC", "")
 
 sys.path.insert(0, os.path.join(repo, "scripts"))
-import db as dbmod
-from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
+from http_api import api_get
 
-conn = dbmod.get_conn()
-ensure_search_topic_schema(conn)
-select_cols = """
-    SELECT post_url, activity_id, all_urns, author_name, author_profile_url,
-           post_text, language, matched_project, velocity_score, search_query,
-           search_topic
-      FROM linkedin_candidates
-"""
-row = conn.execute(
-    select_cols + """
-     WHERE status='pending'
-       AND batch_id=%s
-       AND LOWER(COALESCE(matched_project, '')) = LOWER(%s)
-       AND LOWER(COALESCE(search_topic, '')) = LOWER(%s)
-     ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
-     LIMIT 1
-    """,
-    [batch_id, project, search_topic],
-).fetchone()
-if not row:
-    row = conn.execute(
-        select_cols + """
-         WHERE status='pending'
-           AND age_hours <= 96
-           AND LOWER(COALESCE(matched_project, '')) = LOWER(%s)
-           AND LOWER(COALESCE(search_topic, '')) = LOWER(%s)
-         ORDER BY velocity_score DESC NULLS LAST, discovered_at DESC
-         LIMIT 1
-        """,
-        [project, search_topic],
-    ).fetchone()
-conn.close()
-if not row:
+# Two-stage pending pick (freshest batch first, then same-project/topic
+# fallback within a 96h window) runs server-side; see route.ts. The returned
+# candidate shape matches the keys the PA_* extractors below expect exactly.
+resp = api_get(
+    "/api/v1/linkedin-candidates/next-pending",
+    {
+        "batch_id": batch_id,
+        "project": project,
+        "search_topic": search_topic,
+        "max_age_hours": 96,
+    },
+)
+cand = (resp.get("data") or {}).get("candidate")
+if not cand:
     print(json.dumps({}))
 else:
     out = {
-        "post_url": row[0],
-        "activity_id": row[1],
-        "all_urns": row[2] or "",
-        "author_name": row[3] or "",
-        "author_profile_url": row[4] or "",
-        "post_text": (row[5] or ""),
-        "language": row[6] or "en",
-        "project": row[7] or project,
-        "velocity_score": float(row[8] or 0),
-        "search_query": row[9] or "",
-        "search_topic": row[10] or search_topic,
+        "post_url": cand.get("post_url") or "",
+        "activity_id": cand.get("activity_id") or "",
+        "all_urns": cand.get("all_urns") or "",
+        "author_name": cand.get("author_name") or "",
+        "author_profile_url": cand.get("author_profile_url") or "",
+        "post_text": cand.get("post_text") or "",
+        "language": cand.get("language") or "en",
+        "project": cand.get("project") or project,
+        "velocity_score": float(cand.get("velocity_score") or 0),
+        "search_query": cand.get("search_query") or "",
+        "search_topic": cand.get("search_topic") or search_topic,
     }
     print(json.dumps(out))
 PY
@@ -1214,7 +1203,7 @@ $STYLES_BLOCK
 1. Defensive engaged-id re-check. Run via Bash:
      python3 $REPO_DIR/scripts/linkedin_url.py --check-engaged-ids '$PA_ACTIVITY_ID'
    If exit code 0 (already engaged), mark the candidate skipped:
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
    then STOP with '## Already engaged (defensive catch in Phase B)'.
 
 2. Draft the comment using the ASSIGNED engagement style (the style block above
@@ -1277,7 +1266,7 @@ $STYLES_BLOCK
      REJECTED = ok false, non-2xx status, or an error response object.
 
 5. If REJECTED, do NOT call the success log path. Mark candidate skipped:
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
    Then ledger the soft-block:
      python3 $REPO_DIR/scripts/log_post.py --rejected \\
        --platform linkedin \\
@@ -1311,7 +1300,7 @@ $STYLES_BLOCK
        --language '$PA_LANG' \\
        --urns '$PA_ACTIVITY_ID')
      echo "\$LOG_RESULT"
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='posted', posted_at=NOW() WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'posted'}, ok_on_404=True)"
      If MINTED_SESSION is non-empty: extract post_id from LOG_RESULT and backfill:
        LOG_POST_ID=\$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('post_id',''))" "\$LOG_RESULT" 2>/dev/null || echo "")
        [ -n "\$LOG_POST_ID" ] && python3 $REPO_DIR/scripts/dm_short_links.py backfill-post \\
@@ -1383,21 +1372,21 @@ $STYLES_BLOCK
            from step 2.
          * If ALL THREE namespaces hit post-not-found markers, the post
            genuinely no longer exists. Mark candidate skipped:
-             python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+             python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
            Update the run-level counter signal: print a line containing
            the literal token 'PHASE_B_SKIP_POST_UNAVAILABLE' so the wrapper
            can attribute it. Then STOP with '## Post unavailable, candidate skipped'.
 
    1b. If you found a working namespace different from $PA_URL, persist it
        so future navigations / engaged-id checks use the right canonical:
-         python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET post_url=%s WHERE activity_id=%s\", ['<WORKING_URL>','$PA_ACTIVITY_ID']); c.commit(); c.close()"
+         python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'post_url': '<WORKING_URL>'}, ok_on_404=True)"
 
 2. Defensive engaged-id re-check (Phase A may have missed a URN that only
    surfaces after the post page fully loads). Walk the rendered DOM for ALL
    URNs (activity, share, ugcPost forms), merge with '$PA_ALL_URNS', and run:
      python3 $REPO_DIR/scripts/linkedin_url.py --check-engaged-ids 'MERGED_URNS'
    If exit code 0 (already engaged), mark the candidate skipped:
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
    then STOP with '## Already engaged (defensive catch in Phase B)'.
 
 3. Draft the comment using the ASSIGNED engagement style (the style block above
@@ -1490,7 +1479,7 @@ $STYLES_BLOCK
    5d. SUCCESS = all four pass. REJECTED = toast present OR count unchanged.
 
 6. If REJECTED, do NOT call the success log path. Mark candidate skipped:
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='skipped' WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
    Then ledger the soft-block:
      python3 $REPO_DIR/scripts/log_post.py --rejected \\
        --platform linkedin \\
@@ -1524,7 +1513,7 @@ $STYLES_BLOCK
        --language '$PA_LANG' \\
        --urns 'ALL_POST_URNS')
      echo "\$LOG_RESULT"
-     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); import db; c=db.get_conn(); c.execute(\"UPDATE linkedin_candidates SET status='posted', posted_at=NOW() WHERE activity_id=%s\", ['$PA_ACTIVITY_ID']); c.commit(); c.close()"
+     python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'posted'}, ok_on_404=True)"
      If MINTED_SESSION is non-empty: extract post_id from LOG_RESULT and backfill:
        LOG_POST_ID=\$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('post_id',''))" "\$LOG_RESULT" 2>/dev/null || echo "")
        [ -n "\$LOG_POST_ID" ] && python3 $REPO_DIR/scripts/dm_short_links.py backfill-post \\
