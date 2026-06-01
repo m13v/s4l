@@ -22,7 +22,11 @@
     "skill/lib/*.sh",
     "setup/SKILL.md",
     "browser-agent-configs/",
-    "mcp-servers/"
+    "mcp-servers/",
+    "mcp/dist/",
+    "mcp/package.json",
+    "mcp/manifest.json",
+    "mcp/install.mjs"
   ],
   "keywords": [
     "social-media",
