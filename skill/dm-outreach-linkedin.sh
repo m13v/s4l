@@ -222,13 +222,13 @@ Inspect the send result (capture_screenshot + Read the PNG to confirm the messag
   log-outbound without a verified send) came from bypassing this gateway.
 
 (B) The send did not land (no toast, message did not appear in thread)  ->  mark error:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='send_unverified', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status error --skip-reason send_unverified --claude-session-id "$CLAUDE_SESSION_ID"
 
 (C) DMs disabled / chat blocked  ->  mark skipped:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='skipped', skip_reason='chat_disabled', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status skipped --skip-reason chat_disabled --claude-session-id "$CLAUDE_SESSION_ID"
 
 (D) Rate limit, account checkpoint, or any other thrown exception  ->  mark error and STOP the run:
-  psql "\$DATABASE_URL" -c "UPDATE dms SET status='error', skip_reason='REASON', claude_session_id='$CLAUDE_SESSION_ID'::uuid WHERE id=DM_ID;"
+  python3 $REPO_DIR/scripts/dm_db_update.py --dm-id DM_ID --status error --skip-reason "REASON" --claude-session-id "$CLAUDE_SESSION_ID"
 
 CRITICAL: ALL browser calls MUST use the mcp__linkedin-harness__bh_run tool (the BROWSER BACKEND block above). NEVER use generic mcp__playwright-extension__*, mcp__isolated-browser__*, or mcp__macos-use__* tools. If a bh_run call is blocked or times out, wait 30 seconds and retry (up to 3 times). Do NOT fall back to any other browser tool.
 PROMPT_EOF
@@ -237,8 +237,8 @@ ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 gtimeout 2700 "$REPO_DIR/scripts/run_claude.sh" "dm-outreach-linkedin" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: LinkedIn DM outreach claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
-SENT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='linkedin' AND status='sent';" 2>/dev/null || echo "0")
-STILL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM dms WHERE platform='linkedin' AND status='pending';" 2>/dev/null || echo "0")
+SENT=$(dm_count sent)
+STILL_PENDING=$(dm_count pending)
 log "LinkedIn DM outreach summary: sent (all-time)=$SENT, still_pending=$STILL_PENDING"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
