@@ -83,11 +83,6 @@ SCRAPER_PYTHON_BIN="/usr/bin/python3"
 MAX_SCROLLS=400           # 2026-05-28 set to 400 per user direction; natural stagnant>=8 bail should fire well before this (~tick 150). Safety ceiling, not target. Previous: 300 (auto-commit) <- 1000 (runaway 2026-05-27).
 SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via SAPS_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
-
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/stats-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
@@ -96,14 +91,15 @@ RUN_START=$(date +%s)
 log "=== LinkedIn Stats Run (unified): $(date) ==="
 log "mode: python (no LLM); MAX_SCROLLS=$MAX_SCROLLS; timeout=${SCRAPER_TIMEOUT_SEC}s"
 
-# Coverage hint.
+# Coverage hint. Reads via the s4l.ai HTTP API (no DATABASE_URL needed); the
+# linkedin-engagement-comments GET returns every addressable row, so we just
+# count them. Purely informational; never blocks the run.
 COVERAGE=$("$PYTHON_BIN" -c "
 import sys; sys.path.insert(0, '$REPO_DIR/scripts')
-import db as dbmod; dbmod.load_env(); db = dbmod.get_conn()
-cur = db.execute(\"\"\"SELECT COUNT(*) AS n FROM posts
-                     WHERE platform='linkedin' AND status IN ('active','removed')
-                       AND our_url IS NOT NULL AND our_url ILIKE '%commentUrn%'\"\"\")
-print(f\"posts={cur.fetchone()['n']}\")
+from http_api import api_get
+resp = api_get('/api/v1/linkedin-engagement-comments')
+rows = (resp.get('data') or {}).get('rows') or []
+print(f'posts={len(rows)}')
 " 2>/dev/null || echo "posts=?")
 log "Active LinkedIn comments addressable by this feed: $COVERAGE"
 
