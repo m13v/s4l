@@ -417,6 +417,7 @@ def synthesize_for_platform(conn, platform, reserved, dry_run=False):
             "prompt_chars": len(prompt),
             "source_likes_top": replies[0]["likes"],
             "source_likes_bottom": replies[-1]["likes"],
+            "target_chars": median_reply_chars(replies),
         }
 
     text = call_claude(prompt)
@@ -444,6 +445,7 @@ def synthesize_for_platform(conn, platform, reserved, dry_run=False):
         "source_count": len(replies),
         "source_likes_top": replies[0]["likes"],
         "source_likes_bottom": replies[-1]["likes"],
+        "target_chars": median_reply_chars(replies),
         "created": created,
     }
 
