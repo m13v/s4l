@@ -223,9 +223,26 @@ def _logged_in(send) -> bool:
 
 
 def _is_session_valid() -> bool:
+    """Rigorous check: navigates x.com/home if needed. Used by `connect`."""
     ws, send = _attach()
     try:
         return _logged_in(send)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _has_session_quick() -> bool:
+    """Read-only check: auth_token cookie present? Never navigates the live
+    browser, so it's safe to poll while a posting cycle is running. Used by
+    `status`. A present-but-server-revoked cookie can false-positive here; the
+    `connect` path's navigate-validate is the authoritative check."""
+    ws, send = _attach()
+    try:
+        send("Network.enable")
+        return _has_auth_cookie(send)
     finally:
         try:
             ws.close()
@@ -275,7 +292,7 @@ def cmd_status(args) -> dict:
             "cdp": CDP,
         }
     try:
-        valid = _is_session_valid()
+        valid = _has_session_quick()
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error", "error": str(e), "cdp": CDP}
     return {
