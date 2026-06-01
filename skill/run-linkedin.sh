@@ -1133,7 +1133,7 @@ try:
 except Exception:
     print('use')
 " 2>/dev/null)
-log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
+echo "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}" | tee -a "$LOG_FILE"
 
 if [ -n "$PICKED_STYLE" ]; then
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
