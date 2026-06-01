@@ -765,70 +765,60 @@ def wrap_text_for_post(*, text: str, platform: str, project_name: str) -> dict:
 
     minted_session = str(uuid.uuid4())
     projects = _load_projects()
-    # Conn is only opened for the legacy direct-DB path (env-gated). The
-    # default API path doesn't need it; lazy-open avoids a wasted Postgres
-    # connection on VMs that don't have DATABASE_URL.
-    use_legacy = os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') == '1'
-    conn = dbmod.get_conn() if use_legacy else None
-    try:
-        seen = {}
-        codes = []
-        skipped = []
+    seen = {}
+    codes = []
+    skipped = []
 
-        for m in list(_URL_RE.finditer(text)):
-            raw = m.group(0)
-            stripped = raw.rstrip(_TRAILING_PUNCT)
-            if stripped in seen:
-                continue
+    for m in list(_URL_RE.finditer(text)):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        if stripped in seen:
+            continue
 
-            # Already-wrapped /r/<code> on one of our domains: leave alone.
-            if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', stripped, re.IGNORECASE):
-                seen[stripped] = stripped
-                skipped.append({'url': stripped, 'reason': 'already_wrapped'})
-                continue
+        # Already-wrapped /r/<code> on one of our domains: leave alone.
+        if re.search(r'/r/[a-z0-9]{4,32}(?:[/?#]|$)', stripped, re.IGNORECASE):
+            seen[stripped] = stripped
+            skipped.append({'url': stripped, 'reason': 'already_wrapped'})
+            continue
 
-            res = _mint_one_post(
-                conn,
-                target_url=stripped,
-                projects=projects,
-                platform=platform,
-                project_name=project_name,
-                minted_session=minted_session,
-            )
-            if not res.get('ok'):
-                return {**res, 'ok': False}
-            seen[stripped] = res['short_url']
-            if res.get('code') is not None:
-                codes.append(res['code'])
-            else:
-                # UTM-only fallback (no /r/<code>): track in skipped[] so the
-                # caller's logging doesn't see [None] in codes[] but still has
-                # visibility into how the URL was handled.
-                skipped.append({'url': stripped, 'reason': 'utm_fallback',
-                                'detail': res.get('fallback_reason')})
+        res = _mint_one_post(
+            target_url=stripped,
+            projects=projects,
+            platform=platform,
+            project_name=project_name,
+            minted_session=minted_session,
+        )
+        if not res.get('ok'):
+            return {**res, 'ok': False}
+        seen[stripped] = res['short_url']
+        if res.get('code') is not None:
+            codes.append(res['code'])
+        else:
+            # UTM-only fallback (no /r/<code>): track in skipped[] so the
+            # caller's logging doesn't see [None] in codes[] but still has
+            # visibility into how the URL was handled.
+            skipped.append({'url': stripped, 'reason': 'utm_fallback',
+                            'detail': res.get('fallback_reason')})
 
-        if not seen:
-            return {'ok': True, 'text': text, 'minted_session': None,
-                    'codes': [], 'skipped': skipped}
+    if not seen:
+        return {'ok': True, 'text': text, 'minted_session': None,
+                'codes': [], 'skipped': skipped}
 
-        def _sub(m):
-            raw = m.group(0)
-            stripped = raw.rstrip(_TRAILING_PUNCT)
-            trailing = raw[len(stripped):]
-            wrapped = seen.get(stripped, stripped)
-            return wrapped + trailing
+    def _sub(m):
+        raw = m.group(0)
+        stripped = raw.rstrip(_TRAILING_PUNCT)
+        trailing = raw[len(stripped):]
+        wrapped = seen.get(stripped, stripped)
+        return wrapped + trailing
 
-        new_text = _URL_RE.sub(_sub, text)
-        return {
-            'ok': True,
-            'text': new_text,
-            'minted_session': minted_session,
-            'codes': codes,
-            'skipped': skipped,
-        }
-    finally:
-        if conn is not None:
-            conn.close()
+    new_text = _URL_RE.sub(_sub, text)
+    return {
+        'ok': True,
+        'text': new_text,
+        'minted_session': minted_session,
+        'codes': codes,
+        'skipped': skipped,
+    }
 
 
 def _backfill_via_api(*, minted_session: str, post_id: int | None = None,
@@ -857,44 +847,20 @@ def backfill_post_id(*, minted_session: str, post_id: int) -> int:
     and minted_session was None — the caller should skip the backfill in
     that case.
 
-    Routes through /api/v1/post-links/backfill by default. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-DB path.
+    HTTP-only: routes through /api/v1/post-links/backfill. There is no
+    direct-Postgres path and no fallback.
     """
     if not minted_session or post_id is None:
         return 0
-    if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') != '1':
-        return _backfill_via_api(minted_session=minted_session, post_id=post_id)
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            "UPDATE post_links SET post_id = %s "
-            "WHERE minted_session = %s AND post_id IS NULL",
-            (post_id, minted_session),
-        )
-        conn.commit()
-        return cur.rowcount or 0
-    finally:
-        conn.close()
+    return _backfill_via_api(minted_session=minted_session, post_id=post_id)
 
 
 def backfill_reply_id(*, minted_session: str, reply_id: int) -> int:
     """Same as backfill_post_id but stamps post_links.reply_id (engage_reddit
-    writes to the `replies` table, not `posts`)."""
+    writes to the `replies` table, not `posts`). HTTP-only."""
     if not minted_session or reply_id is None:
         return 0
-    if os.environ.get('SOCIAL_AUTOPOSTER_LEGACY_NEON') != '1':
-        return _backfill_via_api(minted_session=minted_session, reply_id=reply_id)
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            "UPDATE post_links SET reply_id = %s "
-            "WHERE minted_session = %s AND reply_id IS NULL",
-            (reply_id, minted_session),
-        )
-        conn.commit()
-        return cur.rowcount or 0
-    finally:
-        conn.close()
+    return _backfill_via_api(minted_session=minted_session, reply_id=reply_id)
 
 
 # ---- CLI subcommands ----
@@ -902,26 +868,21 @@ def backfill_reply_id(*, minted_session: str, reply_id: int) -> int:
 def cmd_mint(args):
     projects = _load_projects()
     projects_by_name = {p['name']: p for p in projects}
-    conn = dbmod.get_conn()
-    try:
-        dm = _dm_row(conn, args.dm_id)
-        res = _mint_one(
-            conn,
-            dm_id=args.dm_id,
-            target_url=args.target_url,
-            projects=projects,
-            projects_by_name=projects_by_name,
-            dm=dm,
-        )
-        if not res.get('ok'):
-            sys.stderr.write(json.dumps(res) + '\n')
-            sys.exit(2)
-        if args.json:
-            print(json.dumps(res))
-        else:
-            print(res['short_url'])
-    finally:
-        conn.close()
+    dm = _dm_row(args.dm_id)
+    res = _mint_one(
+        dm_id=args.dm_id,
+        target_url=args.target_url,
+        projects=projects,
+        projects_by_name=projects_by_name,
+        dm=dm,
+    )
+    if not res.get('ok'):
+        sys.stderr.write(json.dumps(res) + '\n')
+        sys.exit(2)
+    if args.json:
+        print(json.dumps(res))
+    else:
+        print(res['short_url'])
 
 
 # Bot User-Agent regex. Matches Twitter card prefetch, LinkedIn unfurl,
@@ -948,74 +909,44 @@ BOT_UA_RE = re.compile(
 
 
 def cmd_resolve(args):
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            "SELECT l.code, l.dm_id, l.target_url, l.kind, "
-            "       d.platform, d.target_project, d.project_name "
-            "FROM dm_links l JOIN dms d ON d.id = l.dm_id "
-            "WHERE l.code = %s",
-            (args.code,),
-        )
-        row = cur.fetchone()
-        if not row:
-            print(json.dumps({'error': 'not_found', 'code': args.code}))
-            return
-        row = dict(row)
-        platform = (row.get('platform') or 'reddit').lower()
-        if platform == 'x':
-            platform = 'twitter'
+    # HTTP-only: bot detection + IP hashing happen here; the click logging and
+    # join read run server-side via POST /api/v1/dm-links/resolve. There is no
+    # direct-Postgres path.
+    ua = (getattr(args, 'user_agent', '') or '').strip()
+    referrer = (getattr(args, 'referrer', '') or '').strip() or None
+    is_bot = bool(ua and BOT_UA_RE.search(ua))
+    ip_raw = (getattr(args, 'ip', '') or '').strip()
+    ip_hash = (
+        hashlib.sha256(ip_raw.encode('utf-8')).hexdigest()[:16]
+        if ip_raw else None
+    )
 
-        ua = (getattr(args, 'user_agent', '') or '').strip()
-        referrer = (getattr(args, 'referrer', '') or '').strip() or None
-        is_bot = bool(ua and BOT_UA_RE.search(ua))
-        ip_raw = (getattr(args, 'ip', '') or '').strip()
-        ip_hash = (
-            hashlib.sha256(ip_raw.encode('utf-8')).hexdigest()[:16]
-            if ip_raw else None
-        )
-
-        if not args.no_count:
-            # Per-click log row, captures every hit (human or bot).
-            try:
-                conn.execute(
-                    "INSERT INTO dm_link_clicks (code, ip_hash, user_agent, is_bot, referrer) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (args.code, ip_hash, ua[:500] if ua else None, is_bot, referrer[:500] if referrer else None),
-                )
-            except Exception as e:
-                sys.stderr.write(f"[dm_short_links] dm_link_clicks insert failed (non-fatal): {e}\n")
-
-            if not is_bot:
-                conn.execute(
-                    "UPDATE dm_links SET "
-                    "  clicks = clicks + 1, "
-                    "  first_click_at = COALESCE(first_click_at, NOW()), "
-                    "  last_click_at = NOW() "
-                    "WHERE code = %s",
-                    (args.code,),
-                )
-                try:
-                    conn.execute(
-                        "INSERT INTO dm_messages (dm_id, direction, author, content, message_at, logged_at) "
-                        "VALUES (%s, 'inbound', '__click_signal__', "
-                        "        '[CLICK_SIGNAL] short link clicked', NOW(), NOW())",
-                        (row['dm_id'],),
-                    )
-                except Exception as e:
-                    sys.stderr.write(f"[dm_short_links] click_signal insert failed (non-fatal): {e}\n")
-            conn.commit()
-
-        print(json.dumps({
-            'dm_id': row['dm_id'],
-            'platform': platform,
-            'project': row.get('target_project') or row.get('project_name'),
-            'kind': row.get('kind'),
-            'target_url': row['target_url'],
-            'is_bot': is_bot,
-        }))
-    finally:
-        conn.close()
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from http_api import api_post
+    resp = api_post(
+        "/api/v1/dm-links/resolve",
+        {
+            "code": args.code,
+            "no_count": bool(args.no_count),
+            "is_bot": is_bot,
+            "ip_hash": ip_hash,
+            "user_agent": ua or None,
+            "referrer": referrer,
+        },
+        ok_on_404=True,
+    )
+    if not resp or not resp.get('ok'):
+        print(json.dumps({'error': 'not_found', 'code': args.code}))
+        return
+    data = resp.get('data') or {}
+    print(json.dumps({
+        'dm_id': data.get('dm_id'),
+        'platform': data.get('platform'),
+        'project': data.get('project'),
+        'kind': data.get('kind'),
+        'target_url': data.get('target_url'),
+        'is_bot': data.get('is_bot', is_bot),
+    }))
 
 
 def cmd_wrap_text(args):
