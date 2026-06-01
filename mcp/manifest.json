@@ -1,0 +1,65 @@
+{
+  "dxt_version": "0.1",
+  "name": "social-autoposter",
+  "display_name": "Social Autoposter (X / Twitter)",
+  "version": "0.0.1",
+  "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
+  "long_description": "A guided X/Twitter posting assistant. Run setup once to tell it your website, what you do, who to target, and your brand voice. Then draft_cycle scans X, drafts replies, and walks you through each one (approve or skip) before anything is posted. Flip to autopilot when you trust it, and check get_stats to see how your posts perform. This is a thin client: it shells out to the social-autoposter pipeline scripts in a repo clone on your machine, so it needs SAPS_REPO_DIR to point at that clone.",
+  "author": {
+    "name": "m13v",
+    "email": "i@m13v.com",
+    "url": "https://m13v.com"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "SAPS_REPO_DIR": "${user_config.saps_repo_dir}",
+        "SAPS_PYTHON": "${user_config.saps_python}",
+        "PATH": "${user_config.saps_repo_dir}/../node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "setup",
+      "description": "Run first. Configures the single project this install posts for: website, description, target audience, brand voice."
+    },
+    {
+      "name": "draft_cycle",
+      "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
+    },
+    {
+      "name": "autopilot",
+      "description": "Enable or disable background X/Twitter posting (the launchd cycle)."
+    },
+    {
+      "name": "get_stats",
+      "description": "Read-only post and engagement stats for the X/Twitter rail over the last N days."
+    }
+  ],
+  "user_config": {
+    "saps_repo_dir": {
+      "type": "directory",
+      "title": "Social Autoposter repo path",
+      "description": "Absolute path to your social-autoposter repo clone (the folder that contains config.json, scripts/, skill/). The MCP shells out to the pipeline scripts in this folder.",
+      "required": true
+    },
+    "saps_python": {
+      "type": "string",
+      "title": "Python interpreter",
+      "description": "Python used by the pipeline (must have psycopg2 etc). Leave as default unless you know you need a different one.",
+      "required": false,
+      "default": "/opt/homebrew/bin/python3"
+    }
+  },
+  "keywords": ["twitter", "x", "social", "autoposter", "marketing"],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m13v/social-autoposter"
+  }
+}
