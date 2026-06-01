@@ -119,6 +119,7 @@ from linkedin_browser import (  # noqa: E402
     _is_login_or_checkpoint,
 )
 from score_linkedin_candidates import calculate_velocity_score  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 DEVTOOLS_ACTIVE_PORT = os.path.join(PROFILE_DIR, "DevToolsActivePort")
 
@@ -142,59 +143,27 @@ DEVTOOLS_ACTIVE_PORT = os.path.join(PROFILE_DIR, "DevToolsActivePort")
 # back-to-back machine-cadence search hits are now structurally possible
 # from this script.
 SEARCH_VERTICALS = ("people", "content", "companies")
-SEARCH_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS linkedin_browser_searches (
-    id        SERIAL PRIMARY KEY,
-    query     TEXT NOT NULL,
-    vertical  TEXT NOT NULL,
-    ok        BOOLEAN NOT NULL,
-    error     TEXT,
-    ran_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_lbs_ran_at
-    ON linkedin_browser_searches(ran_at DESC);
-"""
-
-
-def _open_db():
-    """Lazy-import scripts.db; raises ImportError on failure."""
-    import db as dbmod  # type: ignore  # noqa: WPS433
-    dbmod.load_env()
-    return dbmod.get_conn()
 
 
 def _check_rate_limit() -> dict:
     """Always returns ok=True. Caps removed 2026-05-01 per user instruction.
 
-    Still touches the DB to (a) create the linkedin_browser_searches table on
-    first use and (b) read current daily/monthly volume so the response shape
-    keeps the rate_budget block populated for the dashboard. A DB error here
-    is non-fatal — the search proceeds anyway since there's no cap to enforce.
+    Reads current daily/monthly volume so the response shape keeps the
+    rate_budget block populated for the dashboard. A failure here is
+    non-fatal — the search proceeds anyway since there's no cap to enforce.
+
+    Migrated 2026-06-01 from a direct DB read (+ first-use CREATE TABLE) to
+    GET /api/v1/linkedin-browser-searches. The table now lives in the
+    social-autoposter-website schema; no client-side DDL needed.
     """
     daily = monthly = 0
     try:
-        conn = _open_db()
-        try:
-            for stmt in [s.strip() for s in SEARCH_TABLE_DDL.split(";") if s.strip()]:
-                conn.execute(stmt)
-            conn.commit()
-            cur = conn.execute(
-                "SELECT COUNT(*) AS n FROM linkedin_browser_searches "
-                "WHERE ran_at >= NOW() - INTERVAL '24 hours'"
-            )
-            daily = cur.fetchone()["n"]
-            cur = conn.execute(
-                "SELECT COUNT(*) AS n FROM linkedin_browser_searches "
-                "WHERE ran_at >= date_trunc('month', NOW())"
-            )
-            monthly = cur.fetchone()["n"]
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-    except Exception:
-        # DB down? Not our problem — caps are off, search proceeds.
+        resp = api_get("/api/v1/linkedin-browser-searches")
+        data = resp.get("data") or {}
+        daily = int(data.get("daily_used") or 0)
+        monthly = int(data.get("monthly_used") or 0)
+    except (Exception, SystemExit):
+        # API down? Not our problem — caps are off, search proceeds.
         pass
     return {"ok": True, "daily_used": daily, "monthly_used": monthly}
 
@@ -206,32 +175,21 @@ def _log_search(query: str, vertical: str, ok: bool, error: Optional[str]) -> No
     failure. Note that if logging fails the next rate-limit check will
     under-count. Acceptable: the monthly cap has 50% headroom under the
     actual wall.
+
+    Migrated 2026-06-01 to POST /api/v1/linkedin-browser-searches. SystemExit
+    (raised by http_api on 4xx / exhausted retries) is swallowed too, so a
+    logging failure can never bubble up and fail a real search.
     """
     try:
-        conn = _open_db()
-    except Exception as e:
+        api_post(
+            "/api/v1/linkedin-browser-searches",
+            {"query": query, "vertical": vertical, "ok": ok, "error": error},
+        )
+    except (Exception, SystemExit) as e:
         print(
-            f"[discover_linkedin_candidates] _log_search: db open failed: {e}",
+            f"[discover_linkedin_candidates] _log_search: post failed: {e}",
             file=sys.stderr,
         )
-        return
-    try:
-        conn.execute(
-            "INSERT INTO linkedin_browser_searches "
-            "(query, vertical, ok, error) VALUES (%s, %s, %s, %s)",
-            [query, vertical, ok, error],
-        )
-        conn.commit()
-    except Exception as e:
-        print(
-            f"[discover_linkedin_candidates] _log_search: insert failed: {e}",
-            file=sys.stderr,
-        )
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 # DOM extractors per vertical. Each is a single querySelectorAll + map, with
