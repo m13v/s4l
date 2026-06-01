@@ -26,6 +26,9 @@ previously invisible.
 Pair with top_dud_linkedin_queries.py.
 
     python3 scripts/log_linkedin_search_attempts.py --batch-id <id> < queries.json
+
+Migrated 2026-06-01 from direct psycopg2/db.py INSERTs to the s4l.ai HTTP API
+(POST /api/v1/linkedin-search-attempts, batch form). No DATABASE_URL needed.
 """
 import argparse
 import json
@@ -33,8 +36,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-from linkedin_search_topic_schema import ensure as ensure_search_topic_schema
+from http_api import api_post
 
 
 def main():
@@ -60,13 +62,13 @@ def main():
               file=sys.stderr)
         return 0
 
-    conn = dbmod.get_conn()
-    ensure_search_topic_schema(conn)
-    inserted = 0
+    payload = []
     for r in rows:
         if not isinstance(r, dict):
             continue
         query = (r.get("query") or "").strip()
+        if not query:
+            continue
         project = (r.get("project") or "").strip() or None
         search_topic = (r.get("search_topic") or "").strip() or None
         candidates_found = r.get("candidates_found")
@@ -84,20 +86,24 @@ def main():
             serp = float(serp) if serp is not None else None
         except (TypeError, ValueError):
             serp = None
-        if not query:
-            continue
-        conn.execute(
-            """
-            INSERT INTO linkedin_search_attempts
-                (query, project_name, search_topic, candidates_found, serp_quality_score,
-                 candidates_dropped_below_floor, batch_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            [query, project, search_topic, candidates_found, serp, dropped, args.batch_id],
-        )
-        inserted += 1
-    conn.commit()
-    conn.close()
+        payload.append({
+            "query": query,
+            "project_name": project,
+            "search_topic": search_topic,
+            "candidates_found": candidates_found,
+            "serp_quality_score": serp,
+            "candidates_dropped_below_floor": dropped,
+            "batch_id": args.batch_id,
+        })
+
+    if not payload:
+        print("log_linkedin_search_attempts: no valid rows after parse, nothing to log",
+              file=sys.stderr)
+        return 0
+
+    resp = api_post("/api/v1/linkedin-search-attempts", payload)
+    inserted = (resp.get("data") or {}).get("inserted", len(payload))
+
     duds = sum(
         1 for r in rows
         if isinstance(r, dict) and not int(r.get("candidates_found") or 0)
