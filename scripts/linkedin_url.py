@@ -36,6 +36,7 @@ import sys
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_get
 
 ID_RE = re.compile(r"\b(\d{16,19})\b")
 ACTIVITY_URN_RE = re.compile(r"urn:li:activity:(\d{16,19})", re.IGNORECASE)
@@ -108,7 +109,7 @@ def canonicalize(url):
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
-def find_existing_engagement(conn, ids):
+def find_existing_engagement(ids):
     """Given a list of LinkedIn IDs, return the first existing posts row
     that mentions any of them in posts.urns (primary, GIN-indexed) OR in
     thread_url / our_url (fallback for any row missed by backfill).
@@ -120,41 +121,39 @@ def find_existing_engagement(conn, ids):
     ``urns && ARRAY[...]`` overlap query catches the collision regardless
     of which URN form the candidate page rendered.
 
-    Returns None if no overlap. Row shape: (id, posted_at, thread_url,
-    our_url, our_account).
+    Returns None if no overlap, else a dict with keys post_id, posted_at,
+    thread_url, our_url, our_account.
+
+    Migrated 2026-06-01 to the s4l.ai HTTP API
+    (GET /api/v1/linkedin-engaged?ids=...). The collision query (urns
+    overlap + thread_url/our_url substring) now runs server-side; no
+    DATABASE_URL needed.
     """
     if not ids:
         return None
-    # ID strings are pure digits so no escaping concerns.
-    ilike_clauses = []
-    params = [ids]  # first param: the array for urns && ANY check
-    for v in ids:
-        ilike_clauses.append("thread_url ILIKE %s OR our_url ILIKE %s")
-        params.append(f"%{v}%")
-        params.append(f"%{v}%")
-    sql = (
-        "SELECT id, posted_at, thread_url, our_url, our_account "
-        "FROM posts WHERE platform='linkedin' AND ("
-        "urns && %s::text[] OR " + " OR ".join(ilike_clauses) + ") "
-        "ORDER BY posted_at LIMIT 1"
-    )
-    cur = conn.execute(sql, params)
-    return cur.fetchone()
+    resp = api_get("/api/v1/linkedin-engaged", {"ids": ",".join(ids)})
+    data = resp.get("data") or {}
+    if not data.get("engaged"):
+        return None
+    return data.get("match")
 
 
-def get_engaged_ids(conn):
+def get_engaged_ids():
     """Return a sorted list of every LinkedIn ID we've engaged with
     (anything 16-19 digits found in thread_url or our_url for
-    platform='linkedin'). Used to brief the LLM in run-linkedin.sh."""
-    cur = conn.execute(
-        "SELECT thread_url, our_url FROM posts "
-        "WHERE platform='linkedin' AND (thread_url IS NOT NULL OR our_url IS NOT NULL)"
-    )
+    platform='linkedin'). Used to brief the LLM in run-linkedin.sh.
+
+    Migrated 2026-06-01: the API returns the raw (thread_url, our_url)
+    pairs; the canonical ID extraction (extract_ids) stays single-sourced
+    here in Python rather than being re-implemented as a Postgres regexp.
+    """
+    resp = api_get("/api/v1/linkedin-engaged", {"list_urls": 1})
+    rows = (resp.get("data") or {}).get("urls") or []
     ids = set()
-    for thread_url, our_url in cur.fetchall():
-        for v in extract_ids(thread_url or ""):
+    for row in rows:
+        for v in extract_ids(row.get("thread_url") or ""):
             ids.add(v)
-        for v in extract_ids(our_url or ""):
+        for v in extract_ids(row.get("our_url") or ""):
             ids.add(v)
     return sorted(ids)
 
