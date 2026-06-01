@@ -10,7 +10,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "install-clients": "node install.mjs",
+    "uninstall-clients": "node install.mjs --uninstall"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
