@@ -514,6 +514,15 @@ def register_style(name, meta, source_post=None):
         return "existing", cached[name]
 
     src = source_post or {}
+    # Coerce the model-declared target length. The invent prompt requires a
+    # target_chars in the new_style block, but we default gracefully rather
+    # than reject an otherwise-valid invention just because the length is
+    # missing or garbage. Clamp to a sane 20..2200 band.
+    try:
+        _tc = int(meta.get("target_chars"))
+        target_chars = max(20, min(2200, _tc))
+    except (TypeError, ValueError):
+        target_chars = DEFAULT_TARGET_CHARS
     # 2026-05-25: explicitly stamp kind='model_invented' on the payload.
     # The server route (social-autoposter-website/src/app/api/v1/engagement-styles/
     # registry/route.ts:220-234) defaults kind to 'seed' when invented_by_model
@@ -536,6 +545,7 @@ def register_style(name, meta, source_post=None):
         "first_post_platform": src.get("platform"),
         "invented_by_model": src.get("model"),
         "best_in": {},
+        "target_chars": target_chars,
     }
     try:
         import sys as _sys
@@ -564,6 +574,7 @@ def register_style(name, meta, source_post=None):
             "note": style_row.get("note") or payload["note"],
             "best_in": style_row.get("best_in") or {},
             "status": style_row.get("status") or "active",
+            "target_chars": style_row.get("target_chars") or payload["target_chars"],
         },
         "active",
     )
@@ -1116,6 +1127,7 @@ def _fetch_latest_human_derived(platform):
         "example": row.get("example") or "",
         "best_in": best_in,
         "note": row.get("note") or "",
+        "target_chars": row.get("target_chars") or DEFAULT_TARGET_CHARS,
         "generated_at": row.get("generated_at"),
         "platform": row.get("platform"),
     }
@@ -1159,8 +1171,9 @@ def pick_style_for_post(platform, context="posting",
             "description": str | None,
             "example": str | None,
             "note": str | None,
+            "target_chars": int | None,           # authoritative length; None on invent
             "reference_styles": [                 # top-N meta (always populated)
-                {"style", "description", "example", "note",
+                {"style", "description", "example", "note", "target_chars",
                  "score", "pct", "n", "avg_clicks", "avg_cm", "avg_up"},
                 ...
             ],
@@ -1191,6 +1204,7 @@ def pick_style_for_post(platform, context="posting",
                 "description": hd["description"],
                 "example": hd["example"],
                 "note": hd["note"],
+                "target_chars": hd.get("target_chars") or DEFAULT_TARGET_CHARS,
                 "source": "human_derived",
                 "human_derived_id": hd["id"],
                 "reference_styles": [],
@@ -1235,6 +1249,7 @@ def pick_style_for_post(platform, context="posting",
             "description": m.get("description", ""),
             "example": m.get("example", ""),
             "note": m.get("note", ""),
+            "target_chars": m.get("target_chars") or DEFAULT_TARGET_CHARS,
             "score": round(row.get("score", 0.0), 3),
             "pct": round(row.get("pct", 0.0), 1),
             "n": row.get("n", 0),
@@ -1265,6 +1280,7 @@ def pick_style_for_post(platform, context="posting",
             "description": None,
             "example": None,
             "note": None,
+            "target_chars": None,
             "reference_styles": reference_styles,
             "distribution_snapshot": distribution_snapshot,
             "picked_at": picked_at,
@@ -1292,6 +1308,7 @@ def pick_style_for_post(platform, context="posting",
         "description": meta["description"],
         "example": meta["example"],
         "note": meta["note"],
+        "target_chars": meta.get("target_chars") or DEFAULT_TARGET_CHARS,
         "reference_styles": reference_styles,
         "distribution_snapshot": distribution_snapshot,
         "picked_at": picked_at,
@@ -1336,6 +1353,16 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
             lines.append(f'  Example: "{assignment["example"]}"')
         if assignment.get("note"):
             lines.append(f"  Note: {assignment['note']}")
+        _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
+        lines.append("")
+        lines.append(
+            f"**Target length: ~{_tc} characters.** This is the length THIS "
+            f"style wins at, not a budget to fill. Aim to land near {_tc}, not "
+            f"above it; coming in shorter is good. The top human replies that "
+            f"actually get engagement are mostly fragments and single lines, "
+            f"not tidy two-clause sentences. Any hard char cap mentioned "
+            f"elsewhere is a technical ceiling, not your goal."
+        )
         lines.append("")
         lines.append(
             'In your output JSON, set "engagement_style" to exactly '
@@ -1367,7 +1394,8 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
             lines.append(
                 f"- **{ref['style']}** "
                 f"(score {ref['score']:.2f}, clicks {ref['avg_clicks']:.2f}, "
-                f"cm {ref['avg_cm']:.2f}, up {ref['avg_up']:.2f}, n={ref['n']})"
+                f"cm {ref['avg_cm']:.2f}, up {ref['avg_up']:.2f}, n={ref['n']}, "
+                f"target ~{ref.get('target_chars') or DEFAULT_TARGET_CHARS} chars)"
             )
             lines.append(f"  {ref['description']}")
             if ref.get("example"):
@@ -1381,6 +1409,12 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
         lines.append("  - example: short utterance demonstrating the style")
         lines.append("  - note: when to use / when not to")
         lines.append("  - why_existing_didnt_fit: why none of the above worked here")
+        lines.append(
+            f"  - target_chars: integer, the comment length this style wins "
+            f"at. Bias SHORT — the top human replies cluster near {DEFAULT_TARGET_CHARS} "
+            f"chars and below. Only go high (150+) if the style is genuinely "
+            f"narrative; never propose a target just to fill space."
+        )
 
     lines.append("")
     lines.append(
