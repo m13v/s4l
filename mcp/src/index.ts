@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // social-autoposter MCP server (X/Twitter rail).
 //
-// Manual mode: surface drafted replies, let the user edit/approve, then post
-// only the approved ones via the existing twitter_post_plan.py.
-// Autopilot: load/unload the launchd job so the cycle fires in the background.
-// Stats: read-only project stats via project_stats_json.py.
+// Three tools, nothing more:
+//   draft_cycle  - scan + draft, surface each thread + drafted reply, run an
+//                  elicitation approve/skip per draft, then post the approved ones.
+//   autopilot    - one tool, action = enable | disable | status (launchd job).
+//   get_stats    - read-only post + engagement stats.
 //
-// This server is a THIN wrapper. The pipeline brain (scan, score, drafting
-// prompts, posting) stays in the Python/shell scripts; we only orchestrate
-// and present.
+// THIN wrapper. The pipeline brain (scan, score, drafting prompts, posting)
+// stays in the Python/shell scripts; we only orchestrate and present.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -22,6 +22,7 @@ import {
   readPlan,
   writePlan,
   latestBatchId,
+  type Plan,
   type PlanCandidate,
 } from "./repo.js";
 
@@ -35,7 +36,7 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
 
 const server = new McpServer({
   name: "social-autoposter",
-  version: "0.0.1",
+  version: "0.1.0",
 });
 
 function jsonContent(obj: unknown) {
@@ -45,11 +46,210 @@ function textContent(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-function resolveBatch(batchId?: string): string | null {
-  return batchId && batchId.trim() ? batchId.trim() : latestBatchId();
+// ---------------------------------------------------------------------------
+// Draft production (scan + score + draft -> plan JSON).
+//
+// The drafting orchestration lives in the locked run-twitter-cycle.sh, which
+// today runs scan->score->draft->POST straight through with NO draft-only stop.
+// Until that gate exists, produceDrafts reports the decision instead of guessing
+// or posting unreviewed. Everything downstream of this (elicit + post) is real.
+// ---------------------------------------------------------------------------
+interface DraftResult {
+  batchId: string | null;
+  blocked?: string;
 }
 
-// ---- Stats (read-only, works today) ---------------------------------------
+async function produceDrafts(_project?: string): Promise<DraftResult> {
+  // TODO(decision): wire scan+draft once the DRAFT_ONLY gate lands.
+  //   (a) unlock run-twitter-cycle.sh, add DRAFT_ONLY=1 that exits after writing
+  //       /tmp/twitter_cycle_plan_<batch>.json, then call it here; or
+  //   (b) drive the scan/score/draft phases directly from this wrapper.
+  // For now, operate on the most recent existing plan if one is present so the
+  // review+post half is fully testable.
+  const existing = latestBatchId();
+  if (existing) return { batchId: existing };
+  return {
+    batchId: null,
+    blocked:
+      "Scan+draft is not wired yet: the drafting phase lives in the locked " +
+      "run-twitter-cycle.sh, which posts straight through with no draft-only stop. " +
+      "Decide: (a) unlock it to add a DRAFT_ONLY=1 gate that exits after writing the " +
+      "plan JSON, or (b) drive scan/score/draft phases from this wrapper. Once chosen, " +
+      "draft_cycle will produce a batch, walk you through approve/skip, and post.",
+  };
+}
+
+// One elicitation per draft: approve or skip. Returns count approved.
+async function reviewDrafts(plan: Plan): Promise<{ approved: number; skipped: number; aborted: boolean }> {
+  const candidates = plan.candidates || [];
+  let approved = 0;
+  let skipped = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const msg =
+      `Draft ${i + 1} of ${candidates.length}\n` +
+      `Thread: @${c.thread_author ?? "?"}  ${c.candidate_url ?? ""}\n` +
+      `Style: ${c.engagement_style ?? "?"}\n\n` +
+      `Drafted reply:\n${c.reply_text ?? "(empty)"}` +
+      (c.link_url ? `\n\nLink: ${c.link_url}` : "");
+    let res;
+    try {
+      res = await server.server.elicitInput({
+        message: msg,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            decision: {
+              type: "string",
+              enum: ["approve", "skip"],
+              description: "approve = post this reply, skip = discard it",
+            },
+          },
+          required: ["decision"],
+        },
+      });
+    } catch (e) {
+      // Host doesn't support elicitation (some Claude Desktop builds). Bail out
+      // rather than silently posting or silently skipping everything.
+      return { approved, skipped, aborted: true };
+    }
+    if (res.action !== "accept") {
+      // User cancelled/declined the whole review.
+      c.approved = false;
+      return { approved, skipped, aborted: res.action === "cancel" };
+    }
+    const decision = (res.content as { decision?: string } | undefined)?.decision;
+    if (decision === "approve") {
+      c.approved = true;
+      approved++;
+    } else {
+      c.approved = false;
+      skipped++;
+    }
+  }
+  return { approved, skipped, aborted: false };
+}
+
+async function postApproved(batchId: string, plan: Plan) {
+  const approved = (plan.candidates || []).filter((c: PlanCandidate) => c.approved === true);
+  if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
+  const approvedBatch = `${batchId}_approved`;
+  writePlan(approvedBatch, { ...plan, candidates: approved });
+  const res = await runPython(
+    "scripts/twitter_post_plan.py",
+    ["--plan", path.join(os.tmpdir(), `twitter_cycle_plan_${approvedBatch}.json`)],
+    { timeoutMs: 900_000 }
+  );
+  let summary: unknown = res.stdout.trim();
+  try {
+    const lines = res.stdout.trim().split("\n");
+    summary = JSON.parse(lines[lines.length - 1]);
+  } catch {
+    /* keep raw */
+  }
+  return {
+    attempted: approved.length,
+    exit_code: res.code,
+    summary,
+    stderr_tail: res.stderr.split("\n").slice(-8).join("\n"),
+  };
+}
+
+// ---- draft_cycle: the whole manual loop in one tool -----------------------
+server.registerTool(
+  "draft_cycle",
+  {
+    title: "Draft an X reply cycle",
+    description:
+      "Scan X, draft replies on this machine, then walk you through each one (approve or " +
+      "skip) and post only the approved ones. The entire manual loop in one call: discover " +
+      "-> draft -> review -> post. Nothing posts without your approval.",
+    inputSchema: {
+      project: z.string().optional(),
+    },
+  },
+  async ({ project }) => {
+    const drafted = await produceDrafts(project);
+    if (drafted.blocked || !drafted.batchId) {
+      return textContent(drafted.blocked ?? "No drafts produced.");
+    }
+    const plan = readPlan(drafted.batchId);
+    if (!plan || !(plan.candidates && plan.candidates.length)) {
+      return textContent(`No drafts in batch ${drafted.batchId}.`);
+    }
+    const review = await reviewDrafts(plan);
+    writePlan(drafted.batchId, plan);
+    if (review.aborted && review.approved === 0) {
+      return jsonContent({
+        batch_id: drafted.batchId,
+        drafted: plan.candidates.length,
+        review_aborted: true,
+        note:
+          "Review did not complete (host may not support elicitation, or you cancelled). " +
+          "Nothing was posted.",
+      });
+    }
+    const posted = await postApproved(drafted.batchId, plan);
+    return jsonContent({
+      batch_id: drafted.batchId,
+      drafted: plan.candidates.length,
+      approved: review.approved,
+      skipped: review.skipped,
+      posted,
+    });
+  }
+);
+
+// ---- autopilot: one tool, three actions -----------------------------------
+server.registerTool(
+  "autopilot",
+  {
+    title: "X autopilot",
+    description:
+      "Control background X/Twitter posting. action=enable loads the launchd job so the " +
+      "cycle fires automatically; action=disable unloads it (manual draft_cycle still works); " +
+      "action=status reports whether it is loaded.",
+    inputSchema: {
+      action: z.enum(["enable", "disable", "status"]),
+    },
+  },
+  async ({ action }) => {
+    const uid = process.getuid ? process.getuid() : 0;
+    if (action === "status") {
+      const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
+      const loaded = res.stdout.split("\n").some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
+      return jsonContent({ label: TWITTER_AUTOPILOT_LABEL, loaded });
+    }
+    if (action === "enable") {
+      let res = await run("launchctl", ["bootstrap", `gui/${uid}`, TWITTER_AUTOPILOT_PLIST], {
+        timeoutMs: 15_000,
+      });
+      if (res.code !== 0) {
+        res = await run("launchctl", ["load", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
+      }
+      return textContent(
+        res.code === 0
+          ? `Autopilot enabled (${TWITTER_AUTOPILOT_LABEL} loaded).`
+          : `Failed to enable autopilot (exit ${res.code}): ${res.stderr || res.stdout}\n` +
+              `Check the plist exists at ${TWITTER_AUTOPILOT_PLIST}.`
+      );
+    }
+    // disable
+    let res = await run("launchctl", ["bootout", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`], {
+      timeoutMs: 15_000,
+    });
+    if (res.code !== 0) {
+      res = await run("launchctl", ["unload", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
+    }
+    return textContent(
+      res.code === 0
+        ? `Autopilot disabled (${TWITTER_AUTOPILOT_LABEL} unloaded).`
+        : `Failed (exit ${res.code}): ${res.stderr || res.stdout}`
+    );
+  }
+);
+
+// ---- get_stats: read-only -------------------------------------------------
 server.registerTool(
   "get_stats",
   {
@@ -63,9 +263,9 @@ server.registerTool(
     },
   },
   async ({ days, project }) => {
-    const args = ["scripts/project_stats_json.py", "--posts-only", "--platform", "twitter", "--days", String(days)];
+    const args = ["--posts-only", "--platform", "twitter", "--days", String(days)];
     if (project) args.push("--project", project);
-    const res = await runPython(args[0], args.slice(1), { timeoutMs: 120_000 });
+    const res = await runPython("scripts/project_stats_json.py", args, { timeoutMs: 120_000 });
     if (res.code !== 0) {
       return textContent(`stats failed (exit ${res.code}):\n${res.stderr || res.stdout}`);
     }
@@ -77,264 +277,9 @@ server.registerTool(
   }
 );
 
-// ---- List drafted replies awaiting review ---------------------------------
-server.registerTool(
-  "list_drafts",
-  {
-    title: "List drafted X replies",
-    description:
-      "List the drafted replies in the current (or a specified) draft batch, with their " +
-      "approval state. Render these to the user for edit/approve before posting. " +
-      "Reads the plan JSON produced by the drafting phase.",
-    inputSchema: {
-      batch_id: z.string().optional(),
-    },
-  },
-  async ({ batch_id }) => {
-    const batch = resolveBatch(batch_id);
-    if (!batch) return textContent("No draft batch found. Run start_draft_cycle first.");
-    const plan = readPlan(batch);
-    if (!plan) return textContent(`No plan file for batch ${batch}.`);
-    const drafts = (plan.candidates || []).map((c, i) => ({
-      index: i,
-      candidate_id: c.candidate_id,
-      author: c.thread_author,
-      url: c.candidate_url,
-      style: c.engagement_style,
-      reply_text: c.reply_text,
-      link_url: c.link_url,
-      approved: c.approved === true,
-    }));
-    return jsonContent({ batch_id: batch, count: drafts.length, drafts });
-  }
-);
-
-// ---- Edit a draft ----------------------------------------------------------
-server.registerTool(
-  "edit_draft",
-  {
-    title: "Edit a drafted X reply",
-    description:
-      "Replace the reply text of one draft (by index) in a batch. Does not post; only " +
-      "updates the pending draft so the user can refine it before approving.",
-    inputSchema: {
-      index: z.number().int().min(0),
-      reply_text: z.string().min(1),
-      batch_id: z.string().optional(),
-    },
-  },
-  async ({ index, reply_text, batch_id }) => {
-    const batch = resolveBatch(batch_id);
-    if (!batch) return textContent("No draft batch found.");
-    const plan = readPlan(batch);
-    if (!plan || !plan.candidates || !plan.candidates[index]) {
-      return textContent(`No draft at index ${index} in batch ${batch}.`);
-    }
-    plan.candidates[index].reply_text = reply_text;
-    writePlan(batch, plan);
-    return textContent(`Updated draft ${index} in batch ${batch}.`);
-  }
-);
-
-// ---- Approve / reject ------------------------------------------------------
-server.registerTool(
-  "approve_draft",
-  {
-    title: "Approve drafted X reply/replies",
-    description:
-      "Mark one draft (by index) or all drafts in a batch as approved. Approved drafts are " +
-      "the only ones post_approved will publish.",
-    inputSchema: {
-      index: z.number().int().min(0).optional(),
-      all: z.boolean().default(false),
-      batch_id: z.string().optional(),
-    },
-  },
-  async ({ index, all, batch_id }) => {
-    const batch = resolveBatch(batch_id);
-    if (!batch) return textContent("No draft batch found.");
-    const plan = readPlan(batch);
-    if (!plan || !plan.candidates) return textContent(`No plan for batch ${batch}.`);
-    if (all) {
-      plan.candidates.forEach((c) => (c.approved = true));
-    } else if (index !== undefined && plan.candidates[index]) {
-      plan.candidates[index].approved = true;
-    } else {
-      return textContent("Provide either index or all=true.");
-    }
-    writePlan(batch, plan);
-    const n = plan.candidates.filter((c) => c.approved).length;
-    return textContent(`Approved ${all ? "all" : `draft ${index}`}. ${n} approved in batch ${batch}.`);
-  }
-);
-
-server.registerTool(
-  "reject_draft",
-  {
-    title: "Reject a drafted X reply",
-    description: "Mark one draft (by index) as not approved so it will be skipped at posting time.",
-    inputSchema: {
-      index: z.number().int().min(0),
-      batch_id: z.string().optional(),
-    },
-  },
-  async ({ index, batch_id }) => {
-    const batch = resolveBatch(batch_id);
-    if (!batch) return textContent("No draft batch found.");
-    const plan = readPlan(batch);
-    if (!plan || !plan.candidates || !plan.candidates[index]) {
-      return textContent(`No draft at index ${index} in batch ${batch}.`);
-    }
-    plan.candidates[index].approved = false;
-    writePlan(batch, plan);
-    return textContent(`Rejected draft ${index} in batch ${batch}.`);
-  }
-);
-
-// ---- Post approved drafts --------------------------------------------------
-server.registerTool(
-  "post_approved",
-  {
-    title: "Post approved X replies",
-    description:
-      "Publish ONLY the approved drafts in a batch. Builds a filtered plan and runs the " +
-      "existing twitter_post_plan.py against it. Irreversible: this posts to X.",
-    inputSchema: {
-      batch_id: z.string().optional(),
-    },
-  },
-  async ({ batch_id }) => {
-    const batch = resolveBatch(batch_id);
-    if (!batch) return textContent("No draft batch found.");
-    const plan = readPlan(batch);
-    if (!plan || !plan.candidates) return textContent(`No plan for batch ${batch}.`);
-    const approved = plan.candidates.filter((c: PlanCandidate) => c.approved === true);
-    if (approved.length === 0) {
-      return textContent("No approved drafts to post. Approve at least one first.");
-    }
-    const filtered = { ...plan, candidates: approved };
-    const approvedBatch = `${batch}_approved`;
-    writePlan(approvedBatch, filtered);
-    const res = await runPython(
-      "scripts/twitter_post_plan.py",
-      ["--plan", path.join(os.tmpdir(), `twitter_cycle_plan_${approvedBatch}.json`)],
-      { timeoutMs: 900_000 }
-    );
-    let summary: unknown = res.stdout.trim();
-    try {
-      const lines = res.stdout.trim().split("\n");
-      summary = JSON.parse(lines[lines.length - 1]);
-    } catch {
-      /* keep raw */
-    }
-    return jsonContent({
-      batch_id: batch,
-      attempted: approved.length,
-      exit_code: res.code,
-      summary,
-      stderr_tail: res.stderr.split("\n").slice(-8).join("\n"),
-    });
-  }
-);
-
-// ---- Autopilot control -----------------------------------------------------
-server.registerTool(
-  "autopilot_status",
-  {
-    title: "X autopilot status",
-    description: "Report whether the background X/Twitter posting job (launchd) is loaded.",
-    inputSchema: {},
-  },
-  async () => {
-    const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-    const loaded = res.stdout
-      .split("\n")
-      .some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
-    return jsonContent({ label: TWITTER_AUTOPILOT_LABEL, loaded });
-  }
-);
-
-server.registerTool(
-  "enable_autopilot",
-  {
-    title: "Enable X autopilot",
-    description:
-      "Turn on background posting: load the launchd job so the X/Twitter cycle fires " +
-      "automatically. Requires the plist to already be generated by install/init.",
-    inputSchema: {},
-  },
-  async () => {
-    const uid = process.getuid ? process.getuid() : 0;
-    // Prefer modern bootstrap; fall back to legacy load.
-    let res = await run("launchctl", ["bootstrap", `gui/${uid}`, TWITTER_AUTOPILOT_PLIST], {
-      timeoutMs: 15_000,
-    });
-    if (res.code !== 0) {
-      res = await run("launchctl", ["load", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
-    }
-    const ok = res.code === 0;
-    return textContent(
-      ok
-        ? `Autopilot enabled (${TWITTER_AUTOPILOT_LABEL} loaded).`
-        : `Failed to enable autopilot (exit ${res.code}): ${res.stderr || res.stdout}\n` +
-            `Check the plist exists at ${TWITTER_AUTOPILOT_PLIST}.`
-    );
-  }
-);
-
-server.registerTool(
-  "disable_autopilot",
-  {
-    title: "Disable X autopilot",
-    description: "Turn off background posting: unload the launchd job. Manual mode still works.",
-    inputSchema: {},
-  },
-  async () => {
-    const uid = process.getuid ? process.getuid() : 0;
-    let res = await run("launchctl", ["bootout", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`], {
-      timeoutMs: 15_000,
-    });
-    if (res.code !== 0) {
-      res = await run("launchctl", ["unload", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
-    }
-    const ok = res.code === 0;
-    return textContent(
-      ok ? `Autopilot disabled (${TWITTER_AUTOPILOT_LABEL} unloaded).` : `Failed (exit ${res.code}): ${res.stderr || res.stdout}`
-    );
-  }
-);
-
-// ---- Draft cycle (BLOCKED on a decision; see reply) ------------------------
-// run-twitter-cycle.sh runs scan->score->draft->POST straight through and is on
-// the locked-files list, so there is no draft-only stop point yet. Until we add
-// a DRAFT_ONLY=1 gate (needs unlock) or drive the phases individually, this tool
-// reports the blocker instead of silently doing nothing or posting unreviewed.
-server.registerTool(
-  "start_draft_cycle",
-  {
-    title: "Start an X draft cycle (not yet wired)",
-    description:
-      "Run scan + score + draft and STOP before posting, so the user can review. " +
-      "Pending an architecture decision (DRAFT_ONLY gate in the locked run-twitter-cycle.sh).",
-    inputSchema: {
-      project: z.string().optional(),
-    },
-  },
-  async () => {
-    return textContent(
-      "start_draft_cycle is not wired yet. The drafting phase lives in the locked " +
-        "run-twitter-cycle.sh, which posts straight through with no draft-only stop. " +
-        "Decision needed: (a) unlock it to add a DRAFT_ONLY=1 gate that exits after writing " +
-        "/tmp/twitter_cycle_plan_<batch>.json, or (b) drive scan/score/draft phases from the " +
-        "wrapper. Once chosen, this tool will produce a batch and you can list_drafts on it."
-    );
-  }
-);
-
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // stderr only; stdout is the MCP channel.
   console.error(`[social-autoposter-mcp] connected. repo=${REPO_DIR}`);
 }
 
