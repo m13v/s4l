@@ -16,7 +16,6 @@ const HOME = os.homedir();
 // Files/dirs to copy from npm package to ~/social-autoposter
 const COPY_TARGETS = [
   'scripts',
-  'schema-postgres.sql',
   'config.example.json',
   'requirements.txt',
   'SKILL.md',
@@ -39,11 +38,6 @@ MOLTBOOK_API_KEY=
 # AUTOPOSTER_API_KEY only if your install uses a bearer token.
 # AUTOPOSTER_API_BASE=https://s4l.ai
 # AUTOPOSTER_API_KEY=
-
-# Optional. Only the local dashboard (bin/server.js) still reads Postgres
-# directly; the posting pipelines do not. Leave blank unless you run the
-# dashboard. Format: postgresql://<user>:<password>@<host>/<db>?sslmode=require
-# DATABASE_URL=
 `;
 
 // Never overwrite these user files during update
@@ -453,7 +447,7 @@ function bootstrapVm() {
   // Install Python deps from requirements.txt. installBrowserHarness only
   // installs uv + mcp; it does NOT read requirements.txt, so without this the
   // VM is missing websocket-client (restore_twitter_session.py aborts on
-  // import) plus psycopg2-binary/playwright that the cycle scripts need.
+  // import) plus playwright that the cycle scripts need.
   installPythonDeps();
 
   // Restore the Twitter login if we have stored cookies and the Chrome is
@@ -909,14 +903,14 @@ function installPythonDeps() {
   const reqPath = path.join(PKG_ROOT, 'requirements.txt');
   const args = fs.existsSync(reqPath)
     ? ['-r', reqPath, '-q']
-    : ['-q', 'psycopg2-binary', 'playwright'];
+    : ['-q', 'playwright'];
   // Install into the SAME interpreter the MCP server runs (SAPS_PYTHON =
   // Homebrew python), NOT bare pip3 which on macOS targets the Xcode CLT system
   // python — deps installed there are invisible to the scripts at runtime.
   // pipInstall() also gates --break-system-packages on pip>=23 so it doesn't
   // hard-fail against the ancient system pip.
   const pythonBin = findPythonBin();
-  console.log(`  installing Python deps (psycopg2-binary, playwright, ...) into ${pythonBin}`);
+  console.log(`  installing Python deps (playwright, ...) into ${pythonBin}`);
   const r = pipInstall(pythonBin, args);
   if (r.status !== 0) {
     console.warn('  WARNING: pip install failed — run manually:');
@@ -1019,7 +1013,17 @@ if (cmd === 'init') {
   process.argv = [process.argv[0], process.argv[1], 'import', ...process.argv.slice(3)];
   require('./cookie-helper.js');
 } else if (!cmd) {
-  require('./server.js');
+  // The dashboard server (bin/server.js) is a local-only operator tool and is
+  // NOT shipped in the published package (it talks directly to Postgres). When
+  // it's absent, fall back to usage help instead of crashing on a missing require.
+  if (fs.existsSync(path.join(__dirname, 'server.js'))) {
+    require('./server.js');
+  } else {
+    console.log('social-autoposter — automated social posting for Claude agents');
+    console.log('');
+    console.log('The local dashboard is not part of the published package.');
+    console.log('Run `npx social-autoposter init` to set up, then drive it from your Claude agent.');
+  }
 } else {
   console.log('social-autoposter — automated social posting for Claude agents');
   console.log('');
