@@ -53,8 +53,7 @@ if ENV_PATH.exists():
 
 sys.path.insert(0, str(ROOT_DIR / "scripts"))
 from project_slugs import get_client_slug as _client_slug  # noqa: E402
-
-import psycopg2  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 
 WEIGHTS = {
@@ -180,30 +179,12 @@ def _bookings_by_path(client_slug, days):
     (e.g. '/t/accessibility-api-ai-agents-vs-screenshots'). Test bookings
     are filtered with the same heuristics as pick_top_page.py.
     """
-    url = os.environ.get("BOOKINGS_DATABASE_URL")
-    if not url or not client_slug:
+    if not client_slug:
         return {}
     try:
-        conn = psycopg2.connect(url)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT utm_campaign, COUNT(*) "
-            "FROM cal_bookings "
-            "WHERE client_slug = %s "
-            f"AND created_at >= NOW() - INTERVAL '{int(days)} days' "
-            "AND utm_campaign IS NOT NULL "
-            "AND utm_campaign <> '' "
-            "AND attendee_email NOT LIKE '%%test%%' "
-            "AND attendee_email NOT LIKE '%%example%%' "
-            "AND attendee_name NOT LIKE '%%TEST%%' "
-            "AND attendee_name NOT LIKE '%%John Doe%%' "
-            "GROUP BY utm_campaign",
-            (client_slug,),
-        )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return {(r[0] or ""): int(r[1] or 0) for r in rows if r[0]}
+        resp = api_get("/api/v1/seo/bookings",
+                       query={"mode": "by_path", "client": client_slug, "days": int(days)})
+        return (resp.get("data") or {}).get("by_path") or {}
     except Exception as e:
         print(f"  bookings query failed: {e}", file=sys.stderr)
         return {}
@@ -248,14 +229,24 @@ def _created_paths_for_project(proj, days=None):
             _created_paths_for_project.SCRIPTS_DIR = str(ROOT_DIR / "scripts")
             sys.path.insert(0, _created_paths_for_project.SCRIPTS_DIR)
         import project_stats_json as psj  # noqa: E402
-        import db as _db  # noqa: E402
-        _db.load_env()
-        conn = _db.get_conn()
-        try:
-            by_domain = psj._created_paths_for_project(conn, proj, days=days)
-        finally:
-            try: conn.close()
-            except Exception: pass
+
+        by_domain = {}
+        # Filesystem scan (local, no DB): only when no window is requested —
+        # static files on disk carry no trustworthy creation timestamp.
+        if days is None:
+            lp = proj.get("landing_pages") or {}
+            repo_path = lp.get("repo") if isinstance(lp, dict) else None
+            fs_paths = psj._scan_repo_pages(repo_path) if repo_path else set()
+            for p in fs_paths:
+                by_domain.setdefault("_fs", set()).add(p)
+        # DB half (seo_keywords UNION gsc_queries page_urls by host) via HTTP.
+        q = {"product": proj.get("name") or ""}
+        if days is not None:
+            q["days"] = int(days)
+        resp = api_get("/api/v1/seo/created-pages", query=q)
+        db_by_domain = (resp.get("data") or {}).get("by_domain") or {}
+        for host, paths in db_by_domain.items():
+            by_domain.setdefault(host, set()).update(paths)
         # Flatten into a single set of paths; the picker compares paths
         # only (we already scope the PostHog query to the project's
         # primary domain).
@@ -270,21 +261,16 @@ def _created_paths_for_project(proj, days=None):
 
 def _history_for_path(product, page_path, limit=5):
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT created_at, status, slug, keyword, page_url "
-            "FROM seo_keywords "
-            "WHERE product = %s AND (slug = %s OR page_url LIKE %s) "
-            "ORDER BY created_at DESC LIMIT %s",
-            (product, page_path.lstrip("/").split("/")[-1], f"%{page_path}%", limit),
-        )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        slug = page_path.lstrip("/").split("/")[-1]
+        resp = api_get("/api/v1/seo/keywords",
+                       query={"mode": "created_paths", "product": product,
+                              "slug": slug, "page_url_like": f"%{page_path}%",
+                              "limit": int(limit)})
+        rows = (resp.get("data") or {}).get("rows") or []
         return [
-            {"at": r[0].isoformat() if r[0] else None, "status": r[1],
-             "slug": r[2], "keyword": r[3], "page_url": r[4]}
+            {"at": r.get("created_at"), "status": r.get("status"),
+             "slug": r.get("slug"), "keyword": r.get("keyword"),
+             "page_url": r.get("page_url")}
             for r in rows
         ]
     except Exception as e:
@@ -367,15 +353,10 @@ def _recent_winner_keys(cooldown_days=7):
     window. Used to rotate seeds so the same page doesn't reseed every day.
     Failures return empty set (fail-open: better a repeat than a dark day)."""
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT product, path FROM top_page_winners "
-            f"WHERE won_at >= NOW() - INTERVAL '{int(cooldown_days)} days'"
-        )
-        keys = {(r[0], r[1]) for r in cur.fetchall()}
-        cur.close(); conn.close()
-        return keys
+        resp = api_get("/api/v1/seo/top-page-winners",
+                       query={"mode": "recent", "cooldown_days": int(cooldown_days)})
+        keys = (resp.get("data") or {}).get("keys") or []
+        return {(k.get("product"), k.get("path")) for k in keys}
     except Exception as e:
         print(f"  recent winners query failed (fail-open): {e}", file=sys.stderr)
         return set()
@@ -386,21 +367,13 @@ def _record_winner(winner, cooldown_days=7):
     enforce the cooldown. Best-effort: if the insert fails, log but don't
     fail the pipeline (the brief is already written)."""
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO top_page_winners (product, path, page_url, score, metrics) "
-            "VALUES (%s, %s, %s, %s, %s::jsonb)",
-            (
-                winner["product"],
-                winner["path"],
-                winner["page_url"],
-                winner["score"],
-                json.dumps(winner["metrics"]),
-            ),
-        )
-        conn.commit()
-        cur.close(); conn.close()
+        api_post("/api/v1/seo/top-page-winners", {
+            "product": winner["product"],
+            "path": winner["path"],
+            "page_url": winner["page_url"],
+            "score": winner["score"],
+            "metrics": winner["metrics"],
+        })
         print(f"  recorded winner: {winner['product']} {winner['path']}", file=sys.stderr)
     except Exception as e:
         print(f"  record winner failed: {e}", file=sys.stderr)
