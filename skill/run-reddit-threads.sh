@@ -608,37 +608,33 @@ if not permalink or not title:
     print("[db-insert] SKIP — empty permalink or title in structured_output")
     sys.exit(0)
 
-conn = dbmod.get_conn()
-# Idempotency guard: never log the same Reddit URL twice.
-existing = conn.execute(
-    "SELECT id FROM posts WHERE platform='reddit' AND our_url=%s LIMIT 1",
-    (permalink,),
-).fetchone()
-if existing:
-    print(f"[db-insert] SKIP — post {permalink} already in DB as id={existing[0]}")
+# HTTP-only lane (2026-06-01): the authoritative post log goes through the
+# s4l.ai API (POST /api/v1/posts). No DATABASE_URL, no psql, no db.get_conn().
+# The endpoint dedups on (platform, thread_url) server-side and returns 409 with
+# existing_post_id, which replaces the old SELECT idempotency guard. For an
+# own-thread post, thread_url == our_url == permalink, so the (platform,
+# thread_url) dedup is equivalent to the old (platform, our_url) check.
+resp = api_post("/api/v1/posts", {
+    "platform": "reddit",
+    "thread_url": permalink,
+    "thread_author": account,
+    "thread_title": title,
+    "our_url": permalink,
+    "our_content": body,
+    "our_account": account,
+    "source_summary": summary,
+    "project": project,
+    "engagement_style": style,
+    "status": "active",
+    "claude_session_id": session,
+}, ok_on_conflict=True)
+
+if not resp.get("ok", True) and (resp.get("error") or {}).get("code") == "duplicate_thread":
+    existing_id = ((resp.get("error") or {}).get("details") or {}).get("existing_post_id")
+    print(f"[db-insert] SKIP — post {permalink} already in DB as id={existing_id}")
     sys.exit(0)
 
-row = conn.execute(
-    """
-    INSERT INTO posts
-      (platform, thread_url, thread_author, thread_author_handle,
-       thread_title, thread_content, our_url, our_content, our_account,
-       source_summary, project_name, engagement_style,
-       feedback_report_used, status, posted_at, claude_session_id)
-    VALUES
-      ('reddit', %s, %s, %s,
-       %s, %s, %s, %s, %s,
-       %s, %s, %s,
-       TRUE, 'active', NOW(), %s::uuid)
-    RETURNING id
-    """,
-    (permalink, account, account,
-     title, body, permalink, body, account,
-     summary, project, style,
-     session),
-).fetchone()
-conn.commit()
-post_id = row[0]
+post_id = (resp.get("data") or {}).get("post", {}).get("id")
 print(f"[db-insert] OK — inserted posts.id={post_id} for {permalink}")
 
 # If this run came from a pending_threads retry, mark the pending row posted
@@ -687,11 +683,8 @@ if applied_campaign_ids:
         edit_payload = {"_parse_error": f"{type(e).__name__}: {e}",
                         "_stdout_tail": (edit_proc.stdout or "")[-200:]}
     if edit_ok:
-        conn.execute(
-            "UPDATE posts SET our_content = %s WHERE id = %s",
-            (new_body, post_id),
-        )
-        conn.commit()
+        from http_api import api_patch
+        api_patch(f"/api/v1/posts/{post_id}", {"our_content": new_body})
         bump = os.path.join(os.environ["REPO_DIR"], "scripts", "campaign_bump.py")
         for cid in applied_campaign_ids:
             try:
