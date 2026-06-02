@@ -549,23 +549,28 @@ function installBrowserHarness() {
       spawnSync(harnessBin, ['--reload'], { stdio: 'inherit' });
     }
 
-    // Contract check: server.py invokes `browser-harness -c <script>`. If an
-    // offline/rate-limited fetch left a stale checkout that predates the `-c`
-    // interface, the CLI still "installs" fine but every bh_run returns the
-    // usage banner and CDP looks "not connected". Verify the installed binary
-    // actually speaks `-c` (its no-arg usage string mentions it) and fail
-    // LOUDLY here instead of shipping a silently-broken twitter-harness.
+    // Contract check: server.py pipes the script to browser-harness via stdin.
+    // Upstream supports two banner shapes — older builds advertise `-c <script>`
+    // and newer builds advertise the `<<'PY' ... PY` heredoc form. Either is
+    // fine for our use case (we pass the script via stdin, which both accept).
+    // Fail loudly if the installed binary advertises NEITHER, which usually
+    // means an offline/partial clone left a broken CLI that will silently make
+    // every bh_run look like "CDP not connected".
     if (fs.existsSync(harnessBin)) {
       const probe = spawnSync(harnessBin, [], { stdio: 'pipe', encoding: 'utf8', timeout: 15000 });
       const usage = `${probe.stdout || ''}${probe.stderr || ''}`;
-      if (!/\b-c\b/.test(usage)) {
-        console.error('    ERROR: installed browser-harness CLI does not accept `-c` (stale clone).');
-        console.error('    The twitter-harness MCP will return a usage banner / "CDP not connected".');
+      const supportsDashC = /\b-c\b/.test(usage);
+      const supportsStdin = /<<'PY'|<<"PY"|<<PY\b/.test(usage);
+      if (!supportsDashC && !supportsStdin) {
+        console.error('    ERROR: installed browser-harness CLI advertises neither `-c` nor a stdin heredoc.');
+        console.error('    This usually means a partial/corrupted install. The twitter-harness MCP will');
+        console.error('    return a usage banner / "CDP not connected" on every call.');
         console.error(`    Fix: rm -rf ${harnessDir} && re-run \`social-autoposter init\` while online,`);
         console.error('    or manually: git clone https://github.com/browser-use/browser-harness ' + harnessDir +
           ' && ' + uvBin + ' tool install --force -e ' + harnessDir);
       } else {
-        console.log('    browser-harness CLI verified (accepts -c).');
+        const shape = supportsStdin ? 'stdin heredoc' : '-c flag';
+        console.log(`    browser-harness CLI verified (${shape}).`);
       }
     }
   }
