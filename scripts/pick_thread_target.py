@@ -149,20 +149,13 @@ def recent_posts_by_sub(max_days):
 
 def recent_posts_by_project(days=7):
     """Return dict: project_name -> count of original threads posted in last N days."""
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT project_name, COUNT(*)
-        FROM posts
-        WHERE platform='reddit'
-          AND thread_url = our_url
-          AND posted_at > NOW() - INTERVAL '%s days'
-          AND project_name IS NOT NULL
-        GROUP BY project_name
-        """ % days
-    ).fetchall()
-    conn.close()
-    return {name: int(cnt) for name, cnt in rows}
+    rows = _fetch_own_reddit_threads(days)
+    counts = {}
+    for _url, _days_ago, project in rows:
+        if not project:
+            continue
+        counts[project] = counts.get(project, 0) + 1
+    return counts
 
 
 def build_candidates(config):
