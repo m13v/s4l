@@ -15,6 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 import {
   REPO_DIR,
   runPython,
@@ -47,13 +48,125 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
   `${TWITTER_AUTOPILOT_LABEL}.plist`
 );
 
+// Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
+// install keeps itself current — the interactive `version` tool only helps when
+// a human-facing agent session is open, which an autopilot box never has.
+const UPDATER_LABEL = "com.m13v.social-autoposter-update";
+const UPDATER_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${UPDATER_LABEL}.plist`
+);
+
+// A sane PATH for launchd jobs (launchd starts with a bare PATH). Include the
+// node bin dir so `npx`/`npm` resolve inside the updater.
+const LAUNCHD_PATH = [
+  path.dirname(process.execPath),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+].join(":");
+
+function plistXml(opts: {
+  label: string;
+  programArgs: string[];
+  intervalSecs: number;
+  runAtLoad: boolean;
+  stdoutLog: string;
+  stderrLog: string;
+}): string {
+  const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>Label</key>
+\t<string>${opts.label}</string>
+\t<key>ProgramArguments</key>
+\t<array>
+${args}
+\t</array>
+\t<key>StartInterval</key>
+\t<integer>${opts.intervalSecs}</integer>
+\t<key>StandardOutPath</key>
+\t<string>${opts.stdoutLog}</string>
+\t<key>StandardErrorPath</key>
+\t<string>${opts.stderrLog}</string>
+\t<key>EnvironmentVariables</key>
+\t<dict>
+\t\t<key>PATH</key>
+\t\t<string>${LAUNCHD_PATH}</string>
+\t\t<key>HOME</key>
+\t\t<string>${os.homedir()}</string>
+\t\t<key>SAPS_REPO_DIR</key>
+\t\t<string>${REPO_DIR}</string>
+\t</dict>
+\t<key>RunAtLoad</key>
+\t<${opts.runAtLoad ? "true" : "false"}/>
+</dict>
+</plist>
+`;
+}
+
+// Write a plist only if it does not already exist, so we never clobber a
+// hand-tuned plist (e.g. a dev box with custom EnvironmentVariables). Returns
+// whether it created a new file.
+function ensurePlist(p: string, xml: string): boolean {
+  if (fs.existsSync(p)) return false;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, xml, "utf-8");
+  return true;
+}
+
+async function loadPlist(label: string, plistPath: string, uid: number) {
+  let res = await run("launchctl", ["bootstrap", `gui/${uid}`, plistPath], { timeoutMs: 15_000 });
+  if (res.code !== 0) {
+    res = await run("launchctl", ["load", plistPath], { timeoutMs: 15_000 });
+  }
+  return res;
+}
+
+async function unloadPlist(label: string, plistPath: string, uid: number) {
+  let res = await run("launchctl", ["bootout", `gui/${uid}/${label}`], { timeoutMs: 15_000 });
+  if (res.code !== 0) {
+    res = await run("launchctl", ["unload", plistPath], { timeoutMs: 15_000 });
+  }
+  return res;
+}
+
 // version is resolved at runtime from the real shipped package (see version.ts),
 // so serverInfo.version finally reflects what the user actually has installed
 // instead of a frozen literal.
-const server = new McpServer({
-  name: "social-autoposter",
-  version: VERSION,
-});
+const server = new McpServer(
+  {
+    name: "social-autoposter",
+    version: VERSION,
+  },
+  {
+    // Host injects this into the agent's system prompt, so be proactive about
+    // WHEN this tool earns its keep, not just what it does.
+    instructions:
+      "social-autoposter drafts, reviews, and posts X/Twitter replies for the user's product, and " +
+      "can run them hands-free on autopilot.\n\n" +
+      "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
+      "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
+      "milestone), don't wait to be asked: offer to tell the world by running `draft_cycle` to post " +
+      "about it. A feature nobody hears about is wasted distribution. Use judgment, suggest it for " +
+      "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
+      "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
+      "release, call the `version` tool (action:'status'). If `update_available` is true, tell the " +
+      "user and offer to run `version` with action:'update'. The `setup` tool's status also surfaces " +
+      "`update_available` and an `update_hint`.\n\n" +
+      "TYPICAL FLOW: `setup` (configure the project once) -> `draft_cycle` (scan + review a batch; the " +
+      "user approves / edits / skips every draft in a single form) -> `autopilot` (enable to also turn " +
+      "on hands-free background posting AND daily auto-updates) -> `get_stats` (see performance). Run " +
+      "`setup` first; the other tools refuse until a project is fully configured.",
+  }
+);
 
 function jsonContent(obj: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] };
