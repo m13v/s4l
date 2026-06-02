@@ -99,25 +99,20 @@ def main():
                 f"({r['target_account']}); mirroring NULL", args.quiet)
             engagement_style = None
 
-        # POST /api/v1/posts dedups on (platform, thread_url); for IG
-        # thread_url == our_url == permalink, so an already-mirrored row
-        # comes back 409 and we count it as skipped.
+        # The mirror endpoint is idempotent on (platform='instagram',
+        # our_url=ig_url): inserted=false means the row was already mirrored.
         result = api_post(
-            "/api/v1/posts",
+            "/api/v1/posts/mirror-instagram",
             {
-                "platform": "instagram",
-                "thread_url": ig_url,
-                "our_url": ig_url,
-                "our_content": r["caption_text"] or "",
-                "our_account": r["target_account"] or "matt_diak",
-                "project": r["project_name"],
-                "status": "active",
-                "autoposter_version": "ig-sync-v1",
+                "ig_url": ig_url,
+                "caption_text": r["caption_text"] or "",
+                "target_account": r["target_account"] or "matt_diak",
+                "posted_at": r["posted_at"],
+                "project_name": r["project_name"],
                 "engagement_style": engagement_style,
             },
-            ok_on_conflict=True,
         )
-        if (result.get("error") or {}).get("code") == "duplicate_thread":
+        if not (result.get("data") or {}).get("inserted"):
             skipped += 1
             continue
         inserted += 1
