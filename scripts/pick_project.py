@@ -45,36 +45,11 @@ def _counts_via_api(platform=None):
     return {k: int(v) for k, v in counts.items()}
 
 
-def _counts_via_db(platform=None):
-    import db as dbmod
-    conn = dbmod.get_conn()
-    try:
-        if platform:
-            rows = conn.execute(
-                "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
-                "FROM posts WHERE DATE(posted_at) = CURRENT_DATE AND platform = %s "
-                "GROUP BY project_name",
-                [platform],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT COALESCE(project_name, '(none)'), COUNT(*) "
-                "FROM posts WHERE DATE(posted_at) = CURRENT_DATE "
-                "GROUP BY project_name"
-            ).fetchall()
-    finally:
-        conn.close()
-    return {row[0]: row[1] for row in rows}
-
-
 def get_posts_today_by_project(platform=None):
     """Return dict of project_name -> post count for today.
 
-    Routes through /api/v1/posts/counts-today-by-project by default.
-    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct DB.
+    Routes through /api/v1/posts/counts-today-by-project (HTTP-only).
     """
-    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _counts_via_db(platform)
     return _counts_via_api(platform)
 
 
@@ -89,39 +64,12 @@ def _recent_counts_via_api(platform=None, days=RECENT_WINDOW_DAYS):
     return {k: int(v) for k, v in counts.items()}
 
 
-def _recent_counts_via_db(platform=None, days=RECENT_WINDOW_DAYS):
-    import db as dbmod
-
-    days = int(days)
-    conn = dbmod.get_conn()
-    try:
-        base = (
-            "SELECT project_name, COUNT(*) FROM posts "
-            f"WHERE posted_at > NOW() - INTERVAL '{days} days' "
-            "  AND project_name IS NOT NULL"
-        )
-        if platform:
-            rows = conn.execute(
-                base + " AND platform = %s GROUP BY project_name", [platform]
-            ).fetchall()
-        else:
-            rows = conn.execute(base + " GROUP BY project_name").fetchall()
-    finally:
-        conn.close()
-    return {row[0]: int(row[1]) for row in rows}
-
-
 def recent_posts_by_project(platform=None, days=RECENT_WINDOW_DAYS):
     """Return {project_name: post count} over the last `days` days.
 
-    Routes through /api/v1/posts/counts-by-project-window by default.
-    Set SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for direct DB. Feeds the
-    inverse-recent-share weighting in pick_projects(). HTTPS-only is
-    required for e2b VM / sandbox installs that intentionally omit
-    DATABASE_URL.
+    Routes through /api/v1/posts/counts-by-project-window (HTTP-only).
+    Feeds the inverse-recent-share weighting in pick_projects().
     """
-    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _recent_counts_via_db(platform, days)
     return _recent_counts_via_api(platform, days)
 
 
