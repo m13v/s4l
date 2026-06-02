@@ -68,19 +68,11 @@ def main():
     # media_posts.metadata for forensics.
     canonical_styles = _load_canonical_style_names(args.quiet)
 
-    # NB: db._translate_sql blindly rewrites `?` -> `%s`, so we can't use the
-    # JSONB `?` exists operator. Use ->'key' IS NOT NULL instead.
-    sql = """
-        SELECT id, post_number, target_account, project_name, caption_text,
-               posted_at, posted_urls, metadata
-        FROM media_posts
-        WHERE status = 'posted'
-          AND posted_urls -> 'instagram' IS NOT NULL
-        ORDER BY posted_at ASC
-    """
-    rows = db.execute(sql).fetchall()
+    query = {}
     if args.limit:
-        rows = rows[: args.limit]
+        query["limit"] = int(args.limit)
+    resp = api_get("/api/v1/media-posts/posted-instagram", query=query or None)
+    rows = (resp.get("data") or {}).get("rows") or []
     log(f"[sync] media_posts: {len(rows)} posted IG rows", args.quiet)
 
     inserted = 0
@@ -89,16 +81,8 @@ def main():
         posted_urls = r["posted_urls"]
         if isinstance(posted_urls, str):
             posted_urls = json.loads(posted_urls)
-        ig_url = posted_urls.get("instagram")
+        ig_url = (posted_urls or {}).get("instagram")
         if not ig_url:
-            continue
-
-        existing = db.execute(
-            "SELECT id FROM posts WHERE platform='instagram' AND our_url=%s",
-            (ig_url,),
-        ).fetchone()
-        if existing:
-            skipped += 1
             continue
 
         # thread_url is NOT NULL; for original posts we self-reference
@@ -110,36 +94,35 @@ def main():
             metadata = {}
         engagement_style = metadata.get("engagement_style") or metadata.get("caption_style")
         if engagement_style and canonical_styles and engagement_style not in canonical_styles:
-            log(f"[sync] WARNING — dropping non-canonical engagement_style "
+            log(f"[sync] WARNING: dropping non-canonical engagement_style "
                 f"{engagement_style!r} for post-{r['post_number']} "
                 f"({r['target_account']}); mirroring NULL", args.quiet)
             engagement_style = None
-        db.execute(
-            """
-            INSERT INTO posts (
-                platform, thread_url, our_url, our_content, our_account,
-                posted_at, project_name, status, autoposter_version,
-                engagement_style
-            )
-            VALUES (
-                'instagram', %s, %s, %s, %s, %s, %s, 'active', 'ig-sync-v1', %s
-            )
-            """,
-            (
-                ig_url,                                # thread_url = our_url
-                ig_url,                                # our_url
-                r["caption_text"] or "",               # our_content
-                r["target_account"] or "matt_diak",    # our_account
-                r["posted_at"],
-                r["project_name"],
-                engagement_style,
-            ),
+
+        # POST /api/v1/posts dedups on (platform, thread_url); for IG
+        # thread_url == our_url == permalink, so an already-mirrored row
+        # comes back 409 and we count it as skipped.
+        result = api_post(
+            "/api/v1/posts",
+            {
+                "platform": "instagram",
+                "thread_url": ig_url,
+                "our_url": ig_url,
+                "our_content": r["caption_text"] or "",
+                "our_account": r["target_account"] or "matt_diak",
+                "project": r["project_name"],
+                "status": "active",
+                "autoposter_version": "ig-sync-v1",
+                "engagement_style": engagement_style,
+            },
+            ok_on_conflict=True,
         )
+        if (result.get("error") or {}).get("code") == "duplicate_thread":
+            skipped += 1
+            continue
         inserted += 1
         log(f"[sync] inserted post-{r['post_number']} ({r['target_account']}) -> {ig_url}", args.quiet)
 
-    db.commit()
-    db.close()
     log(f"[sync] done: inserted={inserted} skipped_existing={skipped} total_scanned={len(rows)}", args.quiet)
 
 
