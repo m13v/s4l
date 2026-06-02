@@ -152,3 +152,4 @@ scripts/tmp_li_scan/
 # Customer onboarding playbook + drafts (private)
 /onboarding/
 .vercel
+config.json.pre-*
