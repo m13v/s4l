@@ -4,7 +4,6 @@
 # Playwright browser binaries are downloaded separately (same interpreter:
 # `<saps_python> -m playwright install chromium`).
 
-psycopg2-binary
 playwright
 # CDP client used by scripts/restore_twitter_session.py and the cookie-grab/
 # CDP-driven helpers. Required on AppMaker VMs for the post-substitution
