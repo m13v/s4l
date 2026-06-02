@@ -16,10 +16,10 @@ Behavior:
 """
 import os, sys, datetime, html, subprocess, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from db import load_env, get_conn
+from http_api import api_get, load_env
 
 load_env()
-db = get_conn()
+_digest = (api_get("/api/v1/install-lane/digest", query={"within_hours": 24}).get("data") or {})
 
 # Platforms that use HTTP-lane (install_id) attribution. Must mirror
 # install_lane_monitor.py::HTTP_LANE_PLATFORMS. Adding a platform here
@@ -42,24 +42,14 @@ def bump(level: str):
 
 
 # 1. Heartbeat
-cur = db.execute(
-    """
-    SELECT install_id, hostname, request_count,
-           EXTRACT(EPOCH FROM (NOW() - last_seen_at))::int AS age_sec,
-           last_seen_at, last_ip, last_city, last_country
-    FROM installations
-    ORDER BY last_seen_at DESC
-    LIMIT 5
-    """
-)
-heartbeat_rows = cur.fetchall()
+heartbeat_rows = _digest.get("heartbeat") or []
 heartbeat_html = ""
 if not heartbeat_rows:
     heartbeat_html = "<p><b>HEARTBEAT:</b> no installations rows yet (FAIL)</p>"
     bump("FAIL")
 else:
     head = heartbeat_rows[0]
-    age = head[3]
+    age = head["age_sec"]
     age_disp = f"{age}s" if age < 120 else f"{age // 60}m {age % 60}s"
     if age >= 3600:
         bump("FAIL")
@@ -71,34 +61,20 @@ else:
         flag = "OK"
     heartbeat_html = (
         f"<p><b>HEARTBEAT:</b> {flag} — last beat {html.escape(age_disp)} ago"
-        f" (install_id <code>{html.escape(head[0])}</code>, {head[2]} beats total,"
-        f" last_ip {html.escape(str(head[5] or '?'))} {html.escape(str(head[6] or '?'))}/{html.escape(str(head[7] or '?'))})</p>"
+        f" (install_id <code>{html.escape(head['install_id'])}</code>, {head['request_count']} beats total,"
+        f" last_ip {html.escape(str(head['last_ip'] or '?'))} {html.escape(str(head['last_city'] or '?'))}/{html.escape(str(head['last_country'] or '?'))})</p>"
     )
 
 # 2. Per-platform attribution coverage (last 24h)
-cur = db.execute(
-    """
-    SELECT platform,
-           COUNT(*)                                   AS total,
-           COUNT(install_id)                          AS attributed,
-           COUNT(CASE WHEN status='replied'  THEN 1 END) AS replied,
-           COUNT(CASE WHEN status='skipped'  THEN 1 END) AS skipped,
-           COUNT(CASE WHEN status='processing' THEN 1 END) AS processing,
-           COUNT(CASE WHEN status='pending'  THEN 1 END) AS pending
-    FROM replies
-    WHERE discovered_at >= NOW() - INTERVAL '24 hours'
-    GROUP BY platform
-    ORDER BY total DESC
-    """
-)
-platform_rows = cur.fetchall()
+platform_rows = _digest.get("platforms") or []
 platforms_html = "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
 platforms_html += (
     "<tr><th>platform</th><th>total</th><th>attributed</th><th>replied</th>"
     "<th>skipped</th><th>processing</th><th>pending</th><th>note</th></tr>"
 )
 for r in platform_rows:
-    plat, total, attrib, replied, skipped, proc, pend = r
+    plat, total, attrib = r["platform"], r["total"], r["attributed"]
+    replied, skipped, proc, pend = r["replied"], r["skipped"], r["processing"], r["pending"]
     note = ""
     if plat in HTTP_LANE_PLATFORMS:
         if total == 0:
@@ -122,26 +98,14 @@ for r in platform_rows:
 platforms_html += "</table>"
 
 # 3. Stuck in processing
-cur = db.execute(
-    """
-    SELECT id, platform, install_id,
-           EXTRACT(EPOCH FROM (NOW() - processing_at))::int AS age_sec
-    FROM replies
-    WHERE status='processing'
-      AND processing_at IS NOT NULL
-      AND processing_at < NOW() - INTERVAL '30 minutes'
-    ORDER BY processing_at ASC
-    LIMIT 10
-    """
-)
-stuck_rows = cur.fetchall()
+stuck_rows = _digest.get("stuck") or []
 if not stuck_rows:
     stuck_html = "<p><b>STUCK PROCESSING:</b> none</p>"
 else:
     bump("WARN")
     stuck_html = f"<p><b>STUCK PROCESSING ({len(stuck_rows)}):</b></p><ul>"
     for r in stuck_rows:
-        rid, plat, iid, age = r
+        rid, plat, iid, age = r["id"], r["platform"], r["install_id"], r["age_sec"]
         age_disp = f"{age // 60}m" if age < 7200 else f"{age // 3600}h"
         stuck_html += (
             f"<li>id={rid} platform={html.escape(plat)} "
