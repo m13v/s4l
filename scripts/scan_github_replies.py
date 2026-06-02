@@ -122,53 +122,45 @@ def main():
             comment_id = str(comment.get("id", ""))
             comment_url = comment.get("url", "")
 
-            # Check if already tracked
-            existing = conn.execute(
-                "SELECT COUNT(*) FROM replies WHERE platform='github_issues' AND their_comment_id=%s",
-                (comment_id,)
-            ).fetchone()
-            if existing[0] > 0:
-                continue
-
+            # Determine status + skip_reason up front; the (platform,
+            # their_comment_id) UNIQUE index on the API handles "already
+            # tracked" (returns 409), so the old COUNT pre-check is gone.
             if author.lower() in excluded_authors:
-                conn.execute(
-                    """INSERT INTO replies
-                    (post_id, platform, their_comment_id, their_author, their_content,
-                     their_comment_url, depth, status, skip_reason)
-                    VALUES (%s, 'github_issues', %s, %s, %s, %s, 1, 'skipped', 'excluded_author')""",
-                    (post_id, comment_id, author, body, comment_url)
-                )
-                conn.commit()
-                skipped += 1
-                continue
+                status, skip_reason = "skipped", "excluded_author"
+            elif word_count(body) < MIN_WORDS:
+                status, skip_reason = "skipped", f"too_short ({word_count(body)} words)"
+            else:
+                status, skip_reason = "pending", None
 
-            if word_count(body) < MIN_WORDS:
-                conn.execute(
-                    """INSERT INTO replies
-                    (post_id, platform, their_comment_id, their_author, their_content,
-                     their_comment_url, depth, status, skip_reason)
-                    VALUES (%s, 'github_issues', %s, %s, %s, %s, 1, 'skipped', %s)""",
-                    (post_id, comment_id, author, body, comment_url,
-                     f"too_short ({word_count(body)} words)")
-                )
-                conn.commit()
-                skipped += 1
-                continue
+            payload = {
+                "post_id": post_id,
+                "platform": SCAN_PLATFORM,
+                "their_comment_id": comment_id,
+                "their_author": author,
+                "their_content": body,
+                "their_comment_url": comment_url,
+                "depth": 1,
+                "status": status,
+            }
+            if skip_reason:
+                payload["skip_reason"] = skip_reason
 
-            conn.execute(
-                """INSERT INTO replies
-                (post_id, platform, their_comment_id, their_author, their_content,
-                 their_comment_url, depth, status)
-                VALUES (%s, 'github_issues', %s, %s, %s, %s, 1, 'pending')""",
-                (post_id, comment_id, author, body, comment_url)
-            )
-            conn.commit()
-            discovered += 1
-            print(f"  NEW: @{author} on {issue_key}: {body[:80]}...")
+            resp = api_post("/api/v1/replies", payload, ok_on_conflict=True)
+            if not (resp or {}).get("ok"):
+                # 409 duplicate_reply: already tracked from a prior run. Skip.
+                continue
+            reply = ((resp or {}).get("data") or {}).get("reply")
+            if reply is None:
+                # Blocklist / velocity gate dropped this fresh pending row.
+                continue
+            if status == "skipped":
+                skipped += 1
+            else:
+                discovered += 1
+                print(f"  NEW: @{author} on {issue_key}: {body[:80]}...")
 
         time.sleep(1)  # Light rate limiting
 
-    conn.close()
     print(f"\nGitHub scan complete: {discovered} new pending, {skipped} skipped, {errors} errors")
 
 
