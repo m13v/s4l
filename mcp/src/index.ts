@@ -101,55 +101,100 @@ async function produceDrafts(project?: string): Promise<DraftResult> {
   };
 }
 
-// One elicitation per draft: approve or skip. Returns count approved.
-async function reviewDrafts(plan: Plan): Promise<{ approved: number; skipped: number; aborted: boolean }> {
+// One BATCHED elicitation: present every draft at once as a checkbox grid with
+// an optional inline edit per draft, submitted in a single round trip. The user
+// ticks which to post (all pre-checked, so the common path is just "submit"),
+// optionally rewrites any reply, and confirms ONCE — collapsing N popups into 1.
+//
+// MCP elicitation schemas must be FLAT primitives (no arrays / nested objects),
+// so we generate one `post_<n>` boolean + one `edit_<n>` string per draft.
+async function reviewDrafts(
+  plan: Plan
+): Promise<{ approved: number; skipped: number; edited: number; aborted: boolean }> {
   const candidates = plan.candidates || [];
+  if (candidates.length === 0) return { approved: 0, skipped: 0, edited: 0, aborted: false };
+
+  // Build the flat schema + a human-readable table for the form header.
+  // Each property is a primitive elicitation schema (boolean checkbox or
+  // optional string), the only shapes MCP elicitation allows.
+  type ElicitProp =
+    | { type: "boolean"; title?: string; description?: string; default?: boolean }
+    | { type: "string"; title?: string; description?: string };
+  const properties: Record<string, ElicitProp> = {};
+  const rows: string[] = [];
+  candidates.forEach((c, i) => {
+    const n = i + 1;
+    const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
+    const style = c.engagement_style ?? "?";
+    const reply = c.reply_text ?? "(empty)";
+    const link = c.link_url ? `  ·  link: ${c.link_url}` : "";
+    rows.push(
+      `[${n}] ${author}  (style: ${style})${link}\n` +
+        `    ${reply.replace(/\n/g, "\n    ")}\n` +
+        `    thread: ${c.candidate_url ?? "?"}`
+    );
+    const preview = reply.length > 140 ? `${reply.slice(0, 140)}…` : reply;
+    properties[`post_${n}`] = {
+      type: "boolean",
+      title: `Post [${n}] ${author}`,
+      description: preview,
+      default: true,
+    };
+    properties[`edit_${n}`] = {
+      type: "string",
+      title: `Rewrite [${n}] (optional)`,
+      description:
+        "Leave blank to post as drafted. Type your own wording to replace this reply before posting.",
+    };
+  });
+
+  const message =
+    `Review ${candidates.length} drafted ` +
+    `${candidates.length === 1 ? "reply" : "replies"}. ` +
+    `Every draft is pre-checked to post — untick the ones you don't want, ` +
+    `optionally rewrite any, then submit once.\n\n` +
+    rows.join("\n\n");
+
+  let res;
+  try {
+    res = await server.server.elicitInput({
+      message,
+      requestedSchema: { type: "object", properties, required: [] },
+    });
+  } catch (e) {
+    // Host doesn't support elicitation (some Claude Desktop builds). Bail out
+    // rather than silently posting or silently skipping everything.
+    return { approved: 0, skipped: 0, edited: 0, aborted: true };
+  }
+  if (res.action !== "accept") {
+    // User cancelled/declined the whole review -> post nothing.
+    candidates.forEach((c) => (c.approved = false));
+    return { approved: 0, skipped: 0, edited: 0, aborted: res.action === "cancel" };
+  }
+
+  const content = (res.content as Record<string, unknown>) || {};
   let approved = 0;
   let skipped = 0;
-  for (let i = 0; i < candidates.length; i++) {
-    const c = candidates[i];
-    const msg =
-      `Draft ${i + 1} of ${candidates.length}\n` +
-      `Thread: @${c.thread_author ?? "?"}  ${c.candidate_url ?? ""}\n` +
-      `Style: ${c.engagement_style ?? "?"}\n\n` +
-      `Drafted reply:\n${c.reply_text ?? "(empty)"}` +
-      (c.link_url ? `\n\nLink: ${c.link_url}` : "");
-    let res;
-    try {
-      res = await server.server.elicitInput({
-        message: msg,
-        requestedSchema: {
-          type: "object",
-          properties: {
-            decision: {
-              type: "string",
-              enum: ["approve", "skip"],
-              description: "approve = post this reply, skip = discard it",
-            },
-          },
-          required: ["decision"],
-        },
-      });
-    } catch (e) {
-      // Host doesn't support elicitation (some Claude Desktop builds). Bail out
-      // rather than silently posting or silently skipping everything.
-      return { approved, skipped, aborted: true };
+  let edited = 0;
+  candidates.forEach((c, i) => {
+    const n = i + 1;
+    // Pre-checked (default:true): treat anything but an explicit false as "post".
+    const wantPost = content[`post_${n}`] !== false;
+    const rawEdit = content[`edit_${n}`];
+    const edit = typeof rawEdit === "string" ? rawEdit.trim() : "";
+    if (edit) {
+      c.reply_text = edit; // inline correction replaces the drafted reply
+      edited++;
     }
-    if (res.action !== "accept") {
-      // User cancelled/declined the whole review.
-      c.approved = false;
-      return { approved, skipped, aborted: res.action === "cancel" };
-    }
-    const decision = (res.content as { decision?: string } | undefined)?.decision;
-    if (decision === "approve") {
+    if (wantPost) {
       c.approved = true;
       approved++;
     } else {
       c.approved = false;
       skipped++;
     }
-  }
-  return { approved, skipped, aborted: false };
+  });
+  return { approved, skipped, edited, aborted: false };
 }
 
 async function postApproved(batchId: string, plan: Plan) {
@@ -392,9 +437,10 @@ server.registerTool(
   {
     title: "Draft an X reply cycle",
     description:
-      "Scan X, draft replies on this machine, then walk you through each one (approve or " +
-      "skip) and post only the approved ones. The entire manual loop in one call: discover " +
-      "-> draft -> review -> post. Nothing posts without your approval.",
+      "Scan X, draft replies on this machine, then show ALL drafts at once in a single " +
+      "checkbox form: tick which to post (every draft pre-checked), optionally rewrite any " +
+      "reply inline, and submit once. Only the ticked ones post. The entire manual loop in " +
+      "one call: discover -> draft -> review -> post. Nothing posts without your approval.",
     inputSchema: {
       project: z
         .string()
@@ -432,6 +478,7 @@ server.registerTool(
       drafted: plan.candidates.length,
       approved: review.approved,
       skipped: review.skipped,
+      edited: review.edited,
       posted,
     });
   }
