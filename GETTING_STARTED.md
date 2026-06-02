@@ -8,7 +8,8 @@ This is the paste-able onboarding prompt for a brand-new machine.
    shell runs in a throwaway Linux container that can't touch your Mac, so it
    cannot install anything locally. Claude Code has a real shell on your machine.
 2. Paste the prompt below.
-3. When it finishes, it tells you (in bold) exactly what to send next to begin.
+3. When it finishes, it tells you the next step: relaunch Claude, then send
+   "Set me up on social-autoposter" to begin.
 
 ---
 
@@ -48,10 +49,9 @@ TROUBLESHOOTING (handle these yourself, don't make me debug)
   - python errors: make sure the MCP's SAPS_PYTHON points at
     /opt/homebrew/bin/python3, not /usr/bin/python3.
 
-When everything above succeeds, your FINAL message to me must end with this line,
-in bold, on its own:
-
-**Done. Fully quit and relaunch Claude (Cmd+Q), then send me: "Set me up on social-autoposter" to begin.**
+When everything above succeeds, tell me the next step in your own words: I need to
+fully quit and relaunch Claude (Cmd+Q, not just close the window) so the new MCP
+loads, then send "Set me up on social-autoposter" to begin.
 ```
 
 ---
