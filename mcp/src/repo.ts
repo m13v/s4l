@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 export const REPO_DIR =
   process.env.SAPS_REPO_DIR || path.resolve(__dirname, "..", "..");
 
-// Python used by the pipeline (psycopg2 etc). Override per-install.
+// Python used by the pipeline (deps from requirements.txt). Override per-install.
 export const PYTHON = process.env.SAPS_PYTHON || "python3";
 
 // The locked pipeline script (run-twitter-cycle.sh) writes the draft plan to a
@@ -34,7 +34,7 @@ export interface RunResult {
   stderr: string;
 }
 
-// Spawn a process inside the repo, inheriting the repo env (DATABASE_URL etc
+// Spawn a process inside the repo, inheriting the repo env (API base + keys
 // come from the install's environment / .env loaded by the scripts themselves).
 export function run(
   cmd: string,
