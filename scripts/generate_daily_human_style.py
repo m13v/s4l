@@ -128,7 +128,7 @@ def load_existing_style_names():
     return names
 
 
-def already_generated_recently(conn, platform, hours=20):
+def already_generated_recently(platform, hours=20):
     """True if a human_derived style for `platform` was already created in the
     last `hours`.
 
@@ -142,20 +142,37 @@ def already_generated_recently(conn, platform, hours=20):
     more than we consume" => at most one human_derived style per platform per
     day.
 
-    Fails OPEN (returns False) on any DB error so a transient blip never
-    silently kills the daily run.
+    Reads the newest human_derived row for the platform via the registry route
+    (kind=human_derived&platform=X&latest=1) and compares generated_at to the
+    window locally, so no DATABASE_URL is needed.
+
+    Fails OPEN (returns False) on any error so a transient blip never silently
+    kills the daily run.
     """
     try:
-        cur = conn.execute(
-            "SELECT 1 FROM engagement_styles_registry "
-            "WHERE kind = 'human_derived' AND platform = %s "
-            "AND generated_at >= NOW() - (%s || ' hours')::INTERVAL "
-            "LIMIT 1",
-            (platform, str(hours)),
+        resp = api_get(
+            "/api/v1/engagement-styles/registry",
+            query={
+                "kind": "human_derived",
+                "platform": platform,
+                "latest": "1",
+                "status": "all",
+            },
         )
-        hit = cur.fetchone() is not None
-        cur.close()
-        return hit
+        styles = (resp.get("data") or {}).get("styles") or []
+        if not styles:
+            return False
+        gen = styles[0].get("generated_at")
+        if not gen:
+            return False
+        s = str(gen)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        return dt >= cutoff
     except Exception as e:
         sys.stderr.write(
             f"[generate_daily_human_style] platform={platform} idempotency "
@@ -357,7 +374,7 @@ def post_style(style, platform, replies, prompt_chars):
     )
 
 
-def synthesize_for_platform(conn, platform, reserved, dry_run=False):
+def synthesize_for_platform(platform, reserved, dry_run=False):
     """Run the synthesizer for ONE platform. Returns a result dict for
     summary logging; raises only on genuinely fatal errors (e.g. Claude
     wrapper crash). Insufficient-data is a soft skip.
@@ -366,13 +383,13 @@ def synthesize_for_platform(conn, platform, reserved, dry_run=False):
     # before spending a Claude call if today's style already exists (rerun,
     # launchd catch-up, double-fire). dry_run bypasses so prompts stay
     # inspectable.
-    if not dry_run and already_generated_recently(conn, platform):
+    if not dry_run and already_generated_recently(platform):
         sys.stderr.write(
             f"[generate_daily_human_style] platform={platform} already has a "
             f"human_derived style from the last 20h; skipping (idempotent).\n"
         )
         return {"platform": platform, "status": "skipped_already_today"}
-    replies = fetch_top_human_replies(conn, platform)
+    replies = fetch_top_human_replies(platform)
     if len(replies) < MIN_REPLIES:
         sys.stderr.write(
             f"[generate_daily_human_style] platform={platform} only "
@@ -447,28 +464,24 @@ def main():
     args = ap.parse_args()
     platforms = args.platform or PLATFORMS
 
-    conn = get_conn()
     summary = []
-    try:
-        reserved = load_existing_style_names(conn)
-        for platform in platforms:
-            try:
-                result = synthesize_for_platform(
-                    conn, platform, reserved, dry_run=args.dry_run,
-                )
-            except Exception as e:
-                sys.stderr.write(
-                    f"[generate_daily_human_style] platform={platform} "
-                    f"failed: {e}\n"
-                )
-                result = {
-                    "platform": platform,
-                    "status": "error",
-                    "error": str(e),
-                }
-            summary.append(result)
-    finally:
-        conn.close()
+    reserved = load_existing_style_names()
+    for platform in platforms:
+        try:
+            result = synthesize_for_platform(
+                platform, reserved, dry_run=args.dry_run,
+            )
+        except Exception as e:
+            sys.stderr.write(
+                f"[generate_daily_human_style] platform={platform} "
+                f"failed: {e}\n"
+            )
+            result = {
+                "platform": platform,
+                "status": "error",
+                "error": str(e),
+            }
+        summary.append(result)
 
     print(json.dumps({"runs": summary}, indent=2, default=str))
     # Exit non-zero if every platform errored — soft skips don't count.
