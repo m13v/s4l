@@ -47,8 +47,8 @@ if ENV_PATH.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-import psycopg2  # noqa: E402
-from psycopg2.extras import Json  # noqa: E402
+sys.path.insert(0, str(ROOT_DIR / "scripts"))
+from http_api import api_post, api_patch  # noqa: E402
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from claude_wait import wait_for_claude  # noqa: E402
@@ -440,43 +440,25 @@ def _run_claude(prompt: str, cwd: str, log_path: Path, session_id: str) -> dict:
 
 
 def _insert_running_row(brief: dict) -> int:
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO seo_page_improvements "
-        "(product, domain, page_path, page_url, metrics_24h, metrics_7d_avg, metrics_30d_avg, "
-        " brief_json, status) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'running') RETURNING id",
-        (
-            brief["product"], brief["domain"], brief["page_path"], brief["page_url"],
-            Json(brief["metrics"]["24h"]),
-            Json(brief["metrics"]["7d_avg_per_day"]),
-            Json(brief["metrics"]["30d_avg_per_day"]),
-            Json(brief),
-        ),
-    )
-    row_id = cur.fetchone()[0]
-    conn.commit(); cur.close(); conn.close()
-    return row_id
+    resp = api_post("/api/v1/seo/page-improvements", {
+        "product": brief["product"],
+        "domain": brief["domain"],
+        "page_path": brief["page_path"],
+        "page_url": brief["page_url"],
+        "metrics_24h": brief["metrics"]["24h"],
+        "metrics_7d_avg": brief["metrics"]["7d_avg_per_day"],
+        "metrics_30d_avg": brief["metrics"]["30d_avg_per_day"],
+        "brief_json": brief,
+    })
+    return int((resp.get("data") or {}).get("id"))
 
 
 def _finish_row(row_id: int, **fields):
     if not fields:
         return
-    cols = []
-    vals = []
-    for k, v in fields.items():
-        cols.append(f"{k} = %s")
-        if isinstance(v, (dict, list)) and k in ("tool_summary",):
-            vals.append(Json(v))
-        else:
-            vals.append(v)
-    cols.append("completed_at = NOW()")
-    vals.append(row_id)
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-    cur.execute(f"UPDATE seo_page_improvements SET {', '.join(cols)} WHERE id = %s", vals)
-    conn.commit(); cur.close(); conn.close()
+    body = {"id": row_id}
+    body.update(fields)
+    api_patch("/api/v1/seo/page-improvements", body)
 
 
 def main():
