@@ -697,9 +697,12 @@ ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 # cases that previously surfaced as "Phase 1 returned 0 tweets" mysteries.
 # Failing fast here turns a wasted ~7-minute scan + Claude bill into a clear
 # "reconnect X" message in the log.
-log "Pre-flight: probing harness Chrome for a live x.com auth_token..."
-_PREFLIGHT_OUT=$(BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
-    "$HOME/.local/bin/browser-harness" <<'PY' 2>&1
+# Probe the harness Chrome for a live x.com auth_token. Echoes a single
+# PREFLIGHT_OK / PREFLIGHT_FAIL / PREFLIGHT_CDP_ERROR line. Used pre-cycle and
+# again after an auto-restore from the local cookie mirror.
+_xsession_probe() {
+    BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
+        "$HOME/.local/bin/browser-harness" <<'PY' 2>&1
 import sys, time
 try:
     raw = cdp('Network.getCookies', urls=['https://x.com/', 'https://twitter.com/'])
@@ -722,11 +725,27 @@ else:
         sys.exit(0)
     print('PREFLIGHT_OK exp=' + str(int(exp)) + ' domain=' + domain)
 PY
-)
+}
+
+log "Pre-flight: probing harness Chrome for a live x.com auth_token..."
+_PREFLIGHT_OUT=$(_xsession_probe)
+if ! printf '%s\n' "$_PREFLIGHT_OUT" | grep -q '^PREFLIGHT_OK'; then
+    # Gap B auto-recovery: the harness Chrome lost its x.com session — its cookie
+    # store was wiped on a hard restart or a macOS keychain re-lock, or never
+    # persisted to disk. Re-inject from the durable 0600 local cookie mirror
+    # (written on every connect, keychain-independent) via CDP, then re-probe
+    # before giving up. This is what makes the session survive app/Chrome
+    # restarts without a manual reconnect.
+    log "  Pre-flight FAILED ($(printf '%s\n' "$_PREFLIGHT_OUT" | tail -1)); auto-restoring from local cookie mirror..."
+    _RESTORE_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
+        python3 "$REPO_DIR/scripts/restore_twitter_session.py" 2>&1)
+    log "  Restore: $(printf '%s\n' "$_RESTORE_OUT" | tail -2 | tr '\n' '|')"
+    _PREFLIGHT_OUT=$(_xsession_probe)
+fi
 if printf '%s\n' "$_PREFLIGHT_OUT" | grep -q '^PREFLIGHT_OK'; then
     log "  Pre-flight OK: $(printf '%s\n' "$_PREFLIGHT_OUT" | grep '^PREFLIGHT_OK' | head -1)"
 else
-    log "  Pre-flight FAILED. The harness Chrome has no live X session."
+    log "  Pre-flight FAILED. The harness Chrome has no live X session (auto-restore from the local cookie mirror did not recover it)."
     log "  Details: $(printf '%s\n' "$_PREFLIGHT_OUT" | tail -3 | tr '\n' '|')"
     log "  Action: run \`python3 scripts/setup_twitter_auth.py connect\` (or call the connect_x MCP tool) to import a fresh X session from your everyday browser, then re-run the cycle. If the import fails with 'access denied', unlock the macOS keychain first: \`security unlock-keychain ~/Library/Keychains/login.keychain-db\`."
     echo "twitter_batches: ended $BATCH_ID"
