@@ -24,7 +24,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post
 
 
 def log(msg, quiet=False):
@@ -57,8 +57,6 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                         help="Cap rows processed (for testing).")
     args = parser.parse_args()
-
-    db = dbmod.get_conn()
 
     # 2026-05-25: gate posts.engagement_style writes against the canonical
     # registry. IG renders pre-pick a style (run-instagram-render.sh) and ask
