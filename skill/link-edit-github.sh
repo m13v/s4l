@@ -23,11 +23,9 @@ acquire_lock "link-edit-github" 2700
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
-
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): all reads/writes go through the s4l.ai API via
+# scripts/link_edit_helper.py. No DATABASE_URL, no psql, no fallback.
+LE_HELPER="$REPO_DIR/scripts/link_edit_helper.py"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/link-edit-github-$(date +%Y-%m-%d_%H%M%S).log"
@@ -53,19 +51,7 @@ LINK_EDIT_GITHUB_PAGE_GEN_RATE="${LINK_EDIT_GITHUB_PAGE_GEN_RATE:-0.0}"
 PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_GITHUB_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
 log "A/B gate: LINK_EDIT_GITHUB_PAGE_GEN_RATE=$LINK_EDIT_GITHUB_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
 
-EDITABLE=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT id, platform, our_url, our_content, thread_title, thread_url, upvotes, project_name,
-               CASE WHEN ((hashtext(id::text) % 100) + 100) % 100 < ${PAGE_GEN_RATE_PCT}
-                    THEN 'page_gen' ELSE 'ab_skip' END AS page_gen_lane
-        FROM posts
-        WHERE status='active'
-          AND platform='github'
-          AND posted_at < NOW() - INTERVAL '6 hours'
-          AND link_edited_at IS NULL
-          AND our_url IS NOT NULL
-        ORDER BY posted_at ASC
-    ) q;" 2>/dev/null || echo "")
+EDITABLE=$(python3 "$LE_HELPER" eligible --platform github --page-gen-rate-pct "$PAGE_GEN_RATE_PCT" --order posted_at 2>/dev/null || echo "")
 
 if [ "$EDITABLE" = "null" ] || [ -z "$EDITABLE" ]; then
     log "No GitHub posts eligible for link edit"
@@ -123,8 +109,8 @@ Process ALL of them. For each post:
    gh api repos/OWNER/REPO/issues/comments/COMMENT_ID -X PATCH -f body="EXISTING_CONTENT
 
    WRAPPED_LINK_TEXT"
-8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_ab_skip vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py and the Reddit link-edit pipeline does) and backfill short-link attribution:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
+8. After each successful edit, update the DB (via the HTTP API helper; pass link_source so we can A/B compare seo_page vs plain_url_ab_skip vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py and the Reddit link-edit pipeline does) and backfill short-link attribution:
+   python3 ~/social-autoposter/scripts/link_edit_helper.py mark-edited --post-id POST_ID --content "LINK_TEXT" --source "LINK_SOURCE"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
@@ -132,13 +118,13 @@ Process ALL of them. For each post:
    - NEVER offer to DM or send anything outside the comment.
    - NEVER make time-bound promises.
 10. If a post is SKIPPED (no project match, comment not found, issue locked, 404, bad URL), ALWAYS mark it so it won't be retried:
-    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+    python3 ~/social-autoposter/scripts/link_edit_helper.py mark-skipped --post-id POST_ID --reason "REASON"
 PROMPT_EOF
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "link-edit-github" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/no-agents-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" --output-format stream-json --verbose -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: GitHub link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
-EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='github' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
+EDITED=$(python3 "$LE_HELPER" edited-count --platform github 2>/dev/null || echo "0")
 log "GitHub link-edit complete. Total github posts edited (all-time): $EDITED"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
