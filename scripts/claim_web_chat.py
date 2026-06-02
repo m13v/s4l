@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Claim a web-chat thread (reset unread_by_founder=0, set 5-min cooldown).
 
-Mirror of ~/fazm/inbox/scripts/claim-chat.js. The cooldown prevents multiple
-Claude sessions from spawning for the same visitor when they send rapid-fire
-messages.
+HTTP-only: POST /api/v1/web-chat/threads/<thread_id>/claim. The cooldown
+prevents multiple Claude sessions from spawning for the same visitor when they
+send rapid-fire messages.
 
 Usage:
   python3 claim_web_chat.py <thread_id> [--check-only]
@@ -17,9 +17,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-
-COOLDOWN_MIN = 5
+from http_api import api_post
 
 
 def main():
@@ -28,39 +26,21 @@ def main():
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
+    resp = api_post(
+        f"/api/v1/web-chat/threads/{args.thread_id}/claim",
+        {"check_only": bool(args.check_only)},
+    )
+    data = resp.get("data") or {}
+    state = data.get("state")
 
-    row = conn.execute(
-        "SELECT claimed_until FROM web_chat_threads WHERE thread_id = %s",
-        (args.thread_id,),
-    ).fetchone()
-
-    if row and row["claimed_until"]:
-        # claimed_until is timezone-aware; compare in DB to avoid TZ skew
-        still = conn.execute(
-            "SELECT claimed_until > NOW() AS still_locked FROM web_chat_threads WHERE thread_id = %s",
-            (args.thread_id,),
-        ).fetchone()
-        if still and still["still_locked"]:
-            print(f"thread {args.thread_id} in cooldown until {row['claimed_until']}")
-            sys.exit(2)
-
-    if args.check_only:
+    if state == "cooldown":
+        print(f"thread {args.thread_id} in cooldown until {data.get('claimed_until')}")
+        sys.exit(2)
+    if state == "claimable":
         print(f"thread {args.thread_id} claimable")
         sys.exit(0)
-
-    conn.execute(
-        f"""
-        UPDATE web_chat_threads
-           SET unread_by_founder = 0,
-               claimed_until = NOW() + INTERVAL '{COOLDOWN_MIN} minutes'
-         WHERE thread_id = %s
-        """,
-        (args.thread_id,),
-    )
-    conn.commit()
-    print(f"claimed thread {args.thread_id} (cooldown {COOLDOWN_MIN}m)")
+    # state == "claimed"
+    print(f"claimed thread {args.thread_id} (cooldown {data.get('cooldown_min', 5)}m)")
 
 
 if __name__ == "__main__":
