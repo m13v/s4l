@@ -23,6 +23,24 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+ENV_PATH = os.path.expanduser("~/social-autoposter/.env")
+
+
+def load_env():
+    """Load ~/social-autoposter/.env into os.environ (setdefault, never clobber).
+
+    Generic dotenv loader, not DB-specific: callers need it for keys like
+    MOLTBOOK_API_KEY / AUTOPOSTER_API_KEY / AUTOPOSTER_API_BASE. Lives here
+    (rather than the now-removed db.py) so HTTP-only scripts have one import.
+    """
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
 
 def _base_url():
     return os.environ.get("AUTOPOSTER_API_BASE", "https://s4l.ai").rstrip("/")
