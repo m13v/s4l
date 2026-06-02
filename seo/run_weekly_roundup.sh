@@ -131,21 +131,17 @@ for row in "${ELIGIBLE[@]}"; do
         # original slug+keyword so we finish the job instead of abandoning
         # it. The slug was date-stamped to the prior run so --force is
         # required to overwrite any half-committed page file.
-        pending=$(python3 - "$product" <<'PY' 2>/dev/null
-import os, sys, psycopg2
+        pending=$(SEO_SCRIPT_DIR="$SCRIPT_DIR" python3 - "$product" <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ['SEO_SCRIPT_DIR']), 'scripts'))
+from http_api import api_get, load_env
+load_env()
 try:
-    conn = psycopg2.connect(os.environ['DATABASE_URL'])
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT keyword, slug FROM seo_keywords "
-        "WHERE source='roundup' AND status='pending' "
-        "AND product=%s AND updated_at > NOW() - INTERVAL '14 days' "
-        "ORDER BY updated_at DESC LIMIT 1",
-        (sys.argv[1],),
-    )
-    row = cur.fetchone()
-    if row:
-        print(f"{row[0]}\t{row[1]}")
+    resp = api_get('/api/v1/seo/keywords', query={'mode': 'stale_pending', 'source': 'roundup', 'product': sys.argv[1]})
+    rows = (resp.get('data') or {}).get('rows') or []
+    if rows:
+        r = rows[0]
+        print(f"{r.get('keyword') or ''}\t{r.get('slug') or ''}")
 except Exception:
     pass
 PY
