@@ -128,6 +128,39 @@ def _log(msg: str) -> None:
 
 # --- Chrome lifecycle ---
 
+# Hardcoded fallbacks used only the very first time a profile launches (before
+# Chrome has written any window_placement to its Preferences).
+DEFAULT_WINDOW_POS = "3042,-1032"
+DEFAULT_WINDOW_SIZE = "1024,1013"
+
+
+def _persisted_window_geometry() -> tuple[str | None, str | None]:
+    """Read the window position+size Chrome last persisted for THIS profile.
+
+    Chrome writes the live window bounds to <profile>/Default/Preferences ->
+    browser.window_placement (left/top/right/bottom, in screen coords) whenever
+    the user moves/resizes the window. By reading that back and feeding it into
+    the launch flags, a user's manual placement survives SIGKILL+relaunch
+    instead of snapping back to the hardcoded default. Returns ("X,Y", "W,H")
+    or (None, None) when nothing usable is persisted yet.
+    """
+    pref = PROFILE_DIR / "Default" / "Preferences"
+    try:
+        wp = json.loads(pref.read_text()).get("browser", {}).get("window_placement")
+    except (FileNotFoundError, ValueError, OSError):
+        return (None, None)
+    if not isinstance(wp, dict) or wp.get("maximized"):
+        return (None, None)
+    try:
+        left, top = int(wp["left"]), int(wp["top"])
+        width, height = int(wp["right"]) - left, int(wp["bottom"]) - top
+    except (KeyError, TypeError, ValueError):
+        return (None, None)
+    if width <= 0 or height <= 0:
+        return (f"{left},{top}", None)
+    return (f"{left},{top}", f"{width},{height}")
+
+
 def _port_open(port: int) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.5)
@@ -187,12 +220,24 @@ def _build_chrome_cmd() -> list[str]:
         cmd.append("--no-sandbox")
         cmd.append("--disable-dev-shm-usage")
 
-    # 2026-05-13: persistent window placement on macOS multi-monitor setups.
+    # Persistent window placement on macOS multi-monitor setups.
     # Skip on headless / Linux where positioning is meaningless and the
     # off-screen values would just hide the window on a single-monitor setup.
+    # Position priority (2026-06-02):
+    #   1. BH_WINDOW_POS / BH_WINDOW_SIZE env  (explicit hard override)
+    #   2. whatever Chrome last persisted for this profile (the user's own
+    #      manually-dragged position) -> so user placement survives relaunch
+    #   3. hardcoded default (first-ever launch only)
+    # We still pass an explicit --window-position flag (rather than letting
+    # Chrome restore on its own), so SIGKILL+relaunch can't cascade/drift the
+    # window: we control the exact value, but that value now tracks the user's
+    # last placement instead of a fixed constant.
     if not HEADLESS and not _IS_LINUX:
-        cmd.append(f"--window-position={os.environ.get('BH_WINDOW_POS', '3042,-1032')}")
-        cmd.append(f"--window-size={os.environ.get('BH_WINDOW_SIZE', '1024,1013')}")
+        saved_pos, saved_size = _persisted_window_geometry()
+        win_pos = os.environ.get("BH_WINDOW_POS") or saved_pos or DEFAULT_WINDOW_POS
+        win_size = os.environ.get("BH_WINDOW_SIZE") or saved_size or DEFAULT_WINDOW_SIZE
+        cmd.append(f"--window-position={win_pos}")
+        cmd.append(f"--window-size={win_size}")
 
     # Open a real tab so CDP has something to attach to immediately.
     cmd.append("about:blank")
