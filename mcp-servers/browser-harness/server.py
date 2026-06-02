@@ -407,9 +407,14 @@ def _run_harness(script: str, timeout: int = EXEC_TIMEOUT_SEC) -> dict:
     # Make sure ~/.local/bin is on PATH (uv tools live there).
     env["PATH"] = f"{Path.home()}/.local/bin:" + env.get("PATH", "")
 
+    # Upstream browser-harness dropped the `-c <script>` flag and now reads the
+    # script from stdin only (heredoc style). Pass via stdin so we work against
+    # current upstream; the old `-c` form returns the usage banner and exits 1,
+    # which used to surface as "CDP not connected" on every fresh install.
     try:
         proc = subprocess.run(
-            [BROWSER_HARNESS_BIN, "-c", script],
+            [BROWSER_HARNESS_BIN],
+            input=script,
             env=env,
             capture_output=True,
             text=True,
