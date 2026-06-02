@@ -484,7 +484,16 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # trim the COMMENT TEXT to the style ceiling here, before the link is
     # appended. No-op when the draft is already within budget or target_chars
     # is unknown.
-    if target_chars:
+    #
+    # LENGTH A/B (2026-06-01): this truncation gate is part of the *treatment*
+    # arm. In the *control* arm the gate is skipped entirely (and the draft
+    # prompt got only generic length guidance, not the per-style target), which
+    # reproduces pre-length-project behavior. The arm is decided per cycle in
+    # run-twitter-cycle.sh and handed down via LENGTH_ARM; the draft render in
+    # engagement_styles.py reads the same env so prompt and gate always agree.
+    # LENGTH_ARM unset => treatment (full behavior when LENGTH_AB_ENABLED=0).
+    _arm = (os.environ.get("LENGTH_ARM") or "treatment").strip().lower()
+    if target_chars and _arm != "control":
         _orig_len = len(reply_text)
         reply_text, _trimmed = enforce_reply_length(reply_text, target_chars)
         if _trimmed:
@@ -700,6 +709,10 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         log_args += ["--search-topic", search_topic]
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
+    # LENGTH A/B (2026-06-01): stamp the per-cycle arm onto posts.length_arm so
+    # conversion + realized comment length can be sliced control-vs-treatment.
+    if _arm in ("control", "treatment"):
+        log_args += ["--length-arm", _arm]
     # Generation trace: run-twitter-cycle.sh writes a snapshot of the
     # cycle's few-shot context (top_performers, top_queries, supply
     # signal, dud queries) to a tempfile and exports the path via
