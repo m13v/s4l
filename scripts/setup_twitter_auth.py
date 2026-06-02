@@ -308,7 +308,11 @@ def _save_session_to_store() -> None:
         api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
         print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
               "(auto-restore enabled)", file=sys.stderr)
-    except Exception as e:
+    # api_post raises SystemExit (BaseException, NOT Exception) on a 4xx/5xx —
+    # e.g. "no social_accounts row" on a persistent machine that never registered
+    # this handle. The save is best-effort and must never abort connect_x, so
+    # catch SystemExit too.
+    except (Exception, SystemExit) as e:
         print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
     finally:
         try:
