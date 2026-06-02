@@ -64,10 +64,10 @@ launchd  ──▶  skill/run-{platform}.sh  ──▶  claude -p  --strict-mcp-
                        │                                                       │
                        │                                                       └──▶  ~/.claude/browser-profiles/{platform}/  (persistent userDataDir)
                        │
-                       ├──▶  scripts/find_threads.py, top_twitter_queries.py  (no browser, API + DB dedup)
+                       ├──▶  scripts/find_threads.py, top_twitter_queries.py  (no browser, API dedup)
                        ├──▶  scripts/pick_project.py            (weighted project rotation)
                        ├──▶  scripts/top_performers.py          (feedback report from past stats)
-                       └──▶  Postgres                           (DATABASE_URL in .env)
+                       └──▶  S4L HTTP API                       (AUTOPOSTER_API_BASE in .env)
 ```
 
 Each `skill/run-*.sh`:
@@ -103,7 +103,7 @@ launchctl load ~/Library/LaunchAgents/com.m13v.social-twitter-cycle.plist
 | `/social-autoposter engage` | Scan and reply to responses on our posts |
 | `/social-autoposter audit` | Full browser audit of all posts |
 
-View live stats at `https://s4l.ai/stats/<your-handle>` once posts start landing in Postgres.
+View live stats at `https://s4l.ai/stats/<your-handle>` once posts start landing.
 
 ## Repo layout
 
@@ -113,7 +113,6 @@ social-autoposter/
 ├── bin/cli.js                installer + dashboard launcher
 ├── browser-agent-configs/    Playwright MCP templates (twitter/reddit/linkedin)
 ├── config.example.json       config template
-├── schema-postgres.sql       Postgres schema
 ├── setup/SKILL.md            interactive setup wizard skill (locked)
 ├── scripts/                  Python and JS helpers (no browser, no LLM)
 ├── skill/                    shell wrappers invoked by launchd
