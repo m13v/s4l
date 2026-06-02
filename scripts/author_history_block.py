@@ -32,10 +32,11 @@ not anything dangerous.
 import argparse
 import os
 import sys
+from datetime import datetime
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
-import db as dbmod  # noqa: E402
+from http_api import api_get  # noqa: E402
 
 
 PLATFORM_ALIAS = {
@@ -131,34 +132,41 @@ def _normalize(handle):
     return h
 
 
-SQL = """
-SELECT
-  p.id,
-  p.posted_at,
-  p.project_name,
-  p.our_content,
-  p.thread_title,
-  COALESCE(p.upvotes, 0)        AS upvotes,
-  COALESCE(p.comments_count, 0) AS replies_count,
-  COALESCE(p.views, 0)          AS views,
-  (
-    SELECT r.their_content
-    FROM replies r
-    WHERE r.post_id = p.id
-      AND r.their_content IS NOT NULL
-      AND COALESCE(r.their_content, '') <> ''
-    ORDER BY r.discovered_at ASC
-    LIMIT 1
-  ) AS their_first_reply
-FROM posts p
-WHERE p.platform = %s
-  AND LOWER(REGEXP_REPLACE(COALESCE(p.thread_author_handle, ''), '^(@|u/)', ''))
-        = %s
-  AND p.status NOT IN ('deleted', 'removed', 'migrated')
-  AND p.posted_at > NOW() - (%s || ' days')::interval
-ORDER BY p.posted_at DESC
-LIMIT %s
-"""
+# Column order returned by GET /api/v1/posts/author-history (which is the
+# single source of truth for the SQL; the route comment notes "keep the column
+# list + filters in sync"). format_block below indexes the tuple positionally,
+# so this order is load-bearing.
+def _parse_dt(s):
+    """Parse the API's ISO posted_at into a datetime; None on any failure.
+
+    format_block / fetch's summary call `.date()` on this, so a real datetime
+    is required where present. Falls back to the leading YYYY-MM-DD so older
+    Pythons (pre-3.11 fromisoformat can't take 'Z' or variable fractional
+    digits) still yield a usable date instead of crashing the prompt path.
+    """
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).strip().replace("Z", "+00:00"))
+    except Exception:
+        try:
+            return datetime.fromisoformat(str(s)[:10])
+        except Exception:
+            return None
+
+
+def _row_to_tuple(r):
+    return (
+        r.get("id"),
+        _parse_dt(r.get("posted_at")),
+        r.get("project_name"),
+        r.get("our_content"),
+        r.get("thread_title"),
+        r.get("upvotes") or 0,
+        r.get("replies_count") or 0,
+        r.get("views") or 0,
+        r.get("their_first_reply"),
+    )
 
 
 def fetch(platform, author, days=30, limit=5):
@@ -184,11 +192,17 @@ def fetch(platform, author, days=30, limit=5):
         )
         return []
     try:
-        conn = dbmod.get_conn()
-        cur = conn.execute(SQL, (plat, norm, int(days), int(limit)))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        resp = api_get(
+            "/api/v1/posts/author-history",
+            query={
+                "platform": plat,
+                "author": norm,
+                "days": int(days),
+                "limit": int(limit),
+            },
+        )
+        json_rows = ((resp or {}).get("data") or {}).get("rows") or []
+        rows = [_row_to_tuple(r) for r in json_rows]
         if not rows:
             print(
                 f"[author_history_block] EMPTY platform={plat} "
@@ -330,7 +344,6 @@ def main():
     )
     args = p.parse_args()
 
-    dbmod.load_env()
     block = render(args.platform, args.author, days=args.days, limit=args.limit)
     if block:
         print(block)
