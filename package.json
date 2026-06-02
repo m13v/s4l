@@ -1,6 +1,6 @@
 {
   "name": "social-autoposter",
-  "version": "1.6.24",
+  "version": "1.6.25",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
     "social-autoposter": "bin/cli.js"
@@ -14,6 +14,14 @@
     "bin/",
     "scripts/*.py",
     "!scripts/tmp_*.py",
+    "!scripts/insert_post*.py",
+    "!scripts/_insert_post_*.py",
+    "!scripts/_log_cyrano_*.py",
+    "!scripts/_redditlink_finalize.py",
+    "!scripts/_seo_lane_roi.py",
+    "!scripts/check_improve_runs.py",
+    "!scripts/classify_all_dms.py",
+    "!scripts/migrate_engagement_styles_to_db.py",
     "scripts/*.sh",
     "schema-postgres.sql",
     "config.example.json",
