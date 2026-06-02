@@ -151,6 +151,16 @@ def cmd_expire_batch(batch_id: str) -> int:
     return 0
 
 
+def cmd_stamp_cycle_variant(batch_id: str, variant: str) -> int:
+    resp = api_post(
+        "/api/v1/twitter-candidates/stamp-cycle-variant",
+        {"batch_id": batch_id, "cycle_variant": variant},
+    )
+    d = resp.get("data") or {}
+    sys.stdout.write(f"{int(d.get('stamped_count') or 0)}\n")
+    return 0
+
+
 def _sanitize(s) -> str:
     """Mirror the SQL `REPLACE(REPLACE(..., E'\n', ' '), E'\r', ' ')` so a
     multi-line tweet/draft body doesn't break the pipe-delimited row format."""
@@ -271,6 +281,10 @@ def main() -> int:
     p_ca = sub.add_parser("candidates")
     p_ca.add_argument("--batch-id", required=True)
 
+    p_cv = sub.add_parser("stamp-cycle-variant")
+    p_cv.add_argument("--batch-id", required=True)
+    p_cv.add_argument("--variant", required=True)
+
     args = ap.parse_args()
 
     if args.cmd == "status-counts":
@@ -287,6 +301,8 @@ def main() -> int:
         return cmd_expire_batch(args.batch_id)
     if args.cmd == "candidates":
         return cmd_candidates(args.batch_id)
+    if args.cmd == "stamp-cycle-variant":
+        return cmd_stamp_cycle_variant(args.batch_id, args.variant)
     return 1
 
 
