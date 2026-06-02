@@ -27,8 +27,10 @@ Sub-commands (called from shell pipelines):
   abandon       status=abandoned (e.g. sub got permanent_block)
   list-pending  print all pending rows for a project (or all if no project)
 
-This file is intentionally NOT chflags-locked. New columns are easy to add
-because the helpers use SQL fragments rather than ORM models.
+HTTP-only lane (2026-06-01): every read/write routes through the s4l.ai API
+(/api/v1/pending-threads). No DATABASE_URL, no psql, no db.get_conn(), no
+fallback. The function signatures + CLI shapes are unchanged so callers
+(run-reddit-threads.sh) need no edits beyond the DB-insert swap.
 """
 from __future__ import annotations
 
@@ -41,11 +43,7 @@ from typing import Any, Optional
 # scripts/ is on sys.path when called from skill/*.sh; ensure it works
 # standalone too.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db  # noqa: E402
-
-
-def _conn():
-    return db.get_conn()
+from http_api import api_get, api_post, api_patch  # noqa: E402
 
 
 def create(
@@ -62,143 +60,56 @@ def create(
     claude_session_id: Optional[str] = None,
     cost_usd: Optional[float] = None,
 ) -> int:
-    conn = _conn()
-    row = conn.execute(
-        """
-        INSERT INTO pending_threads
-          (project_name, subreddit, our_account, title, body,
-           flair_target, engagement_style, topic_angle, source_summary,
-           claude_session_id, cost_usd, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid, %s, 'pending')
-        RETURNING id
-        """,
-        (project, subreddit, account, title, body,
-         flair_target, engagement_style, topic_angle, source_summary,
-         claude_session_id, cost_usd),
-    ).fetchone()
-    conn.commit()
-    return int(row[0])
+    resp = api_post("/api/v1/pending-threads", {
+        "project": project,
+        "subreddit": subreddit,
+        "account": account,
+        "title": title,
+        "body": body,
+        "flair_target": flair_target,
+        "engagement_style": engagement_style,
+        "topic_angle": topic_angle,
+        "source_summary": source_summary,
+        "claude_session_id": claude_session_id,
+        "cost_usd": cost_usd,
+    })
+    return int((resp.get("data") or {}).get("id"))
 
 
 def mark_posted(*, pending_id: int, post_id: int, permalink: str) -> None:
-    conn = _conn()
-    conn.execute(
-        """
-        UPDATE pending_threads
-        SET status='posted',
-            posted_post_id=%s,
-            posted_permalink=%s,
-            updated_at=NOW()
-        WHERE id=%s
-        """,
-        (post_id, permalink, pending_id),
-    )
-    conn.commit()
+    api_patch(f"/api/v1/pending-threads/{pending_id}", {
+        "action": "mark_posted",
+        "post_id": post_id,
+        "permalink": permalink,
+    })
 
 
 def mark_aborted(*, pending_id: int, abort_reason: str, abort_stage: Optional[str] = None) -> None:
-    conn = _conn()
-    conn.execute(
-        """
-        UPDATE pending_threads
-        SET attempts = attempts + 1,
-            last_attempt_at = NOW(),
-            abort_reason = %s,
-            abort_stage = %s,
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (abort_reason, abort_stage, pending_id),
-    )
-    conn.commit()
+    api_patch(f"/api/v1/pending-threads/{pending_id}", {
+        "action": "mark_aborted",
+        "abort_reason": abort_reason,
+        "abort_stage": abort_stage,
+    })
 
 
 def abandon(*, pending_id: int, reason: str) -> None:
-    conn = _conn()
-    conn.execute(
-        """
-        UPDATE pending_threads
-        SET status='abandoned',
-            abort_reason=COALESCE(abort_reason, '') || E'\n[abandoned] ' || %s,
-            updated_at=NOW()
-        WHERE id=%s
-        """,
-        (reason, pending_id),
-    )
-    conn.commit()
+    api_patch(f"/api/v1/pending-threads/{pending_id}", {
+        "action": "abandon",
+        "reason": reason,
+    })
 
 
 def list_pending(project: Optional[str] = None) -> list[dict[str, Any]]:
-    conn = _conn()
-    if project:
-        rows = conn.execute(
-            """
-            SELECT id, project_name, subreddit, our_account, title,
-                   flair_target, engagement_style, attempts, abort_reason,
-                   created_at, updated_at
-            FROM pending_threads
-            WHERE status='pending' AND project_name=%s
-            ORDER BY created_at ASC
-            """,
-            (project,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT id, project_name, subreddit, our_account, title,
-                   flair_target, engagement_style, attempts, abort_reason,
-                   created_at, updated_at
-            FROM pending_threads
-            WHERE status='pending'
-            ORDER BY created_at ASC
-            """
-        ).fetchall()
-    cols = [
-        "id", "project_name", "subreddit", "our_account", "title",
-        "flair_target", "engagement_style", "attempts", "abort_reason",
-        "created_at", "updated_at",
-    ]
-    out = []
-    for r in rows:
-        d = dict(zip(cols, r))
-        # JSON-friendly serialization for timestamps
-        d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
-        d["updated_at"] = d["updated_at"].isoformat() if d["updated_at"] else None
-        out.append(d)
-    return out
+    resp = api_get("/api/v1/pending-threads",
+                   query={"project": project} if project else None)
+    return (resp.get("data") or {}).get("pending_threads") or []
 
 
 def get(pending_id: int) -> Optional[dict[str, Any]]:
-    conn = _conn()
-    row = conn.execute(
-        """
-        SELECT id, project_name, subreddit, our_account, title, body,
-               flair_target, engagement_style, topic_angle, source_summary,
-               abort_reason, abort_stage, status, attempts, posted_post_id,
-               posted_permalink, claude_session_id, cost_usd,
-               created_at, updated_at
-        FROM pending_threads WHERE id=%s
-        """,
-        (pending_id,),
-    ).fetchone()
-    if not row:
+    resp = api_get(f"/api/v1/pending-threads/{pending_id}", ok_on_404=True)
+    if resp.get("_not_found"):
         return None
-    cols = [
-        "id", "project_name", "subreddit", "our_account", "title", "body",
-        "flair_target", "engagement_style", "topic_angle", "source_summary",
-        "abort_reason", "abort_stage", "status", "attempts", "posted_post_id",
-        "posted_permalink", "claude_session_id", "cost_usd",
-        "created_at", "updated_at",
-    ]
-    d = dict(zip(cols, row))
-    for k in ("created_at", "updated_at"):
-        if d[k]:
-            d[k] = d[k].isoformat()
-    if d.get("claude_session_id"):
-        d["claude_session_id"] = str(d["claude_session_id"])
-    if d.get("cost_usd") is not None:
-        d["cost_usd"] = float(d["cost_usd"])
-    return d
+    return (resp.get("data") or {}).get("pending_thread")
 
 
 def main() -> int:
