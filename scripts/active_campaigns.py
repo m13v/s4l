@@ -51,47 +51,11 @@ def _get_active_via_api(platform):
     return out
 
 
-def _get_active_via_db(platform):
-    import db
-    conn = db.get_conn()
-    try:
-        cur = conn.execute(
-            """
-            SELECT id, name, prompt, max_posts_total, posts_made
-            FROM campaigns
-            WHERE status = 'active'
-              AND (',' || platforms || ',') LIKE %s
-              AND max_posts_total IS NOT NULL
-              AND posts_made < max_posts_total
-            ORDER BY id
-            """,
-            [f"%,{platform},%"],
-        )
-        rows = cur.fetchall()
-    finally:
-        conn.close()
-    return [
-        {
-            "id": r[0],
-            "name": r[1],
-            "prompt": r[2],
-            "max_posts_total": r[3],
-            "posts_made": r[4],
-            "remaining": r[3] - r[4],
-        }
-        for r in rows
-    ]
-
-
 def get_active_campaigns(platform):
     """Active campaigns for `platform` with budget remaining.
 
-    Routes through /api/v1/campaigns by default so VMs without
-    DATABASE_URL still get the active list. Set
-    SOCIAL_AUTOPOSTER_LEGACY_NEON=1 for the direct-DB path.
+    Routes through /api/v1/campaigns (HTTP-only).
     """
-    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        return _get_active_via_db(platform)
     return _get_active_via_api(platform)
 
 
