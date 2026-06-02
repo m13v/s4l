@@ -31,11 +31,9 @@ acquire_lock "link-edit-reddit" 5400
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
-
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): all reads/writes go through the s4l.ai API via
+# scripts/link_edit_helper.py. No DATABASE_URL, no psql, no fallback.
+LE_HELPER="$REPO_DIR/scripts/link_edit_helper.py"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/link-edit-reddit-$(date +%Y-%m-%d_%H%M%S).log"
@@ -60,20 +58,7 @@ LINK_EDIT_REDDIT_PAGE_GEN_RATE="${LINK_EDIT_REDDIT_PAGE_GEN_RATE:-0.0}"
 PAGE_GEN_RATE_PCT=$(python3 -c "v=float('$LINK_EDIT_REDDIT_PAGE_GEN_RATE'); v=max(0.0,min(1.0,v)); print(int(round(v*100)))")
 log "A/B gate: LINK_EDIT_REDDIT_PAGE_GEN_RATE=$LINK_EDIT_REDDIT_PAGE_GEN_RATE (page_gen_lane='page_gen' on ~${PAGE_GEN_RATE_PCT}% of eligible posts; rest go to plain_url_ab_skip)"
 
-EDITABLE=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name,
-               CASE WHEN ((hashtext(id::text) % 100) + 100) % 100 < ${PAGE_GEN_RATE_PCT}
-                    THEN 'page_gen' ELSE 'ab_skip' END AS page_gen_lane
-        FROM posts
-        WHERE status='active'
-          AND platform='reddit'
-          AND posted_at < NOW() - INTERVAL '6 hours'
-          AND link_edited_at IS NULL
-          AND our_url IS NOT NULL
-          AND upvotes > 1
-        ORDER BY upvotes DESC NULLS LAST
-    ) q;" 2>/dev/null || echo "")
+EDITABLE=$(python3 "$LE_HELPER" eligible --platform reddit --min-upvotes-exclusive 1 --page-gen-rate-pct "$PAGE_GEN_RATE_PCT" --order upvotes 2>/dev/null || echo "")
 
 if [ "$EDITABLE" = "null" ] || [ -z "$EDITABLE" ]; then
     log "No Reddit posts eligible for link edit"
@@ -109,7 +94,7 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
 1. Read ~/social-autoposter/config.json to get the projects list.
 2. Pick the project whose topics are the CLOSEST match to thread_title + our_content.
    a. First check the project_name column. If it is set AND its topics/description fit the thread, use it.
-   b. If project_name is set but CLEARLY does not fit the thread (e.g. Cyrano tagged to a law firm billing thread), treat it as a bad upstream tag and scan config.json for a project that DOES fit. If you find one, use that project instead and also run: psql "\$DATABASE_URL" -c "UPDATE posts SET project_name='BETTER_PROJECT' WHERE id=POST_ID" so the correction is persisted.
+   b. If project_name is set but CLEARLY does not fit the thread (e.g. Cyrano tagged to a law firm billing thread), treat it as a bad upstream tag and scan config.json for a project that DOES fit. If you find one, use that project instead and also run: python3 ~/social-autoposter/scripts/link_edit_helper.py set-project --post-id POST_ID --project "BETTER_PROJECT" so the correction is persisted.
    c. If project_name is NOT set, match by topics. Be generous: if the thread touches agents, automation, desktop, memory, or anything related to the project descriptions, it's a match.
    d. ONLY if no project in config.json fits at all, mark it skipped (see step 9) and move on. Frame it as recommending a cool tool you've come across, NOT as something you built.
 3. PAGE-GEN LANE GATE — read the post's \`page_gen_lane\` field (set deterministically by the pipeline; do NOT override).
@@ -157,8 +142,8 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
 7.5. RELEASE the reddit-browser lock IMMEDIATELY after the edit confirms or fails. This is mandatory — failing to release it blocks every other reddit pipeline:
        python3 ~/social-autoposter/scripts/reddit_browser_lock.py release
      Run this even if step 7 raised, errored, or you're skipping the post. Wrap step 7 in a way that step 7.5 ALWAYS executes (mental try/finally). The release is idempotent and safe to call multiple times.
-8. After each successful edit, update the DB (including link_source so we can A/B compare seo_page vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py) and backfill short-link attribution. THIS MUST RUN BEFORE YOU START THE NEXT POST:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT', link_source='LINK_SOURCE' WHERE id=POST_ID"
+8. After each successful edit, update the DB (via the HTTP API helper; pass link_source so we can A/B compare seo_page vs plain_url_fallback:* vs plain_url_no_lp click-through rates, same as Twitter does in scripts/twitter_gen_links.py) and backfill short-link attribution. THIS MUST RUN BEFORE YOU START THE NEXT POST:
+   python3 ~/social-autoposter/scripts/link_edit_helper.py mark-edited --post-id POST_ID --content "LINK_TEXT" --source "LINK_SOURCE"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
@@ -167,7 +152,7 @@ Process ALL of them SEQUENTIALLY (one at a time, full chain per post). For each 
    - NEVER make time-bound promises.
 10. SKIP HANDLING — two classes:
     A. PERMANENT skips (no project match, comment not found, removed by moderation, bad URL, post deleted, project has no landing_pages and no website at all): mark so it won't be retried.
-       psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+       python3 ~/social-autoposter/scripts/link_edit_helper.py mark-skipped --post-id POST_ID --reason "REASON"
     B. TRANSIENT skips (single_run_capacity_exceeded, batch budget exhausted, you ran out of time, reddit-agent locked by peer, anything that would resolve on retry): DO NOT stamp link_edited_at. Leave both link_edited_at and link_edit_content NULL so the next 6h cron picks it up again.
        Only annotate the reason in a comment / log line; never write to the DB for transient skips.
     If unsure which class a skip falls into, treat it as TRANSIENT (default to retry, not to swallow). Stamping link_edited_at is permanent — once set, the post is excluded from future eligibility queries forever.
@@ -204,7 +189,7 @@ rm -f "$PROMPT_FILE"
 # the lock_dir and rm-rf's it; safe even if claude already released.
 python3 "$REPO_DIR/scripts/reddit_browser_lock.py" release 2>/dev/null || true
 
-EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='reddit' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
+EDITED=$(python3 "$LE_HELPER" edited-count --platform reddit 2>/dev/null || echo "0")
 log "Reddit link-edit complete. Total reddit posts edited (all-time): $EDITED"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
