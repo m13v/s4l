@@ -25,9 +25,6 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def _use_legacy_db() -> bool:
-    return os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1"
-
 PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 
 # Archive root for post-facto investigation. ~/.claude/projects/ is Claude
@@ -679,12 +676,8 @@ def main():
         else None
     )
 
-    if _use_legacy_db():
-        backfill_counts = _persist_via_db(args, parsed, started, ended, duration_ms,
-                                            orch_cost, cycle_id)
-    else:
-        backfill_counts = _persist_via_api(args, parsed, started, ended, duration_ms,
-                                           orch_cost, cycle_id)
+    backfill_counts = _persist_via_api(args, parsed, started, ended, duration_ms,
+                                       orch_cost, cycle_id)
 
     print(json.dumps({
         "logged": True,
