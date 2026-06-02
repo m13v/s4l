@@ -107,36 +107,7 @@ fi
 log "Step 1: Done"
 
 # --- Step 2: Pick next pending query (>= 5 impressions, highest first) ---
-NEXT_JSON=$(python3 -c "
-import json, os, psycopg2
-
-# Load .env
-env_path = os.path.join('$ROOT_DIR', '.env')
-if os.path.exists(env_path):
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                os.environ.setdefault(k.strip(), v.strip())
-
-conn = psycopg2.connect(os.environ['DATABASE_URL'])
-cur = conn.cursor()
-cur.execute('''
-    SELECT query, impressions, clicks
-    FROM gsc_queries
-    WHERE product = %s AND status = %s AND impressions >= 5
-    ORDER BY impressions DESC, clicks DESC
-    LIMIT 1
-''', ('$PRODUCT', 'pending'))
-row = cur.fetchone()
-cur.close()
-conn.close()
-if row:
-    print(json.dumps({'query': row[0], 'impressions': row[1], 'clicks': row[2]}))
-else:
-    print('')
-" 2>/dev/null)
+NEXT_JSON=$(python3 "$SCRIPT_DIR/gsc_helpers.py" pick "$PRODUCT" 2>/dev/null)
 
 if [ -z "$NEXT_JSON" ]; then
     log "No pending queries with >= 5 impressions. Done."
@@ -161,44 +132,12 @@ log "Next query: '$QUERY' (slug: $SLUG)"
 FORBIDDEN_MATCH=$(python3 "$SCRIPT_DIR/db_helpers.py" check_forbidden "$PRODUCT" "$QUERY")
 if [ "$FORBIDDEN_MATCH" != "ok" ]; then
     log "Forbidden keyword pattern matched: '$FORBIDDEN_MATCH'. Marking skip."
-    SEO_PRODUCT="$PRODUCT" SEO_QUERY="$QUERY" SEO_MATCH="$FORBIDDEN_MATCH" \
-    SEO_ROOT_DIR="$ROOT_DIR" python3 -c "
-import os, psycopg2
-env_path = os.path.join(os.environ['SEO_ROOT_DIR'], '.env')
-if os.path.exists(env_path):
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                os.environ.setdefault(k.strip(), v.strip())
-conn = psycopg2.connect(os.environ['DATABASE_URL'])
-cur = conn.cursor()
-cur.execute(\"UPDATE gsc_queries SET status='skip', notes=%s, updated_at=NOW() WHERE product=%s AND query=%s\",
-            ('forbidden_keyword: ' + os.environ['SEO_MATCH'],
-             os.environ['SEO_PRODUCT'], os.environ['SEO_QUERY']))
-conn.commit(); cur.close(); conn.close()
-" 2>/dev/null
+    python3 "$SCRIPT_DIR/gsc_helpers.py" mark "$PRODUCT" "$QUERY" skip "forbidden_keyword: $FORBIDDEN_MATCH" 2>/dev/null
     exit 0
 fi
 
 # --- Step 3: Mark in_progress ---
-python3 -c "
-import os, psycopg2
-env_path = '$ROOT_DIR/.env'
-if os.path.exists(env_path):
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                os.environ.setdefault(k.strip(), v.strip())
-conn = psycopg2.connect(os.environ['DATABASE_URL'])
-cur = conn.cursor()
-cur.execute(\"UPDATE gsc_queries SET status='in_progress', updated_at=NOW() WHERE product=%s AND query=%s\",
-            ('$PRODUCT', '$QUERY'))
-conn.commit(); cur.close(); conn.close()
-" 2>/dev/null
+python3 "$SCRIPT_DIR/gsc_helpers.py" mark "$PRODUCT" "$QUERY" in_progress 2>/dev/null
 
 # --- Step 4: Hand off to unified generator ---
 # Generator owns: prompt, stream-json tool capture, git verification,
@@ -216,23 +155,5 @@ fi
 log "Step 4: Done."
 
 # --- Summary ---
-COUNTS=$(python3 -c "
-import os, psycopg2
-env_path = '$ROOT_DIR/.env'
-if os.path.exists(env_path):
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                os.environ.setdefault(k.strip(), v.strip())
-conn = psycopg2.connect(os.environ['DATABASE_URL'])
-cur = conn.cursor()
-cur.execute('SELECT status, COUNT(*) FROM gsc_queries WHERE product=%s GROUP BY status', ('$PRODUCT',))
-counts = dict(cur.fetchall())
-cur.close(); conn.close()
-print('done={} pending={} skip={} in_progress={}'.format(
-    counts.get('done',0), counts.get('pending',0),
-    counts.get('skip',0), counts.get('in_progress',0)))
-" 2>/dev/null)
+COUNTS=$(python3 "$SCRIPT_DIR/gsc_helpers.py" summary "$PRODUCT" 2>/dev/null)
 log "=== GSC Pipeline complete: $PRODUCT | $COUNTS ==="
