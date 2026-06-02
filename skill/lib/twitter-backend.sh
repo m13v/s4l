@@ -227,3 +227,65 @@ defer_if_foreign_for_backend() {
     # the twitter-agent profile. Always return 1 (do not defer).
     return 1
 }
+
+# --- browser-harness `-c` capability self-heal (added 2026-06-02) -----------
+# A stale ~/Developer/browser-harness checkout that PREDATES the `-c` interface
+# makes `browser-harness -c "<script>"` print its usage string instead of
+# running the script. The Phase 1 scan loop in run-twitter-cycle.sh then yields
+# zero tweets with no obvious cause. cli.js documents the same failure for the
+# bh_run MCP path. When this bit the testing machine, the debugging agent saw
+# the `-c` flag, WRONGLY assumed it was unsupported, and proposed rewriting the
+# call to a nonexistent "stdin form" (browser-harness has no stdin mode — `-c`
+# is the only interface; see run.py). This runs at source-time, before any
+# `-c` call, so all twitter harness scripts (cycle/threads/engage/dm/followups)
+# get auto-repair. Static probe is one grep when fresh (zero steady-state cost);
+# the git+uv refresh only fires when the checkout is actually stale.
+_sa_harness_log() {
+    # Use the caller's log() FUNCTION when present; `declare -F` matches only a
+    # shell function, never the macOS /usr/bin/log binary (command -v would).
+    if declare -F log >/dev/null 2>&1; then log "$*"; else echo "[$(date +%H:%M:%S)] $*" >&2; fi
+}
+_sa_resolve_uv() {
+    local c
+    c="$(command -v uv 2>/dev/null)" && { echo "$c"; return 0; }
+    for c in "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+ensure_harness_c_support() {
+    # Run once per process even if several libs source this file.
+    [ -n "${_SA_HARNESS_C_CHECKED:-}" ] && return 0
+    export _SA_HARNESS_C_CHECKED=1
+
+    local src="$HOME/Developer/browser-harness"
+    local run_py="$src/src/browser_harness/run.py"
+    local bh="$HOME/.local/bin/browser-harness"
+
+    # Static capability probe — no daemon/Chrome needed. The CLI is an editable
+    # (`uv tool install -e`) install of $src, so its run.py is the source of
+    # truth for whether `-c` is recognized.
+    if [ -f "$run_py" ] && grep -q '"-c"' "$run_py"; then
+        return 0
+    fi
+
+    _sa_harness_log "[harness] browser-harness checkout missing/stale (no -c support) -> self-healing via git + uv..."
+    if [ -d "$src/.git" ]; then
+        git -C "$src" fetch --depth 1 origin HEAD >/dev/null 2>&1 \
+            && git -C "$src" reset --hard FETCH_HEAD >/dev/null 2>&1
+    fi
+    local uv; uv="$(_sa_resolve_uv || true)"
+    if [ -n "$uv" ] && [ -d "$src" ]; then
+        "$uv" tool install --force -e "$src" >/dev/null 2>&1 || true
+    fi
+    [ -x "$bh" ] && "$bh" --reload >/dev/null 2>&1 || true
+
+    if [ -f "$run_py" ] && grep -q '"-c"' "$run_py"; then
+        _sa_harness_log "[harness] self-heal OK -> browser-harness -c is supported now"
+        return 0
+    fi
+    _sa_harness_log "[harness] ERROR: browser-harness still lacks -c after self-heal."
+    _sa_harness_log "[harness] FIX: run 'social-autoposter update' (re-clones/refreshes $src + reinstalls the CLI). The -c flag is CORRECT; browser-harness has NO stdin mode, so do NOT rewrite the cycle to a stdin form."
+    return 1
+}
+ensure_harness_c_support || true
