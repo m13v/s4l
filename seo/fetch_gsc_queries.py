@@ -24,20 +24,12 @@ ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 CONFIG_FILE = os.path.join(ROOT_DIR, "config.json")
 SA_PATH = os.path.join(SCRIPT_DIR, "credentials", "seo-autopilot-sa.json")
 
+sys.path.insert(0, os.path.join(ROOT_DIR, "scripts"))
+from http_api import api_get, api_post, load_env  # noqa: E402
+
 PERIOD_DAYS = 90
 ROW_LIMIT = 25000
 IMPRESSIONS_THRESHOLD = 5
-
-
-def load_env():
-    env_path = os.path.join(ROOT_DIR, ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
 
 
 def get_product_config(product_name):
@@ -76,12 +68,6 @@ def fetch_gsc_rows(gsc_property):
     return result.get("rows", [])
 
 
-def get_conn():
-    import psycopg2
-    load_env()
-    return psycopg2.connect(os.environ["DATABASE_URL"])
-
-
 def classify(query_text, brand_terms):
     q = query_text.lower().strip()
     if q in {t.lower() for t in brand_terms}:
@@ -95,79 +81,44 @@ def upsert(product, rows, brand_terms, dry_run=False):
         print(f"[fetch_gsc_queries] DRY RUN: would upsert {len(rows)} queries ({added} above threshold)")
         return len(rows), 0
 
-    from psycopg2.extras import execute_values
-
-    values = [
-        (
-            product,
-            row["keys"][0],
-            int(row["impressions"]),
-            int(row["clicks"]),
-            float(row.get("ctr", 0)),
-            float(row.get("position", 0)),
-            classify(row["keys"][0], brand_terms),
-        )
+    payload_rows = [
+        {
+            "query": row["keys"][0],
+            "impressions": int(row["impressions"]),
+            "clicks": int(row["clicks"]),
+            "ctr": float(row.get("ctr", 0)),
+            "position": float(row.get("position", 0)),
+            "status": classify(row["keys"][0], brand_terms),
+        }
         for row in rows
     ]
-
-    if not values:
+    if not payload_rows:
         return 0, 0
 
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Single batched upsert. xmax=0 identifies freshly inserted rows;
-    # anything else is an existing row that got its metrics refreshed.
-    sql = """
-        INSERT INTO gsc_queries
-          (product, query, impressions, clicks, ctr, position, status)
-        VALUES %s
-        ON CONFLICT (product, query) DO UPDATE SET
-          impressions = EXCLUDED.impressions,
-          clicks      = EXCLUDED.clicks,
-          ctr         = EXCLUDED.ctr,
-          position    = EXCLUDED.position,
-          last_seen   = NOW(),
-          updated_at  = NOW()
-        RETURNING (xmax = 0) AS inserted
-    """
-    results = execute_values(cur, sql, values, page_size=1000, fetch=True)
-    added = sum(1 for r in results if r[0])
-    updated = len(results) - added
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    return added, updated
+    resp = api_post("/api/v1/seo/gsc-queries", {"product": product, "rows": payload_rows})
+    data = resp.get("data") or {}
+    return int(data.get("added") or 0), int(data.get("updated") or 0)
 
 
 def print_summary(product, dry_run=False):
     if dry_run:
         return
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT status, COUNT(*) FROM gsc_queries WHERE product = %s GROUP BY status
-    """, (product,))
-    counts = dict(cur.fetchall())
+    resp = api_get("/api/v1/seo/gsc-queries", query={"mode": "stats", "product": product})
+    by_status = (resp.get("data") or {}).get("by_status") or []
+    counts = {r.get("status"): int(r.get("count") or 0) for r in by_status}
     pending = counts.get("pending", 0)
     done = counts.get("done", 0)
     skip = counts.get("skip", 0)
     in_progress = counts.get("in_progress", 0)
     print(f"[fetch_gsc_queries] pending={pending} done={done} skip={skip} in_progress={in_progress}")
 
-    cur.execute("""
-        SELECT query, impressions, clicks FROM gsc_queries
-        WHERE product = %s AND status = 'pending' AND impressions >= %s
-        ORDER BY impressions DESC LIMIT 10
-    """, (product, IMPRESSIONS_THRESHOLD))
-    rows = cur.fetchall()
+    resp = api_get("/api/v1/seo/gsc-queries",
+                   query={"mode": "top_pending", "product": product, "limit": 10})
+    rows = (resp.get("data") or {}).get("rows") or []
     if rows:
         print(f"\n[fetch_gsc_queries] Top 10 pending queries (>={IMPRESSIONS_THRESHOLD} impr):")
-        for query, impr, clk in rows:
-            print(f"  {impr:>5} impr  {clk:>4} clk  {query}")
-    cur.close()
-    conn.close()
+        for r in rows:
+            print(f"  {int(r.get('impressions') or 0):>5} impr  {int(r.get('clicks') or 0):>4} clk  {r.get('query')}")
 
 
 def main():
