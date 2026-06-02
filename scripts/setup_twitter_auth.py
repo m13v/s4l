@@ -412,6 +412,99 @@ def _import_from(source: str) -> dict:
     }
 
 
+# --- Headless / Keychain pre-flight (#3 + #4, added 2026-06-02) -------------
+# macOS Keychain access for Chrome's Safe Storage is GUI-session-gated. Calls
+# from SSH-invoked processes (cron, ansible, the macstadium test runner, etc.)
+# silently get errSecAuthFailed because there's no GUI to render an auth
+# prompt to. Without these helpers, copy_browser_cookies.py fails with a
+# generic "access denied", setup_twitter_auth re-classifies as needs_login,
+# and the user sees "log in manually" when the actual cause is "your process
+# can't read the OS keychain." This block detects the headless case up front
+# AND classifies the import error so the user-facing message is accurate.
+
+def _is_headless() -> bool:
+    """True when running without a GUI/interactive session — the case where
+    Keychain Safe Storage reads will silently deny without a prompt."""
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"):
+        return True
+    try:
+        if not sys.stdin.isatty():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _keychain_safe_storage_ok(browser_label: str = "Chrome") -> tuple[bool, str]:
+    """Probe whether the OS keychain entry for `<browser_label> Safe Storage`
+    is readable by THIS process. Returns (ok, detail_for_log)."""
+    svc = f"{browser_label} Safe Storage"
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", svc, "-a", browser_label, "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"security probe failed: {e}"
+    if r.returncode == 0:
+        return True, "accessible"
+    err_tail = (r.stderr or "").strip().splitlines()
+    return False, (err_tail[-1] if err_tail else f"exit {r.returncode}")
+
+
+def _classify_import_error(detail: str | None) -> str:
+    """Map a copy_browser_cookies.py error string to a structured type so the
+    upper layers (connect_x, the user) can show a precise remediation instead
+    of a generic 'needs_login'."""
+    if not detail:
+        return "unknown"
+    d = detail.lower()
+    # Keychain access issues — most common on headless runs.
+    if ("user interaction is not allowed" in d) or ("interaction is not allowed" in d):
+        return "keychain_locked"
+    if ("access denied" in d) or ("errsecauth" in d) or ("-25293" in d):
+        return "keychain_acl_denied"
+    if ("not be found in the keychain" in d) or ("errsecitemnotfound" in d):
+        return "keychain_entry_missing"
+    # Source profile / browser mapping
+    if ("no profile" in d) or ("available" in d and "profiles" in d):
+        return "source_profile_not_found"
+    # CDP injection
+    if ("websocket" in d) or ("connection refused" in d) or ("port" in d and "9555" in d):
+        return "cdp_inject_failed"
+    return "unknown"
+
+
+def _force_cookie_flush() -> tuple[bool, str]:
+    """Trigger Chrome's cookie-store flush via CDP Browser.close (#2).
+
+    Verified empirically on Chrome 148/macOS 26: Browser.close synchronously
+    commits the in-memory CookieMonster to the on-disk SQLite, but does NOT
+    actually terminate the process. We rely on the flush side-effect, so a
+    SIGKILL immediately after import no longer wipes the imported cookies.
+
+    Returns (ok, detail). ok=True if the RPC was issued cleanly; the process
+    still being alive afterwards is expected behavior, not a failure."""
+    bh = Path.home() / ".local" / "bin" / "browser-harness"
+    if not bh.exists():
+        return False, f"browser-harness CLI missing at {bh}"
+    env = os.environ.copy()
+    env["BU_CDP_URL"] = CDP
+    env.setdefault("BU_NAME", "twitter-harness")
+    env["PATH"] = f"{Path.home()}/.local/bin:" + env.get("PATH", "")
+    try:
+        r = subprocess.run(
+            [str(bh)],
+            input="cdp('Browser.close')\n",
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"browser-harness invocation failed: {e}"
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[:300]
+    return True, "Browser.close issued; cookie store flushed to SQLite"
+
+
 # --- Commands ---------------------------------------------------------------
 
 def cmd_status(args) -> dict:
@@ -462,26 +555,79 @@ def cmd_connect(args) -> dict:
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error", "error": str(e), "cdp": CDP}
 
+    # 1b. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02).
+    # On macOS, copy_browser_cookies.py needs to read the per-browser Safe
+    # Storage entry from the OS keychain. SSH-invoked processes get
+    # errSecAuthFailed silently — no prompt, no warning. We probe up front so
+    # the user sees "your keychain is locked / run unlock-keychain" instead of
+    # the misleading "log in manually" cascade.
+    headless = _is_headless()
+    if headless:
+        # Probe with the first source's likely browser label. We don't know
+        # which source will succeed yet, so probe Chrome (the autoposter
+        # default); if that's denied, all the AUTO_SOURCES will be too.
+        kc_ok, kc_detail = _keychain_safe_storage_ok("Chrome")
+        if not kc_ok:
+            return {
+                "ok": True,
+                "connected": False,
+                "state": "keychain_locked",
+                "error_type": "keychain_locked",
+                "headless": True,
+                "keychain_detail": kc_detail,
+                "note": (
+                    "Cookie import requires reading Chrome's Safe Storage from the macOS "
+                    "Keychain, but this process can't access it (probably running over SSH "
+                    "or another headless context). No GUI prompt is shown for this — macOS "
+                    "denies access silently. To fix, run this once in the same session:\n"
+                    "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
+                    "Then re-run connect_x. If you're on the autoposter machine via SSH, you "
+                    "may also need to run it before every fresh shell, or persist with "
+                    "`security set-keychain-settings -lut 0`."
+                ),
+                "remediation_cmd": "security unlock-keychain ~/Library/Keychains/login.keychain-db",
+                "cdp": CDP,
+            }
+
     # 2. Import from the user's everyday browser.
     sources = [args.source] if args.source else AUTO_SOURCES
     attempts = []
     for src in sources:
         res = _import_from(src)
         copied = res.get("stdout", "")
-        attempts.append({"source": src, "ok": res.get("ok"), "detail": copied or res.get("error") or res.get("stderr")})
+        detail = copied or res.get("error") or res.get("stderr")
+        # #3: classify the error so the caller doesn't see string soup.
+        error_type = None if res.get("ok") else _classify_import_error(detail)
+        attempts.append({
+            "source": src,
+            "ok": res.get("ok"),
+            "detail": detail,
+            "error_type": error_type,
+        })
         if not res.get("ok"):
             continue
         # 3. Re-validate after this source.
         try:
             if _is_session_valid():
                 _save_session_to_store()
+                # #2: force a cookie-store flush via CDP Browser.close so the
+                # imported session survives any subsequent SIGKILL (e.g. the
+                # autoposter cron stopping Chrome with no grace window). Empty
+                # result on this build is success — Browser.close triggers the
+                # flush synchronously but doesn't actually terminate Chrome.
+                flush_ok, flush_detail = _force_cookie_flush()
                 return {
                     "ok": True,
                     "connected": True,
                     "state": "imported",
                     "source": src,
                     "attempts": attempts,
-                    "note": f"Imported your X session from {src} into the autoposter browser.",
+                    "flushed_to_disk": flush_ok,
+                    "flush_detail": flush_detail,
+                    "note": f"Imported your X session from {src} into the autoposter browser. "
+                            + ("Cookies flushed to disk (persists across Chrome restart)."
+                               if flush_ok else
+                               "Cookies are in RAM; a clean stop_chrome (1.6.32+) will flush them."),
                     "cdp": CDP,
                 }
         except Exception:
@@ -502,10 +648,18 @@ def cmd_connect(args) -> dict:
         "autoposter's own profile, so this is a one-time step. "
         "(Auto-import tried: " + ", ".join(sources) + ".)"
     )
+    # If every attempt classified to the same root cause, surface it so the
+    # caller doesn't keep telling the user "log in manually" when really the
+    # keychain is locked / no source profile exists / CDP isn't reachable.
+    distinct_error_types = {a.get("error_type") for a in attempts if a.get("error_type")}
+    rolled_up_error_type = (
+        next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
+    )
     return {
         "ok": True,
         "connected": False,
         "state": "needs_login",
+        "error_type": rolled_up_error_type,
         "attempts": attempts,
         "login_window_opened": shown,
         "note": note,
