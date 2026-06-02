@@ -198,7 +198,7 @@ TW_ENGINE_PREFIX="${BROWSER_INSTRUCTIONS}"$'\n\n' # inject backend + translation
 # twitter_batches row. SIGKILL / OOM / hard crash bypasses traps and
 # intentionally leaves the row stale — that's the salvage recovery path.
 _sa_cleanup_batch_row() {
-    if [ -n "${BATCH_ID:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+    if [ -n "${BATCH_ID:-}" ]; then
         python3 "$REPO_DIR/scripts/twitter_batch_phase.py" end "$BATCH_ID" 2>/dev/null || true
     fi
 }
@@ -1253,13 +1253,12 @@ done
 # top-reply ratio) stay continuous with the historical experiment rows.
 # Idempotent: same value would be written if the batch is salvaged into a peer
 # cycle.
-python3 -c "
-import os, psycopg2 as psycopg
-with psycopg.connect(os.environ['DATABASE_URL']) as conn:
-    with conn.cursor() as cur:
-        cur.execute('UPDATE twitter_candidates SET cycle_variant=%s WHERE batch_id=%s AND cycle_variant IS NULL', (os.environ['TWITTER_CYCLE_VARIANT'], os.environ['BATCH_ID']))
-        conn.commit()
-" 2>>"$LOG_FILE" || log "Phase 1: cycle_variant stamp failed (non-fatal)"
+# HTTP-only (2026-06-01): the cycle_variant stamp routes through
+# /api/v1/twitter-candidates/stamp-cycle-variant via twitter_cycle_helper.py.
+# No DATABASE_URL, no psycopg, no fallback. Idempotent: only NULL rows touched.
+python3 "$REPO_DIR/scripts/twitter_cycle_helper.py" stamp-cycle-variant \
+    --batch-id "$BATCH_ID" --variant "$TWITTER_CYCLE_VARIANT" \
+    >/dev/null 2>>"$LOG_FILE" || log "Phase 1: cycle_variant stamp failed (non-fatal)"
 
 # Promote cumulative totals onto the per-iteration names so every downstream
 # log_run.py / trap handler picks up the cycle-level work (not just the last
