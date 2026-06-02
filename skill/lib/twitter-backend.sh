@@ -254,38 +254,14 @@ _sa_resolve_uv() {
     return 1
 }
 ensure_harness_c_support() {
-    # Run once per process even if several libs source this file.
-    [ -n "${_SA_HARNESS_C_CHECKED:-}" ] && return 0
-    export _SA_HARNESS_C_CHECKED=1
-
-    local src="$HOME/Developer/browser-harness"
-    local run_py="$src/src/browser_harness/run.py"
-    local bh="$HOME/.local/bin/browser-harness"
-
-    # Static capability probe — no daemon/Chrome needed. The CLI is an editable
-    # (`uv tool install -e`) install of $src, so its run.py is the source of
-    # truth for whether `-c` is recognized.
-    if [ -f "$run_py" ] && grep -q '"-c"' "$run_py"; then
-        return 0
-    fi
-
-    _sa_harness_log "[harness] browser-harness checkout missing/stale (no -c support) -> self-healing via git + uv..."
-    if [ -d "$src/.git" ]; then
-        git -C "$src" fetch --depth 1 origin HEAD >/dev/null 2>&1 \
-            && git -C "$src" reset --hard FETCH_HEAD >/dev/null 2>&1
-    fi
-    local uv; uv="$(_sa_resolve_uv || true)"
-    if [ -n "$uv" ] && [ -d "$src" ]; then
-        "$uv" tool install --force -e "$src" >/dev/null 2>&1 || true
-    fi
-    [ -x "$bh" ] && "$bh" --reload >/dev/null 2>&1 || true
-
-    if [ -f "$run_py" ] && grep -q '"-c"' "$run_py"; then
-        _sa_harness_log "[harness] self-heal OK -> browser-harness -c is supported now"
-        return 0
-    fi
-    _sa_harness_log "[harness] ERROR: browser-harness still lacks -c after self-heal."
-    _sa_harness_log "[harness] FIX: run 'social-autoposter update' (re-clones/refreshes $src + reinstalls the CLI). The -c flag is CORRECT; browser-harness has NO stdin mode, so do NOT rewrite the cycle to a stdin form."
-    return 1
+    # Retired 2026-06-02. Upstream browser-harness removed `-c` in favor of
+    # stdin-heredoc (commits after merge-base 0e679e2); our server.py wrapper
+    # now passes scripts via stdin (input=script) so the CLI shape doesn't
+    # need any pre-flight probing. The old gate grepped run.py for `"-c"`
+    # which always fails against current upstream, and its "self-heal" was a
+    # `git reset --hard FETCH_HEAD` on ~/Developer/browser-harness that
+    # would clobber local commits AND not actually re-add `-c`. Keep the
+    # name + no-op return so older sourced contexts that call it don't break.
+    return 0
 }
 ensure_harness_c_support || true
