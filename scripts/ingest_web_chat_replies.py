@@ -29,7 +29,7 @@ from email import message_from_bytes
 from email.policy import default as email_default_policy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -121,9 +121,6 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
     try:
         service = gmail_service()
     except Exception as e:
@@ -157,14 +154,14 @@ def main():
             continue
 
         thread_db_id = int(m.group(1))
-        thread = conn.execute(
-            "SELECT thread_id, project_name, visitor_email FROM web_chat_threads WHERE id = %s",
-            (thread_db_id,),
-        ).fetchone()
-        if not thread:
+        thread_resp = api_get(
+            f"/api/v1/web-chat/thread-by-id/{thread_db_id}", ok_on_404=True
+        )
+        if thread_resp.get("_not_found"):
             print(f"  SKIP {gmail_id}: thread #{thread_db_id} not found")
             skipped += 1
             continue
+        thread = thread_resp.get("data") or {}
 
         body = pick_plain_body(email_msg)
         reply_text = strip_quoted(body)
@@ -174,12 +171,12 @@ def main():
             continue
 
         # Dedup on gmail id (partial unique index in schema, but pre-check anyway).
-        already = conn.execute(
-            "SELECT id FROM web_chat_messages WHERE ingested_gmail_id = %s LIMIT 1",
-            (gmail_id,),
-        ).fetchone()
-        if already:
-            print(f"  SKIP {gmail_id}: already ingested as msg #{already['id']}")
+        dedup = api_get(
+            "/api/v1/web-chat/gmail-ingested", query={"gmail_id": gmail_id}
+        )
+        already_id = (dedup.get("data") or {}).get("ingested_message_id")
+        if already_id:
+            print(f"  SKIP {gmail_id}: already ingested as msg #{already_id}")
             skipped += 1
             try:
                 service.users().messages().modify(
@@ -197,29 +194,19 @@ def main():
 
         # Insert as sender='founder' AND fire visitor email via send-email.js
         # (use send_web_chat_reply.py so the dedup + email logic stays in one place).
+        # Pass --ingested-gmail-id so the reply endpoint stamps it on the
+        # inserted row directly, keeping dedup honest on re-runs.
         try:
             subprocess.run(
-                ["python3", SEND_REPLY,
+                [sys.executable, SEND_REPLY,
                  "--thread", thread["thread_id"],
                  "--text", reply_text,
                  "--name", "matt",
-                 "--sender", "founder"],
+                 "--sender", "founder",
+                 "--ingested-gmail-id", gmail_id],
                 check=True,
                 timeout=60,
             )
-            # Tag the just-inserted message with the gmail id so dedup works on re-runs.
-            conn.execute(
-                """
-                UPDATE web_chat_messages
-                   SET ingested_gmail_id = %s
-                 WHERE thread_id = %s
-                   AND sender = 'founder'
-                   AND ingested_gmail_id IS NULL
-                   AND created_at > NOW() - INTERVAL '5 minutes'
-                """,
-                (gmail_id, thread["thread_id"]),
-            )
-            conn.commit()
         except Exception as e:
             print(f"  ERROR {gmail_id}: send_web_chat_reply.py failed: {e}")
             skipped += 1
