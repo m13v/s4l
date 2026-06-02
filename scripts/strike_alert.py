@@ -75,7 +75,7 @@ if _GH_BIN is None:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
-import db as dbmod
+from http_api import api_get, api_patch, load_env  # noqa: E402
 
 GMAIL_TOKEN_PATH = os.path.expanduser("~/gmail-api/token_i_at_m13v.com.json")
 GMAIL_SCOPES = ["https://mail.google.com/"]
@@ -338,18 +338,18 @@ def _reddit_live_recheck(our_url, our_account, user_agent):
         return "unknown"
 
 
-def _resurrect_post(db, post_id):
+def _resurrect_post(post_id):
     """Flip a Reddit strike row back to 'active' after a live re-check confirms
     the comment is still visible. Mirrors update_reddit_resurrect's UPDATE."""
-    db.execute(
-        "UPDATE posts SET status='active', deletion_detect_count=0, "
-        "resurrected_at=NOW(), status_checked_at=NOW() WHERE id=%s",
-        [post_id],
-    )
-    db.commit()
+    api_patch(f"/api/v1/posts/{int(post_id)}", {
+        "status": "active",
+        "reset_deletion_detect_count": True,
+        "stamp_resurrected_now": True,
+        "stamp_status_checked_now": True,
+    })
 
 
-def _owner_strike_count(db, owner, days=90):
+def _owner_strike_count(owner, days=90):
     """How many of our posts under this owner have been moderated in the
     last `days` days, excluding posts whose entire parent repo is now 404
     (repo-gone is not a moderation strike). Mirrors the same filtering used
@@ -357,18 +357,16 @@ def _owner_strike_count(db, owner, days=90):
     search-time blocklist stay in sync."""
     if not owner:
         return (0, 0)
-    cur = db.execute(
-        "SELECT thread_url FROM posts "
-        "WHERE platform='github' "
-        "  AND posted_at > NOW() - INTERVAL %s "
-        "  AND lower(thread_url) LIKE %s "
-        "  AND (status='deleted' OR COALESCE(deletion_detect_count, 0) > 0)",
-        [f"{int(days)} days", f"https://github.com/{owner.lower()}/%"],
-    )
+    prefix = f"https://github.com/{owner.lower()}/"
+    resp = api_get("/api/v1/posts/thread-urls", query={
+        "platform": "github", "moderated_within_days": int(days),
+    })
+    all_urls = (resp.get("data") or {}).get("thread_urls") or []
     raw_count = 0
     live_count = 0
-    for r in cur.fetchall():
-        url = r[0] if not hasattr(r, "get") else r["thread_url"]
+    for url in all_urls:
+        if not url or not url.lower().startswith(prefix):
+            continue
         raw_count += 1
         state = _github_repo_state(url)
         # repo_gone, issue_deleted, and feature_disabled are all "owner
@@ -404,7 +402,7 @@ def _format_subject(post, repo_state=None):
     )
 
 
-def _format_body(db, post, repo_state=None):
+def _format_body(post, repo_state=None):
     platform = post["platform"] or "?"
     status = post["status"] or "?"
     project = post["project_name"] or "(no project)"
@@ -450,7 +448,7 @@ def _format_body(db, post, repo_state=None):
         parts = urlparse(thread_url).path.strip("/").split("/")
         owner = parts[0] if parts else None
         if owner:
-            live_n, raw_n = _owner_strike_count(db, owner)
+            live_n, raw_n = _owner_strike_count(owner)
             from github_tools import DYNAMIC_BLOCK_THRESHOLD as THR
             verdict = (
                 "AUTO-BLOCKLISTED" if live_n >= THR
@@ -508,16 +506,11 @@ def _send_email(subject, body):
     return service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
 
-def _select_pending(db, post_id=None, limit=None):
+def _select_pending(post_id=None, limit=None):
     if post_id is not None:
-        cur = db.execute(
-            "SELECT id, platform, status, project_name, our_account, posted_at, "
-            "  status_checked_at, thread_url, our_url, thread_title, our_content, "
-            "  engagement_style, deletion_detect_count, strike_email_sent_at "
-            "FROM posts WHERE id=%s",
-            [post_id],
-        )
-        return cur.fetchall()
+        resp = api_get(f"/api/v1/posts/{int(post_id)}", ok_on_404=True)
+        post = (resp.get("data") or {}).get("post") if resp else None
+        return [post] if post else []
     # Mentions live in the dedicated `mentions` table now (2026-05-23 cutover);
     # no posts-level filter needed. Previously this clause excluded placeholder
     # `posts` rows where our_content = '(mention - no original post)' to avoid
@@ -526,25 +519,13 @@ def _select_pending(db, post_id=None, limit=None):
     # migrate_mentions_out_of_posts.py --commit-delete; the posts table now
     # only contains content we authored, so every status='deleted' row IS a
     # real moderation strike against us.
-    sql = (
-        "SELECT id, platform, status, project_name, our_account, posted_at, "
-        "  status_checked_at, thread_url, our_url, thread_title, our_content, "
-        "  engagement_style, deletion_detect_count, strike_email_sent_at "
-        "FROM posts "
-        "WHERE status IN ('deleted','removed') AND strike_email_sent_at IS NULL "
-        "ORDER BY COALESCE(status_checked_at, posted_at) DESC"
-    )
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-    cur = db.execute(sql)
-    return cur.fetchall()
+    resp = api_get("/api/v1/posts/pending-strikes",
+                   query={"limit": int(limit)} if limit else None)
+    return (resp.get("data") or {}).get("posts") or []
 
 
-def _mark_sent(db, post_id):
-    db.execute(
-        "UPDATE posts SET strike_email_sent_at=NOW() WHERE id=%s", [post_id]
-    )
-    db.commit()
+def _mark_sent(post_id):
+    api_patch(f"/api/v1/posts/{int(post_id)}", {"stamp_strike_email_sent_now": True})
 
 
 def main():
@@ -561,8 +542,7 @@ def main():
                         help="Print what would be sent without sending or marking.")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    db = dbmod.get_conn()
+    load_env()
 
     # Reddit user-agent for the live re-check. Mirrors stats.py:1924
     # so the pre-send re-check uses the same UA Reddit already saw on the
@@ -582,7 +562,7 @@ def main():
         if _reddit_username else "social-autoposter/1.0"
     )
 
-    rows = _select_pending(db, post_id=args.post_id, limit=args.limit)
+    rows = _select_pending(post_id=args.post_id, limit=args.limit)
     if not rows:
         print("[strike_alert] no pending strikes")
         return
@@ -618,7 +598,7 @@ def main():
             )
             if live_state == "alive":
                 if not args.dry_run:
-                    _resurrect_post(db, r["id"])
+                    _resurrect_post(r["id"])
                 filtered += 1
                 print(
                     f"[strike_alert] filtered id={r['id']} reason=reddit-alive "
@@ -649,7 +629,7 @@ def main():
             "repo_gone", "issue_deleted", "feature_disabled"
         ):
             if not args.dry_run:
-                _mark_sent(db, r["id"])
+                _mark_sent(r["id"])
             filtered += 1
             reason_map = {
                 "repo_gone": "repo-gone",
@@ -665,7 +645,7 @@ def main():
             continue
 
         subject = _format_subject(r, repo_state=repo_state)
-        body = _format_body(db, r, repo_state=repo_state)
+        body = _format_body(r, repo_state=repo_state)
         if args.dry_run:
             print(f"[strike_alert] DRY RUN id={r['id']}")
             print(f"  subject: {subject}")
