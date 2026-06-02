@@ -1116,11 +1116,49 @@ function doctor() {
       `print(c.execute("SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%x.com' OR host_key LIKE '%twitter.com'").fetchone()[0])`,
     ], { encoding: 'utf8', timeout: 10000 });
     const n = parseInt((r.stdout || '0').trim(), 10);
-    if (n > 0) return { ok: true, detail: `${n} rows persisted (durable across Chrome restart)` };
+    if (n > 0) return { ok: true, detail: `${n} rows persisted (Chrome's encrypted store)` };
     return {
       ok: false,
       detail: '0 x.com rows in SQLite',
-      fix: 'run setup_twitter_auth.py connect to import + auto-flush via #2 (1.6.34+)',
+      fix: 'run setup_twitter_auth.py connect to import (durability is backed by the cookie mirror below)',
+    };
+  });
+
+  // Gap B durability layer (1.6.35+): the keychain-independent local cookie
+  // mirror is what survives a re-locked keychain wiping Chrome's encrypted
+  // Cookies DB on relaunch. Read it directly (plaintext 0600 JSON).
+  const mirrorPath = path.join(HOME, '.claude', 'browser-profiles', 'browser-harness.x-cookies.json');
+  const mirrorCount = () => {
+    try {
+      const data = JSON.parse(fs.readFileSync(mirrorPath, 'utf8'));
+      return Array.isArray(data.cookies) ? data.cookies.length : 0;
+    } catch { return -1; }
+  };
+
+  add('X cookie mirror (durable across keychain re-lock)', () => {
+    const n = mirrorCount();
+    if (n > 0) return { ok: true, detail: `${n} cookies mirrored — cycle preflight auto-restores after a wipe` };
+    if (n === 0) return { ok: false, detail: 'mirror file present but empty', fix: 'run setup_twitter_auth.py connect to (re)populate the mirror' };
+    return { ok: false, detail: `no mirror at ${mirrorPath}`, fix: 'run setup_twitter_auth.py connect (1.6.35+) to create the durable cookie mirror' };
+  });
+
+  add('macOS Keychain: login keychain auto-lock', () => {
+    if (process.platform !== 'darwin') return { ok: true, detail: 'skipped (non-macOS)' };
+    const kc = path.join(HOME, 'Library', 'Keychains', 'login.keychain-db');
+    const r = spawnSync('security', ['show-keychain-info', kc], { encoding: 'utf8', timeout: 10000 });
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    const m = out.match(/timeout=(\d+)s/);
+    if (!m) return { ok: true, detail: 'no auto-lock timeout (encrypted cookie store stays decryptable)' };
+    const secs = parseInt(m[1], 10);
+    // Only a real problem if the keychain re-locks AND the mirror isn't there to
+    // cover the resulting Cookies-DB wipe. With a populated mirror this is benign.
+    if (mirrorCount() > 0) {
+      return { ok: true, detail: `auto-locks after ${secs}s, but the cookie mirror covers the relaunch-wipe case` };
+    }
+    return {
+      ok: false,
+      detail: `auto-locks after ${secs}s — Chrome's encrypted cookie store can wipe on relaunch with no mirror to restore from`,
+      fix: `run connect_x to create the cookie mirror, or disable auto-lock: security set-keychain-settings "${kc}"`,
     };
   });
 
