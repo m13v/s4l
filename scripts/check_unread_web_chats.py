@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Check Postgres for web-chat threads with unread visitor messages.
+"""Check for web-chat threads with unread visitor messages (HTTP-only).
 
-Mirror of ~/fazm/inbox/scripts/check-unread-chats.js but reads/writes
-Postgres web_chat_threads / web_chat_messages tables instead of Firestore.
+Reads GET /api/v1/web-chat/unread, which (1) recovers stuck threads and
+(2) returns each unread, claimable thread with its first 200 messages embedded
+in one round trip. Replaces the inline psycopg2 reads.
 
-Returns JSON array of:
+Prints a JSON array of:
   { thread_id, project, visitor_email, visitor_name, unread, last_message,
     page_url, messages: [{ id, text, sender, sender_name, created_at, read }] }
-
-Also recovers stuck threads (last_message_sender='visitor' but
-unread_by_founder=0 with expired claimed_until) by re-flagging them as unread.
-This catches Claude sessions that died without unclaiming.
 """
 
 import json
@@ -18,90 +15,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 
 
 def main():
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
-    # Recover stuck threads first.
-    #
-    # `processed_at` is the idempotency gate: it's stamped at the END of a
-    # successful Claude session (replied OR explicitly skipped). Without it,
-    # the recovery loop re-fires forever on legit smoke tests where Claude
-    # correctly chose not to reply (last_message_sender stays 'visitor', so
-    # every cooldown expiry would re-flag unread). With it, we only recover
-    # when the visitor sent a NEW message after Claude last finished (i.e.
-    # last_message_at > processed_at), which is the true "stuck Claude" case.
-    conn.execute(
-        """
-        UPDATE web_chat_threads
-           SET unread_by_founder = 1
-         WHERE unread_by_founder = 0
-           AND last_message_sender = 'visitor'
-           AND (claimed_until IS NULL OR claimed_until < NOW())
-           AND (rate_limited_until IS NULL OR rate_limited_until < NOW())
-           AND last_message_at > NOW() - INTERVAL '24 hours'
-           AND (processed_at IS NULL OR last_message_at > processed_at)
-        """
-    )
-    conn.commit()
-
-    rows = conn.execute(
-        """
-        SELECT thread_id, project_name, visitor_email, visitor_name,
-               unread_by_founder, last_message_text, page_url, last_message_at
-          FROM web_chat_threads
-         WHERE unread_by_founder > 0
-           AND (claimed_until IS NULL OR claimed_until < NOW())
-           AND (rate_limited_until IS NULL OR rate_limited_until < NOW())
-         ORDER BY last_message_at ASC NULLS LAST
-        """
-    ).fetchall()
-
-    if not rows:
-        print("[]")
-        return
-
-    out = []
-    for row in rows:
-        thread_id = row["thread_id"]
-        msgs_cur = conn.execute(
-            """
-            SELECT id, sender, sender_name, text, read_by_founder, created_at
-              FROM web_chat_messages
-             WHERE thread_id = %s
-             ORDER BY created_at ASC
-             LIMIT 200
-            """,
-            (thread_id,),
-        ).fetchall()
-        messages = [
-            {
-                "id": m["id"],
-                "text": m["text"] or "",
-                "sender": m["sender"],
-                "sender_name": m["sender_name"] or "",
-                "created_at": m["created_at"].isoformat() if m["created_at"] else "",
-                "read": bool(m["read_by_founder"]),
-            }
-            for m in msgs_cur
-        ]
-        out.append(
-            {
-                "thread_id": thread_id,
-                "project": row["project_name"],
-                "visitor_email": row["visitor_email"] or "",
-                "visitor_name": row["visitor_name"] or "",
-                "unread": int(row["unread_by_founder"] or 0),
-                "last_message": row["last_message_text"] or "",
-                "page_url": row["page_url"] or "",
-                "messages": messages,
-            }
-        )
-
-    print(json.dumps(out))
+    resp = api_get("/api/v1/web-chat/unread")
+    threads = (resp.get("data") or {}).get("threads") or []
+    print(json.dumps(threads))
 
 
 if __name__ == "__main__":
