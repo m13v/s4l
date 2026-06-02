@@ -682,12 +682,20 @@ def bh_screenshot(quality: int = 50) -> str:
 
     Returns JSON with the file path and basic page info. Use bh_run for any
     workflow that needs to keep state across multiple steps.
+
+    The `quality` parameter is accepted for back-compat but is ignored — the
+    current upstream `capture_screenshot()` signature is (path, full, max_dim)
+    and does not expose a JPEG-quality knob. Older callers (and the MCP tool
+    schema) still pass it; we just don't forward it.
     """
+    # Avoid the unused-variable lint and keep `quality` part of the MCP
+    # contract: a sanity-cap so a bad caller can't pass arbitrary types.
+    _ = int(quality)
     script = (
         "import json, time, os\n"
         "ensure_real_tab()\n"
         "info = page_info()\n"
-        f"path = capture_screenshot(quality={int(quality)})\n"
+        "path = capture_screenshot()\n"
         "print(json.dumps({\"screenshot\": str(path), \"page\": info}))\n"
     )
     result = _run_harness(script)
