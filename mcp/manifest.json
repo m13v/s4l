@@ -50,7 +50,8 @@
       "type": "directory",
       "title": "Social Autoposter repo path",
       "description": "Absolute path to your social-autoposter repo clone (the folder that contains config.json, scripts/, skill/). The MCP shells out to the pipeline scripts in this folder.",
-      "required": true
+      "required": true,
+      "default": "${HOME}/social-autoposter"
     },
     "saps_python": {
       "type": "string",
