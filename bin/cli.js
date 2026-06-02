@@ -214,6 +214,30 @@ function isAppMakerVm() {
   return probe.status === 0;
 }
 
+// VM / AppMaker support is strictly opt-in. A normal `init`/`update` (the
+// macOS user path) installs none of it — no apt-get, no :9222 CDP env file, no
+// AppMaker MCP port overrides. It activates only when explicitly requested:
+//   - env  SA_VM=1  (or SOCIAL_AUTOPOSTER_VM=1)
+//   - flag --vm     on the command line
+//   - a persisted marker written by `bootstrap-vm` (so later `update`s on the
+//     same VM stay in VM mode without re-passing the flag)
+//   - a genuine AppMaker VM (linux + /opt/startup.sh + live :9222) — kept as a
+//     fallback so the existing mk0r bootstrap keeps working untouched. This can
+//     never be true on a user's Mac.
+const VM_MARKER = path.join(HOME, '.social-autoposter', 'vm-mode');
+function vmModeEnabled() {
+  if (process.env.SA_VM === '1' || process.env.SOCIAL_AUTOPOSTER_VM === '1') return true;
+  if (process.argv.includes('--vm')) return true;
+  try { if (fs.existsSync(VM_MARKER)) return true; } catch { /* ignore */ }
+  return isAppMakerVm();
+}
+function enableVmMode() {
+  try {
+    fs.mkdirSync(path.dirname(VM_MARKER), { recursive: true });
+    fs.writeFileSync(VM_MARKER, 'enabled\n');
+  } catch { /* best-effort; vmModeEnabled() still honors env/flag/probe */ }
+}
+
 // Write ~/.social-autoposter-env so skill/lib/twitter-backend.sh picks up the
 // AppMaker-specific TWITTER_CDP_URL before its `${VAR:-default}` fallback hits.
 // Idempotent: rewrites the file every invocation so a config edit on the VM
@@ -375,6 +399,9 @@ function bootstrapVm() {
     console.error('bootstrap-vm: not an AppMaker VM (no /opt/startup.sh + CDP :9222). Use `init` or `update` on dev boxes.');
     process.exit(2);
   }
+  // Persist VM mode so subsequent `update` runs on this sandbox keep the
+  // AppMaker tweaks without re-passing --vm/SA_VM.
+  enableVmMode();
   console.log('  AppMaker VM bootstrap: resolving identity from DB by sessionKey...');
 
   let sessionKey;
@@ -471,7 +498,7 @@ function bootstrapVm() {
 }
 
 function installBrowserHarness() {
-  const onAppMaker = isAppMakerVm();
+  const onAppMaker = vmModeEnabled();
   if (onAppMaker) {
     console.log('  AppMaker VM detected -> installing harness toolchain (deps); MCP will be pointed at port 9222');
     writeAppMakerEnvFile();
@@ -803,7 +830,7 @@ function init() {
   installBrowserAgentConfigs();
   // On AppMaker VMs, patch the twitter-harness MCP config so its server.py
   // drives port 9222 (AppMaker Chromium) instead of the default 9555.
-  if (isAppMakerVm()) applyAppMakerMcpConfigOverrides();
+  if (vmModeEnabled()) applyAppMakerMcpConfigOverrides();
   // Register those MCP servers with Claude so they show up in `claude mcp list`.
   registerBrowserAgentMcpServers();
 
@@ -891,7 +918,7 @@ function update() {
   installBrowserAgentConfigs();
   // On AppMaker VMs, patch the twitter-harness MCP config so its server.py
   // drives port 9222 (AppMaker Chromium) instead of the default 9555.
-  if (isAppMakerVm()) applyAppMakerMcpConfigOverrides();
+  if (vmModeEnabled()) applyAppMakerMcpConfigOverrides();
   // Register any newly added MCP servers with Claude (idempotent).
   registerBrowserAgentMcpServers();
 
