@@ -1458,17 +1458,9 @@ def main():
         print(json.dumps({"error": "POSTHOG_PERSONAL_API_KEY not set"}), file=sys.stdout)
         sys.exit(1)
 
-    conn = ps.dbmod.get_conn()
-
-    bookings_conn = None
-    if bookings_db_url:
-        try:
-            import psycopg2
-            bookings_conn = psycopg2.connect(bookings_db_url)
-        except Exception as e:
-            print(f"  Bookings DB connect error: {e}", file=sys.stderr)
-            bookings_conn = None
-
+    # Per-project main-DB + bookings-DB stats now come from HTTP endpoints
+    # (build_project_entry calls /api/v1/stats/project-detail). No direct
+    # Postgres connection is opened here anymore (HTTP-only, 2026-06-01).
     selected_projects = []
     for proj in config.get("projects", []):
         name = proj["name"]
@@ -1544,7 +1536,7 @@ def main():
         name = proj["name"]
         try:
             out_projects.append(build_project_entry(
-                conn, proj, args.days, api_key, project_id, bookings_conn, env, ph_results,
+                proj, args.days, api_key, project_id, env, ph_results,
                 platform=platform,
             ))
         except Exception as e:
@@ -1552,18 +1544,11 @@ def main():
 
     # `overall.recent` also respects the platform filter so the dashboard's
     # "N project(s)" / total header stays self-consistent with the per-row data.
-    plat_clause_overall = _platform_sql_clause(platform, "")
-    cur = conn.execute(
-        "SELECT COUNT(*) FROM posts WHERE posted_at >= NOW() - INTERVAL '" + str(args.days) + " days'"
-        + plat_clause_overall
-    )
-    total_recent = cur.fetchone()[0]
-    cur = conn.execute("SELECT COUNT(*) FROM posts")
-    total_all = cur.fetchone()[0]
-    conn.close()
-    if bookings_conn:
-        try: bookings_conn.close()
-        except Exception: pass
+    from http_api import api_get
+    _overall = (api_get("/api/v1/stats/posts-overall",
+                        query={"days": int(args.days), "platform": platform or ""}).get("data") or {})
+    total_all = int(_overall.get("total") or 0)
+    total_recent = int(_overall.get("recent") or 0)
 
     print(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
