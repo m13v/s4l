@@ -632,37 +632,84 @@ server.registerTool(
       );
     }
     const uid = process.getuid ? process.getuid() : 0;
+    const logDir = path.join(REPO_DIR, "skill", "logs");
+
     if (action === "status") {
       const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-      const loaded = res.stdout.split("\n").some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
-      return jsonContent({ label: TWITTER_AUTOPILOT_LABEL, loaded });
-    }
-    if (action === "enable") {
-      let res = await run("launchctl", ["bootstrap", `gui/${uid}`, TWITTER_AUTOPILOT_PLIST], {
-        timeoutMs: 15_000,
+      const lines = res.stdout.split("\n");
+      const loaded = lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
+      const updaterLoaded = lines.some((l) => l.includes(UPDATER_LABEL));
+      return jsonContent({
+        label: TWITTER_AUTOPILOT_LABEL,
+        loaded,
+        auto_update_label: UPDATER_LABEL,
+        auto_update_loaded: updaterLoaded,
       });
-      if (res.code !== 0) {
-        res = await run("launchctl", ["load", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
-      }
-      return textContent(
-        res.code === 0
-          ? `Autopilot enabled (${TWITTER_AUTOPILOT_LABEL} loaded).`
-          : `Failed to enable autopilot (exit ${res.code}): ${res.stderr || res.stdout}\n` +
-              `Check the plist exists at ${TWITTER_AUTOPILOT_PLIST}.`
+    }
+
+    if (action === "enable") {
+      // 1) Cycle plist. Write one pointing at the self-update guard ONLY if no
+      //    plist exists yet; never overwrite a hand-tuned/dev plist.
+      const createdCycle = ensurePlist(
+        TWITTER_AUTOPILOT_PLIST,
+        plistXml({
+          label: TWITTER_AUTOPILOT_LABEL,
+          programArgs: ["/bin/bash", path.join(REPO_DIR, "skill", "run-cycle-update-guard.sh")],
+          intervalSecs: 60,
+          runAtLoad: false,
+          stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
+          stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
+        })
       );
+      const cycleRes = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+
+      // 2) Daily self-updater. Keeps a headless install current with no human
+      //    in the loop. RunAtLoad so it also checks shortly after enable.
+      const createdUpdater = ensurePlist(
+        UPDATER_PLIST,
+        plistXml({
+          label: UPDATER_LABEL,
+          programArgs: ["/bin/bash", path.join(REPO_DIR, "skill", "social-autoposter-update.sh")],
+          intervalSecs: 86_400,
+          runAtLoad: true,
+          stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
+          stderrLog: path.join(logDir, "launchd-self-update-stderr.log"),
+        })
+      );
+      const updaterRes = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+
+      return jsonContent({
+        action: "enable",
+        autopilot: {
+          loaded: cycleRes.code === 0,
+          plist: TWITTER_AUTOPILOT_PLIST,
+          created: createdCycle,
+          error: cycleRes.code === 0 ? null : (cycleRes.stderr || cycleRes.stdout).trim(),
+        },
+        auto_update: {
+          loaded: updaterRes.code === 0,
+          plist: UPDATER_PLIST,
+          created: createdUpdater,
+          note:
+            "Daily updater enabled. It self-updates real npm installs and is a no-op on dev/source " +
+            "checkouts (refuses to clobber a .git working tree).",
+          error: updaterRes.code === 0 ? null : (updaterRes.stderr || updaterRes.stdout).trim(),
+        },
+      });
     }
-    // disable
-    let res = await run("launchctl", ["bootout", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`], {
-      timeoutMs: 15_000,
+
+    // disable — unload both jobs (leave the plist files in place for re-enable)
+    const cycleOff = await unloadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+    const updaterOff = await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
+    return jsonContent({
+      action: "disable",
+      autopilot_unloaded: cycleOff.code === 0,
+      auto_update_unloaded: updaterOff.code === 0,
+      note:
+        cycleOff.code === 0
+          ? "Autopilot and daily auto-update unloaded. Manual draft_cycle still works."
+          : `Autopilot disable reported exit ${cycleOff.code}: ${(cycleOff.stderr || cycleOff.stdout).trim()}`,
     });
-    if (res.code !== 0) {
-      res = await run("launchctl", ["unload", TWITTER_AUTOPILOT_PLIST], { timeoutMs: 15_000 });
-    }
-    return textContent(
-      res.code === 0
-        ? `Autopilot disabled (${TWITTER_AUTOPILOT_LABEL} unloaded).`
-        : `Failed (exit ${res.code}): ${res.stderr || res.stdout}`
-    );
   }
 );
 
