@@ -31,11 +31,9 @@ acquire_lock "audit-reddit-resurrect" 3600
 
 REPO_DIR="$HOME/social-autoposter"
 LOG_DIR="$REPO_DIR/skill/logs"
-
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): the candidate-count read goes through the s4l.ai
+# API via scripts/audit_helper.py. No DATABASE_URL, no psql, no fallback.
+AUDIT_HELPER="$REPO_DIR/scripts/audit_helper.py"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/audit-reddit-resurrect-$(date +%Y-%m-%d_%H%M%S).log"
@@ -45,11 +43,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; echo "[$(date +%H:%M:%S)] 
 RUN_START=$(date +%s)
 log "=== Reddit resurrect audit: $(date) ==="
 
-CANDIDATES=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT COUNT(*) FROM posts
-    WHERE platform='reddit' AND status IN ('deleted','removed')
-      AND posted_at > NOW() - INTERVAL '60 days'
-      AND our_url IS NOT NULL;" 2>/dev/null || echo "0")
+CANDIDATES=$(python3 "$AUDIT_HELPER" resurrect-candidates 2>/dev/null || echo "0")
 
 log "Candidates: $CANDIDATES posts marked deleted/removed in last 60 days"
 
