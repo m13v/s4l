@@ -548,6 +548,26 @@ function installBrowserHarness() {
     if (fs.existsSync(harnessBin)) {
       spawnSync(harnessBin, ['--reload'], { stdio: 'inherit' });
     }
+
+    // Contract check: server.py invokes `browser-harness -c <script>`. If an
+    // offline/rate-limited fetch left a stale checkout that predates the `-c`
+    // interface, the CLI still "installs" fine but every bh_run returns the
+    // usage banner and CDP looks "not connected". Verify the installed binary
+    // actually speaks `-c` (its no-arg usage string mentions it) and fail
+    // LOUDLY here instead of shipping a silently-broken twitter-harness.
+    if (fs.existsSync(harnessBin)) {
+      const probe = spawnSync(harnessBin, [], { stdio: 'pipe', encoding: 'utf8', timeout: 15000 });
+      const usage = `${probe.stdout || ''}${probe.stderr || ''}`;
+      if (!/\b-c\b/.test(usage)) {
+        console.error('    ERROR: installed browser-harness CLI does not accept `-c` (stale clone).');
+        console.error('    The twitter-harness MCP will return a usage banner / "CDP not connected".');
+        console.error(`    Fix: rm -rf ${harnessDir} && re-run \`social-autoposter init\` while online,`);
+        console.error('    or manually: git clone https://github.com/browser-use/browser-harness ' + harnessDir +
+          ' && ' + uvBin + ' tool install --force -e ' + harnessDir);
+      } else {
+        console.log('    browser-harness CLI verified (accepts -c).');
+      }
+    }
   }
 
   // Step 4: ensure mcp Python package available (server.py uses `from mcp.server.fastmcp ...`).
