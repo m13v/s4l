@@ -509,19 +509,76 @@ def _classify_import_error(detail: str | None) -> str:
     return "unknown"
 
 
+def _cookies_db_path() -> Path | None:
+    """Resolve the harness profile's on-disk Cookies SQLite. Newer Chrome nests
+    it under Default/Network/; older builds keep it at Default/. Returns whichever
+    exists (most-recently-modified wins if both linger), or None."""
+    candidates = [
+        PROFILE_DIR / "Default" / "Network" / "Cookies",
+        PROFILE_DIR / "Default" / "Cookies",
+    ]
+    existing = [p for p in candidates if p.exists()]
+    if not existing:
+        return None
+    return max(existing, key=lambda p: p.stat().st_mtime)
+
+
+def _count_x_cookies_on_disk() -> int:
+    """Count x.com/twitter.com rows committed to the on-disk Cookies SQLite.
+
+    Reads a temp COPY of the DB (+ -wal/-shm) so an in-flight write by the live
+    Chrome can't lock us out, and opens it read-write on the copy so WAL-resident
+    rows are visible (a read-only open would miss not-yet-checkpointed writes —
+    exactly the rows we are polling for). Returns the count, or -1 if the DB is
+    missing/unreadable."""
+    db = _cookies_db_path()
+    if not db:
+        return -1
+    import shutil
+    import sqlite3
+    import tempfile
+    tmpdir = None
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="saps_flushchk_"))
+        dst = tmpdir / "Cookies"
+        shutil.copy2(db, dst)
+        for suffix in ("-wal", "-shm"):
+            w = db.parent / (db.name + suffix)
+            if w.exists():
+                shutil.copy2(w, tmpdir / ("Cookies" + suffix))
+        conn = sqlite3.connect(str(dst))
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM cookies "
+                "WHERE host_key LIKE '%x.com' OR host_key LIKE '%twitter.com'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return int(n)
+    except Exception:
+        return -1
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _force_cookie_flush() -> tuple[bool, str]:
-    """Trigger Chrome's cookie-store flush via CDP Browser.close (#2).
+    """Flush Chrome's in-memory cookie store to disk via CDP Browser.close, then
+    VERIFY the x.com cookies actually landed in the on-disk SQLite before
+    returning (Gap A, 2026-06-02).
 
-    Verified empirically on Chrome 148/macOS 26: Browser.close synchronously
-    commits the in-memory CookieMonster to the on-disk SQLite, but does NOT
-    actually terminate the process. We rely on the flush side-effect, so a
-    SIGKILL immediately after import no longer wipes the imported cookies.
+    The bug this fixes: Browser.close acks immediately, but Chrome commits the
+    CookieMonster -> SQLite write ASYNCHRONOUSLY (~0.5-5s under load). The old
+    code treated the RPC ack as proof of persistence and reported
+    flushed_to_disk=true while the disk was still empty, so a doctor run or a
+    SIGKILL in that window saw zero cookies. We now poll the on-disk row count
+    until the flush is observably durable (or a timeout proves it isn't).
 
-    Returns (ok, detail). ok=True if the RPC was issued cleanly; the process
-    still being alive afterwards is expected behavior, not a failure."""
+    Returns (ok, detail). ok=True only when x.com rows are confirmed on disk."""
     bh = Path.home() / ".local" / "bin" / "browser-harness"
     if not bh.exists():
         return False, f"browser-harness CLI missing at {bh}"
+    before = _count_x_cookies_on_disk()
     env = os.environ.copy()
     env["BU_CDP_URL"] = CDP
     env.setdefault("BU_NAME", "twitter-harness")
@@ -536,7 +593,23 @@ def _force_cookie_flush() -> tuple[bool, str]:
         return False, f"browser-harness invocation failed: {e}"
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()[:300]
-    return True, "Browser.close issued; cookie store flushed to SQLite"
+
+    # Poll the disk for the async commit to land. Accept as soon as we observe
+    # x.com rows on disk (and, if we had a baseline, that it didn't regress).
+    deadline = time.time() + 8.0
+    last = before
+    while time.time() < deadline:
+        n = _count_x_cookies_on_disk()
+        if n > 0 and (before <= 0 or n >= before):
+            return True, f"verified {n} x.com cookies committed to on-disk SQLite"
+        last = n
+        time.sleep(0.5)
+    if last > 0:
+        return True, f"verified {last} x.com cookies on disk (slow flush)"
+    return False, (
+        f"Browser.close issued but on-disk x.com cookie count is {last} after 8s "
+        "(flush not confirmed; relying on the local cookie mirror for durability)"
+    )
 
 
 # --- Commands ---------------------------------------------------------------
@@ -650,6 +723,10 @@ def cmd_connect(args) -> dict:
                 # result on this build is success — Browser.close triggers the
                 # flush synchronously but doesn't actually terminate Chrome.
                 flush_ok, flush_detail = _force_cookie_flush()
+                mirror_count = (
+                    twitter_cookie_mirror.load_meta().get("count")
+                    if twitter_cookie_mirror is not None else None
+                )
                 return {
                     "ok": True,
                     "connected": True,
@@ -658,10 +735,16 @@ def cmd_connect(args) -> dict:
                     "attempts": attempts,
                     "flushed_to_disk": flush_ok,
                     "flush_detail": flush_detail,
+                    "mirrored_cookies": mirror_count,
                     "note": f"Imported your X session from {src} into the autoposter browser. "
-                            + ("Cookies flushed to disk (persists across Chrome restart)."
+                            + ("Cookies verified on disk AND mirrored locally; "
                                if flush_ok else
-                               "Cookies are in RAM; a clean stop_chrome (1.6.32+) will flush them."),
+                               "Chrome's encrypted store didn't confirm the flush, but ")
+                            + (f"{mirror_count} cookies are saved to a keychain-independent "
+                               "mirror, so the cycle preflight auto-restores the session even if "
+                               "Chrome re-launches logged out."
+                               if mirror_count else
+                               "the session is live in the running browser."),
                     "cdp": CDP,
                 }
         except Exception:
