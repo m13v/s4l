@@ -35,7 +35,7 @@ from urllib.parse import urlencode
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, 'scripts'))
 
-import db as dbmod  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 from dm_short_links import CODE_ALPHABET, CODE_LEN, _load_projects  # noqa: E402
 
 POOL_SESSION_PREFIX = 'pool:'
@@ -79,42 +79,39 @@ def mint_pool(*, project_name: str, platforms: list, per_platform: int,
     slug = _slug(project_name)
     session = session_tag or f"{POOL_SESSION_PREFIX}{slug}-{platforms[0] if len(platforms)==1 else 'multi'}"
 
-    conn = dbmod.get_conn()
     minted = {plat: 0 for plat in platforms}
     skipped = {plat: 0 for plat in platforms}
-    try:
-        for platform in platforms:
-            tries = 0
-            while minted[platform] < per_platform and tries < per_platform * 3:
-                tries += 1
-                code = _gen_code()
-                target = _build_target(homepage, platform=platform, slug=slug, code=code)
-                try:
-                    conn.execute(
-                        "INSERT INTO post_links "
-                        "  (code, platform, project_name, target_url, kind, "
-                        "   project_at_mint, minted_session) "
-                        "VALUES (%s, %s, %s, %s, 'website', %s, %s)",
-                        (code, platform, project_name, target, project_name,
-                         f"{POOL_SESSION_PREFIX}{slug}-{platform}"),
-                    )
-                    conn.commit()
-                    minted[platform] += 1
-                except Exception as e:
-                    if 'duplicate key' in str(e).lower():
-                        conn.execute("ROLLBACK")
-                        skipped[platform] += 1
-                        continue
-                    raise
-        return {
-            'project': project_name,
-            'homepage': homepage,
-            'minted': minted,
-            'skipped_collisions': skipped,
-            'total_minted': sum(minted.values()),
-        }
-    finally:
-        conn.close()
+    for platform in platforms:
+        tries = 0
+        while minted[platform] < per_platform and tries < per_platform * 3:
+            tries += 1
+            code = _gen_code()
+            target = _build_target(homepage, platform=platform, slug=slug, code=code)
+            result = api_post(
+                "/api/v1/post-links/mint",
+                {
+                    "code": code,
+                    "platform": platform,
+                    "project_name": project_name,
+                    "target_url": target,
+                    "kind": "website",
+                    "project_at_mint": project_name,
+                    "minted_session": f"{POOL_SESSION_PREFIX}{slug}-{platform}",
+                },
+                ok_on_conflict=True,
+            )
+            if not result.get("ok", True):
+                # code_collision (409): retry with a fresh random code.
+                skipped[platform] += 1
+                continue
+            minted[platform] += 1
+    return {
+        'project': project_name,
+        'homepage': homepage,
+        'minted': minted,
+        'skipped_collisions': skipped,
+        'total_minted': sum(minted.values()),
+    }
 
 
 def pool_status(project_filter: str | None = None) -> list[dict]:
