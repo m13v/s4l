@@ -998,45 +998,23 @@ def refresh_moltbook(db, api_key, quiet=False):
                 total_comments = data.get("count", 0)
                 if has_more or total_comments > 100:
                     # Comment is buried beyond first page — not an error, just unreachable
-                    db.execute(
-                        "UPDATE posts SET status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                        [post_id],
-                    )
+                    _http_patch_post(post_id, {"stamp_status_checked_now": True,
+                                               "reset_deletion_detect_count": True})
                 else:
                     # Post has few comments but ours is missing — likely deleted
-                    row = db.execute(
-                        "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                    ).fetchone()
-                    detect_count = (row[0] if row else 0) + 1
-                    if detect_count >= 2:
-                        db.execute(
-                            "UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                            [detect_count, post_id],
-                        )
+                    detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+                    if status_set:
                         deleted += 1
                         if not quiet:
                             print(f"DELETED (Moltbook comment missing) [{post_id}] (confirmed after {detect_count} detections)")
-                    else:
-                        db.execute(
-                            "UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                            [detect_count, post_id],
-                        )
-                        if not quiet:
-                            print(f"DELETION PENDING (Moltbook comment missing) [{post_id}] (detection {detect_count}/2)")
+                    elif not quiet:
+                        print(f"DELETION PENDING (Moltbook comment missing) [{post_id}] (detection {detect_count}/2)")
                 continue
 
             if our_comment.get("is_deleted"):
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+                if status_set:
                     deleted += 1
-                else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
                 continue
 
             # Comment-specific engagement
@@ -1048,16 +1026,15 @@ def refresh_moltbook(db, api_key, quiet=False):
             verification = our_comment.get("verification_status", "unknown")
             thread_comment_count = data.get("count", 0)
 
-            db.execute(
-                "UPDATE posts SET upvotes=%s, comments_count=%s, "
-                "engagement_updated_at=NOW(), status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                [comment_upvotes, comment_replies, post_id],
-            )
-            updated += 1
+            patch = {"upvotes": comment_upvotes, "comments_count": comment_replies,
+                     "stamp_engagement_now": True, "stamp_status_checked_now": True,
+                     "reset_deletion_detect_count": True}
             if comment_upvotes == prev_upvotes and comment_replies == prev_comments:
-                db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id=%s", [post_id])
+                patch["scan_no_change_delta"] = 1
             else:
-                db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id=%s", [post_id])
+                patch["scan_no_change_count"] = 0
+            _http_patch_post(post_id, patch)
+            updated += 1
             results.append({"id": post_id, "upvotes": comment_upvotes,
                             "replies": comment_replies, "verification": verification})
         else:
@@ -1074,21 +1051,13 @@ def refresh_moltbook(db, api_key, quiet=False):
                 continue
             except MoltbookNotFoundError:
                 # Post deleted on Moltbook - use detection counter
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+                if status_set:
                     deleted += 1
                     if not quiet:
                         print(f"DELETED (Moltbook 404) [{post_id}] (confirmed after {detect_count} detections)")
-                else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
-                    if not quiet:
-                        print(f"DELETION PENDING (Moltbook 404) [{post_id}] (detection {detect_count}/2)")
+                elif not quiet:
+                    print(f"DELETION PENDING (Moltbook 404) [{post_id}] (detection {detect_count}/2)")
                 continue
             if not data or not data.get("success"):
                 errors += 1
@@ -1096,17 +1065,9 @@ def refresh_moltbook(db, api_key, quiet=False):
 
             post_data = data.get("post", {})
             if post_data.get("is_deleted"):
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+                if status_set:
                     deleted += 1
-                else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
                 continue
 
             upvotes = post_data.get("upvotes", 0)
@@ -1114,20 +1075,18 @@ def refresh_moltbook(db, api_key, quiet=False):
             score = post_data.get("score", 0)
             views = post_data.get("views", 0)
 
-            db.execute(
-                "UPDATE posts SET upvotes=%s, comments_count=%s, views=%s, "
-                "engagement_updated_at=NOW(), status_checked_at=NOW(), deletion_detect_count=0 WHERE id=%s",
-                [upvotes, comment_count, views, post_id],
-            )
-            updated += 1
+            patch = {"upvotes": upvotes, "comments_count": comment_count, "views": views,
+                     "stamp_engagement_now": True, "stamp_status_checked_now": True,
+                     "reset_deletion_detect_count": True}
             if upvotes == prev_upvotes and comment_count == prev_comments:
-                db.execute("UPDATE posts SET scan_no_change_count = COALESCE(scan_no_change_count, 0) + 1 WHERE id=%s", [post_id])
+                patch["scan_no_change_delta"] = 1
             else:
-                db.execute("UPDATE posts SET scan_no_change_count = 0 WHERE id=%s", [post_id])
+                patch["scan_no_change_count"] = 0
+            _http_patch_post(post_id, patch)
+            updated += 1
             results.append({"id": post_id, "upvotes": upvotes, "score": score,
                             "comments": comment_count})
 
-    db.commit()
     progress.done("moltbook", len(posts),
                   updated=updated, deleted=deleted,
                   errors=errors, skipped=skipped)
@@ -1169,11 +1128,11 @@ def _detect_minimized_github_comments(db, posts, quiet=False):
     # Group: (owner, repo, number) -> [(post_id, comment_id), ...]
     threads = defaultdict(list)
     for post in posts:
-        m = comment_re.match((post[1] or ""))
+        m = comment_re.match((post.get("our_url") or ""))
         if not m:
             continue
         owner, repo, number, cid = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
-        threads[(owner, repo, number)].append((post[0], cid))
+        threads[(owner, repo, number)].append((post["id"], cid))
 
     if not threads:
         return 0
@@ -1230,21 +1189,12 @@ def _detect_minimized_github_comments(db, posts, quiet=False):
             for post_id, cid in threads[key]:
                 if cid in min_set:
                     reason = min_set[cid] or ""
-                    db.execute(
-                        "UPDATE posts SET status='deleted', "
-                        "deletion_detect_count=GREATEST(COALESCE(deletion_detect_count,0), 2), "
-                        "source_summary=COALESCE(NULLIF(source_summary,''), '') "
-                        "  || CASE WHEN COALESCE(source_summary,'')='' THEN '' ELSE ' ' END "
-                        "  || %s, "
-                        "status_checked_at=NOW() WHERE id=%s",
-                        [f"[minimized:{reason}]", post_id],
-                    )
+                    _http_mark_minimized(post_id, reason)
                     minimized += 1
                     if not quiet:
                         owner, repo, number = key
                         print(f"MINIMIZED [{post_id}] {owner}/{repo}#{number} reason={reason}",
                               flush=True)
-        db.commit()
 
     if not quiet:
         rl_note = f", failures={failures}" if failures else ""
