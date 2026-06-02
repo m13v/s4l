@@ -1,0 +1,116 @@
+/* Social Autoposter control panel.
+ * Black / white / grayscale only (matches the dashboard palette rule). The host
+ * (Claude, etc.) injects its own CSS variables via applyHostStyleVariables; we
+ * reference them with safe grayscale fallbacks so it looks native in any host. */
+
+:root {
+  --bg: var(--background, #ffffff);
+  --fg: var(--foreground, #111111);
+  --muted: var(--muted-foreground, #6b6b6b);
+  --card: var(--card, #f5f5f5);
+  --border: var(--border, #e2e2e2);
+  --btn-fg: var(--primary-foreground, #ffffff);
+  --btn-bg: var(--primary, #111111);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: var(--background, #1a1a1a);
+    --fg: var(--foreground, #f2f2f2);
+    --muted: var(--muted-foreground, #9a9a9a);
+    --card: var(--card, #262626);
+    --border: var(--border, #3a3a3a);
+    --btn-fg: var(--primary-foreground, #111111);
+    --btn-bg: var(--primary, #f2f2f2);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+.ver { font-size: 12px; color: var(--muted); }
+.ver .update { color: var(--fg); font-weight: 600; }
+
+.status {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 64px;
+}
+.card .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.card .v { font-size: 18px; font-weight: 650; margin-top: 2px; }
+.card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+button:hover:not(:disabled) { opacity: 0.82; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
+button.ghost { background: transparent; }
+button[hidden] { display: none; }
+
+.stats { display: flex; flex-direction: column; gap: 8px; }
+.stats-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
+.stat {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.stat .n { font-size: 17px; font-weight: 650; }
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+.log {
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 16px;
+  white-space: pre-wrap;
+}
+.muted { color: var(--muted); }
