@@ -30,6 +30,9 @@ import random
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_get
+
 CONFIG_PATH = Path.home() / "social-autoposter" / "config.json"
 ENV_PATH = Path.home() / "social-autoposter" / ".env"
 
@@ -59,31 +62,13 @@ def recent_posts_by_account(window_days):
 
     media_posts is the per-platform table for IG; we don't need the unified
     `posts` table here because all IG posts route through this pipeline.
+    Served via the HTTP API (account-post-counts) so no DATABASE_URL is needed.
     """
-    try:
-        import psycopg2
-    except ImportError:
-        sys.stderr.write("psycopg2 missing\n")
-        sys.exit(4)
-    env = load_env()
-    db_url = env.get("DATABASE_URL")
-    if not db_url:
-        sys.stderr.write("DATABASE_URL missing in .env\n")
-        sys.exit(4)
-    conn = psycopg2.connect(db_url)
-    try:
-        c = conn.cursor()
-        c.execute(
-            "SELECT target_account, COUNT(*) FROM media_posts "
-            "WHERE status='posted' AND posted_urls ? 'instagram' "
-            "  AND posted_at > NOW() - INTERVAL %s "
-            "  AND target_account IS NOT NULL "
-            "GROUP BY target_account",
-            (f"{int(window_days)} days",),
-        )
-        return {r[0]: int(r[1]) for r in c.fetchall()}
-    finally:
-        conn.close()
+    resp = api_get(
+        "/api/v1/media-posts/account-post-counts",
+        query={"window_days": int(window_days)},
+    )
+    return (resp.get("data") or {}).get("account_counts") or {}
 
 
 def pick_account(accounts, window_days):
