@@ -402,15 +402,21 @@ def _format_subject(post, repo_state=None):
     )
 
 
+def _ts(v):
+    """Render a timestamp field. The HTTP API returns ISO strings; tolerate a
+    datetime too (defensive, in case a caller passes one)."""
+    if not v:
+        return "?"
+    return v.isoformat() if hasattr(v, "isoformat") else str(v)
+
+
 def _format_body(post, repo_state=None):
     platform = post["platform"] or "?"
     status = post["status"] or "?"
     project = post["project_name"] or "(no project)"
     account = post["our_account"] or "?"
-    posted_at = post["posted_at"].isoformat() if post["posted_at"] else "?"
-    checked_at = (
-        post["status_checked_at"].isoformat() if post["status_checked_at"] else "?"
-    )
+    posted_at = _ts(post["posted_at"])
+    checked_at = _ts(post["status_checked_at"])
     thread_url = post["thread_url"] or "?"
     our_url = post["our_url"] or "(no comment URL)"
     title = post["thread_title"] or "(no title)"
@@ -656,7 +662,7 @@ def main():
             continue
         try:
             _send_email(subject, body)
-            _mark_sent(db, r["id"])
+            _mark_sent(r["id"])
             sent += 1
             print(f"[strike_alert] alerted id={r['id']} ({r['platform']} {r['status']})")
         except Exception as e:
