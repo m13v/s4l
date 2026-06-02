@@ -246,8 +246,13 @@ def ensure_chrome() -> dict:
     PID_FILE.write_text(str(proc.pid))
     _log(f"launched Chrome pid={proc.pid} port={PORT} profile={PROFILE_DIR} headless={HEADLESS}")
 
-    # Wait for CDP to be ready.
-    deadline = time.time() + 15
+    # Wait for CDP to be ready. First launch on a cold/fresh machine has to
+    # create the profile and run Chrome's first-run setup, which routinely
+    # exceeds 15s on a slow VM; an over-tight deadline returns launch_timeout
+    # and the caller runs against a port that was about to come up. 30s is the
+    # safe floor (override with BH_LAUNCH_TIMEOUT_SEC).
+    launch_timeout = int(os.environ.get("BH_LAUNCH_TIMEOUT_SEC", "30"))
+    deadline = time.time() + launch_timeout
     while time.time() < deadline:
         if _cdp_alive():
             return {"status": "started", "pid": proc.pid, "cdp": CDP_URL}
@@ -258,6 +263,8 @@ def ensure_chrome() -> dict:
         "pid": proc.pid,
         "cdp": CDP_URL,
         "log": str(LOG_FILE),
+        "waited_sec": launch_timeout,
+        "log_tail": _chrome_log_tail(),
     }
 
 
@@ -331,6 +338,56 @@ def stop_chrome() -> dict:
 
 # --- browser-harness exec wrapper ---
 
+def _chrome_log_tail(lines: int = 25) -> str:
+    """Last `lines` of the managed-Chrome log, for surfacing in CDP errors."""
+    try:
+        text = LOG_FILE.read_text(errors="replace")
+    except (FileNotFoundError, OSError):
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _ensure_cdp_ready() -> dict | None:
+    """Guarantee CDP is actually answering on PORT before we shell out to the
+    harness CLI. Returns None when CDP is live; otherwise returns a structured,
+    actionable error dict (and leaves the chrome log tail attached).
+
+    Without this gate, ensure_chrome() failures (no_chrome_binary,
+    launch_timeout) were swallowed and the CLI ran against a dead port, so the
+    agent saw a cryptic usage banner / connection error instead of the real
+    cause. This is the #1 fresh-install failure mode."""
+    res = ensure_chrome()
+    if _cdp_alive():
+        return None
+
+    # One self-heal attempt: a stale Chrome bound to the port but not speaking
+    # CDP (crashed renderer, half-dead profile) won't recover on its own.
+    _log(f"CDP not alive after ensure_chrome (status={res.get('status')}); attempting stop+relaunch")
+    stop_chrome()
+    time.sleep(1.0)
+    res = ensure_chrome()
+    if _cdp_alive():
+        return None
+
+    status = res.get("status", "unknown")
+    if status == "no_chrome_binary":
+        hint = res.get("hint", "Install Chrome/Chromium or set BH_CHROME_BIN.")
+    else:
+        hint = (
+            f"Chrome did not expose CDP on {CDP_URL} (status={status}). "
+            "On a headless Linux box ensure BH_HEADLESS=1 and a Chrome binary "
+            "are present; on macOS make sure no other Chrome owns the profile. "
+            f"See {LOG_FILE}."
+        )
+    return {
+        "ok": False,
+        "error": f"browser-harness CDP not connected: {hint}",
+        "cdp": CDP_URL,
+        "ensure_chrome": res,
+        "chrome_log_tail": _chrome_log_tail(),
+    }
+
+
 def _run_harness(script: str, timeout: int = EXEC_TIMEOUT_SEC) -> dict:
     if not shutil.which(BROWSER_HARNESS_BIN) and not Path(BROWSER_HARNESS_BIN).exists():
         return {
@@ -341,7 +398,9 @@ def _run_harness(script: str, timeout: int = EXEC_TIMEOUT_SEC) -> dict:
             ),
         }
 
-    ensure_chrome()
+    cdp_err = _ensure_cdp_ready()
+    if cdp_err is not None:
+        return cdp_err
 
     env = os.environ.copy()
     env["BU_CDP_URL"] = CDP_URL
