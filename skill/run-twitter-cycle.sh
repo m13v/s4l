@@ -1002,7 +1002,7 @@ if [ "$QUERIES_COUNT" -gt 0 ]; then
     ENGAGED_TWEET_IDS="$ENGAGED_TWEET_IDS" \
         "$HOME/.local/bin/browser-harness" -c "
 import sys, json, os, time
-sys.path.insert(0, '/Users/matthewdi/social-autoposter/scripts')
+sys.path.insert(0, '$REPO_DIR/scripts')
 from twitter_scan import scan
 queries = json.load(open('$QUERIES_TMP'))
 freshness = int(os.environ.get('FRESHNESS_HOURS_DISCOVER', '6'))
