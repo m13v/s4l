@@ -690,6 +690,50 @@ log "twitter-browser lock held (pid=$$) Phase 1"
 # refuses to clean if the lock PID is alive.
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
+# --- Pre-flight: live X session probe (added 2026-06-02) --------------------
+# Before drafting/scraping anything, confirm the harness Chrome actually has a
+# valid x.com session. One CDP Network.getCookies call (<1s) catches the
+# "import never ran, evaporated after a hard restart, or auth_token expired"
+# cases that previously surfaced as "Phase 1 returned 0 tweets" mysteries.
+# Failing fast here turns a wasted ~7-minute scan + Claude bill into a clear
+# "reconnect X" message in the log.
+log "Pre-flight: probing harness Chrome for a live x.com auth_token..."
+_PREFLIGHT_OUT=$(BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
+    "$HOME/.local/bin/browser-harness" <<'PY' 2>&1
+import sys, time
+try:
+    raw = cdp('Network.getCookies', urls=['https://x.com/', 'https://twitter.com/'])
+except Exception as e:
+    print('PREFLIGHT_CDP_ERROR ' + type(e).__name__ + ': ' + str(e))
+    sys.exit(0)
+ck = raw.get('cookies', [])
+auth = [c for c in ck if c.get('name') == 'auth_token']
+if not auth:
+    print('PREFLIGHT_FAIL no_auth_token cookies_total=' + str(len(ck)))
+    sys.exit(0)
+exp = auth[0].get('expires')
+domain = auth[0].get('domain', '?')
+if exp in (None, -1, 0):
+    print('PREFLIGHT_OK session domain=' + domain)
+else:
+    now = time.time()
+    if exp < now:
+        print('PREFLIGHT_FAIL auth_token_expired exp=' + str(int(exp)) + ' now=' + str(int(now)))
+        sys.exit(0)
+    print('PREFLIGHT_OK exp=' + str(int(exp)) + ' domain=' + domain)
+PY
+)
+if printf '%s\n' "$_PREFLIGHT_OUT" | grep -q '^PREFLIGHT_OK'; then
+    log "  Pre-flight OK: $(printf '%s\n' "$_PREFLIGHT_OUT" | grep '^PREFLIGHT_OK' | head -1)"
+else
+    log "  Pre-flight FAILED. The harness Chrome has no live X session."
+    log "  Details: $(printf '%s\n' "$_PREFLIGHT_OUT" | tail -3 | tr '\n' '|')"
+    log "  Action: run \`python3 scripts/setup_twitter_auth.py connect\` (or call the connect_x MCP tool) to import a fresh X session from your everyday browser, then re-run the cycle. If the import fails with 'access denied', unlock the macOS keychain first: \`security unlock-keychain ~/Library/Keychains/login.keychain-db\`."
+    echo "twitter_batches: ended $BATCH_ID"
+    release_lock "twitter-browser" 2>/dev/null || true
+    exit 1
+fi
+
 # --- Phase 1 retry loop (2026-05-27) ----------------------------------------
 # When a single scan produces fewer than RETRY_TARGET candidates that survive
 # all Phase 1 filters (harness age gate, scorer stale_age cutoff, already-
@@ -996,21 +1040,24 @@ except Exception: print(0)
 # $SCAN_TWEETS_FILE, which the existing shell-side parse below consumes.
 if [ "$QUERIES_COUNT" -gt 0 ]; then
     log "Lean Phase 1: executing $QUERIES_COUNT queries via browser-harness CDP"
-    # Installed browser-harness (v0.1.0) only accepts `-c "<script>"`; it does NOT
-    # read a script from stdin (a heredoc just makes it print its usage line and
-    # exit, producing 0 tweets). Use double-quoted -c so $REPO_DIR / $QUERIES_TMP
-    # still expand; the Python body uses single quotes internally so it nests fine.
+    # browser-harness upstream main reads the script from STDIN (the `-c` flag was
+    # removed). Feed the body via a quoted heredoc and pass $REPO_DIR / $QUERIES_TMP
+    # through the environment so the Python reads them from os.environ (no shell
+    # expansion inside the heredoc). Keep the local CLI in sync with upstream main:
+    # `uv tool install -e ~/Developer/browser-harness --force` after a git pull.
     BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
     SCAN_TWEETS_FILE="$SCAN_TWEETS_FILE" \
     BATCH_ID="$BATCH_ID" \
     TWITTER_CYCLE_VARIANT="$TWITTER_CYCLE_VARIANT" \
     FRESHNESS_HOURS_DISCOVER="$FRESHNESS_HOURS_DISCOVER" \
     ENGAGED_TWEET_IDS="$ENGAGED_TWEET_IDS" \
-        "$HOME/.local/bin/browser-harness" -c "
+    REPO_DIR="$REPO_DIR" \
+    QUERIES_TMP="$QUERIES_TMP" \
+        "$HOME/.local/bin/browser-harness" <<'PY' 2>&1 | tee -a "$LOG_FILE"
 import sys, json, os, time
-sys.path.insert(0, '$REPO_DIR/scripts')
+sys.path.insert(0, os.environ['REPO_DIR'] + '/scripts')
 from twitter_scan import scan
-queries = json.load(open('$QUERIES_TMP'))
+queries = json.load(open(os.environ['QUERIES_TMP']))
 freshness = int(os.environ.get('FRESHNESS_HOURS_DISCOVER', '6'))
 skip_ids = json.loads(os.environ.get('ENGAGED_TWEET_IDS', '[]'))
 for q in queries:
@@ -1031,7 +1078,7 @@ for q in queries:
     except Exception as e:
         dt = time.time() - t0
         print(f'  err project={project!r}  q={query[:50]!r}  in {dt:.1f}s  {type(e).__name__}: {e}', flush=True)
-" 2>&1 | tee -a "$LOG_FILE"
+PY
 fi
 rm -f "$QUERIES_TMP"
 
