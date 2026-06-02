@@ -36,25 +36,11 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "config.json")
 
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+from http_api import api_get  # noqa: E402
+
 GSC_IMPRESSIONS_THRESHOLD = 5
 SERP_SCORE_THRESHOLD = 1.5  # raised 2026-05-05 from 1.0 to cut dead-weight pages dragging domain quality
-
-
-def load_env():
-    env_path = os.path.join(REPO_ROOT, ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-
-
-def get_conn():
-    import psycopg2
-    load_env()
-    return psycopg2.connect(os.environ["DATABASE_URL"])
 
 
 def base_eligible(config, require_gsc_property=False):
@@ -76,21 +62,11 @@ def products_with_serp_work(candidates, status, score_filter=False):
     names = [n for n, _ in candidates]
     if not names:
         return []
-    conn = get_conn()
-    cur = conn.cursor()
+    query = {"mode": "with_serp_work", "products": ",".join(names), "status": status}
     if score_filter:
-        cur.execute("""
-            SELECT DISTINCT product FROM seo_keywords
-            WHERE product = ANY(%s) AND status = %s AND score >= %s
-        """, (names, status, SERP_SCORE_THRESHOLD))
-    else:
-        cur.execute("""
-            SELECT DISTINCT product FROM seo_keywords
-            WHERE product = ANY(%s) AND status = %s
-        """, (names, status))
-    with_work = {r[0] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
+        query["score_filter"] = "1"
+    resp = api_get("/api/v1/seo/keywords", query=query)
+    with_work = set((resp.get("data") or {}).get("products") or [])
     return [(n, w) for n, w in candidates if n in with_work]
 
 
@@ -99,15 +75,10 @@ def products_without_keywords(candidates):
     names = [n for n, _ in candidates]
     if not names:
         return []
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT product FROM seo_keywords WHERE product = ANY(%s)
-    """, (names,))
-    seeded = {r[0] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
-    return [(n, w) for n, w in candidates if n not in seeded]
+    resp = api_get("/api/v1/seo/keywords",
+                   query={"mode": "without_keywords", "products": ",".join(names)})
+    without = set((resp.get("data") or {}).get("products") or [])
+    return [(n, w) for n, w in candidates if n in without]
 
 
 def products_without_gsc_queries(candidates):
@@ -115,15 +86,10 @@ def products_without_gsc_queries(candidates):
     names = [n for n, _ in candidates]
     if not names:
         return []
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT product FROM gsc_queries WHERE product = ANY(%s)
-    """, (names,))
-    seeded = {r[0] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
-    return [(n, w) for n, w in candidates if n not in seeded]
+    resp = api_get("/api/v1/seo/gsc-queries",
+                   query={"mode": "without", "products": ",".join(names)})
+    without = set((resp.get("data") or {}).get("products") or [])
+    return [(n, w) for n, w in candidates if n in without]
 
 
 def products_with_gsc_work(candidates):
@@ -131,15 +97,9 @@ def products_with_gsc_work(candidates):
     names = [n for n, _ in candidates]
     if not names:
         return []
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT product FROM gsc_queries
-        WHERE product = ANY(%s) AND status = 'pending' AND impressions >= %s
-    """, (names, GSC_IMPRESSIONS_THRESHOLD))
-    with_work = {r[0] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
+    resp = api_get("/api/v1/seo/gsc-queries",
+                   query={"mode": "with_work", "products": ",".join(names)})
+    with_work = set((resp.get("data") or {}).get("products") or [])
     return [(n, w) for n, w in candidates if n in with_work]
 
 
