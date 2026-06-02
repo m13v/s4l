@@ -1125,36 +1125,31 @@ def _platform_breakdown_synthetic_null(conn, days):
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, ph_results, platform=None):
+def build_project_entry(proj, days, api_key, ph_pid, env, ph_results, platform=None):
     name = proj["name"]
-    if name == SYNTHETIC_NO_PROJECT_NAME:
-        # Bypass ps.* (locked) for the synthetic bucket; both helpers above
-        # query posts WHERE project_name IS NULL with the same shape.
-        post_stats = _post_stats_synthetic_null(conn, days)
-        platforms = _platform_breakdown_synthetic_null(conn, days)
-    else:
-        post_stats = ps.get_post_stats(conn, name, days)
-        platforms = ps.get_platform_breakdown(conn, name, days)
-    eng_recent = _windowed_post_engagement(conn, name, days, platform=platform)
-    eng_period_total = _period_total_engagement(conn, name, days, platform=platform)
-    seo_pages_recent = _seo_pages_count(conn, name, days)
-
-    # When a platform filter is active, override the "recent" post count
-    # in post_stats (which project_stats.get_post_stats computes across all
-    # platforms and is chflags-locked so we can't add a param there) so the
-    # "Posts" column in the dashboard's Project Final Stats table speaks the
-    # same vocabulary as Upvotes/Comments/Views.
-    if platform:
-        plat_clause = _platform_sql_clause(platform, "")
-        proj_clause, proj_params = _project_filter_sql(name, "")
-        cur_pf = conn.execute(
-            "SELECT COUNT(*) FROM posts "
-            "WHERE " + proj_clause + " "
-            "AND posted_at >= NOW() - INTERVAL '" + str(int(days)) + " days'"
-            + plat_clause,
-            proj_params,
-        )
-        post_stats["recent"] = int((cur_pf.fetchone() or (0,))[0])
+    # All main-DB + bookings-DB per-project stats come from one consolidated
+    # HTTP endpoint (HTTP-only migration 2026-06-01). Booking scoping params
+    # (client_slug / table / require_utm) are computed locally from config and
+    # forwarded so the endpoint can read the separate bookings DB server-side.
+    # The endpoint folds the platform filter into post_stats.recent directly,
+    # so the legacy platform-override COUNT is no longer needed here.
+    client_slug = ps.get_client_slug(name)
+    booking_table = ps.get_booking_table(name)
+    require_utm = _bookings_require_utm(name)
+    from http_api import api_get
+    _detail = (api_get("/api/v1/stats/project-detail", query={
+        "project": name,
+        "days": int(days),
+        "platform": platform or "",
+        "client_slug": client_slug or "",
+        "booking_table": booking_table or "cal_bookings",
+        "require_utm": "1" if require_utm else "0",
+    }).get("data") or {})
+    post_stats = dict(_detail.get("post_stats") or {})
+    platforms = _detail.get("platforms") or {}
+    eng_recent = _detail.get("windowed") or {"upvotes": 0, "comments": 0, "views": 0, "views_posts": 0, "post_clicks": 0}
+    eng_period_total = _detail.get("period") or {"upvotes": 0, "comments": 0, "views": 0, "post_clicks": 0}
+    seo_pages_recent = int(_detail.get("seo_pages_recent") or 0)
 
     domains = ps.get_project_domains(proj)
     ph_override = proj.get("posthog", {}) or {}
@@ -1180,7 +1175,14 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
     # seo_keywords/gsc_queries `completed_at` falls inside `days`. Top tab →
     # Pages sub-tab already filters rows on this set, so it becomes "pages
     # created in the selected period" automatically.
-    created_by_domain = _created_paths_for_project(conn, proj, days=days)
+    # Window-scoped created paths come from the endpoint's db_created_pages
+    # ({host: [paths]}). With a window set, the filesystem scan is intentionally
+    # skipped (static page files carry no trustworthy creation timestamp), so
+    # the DB-derived set is the whole answer — matching _created_paths_for_project
+    # with days set.
+    created_by_domain = {
+        host: set(paths) for host, paths in (_detail.get("db_created_pages") or {}).items()
+    }
     if posthog is not None:
         for d, detail in (posthog.get("pageview_details") or {}).items():
             paths = created_by_domain.get((d or "").lower(), set())
@@ -1222,10 +1224,7 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
                     scoped_pv += int(cnt or 0)
         posthog["pageviews"] = scoped_pv
 
-    client_slug = ps.get_client_slug(name)
-    booking_table = ps.get_booking_table(name)
-    require_utm = _bookings_require_utm(name)
-    bookings = _bookings_shared(bookings_conn, client_slug, days, booking_table, require_utm) if client_slug else None
+    bookings = _detail.get("bookings")
 
     # When the PostHog batch failed, the aggregate numbers on `posthog` are
     # all 0 but that doesn't mean there are no events, it means we couldn't
@@ -1272,8 +1271,8 @@ def build_project_entry(conn, proj, days, api_key, ph_pid, bookings_conn, env, p
         analytics_suspected_broken = (domain_wide_pv >= 500) and ((domain_wide_signups + domain_wide_sched + domain_wide_get_started) == 0)
 
     real = bookings.get("real_bookings", 0) if bookings else 0
-    dm_clicks = _dm_short_link_stats(conn, name, days)
-    dm_bookings = _dm_booking_count(conn, bookings_conn, name, days)
+    dm_clicks = int(_detail.get("dm_clicks") or 0)
+    dm_bookings = int(_detail.get("dm_bookings") or 0)
     amplitude_signups = _amplitude_signups(proj, days, env)
     if not analytics_error:
         conv = (real / ctas * 100) if ctas else None
