@@ -55,24 +55,12 @@ else:
         print(f"     +{len(rows)-1} other install(s) seen recently")
 
 # 2. Per-platform attribution coverage (last 24h created replies)
-cur = db.execute("""
-    SELECT platform,
-           COUNT(*)                                   AS total,
-           COUNT(install_id)                          AS attributed,
-           COUNT(CASE WHEN status='replied'  THEN 1 END) AS replied,
-           COUNT(CASE WHEN status='skipped'  THEN 1 END) AS skipped,
-           COUNT(CASE WHEN status='processing' THEN 1 END) AS processing,
-           COUNT(CASE WHEN status='pending'  THEN 1 END) AS pending
-    FROM replies
-    WHERE discovered_at >= NOW() - INTERVAL '24 hours'
-    GROUP BY platform
-    ORDER BY total DESC
-""")
-rows = cur.fetchall()
+rows = _digest.get("platforms") or []
 print(f"\n[2] LAST 24H REPLIES BY PLATFORM (HTTP-lane: {', '.join(sorted(HTTP_LANE_PLATFORMS))})")
 print(f"     {'platform':<10} {'total':>5} {'attrib':>7} {'rep':>5} {'skp':>5} {'prc':>5} {'pnd':>5}  notes")
 for r in rows:
-    plat, total, attrib, replied, skipped, proc, pend = r
+    plat, total, attrib = r["platform"], r["total"], r["attributed"]
+    replied, skipped, proc, pend = r["replied"], r["skipped"], r["processing"], r["pending"]
     pct = (attrib / total * 100) if total else 0
     note = ""
     if plat in HTTP_LANE_PLATFORMS:
@@ -89,24 +77,14 @@ for r in rows:
     print(f"     {plat:<10} {total:>5} {attrib:>7} {replied:>5} {skipped:>5} {proc:>5} {pend:>5}{note}")
 
 # 3. Stuck in 'processing' > 30min — the canonical failure mode of a new claim path
-cur = db.execute("""
-    SELECT id, platform, install_id,
-           EXTRACT(EPOCH FROM (NOW() - processing_at))::int AS age_sec
-    FROM replies
-    WHERE status='processing'
-      AND processing_at IS NOT NULL
-      AND processing_at < NOW() - INTERVAL '30 minutes'
-    ORDER BY processing_at ASC
-    LIMIT 10
-""")
-rows = cur.fetchall()
+rows = _digest.get("stuck") or []
 print("\n[3] STUCK IN 'processing' > 30min")
 if not rows:
     print(f"  {OK} none")
 else:
     print(f"  {WARN} {len(rows)} stuck rows (revert with: UPDATE replies SET status='pending' WHERE id IN (...))")
     for r in rows:
-        rid, plat, iid, age = r
+        rid, plat, iid, age = r["id"], r["platform"], r["install_id"], r["age_sec"]
         age_disp = f"{age // 60}m" if age < 7200 else f"{age // 3600}h"
         print(f"     id={rid:<6} {plat:<8} iid={(iid or '-')[:8]}  {age_disp} ago")
 
