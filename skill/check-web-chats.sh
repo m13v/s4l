@@ -9,19 +9,16 @@
 
 set -euo pipefail
 
-# Ensure Homebrew bins (gtimeout, jq, psql) AND the user's npm-global bin
-# (claude) are findable regardless of how the script is invoked. Launchd has
-# these via the plist's PATH; manual / sandboxed shells may not.
+# Ensure Homebrew bins (gtimeout, jq) AND the user's npm-global bin (claude)
+# are findable regardless of how the script is invoked. Launchd has these via
+# the plist's PATH; manual / sandboxed shells may not.
 export PATH="/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 source "$(dirname "$0")/lock.sh"
 acquire_lock "check-web-chats" 60
 
-# Load social-autoposter env (Postgres DATABASE_URL, RESEND_API_KEY).
-ENV_FILE="$HOME/social-autoposter/.env"
-if [ -f "$ENV_FILE" ]; then
-    export DATABASE_URL=$(grep '^DATABASE_URL=' "$ENV_FILE" | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"')
-fi
+# DB access is HTTP-only via scripts/http_api.py -> s4l.ai /api/v1/web-chat/*.
+# No DATABASE_URL needed here any more.
 
 # send-email.js needs RESEND_API_KEY + the analytics node_modules.
 ANALYTICS_ENV="$HOME/analytics/.env.production.local"
