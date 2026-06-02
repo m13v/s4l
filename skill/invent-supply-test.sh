@@ -65,11 +65,13 @@ echo "[invent-supply-test] twitter-browser lock held (pid=$$)" >&2
 
 # One harness invocation handles every query so we pay the CLI startup once.
 # Each scan() call appends a JSONL record to SCAN_TWEETS_FILE=$SCAN_OUT.
+# Upstream browser-harness dropped `-c <script>` for stdin-heredoc; pipe via
+# an unquoted heredoc so $REPO_DIR / $QUERIES_JSON still expand.
 BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
 SCAN_TWEETS_FILE="$SCAN_OUT" \
 BATCH_ID="${BATCH_ID:-}" \
 FRESHNESS_HOURS_DISCOVER="$FRESHNESS_HOURS" \
-  "$HARNESS_BIN" -c "
+  "$HARNESS_BIN" <<PY 2>&1
 import sys, json, os, time
 sys.path.insert(0, '$REPO_DIR/scripts')
 from twitter_scan import scan
@@ -88,7 +90,7 @@ for q in queries:
     except Exception as e:
         dt = time.time() - t0
         print(f'  err project={project!r}  q={query[:50]!r}  in {dt:.1f}s  {type(e).__name__}: {e}', flush=True)
-" 2>&1
+PY
 
 release_lock "twitter-browser"
 echo "[invent-supply-test] done; results in $SCAN_OUT" >&2
