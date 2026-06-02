@@ -2072,7 +2072,14 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        result = reply_to_tweet(sys.argv[2], sys.argv[3])
+        # SAPS_SKIP_CAMPAIGN_SUFFIX=1 opts this reply out of active-campaign
+        # suffixes (e.g. " written with ai"). Set ONLY by the MCP draft_cycle
+        # post path (mcp/src/index.ts::postApproved) so manual/reviewed posts
+        # land clean; the cron pipeline never sets it, so the A/B experiment
+        # keeps running there and on Reddit. Reuses the existing apply_campaigns
+        # plumbing (same flag the self-reply path uses below).
+        _skip_camp = os.environ.get("SAPS_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        result = reply_to_tweet(sys.argv[2], sys.argv[3], apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
     elif cmd == "like":
