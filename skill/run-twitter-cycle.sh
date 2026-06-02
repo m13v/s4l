@@ -112,7 +112,12 @@ TW_ENGINE_PREFIX=""
 # Tweets older than this are no longer worth replying to. Pending rows older
 # than this are hard-expired by Phase 0; younger pending rows are salvaged
 # from prior cycles into this batch.
-FRESHNESS_HOURS=6
+# 2026-06-01: tightened 6h -> 2h. The pending pool had bloated to 636 rows,
+# 523 of them >6h old (median virality 0.44, far below the ~5.8 posted median),
+# because the salvage loop kept re-carrying stale low-virality junk. A 2h
+# ceiling drops that carry runway so aged-out junk expires instead of riding
+# ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
+FRESHNESS_HOURS=2
 
 # ----------------------------------------------------------------------------
 # EXPERIMENT CONCLUDED 2026-05-31: variant D won the ripen+freshness A/B/C/D
@@ -124,10 +129,10 @@ FRESHNESS_HOURS=6
 # permanent, hardcoded behavior. The cycle_variant column is still stamped 'D'
 # below so historical analytics keep a consistent label.
 #
-# Phase 0 hard-expire continues to use FRESHNESS_HOURS=6 (the union ceiling) so
-# peer cycles don't accidentally expire each other's still-pending rows. Only
-# FRESHNESS_HOURS_DISCOVER (Phase 1 prompt + since-rewrite hook) is tightened to
-# 1h, which was the winning D setting.
+# Phase 0 hard-expire uses FRESHNESS_HOURS (the union ceiling, tightened to 2h
+# on 2026-06-01, see above) so peer cycles don't accidentally expire each
+# other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
+# since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
 FRESHNESS_HOURS_DISCOVER=1
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER
