@@ -32,6 +32,11 @@ sys.path.insert(0, str(GMAIL_DIR))
 SCRIPT_DIR = Path(__file__).parent
 ENV_PATH = SCRIPT_DIR.parent / ".env"
 
+sys.path.insert(0, str(SCRIPT_DIR.parent / "scripts"))
+from http_api import api_get, load_env  # noqa: E402
+
+load_env()
+
 _RUN_START = time.time()
 
 
@@ -59,79 +64,51 @@ CREDENTIALS_PATH = GMAIL_DIR / "credentials.json"
 SEO_PRODUCTS = {"Assrt", "Cyrano", "Fazm", "PieLine", "NightOwl"}
 
 
-def get_db_url() -> str:
-    with open(ENV_PATH) as f:
-        for line in f:
-            if line.startswith("DATABASE_URL="):
-                return line.split("=", 1)[1].strip().strip('"')
-    raise RuntimeError("DATABASE_URL not found in .env")
+def load_recipients():
+    resp = api_get("/api/v1/dashboard-users", query={"mode": "recipients"})
+    return (resp.get("data") or {}).get("recipients") or []
 
 
-def load_recipients(conn):
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT email, name, admin, projects
-        FROM dashboard_users
-        WHERE report_enabled
-        ORDER BY admin DESC, email
-    """)
-    cols = [d[0] for d in cur.description]
-    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-    cur.close()
-    return rows
+def _parse_dt(v):
+    """Parse an ISO timestamp string returned by the API into a datetime, or
+    None. The API serializes completed_at as ISO 8601 (possibly with a Z)."""
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
-def query_report(conn, projects) -> dict:
+def query_report(projects) -> dict:
     """If projects is None/empty, return unscoped master view."""
-    cur = conn.cursor()
     now_utc = datetime.now(timezone.utc)
     since = now_utc - timedelta(days=7)
     scope = projects or None
 
-    pages_filter = ""
-    pool_filter = ""
-    stuck_filter = ""
-    summary_filter = ""
-    pages_params = [since]
-    summary_params = [since]
-    pool_params = []
-    stuck_params = []
+    query = {}
     if scope:
-        pages_filter = " AND product = ANY(%s)"
-        pool_filter = " WHERE product = ANY(%s)"
-        stuck_filter = " AND product = ANY(%s)"
-        summary_filter = " AND product = ANY(%s)"
-        pages_params.append(scope)
-        summary_params.append(scope)
-        pool_params.append(scope)
-        stuck_params.append(scope)
+        query["products"] = ",".join(scope)
+    resp = api_get("/api/v1/seo/weekly-report", query=query)
+    data = resp.get("data") or {}
 
-    cur.execute(f"""
-        SELECT product, keyword, slug, page_url, completed_at
-        FROM seo_keywords
-        WHERE status = 'done' AND page_url IS NOT NULL
-          AND completed_at >= %s{pages_filter}
-        ORDER BY completed_at DESC
-    """, pages_params)
-    pages_created = cur.fetchall()
+    # Reshape into the tuple forms the formatter expects.
+    pages_created = [
+        (r.get("product"), r.get("keyword"), r.get("slug"), r.get("page_url"),
+         _parse_dt(r.get("completed_at")))
+        for r in (data.get("pages_created") or [])
+    ]
+    pool_status = [
+        (r.get("product"), r.get("status"), int(r.get("count") or 0))
+        for r in (data.get("pool_status") or [])
+    ]
+    stuck = [
+        (r.get("product"), r.get("keyword"), r.get("status"))
+        for r in (data.get("stuck") or [])
+    ]
 
-    cur.execute(f"""
-        SELECT product, status, COUNT(*)
-        FROM seo_keywords{pool_filter}
-        GROUP BY product, status
-        ORDER BY product, status
-    """, pool_params)
-    pool_status = cur.fetchall()
-
-    cur.execute(f"""
-        SELECT product, keyword, status
-        FROM seo_keywords
-        WHERE status IN ('scoring', 'in_progress'){stuck_filter}
-        ORDER BY product
-    """, stuck_params)
-    stuck = cur.fetchall()
-
-    cur.close()
     return {
         "pages_created": pages_created,
         "pool_status": pool_status,
@@ -250,48 +227,43 @@ def main():
                         help="Only process the recipient with this email (case-insensitive).")
     args = parser.parse_args()
 
-    import psycopg2
-    conn = psycopg2.connect(get_db_url())
-    try:
-        recipients = load_recipients(conn)
-        if args.only:
-            wanted = args.only.lower()
-            recipients = [r for r in recipients if r["email"].lower() == wanted]
-            if not recipients:
-                print(f"No recipient matches --only={args.only}", file=sys.stderr)
-                sys.exit(2)
+    recipients = load_recipients()
+    if args.only:
+        wanted = args.only.lower()
+        recipients = [r for r in recipients if r["email"].lower() == wanted]
+        if not recipients:
+            print(f"No recipient matches --only={args.only}", file=sys.stderr)
+            sys.exit(2)
 
-        mode = " (SAMPLE mode)" if args.sample else ""
-        print(f"Processing {len(recipients)} recipient(s){mode}")
-        for r in recipients:
-            projects = r["projects"] or []
-            # Quiet-week rule (per user instruction 2026-05-14): skip recipients
-            # whose scope had zero pages created in the last 7 days. Applies in
-            # both live and sample modes so the preview matches reality.
-            # Recipients whose projects don't intersect SEO_PRODUCTS at all
-            # naturally have pages_created=[], so they fall through the same
-            # gate without needing a separate check.
-            data = query_report(conn, projects)
-            if not data["pages_created"]:
-                print(f"  SKIP -> {r['email']:30s}  (no pages created in scope last 7 days)")
-                continue
+    mode = " (SAMPLE mode)" if args.sample else ""
+    print(f"Processing {len(recipients)} recipient(s){mode}")
+    for r in recipients:
+        projects = r["projects"] or []
+        # Quiet-week rule (per user instruction 2026-05-14): skip recipients
+        # whose scope had zero pages created in the last 7 days. Applies in
+        # both live and sample modes so the preview matches reality.
+        # Recipients whose projects don't intersect SEO_PRODUCTS at all
+        # naturally have pages_created=[], so they fall through the same
+        # gate without needing a separate check.
+        data = query_report(projects)
+        if not data["pages_created"]:
+            print(f"  SKIP -> {r['email']:30s}  (no pages created in scope last 7 days)")
+            continue
 
-            subject, html_body = format_report(data, r)
+        subject, html_body = format_report(data, r)
 
-            to_addr = OPERATOR_EMAIL if args.sample else r["email"]
-            full_subject = (
-                f"[SAMPLE for {r['email']}] {subject}"
-                if args.sample else subject
-            )
+        to_addr = OPERATOR_EMAIL if args.sample else r["email"]
+        full_subject = (
+            f"[SAMPLE for {r['email']}] {subject}"
+            if args.sample else subject
+        )
 
-            if args.dry_run:
-                print(f"  DRY  -> {to_addr:30s}  subj='{full_subject}'")
-                continue
+        if args.dry_run:
+            print(f"  DRY  -> {to_addr:30s}  subj='{full_subject}'")
+            continue
 
-            send_email(to_addr, full_subject, html_body)
-            print(f"  SENT -> {to_addr:30s}  subj='{full_subject}'")
-    finally:
-        conn.close()
+        send_email(to_addr, full_subject, html_body)
+        print(f"  SENT -> {to_addr:30s}  subj='{full_subject}'")
 
 
 if __name__ == "__main__":
