@@ -34,7 +34,7 @@ const nodeBin = whichNode();
 function whichPython() {
   // Prefer a real Homebrew python (has the pipeline's deps) over the macOS
   // /usr/bin/python3 stub, which can trigger an Xcode CLT install prompt and
-  // often lacks psycopg2 etc.
+  // often lacks the pipeline deps.
   const candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"];
   try {
     const found = execSync("command -v python3 2>/dev/null", { shell: "/bin/bash" })
