@@ -157,34 +157,20 @@ def cmd_open(args):
     # escalate normally because those are operational, not model-judgment,
     # blockers.
     if args.trigger_kind == "model_initiated":
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
         skip_note = f"auto-skip (model_initiated, no escalation): {args.reason}"[:1000]
-        # seo_keywords path
-        cur.execute(
-            "UPDATE seo_keywords SET status='skip', "
-            "notes = COALESCE(notes,'') || E'\\n' || %s, "
-            "updated_at = NOW() "
-            "WHERE product = %s AND keyword = %s AND status != 'done' "
-            "RETURNING id",
-            (skip_note, args.product, args.keyword),
-        )
-        sk_rows = cur.fetchall()
-        # gsc_queries path (same product+keyword may live here too)
-        cur.execute(
-            "UPDATE gsc_queries SET status='skip', "
-            "notes = COALESCE(notes,'') || E'\\n' || %s, "
-            "updated_at = NOW() "
-            "WHERE product = %s AND query = %s AND status != 'done' "
-            "RETURNING id",
-            (skip_note, args.product, args.keyword),
-        )
-        gq_rows = cur.fetchall()
-        conn.commit()
+        resp = api_post("/api/v1/seo/escalations", {
+            "mode": "auto_skip",
+            "product": args.product,
+            "keyword": args.keyword,
+            "skip_note": skip_note,
+        })
+        data = resp.get("data") or {}
+        sk_n = int(data.get("seo_keywords_updated") or 0)
+        gq_n = int(data.get("gsc_queries_updated") or 0)
         _append_log(
             f"auto_skip model_initiated product={args.product} "
-            f"keyword=\"{args.keyword}\" seo_keywords_rows={len(sk_rows)} "
-            f"gsc_queries_rows={len(gq_rows)}"
+            f"keyword=\"{args.keyword}\" seo_keywords_rows={sk_n} "
+            f"gsc_queries_rows={gq_n}"
         )
         print(json.dumps({
             "ok": True,
@@ -192,52 +178,45 @@ def cmd_open(args):
             "reason": "model_initiated trigger is disabled; keyword marked skip instead of emailing",
             "product": args.product,
             "keyword": args.keyword,
-            "seo_keywords_updated": len(sk_rows),
-            "gsc_queries_updated": len(gq_rows),
+            "seo_keywords_updated": sk_n,
+            "gsc_queries_updated": gq_n,
         }))
-        cur.close(); conn.close()
         return 0
 
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
+    if not args.force:
+        dresp = api_get("/api/v1/seo/escalations", query={
+            "mode": "debounce",
+            "product": args.product,
+            "keyword": args.keyword,
+            "hours": 24,
+        })
+        existing = (dresp.get("data") or {}).get("existing")
+        if existing:
+            print(json.dumps({
+                "ok": False,
+                "reason": "debounced",
+                "existing_id": existing.get("id"),
+                "existing_status": existing.get("status"),
+                "asked_at": existing.get("asked_at"),
+            }))
+            sys.exit(2)
 
-    existing = _recent_open_or_replied(cur, args.product, args.keyword, hours=24)
-    if existing and not args.force:
-        eid, status, asked_at = existing
-        print(json.dumps({
-            "ok": False,
-            "reason": "debounced",
-            "existing_id": eid,
-            "existing_status": status,
-            "asked_at": asked_at.isoformat() if asked_at else None,
-        }))
-        cur.close(); conn.close()
-        sys.exit(2)
-
-    cur.execute(
-        """
-        INSERT INTO seo_escalations
-            (source_table, source_id, product, keyword, slug,
-             claude_session_id, run_log_path, reason, trigger_kind)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            args.source_table, args.source_id, args.product, args.keyword,
-            args.slug, args.session_id, args.log_path, args.reason,
-            args.trigger_kind,
-        ),
-    )
-    escalation_id = cur.fetchone()[0]
-
-    note = f"\n[escalated #{escalation_id} {args.trigger_kind}]: {args.reason}"
-    _stamp_source_row(
-        cur, args.source_table, args.source_id, escalation_id,
-        args.product, args.keyword,
-        mark_status="escalated" if args.set_status_escalated else None,
-        append_note=note,
-    )
-    conn.commit()
+    note = f"\n[escalated # {args.trigger_kind}]: {args.reason}"
+    oresp = api_post("/api/v1/seo/escalations", {
+        "mode": "open",
+        "source_table": args.source_table,
+        "source_id": args.source_id,
+        "product": args.product,
+        "keyword": args.keyword,
+        "slug": args.slug,
+        "claude_session_id": args.session_id,
+        "run_log_path": args.log_path,
+        "reason": args.reason,
+        "trigger_kind": args.trigger_kind,
+        "set_status_escalated": bool(args.set_status_escalated),
+        "note": note,
+    })
+    escalation_id = (oresp.get("data") or {}).get("id")
 
     gmail_id = _send_escalation_email(
         escalation_id=escalation_id,
@@ -252,11 +231,10 @@ def cmd_open(args):
         source_id=args.source_id,
     )
     if gmail_id:
-        cur.execute(
-            "UPDATE seo_escalations SET gmail_outbound_id = %s, updated_at = NOW() WHERE id = %s",
-            (gmail_id, escalation_id),
-        )
-        conn.commit()
+        api_patch("/api/v1/seo/escalations", {
+            "id": escalation_id,
+            "gmail_outbound_id": gmail_id,
+        })
 
     _append_log(
         f"open #{escalation_id} product={args.product} keyword=\"{args.keyword}\" "
@@ -269,137 +247,70 @@ def cmd_open(args):
         "gmail_outbound_id": gmail_id,
         "notification_email": NOTIFICATION_EMAIL,
     }))
-    cur.close(); conn.close()
 
 
 def cmd_list(args):
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
-    where = []
-    vals: list = []
-    if args.status:
-        where.append("status = %s"); vals.append(args.status)
-    if args.product:
-        where.append("product = %s"); vals.append(args.product)
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    cur.execute(
-        f"""
-        SELECT id, status, trigger_kind, product, keyword, slug,
-               asked_at, replied_at, resumed_at, reason
-        FROM seo_escalations
-        {where_sql}
-        ORDER BY asked_at DESC
-        LIMIT %s
-        """,
-        vals + [args.limit],
-    )
-    rows = cur.fetchall()
+    resp = api_get("/api/v1/seo/escalations", query={
+        "mode": "list",
+        "status": args.status,
+        "product": args.product,
+        "limit": args.limit,
+    })
+    rows = (resp.get("data") or {}).get("rows") or []
     if args.json:
-        out = []
-        for r in rows:
-            out.append({
-                "id": r[0], "status": r[1], "trigger_kind": r[2],
-                "product": r[3], "keyword": r[4], "slug": r[5],
-                "asked_at": r[6].isoformat() if r[6] else None,
-                "replied_at": r[7].isoformat() if r[7] else None,
-                "resumed_at": r[8].isoformat() if r[8] else None,
-                "reason": r[9],
-            })
-        print(json.dumps(out, indent=2))
+        print(json.dumps(rows, indent=2, default=str))
     else:
         print(f"{'ID':<5} {'STATUS':<10} {'TRIGGER':<16} {'PRODUCT':<14} {'KEYWORD':<40} ASKED")
         for r in rows:
-            asked = r[6].strftime('%Y-%m-%d %H:%M') if r[6] else '?'
-            kw = (r[4] or '')[:40]
-            print(f"{r[0]:<5} {r[1]:<10} {r[2]:<16} {r[3]:<14} {kw:<40} {asked}")
-    cur.close(); conn.close()
+            asked = str(r.get("asked_at") or "")[:16].replace("T", " ") or "?"
+            kw = str(r.get("keyword") or "")[:40]
+            print(f"{r.get('id'):<5} {str(r.get('status') or ''):<10} "
+                  f"{str(r.get('trigger_kind') or ''):<16} {str(r.get('product') or ''):<14} "
+                  f"{kw:<40} {asked}")
 
 
 def cmd_show(args):
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM seo_escalations WHERE id = %s",
-        (args.id,),
-    )
-    row = cur.fetchone()
+    resp = api_get("/api/v1/seo/escalations",
+                   query={"mode": "show", "id": args.id}, ok_on_404=True)
+    if resp.get("_not_found"):
+        print(f"ERROR: escalation #{args.id} not found", file=sys.stderr)
+        sys.exit(1)
+    row = (resp.get("data") or {}).get("row")
     if not row:
         print(f"ERROR: escalation #{args.id} not found", file=sys.stderr)
         sys.exit(1)
-    cols = [d[0] for d in cur.description]
-    out = {}
-    for c, v in zip(cols, row):
-        if hasattr(v, "isoformat"):
-            v = v.isoformat()
-        out[c] = v
-    print(json.dumps(out, indent=2, default=str))
-    cur.close(); conn.close()
+    print(json.dumps(row, indent=2, default=str))
 
 
 def cmd_cancel(args):
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE seo_escalations
-        SET status = 'cancelled',
-            resume_outcome = COALESCE(%s, resume_outcome),
-            updated_at = NOW()
-        WHERE id = %s AND status IN ('pending','replied')
-        RETURNING product, keyword
-        """,
-        (args.note, args.id),
-    )
-    row = cur.fetchone()
-    if not row:
+    resp = api_patch("/api/v1/seo/escalations", {
+        "id": args.id,
+        "action": "cancel",
+        "note": args.note,
+    }, ok_on_404=True)
+    if resp.get("_not_found"):
         print(f"ERROR: escalation #{args.id} not in cancellable state", file=sys.stderr)
         sys.exit(1)
-    cur.execute(
-        """
-        UPDATE seo_keywords SET open_escalation_id = NULL, updated_at = NOW()
-        WHERE open_escalation_id = %s
-        """, (args.id,))
-    cur.execute(
-        """
-        UPDATE gsc_queries SET open_escalation_id = NULL, updated_at = NOW()
-        WHERE open_escalation_id = %s
-        """, (args.id,))
-    conn.commit()
+    data = resp.get("data") or {}
     _append_log(f"cancel #{args.id} note=\"{(args.note or '')[:120]}\"")
-    print(json.dumps({"ok": True, "id": args.id, "product": row[0], "keyword": row[1]}))
-    cur.close(); conn.close()
+    print(json.dumps({"ok": True, "id": args.id,
+                      "product": data.get("product"), "keyword": data.get("keyword")}))
 
 
 def cmd_mark_resumed(args):
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE seo_escalations
-        SET status = 'resumed',
-            resumed_at = NOW(),
-            resumed_run_log_path = %s,
-            resume_outcome = %s,
-            updated_at = NOW()
-        WHERE id = %s AND status = 'replied'
-        RETURNING product, keyword
-        """,
-        (args.log_path, args.outcome, args.id),
-    )
-    row = cur.fetchone()
-    if not row:
+    resp = api_patch("/api/v1/seo/escalations", {
+        "id": args.id,
+        "action": "mark_resumed",
+        "log_path": args.log_path,
+        "outcome": args.outcome,
+    }, ok_on_404=True)
+    if resp.get("_not_found"):
         print(f"ERROR: escalation #{args.id} not in 'replied' state", file=sys.stderr)
         sys.exit(1)
-    cur.execute(
-        "UPDATE seo_keywords SET open_escalation_id = NULL, updated_at = NOW() WHERE open_escalation_id = %s",
-        (args.id,))
-    cur.execute(
-        "UPDATE gsc_queries SET open_escalation_id = NULL, updated_at = NOW() WHERE open_escalation_id = %s",
-        (args.id,))
-    conn.commit()
+    data = resp.get("data") or {}
     _append_log(f"resumed #{args.id} outcome={args.outcome} log={args.log_path or 'NONE'}")
-    print(json.dumps({"ok": True, "id": args.id, "product": row[0], "keyword": row[1]}))
-    cur.close(); conn.close()
+    print(json.dumps({"ok": True, "id": args.id,
+                      "product": data.get("product"), "keyword": data.get("keyword")}))
 
 
 def main():
