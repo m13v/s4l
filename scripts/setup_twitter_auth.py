@@ -63,12 +63,27 @@ except ImportError:
     )
     sys.exit(0)
 
+# Optional server-side session-cookie store (best-effort). Lets connect_x persist
+# the validated X cookies so restore_twitter_session.py can auto-re-inject them
+# after any logout. Guarded so a missing dep or offline API never breaks setup.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from http_api import api_post  # noqa: E402
+    from twitter_account import resolve_handle  # noqa: E402
+except Exception:
+    api_post = None
+    resolve_handle = None
+
 # --- Config -----------------------------------------------------------------
 
 # Same managed Chrome the twitter-harness pipeline uses (skill/lib/twitter-backend.sh).
 CDP = os.environ.get("SAPS_TWITTER_CDP_URL", os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555")).rstrip("/")
 PORT = int(CDP.rsplit(":", 1)[-1]) if CDP.rsplit(":", 1)[-1].isdigit() else 9555
 PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / "browser-harness"
+# Same PID file server.py (the twitter-harness MCP) writes, so a Chrome launched
+# here is tracked and reapable by bh_stop instead of becoming an orphan that
+# strands the debug port.
+PID_FILE = Path.home() / ".claude" / "browser-profiles" / "browser-harness.chrome.pid"
 
 # Browsers ai_browser_profile.cookies can read from, in auto-detect priority.
 AUTO_SOURCES = ["chrome:Default", "arc:Default", "brave:Default", "edge:Default"]
@@ -163,7 +178,11 @@ def _launch_chrome() -> bool:
         cmd += ["--window-position=80,80", "--window-size=1100,900"]
     cmd.append("about:blank")
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        PID_FILE.write_text(str(proc.pid))
+    except OSError:
+        pass
     for _ in range(15):
         if _cdp_alive():
             return True
@@ -251,6 +270,46 @@ def _has_session_quick() -> bool:
     try:
         send("Network.enable")
         return _has_auth_cookie(send)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _save_session_to_store() -> None:
+    """Best-effort: persist the live x.com cookies to the server-side session
+    store (social_accounts.session_cookies, via POST /api/v1/twitter/session-cookies)
+    so restore_twitter_session.py can auto-re-inject them on the next preflight
+    after ANY logout — hard kill, crash, or AppMaker VM reseed. Non-fatal: the
+    local session is already valid; this only enables future auto-recovery.
+    Without it the restore rail has nothing to read and every logout needs a
+    manual connect_x."""
+    if api_post is None or resolve_handle is None:
+        return
+    try:
+        handle = resolve_handle()
+    except Exception:
+        handle = None
+    if not handle:
+        return
+    try:
+        ws, send = _attach()
+    except Exception:
+        return
+    try:
+        send("Network.enable")
+        r = send("Network.getAllCookies")
+        cks = r.get("result", {}).get("cookies", []) or []
+        wanted = tuple(d.strip() for d in DOMAINS.split(",") if d.strip())
+        cookies = [c for c in cks if any(w in (c.get("domain") or "") for w in wanted)]
+        if not cookies:
+            return
+        api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
+        print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
+              "(auto-restore enabled)", file=sys.stderr)
+    except Exception as e:
+        print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
     finally:
         try:
             ws.close()
@@ -387,6 +446,7 @@ def cmd_connect(args) -> dict:
     # 1. Already logged in? Nothing to import.
     try:
         if _is_session_valid():
+            _save_session_to_store()
             return {
                 "ok": True,
                 "connected": True,
@@ -410,6 +470,7 @@ def cmd_connect(args) -> dict:
         # 3. Re-validate after this source.
         try:
             if _is_session_valid():
+                _save_session_to_store()
                 return {
                     "ok": True,
                     "connected": True,
