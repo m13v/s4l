@@ -20,7 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
 from project_topics import topics_for_project
 try:
@@ -61,21 +61,16 @@ def get_already_posted():
     keep the old behavior. Other platforms have their own scoped readers
     (score_twitter_candidates.py, github_tools.py, score_linkedin_candidates.py).
     """
-    conn = dbmod.get_conn()
     acct = _resolve_account("reddit")
     if acct:
-        rows = conn.execute(
-            "SELECT thread_url FROM posts "
-            "WHERE platform='reddit' AND thread_url IS NOT NULL "
-            "  AND our_account = %s",
-            [acct],
-        ).fetchall()
+        resp = api_get(
+            "/api/v1/posts/thread-urls",
+            query={"platform": "reddit", "our_account": acct},
+        )
     else:
-        rows = conn.execute(
-            "SELECT thread_url FROM posts WHERE thread_url IS NOT NULL"
-        ).fetchall()
-    conn.close()
-    return {row[0] for row in rows}
+        resp = api_get("/api/v1/posts/thread-urls", query={"all_platforms": 1})
+    urls = (resp.get("data") or {}).get("thread_urls") or []
+    return {u for u in urls if u}
 
 
 def get_engaged_linkedin_authors():
@@ -84,13 +79,9 @@ def get_engaged_linkedin_authors():
     LinkedIn batch commenting uses search result pages (not unique post URLs),
     so URL-based dedup doesn't work. This provides author-level dedup instead.
     """
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        "SELECT LOWER(thread_author) FROM posts "
-        "WHERE platform = 'linkedin' AND thread_author IS NOT NULL AND thread_author != ''"
-    ).fetchall()
-    conn.close()
-    return {row[0] for row in rows}
+    resp = api_get("/api/v1/linkedin-engaged", query={"list_authors": 1})
+    authors = (resp.get("data") or {}).get("authors") or []
+    return {a for a in authors if a}
 
 
 def get_engaged_linkedin_post_ids():
@@ -102,28 +93,34 @@ def get_engaged_linkedin_post_ids():
     that touch the same post overlaps. Used by run-linkedin.sh to brief
     the LLM so it skips a candidate whose URL contains any engaged ID."""
     import linkedin_url as li_url
-    conn = dbmod.get_conn()
-    ids = li_url.get_engaged_ids(conn)
-    conn.close()
-    return ids
+    return li_url.get_engaged_ids()
 
 
 def get_recent_posts(limit=5):
     """Return our last N post contents for repetition checking."""
-    conn = dbmod.get_conn()
-    rows = conn.execute("SELECT our_content FROM posts ORDER BY id DESC LIMIT %s", [limit]).fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+    resp = api_get(
+        "/api/v1/posts",
+        query={"order_by": "id", "order_dir": "desc", "limit": int(limit)},
+    )
+    posts = (resp.get("data") or {}).get("posts") or []
+    return [p.get("our_content") for p in posts]
 
 
 def check_rate_limit(max_per_day=4000):
-    """Return (posts_today, can_post). Default limit: 4000/day."""
-    conn = dbmod.get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) FROM posts WHERE posted_at >= NOW() - INTERVAL '24 hours' AND platform != 'github_issues'"
-    ).fetchone()
-    conn.close()
-    count = row[0]
+    """Return (posts_today, can_post). Default limit: 4000/day.
+
+    The count endpoint filters by platform equality (no negation), so we
+    take the all-platform 24h count and subtract the github_issues 24h
+    count to reproduce the original `platform != 'github_issues'` gate.
+    """
+    total_resp = api_get("/api/v1/posts/count", query={"within_seconds": 86400})
+    gh_resp = api_get(
+        "/api/v1/posts/count",
+        query={"within_seconds": 86400, "platform": "github_issues"},
+    )
+    total = int((total_resp.get("data") or {}).get("count") or 0)
+    gh = int((gh_resp.get("data") or {}).get("count") or 0)
+    count = max(0, total - gh)
     can_post = count < max_per_day if max_per_day else True
     return count, can_post
 
