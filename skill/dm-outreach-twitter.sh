@@ -37,10 +37,11 @@ acquire_lock "dm-outreach-twitter" 2700
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# 2026-06-02: removed the vestigial DATABASE_URL gate. This rail talks to the
+# central store exclusively through the S4L HTTP API (scan_dm_candidates.py,
+# dm_outreach_twitter_helper.py, log_run.py all use scripts/http_api.py). No
+# direct Postgres connection is opened here, matching dm-outreach-reddit.sh and
+# dm-outreach-linkedin.sh (migrated 2026-05-12).
 # (LOG_DIR/LOG_FILE bootstrapped at top of script.)
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
