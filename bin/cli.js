@@ -453,14 +453,37 @@ function installBrowserHarness() {
       console.warn('    WARNING: git clone failed; twitter-harness will not work until you clone manually.');
     }
   } else {
-    console.log(`    browser-harness clone exists -> ${harnessDir}`);
+    // Refresh the existing clone instead of silently reusing it. server.py
+    // invokes `browser-harness -c <script>`; a stale checkout that predates the
+    // `-c` interface (or otherwise drifted from upstream) makes every bh_run
+    // return the CLI usage string while looking "installed". fetch+reset --hard
+    // to current upstream so the installed CLI always matches the shipped
+    // server.py contract.
+    console.log(`    browser-harness clone exists -> ${harnessDir}; updating to latest...`);
+    const fetch = spawnSync('git', ['-C', harnessDir, 'fetch', '--depth', '1', 'origin', 'HEAD'], { stdio: 'inherit' });
+    if (fetch.status === 0) {
+      const reset = spawnSync('git', ['-C', harnessDir, 'reset', '--hard', 'FETCH_HEAD'], { stdio: 'inherit' });
+      if (reset.status !== 0) {
+        console.warn('    WARNING: could not reset browser-harness clone to latest; using existing checkout.');
+      }
+    } else {
+      console.warn('    WARNING: could not fetch browser-harness updates; using existing checkout.');
+    }
   }
 
   if (uvBin && fs.existsSync(harnessDir)) {
     console.log('    installing browser-harness CLI via uv tool...');
-    const install = spawnSync(uvBin, ['tool', 'install', '-e', harnessDir], { stdio: 'inherit' });
+    // --force so a refreshed source / changed entry point is reinstalled even
+    // when the tool is already present (a plain re-install is otherwise a no-op).
+    const install = spawnSync(uvBin, ['tool', 'install', '--force', '-e', harnessDir], { stdio: 'inherit' });
     if (install.status !== 0) {
       console.warn('    WARNING: `uv tool install -e .` failed; check the output above.');
+    }
+    // The harness daemon caches imported code in a long-running process; drop it
+    // so the next bh_run loads the freshly-installed CLI instead of stale code.
+    const harnessBin = path.join(HOME, '.local', 'bin', 'browser-harness');
+    if (fs.existsSync(harnessBin)) {
+      spawnSync(harnessBin, ['--reload'], { stdio: 'inherit' });
     }
   }
 
