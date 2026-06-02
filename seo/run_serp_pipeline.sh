@@ -277,16 +277,14 @@ except Exception as e:
     STATUS=$(SEO_PRODUCT="$PRODUCT" SEO_KEYWORD="$KEYWORD" SEO_SCRIPT_DIR="$SCRIPT_DIR" \
     python3 -c "
 import sys, os
-sys.path.insert(0, os.environ['SEO_SCRIPT_DIR'])
-from db_helpers import get_conn
-conn = get_conn()
-cur = conn.cursor()
-cur.execute('SELECT status FROM seo_keywords WHERE product = %s AND keyword = %s',
-            (os.environ['SEO_PRODUCT'], os.environ['SEO_KEYWORD']))
-row = cur.fetchone()
-print(row[0] if row else 'unknown')
-cur.close()
-conn.close()
+seo_dir = os.environ['SEO_SCRIPT_DIR']
+sys.path.insert(0, os.path.join(os.path.dirname(seo_dir), 'scripts'))
+from http_api import api_get, load_env
+load_env()
+resp = api_get('/api/v1/seo/keywords', query={'mode': 'get',
+    'product': os.environ['SEO_PRODUCT'], 'keyword': os.environ['SEO_KEYWORD']})
+row = resp.get('data')
+print(row.get('status') if row else 'unknown')
 ")
 fi
 
