@@ -10,10 +10,8 @@ set -euo pipefail
 source "$(dirname "$0")/lock.sh"
 acquire_lock "ingest-web-chat-replies" 60
 
-ENV_FILE="$HOME/social-autoposter/.env"
-if [ -f "$ENV_FILE" ]; then
-    export DATABASE_URL=$(grep '^DATABASE_URL=' "$ENV_FILE" | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"')
-fi
+# DB access is HTTP-only via scripts/http_api.py -> s4l.ai /api/v1/web-chat/*.
+# No DATABASE_URL needed here any more.
 
 ANALYTICS_ENV="$HOME/analytics/.env.production.local"
 if [ -f "$ANALYTICS_ENV" ]; then
