@@ -15,10 +15,18 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post
 
 MIN_WORDS = 5
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
+
+# NOTE: posts/replies for GitHub live under platform='github' in the DB; the
+# 'github_issues' value used here matches zero rows, so Phase A has long been a
+# no-op. Preserved verbatim during the HTTP-only migration to avoid an
+# unrequested volume/cost change (switching to 'github' would suddenly scan all
+# ~6.8k GitHub posts). If you want to actually scan GitHub replies, flip
+# SCAN_PLATFORM to 'github' deliberately.
+SCAN_PLATFORM = "github_issues"
 
 
 def load_config():
@@ -33,19 +41,24 @@ def word_count(text):
 
 
 def main():
-    dbmod.load_env()
-    conn = dbmod.get_conn()
     config = load_config()
     github_user = config.get("accounts", {}).get("github", {}).get("username", "m13v")
 
-    # Get all unique GitHub issues we've commented on
-    rows = conn.execute(
-        "SELECT DISTINCT thread_url FROM posts WHERE platform='github_issues' AND status='active'"
-    ).fetchall()
+    # Get all active GitHub posts we've commented on. The posts GET returns id +
+    # thread_url together, so we capture the post_id map here and skip the
+    # per-thread lookup the direct-SQL version used to do.
+    resp = api_get("/api/v1/posts",
+                   query={"platform": SCAN_PLATFORM, "status": "active", "limit": 500})
+    rows = ((resp or {}).get("data") or {}).get("posts") or []
 
     issues = {}
+    post_id_by_url = {}
     for row in rows:
-        url = row["thread_url"]
+        url = row.get("thread_url")
+        if not url:
+            continue
+        # First post per thread_url wins (mirrors the old "use the first one").
+        post_id_by_url.setdefault(url, row.get("id"))
         match = re.match(r"https://github\.com/([^/]+/[^/]+)/issues/(\d+)", url)
         if match:
             repo = match.group(1)
@@ -69,14 +82,10 @@ def main():
     for issue_key, thread_url in issues.items():
         repo, issue_num = issue_key.rsplit("/", 1)
 
-        # Get the post_id for this issue (use the first one)
-        post_row = conn.execute(
-            "SELECT id FROM posts WHERE platform='github_issues' AND thread_url=%s LIMIT 1",
-            (thread_url,)
-        ).fetchone()
-        if not post_row:
+        # post_id captured alongside thread_url in the posts GET above.
+        post_id = post_id_by_url.get(thread_url)
+        if not post_id:
             continue
-        post_id = post_row["id"]
 
         # Fetch all comments on the issue
         try:
