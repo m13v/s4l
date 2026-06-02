@@ -1260,6 +1260,13 @@ if [ "$EXTRACT_EXIT" -ne 0 ] || [ ! -f "$RAW_FILE" ]; then
     # context_overflow) or just "model found nothing relevant". Classify
     # the failure for the post-loop log_run summary; the loop control below
     # decides whether to retry or give up.
+    # SCAN_OUTPUT was a stale leftover from the pre-lean design (when the scan's
+    # stdout was captured into a shell var); the lean Phase 1 loop now tees its
+    # output to $LOG_FILE instead, so an empty-scan attempt hit `set -u` and
+    # aborted the whole cycle here. Feed the classifier the recent log tail (the
+    # actual scan output, where harness/Anthropic error signatures land) so we
+    # still distinguish a real error from "found nothing relevant".
+    SCAN_OUTPUT=$(tail -n 80 "$LOG_FILE" 2>/dev/null || true)
     PHASE1_REASON_LATEST=$(echo "$SCAN_OUTPUT" | python3 "$REPO_DIR/scripts/classify_run_error.py" 2>/dev/null)
     [ -z "$PHASE1_REASON_LATEST" ] && PHASE1_REASON_LATEST="phase1_no_tweets"
     LAST_PHASE1_REASON="$PHASE1_REASON_LATEST"
