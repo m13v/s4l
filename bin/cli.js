@@ -840,6 +840,23 @@ function installMcp() {
     console.warn('  WARNING: mcp/ missing from install — skipping MCP setup');
     return;
   }
+  // Stamp the REAL shipped version (this npm package's version) into the MCP so
+  // it can report itself accurately at runtime. The top-level package.json is
+  // NOT copied into the install, so without this the MCP can't see its true
+  // version. mcp/src/version.ts reads dist/version.json first. Refreshed on
+  // every init/update.
+  try {
+    const pkgVersion = require('../package.json').version;
+    const distDir = path.join(mcpDest, 'dist');
+    fs.mkdirSync(distDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(distDir, 'version.json'),
+      JSON.stringify({ version: pkgVersion, installedAt: new Date().toISOString() }, null, 2)
+    );
+    console.log('  stamped MCP version', pkgVersion);
+  } catch (e) {
+    console.warn('  WARNING: could not stamp MCP version:', e && e.message);
+  }
   console.log('  installing MCP runtime deps (npm install --omit=dev in mcp/)');
   const npmRes = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
     cwd: mcpDest,
