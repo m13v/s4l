@@ -74,6 +74,14 @@ PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / "browser-harness"
 AUTO_SOURCES = ["chrome:Default", "arc:Default", "brave:Default", "edge:Default"]
 DOMAINS = "x.com,twitter.com"
 
+# Primary cookie copier: a self-contained, dependency-light script that ships
+# WITH this repo (deps already in requirements.txt: cryptography +
+# websocket-client). This is what makes the auto-import work on a fresh install.
+VENDORED_COOKIE_SCRIPT = Path(__file__).resolve().parent / "copy_browser_cookies.py"
+
+# Legacy fallback: the separate ~/ai-browser-profile project. Only present on
+# the maintainer's dev box; never installed on a customer machine. Kept solely
+# so nothing regresses there if the vendored script is somehow missing.
 ABP_PYTHON = Path.home() / "ai-browser-profile" / ".venv" / "bin" / "python"
 
 
@@ -300,19 +308,36 @@ def _show_window_and_open_login() -> bool:
 def _import_from(source: str) -> dict:
     """Copy x.com/twitter.com cookies from `source` into the managed Chrome.
 
+    Prefers the vendored copy_browser_cookies.py (ships with this repo, runs
+    under the same interpreter that is already executing this script, so its
+    deps are guaranteed present). Falls back to the legacy ai-browser-profile
+    venv only on a dev box where the vendored script is absent.
+
     Returns {ok, returncode, stdout, stderr}. Cookie values are never surfaced;
-    ai_browser_profile.cookies prints counts only.
+    the copier prints counts only.
     """
-    if not ABP_PYTHON.exists():
-        return {"ok": False, "error": f"ai-browser-profile venv not found at {ABP_PYTHON}"}
-    cmd = [
-        str(ABP_PYTHON), "-m", "ai_browser_profile.cookies", "copy",
-        "--from", source, "--to", CDP, "--domains", DOMAINS,
-    ]
+    if VENDORED_COOKIE_SCRIPT.exists():
+        cmd = [
+            sys.executable, str(VENDORED_COOKIE_SCRIPT), "copy",
+            "--from", source, "--to", CDP, "--domains", DOMAINS,
+        ]
+        cwd = str(VENDORED_COOKIE_SCRIPT.parent)
+    elif ABP_PYTHON.exists():
+        cmd = [
+            str(ABP_PYTHON), "-m", "ai_browser_profile.cookies", "copy",
+            "--from", source, "--to", CDP, "--domains", DOMAINS,
+        ]
+        cwd = str(Path.home() / "ai-browser-profile")
+    else:
+        return {
+            "ok": False,
+            "error": "no cookie copier available "
+            f"(vendored script missing at {VENDORED_COOKIE_SCRIPT} and "
+            f"ai-browser-profile venv not found at {ABP_PYTHON})",
+        }
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60,
-            cwd=str(Path.home() / "ai-browser-profile"),
+            cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"cookie copy from {source} timed out after 60s"}
