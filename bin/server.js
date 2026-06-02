@@ -6216,26 +6216,10 @@ async function handleApi(req, res) {
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
     }
-    const platformFilter = platform
-      ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
-      : '';
-    const projectFilter = pc.clause;
-    const q =
-      "SELECT json_agg(row_to_json(r)) FROM (" +
-        "SELECT to_char((plc.ts AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
-          "COUNT(*)::bigint AS clicks_gained " +
-        "FROM post_link_clicks plc " +
-        "JOIN post_links pl ON pl.code = plc.code " +
-        "JOIN posts p ON p.id = pl.post_id " +
-        "WHERE plc.ts >= CURRENT_DATE - INTERVAL '" + days + " days' " +
-          "AND plc.is_bot = FALSE " +
-          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')" +
-          platformFilter + projectFilter + " " +
-        "GROUP BY day ORDER BY day ASC" +
-      ") r";
+    const scope = pc.list ? pc.list.join(',') : undefined;
     return (async () => {
-      const rows = await pq(q);
-      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      const data = await apiGet('/api/v1/dashboard/clicks-per-day', { days, platform: platform || undefined, scope });
+      const value = (data && data.rows) || [];
       clicksPerDayCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { days, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
@@ -6268,32 +6252,10 @@ async function handleApi(req, res) {
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
     }
-    const platformFilter = platform
-      ? " AND CASE WHEN LOWER(p.platform) = 'x' THEN 'twitter' ELSE LOWER(p.platform) END = '" + platform + "'"
-      : '';
-    const projectFilter = pc.clause;
-    // Split posts_made into threads_made (we authored the thread itself) vs
-    // comments_made (we engaged on someone else's thread). Matches the
-    // /api/activity classifier: thread iff thread_url = our_url AND
-    // (thread_author IS NULL OR thread_author = our_account).
-    const threadClause =
-      "p.thread_url = p.our_url AND (p.thread_author IS NULL OR p.thread_author = p.our_account)";
-    const q =
-      "SELECT json_agg(row_to_json(r)) FROM (" +
-        "SELECT to_char((p.posted_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, " +
-          "COUNT(*)::bigint AS posts_made, " +
-          "SUM(CASE WHEN " + threadClause + " THEN 1 ELSE 0 END)::bigint AS threads_made, " +
-          "SUM(CASE WHEN " + threadClause + " THEN 0 ELSE 1 END)::bigint AS comments_made " +
-        "FROM posts p " +
-        "WHERE p.posted_at IS NOT NULL " +
-          "AND p.posted_at >= CURRENT_DATE - INTERVAL '" + days + " days' " +
-          "AND LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues')" +
-          platformFilter + projectFilter + " " +
-        "GROUP BY day ORDER BY day ASC" +
-      ") r";
+    const scope = pc.list ? pc.list.join(',') : undefined;
     return (async () => {
-      const rows = await pq(q);
-      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      const data = await apiGet('/api/v1/dashboard/posts-per-day', { days, platform: platform || undefined, scope });
+      const value = (data && data.rows) || [];
       postsPerDayCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { days, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
@@ -6321,20 +6283,10 @@ async function handleApi(req, res) {
     if (cached && Date.now() - cached.at < 300000) {
       return json(res, { days, rows: cached.value, cachedAt: cached.at });
     }
-    const projectFilter = pc.clause;
-    const q =
-      "SELECT json_agg(row_to_json(r)) FROM (" +
-        "SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day, " +
-          "COUNT(*)::int AS bookings_gained " +
-        "FROM cal_bookings " +
-        "WHERE created_at >= CURRENT_DATE - INTERVAL '" + days + " days' " +
-          "AND COALESCE(attendee_email, '') NOT ILIKE '%test%'" +
-          projectFilter +
-        " GROUP BY created_at::date ORDER BY created_at::date ASC" +
-      ") r";
+    const scope = pc.list ? pc.list.join(',') : undefined;
     return (async () => {
-      const rows = await pqBookings(q);
-      const value = (rows && rows.length && rows[0].json_agg) ? rows[0].json_agg : [];
+      const data = await apiGet('/api/v1/dashboard/bookings-per-day', { days, scope });
+      const value = (data && data.rows) || [];
       bookingsPerDayCache.set(cacheKey, { at: Date.now(), value });
       return json(res, { days, rows: value });
     })().catch(e => json(res, { error: e.message }, 500));
