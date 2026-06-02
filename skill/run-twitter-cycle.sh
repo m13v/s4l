@@ -75,22 +75,34 @@ export SA_CYCLE_ID="$BATCH_ID"
 #   control   = generic "keep it tight" guidance, no per-style number, no gate
 #               (reproduces pre-length-project length behavior WITHOUT reverting
 #                the bug fixes shipped alongside the length project)
-# Assignment is deterministic from BATCH_ID (md5 low bit) so a re-run of the
-# same cycle id lands the same arm. Set LENGTH_AB_ENABLED=0 to disable the
-# experiment: every cycle then runs treatment (full length-control behavior).
+# Assignment is deterministic from BATCH_ID's trailing timestamp digit (parity)
+# so a re-run of the same cycle id lands the same arm. Set LENGTH_AB_ENABLED=0
+# to disable the experiment: every cycle then runs treatment (full length
+# control behavior).
+#
+# DO NOT switch this back to md5/md5sum. Those binaries live in /sbin on macOS
+# (and /usr/bin/md5sum-only on Linux), and /sbin is NOT on the launchd PATH
+# (node/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin). On 2026-06-02 an
+# md5-based split silently produced an EMPTY hash under cron, fell through the
+# case to control, and stamped 173/173 control in 12h (a dead experiment that
+# looked alive). tr + tail live in /usr/bin (on the launchd PATH, and present
+# on both macOS and the Linux VMs), so the digit split is PATH- and platform-
+# safe. Empty/garbage fails OPEN to treatment (full length behavior), never
+# silently to one arm.
 LENGTH_AB_ENABLED="${LENGTH_AB_ENABLED:-1}"
 if [ "$LENGTH_AB_ENABLED" = "1" ]; then
-  _len_hash=$(printf '%s' "$BATCH_ID" | md5 2>/dev/null || printf '%s' "$BATCH_ID" | md5sum | awk '{print $1}')
-  _len_last=$(printf '%s' "$_len_hash" | tail -c 1)
+  _len_digits=$(printf '%s' "$BATCH_ID" | tr -cd '0-9')
+  _len_last=$(printf '%s' "$_len_digits" | tail -c 1)
   case "$_len_last" in
-    [02468ace]) LENGTH_ARM="treatment" ;;
-    *)          LENGTH_ARM="control" ;;
+    [13579]) LENGTH_ARM="treatment" ;;
+    [02468]) LENGTH_ARM="control" ;;
+    *)       LENGTH_ARM="treatment" ;;
   esac
 else
   LENGTH_ARM="treatment"
+  _len_last="off"
 fi
 export LENGTH_ARM
-echo "[length-ab] LENGTH_AB_ENABLED=$LENGTH_AB_ENABLED arm=$LENGTH_ARM batch=$BATCH_ID" >&2
 
 LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
@@ -155,6 +167,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
 log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-05-31); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
+log "[length-ab] enabled=$LENGTH_AB_ENABLED arm=$LENGTH_ARM (batch=$BATCH_ID, last_digit=${_len_last:-none})"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
 # Three early-exit gates BEFORE we open the DB, set up traps, or touch the
