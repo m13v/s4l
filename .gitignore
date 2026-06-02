@@ -152,9 +152,7 @@ scripts/tmp_li_scan/
 # Customer onboarding playbook + drafts (private)
 /onboarding/
 .vercel
-config.json.pre-*
 scripts/_browser_use_test/
 scripts/*storage_state*.json
-scripts/podlog-shortlinks-*.csv
 scripts/scratch_*.py
 scripts/db_direct.py
