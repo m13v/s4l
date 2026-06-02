@@ -587,10 +587,68 @@ server.registerTool(
   }
 );
 
+// ---- version: report installed version + deliver updates on demand ---------
+server.registerTool(
+  "version",
+  {
+    title: "Version & updates",
+    description:
+      "Report the installed social-autoposter version and check npm for a newer release. " +
+      "action:'status' (default) shows installed vs latest published and whether an update is " +
+      "available. action:'update' pulls and installs the latest release (runs " +
+      "`npx social-autoposter@latest update`); the new MCP code takes effect after the client " +
+      "reconnects / restarts (this running process keeps the old code until then). Use this when " +
+      "the user asks what version they're on, or to push the latest update to their machine.",
+    inputSchema: {
+      action: z.enum(["status", "update"]).optional(),
+    },
+  },
+  async ({ action }) => {
+    if (action === "update") {
+      // Pull + install the latest published release. This overwrites mcp/dist/
+      // (including this running file — safe; the loaded process keeps old code)
+      // and re-runs install.mjs to re-register the client config. npx is run
+      // non-interactively so it can't stall on a confirm prompt.
+      const before = VERSION;
+      const res = await run("npx", ["-y", "social-autoposter@latest", "update"], {
+        timeoutMs: 600_000,
+      });
+      // Bust the latest-version cache so the post-update number is fresh.
+      const latest = await latestPublishedVersion();
+      return jsonContent({
+        action: "update",
+        ran: "npx social-autoposter@latest update",
+        exit_code: res.code,
+        installed_before: before,
+        latest_published: latest,
+        ok: res.code === 0,
+        takes_effect:
+          "after the MCP server restarts — reconnect the client / restart Claude Desktop or " +
+          "Claude Code. This process keeps running the previous version until then.",
+        output_tail: (res.stdout + "\n" + res.stderr).trim().split("\n").slice(-20).join("\n"),
+      });
+    }
+    const v = await versionStatus();
+    return jsonContent({
+      installed: v.installed,
+      latest_published: v.latest,
+      update_available: v.update_available,
+      update_command: "npx social-autoposter@latest update",
+      note:
+        v.latest == null
+          ? "Could not reach npm to check for a newer version (offline or registry error)."
+          : v.update_available
+            ? `A newer version (${v.latest}) is available. Run this tool with action:'update' ` +
+              "to install it, or run `npx social-autoposter@latest update` in a terminal."
+            : "You are on the latest published version.",
+    });
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[social-autoposter-mcp] connected. repo=${REPO_DIR}`);
+  console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${REPO_DIR}`);
 }
 
 main().catch((err) => {
