@@ -81,24 +81,15 @@ _insert_keyword() {
     # score=2.0. ON CONFLICT keeps the newest brief without nuking state.
     PROD="$1" KW="$2" SLUG="$3" python3 - <<'PY'
 import os, sys
-sys.path.insert(0, os.environ['SEO_SCRIPT_DIR'])
-import db_helpers
-conn = db_helpers.get_conn()
-cur = conn.cursor()
-cur.execute(
-    "INSERT INTO seo_keywords (product, keyword, slug, source, status, score) "
-    "VALUES (%s, %s, %s, 'top_page', 'pending', 2.0) "
-    "ON CONFLICT (product, keyword) DO UPDATE SET "
-    "  slug = EXCLUDED.slug, "
-    "  source = 'top_page', "
-    "  status = CASE WHEN seo_keywords.status IN ('done','in_progress') "
-    "               THEN seo_keywords.status ELSE 'pending' END, "
-    "  score = GREATEST(seo_keywords.score, 2.0), "
-    "  updated_at = NOW()",
-    (os.environ['PROD'], os.environ['KW'], os.environ['SLUG']),
-)
-conn.commit()
-cur.close(); conn.close()
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ['SEO_SCRIPT_DIR']), 'scripts'))
+from http_api import api_post, load_env
+load_env()
+api_post('/api/v1/seo/keywords', {
+    'top_page': True,
+    'product': os.environ['PROD'],
+    'keyword': os.environ['KW'],
+    'slug': os.environ['SLUG'],
+})
 print(f"inserted/updated seo_keywords: {os.environ['PROD']} / {os.environ['KW']}")
 PY
 }
@@ -170,19 +161,15 @@ _latest_stream_jsonl() {
 # we don't need the picker or the opus proposal step again. --force overrides
 # any half-committed page file on disk.
 DRAINED_PRODUCTS=()
-pending_rows=$(python3 - <<'PY' 2>/dev/null
-import os, psycopg2
+pending_rows=$(SEO_SCRIPT_DIR="$SCRIPT_DIR" python3 - <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.environ['SEO_SCRIPT_DIR']), 'scripts'))
+from http_api import api_get, load_env
+load_env()
 try:
-    conn = psycopg2.connect(os.environ['DATABASE_URL'])
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT product, keyword, slug FROM seo_keywords "
-        "WHERE source='top_page' AND status='pending' "
-        "AND updated_at > NOW() - INTERVAL '14 days' "
-        "ORDER BY updated_at ASC"
-    )
-    for r in cur.fetchall():
-        print("\t".join(r))
+    resp = api_get('/api/v1/seo/keywords', query={'mode': 'stale_top_page'})
+    for r in (resp.get('data') or {}).get('rows') or []:
+        print("\t".join([r.get('product') or '', r.get('keyword') or '', r.get('slug') or '']))
 except Exception:
     pass
 PY
