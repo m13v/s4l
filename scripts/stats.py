@@ -267,6 +267,65 @@ def _http_insert_thread_snapshot(platform, thread_url, *,
         return None
 
 
+def _http_list_moltbook_active_posts():
+    """Active moltbook posts to refresh. The generic /api/v1/posts list can't
+    order by engagement_updated_at, so we take id-desc; moltbook active volume
+    is small so one 500-row page covers it."""
+    resp = api_get(
+        "/api/v1/posts",
+        query={
+            "platform": "moltbook",
+            "status": "active",
+            "has_our_url": "true",
+            "order_by": "id",
+            "order_dir": "desc",
+            "limit": 500,
+        },
+    )
+    return ((resp or {}).get("data") or {}).get("posts") or []
+
+
+def _http_list_github_active_posts(limit=None):
+    """All active github comments with our_url, plus a folded-in reply_count
+    (so the caller skips a per-post COUNT round trip). Server-side query has no
+    posted_at window / account scoping, matching refresh_github's plain SELECT.
+    limit is applied client-side (smoke tests only)."""
+    resp = api_get("/api/v1/posts/active-for-stats", query={"platform": "github"})
+    rows = ((resp or {}).get("data") or {}).get("posts") or []
+    if limit:
+        rows = rows[: int(limit)]
+    return rows
+
+
+def _http_list_github_replies_to_refresh():
+    """Replies for our github comments (status='replied', our_reply_url NOT
+    NULL). Reuses the install-scoped replies/active-for-stats endpoint, which
+    returns id, our_reply_url, engagement_updated_at with no 500-row cap."""
+    resp = api_get("/api/v1/replies/active-for-stats", query={"platform": "github"})
+    return ((resp or {}).get("data") or {}).get("replies") or []
+
+
+def _http_mark_minimized(post_id, reason):
+    """Flip a hidden (isMinimized) github comment to status='deleted' with the
+    GREATEST/source_summary-append semantics strike_alert expects."""
+    return api_post(
+        f"/api/v1/posts/{int(post_id)}/mark-minimized",
+        {"reason": str(reason or "")},
+    )
+
+
+def _parse_dt(v):
+    """Tolerate both datetime objects (legacy) and ISO strings (HTTP)."""
+    if not v:
+        return None
+    if hasattr(v, "isoformat"):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 import progress
 from moltbook_tools import (
     fetch_moltbook_json,
@@ -824,12 +883,7 @@ def refresh_moltbook(db, api_key, quiet=False):
     if not api_key:
         return {"skipped": True, "reason": "no_api_key"}
 
-    posts = db.execute(
-        "SELECT id, our_url, thread_url, upvotes, comments_count, "
-        "COALESCE(scan_no_change_count, 0) AS scan_no_change_count, posted_at "
-        "FROM posts WHERE platform='moltbook' AND status='active' AND our_url IS NOT NULL "
-        "ORDER BY engagement_updated_at ASC NULLS FIRST, id DESC"
-    ).fetchall()
+    posts = _http_list_moltbook_active_posts()
 
     total = updated = deleted = errors = skipped = 0
     results = []
@@ -843,10 +897,10 @@ def refresh_moltbook(db, api_key, quiet=False):
         if rate_limited:
             break
         total += 1
-        post_id, our_url, thread_url = post[0], post[1], post[2]
-        prev_upvotes, prev_comments = post[3], post[4]
-        no_change = post[5]
-        posted_at = post[6]
+        post_id, our_url, thread_url = post["id"], post["our_url"], post.get("thread_url")
+        prev_upvotes, prev_comments = post.get("upvotes"), post.get("comments_count")
+        no_change = post.get("scan_no_change_count") or 0
+        posted_at = _parse_dt(post.get("posted_at"))
 
         if no_change >= 3 and posted_at:
             pa = posted_at.replace(tzinfo=timezone.utc) if posted_at.tzinfo is None else posted_at
@@ -882,10 +936,7 @@ def refresh_moltbook(db, api_key, quiet=False):
             m = re.search(r"/post/([0-9a-f]{7,})", effective_url)
             if m:
                 # Short UUID - API won't accept it, skip gracefully
-                db.execute(
-                    "UPDATE posts SET status_checked_at=NOW() WHERE id=%s",
-                    [post_id],
-                )
+                _http_patch_post(post_id, {"stamp_status_checked_now": True})
                 continue
             errors += 1
             continue
@@ -919,21 +970,13 @@ def refresh_moltbook(db, api_key, quiet=False):
                 continue
             except MoltbookNotFoundError:
                 # Post deleted on Moltbook - use detection counter
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s", [post_id]
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2:
-                    db.execute("UPDATE posts SET status='deleted', deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
+                detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=2)
+                if status_set:
                     deleted += 1
                     if not quiet:
                         print(f"DELETED (Moltbook 404) [{post_id}] (confirmed after {detect_count} detections)")
-                else:
-                    db.execute("UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() WHERE id=%s",
-                               [detect_count, post_id])
-                    if not quiet:
-                        print(f"DELETION PENDING (Moltbook 404) [{post_id}] (detection {detect_count}/2)")
+                elif not quiet:
+                    print(f"DELETION PENDING (Moltbook 404) [{post_id}] (detection {detect_count}/2)")
                 continue
             if not data or not data.get("success"):
                 errors += 1
