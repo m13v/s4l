@@ -106,6 +106,7 @@
     "!scripts/test_own_reply_dedup.py",
     "!scripts/twitter_compose_dm.py",
     "scripts/*.sh",
+    "!scripts/_dm_icp_batch.sh",
     "config.example.json",
     "requirements.txt",
     "SKILL.md",
@@ -117,7 +118,9 @@
     "mcp/dist/",
     "mcp/package.json",
     "mcp/manifest.json",
-    "mcp/install.mjs"
+    "mcp/install.mjs",
+    "!**/__pycache__/**",
+    "!**/*.pyc"
   ],
   "keywords": [
     "social-media",
