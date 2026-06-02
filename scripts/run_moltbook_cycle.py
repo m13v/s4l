@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post, load_env
 from moltbook_tools import fetch_moltbook_json, MoltbookRateLimitedError
 from engagement_styles import validate_or_register, pick_style_for_post
 from version import read_version as read_autoposter_version
@@ -90,24 +90,27 @@ def fetch_one(post_id, api_key_):
 
 
 def already_posted_thread_ids(thread_ids):
-    """Return the subset we've already commented on, to exclude."""
+    """Return the subset we've already commented on, to exclude.
+
+    The old single SQL OR-LIKE query is replaced by one posts GET per
+    thread_id (thread_url_contains). thread_ids is this cycle's candidate
+    set (scan-limit, ~50), so the request count stays bounded.
+    """
     if not thread_ids:
         return set()
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    placeholders = ",".join("%s" for _ in thread_ids)
-    likes = [f"%{tid}%" for tid in thread_ids]
-    rows = conn.execute(
-        f"SELECT thread_url FROM posts WHERE platform='moltbook' "
-        f"AND ({' OR '.join(['thread_url LIKE %s'] * len(thread_ids))})",
-        likes,
-    ).fetchall()
-    conn.close()
     hit = set()
-    for (url,) in rows:
-        for tid in thread_ids:
-            if tid in (url or ""):
-                hit.add(tid)
+    for tid in thread_ids:
+        resp = api_get(
+            "/api/v1/posts",
+            query={
+                "platform": "moltbook",
+                "thread_url_contains": tid,
+                "limit": 1,
+            },
+        )
+        rows = ((resp or {}).get("data") or {}).get("posts") or []
+        if rows:
+            hit.add(tid)
     return hit
 
 
@@ -266,8 +269,6 @@ def parse_claude_json(output):
 
 def post_and_log(decisions, claude_session_id):
     """Iterate Claude's picks, call moltbook_post.py, log each to DB."""
-    dbmod.load_env()
-    conn = dbmod.get_conn()
     posted = 0
     failed = 0
 
@@ -323,29 +324,28 @@ def post_and_log(decisions, claude_session_id):
             assigned_mode=(style_assignment or {}).get("mode"),
         )
 
-        conn.execute(
-            """
-            INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
-                thread_title, thread_content, our_url, our_content, our_account,
-                source_summary, project_name, engagement_style, feedback_report_used,
-                language, status, posted_at, claude_session_id, autoposter_version)
-            VALUES ('moltbook', %s, %s, %s, %s, %s, %s, %s, 'matthew-autoposter',
-                'moltbook cycle comment', %s, %s, TRUE, %s, 'active', NOW(), %s::uuid, %s)
-            """,
-            [
-                p.get("thread_url", ""),
-                p.get("thread_author", "various"),
-                p.get("thread_author", "various"),
-                p.get("thread_title", ""),
-                "",
-                our_url,
-                text,
-                p.get("matched_project", ""),
-                validated_style or "",
-                p.get("language", "en"),
-                claude_session_id,
-                read_autoposter_version(),
-            ],
+        api_post(
+            "/api/v1/posts",
+            {
+                "platform": "moltbook",
+                "thread_url": p.get("thread_url", ""),
+                "thread_author": p.get("thread_author", "various"),
+                "thread_author_handle": p.get("thread_author", "various"),
+                "thread_title": p.get("thread_title", ""),
+                "thread_content": "",
+                "our_url": our_url,
+                "our_content": text,
+                "our_account": "matthew-autoposter",
+                "source_summary": "moltbook cycle comment",
+                "project_name": p.get("matched_project", ""),
+                "engagement_style": validated_style or "",
+                "feedback_report_used": True,
+                "language": p.get("language", "en"),
+                "status": "active",
+                "claude_session_id": claude_session_id,
+                "autoposter_version": read_autoposter_version(),
+            },
+            ok_on_conflict=True,
         )
         posted += 1
         style_tag = validated_style or "(none)"
@@ -353,8 +353,6 @@ def post_and_log(decisions, claude_session_id):
             style_tag += " [REGISTERED candidate]"
         log(f"  posted to {tid}  project={p.get('matched_project')}  style={style_tag}")
 
-    conn.commit()
-    conn.close()
     return posted, failed
 
 
