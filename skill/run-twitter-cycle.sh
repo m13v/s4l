@@ -1879,6 +1879,14 @@ if [ "${PLAN_COUNT:-0}" = "0" ]; then
             --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" --above-floor "${HIGH_DELTA_COUNT:-0}" \
             --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
     fi
+    # In DRAFT_ONLY (MCP draft_cycle) mode, a non-empty PREP_REASON means the
+    # prep step FAILED for a real reason (e.g. claude_not_logged_in) rather than
+    # genuinely finding nothing on-brand. Surface it on stdout so the MCP wrapper
+    # can tell the user the actual problem (e.g. "run claude /login") instead of
+    # mis-reporting it as "all threads already engaged".
+    if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -n "$PREP_REASON" ]; then
+        echo "DRAFT_ONLY_BLOCKED=$PREP_REASON"
+    fi
     _SA_RUN_SUMMARY_EMITTED=1
     exit 0
 fi
