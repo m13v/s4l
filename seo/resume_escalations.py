@@ -30,7 +30,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-import db_helpers
+sys.path.insert(0, str(SCRIPT_DIR.parent / "scripts"))
+from http_api import api_get, load_env  # noqa: E402
+
+load_env()
 
 ESCALATION_LOG = SCRIPT_DIR / "escalations.log"
 
@@ -44,22 +47,14 @@ def _append_log(line):
         pass
 
 
-def list_replied(conn, only_id=None):
-    cur = conn.cursor()
+def list_replied(only_id=None):
+    resp = api_get("/api/v1/seo/escalations",
+                   query={"mode": "list", "status": "replied", "limit": 500})
+    rows = (resp.get("data") or {}).get("rows") or []
+    rows = sorted(rows, key=lambda r: str(r.get("asked_at") or ""))
     if only_id is not None:
-        cur.execute(
-            "SELECT id, product, keyword, slug FROM seo_escalations "
-            "WHERE id = %s AND status = 'replied'",
-            (only_id,),
-        )
-    else:
-        cur.execute(
-            "SELECT id, product, keyword, slug FROM seo_escalations "
-            "WHERE status = 'replied' ORDER BY replied_at ASC"
-        )
-    rows = cur.fetchall()
-    cur.close()
-    return rows
+        rows = [r for r in rows if r.get("id") == only_id]
+    return [(r.get("id"), r.get("product"), r.get("keyword"), r.get("slug")) for r in rows]
 
 
 def main():
@@ -72,9 +67,7 @@ def main():
                     help="Per-resume timeout in seconds (default 3600)")
     args = ap.parse_args()
 
-    conn = db_helpers.get_conn()
-    rows = list_replied(conn, only_id=args.id)
-    conn.close()
+    rows = list_replied(only_id=args.id)
 
     if not rows:
         print("No replied escalations to resume.")
