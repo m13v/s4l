@@ -2,9 +2,8 @@
 """Unified funnel stats per project: social posts -> pageviews -> CTA clicks -> bookings.
 
 Reads config.json for project definitions, queries:
-  - Posts DB (DATABASE_URL): post counts, engagement by project
+  - Posts + bookings stats via s4l.ai HTTP /api/v1/stats/* (no direct DB)
   - PostHog API (POSTHOG_PERSONAL_API_KEY): pageviews + CTA clicks by domain
-  - Bookings DB (BOOKINGS_DATABASE_URL): cal_bookings by client_slug
 
 Usage:
     python3 scripts/project_stats.py [--project NAME] [--days 30] [--quiet]
@@ -19,7 +18,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get  # noqa: E402
 from project_slugs import get_client_slug, get_booking_table  # noqa: E402
 
 ENV_PATH = os.path.expanduser("~/social-autoposter/.env")
@@ -39,46 +38,6 @@ def load_env():
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
-
-
-def get_post_stats(conn, project_name, days):
-    """Get social post stats for a project from the posts DB.
-
-    upvotes is reported NET of the OP self-upvote on Reddit and Moltbook
-    (those platforms automatically +1 every post; we strip that per row,
-    clamped at 0, so the dashboard total reflects organic engagement
-    rather than (posts * 1) + organic). Other platforms pass through.
-    Mirrors top_performers.SCORE_SQL and bin/server.js upvotes_discounted.
-    """
-    cur = conn.execute(
-        "SELECT COUNT(*), "
-        "COUNT(*) FILTER (WHERE posted_at >= NOW() - INTERVAL '" + str(days) + " days'), "
-        "COUNT(*) FILTER (WHERE status = 'active'), "
-        "COUNT(*) FILTER (WHERE status IN ('removed', 'deleted')), "
-        "COALESCE(SUM(CASE WHEN LOWER(platform) IN ('reddit', 'moltbook') "
-        "  THEN GREATEST(0, COALESCE(upvotes, 0) - 1) "
-        "  ELSE COALESCE(upvotes, 0) END), 0), "
-        "COALESCE(SUM(comments_count), 0), "
-        "COALESCE(SUM(views), 0) "
-        "FROM posts WHERE project_name = %s",
-        (project_name,),
-    )
-    row = cur.fetchone()
-    if not row:
-        return {}
-    cols = ["total", "recent", "active", "removed", "total_upvotes", "total_comments", "total_views"]
-    return dict(zip(cols, row))
-
-
-def get_platform_breakdown(conn, project_name, days):
-    """Get per-platform post counts."""
-    cur = conn.execute(
-        "SELECT platform, COUNT(*) as cnt FROM posts "
-        "WHERE project_name = %s AND posted_at >= NOW() - INTERVAL '" + str(days) + " days' "
-        "GROUP BY platform ORDER BY cnt DESC",
-        (project_name,),
-    )
-    return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def posthog_query(api_key, project_id, event, host_filter, after_date):
@@ -141,55 +100,6 @@ def get_posthog_stats(api_key, project_id, domains, days):
             })
 
     return stats
-
-
-def get_booking_stats(bookings_db_url, client_slug, days, table="cal_bookings"):
-    """Get booking stats from the separate bookings DB.
-    `table` is `cal_bookings` (Cal.com) or `calendly_bookings` (Calendly).
-    Both tables share the columns used here."""
-    if not bookings_db_url:
-        return None
-    try:
-        import psycopg2
-        conn = psycopg2.connect(bookings_db_url)
-        cur = conn.cursor()
-        if table not in {"cal_bookings", "calendly_bookings"}:
-            raise ValueError(f"unsupported booking table: {table}")
-        cur.execute(
-            "SELECT COUNT(*), "
-            "COUNT(*) FILTER (WHERE status = 'created'), "
-            "COUNT(*) FILTER (WHERE status = 'cancelled'), "
-            "COUNT(*) FILTER (WHERE status = 'rescheduled'), "
-            "COUNT(*) FILTER (WHERE attendee_email NOT LIKE '%%test%%' "
-            "AND attendee_email NOT LIKE '%%example%%' "
-            "AND attendee_name NOT LIKE '%%TEST%%' "
-            "AND attendee_name NOT LIKE '%%John Doe%%') "
-            "FROM " + table + " WHERE client_slug = %s "
-            "AND created_at >= NOW() - INTERVAL '" + str(days) + " days'",
-            (client_slug,),
-        )
-        row = cur.fetchone()
-        cols = ["total", "booked", "cancelled", "rescheduled", "real_bookings"]
-        result = dict(zip(cols, row)) if row else {}
-
-        cur.execute(
-            "SELECT attendee_name, attendee_email, status, start_time, created_at "
-            "FROM " + table + " WHERE client_slug = %s "
-            "AND created_at >= NOW() - INTERVAL '" + str(days) + " days' "
-            "ORDER BY created_at DESC LIMIT 5",
-            (client_slug,),
-        )
-        result["recent"] = [
-            {"name": r[0], "email": r[1], "status": r[2],
-             "start": str(r[3])[:16] if r[3] else "?",
-             "created": str(r[4])[:16] if r[4] else "?"}
-            for r in cur.fetchall()
-        ]
-        conn.close()
-        return result
-    except Exception as e:
-        print(f"  Bookings DB error for {client_slug}: {e}", file=sys.stderr)
-        return None
 
 
 def get_project_domains(project):
@@ -276,13 +186,10 @@ def main():
 
     api_key = os.environ.get("POSTHOG_PERSONAL_API_KEY")
     project_id = os.environ.get("POSTHOG_PROJECT_ID", "330744")
-    bookings_db_url = os.environ.get("BOOKINGS_DATABASE_URL")
 
     if not api_key:
         print("ERROR: POSTHOG_PERSONAL_API_KEY not set in .env", file=sys.stderr)
         sys.exit(1)
-
-    conn = dbmod.get_conn()
 
     projects_with_stats = [
         "fazm", "Cyrano", "PieLine", "Terminator", "S4L",
@@ -299,8 +206,17 @@ def main():
         if name not in projects_with_stats and not args.project:
             continue
 
-        post_stats = get_post_stats(conn, name, args.days)
-        platforms = get_platform_breakdown(conn, name, args.days)
+        client_slug = get_client_slug(name)
+        booking_table = get_booking_table(name)
+        detail = (api_get("/api/v1/stats/project-detail", query={
+            "project": name, "days": int(args.days), "platform": "",
+            "client_slug": client_slug or "",
+            "booking_table": booking_table or "cal_bookings",
+            "require_utm": "0",
+        }).get("data") or {})
+        post_stats = detail.get("post_stats") or {}
+        platforms = detail.get("platforms") or {}
+        bookings = detail.get("bookings") if client_slug else None
 
         domains = get_project_domains(proj)
         ph_override = proj.get("posthog", {})
@@ -308,24 +224,17 @@ def main():
         ph_pid = ph_override.get("project_id", project_id)
         posthog = get_posthog_stats(ph_key, ph_pid, domains, args.days) if domains else None
 
-        client_slug = get_client_slug(name)
-        booking_table = get_booking_table(name)
-        bookings = get_booking_stats(bookings_db_url, client_slug, args.days, booking_table) if client_slug else None
-
         print_project_report(name, post_stats, platforms, posthog, bookings, args.quiet)
 
     # Overall summary
-    cur = conn.execute(
-        "SELECT COUNT(*) FROM posts WHERE posted_at >= NOW() - INTERVAL '" + str(args.days) + " days'"
-    )
-    total_recent = cur.fetchone()[0]
-    cur = conn.execute("SELECT COUNT(*) FROM posts")
-    total_all = cur.fetchone()[0]
+    overall = (api_get("/api/v1/stats/posts-overall", query={
+        "days": int(args.days), "platform": "",
+    }).get("data") or {})
+    total_all = int(overall.get("total") or 0)
+    total_recent = int(overall.get("recent") or 0)
     print(f"\n{'='*60}")
     print(f"  Overall: {total_all} total posts, {total_recent} in last {args.days} days")
     print(f"{'='*60}")
-
-    conn.close()
 
 
 if __name__ == "__main__":
