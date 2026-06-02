@@ -57,6 +57,8 @@ CONFIG_PATH = ROOT_DIR / "config.json"
 SA_PATH = SCRIPT_DIR / "credentials" / "seo-autopilot-sa.json"
 ENV_PATH = ROOT_DIR / ".env"
 
+sys.path.insert(0, str(ROOT_DIR / "scripts"))
+
 PERIOD_DAYS = 30
 DEFAULT_MAX_DELETIONS = 100
 DEFAULT_MIN_AGE_DAYS = 30
@@ -272,53 +274,24 @@ def file_age_days(path: Path, repo_path: Path) -> float:
 
 
 def ensure_log_table():
-    """Create seo_expired_pages table if missing."""
-    import psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS seo_expired_pages (
-            id SERIAL PRIMARY KEY,
-            product TEXT NOT NULL,
-            page_url TEXT NOT NULL,
-            source_path TEXT NOT NULL,
-            impressions_30d INT NOT NULL,
-            clicks_30d INT NOT NULL,
-            avg_position NUMERIC(6,2),
-            file_age_days NUMERIC(8,2),
-            expired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            reason TEXT,
-            UNIQUE (product, page_url)
-        )
-        """
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    """No-op: the /api/v1/seo/expired-pages endpoint ensures the table on
+    every POST (CREATE TABLE IF NOT EXISTS in the route). Kept as a stub so
+    the call site in main() stays unchanged."""
+    return
 
 
 def log_expiry(product, page_url, source_path, imp, clicks, pos, age, reason):
-    import psycopg2
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO seo_expired_pages
-          (product, page_url, source_path, impressions_30d, clicks_30d,
-           avg_position, file_age_days, reason)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (product, page_url) DO UPDATE SET
-          expired_at = NOW(), reason = EXCLUDED.reason,
-          source_path = EXCLUDED.source_path,
-          impressions_30d = EXCLUDED.impressions_30d,
-          clicks_30d = EXCLUDED.clicks_30d
-        """,
-        (product, page_url, str(source_path), imp, clicks, pos, age, reason),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    from http_api import api_post
+    api_post("/api/v1/seo/expired-pages", {
+        "product": product,
+        "page_url": page_url,
+        "source_path": str(source_path),
+        "impressions_30d": imp,
+        "clicks_30d": clicks,
+        "avg_position": pos,
+        "file_age_days": age,
+        "reason": reason,
+    })
 
 
 def expire_for_project(svc, project, args, end_date, deletions_remaining):
@@ -422,9 +395,6 @@ def main():
     args = ap.parse_args()
 
     load_env()
-    if "DATABASE_URL" not in os.environ:
-        print("ERROR: DATABASE_URL not in environment")
-        sys.exit(1)
 
     if args.apply:
         ensure_log_table()
