@@ -291,32 +291,32 @@ ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 # Dice are rolled in Python before Claude runs. campaigns.posts_made is bumped
 # only on a verified-suffix outcome (parallels reddit-threads' verified-edit
 # semantics). Multi-suffix concatenation matches post_reddit.py behavior.
+# HTTP-only lane (2026-06-01): active twitter campaigns come from the s4l.ai
+# API (/api/v1/campaigns?status=active&platform=twitter&has_suffix=true&
+# with_budget_remaining=true), mirroring post_reddit.load_active_reddit_campaigns.
+# No DATABASE_URL, no db.get_conn(), no fallback.
 CAMPAIGN_ENV=$(/usr/bin/python3 <<'PYEOF'
 import json, os, random, sys
 sys.path.insert(0, os.path.join(os.environ.get("HOME",""), "social-autoposter", "scripts"))
-import db
-db.load_env()
-conn = db.get_conn()
-try:
-    cur = conn.execute(
-        """SELECT id, suffix, COALESCE(sample_rate, 1.000)
-           FROM campaigns
-           WHERE status = 'active'
-             AND (',' || platforms || ',') LIKE '%,twitter,%'
-             AND max_posts_total IS NOT NULL
-             AND posts_made < max_posts_total
-             AND suffix IS NOT NULL AND suffix <> ''
-           ORDER BY id"""
-    )
-    rows = cur.fetchall()
-finally:
-    conn.close()
+from http_api import api_get
+
+resp = api_get("/api/v1/campaigns", query={
+    "status": "active",
+    "platform": "twitter",
+    "has_suffix": "true",
+    "with_budget_remaining": "true",
+    "limit": 500,
+})
+rows = ((resp or {}).get("data") or {}).get("campaigns") or []
 
 applied_ids = []
 suffix_parts = []
-for cid, suffix, rate in rows:
-    if random.random() < float(rate):
-        applied_ids.append(int(cid))
+for r in rows:
+    cid = int(r["id"])
+    suffix = r.get("suffix")
+    rate = float(r.get("sample_rate") if r.get("sample_rate") is not None else 1.0)
+    if suffix and random.random() < rate:
+        applied_ids.append(cid)
         suffix_parts.append(suffix)
 
 print(json.dumps({
@@ -472,7 +472,7 @@ if [ "$PERMALINK" != "null" ] && [ "$PERMALINK" != "" ] && [ "$PERMALINK" != "PA
   /usr/bin/python3 <<'PYEOF' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, subprocess, sys
 sys.path.insert(0, os.path.join(os.environ["REPO_DIR"], "scripts"))
-import db as dbmod
+from http_api import api_post
 
 parsed = json.loads(os.environ.get("PARSED") or "{}")
 permalink = parsed.get("permalink") or ""
@@ -509,39 +509,34 @@ body = "\n\n".join(t.strip() for t in tweets if t and t.strip())
 # so dashboard listings have something readable.
 title = (tweets[0] or "")[:100]
 
-conn = dbmod.get_conn()
-existing = conn.execute(
-    "SELECT id FROM posts WHERE platform='twitter' AND our_url=%s LIMIT 1",
-    (permalink,),
-).fetchone()
-if existing:
-    print(f"[db-insert] SKIP — post {permalink} already in DB as id={existing[0]}")
+# HTTP-only lane (2026-06-01): the authoritative post log goes through the
+# s4l.ai API (POST /api/v1/posts). No DATABASE_URL, no db.get_conn(). The
+# endpoint dedups on (platform, thread_url) server-side and returns 409 with
+# existing_post_id, replacing the old SELECT idempotency guard (thread_url ==
+# our_url == permalink here, so dedup is equivalent to the old our_url check).
+resp = api_post("/api/v1/posts", {
+    "platform": "twitter",
+    "thread_url": permalink,
+    "thread_author": account,
+    "thread_title": title,
+    "thread_content": body,
+    "our_url": permalink,
+    "our_content": body,
+    "our_account": account,
+    "source_summary": summary,
+    "project": project,
+    "engagement_style": style,
+    "status": "active",
+    "claude_session_id": session,
+    "link_source": link_source,
+}, ok_on_conflict=True)
+
+if not resp.get("ok", True) and (resp.get("error") or {}).get("code") == "duplicate_thread":
+    existing_id = ((resp.get("error") or {}).get("details") or {}).get("existing_post_id")
+    print(f"[db-insert] SKIP — post {permalink} already in DB as id={existing_id}")
     sys.exit(0)
 
-row = conn.execute(
-    """
-    INSERT INTO posts
-      (platform, thread_url, thread_author, thread_author_handle,
-       thread_title, thread_content, our_url, our_content, our_account,
-       source_summary, project_name, engagement_style,
-       feedback_report_used, status, posted_at, claude_session_id,
-       link_source)
-    VALUES
-      ('twitter', %s, %s, %s,
-       %s, %s, %s, %s, %s,
-       %s, %s, %s,
-       TRUE, 'active', NOW(), %s::uuid,
-       %s)
-    RETURNING id
-    """,
-    (permalink, account, account,
-     title, body, permalink, body, account,
-     summary, project, style,
-     session,
-     link_source),
-).fetchone()
-conn.commit()
-post_id = row[0]
+post_id = (resp.get("data") or {}).get("post", {}).get("id")
 print(f"[db-insert] OK — inserted posts.id={post_id} for {permalink}")
 
 # Campaign verification gate. Twitter has no edit API so we cannot fix the
