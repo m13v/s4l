@@ -65,6 +65,33 @@ export BATCH_ID
 # bleeds costs across concurrent stacked cycles. See 2026-05-10 cycle_id
 # rollout (started on reddit, extended here).
 export SA_CYCLE_ID="$BATCH_ID"
+
+# LENGTH A/B (2026-06-01): split each cycle ~50/50 into a length-control
+# experiment arm and hand it to both the draft render (engagement_styles.py
+# get_assigned_style_prompt) and the post-time gate (twitter_post_plan.py) via
+# LENGTH_ARM. One style block is rendered per cycle for the whole batch, so the
+# arm is a per-cycle decision (per BATCH_ID), not per-post.
+#   treatment = per-style target line in the prompt + post-time truncation gate
+#   control   = generic "keep it tight" guidance, no per-style number, no gate
+#               (reproduces pre-length-project length behavior WITHOUT reverting
+#                the bug fixes shipped alongside the length project)
+# Assignment is deterministic from BATCH_ID (md5 low bit) so a re-run of the
+# same cycle id lands the same arm. Set LENGTH_AB_ENABLED=0 to disable the
+# experiment: every cycle then runs treatment (full length-control behavior).
+LENGTH_AB_ENABLED="${LENGTH_AB_ENABLED:-1}"
+if [ "$LENGTH_AB_ENABLED" = "1" ]; then
+  _len_hash=$(printf '%s' "$BATCH_ID" | md5 2>/dev/null || printf '%s' "$BATCH_ID" | md5sum | awk '{print $1}')
+  _len_last=$(printf '%s' "$_len_hash" | tail -c 1)
+  case "$_len_last" in
+    [02468ace]) LENGTH_ARM="treatment" ;;
+    *)          LENGTH_ARM="control" ;;
+  esac
+else
+  LENGTH_ARM="treatment"
+fi
+export LENGTH_ARM
+echo "[length-ab] LENGTH_AB_ENABLED=$LENGTH_AB_ENABLED arm=$LENGTH_ARM batch=$BATCH_ID" >&2
+
 LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
 QUERIES_FILE="/tmp/twitter_cycle_queries_$(date +%s).json"
