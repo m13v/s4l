@@ -147,7 +147,9 @@ FRESHNESS_HOURS=2
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
 FRESHNESS_HOURS_DISCOVER=1
-export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER
+# Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
+# drives the expire-stale gate from the same knob (was hardcoded 18h there).
+export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
 # Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
 # uses it in place of its hardcoded 6h default when present.
 export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
