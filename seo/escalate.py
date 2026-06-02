@@ -42,7 +42,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-import db_helpers
+sys.path.insert(0, str(SCRIPT_DIR.parent / "scripts"))
+from http_api import api_get, api_patch, api_post, load_env  # noqa: E402
+
+load_env()
 
 GMAIL_TOKEN_PATH = os.path.expanduser("~/gmail-api/token_i_at_m13v.com.json")
 GMAIL_SCOPES = ["https://mail.google.com/"]
@@ -81,37 +84,6 @@ def _append_log(line):
             f.write(f"{ts} {line}\n")
     except OSError:
         pass
-
-
-def _stamp_source_row(cur, source_table, source_id, escalation_id, product, keyword,
-                      mark_status=None, append_note=None):
-    """Update the source seo_keywords/gsc_queries row to point at the
-    escalation. We always set open_escalation_id; optionally flip status
-    to 'escalated' and append a note. Done in the same transaction as the
-    INSERT so an external reader never sees a half-stamped state."""
-    if source_table not in ("seo_keywords", "gsc_queries"):
-        return
-    sets = ["open_escalation_id = %s", "updated_at = NOW()"]
-    vals = [escalation_id]
-    if mark_status:
-        sets.append("status = %s")
-        vals.append(mark_status)
-    if append_note:
-        if source_table == "seo_keywords":
-            sets.append("notes = COALESCE(notes,'') || %s")
-        else:
-            sets.append("notes = COALESCE(notes,'') || %s")
-        vals.append(append_note)
-    if source_id is not None:
-        where_sql = "id = %s"
-        vals.append(source_id)
-    else:
-        where_sql = "product = %s AND " + ("keyword" if source_table == "seo_keywords" else "query") + " = %s"
-        vals.extend([product, keyword])
-    cur.execute(
-        f"UPDATE {source_table} SET {', '.join(sets)} WHERE {where_sql}",
-        vals,
-    )
 
 
 def _send_escalation_email(escalation_id, product, keyword, slug, reason,
@@ -173,23 +145,6 @@ def _send_escalation_email(escalation_id, product, keyword, slug, reason,
         print(f"  WARNING: Failed to send escalation email for #{escalation_id}: {e}",
               file=sys.stderr)
         return None
-
-
-def _recent_open_or_replied(cur, product, keyword, hours=24):
-    """Return (id, status, asked_at) for any escalation on this pair within
-    the dedupe window, else None. Counts pending AND replied so we don't
-    spam the human with a re-escalation while they're mid-reply."""
-    cur.execute(
-        """
-        SELECT id, status, asked_at FROM seo_escalations
-        WHERE product = %s AND keyword = %s
-          AND status IN ('pending','replied')
-          AND asked_at > NOW() - (%s || ' hours')::interval
-        ORDER BY asked_at DESC LIMIT 1
-        """,
-        (product, keyword, str(hours)),
-    )
-    return cur.fetchone()
 
 
 def cmd_open(args):
