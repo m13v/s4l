@@ -199,6 +199,43 @@ interface DraftResult {
   blocked?: string;
 }
 
+// Map a pipeline failure-reason key (from scripts/classify_run_error.py, emitted
+// by run-twitter-cycle.sh as `DRAFT_ONLY_BLOCKED=<reason>`) to a clear,
+// actionable message. The most common one on a fresh machine is
+// claude_not_logged_in: the background `claude` CLI the pipeline shells out to
+// has its OWN login, separate from Claude Desktop, so it can be logged out even
+// though this MCP host is signed in. Without this, an auth failure was silently
+// reported as a benign empty cycle ("all threads already engaged").
+function blockedReasonMessage(reason: string): string {
+  switch (reason) {
+    case "claude_not_logged_in":
+      return (
+        "The background Claude CLI on this machine isn't logged in, so the drafting step " +
+        "couldn't run. (It DID find and rank threads, it just couldn't draft replies.) This " +
+        "CLI uses its own login, separate from Claude Desktop. To fix it, open a terminal and run:\n\n" +
+        "    claude\n\n" +
+        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run draft_cycle again."
+      );
+    case "monthly_limit":
+    case "daily_limit":
+    case "rate_limit_5h":
+      return (
+        `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
+        "Wait for the limit to reset, then run draft_cycle again."
+      );
+    case "credit_balance":
+      return (
+        "The drafting step failed because the Anthropic account is out of credits. " +
+        "Add credits, then run draft_cycle again."
+      );
+    default:
+      return (
+        `The drafting step failed (${reason}) and produced no drafts. ` +
+        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run draft_cycle again."
+      );
+  }
+}
+
 async function produceDrafts(project?: string): Promise<DraftResult> {
   // Run the real pipeline in DRAFT_ONLY mode: scan -> score -> draft -> link-gen,
   // then STOP before posting. The script prints `DRAFT_ONLY_PLAN=<path>` and
@@ -218,6 +255,15 @@ async function produceDrafts(project?: string): Promise<DraftResult> {
     res.stdout + "\n" + res.stderr
   );
   if (marker && marker[1]) return { batchId: marker[1] };
+  // A real prep-step failure (e.g. the background claude CLI isn't logged in)
+  // emits DRAFT_ONLY_BLOCKED=<reason>. Surface that instead of silently falling
+  // back to a stale/empty batch and mis-reporting "no fresh candidates".
+  const blockedMarker = /DRAFT_ONLY_BLOCKED=([a-z0-9_]+)/.exec(
+    res.stdout + "\n" + res.stderr
+  );
+  if (blockedMarker && blockedMarker[1]) {
+    return { batchId: null, blocked: blockedReasonMessage(blockedMarker[1]) };
+  }
   const existing = latestBatchId();
   if (existing) return { batchId: existing };
   return {
