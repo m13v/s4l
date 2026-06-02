@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Restore the Twitter browser session on a fresh AppMaker sandbox.
+"""Restore the harness Chrome's Twitter session from the durable cookie mirror.
 
-AppMaker VMs run on the E2B Hobby tier (1h sandbox TTL), so the sandbox is
-substituted ~hourly and /root is reseeded from /etc/skel-root, wiping the
-logged-in harness Chrome profile. This script makes that harmless:
+This is the keychain-independent recovery path (Gap B). On a persistent Mac the
+harness Chrome can come up logged out: a hard restart or a macOS keychain
+re-lock can leave Chrome unable to decrypt its cookie store, so it wipes it to
+an empty schema. The cycle preflight calls this to heal that automatically:
 
-  1. Attach to the harness Chrome (TWITTER_CDP_URL, default 127.0.0.1:9222).
+  1. Attach to the harness Chrome (TWITTER_CDP_URL, default 127.0.0.1:9555 —
+     the Mac harness port; AppMaker VMs override it to :9222 via the env file).
   2. Navigate to x.com/home; if it redirects to /login, the session is gone.
-  3. Fetch the stored cookies for this machine's handle from the HTTP API
-     (GET /api/v1/twitter/session-cookies?handle=...), which reads
-     social_accounts.session_cookies server-side (the VM has no DATABASE_URL).
+  3. Load cookies, mirror-first: the local 0600 mirror written on every connect
+     (keychain-independent), then the server store for machines with a handle.
   4. Inject them via CDP Network.setCookies and reload.
   5. Verify we land on /home (logged in).
 
@@ -45,7 +46,7 @@ except ImportError:
     print("restore_twitter_session: websocket-client not installed", file=sys.stderr)
     sys.exit(1)
 
-CDP = os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9222").rstrip("/")
+CDP = os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555").rstrip("/")
 
 
 def _attach():
