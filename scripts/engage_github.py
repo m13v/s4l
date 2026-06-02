@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 from engagement_styles import get_styles_prompt, get_anti_patterns, get_voice_relationship_rule
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
@@ -47,41 +47,48 @@ def load_config():
         return json.load(f)
 
 
-def get_next_pending(conn):
-    """Fetch the next pending GitHub reply (one at a time, oldest first)."""
-    cur = conn.execute("""
-        SELECT r.id, r.platform, r.their_author, r.their_content,
-               r.their_comment_url, r.their_comment_id, r.depth,
-               p.thread_title, p.thread_url, p.our_content, p.our_url
-        FROM replies r
-        JOIN posts p ON r.post_id = p.id
-        WHERE r.status='pending' AND r.platform='github'
-        ORDER BY r.discovered_at ASC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    if not row:
+def get_next_pending():
+    """Fetch the next pending GitHub reply (one at a time, oldest first).
+
+    Routes through /api/v1/replies/next-pending, which LEFT-JOINs posts +
+    mentions server-side and filters orphans. GitHub replies are always
+    post-rooted, so the post-side fields (thread_title/thread_url/our_content/
+    our_url) come back populated exactly as the old INNER JOIN produced.
+    """
+    resp = api_get("/api/v1/replies/next-pending",
+                   query={"platform": "github", "limit": 1})
+    rows = ((resp or {}).get("data") or {}).get("replies") or []
+    if not rows:
         return None
+    r = rows[0]
     return {
-        "id": row[0], "platform": row[1], "their_author": row[2],
-        "their_content": row[3], "their_comment_url": row[4],
-        "their_comment_id": row[5], "depth": row[6],
-        "thread_title": row[7], "thread_url": row[8],
-        "our_content": row[9], "our_url": row[10],
+        "id": r.get("id"), "platform": r.get("platform"),
+        "their_author": r.get("their_author"),
+        "their_content": r.get("their_content"),
+        "their_comment_url": r.get("their_comment_url"),
+        "their_comment_id": r.get("their_comment_id"),
+        "depth": r.get("depth"),
+        "thread_title": r.get("thread_title"),
+        "thread_url": r.get("thread_url"),
+        "our_content": r.get("our_content"),
+        "our_url": r.get("our_url"),
     }
 
 
-def get_recent_archetypes(conn, limit=3):
-    """Fetch our last N GitHub replies so Claude can vary style across threads."""
-    cur = conn.execute("""
-        SELECT our_reply_content
-        FROM replies
-        WHERE status='replied' AND platform='github'
-              AND our_reply_content IS NOT NULL
-        ORDER BY replied_at DESC
-        LIMIT %s
-    """, [limit])
-    return [row[0] for row in cur.fetchall()]
+def get_recent_archetypes(limit=3):
+    """Fetch our last N GitHub replies so Claude can vary style across threads.
+
+    Routes through /api/v1/replies (status=replied, has_our_reply_content,
+    ordered by replied_at DESC)."""
+    resp = api_get("/api/v1/replies", query={
+        "platform": "github",
+        "status": "replied",
+        "has_our_reply_content": "true",
+        "order_by": "replied_at",
+        "limit": int(limit),
+    })
+    rows = ((resp or {}).get("data") or {}).get("replies") or []
+    return [r.get("our_reply_content") for r in rows if r.get("our_reply_content")]
 
 
 def parse_issue_url(url):
@@ -397,15 +404,14 @@ def main():
                         help="Timeout per claude session in seconds")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
     config = load_config()
     excluded_authors = {a.lower() for a in config.get("exclusions", {}).get("authors", [])}
     excluded_repos = {r.lower() for r in config.get("exclusions", {}).get("github_repos", [])}
     # Auto-blocklist: owners with >=2 moderated posts in last 90 days. Same
     # source of truth as github_tools.py cmd_search uses for new candidates.
+    # (HTTP-only now; per-account scoping is resolved inside the helper.)
     from github_tools import _dynamic_owner_blocklist
-    excluded_repos = excluded_repos | _dynamic_owner_blocklist(conn)
+    excluded_repos = excluded_repos | _dynamic_owner_blocklist()
     our_username = config.get("accounts", {}).get("github", {}).get("username", "m13v")
 
     start_time = time.time()
@@ -431,7 +437,7 @@ def main():
             print(f"[engage_github] 3 consecutive Claude failures (likely rate limit). Stopping.")
             break
 
-        reply = get_next_pending(conn)
+        reply = get_next_pending()
         if not reply:
             print("[engage_github] No pending replies. Done!")
             break
@@ -474,7 +480,7 @@ def main():
             continue
 
         thread_summary = summarize_thread_for_prompt(thread, our_username)
-        recent = get_recent_archetypes(conn, limit=3)
+        recent = get_recent_archetypes(limit=3)
         prompt = build_prompt(reply, thread_summary, recent, our_username, owner, repo, number)
 
         if args.dry_run:
@@ -618,7 +624,6 @@ def main():
     )
 
     subprocess.run(["python3", REPLY_DB, "status"])
-    conn.close()
 
 
 if __name__ == "__main__":
