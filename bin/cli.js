@@ -555,6 +555,18 @@ function generatePlists() {
       stdoutLog: `${DEST}/skill/logs/launchd-stats-stdout.log`,
       stderrLog: `${DEST}/skill/logs/launchd-stats-stderr.log`,
     },
+    {
+      // Daily self-updater. Pulls + installs the latest published release so a
+      // hands-free / headless install never drifts stale. The script refuses to
+      // touch a .git dev checkout, so it is a safe no-op on a source box.
+      file: 'com.m13v.social-autoposter-update.plist',
+      label: 'com.m13v.social-autoposter-update',
+      script: `${DEST}/skill/social-autoposter-update.sh`,
+      interval: 86400,
+      runAtLoad: true,
+      stdoutLog: `${DEST}/skill/logs/launchd-self-update-stdout.log`,
+      stderrLog: `${DEST}/skill/logs/launchd-self-update-stderr.log`,
+    },
   ];
 
   const driver = scheduler.driverFor();
