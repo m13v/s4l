@@ -74,6 +74,13 @@ except Exception:
     api_post = None
     resolve_handle = None
 
+# Local 0600 cookie mirror — the keychain-independent durability layer (Gap B).
+# Always importable (stdlib only); guarded so a path quirk never breaks setup.
+try:
+    import twitter_cookie_mirror  # noqa: E402
+except Exception:
+    twitter_cookie_mirror = None
+
 # --- Config -----------------------------------------------------------------
 
 # Same managed Chrome the twitter-harness pipeline uses (skill/lib/twitter-backend.sh).
@@ -277,48 +284,75 @@ def _has_session_quick() -> bool:
             pass
 
 
-def _save_session_to_store() -> None:
-    """Best-effort: persist the live x.com cookies to the server-side session
-    store (social_accounts.session_cookies, via POST /api/v1/twitter/session-cookies)
-    so restore_twitter_session.py can auto-re-inject them on the next preflight
-    after ANY logout — hard kill, crash, or AppMaker VM reseed. Non-fatal: the
-    local session is already valid; this only enables future auto-recovery.
-    Without it the restore rail has nothing to read and every logout needs a
-    manual connect_x."""
-    if api_post is None or resolve_handle is None:
-        return
-    try:
-        handle = resolve_handle()
-    except Exception:
-        handle = None
-    if not handle:
-        return
+def _collect_x_cookies(send) -> list:
+    """Read the live x.com/twitter.com cookies (CDP shape) from the managed
+    Chrome. Returns [] if none. Shared by the mirror + server-store writers."""
+    send("Network.enable")
+    r = send("Network.getAllCookies")
+    cks = r.get("result", {}).get("cookies", []) or []
+    wanted = tuple(d.strip() for d in DOMAINS.split(",") if d.strip())
+    return [c for c in cks if any(w in (c.get("domain") or "") for w in wanted)]
+
+
+def _persist_session() -> None:
+    """Persist the validated live X session for auto-restore after ANY logout
+    (hard kill, crash, keychain re-lock wiping Chrome's Cookies DB, or AppMaker
+    VM reseed). One CDP attach feeds two sinks:
+
+      1. LOCAL 0600 mirror (twitter_cookie_mirror) — ALWAYS written. This is the
+         keychain-independent durability layer that fixes Gap B on a persistent
+         machine: restore_twitter_session.py re-injects from it on the next cycle
+         preflight even after Chrome wiped its own encrypted store.
+      2. Server-side session store (POST /api/v1/twitter/session-cookies) —
+         best-effort. Enables VM auto-restore where the profile is reseeded
+         hourly. No-op on a persistent machine with no social_accounts row.
+
+    Non-fatal end-to-end: the local session is already valid; this only enables
+    future auto-recovery, so nothing here may abort connect_x."""
     try:
         ws, send = _attach()
     except Exception:
         return
     try:
-        send("Network.enable")
-        r = send("Network.getAllCookies")
-        cks = r.get("result", {}).get("cookies", []) or []
-        wanted = tuple(d.strip() for d in DOMAINS.split(",") if d.strip())
-        cookies = [c for c in cks if any(w in (c.get("domain") or "") for w in wanted)]
-        if not cookies:
-            return
-        api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
-        print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
-              "(auto-restore enabled)", file=sys.stderr)
-    # api_post raises SystemExit (BaseException, NOT Exception) on a 4xx/5xx —
-    # e.g. "no social_accounts row" on a persistent machine that never registered
-    # this handle. The save is best-effort and must never abort connect_x, so
-    # catch SystemExit too.
-    except (Exception, SystemExit) as e:
-        print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
+        cookies = _collect_x_cookies(send)
+    except Exception:
+        cookies = []
     finally:
         try:
             ws.close()
         except Exception:
             pass
+    if not cookies:
+        return
+
+    handle = None
+    if resolve_handle is not None:
+        try:
+            handle = resolve_handle()
+        except Exception:
+            handle = None
+
+    # 1. Local mirror — always, keychain-independent.
+    if twitter_cookie_mirror is not None:
+        try:
+            n = twitter_cookie_mirror.save_cookies(cookies, handle=handle)
+            print(f"setup_twitter_auth: mirrored {n} x.com cookies to "
+                  f"{twitter_cookie_mirror.MIRROR_PATH} (survives keychain re-lock "
+                  "/ Cookies-DB wipe on relaunch)", file=sys.stderr)
+        except Exception as e:
+            print(f"setup_twitter_auth: local mirror save skipped ({e})", file=sys.stderr)
+
+    # 2. Server store — best-effort, only when a handle resolves.
+    if api_post is not None and handle:
+        try:
+            api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
+            print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
+                  "(server auto-restore enabled)", file=sys.stderr)
+        # api_post raises SystemExit (BaseException, NOT Exception) on a 4xx/5xx —
+        # e.g. "no social_accounts row" on a persistent machine that never
+        # registered this handle. Best-effort: must never abort connect_x.
+        except (Exception, SystemExit) as e:
+            print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
 
 
 def _show_window_and_open_login() -> bool:
@@ -543,7 +577,7 @@ def cmd_connect(args) -> dict:
     # 1. Already logged in? Nothing to import.
     try:
         if _is_session_valid():
-            _save_session_to_store()
+            _persist_session()
             return {
                 "ok": True,
                 "connected": True,
@@ -609,7 +643,7 @@ def cmd_connect(args) -> dict:
         # 3. Re-validate after this source.
         try:
             if _is_session_valid():
-                _save_session_to_store()
+                _persist_session()
                 # #2: force a cookie-store flush via CDP Browser.close so the
                 # imported session survives any subsequent SIGKILL (e.g. the
                 # autoposter cron stopping Chrome with no grace window). Empty
