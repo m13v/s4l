@@ -14,9 +14,10 @@ Flow:
      `[SEO #<id>]` in the subject by default.
   3. This script polls i@m13v.com for `is:unread subject:"Re: [SEO #"`.
      For each match it: extracts the escalation id, strips quoted history
-     from the body, and UPDATEs seo_escalations SET status='replied',
-     human_reply=..., replied_at=NOW(), gmail_inbound_id=... WHERE
-     id=N AND status='pending'.
+     from the body, and PATCHes /api/v1/seo/escalations
+     (action=ingest_reply) which sets status='replied', human_reply,
+     replied_at=NOW(), gmail_inbound_id WHERE id=N AND status='pending'.
+     All state goes through the s4l.ai HTTP API (HTTP-only, no DATABASE_URL).
   4. Marks the Gmail message as read so it is not re-ingested.
   5. seo/resume_escalations.py (run from cron_seo.sh) picks up rows with
      status='replied' and re-invokes generate_page.py --resume-escalation N.
@@ -37,8 +38,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SEO_DIR = SCRIPT_DIR.parent / "seo"
-sys.path.insert(0, str(SEO_DIR))
-import db_helpers
+sys.path.insert(0, str(SCRIPT_DIR))
+from http_api import api_get, api_patch, load_env  # noqa: E402
+
+load_env()
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -175,9 +178,6 @@ def main():
         print("No candidate Gmail messages for SEO escalation replies.")
         return
 
-    conn = db_helpers.get_conn()
-    cur = conn.cursor()
-
     ingested = 0
     skipped = 0
     for c in candidates:
@@ -205,19 +205,20 @@ def main():
             skipped += 1
             continue
 
-        cur.execute(
-            "SELECT id, status, product, keyword, gmail_inbound_id "
-            "FROM seo_escalations WHERE id = %s",
-            (escalation_id,),
-        )
-        esc_row = cur.fetchone()
+        show = api_get("/api/v1/seo/escalations",
+                       query={"mode": "show", "id": escalation_id}, ok_on_404=True)
+        esc_row = None if show.get("_not_found") else (show.get("data") or {}).get("row")
         if not esc_row:
             print(f"  SKIP {gmail_id}: escalation #{escalation_id} not found")
             skipped += 1
             mark_read(service, gmail_id) if not args.dry_run else None
             continue
 
-        eid, status, product, keyword, existing_inbound = esc_row
+        eid = esc_row.get("id")
+        status = esc_row.get("status")
+        product = esc_row.get("product")
+        keyword = esc_row.get("keyword")
+        existing_inbound = esc_row.get("gmail_inbound_id")
 
         # Idempotency: if the row already has an inbound id (already ingested),
         # just mark Gmail as read and move on. If status is not pending, we
@@ -249,27 +250,19 @@ def main():
             continue
 
         try:
-            cur.execute(
-                """
-                UPDATE seo_escalations
-                SET status = 'replied',
-                    human_reply = %s,
-                    replied_at = NOW(),
-                    gmail_inbound_id = %s,
-                    updated_at = NOW()
-                WHERE id = %s AND status = 'pending'
-                """,
-                (reply_text, gmail_id, eid),
-            )
-            if cur.rowcount == 0:
+            presp = api_patch("/api/v1/seo/escalations", {
+                "id": eid,
+                "action": "ingest_reply",
+                "human_reply": reply_text,
+                "gmail_inbound_id": gmail_id,
+            })
+            updated = int((presp.get("data") or {}).get("updated") or 0)
+            if updated == 0:
                 print(f"  ERROR {gmail_id}: UPDATE matched 0 rows (race?); leaving message unread")
                 skipped += 1
-                conn.rollback()
                 continue
-            conn.commit()
         except Exception as e:
             print(f"  ERROR {gmail_id}: update failed: {e}")
-            conn.rollback()
             skipped += 1
             continue
 
@@ -280,8 +273,6 @@ def main():
         )
         ingested += 1
 
-    cur.close()
-    conn.close()
     print(f"Done. Ingested={ingested} skipped={skipped} candidates={len(candidates)}")
 
 
