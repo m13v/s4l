@@ -22,11 +22,9 @@ acquire_lock "link-edit-moltbook" 2700
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
-
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): all reads/writes go through the s4l.ai API via
+# scripts/link_edit_helper.py. No DATABASE_URL, no psql, no fallback.
+LE_HELPER="$REPO_DIR/scripts/link_edit_helper.py"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/link-edit-moltbook-$(date +%Y-%m-%d_%H%M%S).log"
@@ -36,18 +34,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 RUN_START=$(date +%s)
 log "=== Moltbook Link Edit Run: $(date) ==="
 
-EDITABLE=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT json_agg(q) FROM (
-        SELECT id, platform, our_url, our_content, thread_title, upvotes, project_name
-        FROM posts
-        WHERE status='active'
-          AND platform='moltbook'
-          AND posted_at < NOW() - INTERVAL '6 hours'
-          AND link_edited_at IS NULL
-          AND our_url IS NOT NULL
-          AND upvotes > 2
-        ORDER BY upvotes DESC NULLS LAST
-    ) q;" 2>/dev/null || echo "")
+EDITABLE=$(python3 "$LE_HELPER" eligible --platform moltbook --min-upvotes-exclusive 2 --order upvotes 2>/dev/null || echo "")
 
 if [ "$EDITABLE" = "null" ] || [ -z "$EDITABLE" ]; then
     log "No Moltbook posts eligible for link edit"
@@ -103,8 +90,8 @@ Process ALL of them. For each post:
      -H "Content-Type: application/json" \\
      -d '{"content": "FULL_CONTENT"}' \\
      "https://www.moltbook.com/api/v1/comments/COMMENT_UUID"
-8. After each successful edit, update the DB and backfill short-link attribution:
-   psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='LINK_TEXT' WHERE id=POST_ID"
+8. After each successful edit, update the DB (via the HTTP API helper) and backfill short-link attribution:
+   python3 ~/social-autoposter/scripts/link_edit_helper.py mark-edited --post-id POST_ID --content "LINK_TEXT"
    python3 ~/social-autoposter/scripts/dm_short_links.py backfill-post --minted-session MINTED_SESSION --post-id POST_ID
 9. COMMITMENT GUARDRAILS (never violate these):
    - NEVER suggest, offer, or agree to calls, meetings, demos, or video chats.
@@ -112,13 +99,13 @@ Process ALL of them. For each post:
    - NEVER offer to DM or send anything outside the comment.
    - NEVER make time-bound promises.
 10. If a post is SKIPPED (no project match, comment not found, removed, bad URL), ALWAYS mark it so it won't be retried:
-    psql "\$DATABASE_URL" -c "UPDATE posts SET link_edited_at=NOW(), link_edit_content='SKIPPED: REASON' WHERE id=POST_ID"
+    python3 ~/social-autoposter/scripts/link_edit_helper.py mark-skipped --post-id POST_ID --reason "REASON"
 PROMPT_EOF
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "link-edit-moltbook" --strict-mcp-config --mcp-config "$HOME/.claude/browser-agent-configs/no-agents-mcp.json" --disallowed-tools "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree" -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Moltbook link-edit claude exited with code $?"
 rm -f "$PROMPT_FILE"
 
-EDITED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='moltbook' AND link_edited_at IS NOT NULL;" 2>/dev/null || echo "0")
+EDITED=$(python3 "$LE_HELPER" edited-count --platform moltbook 2>/dev/null || echo "0")
 log "Moltbook link-edit complete. Total moltbook posts edited (all-time): $EDITED"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
