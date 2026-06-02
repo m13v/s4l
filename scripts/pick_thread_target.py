@@ -24,9 +24,10 @@ import json
 import os
 import random
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 DEFAULT_OWN_FLOOR_DAYS = 1
@@ -36,6 +37,52 @@ DEFAULT_EXTERNAL_FLOOR_DAYS = 3
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def _parse_dt(s):
+    """Parse an ISO posted_at string to an aware datetime, or None."""
+    if not s:
+        return None
+    s = str(s)
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _fetch_own_reddit_threads(days):
+    """Fetch our original Reddit threads (thread_url == our_url) posted in the
+    last `days` days via the HTTP API. Returns a list of (thread_url, days_ago)
+    tuples. Replaces the former direct posts SELECT (own_threads_only mirrors
+    the thread_url = our_url predicate)."""
+    cutoff = datetime.now(timezone.utc).timestamp() - int(days) * 86400
+    since = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+    resp = api_get(
+        "/api/v1/posts",
+        query={
+            "platform": "reddit",
+            "own_threads_only": "true",
+            "since": since,
+            "order_by": "posted_at",
+            "order_dir": "desc",
+            "limit": 500,
+        },
+    )
+    posts = (resp.get("data") or {}).get("posts") or []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    out = []
+    for p in posts:
+        dt = _parse_dt(p.get("posted_at"))
+        if dt is None:
+            continue
+        days_ago = (now_ts - dt.timestamp()) / 86400.0
+        out.append((p.get("thread_url"), days_ago, p.get("project_name")))
+    return out
 
 
 def norm_sub(s):
@@ -89,21 +136,9 @@ def load_thread_blocked_subs(config):
 
 def recent_posts_by_sub(max_days):
     """Return dict: sub_slug (lowercased) -> days_since_last_our_thread."""
-    conn = dbmod.get_conn()
-    rows = conn.execute(
-        """
-        SELECT thread_url,
-               EXTRACT(EPOCH FROM (NOW() - posted_at))/86400.0 AS days_ago
-        FROM posts
-        WHERE platform='reddit'
-          AND thread_url = our_url
-          AND posted_at > NOW() - INTERVAL '%s days'
-        ORDER BY posted_at DESC
-        """ % max_days
-    ).fetchall()
-    conn.close()
+    rows = _fetch_own_reddit_threads(max_days)
     latest = {}
-    for url, days_ago in rows:
+    for url, days_ago, _project in rows:
         if not url or "/r/" not in url:
             continue
         sub = url.split("/r/", 1)[1].split("/", 1)[0].lower()
