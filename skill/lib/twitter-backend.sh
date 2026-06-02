@@ -214,6 +214,15 @@ ensure_twitter_browser_for_backend() {
         fi
         echo "[$(date +%H:%M:%S)] Harness Chrome up on port 9555" >&2
     fi
+    # Re-inject the stored X session if the harness Chrome is logged out — e.g. a
+    # keychain re-lock wiped Chrome's encrypted Cookies SQLite on this launch
+    # (Gap B, 2026-06-02). restore_twitter_session.py reads the keychain-
+    # independent local cookie mirror (written by connect_x) and injects via CDP.
+    # No-op when already logged in; never blocks the cycle on failure. Runs on
+    # both the freshly-launched and already-up paths so a mid-life logout heals.
+    TWITTER_CDP_URL="http://127.0.0.1:9555" \
+        python3 "$HOME/social-autoposter/scripts/restore_twitter_session.py" 2>&1 \
+        | sed 's/^/[restore] /' >&2 || true
     # Always close leftover tabs from prior runs. Safe under acquire_lock
     # "twitter-browser" serialization (every caller of this function holds
     # that lock), so we will not race with another active twitter run.
