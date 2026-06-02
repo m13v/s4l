@@ -119,273 +119,39 @@ EVENT_LABELS = {
 }
 
 
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
+def load_recipients():
+    data = api_get("/api/v1/dashboard-users", query={"mode": "recipients"}).get("data") or {}
+    return data.get("recipients") or []
 
 
-def query_all(conn, sql, params=None):
-    with conn.cursor() as cur:
-        cur.execute(sql, params or ())
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def load_recipients(conn):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT email, name, admin, projects
-            FROM dashboard_users
-            WHERE report_enabled
-            ORDER BY admin DESC, email
-        """)
-        return [dict(r) for r in cur.fetchall()]
-
-
-def _scope_clauses(scope, columns):
+def gather_stats(projects):
     """
-    Build (filter_sql, params) tuples for the projects array. Returns dict
-    keyed by column name. Empty/None scope yields ("", ()).
+    Build all report sections via one HTTP call to /api/v1/stats/weekly-social.
+    If `projects` is None or empty, the endpoint returns the unscoped master
+    view (includes the mention branch + aggregate_stats_daily reconstruction).
+    Otherwise every section is filtered to that scope.
     """
-    out = {}
-    if not scope:
-        for col in columns:
-            out[col] = ("", ())
-        return out
-    for col in columns:
-        out[col] = (f" AND {col} = ANY(%s)", (scope,))
-    return out
+    scope = projects or []
+    data = (api_get("/api/v1/stats/weekly-social", query={
+        "hours": int(WINDOW_HOURS),
+        "scope": ",".join(scope) if scope else "",
+    }).get("data") or {})
 
-
-def gather_activity_events(conn, scope, hours):
-    """
-    Same UNION-ALL shape as bin/server.js /api/activity/stats. Returns a list
-    of (type, platform, count) dicts. Mention branch only included for the
-    unscoped admin view (octolens_mentions has no project column).
-    """
-    win = f"INTERVAL '{hours} hours'"
-    norm = "CASE WHEN LOWER(pl) = 'x' THEN 'twitter' ELSE LOWER(pl) END"
-
-    pc = _scope_clauses(scope, [
-        "project_name", "d.target_project", "product",
-    ])
-    posts_pc = pc["project_name"]
-    replies_pc = pc["project_name"]
-    dms_pc = pc["d.target_project"]
-    seo_pc = pc["product"]
-
-    parts = []
-    params = []
-
-    parts.append(
-        "SELECT CASE WHEN thread_url = our_url AND (thread_author IS NULL OR thread_author = our_account) "
-        "THEN 'posted_thread' ELSE 'posted_comment' END AS type, platform AS pl "
-        f"FROM posts WHERE posted_at >= NOW() - {win}{posts_pc[0]}"
-    )
-    params.extend(posts_pc[1])
-
-    parts.append(
-        f"SELECT 'replied' AS type, platform AS pl FROM replies "
-        f"WHERE status='replied' AND replied_at >= NOW() - {win}{replies_pc[0]}"
-    )
-    params.extend(replies_pc[1])
-
-    parts.append(
-        f"SELECT 'skipped' AS type, platform AS pl FROM replies "
-        f"WHERE status='skipped' AND COALESCE(processing_at, discovered_at) >= NOW() - {win}{replies_pc[0]}"
-    )
-    params.extend(replies_pc[1])
-
-    if not scope:
-        parts.append(
-            f"SELECT 'mention' AS type, platform AS pl FROM octolens_mentions "
-            f"WHERE COALESCE(source_timestamp, received_at) >= NOW() - {win}"
-        )
-
-    parts.append(
-        "SELECT 'dm_sent' AS type, d.platform AS pl FROM dms d "
-        "WHERE EXISTS (SELECT 1 FROM dm_messages m WHERE m.dm_id = d.id "
-        f"  AND m.direction='outbound' AND m.message_at >= NOW() - {win} "
-        "  AND NOT EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = d.id "
-        "    AND m2.direction='outbound' AND m2.message_at < m.message_at))"
-        f"{dms_pc[0]}"
-    )
-    params.extend(dms_pc[1])
-
-    parts.append(
-        "SELECT 'dm_reply_sent' AS type, d.platform AS pl FROM dm_messages m "
-        "JOIN dms d ON d.id = m.dm_id "
-        f"WHERE m.direction='outbound' AND m.message_at >= NOW() - {win} "
-        "  AND EXISTS (SELECT 1 FROM dm_messages m2 WHERE m2.dm_id = m.dm_id "
-        "    AND m2.direction='inbound' AND m2.message_at < m.message_at)"
-        f"{dms_pc[0]}"
-    )
-    params.extend(dms_pc[1])
-
-    # SEO page events: same source-bucketing the dashboard uses. Each branch
-    # repeats seo_pc params, so add them once per push below.
-    seo_branches = [
-        ("page_published_serp",       f"AND page_url IS NOT NULL AND COALESCE(source, '') NOT IN ('reddit', 'top_page', 'top_post', 'roundup')"),
-        ("page_published_reddit",     "AND page_url IS NOT NULL AND source='reddit'"),
-        ("page_published_top",        "AND page_url IS NOT NULL AND source='top_page'"),
-        ("page_published_top_post",   "AND page_url IS NOT NULL AND source='top_post'"),
-        ("page_published_roundup",    "AND page_url IS NOT NULL AND source='roundup'"),
-    ]
-    for ev_type, extra in seo_branches:
-        parts.append(
-            f"SELECT '{ev_type}' AS type, 'seo' AS pl FROM seo_keywords "
-            f"WHERE completed_at >= NOW() - {win} {extra}{seo_pc[0]}"
-        )
-        params.extend(seo_pc[1])
-
-    parts.append(
-        "SELECT 'page_published_gsc' AS type, 'seo' AS pl FROM gsc_queries "
-        f"WHERE completed_at >= NOW() - {win} AND page_url IS NOT NULL{seo_pc[0]}"
-    )
-    params.extend(seo_pc[1])
-
-    parts.append(
-        "SELECT 'page_improved' AS type, 'seo' AS pl FROM seo_page_improvements "
-        f"WHERE completed_at >= NOW() - {win} AND status='committed'{seo_pc[0]}"
-    )
-    params.extend(seo_pc[1])
-
-    parts.append(
-        "SELECT 'resurrected' AS type, platform AS pl FROM posts "
-        f"WHERE resurrected_at >= NOW() - {win}{posts_pc[0]}"
-    )
-    params.extend(posts_pc[1])
-
-    sql = (
-        "SELECT type, " + norm + " AS platform, COUNT(*)::int AS count "
-        "FROM (" + " UNION ALL ".join(parts) + ") u "
-        "GROUP BY type, platform ORDER BY type, platform"
-    )
-
-    with conn.cursor() as cur:
-        cur.execute(sql, tuple(params))
-        return [{"type": r[0], "platform": r[1], "count": r[2]} for r in cur.fetchall()]
-
-
-def gather_engagement_totals(conn, scope, hours):
-    """
-    Total views/upvotes/comments GAINED in the window across ALL our posts
-    (not just posts made in the window). Mirrors the dashboard
-    /api/views|upvotes|comments/per-day query approach: post_views_daily LAG
-    delta. moltbook + github platforms have no post_views_daily snapshots so
-    they're excluded the same way the dashboard does.
-
-    Returns dict with keys: views, upvotes, comments.
-    """
-    days = max(1, hours // 24)
-    project_filter = ""
-    params = []
-    if scope:
-        project_filter = " AND p.project_name = ANY(%s)"
-        params.append(scope)
-
-    metrics = {}
-    for col in ("views", "upvotes", "comments"):
-        sql = (
-            f"WITH per_post_daily AS ("
-            f"  SELECT pvd.post_id, pvd.day, pvd.{col} AS metric, "
-            f"    LAG(pvd.{col}) OVER (PARTITION BY pvd.post_id ORDER BY pvd.day) AS prev_metric "
-            f"  FROM post_views_daily pvd "
-            f"  JOIN posts p ON p.id = pvd.post_id "
-            f"  WHERE LOWER(p.platform) NOT IN ('moltbook', 'github', 'github_issues') "
-            f"    AND pvd.{col} IS NOT NULL "
-            f"    AND pvd.day >= CURRENT_DATE - INTERVAL '{days} days'{project_filter}"
-            f") "
-            f"SELECT COALESCE(SUM(GREATEST(metric - prev_metric, 0)), 0)::bigint "
-            f"FROM per_post_daily WHERE prev_metric IS NOT NULL"
-        )
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            metrics[col] = int(cur.fetchone()[0] or 0)
-
-    # Admin unscoped view also includes the aggregate_stats_daily reconstruction
-    # branch (cross-project, cross-platform backfill). Skipped for scoped users
-    # because it cannot be filtered by project.
-    if not scope:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT "
-                f"  COALESCE(SUM(views_gained), 0)::bigint, "
-                f"  COALESCE(SUM(upvotes_gained), 0)::bigint, "
-                f"  COALESCE(SUM(comments_gained), 0)::bigint "
-                f"FROM aggregate_stats_daily "
-                f"WHERE day >= CURRENT_DATE - INTERVAL '{days} days'"
-            )
-            v, u, c = cur.fetchone()
-            metrics["views"] += int(v or 0)
-            metrics["upvotes"] += int(u or 0)
-            metrics["comments"] += int(c or 0)
-
-    return metrics
-
-
-def gather_stats(conn, projects):
-    """
-    Build all report sections. If `projects` is None or empty, return the
-    unscoped master view. Otherwise filter every section to that scope.
-    """
-    stats = {}
-    scope = projects or None
-    hours = WINDOW_HOURS
-
-    stats["events"] = gather_activity_events(conn, scope, hours)
-    stats["totals"] = gather_engagement_totals(conn, scope, hours)
-
-    # Per-platform / per-project / per-style "posts made in window" drill-down.
-    # No engagement columns here on purpose: aggregating posts.views (cumulative
-    # at-snapshot count) for posts made in a 7-day window double-counts views
-    # earned before the post was made and double-counts again on Monday.
-    pc = _scope_clauses(scope, ["project_name"])
-    posts_pc = pc["project_name"]
-    replies_pc = pc["project_name"]
-    seo_pc = _scope_clauses(scope, ["product"])["product"]
-    dms_pc = _scope_clauses(scope, ["target_project"])["target_project"]
-
-    win = f"INTERVAL '{hours} hours'"
-
-    stats["posts_by_platform"] = query_all(conn, (
-        f"SELECT platform, COUNT(*) AS posts FROM posts "
-        f"WHERE posted_at >= NOW() - {win}{posts_pc[0]} "
-        f"GROUP BY platform ORDER BY posts DESC"
-    ), posts_pc[1])
-
-    stats["posts_by_project"] = query_all(conn, (
-        f"SELECT COALESCE(project_name, '(none)') AS project, COUNT(*) AS posts FROM posts "
-        f"WHERE posted_at >= NOW() - {win}{posts_pc[0]} "
-        f"GROUP BY project_name ORDER BY posts DESC"
-    ), posts_pc[1])
-
-    stats["posts_by_style"] = query_all(conn, (
-        f"SELECT COALESCE(engagement_style, '(none)') AS style, COUNT(*) AS posts FROM posts "
-        f"WHERE posted_at >= NOW() - {win}{posts_pc[0]} "
-        f"GROUP BY engagement_style ORDER BY posts DESC"
-    ), posts_pc[1])
-
-    stats["replies"] = query_all(conn, (
-        f"SELECT platform, "
-        f"  COUNT(*) AS discovered, "
-        f"  COUNT(*) FILTER (WHERE replied_at >= NOW() - {win}) AS replied "
-        f"FROM replies WHERE discovered_at >= NOW() - {win}{replies_pc[0]} "
-        f"GROUP BY platform ORDER BY platform"
-    ), replies_pc[1])
-
-    stats["dms"] = query_all(conn, (
-        f"SELECT platform, status, COUNT(*) AS cnt FROM dms "
-        f"WHERE discovered_at >= NOW() - {win}{dms_pc[0]} "
-        f"GROUP BY platform, status ORDER BY platform"
-    ), dms_pc[1])
-
-    stats["seo_completed"] = query_all(conn, (
-        f"SELECT product, COUNT(*) AS pages_done FROM seo_keywords "
-        f"WHERE completed_at >= NOW() - {win}{seo_pc[0]} "
-        f"GROUP BY product ORDER BY pages_done DESC"
-    ), seo_pc[1])
-
-    return stats
+    engagement = data.get("engagement") or {}
+    return {
+        "events": data.get("activity") or [],
+        "totals": {
+            "views": int(engagement.get("views") or 0),
+            "upvotes": int(engagement.get("upvotes") or 0),
+            "comments": int(engagement.get("comments") or 0),
+        },
+        "posts_by_platform": data.get("posts_by_platform") or [],
+        "posts_by_project": data.get("posts_by_project") or [],
+        "posts_by_style": data.get("posts_by_style") or [],
+        "replies": data.get("replies") or [],
+        "dms": data.get("dms") or [],
+        "seo_completed": data.get("seo_completed") or [],
+    }
 
 
 def html_table(rows, columns, col_labels=None):
@@ -597,51 +363,47 @@ def main():
                         help="Only process the recipient with this email (case-insensitive).")
     args = parser.parse_args()
 
-    conn = get_db()
-    try:
-        recipients = load_recipients(conn)
-        if args.only:
-            wanted = args.only.lower()
-            recipients = [r for r in recipients if r["email"].lower() == wanted]
-            if not recipients:
-                print(f"No recipient matches --only={args.only}", file=sys.stderr)
-                sys.exit(2)
+    recipients = load_recipients()
+    if args.only:
+        wanted = args.only.lower()
+        recipients = [r for r in recipients if r["email"].lower() == wanted]
+        if not recipients:
+            print(f"No recipient matches --only={args.only}", file=sys.stderr)
+            sys.exit(2)
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        service = None if args.dry_run else gmail_service()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    service = None if args.dry_run else gmail_service()
 
-        mode = " (SAMPLE mode)" if args.sample else ""
-        print(f"Processing {len(recipients)} recipient(s){mode}")
-        for r in recipients:
-            stats = gather_stats(conn, r["projects"])
+    mode = " (SAMPLE mode)" if args.sample else ""
+    print(f"Processing {len(recipients)} recipient(s){mode}")
+    for r in recipients:
+        stats = gather_stats(r["projects"])
 
-            # Quiet-week rule: skip recipients whose scope had zero posts in
-            # the window. The headline engagement total (views/upvotes/comments)
-            # could still be non-zero for old posts even when the user posted
-            # nothing this week, but the user's gate is on "posts that we made".
-            posts_this_window = sum(int(row.get("posts") or 0) for row in stats["posts_by_platform"])
-            if posts_this_window == 0:
-                print(f"  SKIP -> {r['email']:30s}  (no posts in scope last 7 days)")
-                continue
+        # Quiet-week rule: skip recipients whose scope had zero posts in
+        # the window. The headline engagement total (views/upvotes/comments)
+        # could still be non-zero for old posts even when the user posted
+        # nothing this week, but the user's gate is on "posts that we made".
+        posts_this_window = sum(int(row.get("posts") or 0) for row in stats["posts_by_platform"])
+        if posts_this_window == 0:
+            print(f"  SKIP -> {r['email']:30s}  (no posts in scope last 7 days)")
+            continue
 
-            html_body = build_html(stats, r)
+        html_body = build_html(stats, r)
 
-            scope = ", ".join(r["projects"]) if r["projects"] else "all"
-            real_subject = f"Social Autoposter Weekly Report ({scope}): {today}"
-            to_addr = OPERATOR_EMAIL if args.sample else r["email"]
-            subject = (
-                f"[SAMPLE for {r['email']}] {real_subject}"
-                if args.sample else real_subject
-            )
+        scope = ", ".join(r["projects"]) if r["projects"] else "all"
+        real_subject = f"Social Autoposter Weekly Report ({scope}): {today}"
+        to_addr = OPERATOR_EMAIL if args.sample else r["email"]
+        subject = (
+            f"[SAMPLE for {r['email']}] {real_subject}"
+            if args.sample else real_subject
+        )
 
-            if args.dry_run:
-                print(f"  DRY  -> {to_addr:30s}  subj='{subject}'")
-                continue
+        if args.dry_run:
+            print(f"  DRY  -> {to_addr:30s}  subj='{subject}'")
+            continue
 
-            mid = send_email(service, to_addr, subject, html_body)
-            print(f"  SENT -> {to_addr:30s}  id={mid}  subj='{subject}'")
-    finally:
-        conn.close()
+        mid = send_email(service, to_addr, subject, html_body)
+        print(f"  SENT -> {to_addr:30s}  id={mid}  subj='{subject}'")
 
 
 if __name__ == "__main__":
