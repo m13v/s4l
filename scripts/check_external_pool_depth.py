@@ -35,7 +35,7 @@ REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, 'scripts'))
 sys.path.insert(0, os.path.expanduser('~/gmail-api'))
 
-import db as dbmod  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 WARN_REMAINING_RATIO = 0.20
 COOLDOWN_HOURS = 24
@@ -54,39 +54,41 @@ def _load_external_projects() -> list[dict]:
     return [p for p in cfg.get('projects', []) if p.get('external_short_links')]
 
 
-def _pool_depth(conn, project: str, platform: str) -> tuple[int, int]:
-    cur = conn.execute(
-        "SELECT "
-        "  COUNT(*) FILTER (WHERE post_id IS NULL AND reply_id IS NULL) AS available, "
-        "  COUNT(*) AS total "
-        "FROM post_links "
-        "WHERE minted_session LIKE %s AND project_name = %s AND platform = %s",
-        ('pool:%', project, platform),
+def _pool_depth(project: str, platform: str) -> tuple[int, int]:
+    resp = api_get(
+        "/api/v1/post-links/pool-depth",
+        query={"project_name": project, "platform": platform},
     )
-    r = dict(cur.fetchone())
-    return int(r['available'] or 0), int(r['total'] or 0)
+    d = resp.get("data") or {}
+    return int(d.get("available") or 0), int(d.get("total") or 0)
 
 
-def _recent_alert_exists(conn, project: str, platform: str, severity: str) -> bool:
-    cur = conn.execute(
-        "SELECT 1 FROM external_pool_alerts "
-        "WHERE project_name=%s AND platform=%s AND severity=%s "
-        "  AND sent_at > NOW() - INTERVAL %s "
-        "LIMIT 1",
-        (project, platform, severity, f"{COOLDOWN_HOURS} hours"),
+def _recent_alert_exists(project: str, platform: str, severity: str) -> bool:
+    resp = api_get(
+        "/api/v1/external-pool-alerts",
+        query={
+            "project_name": project,
+            "platform": platform,
+            "severity": severity,
+            "within_hours": COOLDOWN_HOURS,
+        },
     )
-    return cur.fetchone() is not None
+    return bool((resp.get("data") or {}).get("recent"))
 
 
-def _record_alert(conn, project: str, platform: str, severity: str,
+def _record_alert(project: str, platform: str, severity: str,
                   available: int, total: int, ratio: float) -> None:
-    conn.execute(
-        "INSERT INTO external_pool_alerts "
-        "  (project_name, platform, severity, available, total, ratio) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
-        (project, platform, severity, available, total, ratio),
+    api_post(
+        "/api/v1/external-pool-alerts",
+        {
+            "project_name": project,
+            "platform": platform,
+            "severity": severity,
+            "available": available,
+            "total": total,
+            "ratio": ratio,
+        },
     )
-    conn.commit()
 
 
 def _gmail_send(subject: str, body: str) -> None:
@@ -157,83 +159,78 @@ def _format_body(project: str, platform: str, severity: str,
     return "\n".join(lines)
 
 
-def _destinations_for_slice(conn, project: str, platform: str) -> list[dict]:
-    cur = conn.execute(
-        "SELECT minted_session, "
-        "       COUNT(*) FILTER (WHERE post_id IS NULL AND reply_id IS NULL) AS available, "
-        "       COUNT(*) FILTER (WHERE post_id IS NOT NULL OR reply_id IS NOT NULL) AS claimed "
-        "FROM post_links "
-        "WHERE minted_session LIKE %s AND project_name = %s AND platform = %s "
-        "GROUP BY minted_session ORDER BY available ASC",
-        ('pool:%', project, platform),
+def _destinations_for_slice(project: str, platform: str) -> list[dict]:
+    resp = api_get(
+        "/api/v1/post-links/pool-depth",
+        query={
+            "project_name": project,
+            "platform": platform,
+            "with_destinations": "1",
+        },
     )
-    return [dict(r) for r in cur.fetchall()]
+    return (resp.get("data") or {}).get("destinations") or []
 
 
 def check(dry_run: bool = False, force: bool = False,
           warn_ratio: float = WARN_REMAINING_RATIO,
           limit: int | None = None) -> dict:
     projects = _load_external_projects()
-    conn = dbmod.get_conn()
     fired: list[dict] = []
     skipped_cooldown: list[dict] = []
     healthy: list[dict] = []
-    try:
-        for p in projects:
-            project_name = p['name']
-            for platform in PLATFORMS:
-                available, total = _pool_depth(conn, project_name, platform)
-                if total == 0:
-                    continue
-                ratio = available / total if total > 0 else 0.0
-                if available == 0:
-                    severity = 'CRITICAL'
-                elif ratio <= warn_ratio:
-                    severity = 'WARN'
-                else:
-                    healthy.append({
-                        'project': project_name, 'platform': platform,
-                        'available': available, 'total': total, 'ratio': ratio,
-                    })
-                    continue
-                key = (project_name, platform, severity)
-                if not force and _recent_alert_exists(conn, *key):
-                    skipped_cooldown.append({
-                        'project': project_name, 'platform': platform,
-                        'severity': severity, 'available': available, 'total': total,
-                    })
-                    continue
-                fired_row = {
+    for p in projects:
+        project_name = p['name']
+        for platform in PLATFORMS:
+            available, total = _pool_depth(project_name, platform)
+            if total == 0:
+                continue
+            ratio = available / total if total > 0 else 0.0
+            if available == 0:
+                severity = 'CRITICAL'
+            elif ratio <= warn_ratio:
+                severity = 'WARN'
+            else:
+                healthy.append({
+                    'project': project_name, 'platform': platform,
+                    'available': available, 'total': total, 'ratio': ratio,
+                })
+                continue
+            key = (project_name, platform, severity)
+            if not force and _recent_alert_exists(*key):
+                skipped_cooldown.append({
                     'project': project_name, 'platform': platform,
                     'severity': severity, 'available': available, 'total': total,
-                    'ratio': ratio,
-                }
-                fired.append(fired_row)
-                if dry_run:
-                    continue
-                if limit is not None and len(fired) > limit:
-                    continue
-                destinations = _destinations_for_slice(conn, project_name, platform)
-                subject = _format_subject(project_name, platform, severity, available, total)
-                body = _format_body(project_name, platform, severity, available, total,
-                                    ratio, destinations)
-                try:
-                    _gmail_send(subject, body)
-                    _record_alert(conn, project_name, platform, severity,
-                                  available, total, ratio)
-                except Exception as e:
-                    fired_row['send_error'] = str(e)
-                    print(f"[pool-check] email send failed for {project_name}/{platform}: {e}",
-                          file=sys.stderr)
-        return {
-            'checked_at': datetime.now(timezone.utc).isoformat(),
-            'fired': fired,
-            'skipped_cooldown': skipped_cooldown,
-            'healthy_count': len(healthy),
-            'dry_run': dry_run,
-        }
-    finally:
-        conn.close()
+                })
+                continue
+            fired_row = {
+                'project': project_name, 'platform': platform,
+                'severity': severity, 'available': available, 'total': total,
+                'ratio': ratio,
+            }
+            fired.append(fired_row)
+            if dry_run:
+                continue
+            if limit is not None and len(fired) > limit:
+                continue
+            destinations = _destinations_for_slice(project_name, platform)
+            subject = _format_subject(project_name, platform, severity, available, total)
+            body = _format_body(project_name, platform, severity, available, total,
+                                ratio, destinations)
+            try:
+                _gmail_send(subject, body)
+                _record_alert(project_name, platform, severity,
+                              available, total, ratio)
+            except Exception as e:
+                fired_row['send_error'] = str(e)
+                print(f"[pool-check] email send failed for {project_name}/{platform}: {e}",
+                      file=sys.stderr)
+    return {
+        'checked_at': datetime.now(timezone.utc).isoformat(),
+        'fired': fired,
+        'skipped_cooldown': skipped_cooldown,
+        'healthy_count': len(healthy),
+        'dry_run': dry_run,
+    }
 
 
 def main():
