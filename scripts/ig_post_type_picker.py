@@ -33,19 +33,10 @@ import random
 import sys
 from pathlib import Path
 
-ENV_FILE = Path.home() / "social-autoposter" / ".env"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from http_api import api_get
+
 CONFIG_FILE = Path.home() / "social-autoposter" / "config.json"
-
-
-def load_env():
-    env = {}
-    for line in ENV_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        env[k.strip()] = v.strip()
-    return env
 
 
 def load_ig_config():
@@ -73,44 +64,23 @@ def main():
     ap.add_argument("--account", help="scope all queries to target_account (default: pick across all)")
     args = ap.parse_args()
 
-    try:
-        import psycopg2
-    except ImportError:
-        sys.stderr.write("psycopg2 missing\n")
-        sys.exit(3)
-
-    env = load_env()
-    db_url = env.get("DATABASE_URL")
-    if not db_url:
-        sys.stderr.write("DATABASE_URL missing in .env\n")
-        sys.exit(3)
-
     type_weights_cfg, window_days, cooldown_posts = load_ig_config()
     account = args.account
 
-    conn = psycopg2.connect(db_url)
-    cur = conn.cursor()
-
-    # Recent posted counts per type for inverse-share weighting.
-    # Scoped to target_account when one is requested; otherwise global.
-    if account:
-        cur.execute(
-            "SELECT post_type, COUNT(*) FROM media_posts "
-            "WHERE status='posted' AND posted_urls ? 'instagram' "
-            "  AND target_account=%s "
-            "  AND posted_at > NOW() - INTERVAL %s "
-            "GROUP BY post_type",
-            (account, f"{window_days} days"),
-        )
-    else:
-        cur.execute(
-            "SELECT post_type, COUNT(*) FROM media_posts "
-            "WHERE status='posted' AND posted_urls ? 'instagram' "
-            "  AND posted_at > NOW() - INTERVAL %s "
-            "GROUP BY post_type",
-            (f"{window_days} days",),
-        )
-    recent_counts = {r[0]: r[1] for r in cur.fetchall() if r[0]}
+    # Single round trip: raw rows for weighting + cooldown + draft selection.
+    # All weighting / cooldown / fallback logic stays local (HTTP-only).
+    _ctx = api_get(
+        "/api/v1/media-posts/ig-picker-context",
+        query={
+            "target_account": account,
+            "window_days": window_days,
+            "cooldown_posts": cooldown_posts,
+        },
+    )
+    ctx = (_ctx.get("data") or {})
+    recent_counts = dict(ctx.get("recent_type_counts") or {})
+    recent_posted_projects = list(ctx.get("recent_posted_projects") or [])
+    all_drafts = list(ctx.get("drafts") or [])
     for t in ("organic", "product"):
         recent_counts.setdefault(t, 0)
 
@@ -130,45 +100,26 @@ def main():
 
     def _recent_project_names(window):
         # Project names appearing in the last `window` posted IG rows on this
-        # account. Used to exclude product drafts whose project recently posted.
-        # Organic rows have project_name IS NULL and are skipped via WHERE.
+        # account (already account-scoped + NULL-excluded by the endpoint).
         # Returns a set; empty when window<=0 or no account scoping.
         if window <= 0 or not account:
             return set()
-        cur.execute(
-            "SELECT project_name FROM ("
-            "  SELECT project_name FROM media_posts "
-            "   WHERE status='posted' AND posted_urls ? 'instagram' "
-            "     AND target_account=%s "
-            "   ORDER BY posted_at DESC LIMIT %s"
-            ") t WHERE project_name IS NOT NULL",
-            (account, window),
-        )
-        return {r[0] for r in cur.fetchall()}
+        return set(recent_posted_projects)
 
     def _draft_query(type_, blocked_projects=None):
-        # Drafts for this type, optionally scoped to target_account. We allow
-        # legacy NULL target_account rows to match when no --account is passed
-        # so existing behavior is preserved; when --account is set, rows must
-        # match exactly (account-scoped buffer).
-        # For product drafts, optionally exclude rows whose project_name is in
-        # blocked_projects (project diversity cooldown). NULL project_name rows
-        # always pass (they're organic-shaped and not subject to the cooldown).
-        params = [type_]
-        sql = (
-            "SELECT post_number, video_path, project_name FROM media_posts "
-            "WHERE status='draft' AND post_type=%s "
-        )
-        if account:
-            sql += "  AND target_account=%s "
-            params.append(account)
-        if blocked_projects:
-            placeholders = ",".join(["%s"] * len(blocked_projects))
-            sql += f"  AND (project_name IS NULL OR project_name NOT IN ({placeholders})) "
-            params.extend(sorted(blocked_projects))
-        sql += "ORDER BY post_number ASC LIMIT 1"
-        cur.execute(sql, params)
-        return cur.fetchone()
+        # First draft of this type from the endpoint's account-scoped list
+        # (already ordered by post_number ASC). For product drafts, exclude
+        # rows whose project_name is in blocked_projects (project diversity
+        # cooldown). NULL project_name rows always pass (organic-shaped, never
+        # on cooldown). Returns (post_number, video_path, project_name) or None.
+        for d in all_drafts:
+            if d.get("post_type") != type_:
+                continue
+            pn = d.get("project_name")
+            if blocked_projects and pn is not None and pn in blocked_projects:
+                continue
+            return (d.get("post_number"), d.get("video_path"), pn)
+        return None
 
     # Project diversity cooldown applies to product drafts only. Hard rule:
     # same project_name cannot appear within the last N posted rows on this
@@ -188,24 +139,13 @@ def main():
         cooldown_blocked = _recent_project_names(cooldown_posts) if cooldown_posts > 0 else set()
         cooldown_window_used = cooldown_posts
         if cooldown_blocked:
-            # Diagnostic: which drafts got filtered out by the cooldown
-            if account:
-                cur.execute(
-                    "SELECT post_number, project_name FROM media_posts "
-                    "WHERE status='draft' AND post_type='product' "
-                    "  AND target_account=%s AND project_name = ANY(%s) "
-                    "ORDER BY post_number ASC",
-                    (account, list(cooldown_blocked)),
-                )
-            else:
-                cur.execute(
-                    "SELECT post_number, project_name FROM media_posts "
-                    "WHERE status='draft' AND post_type='product' "
-                    "  AND project_name = ANY(%s) "
-                    "ORDER BY post_number ASC",
-                    (list(cooldown_blocked),),
-                )
-            cooldown_skipped_drafts = [(r[0], r[1]) for r in cur.fetchall()]
+            # Diagnostic: which product drafts got filtered out by the cooldown
+            # (computed locally from the endpoint's draft list).
+            cooldown_skipped_drafts = [
+                (d.get("post_number"), d.get("project_name"))
+                for d in all_drafts
+                if d.get("post_type") == "product" and d.get("project_name") in cooldown_blocked
+            ]
         return _draft_query("product", blocked_projects=cooldown_blocked)
 
     if target == "product":
@@ -282,7 +222,6 @@ def main():
         "cooldown_skipped_drafts": cooldown_skipped_drafts if target == "product" else [],
     }
     print(json.dumps(out))
-    conn.close()
 
 
 if __name__ == "__main__":
