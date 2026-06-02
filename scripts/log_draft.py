@@ -46,7 +46,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_patch
 
 
 def main():
@@ -97,57 +97,42 @@ def main():
             sys.exit(1)
         new_style_json = json.dumps(parsed)
 
-    table = "twitter_candidates"  # platform is twitter-only today
+    # platform is twitter-only today; the by-id endpoint targets twitter_candidates.
+    payload = {
+        "id": args.candidate_id,
+        "action": "set_draft",
+        "text": text,
+        "style": args.style,
+        "assigned_style": args.assigned_style,
+        "assigned_mode": args.assigned_mode,
+    }
+    if new_style_json is not None:
+        # Pass the already-validated JSON string; the endpoint re-parses it.
+        payload["new_style"] = new_style_json
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            f"SELECT status FROM {table} WHERE id = %s",
-            (args.candidate_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            print(json.dumps({"error": "CANDIDATE_NOT_FOUND", "candidate_id": args.candidate_id}))
-            sys.exit(1)
-        if row[0] != "pending":
-            print(json.dumps({
-                "error": "ALREADY_POSTED",
-                "candidate_id": args.candidate_id,
-                "status": row[0],
-            }))
-            sys.exit(1)
+    resp = api_patch(
+        "/api/v1/twitter-candidates/by-id", payload,
+        ok_on_conflict=True, ok_on_404=True,
+    )
 
-        cur = conn.execute(
-            f"""
-            UPDATE {table}
-            SET draft_reply_text       = %s,
-                draft_engagement_style = %s,
-                assigned_style         = %s,
-                assigned_mode          = %s,
-                draft_new_style        = %s::jsonb,
-                drafted_at             = NOW()
-            WHERE id = %s
-            RETURNING drafted_at
-            """,
-            (
-                text,
-                args.style,
-                args.assigned_style,
-                args.assigned_mode,
-                new_style_json,
-                args.candidate_id,
-            ),
-        )
-        drafted_at = cur.fetchone()[0]
-        conn.commit()
-    finally:
-        conn.close()
+    if (resp or {}).get("_not_found"):
+        print(json.dumps({"error": "CANDIDATE_NOT_FOUND", "candidate_id": args.candidate_id}))
+        sys.exit(1)
+    if not (resp or {}).get("ok"):
+        # 409 already_posted (status carried under error.details.status).
+        details = ((resp or {}).get("error") or {}).get("details") or {}
+        print(json.dumps({
+            "error": "ALREADY_POSTED",
+            "candidate_id": args.candidate_id,
+            "status": details.get("status"),
+        }))
+        sys.exit(1)
 
+    candidate = ((resp or {}).get("data") or {}).get("candidate") or {}
     print(json.dumps({
         "logged": True,
         "candidate_id": args.candidate_id,
-        "drafted_at": drafted_at.isoformat(),
+        "drafted_at": candidate.get("drafted_at"),
         "assigned_style": args.assigned_style,
         "assigned_mode": args.assigned_mode,
         "new_style_persisted": bool(new_style_json),
