@@ -19,6 +19,8 @@
     "!scripts/backfill_real_clicks.py",
     "!scripts/historical_engagement.py",
     "!scripts/style_length_report.py",
+    "!scripts/install_lane_monitor.py",
+    "!scripts/li_discover_insert.py",
     "!scripts/_dm_record_sent.sh",
     "!scripts/send_batch_dms.sh",
     "!scripts/mint_podlog_subpage_*.py",
