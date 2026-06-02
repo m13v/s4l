@@ -38,8 +38,7 @@ from datetime import datetime, timedelta, timezone
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, "scripts"))
 
-from db import get_conn  # noqa: E402
-from http_api import api_post  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 # Platforms we attempt synthesis for. Each platform that has >= MIN_REPLIES
 # human replies in the window gets its own row in engagement_styles_registry
@@ -84,7 +83,7 @@ def median_reply_chars(replies):
     return max(TARGET_CHARS_FLOOR, min(TARGET_CHARS_CEIL, int(med)))
 
 
-def fetch_top_human_replies(conn, platform,
+def fetch_top_human_replies(platform,
                             limit=REPLY_POOL_SIZE, hours=WINDOW_HOURS):
     """Top human replies on `platform` from the last <hours>, ordered by likes.
 
@@ -92,42 +91,24 @@ def fetch_top_human_replies(conn, platform,
     in thread_top_replies (views/comments/retweets are platform-shaped),
     so we lean on it as the ranking key. has_link=false filters out
     link-tail spam so the synthesizer only learns from organic moves.
+
+    Served via the HTTP API (thread-top-replies?top_human=1) so no DATABASE_URL
+    is needed. The route returns the same column shape this used to SELECT.
     """
-    cur = conn.execute(
-        """
-        SELECT
-            ttr.id,
-            ttr.reply_url,
-            ttr.thread_url,
-            ttr.reply_author_handle,
-            ttr.reply_content,
-            COALESCE(ttr.likes, 0) AS likes,
-            COALESCE(ttr.replies, 0) AS replies_count,
-            COALESCE(ttr.retweets, 0) AS retweets,
-            ttr.captured_at
-        FROM thread_top_replies ttr
-        WHERE ttr.platform = %s
-          AND COALESCE(ttr.has_link, false) = false
-          AND ttr.captured_at >= NOW() - (%s || ' hours')::INTERVAL
-          AND COALESCE(ttr.likes, 0) >= %s
-          AND ttr.reply_content IS NOT NULL
-          AND LENGTH(TRIM(ttr.reply_content)) > 0
-        ORDER BY COALESCE(ttr.likes, 0) DESC,
-                 COALESCE(ttr.replies, 0) DESC
-        LIMIT %s
-        """,
-        (platform, str(hours), MIN_LIKES, limit),
+    resp = api_get(
+        "/api/v1/thread-top-replies",
+        query={
+            "top_human": "1",
+            "platform": platform,
+            "within_hours": int(hours),
+            "min_likes": MIN_LIKES,
+            "limit": int(limit),
+        },
     )
-    rows = cur.fetchall()
-    cols = [
-        "id", "reply_url", "thread_url", "reply_author_handle",
-        "reply_content", "likes", "replies_count", "retweets",
-        "captured_at",
-    ]
-    return [dict(zip(cols, r)) for r in rows]
+    return (resp.get("data") or {}).get("replies") or []
 
 
-def load_existing_style_names(conn):
+def load_existing_style_names():
     """Every active style name already in the registry (any kind), so the
     model doesn't propose a collision. Falls back to the in-process STYLES
     dict if the registry can't be reached.
