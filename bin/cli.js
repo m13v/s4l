@@ -96,6 +96,45 @@ function findUvBin() {
   return found && fs.existsSync(found) ? found : '';
 }
 
+// Locate the Python the MCP server is actually configured to run (SAPS_PYTHON).
+// mcp/install.mjs picks /opt/homebrew/bin/python3 (or /usr/local/bin/python3)
+// and stamps it into the MCP config, so Python deps MUST be installed into that
+// SAME interpreter. Bare `pip3`/`python3` on macOS usually resolves to the
+// Xcode CLT system python (3.9.x with pip 21.x), which is both the wrong target
+// and too old to understand --break-system-packages. Falls back to `python3`.
+function findPythonBin() {
+  const candidates = ['/opt/homebrew/bin/python3', '/usr/local/bin/python3'];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  const which = spawnSync('command', ['-v', 'python3'], { shell: true, encoding: 'utf8' });
+  const found = (which.stdout || '').trim().split('\n')[0];
+  return found && fs.existsSync(found) ? found : 'python3';
+}
+
+// True if `<pythonBin> -m pip` is new enough (pip >= 23.0) to accept
+// --break-system-packages. Older pips treat the flag as an unknown option and
+// hard-fail, so we must not pass it blindly on the retry.
+function pipSupportsBreakSystemPackages(pythonBin) {
+  const v = spawnSync(pythonBin, ['-m', 'pip', '--version'], { encoding: 'utf8' });
+  const m = (v.stdout || '').match(/pip\s+(\d+)\.(\d+)/);
+  if (!m) return false;
+  return parseInt(m[1], 10) >= 23;
+}
+
+// Install Python packages into a specific interpreter via `<py> -m pip install`.
+// Retries with --break-system-packages only when the resolved pip supports it
+// (PEP 668 environments: Homebrew python, Debian/Ubuntu 23+). Returns the
+// spawnSync result of the last attempt.
+function pipInstall(pythonBin, args) {
+  const base = ['-m', 'pip', 'install', ...args];
+  let r = spawnSync(pythonBin, base, { stdio: 'inherit' });
+  if (r.status !== 0 && pipSupportsBreakSystemPackages(pythonBin)) {
+    r = spawnSync(pythonBin, [...base, '--break-system-packages'], { stdio: 'inherit' });
+  }
+  return r;
+}
+
 function installBrowserAgentConfigs() {
   const nodeBin = path.dirname(process.execPath);
   const uvBin = findUvBin() || path.join(HOME, '.local', 'bin', 'uv');
@@ -489,11 +528,13 @@ function installBrowserHarness() {
 
   // Step 4: ensure mcp Python package available (server.py uses `from mcp.server.fastmcp ...`).
   // server.py is shebanged through `uv run --with mcp ...` so this is belt-and-suspenders;
-  // we install it into the system Python too so a plain `python3 server.py` also works.
-  console.log('    ensuring mcp>=1.0.0 Python package is importable...');
-  let pip = spawnSync('pip3', ['install', '-q', 'mcp>=1.0.0'], { stdio: 'inherit' });
+  // we install it into the SAPS_PYTHON interpreter (the same Homebrew python the MCP
+  // server is configured to use), NOT bare pip3 which targets the Xcode CLT system python.
+  const harnessPython = findPythonBin();
+  console.log(`    ensuring mcp>=1.0.0 Python package is importable (${harnessPython})...`);
+  const pip = pipInstall(harnessPython, ['-q', 'mcp>=1.0.0']);
   if (pip.status !== 0) {
-    pip = spawnSync('pip3', ['install', '-q', 'mcp>=1.0.0', '--break-system-packages'], { stdio: 'inherit' });
+    console.warn('    WARNING: could not install mcp Python package; server.py still runs via `uv run --with mcp`.');
   }
 
   // Step 5: copy our shipped server.py into the canonical install location.
@@ -836,30 +877,29 @@ function update() {
 // browser binary; we run `playwright install chromium` after the pip install.
 function installPythonDeps() {
   const reqPath = path.join(PKG_ROOT, 'requirements.txt');
-  const base = fs.existsSync(reqPath)
-    ? ['install', '-r', reqPath, '-q']
-    : ['install', '-q', 'psycopg2-binary', 'playwright'];
-  console.log('  installing Python deps (psycopg2-binary, playwright, ...)');
-  // Debian/Ubuntu 23+ ship a PEP 668 marker that blocks pip3 against the
-  // system Python without --break-system-packages. Try without first
-  // (safer on macOS) and retry with the flag if the marker fires.
-  let r = spawnSync('pip3', base, { stdio: 'inherit' });
+  const args = fs.existsSync(reqPath)
+    ? ['-r', reqPath, '-q']
+    : ['-q', 'psycopg2-binary', 'playwright'];
+  // Install into the SAME interpreter the MCP server runs (SAPS_PYTHON =
+  // Homebrew python), NOT bare pip3 which on macOS targets the Xcode CLT system
+  // python — deps installed there are invisible to the scripts at runtime.
+  // pipInstall() also gates --break-system-packages on pip>=23 so it doesn't
+  // hard-fail against the ancient system pip.
+  const pythonBin = findPythonBin();
+  console.log(`  installing Python deps (psycopg2-binary, playwright, ...) into ${pythonBin}`);
+  const r = pipInstall(pythonBin, args);
   if (r.status !== 0) {
-    console.log('  retrying with --break-system-packages (PEP 668 environments)');
-    r = spawnSync('pip3', [...base, '--break-system-packages'], { stdio: 'inherit' });
-  }
-  if (r.status !== 0) {
-    console.warn('  WARNING: pip3 install failed — run manually:');
-    console.warn(`    pip3 ${base.join(' ')} --break-system-packages`);
+    console.warn('  WARNING: pip install failed — run manually:');
+    console.warn(`    ${pythonBin} -m pip install ${args.join(' ')} --break-system-packages`);
     return;
   }
   // Playwright needs its browser binary downloaded separately. Chromium
   // is the only engine the repo uses today; skip Firefox/WebKit.
   console.log('  installing Playwright Chromium binary (one-time, ~150MB)...');
-  const pw = spawnSync('python3', ['-m', 'playwright', 'install', 'chromium'], { stdio: 'inherit' });
+  const pw = spawnSync(pythonBin, ['-m', 'playwright', 'install', 'chromium'], { stdio: 'inherit' });
   if (pw.status !== 0) {
     console.warn('  WARNING: playwright install chromium failed — run manually:');
-    console.warn('    python3 -m playwright install chromium');
+    console.warn(`    ${pythonBin} -m playwright install chromium`);
   }
 }
 
