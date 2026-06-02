@@ -1348,30 +1348,48 @@ def get_assigned_style_prompt(platform, assignment, context="posting"):
             lines.append(f'  Example: "{assignment["example"]}"')
         if assignment.get("note"):
             lines.append(f"  Note: {assignment['note']}")
-        _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
-        _ceil = int(round(_tc * 1.5))
+        # LENGTH A/B (2026-06-01): the length-control machinery (per-style
+        # target line here + the post-time truncation gate in
+        # twitter_post_plan.py) is the *treatment*. The *control* arm gets only
+        # generic "keep it tight" guidance with no per-style number and no
+        # gate, reproducing pre-length-project behavior. The arm is decided
+        # per cycle in run-twitter-cycle.sh and handed down via LENGTH_ARM;
+        # both this render and the gate read the same env so they always agree.
+        # LENGTH_ARM unset => treatment (full behavior when the experiment is
+        # off, LENGTH_AB_ENABLED=0).
+        _arm = (os.environ.get("LENGTH_ARM") or "treatment").strip().lower()
         lines.append("")
-        lines.append(
-            f"**TARGET LENGTH: ~{_tc} characters. This is the number to hit, not a "
-            f"ceiling to climb to.**\n"
-            f"Your comment should land at roughly {_tc} characters. {_ceil} is the "
-            f"absolute hard cap and anything past it is automatically truncated by "
-            f"the posting pipeline before it goes live, mid-thought, so DO NOT rely "
-            f"on the cap; write to the ~{_tc} target.\n"
-            f"PROCESS: draft the comment, then count its characters. If it is more "
-            f"than ~{_tc}, you wrote too much. Delete clauses, hedges, and setup "
-            f"until it lands near {_tc}. Shorter than the target is always fine; "
-            f"longer is not.\n"
-            f"- The top human replies that actually get engagement are fragments "
-            f"and single lines, not tidy two-clause sentences. One sharp sentence "
-            f"beats a paragraph every time. When in doubt, cut.\n"
-            f"- The example above IS the length reference: it is written at the "
-            f"target. Match its length, not just its tone.\n"
-            f"- This budget is for the COMMENT TEXT ONLY. Any link/CTA the system "
-            f"appends afterward is separate and does not count against your budget, "
-            f"so do NOT pad the comment to 'make room' for or to introduce a link. "
-            f"Write the comment as if no link will follow."
-        )
+        if _arm == "control":
+            lines.append(
+                "**LENGTH: keep it tight.** One or two sentences, well under the "
+                "250-character Twitter limit. A short, sharp reply almost always "
+                "beats a paragraph. This applies to the comment text only; any "
+                "link/CTA the system appends afterward is separate."
+            )
+        else:
+            _tc = assignment.get("target_chars") or DEFAULT_TARGET_CHARS
+            _ceil = int(round(_tc * 1.5))
+            lines.append(
+                f"**TARGET LENGTH: ~{_tc} characters. This is the number to hit, not a "
+                f"ceiling to climb to.**\n"
+                f"Your comment should land at roughly {_tc} characters. {_ceil} is the "
+                f"absolute hard cap and anything past it is automatically truncated by "
+                f"the posting pipeline before it goes live, mid-thought, so DO NOT rely "
+                f"on the cap; write to the ~{_tc} target.\n"
+                f"PROCESS: draft the comment, then count its characters. If it is more "
+                f"than ~{_tc}, you wrote too much. Delete clauses, hedges, and setup "
+                f"until it lands near {_tc}. Shorter than the target is always fine; "
+                f"longer is not.\n"
+                f"- The top human replies that actually get engagement are fragments "
+                f"and single lines, not tidy two-clause sentences. One sharp sentence "
+                f"beats a paragraph every time. When in doubt, cut.\n"
+                f"- The example above IS the length reference: it is written at the "
+                f"target. Match its length, not just its tone.\n"
+                f"- This budget is for the COMMENT TEXT ONLY. Any link/CTA the system "
+                f"appends afterward is separate and does not count against your budget, "
+                f"so do NOT pad the comment to 'make room' for or to introduce a link. "
+                f"Write the comment as if no link will follow."
+            )
         lines.append("")
         lines.append(
             'In your output JSON, set "engagement_style" to exactly '
