@@ -4,7 +4,7 @@ Open-source repo behind **[S4L (s4lai)](https://s4l.ai)**: an automated social p
 
 > The hosted managed version is **S4L** (written `s4lai`, domain `s4l.ai`): done-for-you Reddit and Twitter brand-awareness, $1/1K impressions, $50/1K site visits. See https://s4l.ai.
 
-Posts are written to a Postgres database via `DATABASE_URL` in `~/social-autoposter/.env`. Bring your own Postgres DB and apply `schema-postgres.sql` once. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
+State (posts, replies, candidates, stats) is read and written through the hosted S4L HTTP API (`AUTOPOSTER_API_BASE` + an install key in `~/social-autoposter/.env`); no database to provision. Each platform drives its own persistent Playwright MCP browser profile, so logins survive across runs.
 
 ## Prerequisites
 
@@ -12,9 +12,8 @@ A new machine needs all of these before the pipeline can run end to end:
 
 - **macOS** (the launchd plists are mac-only; Linux users can crib the cron snippets from `setup/SKILL.md` Step 7)
 - **Node.js 16+** (for `npx`, the installer, and `@playwright/mcp` at runtime)
-- **Python 3.9+** with `pip3` (helper scripts; `psycopg2-binary` is auto-installed by the installer)
+- **Python 3.9+** with `pip3` (helper scripts; deps auto-installed by the installer)
 - **Claude Code CLI** on `PATH` (the cron scripts shell out to `claude -p` with a per-platform MCP config)
-- **`psql`** on `PATH` (a few scripts query Postgres directly)
 - One Chromium install per platform (created on first run by `@playwright/mcp` against the persistent profile dirs)
 
 Optional:
@@ -30,9 +29,9 @@ npx social-autoposter init
 
 `bin/cli.js` does all of the wiring in one shot:
 
-1. Copies `scripts/`, `skill/`, `setup/`, `SKILL.md`, `schema-postgres.sql`, and `browser-agent-configs/` into `~/social-autoposter/`
-2. Creates `config.json` from `config.example.json` and writes a blank `.env` template (fill in your own `DATABASE_URL` and optional `MOLTBOOK_API_KEY`)
-3. Installs `psycopg2-binary` via `pip3` if missing
+1. Copies `scripts/`, `skill/`, `setup/`, `SKILL.md`, and `browser-agent-configs/` into `~/social-autoposter/`
+2. Creates `config.json` from `config.example.json` and writes a blank `.env` template (fill in your S4L API key and optional `MOLTBOOK_API_KEY`)
+3. Installs the Python helper deps via `pip3` if missing
 4. Generates launchd plists in `~/social-autoposter/launchd/` with the user's actual `HOME` and `PATH`
 5. Installs the Playwright MCP configs to `~/.claude/browser-agent-configs/` (twitter, reddit, linkedin) with `__HOME__` and `__NODE_BIN__` placeholders substituted. Existing files are left alone, so any window-position tweaks survive `npx social-autoposter update`.
 6. Creates empty persistent browser profile dirs at `~/.claude/browser-profiles/{twitter,reddit,linkedin}`
@@ -48,7 +47,7 @@ npx social-autoposter update
 
 Tell your Claude Code agent: **"set up social autoposter"**. The interactive wizard in `setup/SKILL.md` walks through:
 
-1. Verifying the Postgres connection
+1. Verifying the S4L API connection
 2. Filling in `~/social-autoposter/config.json` with handles for Reddit, Twitter, LinkedIn, optional Moltbook
 3. A 5-question interview to draft your `content_angle`
 4. Capturing `projects` with `topics` (used by the tiered reply strategy)
