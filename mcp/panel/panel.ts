@@ -55,6 +55,7 @@ const verEl = $("ver");
 const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
 const stX = $("st-x"), stXSub = $("st-x-sub");
 const stAp = $("st-ap"), stApSub = $("st-ap-sub");
+const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
 const btnAuto = $("btn-autopilot") as HTMLButtonElement;
 const btnX = $("btn-connectx") as HTMLButtonElement;
@@ -95,6 +96,12 @@ function render() {
   const hasReady = state.projects_ready > 0;
   btnDraft.disabled = !hasReady;
   btnAuto.disabled = !hasReady;
+  // When nothing is configured yet, Set up is the obvious next action, so
+  // promote it to the primary (filled) style and demote draft (which is
+  // disabled anyway). Once a project is ready, draft regains the emphasis.
+  const needsSetup = !hasReady;
+  btnSetup.classList.toggle("primary", needsSetup);
+  btnDraft.classList.toggle("primary", !needsSetup);
 }
 
 function applyState(snap: Partial<Snapshot>) {
@@ -182,6 +189,31 @@ function busy(btn: HTMLButtonElement, label: string, fn: () => Promise<void>) {
 }
 
 // ---- button handlers ------------------------------------------------------
+// Setup is the one action that genuinely needs the model in the loop (it reads
+// setup/SKILL.md and drives the browser-login wizard). Unlike the other buttons
+// (which call server tools directly via callServerTool, no model involved), this
+// injects a real user turn into the host conversation via sendMessage, so Claude
+// takes a turn and runs the wizard right there in the chat.
+btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async () => {
+  log("Asking Claude to run setup\u2026");
+  try {
+    const res = await app.sendMessage({
+      role: "user",
+      content: [{
+        type: "text",
+        text:
+          "Run the social autoposter setup wizard: configure my project " +
+          "(website, what I do, who to target, brand voice) and connect my X/Twitter account. " +
+          "Walk me through it step by step.",
+      }],
+    });
+    if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
+    else log("Setup started in the chat \u2014 follow the prompts there, then hit Refresh.");
+  } catch (e: any) {
+    log("Couldn\u2019t start setup: " + (e?.message || e));
+  }
+}));
+
 btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
   log("Running draft cycle \u2014 review prompt will appear in the chat\u2026");
   try {
