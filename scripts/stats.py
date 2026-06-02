@@ -21,8 +21,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
-from http_api import api_get, api_post, api_patch
+from http_api import api_get, api_post, api_patch, load_env
 
 
 # --- HTTP wrappers for the Reddit branch (2026-05-12 migration) --------------
@@ -2183,12 +2182,9 @@ def refresh_github_replies(db, quiet=False, limit=None):
     """
     import subprocess
 
-    sql = ("SELECT id, our_reply_url, engagement_updated_at FROM replies "
-           "WHERE platform='github' AND status='replied' AND our_reply_url IS NOT NULL "
-           "ORDER BY id")
+    rows = _http_list_github_replies_to_refresh()
     if limit:
-        sql += f" LIMIT {int(limit)}"
-    rows = db.execute(sql).fetchall()
+        rows = rows[:int(limit)]
 
     FRESH_WINDOW = timedelta(days=3)
     now_utc = datetime.now(timezone.utc)
@@ -2198,7 +2194,9 @@ def refresh_github_replies(db, quiet=False, limit=None):
 
     total = updated = errors = skipped_fresh = 0
     for row in rows:
-        rid, url, eu = row[0], row[1], row[2]
+        rid = row.get("id")
+        url = row.get("our_reply_url") or ""
+        eu = _parse_dt(row.get("engagement_updated_at"))
         if eu:
             if eu.tzinfo is None:
                 eu = eu.replace(tzinfo=timezone.utc)
@@ -2239,18 +2237,13 @@ def refresh_github_replies(db, quiet=False, limit=None):
             continue
 
         reactions = int((data.get("reactions") or {}).get("total_count") or 0)
-        db.execute(
-            "UPDATE replies SET upvotes=%s, engagement_updated_at=NOW() WHERE id=%s",
-            [reactions, rid],
-        )
+        _http_patch_reply(rid, {"upvotes": reactions, "stamp_engagement_now": True})
         updated += 1
         time.sleep(0.1)
         if total % 100 == 0:
-            db.commit()
             progress.tick("github_replies", total, len(rows) - skipped_fresh,
                           updated=updated, errors=errors)
 
-    db.commit()
     progress.done("github_replies", total, updated=updated, errors=errors)
     if not quiet:
         print(f"  github replies: {total} checked, {updated} updated, "
@@ -2379,20 +2372,13 @@ def main():
     reddit_username = config.get("accounts", {}).get("reddit", {}).get("username", "")
     user_agent = f"social-autoposter/1.0 (u/{reddit_username})" if reddit_username else "social-autoposter/1.0"
 
-    dbmod.load_env()
-    # Lazy DB acquisition: the Twitter branch (refresh_twitter, refresh_twitter_replies,
-    # get_aggregate_totals) is fully HTTP-migrated and never touches `db`. The Reddit /
-    # GitHub / Moltbook branches still use psycopg2 directly. Acquire a real connection
-    # only when one of the DB-bound branches will actually run; otherwise pass None so
-    # `--twitter-only` works on the VM (no DATABASE_URL).
-    _twitter_only_path = (
-        (args.twitter_only or args.twitter_audit)
-        or (args.replies_only and (args.twitter_only or args.twitter_audit))
-    )
-    if _twitter_only_path:
-        db = None
-    else:
-        db = dbmod.get_conn()
+    load_env()
+    # Fully HTTP-migrated: every refresh_* branch (reddit, twitter, github,
+    # moltbook, and their reply passes) reads and writes through s4l.ai
+    # /api/v1/* endpoints. No DATABASE_URL is required on any machine. `db` is
+    # kept as None and passed through for signature compatibility only; no
+    # function dereferences it.
+    db = None
 
     reddit_stats = None
     reddit_resurrect_stats = None
@@ -2480,9 +2466,6 @@ def main():
 
     # Gather aggregate totals across all platforms (HTTP-only, db ignored).
     totals = get_aggregate_totals(db)
-
-    if db is not None:
-        db.close()
 
     output = {"totals": totals}
     if reddit_stats is not None:
