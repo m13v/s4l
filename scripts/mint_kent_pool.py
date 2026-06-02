@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, 'scripts'))
 
-import db as dbmod  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 from dm_short_links import CODE_ALPHABET, CODE_LEN  # noqa: E402
 
 PLATFORMS = ['reddit', 'twitter', 'linkedin', 'github_issues', 'moltbook']
@@ -113,11 +113,6 @@ def _gen_unique_codes(n: int, existing: set[str]) -> list[str]:
     return list(out)
 
 
-def _existing_codes(conn) -> set[str]:
-    cur = conn.execute("SELECT code FROM post_links")
-    return {dict(r)['code'] for r in cur.fetchall()}
-
-
 def _plan(per_site: int = TOTAL_PER_SITE, home_frac: float = HOME_FRACTION) -> list[dict]:
     """Compute (project, platform, path, count) tuples for the full mint."""
     rows = []
@@ -164,75 +159,60 @@ def mint_all(*, dry_run: bool = False) -> dict:
         }
 
     today = date.today().isoformat()
-    conn = dbmod.get_conn()
-    raw = conn._conn  # type: ignore[attr-defined]
     minted = {p: 0 for p in SITE_CONFIG}
     total = 0
-    try:
-        existing = _existing_codes(conn)
-        for entry in plan:
-            project = entry['project']
-            platform = entry['platform']
-            path = entry['path']
-            n = entry['count']
-            if n <= 0:
-                continue
-            cfg = SITE_CONFIG[project]
-            slug = cfg['slug']
-            session_tag = _session_tag(today, slug, path, platform)
-            codes = _gen_unique_codes(n, existing)
-            existing.update(codes)
-            values = []
-            for code in codes:
-                target = _build_target(
-                    cfg['origin'], path,
-                    platform=platform, campaign_slug=slug, code=code,
-                )
-                values.append((code, platform, project, target, 'website', project, session_tag))
-            cur = raw.cursor()
-            from psycopg2.extras import execute_values
-            execute_values(
-                cur,
-                "INSERT INTO post_links "
-                "  (code, platform, project_name, target_url, kind, project_at_mint, minted_session) "
-                "VALUES %s "
-                "ON CONFLICT (code) DO NOTHING",
-                values,
-                template=None,
-                page_size=1000,
+    # Server enforces uniqueness via ON CONFLICT (code) DO NOTHING; we only
+    # dedup within this run so a single batch never carries two identical codes.
+    existing: set[str] = set()
+    BATCH = 1000
+    for entry in plan:
+        project = entry['project']
+        platform = entry['platform']
+        path = entry['path']
+        n = entry['count']
+        if n <= 0:
+            continue
+        cfg = SITE_CONFIG[project]
+        slug = cfg['slug']
+        session_tag = _session_tag(today, slug, path, platform)
+        codes = _gen_unique_codes(n, existing)
+        existing.update(codes)
+        rows = []
+        for code in codes:
+            target = _build_target(
+                cfg['origin'], path,
+                platform=platform, campaign_slug=slug, code=code,
             )
-            raw.commit()
-            cur.close()
-            minted[project] += len(values)
-            total += len(values)
-            print(f"  + {project:<8} {platform:<14} {path:<60} count={len(values)}", flush=True)
-        return {
-            'minted_total': total,
-            'minted_by_project': minted,
-            'session_date': today,
-        }
-    finally:
-        conn.close()
+            rows.append({
+                "code": code,
+                "platform": platform,
+                "project_name": project,
+                "target_url": target,
+                "kind": "website",
+                "project_at_mint": project,
+                "minted_session": session_tag,
+            })
+        inserted_here = 0
+        for i in range(0, len(rows), BATCH):
+            chunk = rows[i:i + BATCH]
+            resp = api_post("/api/v1/post-links/mint-batch", {"rows": chunk})
+            inserted_here += int((resp.get("data") or {}).get("inserted") or 0)
+        minted[project] += inserted_here
+        total += inserted_here
+        print(f"  + {project:<8} {platform:<14} {path:<60} count={inserted_here}", flush=True)
+    return {
+        'minted_total': total,
+        'minted_by_project': minted,
+        'session_date': today,
+    }
 
 
 def pool_status_detailed() -> list[dict]:
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            "SELECT project_name, platform, minted_session, "
-            "       COUNT(*) FILTER (WHERE post_id IS NULL AND reply_id IS NULL) AS available, "
-            "       COUNT(*) FILTER (WHERE post_id IS NOT NULL OR reply_id IS NOT NULL) AS claimed, "
-            "       COUNT(*) AS total, "
-            "       MIN(target_url) AS sample_target, "
-            "       MAX(minted_at) AS last_minted "
-            "FROM post_links "
-            "WHERE minted_session LIKE 'pool:kent-%' "
-            "GROUP BY project_name, platform, minted_session "
-            "ORDER BY project_name, platform, minted_session"
-        )
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
+    resp = api_get(
+        "/api/v1/post-links/pool-status",
+        query={"session_like": "pool:kent-%", "group_by_session": "1"},
+    )
+    return (resp.get("data") or {}).get("rows") or []
 
 
 def main():
