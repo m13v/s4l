@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_post
 from version import read_version as read_autoposter_version
 try:
     from account_resolver import resolve as _resolve_account
@@ -171,7 +171,7 @@ def _post_is_collateral(thread_url):
     return False
 
 
-def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
+def _dynamic_owner_blocklist(threshold=DYNAMIC_BLOCK_THRESHOLD,
                               days=DYNAMIC_BLOCK_WINDOW_DAYS):
     """Return lowercased owner names with >=threshold moderated posts in the
     last `days` days. Posts whose entire parent repo is 404 OR whose host
@@ -180,25 +180,23 @@ def _dynamic_owner_blocklist(conn, threshold=DYNAMIC_BLOCK_THRESHOLD,
     Caller unions with static config exclusions before filtering candidates."""
     # Dynamic owner blocklist is scoped per-account so the @matt_diak
     # autoposter doesn't inherit @m13v_'s strike history (or vice versa).
-    # Falls back to unscoped when no handle is configured.
-    _acct_frag, _acct_params = _github_account_filter()
+    # Falls back to unscoped when no handle is configured. The moderation
+    # filter (status='deleted' OR deletion_detect_count>0, inside the window)
+    # is applied server-side via moderated_within_days; the owner-counting and
+    # collateral exclusion stay local.
+    query = {"platform": "github", "moderated_within_days": str(int(days))}
+    handle = _resolve_account("github")
+    if handle:
+        query["our_account"] = handle
     try:
-        cur = conn.execute(
-            "SELECT thread_url FROM posts "
-            "WHERE platform='github' "
-            "  AND posted_at > NOW() - INTERVAL %s "
-            "  AND (status='deleted' OR COALESCE(deletion_detect_count, 0) > 0)"
-            + _acct_frag,
-            [f"{int(days)} days", *_acct_params],
-        )
-        rows = cur.fetchall()
+        resp = api_get("/api/v1/posts/thread-urls", query=query)
+        rows = ((resp or {}).get("data") or {}).get("thread_urls") or []
     except Exception:
         return set()
     from collections import Counter
     from urllib.parse import urlparse
     counts = Counter()
-    for row in rows:
-        url = row[0] if not hasattr(row, "get") else row["thread_url"]
+    for url in rows:
         if not url:
             continue
         parts = urlparse(url).path.strip("/").split("/")
@@ -250,18 +248,14 @@ def cmd_search(args):
     config = _load_config()
     excluded_repos, excluded_authors = _excluded_repos_and_authors(config)
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    excluded_repos = excluded_repos | _dynamic_owner_blocklist(conn)
+    excluded_repos = excluded_repos | _dynamic_owner_blocklist()
     # Per-account dedupe: only filter against threads THIS handle posted in.
-    _acct_frag, _acct_params = _github_account_filter()
-    cur = conn.execute(
-        "SELECT thread_url FROM posts WHERE platform='github' AND thread_url IS NOT NULL"
-        + _acct_frag,
-        _acct_params,
-    )
-    already_posted = {row[0] for row in cur.fetchall()}
-    conn.close()
+    _tu_query = {"platform": "github"}
+    _handle = _resolve_account("github")
+    if _handle:
+        _tu_query["our_account"] = _handle
+    _tu_resp = api_get("/api/v1/posts/thread-urls", query=_tu_query)
+    already_posted = set(((_tu_resp or {}).get("data") or {}).get("thread_urls") or [])
 
     results = []
     for item in items:
@@ -339,18 +333,15 @@ def cmd_already_posted(args):
     Scoped per-account so multi-machine setups don't false-positive on
     each other's posts. Falls back to unscoped when no handle is configured.
     """
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    _acct_frag, _acct_params = _github_account_filter()
-    cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s"
-        + _acct_frag + " LIMIT 1",
-        [args.url, *_acct_params],
-    )
-    row = cur.fetchone()
-    conn.close()
+    query = {"platform": "github", "thread_url": args.url}
+    handle = _resolve_account("github")
+    if handle:
+        query["our_account"] = handle
+    resp = api_get("/api/v1/posts/lookup", query=query)
+    row = ((resp or {}).get("data") or {}).get("post")
     if row:
-        print(json.dumps({"already_posted": True, "post_id": row[0], "content_preview": row[1]}))
+        print(json.dumps({"already_posted": True, "post_id": row.get("id"),
+                          "content_preview": row.get("our_content")}))
     else:
         print(json.dumps({"already_posted": False}))
 
@@ -362,38 +353,30 @@ def cmd_log_post(args):
       1. Same comment URL is never logged twice (our_url hard dedup).
       2. Only one post per GitHub issue thread (thread_url hard dedup).
     """
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-
     # our_url stays globally unique (it's a permalink to a specific comment,
     # and two accounts can't physically produce the same one). thread_url
     # dedup is scoped per-account so two handles can each comment once in
     # the same upstream issue thread.
-    _acct_frag, _acct_params = _github_account_filter()
+    handle = _resolve_account("github")
     if args.our_url:
-        cur = conn.execute(
-            "SELECT id FROM posts WHERE platform='github' AND our_url = %s LIMIT 1",
-            [args.our_url],
-        )
-        existing = cur.fetchone()
+        resp = api_get("/api/v1/posts/lookup",
+                       query={"platform": "github", "our_url": args.our_url})
+        existing = ((resp or {}).get("data") or {}).get("post")
         if existing:
-            conn.close()
-            print(json.dumps({"error": "DUPLICATE_URL", "message": "Already logged this comment URL", "existing_post_id": existing[0]}))
+            print(json.dumps({"error": "DUPLICATE_URL", "message": "Already logged this comment URL", "existing_post_id": existing.get("id")}))
             return
 
-    cur = conn.execute(
-        "SELECT id, our_content FROM posts WHERE platform='github' AND thread_url = %s"
-        + _acct_frag + " LIMIT 1",
-        [args.thread_url, *_acct_params],
-    )
-    existing = cur.fetchone()
+    _tq = {"platform": "github", "thread_url": args.thread_url}
+    if handle:
+        _tq["our_account"] = handle
+    resp = api_get("/api/v1/posts/lookup", query=_tq)
+    existing = ((resp or {}).get("data") or {}).get("post")
     if existing:
-        conn.close()
         print(json.dumps({
             "error": "DUPLICATE_THREAD",
             "message": "Already posted in this thread",
-            "existing_post_id": existing[0],
-            "content_preview": existing[1],
+            "existing_post_id": existing.get("id"),
+            "content_preview": existing.get("our_content"),
         }))
         return
 
@@ -402,51 +385,58 @@ def cmd_log_post(args):
     session_id = (getattr(args, "claude_session_id", None)
                   or os.environ.get("CLAUDE_SESSION_ID")
                   or None)
-    # Generation trace: opaque JSONB blob captured by the generator
-    # before invoking Claude. Stored verbatim so a later audit can ask
-    # "which few-shot examples produced this post?". Loaded from a file
-    # path (--generation-trace) because the JSON can be several KB and
-    # passing it inline via argv blows past macOS ARG_MAX. We do NOT
-    # validate the shape here; the post_github.py builder is the only
-    # writer and owns the shape. Failure to read just nulls the column
-    # — never blocks the INSERT, since losing the audit row for one
-    # post is preferable to losing the post.
-    generation_trace_json = None
+    # Generation trace: opaque JSON blob captured by the generator before
+    # invoking Claude. Loaded from a file path (--generation-trace) because
+    # the JSON can be several KB and passing it inline via argv blows past
+    # macOS ARG_MAX. Passed to the API as a parsed object (the POST route
+    # serializes + caps at 1 MB). Failure to read just nulls the column —
+    # never blocks the post, since losing the audit row for one post is
+    # preferable to losing the post.
+    generation_trace_obj = None
     trace_path = getattr(args, "generation_trace", None)
     if trace_path:
         try:
             with open(trace_path, "r", encoding="utf-8") as tf:
-                # Re-serialize so the DB sees a single JSON literal even
-                # if the input had trailing whitespace / weird formatting.
-                generation_trace_json = json.dumps(json.load(tf))
+                generation_trace_obj = json.load(tf)
         except (OSError, json.JSONDecodeError) as e:
             # Stderr only — stdout is reserved for the JSON envelope
-            # that post_github.py:log_post() parses. Silent loss > broken
-            # JSON-on-stdout that propagates as "post_id: null".
+            # that post_github.py:log_post() parses.
             print(f"WARNING: could not load generation_trace {trace_path}: {e}",
                   file=sys.stderr)
-    cur = conn.execute(
-        """INSERT INTO posts (platform, thread_url, thread_author, thread_author_handle,
-           thread_title, thread_content, our_url, our_content, our_account,
-           source_summary, project_name, status, posted_at, feedback_report_used,
-           engagement_style, search_topic, language, claude_session_id,
-           generation_trace, link_source, autoposter_version)
-           VALUES ('github', %s, %s, %s, %s, '', %s, %s, %s, '', %s, 'active', NOW(), TRUE,
-                   %s, %s, %s, %s::uuid, %s::jsonb, %s, %s) RETURNING id""",
-        [args.thread_url, args.thread_author, args.thread_author, args.thread_title,
-         args.our_url, args.our_text, args.account, args.project,
-         getattr(args, "engagement_style", None),
-         getattr(args, "search_topic", None),
-         (getattr(args, "language", None) or "en"),
-         session_id,
-         generation_trace_json,
-         getattr(args, "link_source", None),
-         read_autoposter_version()],
-    )
-    row = cur.fetchone()
-    new_id = row[0] if row else None
-    conn.commit()
-    conn.close()
+
+    payload = {
+        "platform": "github",
+        "thread_url": args.thread_url,
+        "thread_author": args.thread_author,
+        "thread_title": args.thread_title,
+        "thread_content": "",
+        "our_url": args.our_url,
+        "our_content": args.our_text,
+        "our_account": args.account,
+        "source_summary": "",
+        "project": args.project,
+        "engagement_style": getattr(args, "engagement_style", None),
+        "search_topic": getattr(args, "search_topic", None),
+        "language": (getattr(args, "language", None) or "en"),
+        "claude_session_id": session_id,
+        "link_source": getattr(args, "link_source", None),
+        "autoposter_version": read_autoposter_version(),
+    }
+    if generation_trace_obj is not None:
+        payload["generation_trace"] = generation_trace_obj
+    resp = api_post("/api/v1/posts", payload, ok_on_conflict=True)
+    if not (resp or {}).get("ok"):
+        # Backstop: the POST route dedups (platform, thread_url) globally and
+        # 409s. Our per-account pre-check above already caught the common case;
+        # a 409 here is a cross-account thread collision. Surface DUPLICATE_THREAD.
+        e = (resp or {}).get("error") or {}
+        print(json.dumps({
+            "error": "DUPLICATE_THREAD",
+            "message": e.get("message") or "already posted in this thread",
+            "existing_post_id": (resp or {}).get("existing_post_id") or e.get("existing_post_id"),
+        }))
+        return
+    new_id = (((resp or {}).get("data") or {}).get("post") or {}).get("id")
     # post_id surfaced so post_github.py:log_post can backfill post_links
     # for click attribution. Shape mirrors log_post.py's INSERT envelope.
     print(json.dumps({"logged": True, "post_id": new_id}))
