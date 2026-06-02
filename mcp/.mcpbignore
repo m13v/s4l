@@ -1,18 +1,20 @@
-src/
-*.ts
-tsconfig.json
-package-lock.json
-install.mjs
+# Anchored to bundle root (leading /) so these only drop OUR source files,
+# NOT files inside node_modules. An unanchored "src/" previously matched
+# node_modules/@modelcontextprotocol/ext-apps/dist/src/ and deleted the
+# ext-apps runtime, which crashed the server on launch (ERR_MODULE_NOT_FOUND).
+/src/
+/tsconfig.json
+/package-lock.json
+/install.mjs
+/*.mcpb
+/*.mcpb.bak
 *.log
 .gitignore
 .mcpbignore
-*.mcpb
 node_modules/.bin/
 node_modules/typescript/
 node_modules/@types/
-node_modules/**/*.md
 node_modules/**/*.map
 node_modules/**/test/
 node_modules/**/tests/
 node_modules/**/.github/
-node_modules/**/docs/
