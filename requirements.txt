@@ -7,5 +7,10 @@ psycopg2-binary
 playwright
 # CDP client used by scripts/restore_twitter_session.py and the cookie-grab/
 # CDP-driven helpers. Required on AppMaker VMs for the post-substitution
-# auto-restore flow (bootstrap-vm → restore_twitter_session.py → CDP inject).
+# auto-restore flow (bootstrap-vm, restore_twitter_session.py, CDP inject).
 websocket-client
+# AES-CBC decrypt of Chromium cookie values for scripts/copy_browser_cookies.py
+# (the connect_x auto-import that copies the user's x.com session from their
+# everyday browser into the autoposter's managed Chrome). Without this, the
+# MCP setup connect_x step cannot auto-import and falls back to manual login.
+cryptography
