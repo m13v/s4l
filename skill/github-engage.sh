@@ -31,10 +31,11 @@ export SA_CYCLE_ID="$BATCH_ID"
 RUN_START=$(date +%s)
 log "=== GitHub Engagement Run: $(date) (cycle=$BATCH_ID) ==="
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): all read-side counts route through the s4l.ai
+# HTTP API via scripts/github_engage_helper.py. The direct-Postgres lane was
+# removed; DATABASE_URL, if present in .env, is deliberately ignored. No psql,
+# no DB fallback.
+GH_HELPER="$REPO_DIR/scripts/github_engage_helper.py"
 
 # ═══════════════════════════════════════════════════════
 # PHASE A: Scan for replies to our GitHub comments
@@ -69,7 +70,7 @@ GH_REPLIES_REFRESHED=0
 if [ -s "$GH_REPLY_SUMMARY" ]; then
     GH_REPLIES_REFRESHED=$(python3 -c "import json; print(json.load(open('$GH_REPLY_SUMMARY')).get('github', 0))" 2>/dev/null || echo 0)
 fi
-GH_ACTIVE=$(psql "${DATABASE_URL:-}" -t -A -c "SELECT COUNT(*) FROM posts WHERE platform='github' AND status='active';" 2>/dev/null | tr -d '[:space:]')
+GH_ACTIVE=$(python3 "$GH_HELPER" posts-active-count 2>/dev/null | tr -d '[:space:]')
 [ -z "$GH_ACTIVE" ] && GH_ACTIVE=0
 # Emit a stats_github row so the dashboard Jobs table shows the github stats run
 # the same way it shows stats_reddit / stats_twitter.
@@ -79,7 +80,8 @@ log "Phase A.5: done (replies_refreshed=$GH_REPLIES_REFRESHED)"
 # ═══════════════════════════════════════════════════════
 # PHASE B: Respond to pending GitHub replies
 # ═══════════════════════════════════════════════════════
-PENDING_COUNT=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='pending';")
+PENDING_COUNT=$(python3 "$GH_HELPER" pending-count 2>/dev/null | tr -d '[:space:]')
+[ -z "$PENDING_COUNT" ] && PENDING_COUNT=0
 
 if [ "$PENDING_COUNT" -eq 0 ]; then
     log "Phase B: No pending GitHub replies. Done!"
@@ -159,10 +161,12 @@ GH_LOG_RUN_ARGS=(--script "engage_github" --posted "$GH_POSTED" --skipped "$GH_S
 [ -n "$GH_SCAN_ARG" ] && GH_LOG_RUN_ARGS+=(--scan "$GH_SCAN_ARG")
 python3 "$REPO_DIR/scripts/log_run.py" "${GH_LOG_RUN_ARGS[@]}" || true
 
-# Print cumulative status for visibility in the log file.
-TOTAL_PENDING=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='pending';")
-TOTAL_REPLIED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='replied';")
-TOTAL_SKIPPED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM replies WHERE platform='github' AND status='skipped';")
+# Print cumulative status for visibility in the log file. One HTTP roundtrip
+# for all three counts instead of three psql one-liners.
+GH_COUNTS_JSON=$(python3 "$GH_HELPER" reply-counts 2>/dev/null || echo '{"pending":0,"replied":0,"skipped":0}')
+TOTAL_PENDING=$(echo "$GH_COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending',0))" 2>/dev/null || echo "0")
+TOTAL_REPLIED=$(echo "$GH_COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('replied',0))" 2>/dev/null || echo "0")
+TOTAL_SKIPPED=$(echo "$GH_COUNTS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('skipped',0))" 2>/dev/null || echo "0")
 
 log "GitHub replies cumulative: pending=$TOTAL_PENDING replied=$TOTAL_REPLIED skipped=$TOTAL_SKIPPED"
 
