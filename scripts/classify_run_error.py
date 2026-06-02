@@ -80,6 +80,19 @@ PATTERNS = [
         r"prompt is too long",
         r"max(?:imum)? context (?:length|window)",
     ]),
+    # Claude CLI is not authenticated. On a fresh machine the standalone
+    # `claude` CLI that the pipelines shell out to (via run_claude.sh) has its
+    # own credential store (~/.claude/.credentials.json / keychain) SEPARATE
+    # from Claude Desktop, so it can be logged out even when the MCP host is
+    # logged in. The CLI then returns a result envelope with is_error:true and
+    # result:"Not logged in Â· Please run /login". Must beat the generic
+    # api_error fallback so the dashboard + MCP can tell the user to run
+    # `claude /login` instead of mis-reporting a benign empty plan. The two
+    # phrases below are CLI-specific and don't appear in scraped tweet bodies.
+    ("claude_not_logged_in", [
+        r"not logged in",
+        r"please run /login",
+    ]),
     # Generic Anthropic-side error fallback. Fires when `is_error:true` shows
     # up in the JSONL envelope but none of the more specific patterns matched.
     # Lets the operator see "failed: api_error" instead of nothing at all.
