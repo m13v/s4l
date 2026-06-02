@@ -18,10 +18,10 @@ Exit code 0 if everything green, 1 if any check fails. Safe in cron.
 """
 import os, sys, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from db import load_env, get_conn
+from http_api import api_get, load_env
 
 load_env()
-db = get_conn()
+_digest = (api_get("/api/v1/install-lane/digest", query={"within_hours": 24}).get("data") or {})
 
 OK   = "\033[32m✓\033[0m"
 WARN = "\033[33m!\033[0m"
@@ -34,31 +34,23 @@ print(f"INSTALL LANE CANARY (HTTP: {', '.join(sorted(HTTP_LANE_PLATFORMS))} / ot
 print("=" * 64)
 
 # 1. Heartbeat freshness
-cur = db.execute("""
-    SELECT install_id, hostname, request_count,
-           EXTRACT(EPOCH FROM (NOW() - last_seen_at))::int AS age_sec,
-           last_seen_at, last_ip, last_city, last_country
-    FROM installations
-    ORDER BY last_seen_at DESC
-    LIMIT 5
-""")
-rows = cur.fetchall()
+rows = _digest.get("heartbeat") or []
 print("\n[1] HEARTBEAT")
 if not rows:
     print(f"  {FAIL} no installations rows yet")
     status = 1
 else:
     head = rows[0]
-    age = head[3]
+    age = head["age_sec"]
     age_disp = f"{age}s" if age < 120 else f"{age // 60}m {age % 60}s"
     flag = OK if age < 1800 else (WARN if age < 3600 else FAIL)
     if age >= 1800:
         status = 1
     print(f"  {flag} latest beat {age_disp} ago")
-    print(f"     install_id  {head[0]}")
-    print(f"     hostname    {head[1]}")
-    print(f"     beats total {head[2]}")
-    print(f"     last_ip     {head[5]} ({head[6] or '?'} / {head[7] or '?'})")
+    print(f"     install_id  {head['install_id']}")
+    print(f"     hostname    {head['hostname']}")
+    print(f"     beats total {head['request_count']}")
+    print(f"     last_ip     {head['last_ip']} ({head['last_city'] or '?'} / {head['last_country'] or '?'})")
     if len(rows) > 1:
         print(f"     +{len(rows)-1} other install(s) seen recently")
 
