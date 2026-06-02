@@ -996,15 +996,17 @@ except Exception: print(0)
 # $SCAN_TWEETS_FILE, which the existing shell-side parse below consumes.
 if [ "$QUERIES_COUNT" -gt 0 ]; then
     log "Lean Phase 1: executing $QUERIES_COUNT queries via browser-harness CDP"
-    # Upstream browser-harness dropped `-c <script>` in favor of stdin-heredoc;
-    # pipe via an unquoted heredoc so $REPO_DIR / $QUERIES_TMP still expand.
+    # Installed browser-harness (v0.1.0) only accepts `-c "<script>"`; it does NOT
+    # read a script from stdin (a heredoc just makes it print its usage line and
+    # exit, producing 0 tweets). Use double-quoted -c so $REPO_DIR / $QUERIES_TMP
+    # still expand; the Python body uses single quotes internally so it nests fine.
     BU_NAME=twitter-harness BU_CDP_URL=http://127.0.0.1:9555 \
     SCAN_TWEETS_FILE="$SCAN_TWEETS_FILE" \
     BATCH_ID="$BATCH_ID" \
     TWITTER_CYCLE_VARIANT="$TWITTER_CYCLE_VARIANT" \
     FRESHNESS_HOURS_DISCOVER="$FRESHNESS_HOURS_DISCOVER" \
     ENGAGED_TWEET_IDS="$ENGAGED_TWEET_IDS" \
-        "$HOME/.local/bin/browser-harness" <<PY 2>&1 | tee -a "$LOG_FILE"
+        "$HOME/.local/bin/browser-harness" -c "
 import sys, json, os, time
 sys.path.insert(0, '$REPO_DIR/scripts')
 from twitter_scan import scan
@@ -1029,7 +1031,7 @@ for q in queries:
     except Exception as e:
         dt = time.time() - t0
         print(f'  err project={project!r}  q={query[:50]!r}  in {dt:.1f}s  {type(e).__name__}: {e}', flush=True)
-PY
+" 2>&1 | tee -a "$LOG_FILE"
 fi
 rm -f "$QUERIES_TMP"
 
