@@ -262,22 +262,20 @@ if [ "$RUN_STEP4" -eq 1 ]; then
 log "Step 4: LinkedIn stats (Python CDP-attach to linkedin-agent)"
 
 # PATH hardening: launchd / nohup / cron environments don't inherit the
-# interactive shell PATH, so `psql`, `gtimeout`, and `python3` may not
-# resolve. Pin to absolute Homebrew + system paths. /usr/bin/python3 is
-# the only python on this Mac with playwright installed in user-site
-# (see CLAUDE.md "Programmatic Gmail Access" + engage-dm-replies.sh:1314
-# for the same convention). 2026-05-05 cutover bug: bare `python3` in
-# nohup shells resolved to /opt/homebrew/bin/python3 which has psycopg2
-# but NOT playwright, causing ModuleNotFoundError on every Step 4 fire.
-PSQL_BIN="/opt/homebrew/bin/psql"
+# interactive shell PATH, so `gtimeout` and `python3` may not resolve.
+# Pin to absolute Homebrew + system paths. /usr/bin/python3 is the only
+# python on this Mac with playwright installed in user-site (see CLAUDE.md
+# "Programmatic Gmail Access" + engage-dm-replies.sh:1314 for the same
+# convention). 2026-05-05 cutover bug: bare `python3` in nohup shells
+# resolved to /opt/homebrew/bin/python3 which has psycopg2 but NOT
+# playwright, causing ModuleNotFoundError on every Step 4 fire.
 GTIMEOUT_BIN="/opt/homebrew/bin/gtimeout"
 PY_BIN="/usr/bin/python3"
 
-LINKEDIN_POSTS=$("$PSQL_BIN" "$DATABASE_URL" -t -A -c "
-    SELECT COUNT(*) FROM posts
-    WHERE platform='linkedin' AND status='active' AND our_url IS NOT NULL
-      AND our_url LIKE '%linkedin.com/feed/update/%'
-      AND (engagement_updated_at IS NULL OR engagement_updated_at < NOW() - INTERVAL '7 days');" 2>/dev/null || echo "0")
+# HTTP-only lane (2026-06-01): the LinkedIn refresh-eligibility count goes
+# through the s4l.ai API via scripts/stats_helper.py. No DATABASE_URL, no
+# psql, no fallback. Prints the same integer the old psql COUNT(*) did.
+LINKEDIN_POSTS=$(python3 "$REPO_DIR/scripts/stats_helper.py" linkedin-refresh-count 2>/dev/null || echo "0")
 
 if [ "$LINKEDIN_POSTS" -gt 0 ]; then
     acquire_lock "linkedin-browser" 1800
