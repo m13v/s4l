@@ -261,17 +261,62 @@ def ensure_chrome() -> dict:
     }
 
 
+def _port_owner_pids() -> list[int]:
+    """PIDs LISTENing on our debug PORT, via lsof. Lets stop_chrome reap a Chrome
+    that another launcher (e.g. setup_twitter_auth.py's connect_x) started without
+    writing PID_FILE, instead of stranding an un-reapable orphan that makes
+    bh_start keep reporting 'already_running'. Returns [] if lsof is unavailable."""
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{PORT}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for tok in (out.stdout or "").split():
+        try:
+            pids.append(int(tok))
+        except ValueError:
+            pass
+    return pids
+
+
+def _terminate(pid: int, grace: float = 5.0) -> None:
+    """SIGTERM, then SIGKILL only if still alive after `grace` seconds. The wait
+    gives Chrome time to flush its in-memory cookie store to the on-disk profile,
+    so a stop->start restart preserves the X session instead of coming back
+    logged out (the failure the setup agent hit after a hard kill)."""
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        return
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
 def stop_chrome() -> dict:
-    """Kill the managed Chrome instance, if any."""
+    """Gracefully stop the managed Chrome — the tracked process AND any orphan
+    still LISTENing on the debug port — so connect_x-launched Chromes can't
+    strand the port. SIGTERM-with-grace lets Chrome persist cookies to disk."""
+    targets: list[int] = []
     pid = _read_pid()
     if pid and _pid_alive(pid):
-        try:
-            os.kill(pid, 15)
-            time.sleep(0.6)
-            if _pid_alive(pid):
-                os.kill(pid, 9)
-        except OSError as e:
-            return {"status": "error", "error": str(e), "pid": pid}
+        targets.append(pid)
+    for owner in _port_owner_pids():
+        if owner not in targets and _pid_alive(owner):
+            targets.append(owner)
+
+    for t in targets:
+        _terminate(t)
+
     try:
         PID_FILE.unlink()
     except FileNotFoundError:
@@ -281,7 +326,7 @@ def stop_chrome() -> dict:
             os.unlink(stale)
         except FileNotFoundError:
             pass
-    return {"status": "stopped", "pid": pid}
+    return {"status": "stopped", "reaped": targets, "tracked_pid": pid}
 
 
 # --- browser-harness exec wrapper ---
@@ -375,12 +420,16 @@ def bh_run(script: str, timeout: int = EXEC_TIMEOUT_SEC) -> str:
 def bh_status() -> str:
     """Report whether the managed Chrome is alive and where it lives."""
     pid = _read_pid()
+    owners = _port_owner_pids()
     return json.dumps(
         {
             "cdp_url": CDP_URL,
             "cdp_alive": _cdp_alive(),
             "chrome_pid": pid,
-            "chrome_alive": pid is not None and _pid_alive(pid),
+            "chrome_alive": (pid is not None and _pid_alive(pid)) or _cdp_alive(),
+            # Untracked Chromes (e.g. launched by connect_x) show up here even
+            # when chrome_pid is null — that's the orphan that bh_stop now reaps.
+            "port_owner_pids": owners,
             "profile_dir": str(PROFILE_DIR),
             "log_file": str(LOG_FILE),
             "harness_bin": BROWSER_HARNESS_BIN,
@@ -400,8 +449,24 @@ def bh_start() -> str:
 
 @mcp.tool()
 def bh_stop() -> str:
-    """Kill the managed Chrome instance. Cookies/profile data persist on disk."""
+    """Kill the managed Chrome instance. Cookies/profile data persist on disk.
+
+    Reaps both the tracked process and any orphan still holding the debug port,
+    using a graceful SIGTERM-with-grace so cookies flush to disk first."""
     return json.dumps(stop_chrome(), indent=2)
+
+
+@mcp.tool()
+def bh_restart() -> str:
+    """Flush + restart the managed Chrome in one step. Gracefully stops it (so
+    Chrome persists the cookie store to disk and any port-orphan is reaped), then
+    starts a fresh instance that loads the just-flushed session from disk. Use
+    this instead of killing Chrome by hand — a hard kill drops the in-memory X
+    session before it is written, which is what forces a re-login."""
+    stopped = stop_chrome()
+    time.sleep(0.5)
+    started = ensure_chrome()
+    return json.dumps({"status": "restarted", "stopped": stopped, "started": started}, indent=2)
 
 
 @mcp.tool()
