@@ -41,7 +41,7 @@ import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get
 import pick_project
 from author_history_block import render as _render_author_history
 from project_topics import topics_for_project
@@ -213,18 +213,16 @@ def get_recent_comments(limit=5):
     reverse-link). Backward-compat note: this used to return a plain list
     of strings; callers that consume `recent_comments` for prompt-building
     were updated in the same change."""
-    dbmod.load_env()
-    conn = dbmod.get_conn()
-    cur = conn.execute(
-        "SELECT id, our_content FROM posts "
-        "WHERE platform='github' ORDER BY id DESC LIMIT %s",
-        [limit],
-    )
-    rows = cur.fetchall()
-    conn.close()
+    resp = api_get("/api/v1/posts", query={
+        "platform": "github",
+        "order_by": "id",
+        "order_dir": "desc",
+        "limit": int(limit),
+    })
+    rows = ((resp or {}).get("data") or {}).get("posts") or []
     # Return as list of (id, content) tuples. The caller-side conversion
     # to a flat string list for prompt-building is one-line below in main().
-    return [(int(r[0]), r[1] or "") for r in rows]
+    return [(int(r["id"]), r.get("our_content") or "") for r in rows]
 
 
 # Generation trace plumbing lives in scripts/generation_trace.py so the
