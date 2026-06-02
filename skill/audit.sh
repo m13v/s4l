@@ -77,11 +77,9 @@ acquire_lock "$LOCK_NAME" 3600
 REPO_DIR="$HOME/social-autoposter"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
-
-if [ -z "${DATABASE_URL:-}" ]; then
-    echo "ERROR: DATABASE_URL not set in ~/social-autoposter/.env"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): all reads go through the s4l.ai API via
+# scripts/audit_helper.py. No DATABASE_URL, no psql, no fallback.
+AUDIT_HELPER="$REPO_DIR/scripts/audit_helper.py"
 
 mkdir -p "$LOG_DIR"
 LOG_TAG="${PLATFORM:-all}"
@@ -148,9 +146,7 @@ fi
 # Twitter API audit (fxtwitter — no browser)
 # ═══════════════════════════════════════════════════════
 if [ "$RUN_TWITTER" -eq 1 ]; then
-    TWITTER_COUNT=$(psql "$DATABASE_URL" -t -A -c "
-        SELECT COUNT(*) FROM posts
-        WHERE platform='twitter' AND status='active' AND our_url IS NOT NULL;" 2>/dev/null || echo "0")
+    TWITTER_COUNT=$(python3 "$AUDIT_HELPER" twitter-active-count 2>/dev/null || echo "0")
 
     if [ "$TWITTER_COUNT" -gt 0 ]; then
         log "Twitter: API audit — $TWITTER_COUNT active tweets"
@@ -182,18 +178,9 @@ fi
 # ═══════════════════════════════════════════════════════
 log "Orphan/stale detection"
 
-ORPHAN_REPORT=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT platform, status, COUNT(*)
-    FROM posts
-    WHERE status NOT IN ('active', 'deleted', 'removed')
-    GROUP BY platform, status
-    ORDER BY platform, status;" 2>/dev/null || echo "")
+ORPHAN_REPORT=$(python3 "$AUDIT_HELPER" orphan-report 2>/dev/null || echo "")
 
-BROKEN_URL_COUNT=$(psql "$DATABASE_URL" -t -A -c "
-    SELECT COUNT(*)
-    FROM posts
-    WHERE status = 'active'
-      AND (our_url IS NULL OR our_url = '' OR our_url NOT LIKE 'http%');" 2>/dev/null || echo "0")
+BROKEN_URL_COUNT=$(python3 "$AUDIT_HELPER" broken-url-count 2>/dev/null || echo "0")
 
 if [ -n "$ORPHAN_REPORT" ]; then
     log "WARNING: Posts with non-standard status:"
@@ -210,9 +197,9 @@ fi
 
 log "Summary"
 
-ACTIVE=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE status='active';" 2>/dev/null || echo "?")
-DELETED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE status='deleted';" 2>/dev/null || echo "?")
-REMOVED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM posts WHERE status='removed';" 2>/dev/null || echo "?")
+ACTIVE=$(python3 "$AUDIT_HELPER" status-count --status active 2>/dev/null || echo "?")
+DELETED=$(python3 "$AUDIT_HELPER" status-count --status deleted 2>/dev/null || echo "?")
+REMOVED=$(python3 "$AUDIT_HELPER" status-count --status removed 2>/dev/null || echo "?")
 
 log "Post status: active=$ACTIVE deleted=$DELETED removed=$REMOVED"
 
