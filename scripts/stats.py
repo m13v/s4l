@@ -1346,11 +1346,7 @@ def refresh_github(db, quiet=False, limit=None):
     """
     import subprocess
 
-    sql = ("SELECT id, our_url FROM posts WHERE platform='github' "
-           "AND status='active' AND our_url IS NOT NULL ORDER BY id")
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-    posts = db.execute(sql).fetchall()
+    posts = _http_list_github_active_posts(limit)
 
     # Pre-pass: flag minimized (hidden) comments before REST. Wrapped
     # defensively, a GraphQL flake must not block the REST hot path.
@@ -1360,7 +1356,7 @@ def refresh_github(db, quiet=False, limit=None):
         if not quiet:
             print(f"  github-minimize: pre-pass crashed, skipping: {e}", flush=True)
     # Re-select after the pre-pass so flipped rows drop out of the REST loop.
-    posts = db.execute(sql).fetchall()
+    posts = _http_list_github_active_posts(limit)
 
     total = updated = deleted = errors = repo_gone = transient_skipped = 0
     results = []
@@ -1371,7 +1367,7 @@ def refresh_github(db, quiet=False, limit=None):
 
     for post in posts:
         total += 1
-        post_id, our_url = post[0], post[1]
+        post_id, our_url = post["id"], post.get("our_url")
 
         m = comment_url_re.match(our_url or "")
         if not m:
@@ -1412,11 +1408,8 @@ def refresh_github(db, quiet=False, limit=None):
                 # 5 must reset detect_count to 0 so the next scan starts fresh.
                 cls = _classify_github_404(owner, repo, number, comment_id, quiet=quiet)
                 if cls in ("repo_gone", "issue_deleted", "feature_disabled"):
-                    db.execute(
-                        "UPDATE posts SET status='repo_gone', status_checked_at=NOW() "
-                        "WHERE id=%s",
-                        [post_id],
-                    )
+                    _http_patch_post(post_id, {"status": "repo_gone",
+                                               "stamp_status_checked_now": True})
                     repo_gone += 1
                     if not quiet:
                         print(f"REPO_GONE (github {cls}) [{post_id}] {owner}/{repo}#{number}", flush=True)
@@ -1425,11 +1418,8 @@ def refresh_github(db, quiet=False, limit=None):
                     # REST said 404 but GraphQL confirms our comment is alive
                     # and not minimized. False positive; reset the strike
                     # counter so we don't accumulate it.
-                    db.execute(
-                        "UPDATE posts SET deletion_detect_count=0, "
-                        "status_checked_at=NOW() WHERE id=%s",
-                        [post_id],
-                    )
+                    _http_patch_post(post_id, {"reset_deletion_detect_count": True,
+                                               "stamp_status_checked_now": True})
                     transient_skipped += 1
                     if not quiet:
                         print(f"TRANSIENT-404 (github) [{post_id}] {owner}/{repo}#{number} "
@@ -1437,28 +1427,16 @@ def refresh_github(db, quiet=False, limit=None):
                               flush=True)
                     continue
                 # cls == 'comment_deleted' (GraphQL confirms it's gone) or
-                # 'unknown' (GraphQL itself failed; fall through to count-based
-                # detection so a real deletion still gets caught eventually).
-                row = db.execute(
-                    "SELECT COALESCE(deletion_detect_count, 0) FROM posts WHERE id=%s",
-                    [post_id],
-                ).fetchone()
-                detect_count = (row[0] if row else 0) + 1
-                if detect_count >= 2 and cls == "comment_deleted":
-                    db.execute(
-                        "UPDATE posts SET status='deleted', deletion_detect_count=%s, "
-                        "status_checked_at=NOW() WHERE id=%s",
-                        [detect_count, post_id],
-                    )
+                # 'unknown' (GraphQL itself failed; bump the counter without
+                # flipping so a real deletion still gets caught eventually).
+                # comment_deleted flips at threshold 2; unknown never flips
+                # (threshold 10**9 = bump-only).
+                threshold = 2 if cls == "comment_deleted" else 10 ** 9
+                detect_count, status_set = _http_detect_deletion(post_id, "deleted", threshold=threshold)
+                if status_set:
                     deleted += 1
                     if not quiet:
                         print(f"DELETED (github 404 + graphql confirmed) [{post_id}]", flush=True)
-                else:
-                    db.execute(
-                        "UPDATE posts SET deletion_detect_count=%s, status_checked_at=NOW() "
-                        "WHERE id=%s",
-                        [detect_count, post_id],
-                    )
             else:
                 errors += 1
             continue
@@ -1472,18 +1450,17 @@ def refresh_github(db, quiet=False, limit=None):
         reactions = data.get("reactions") or {}
         total_reactions = int(reactions.get("total_count") or 0)
 
-        row = db.execute(
-            "SELECT COUNT(*) FROM replies WHERE post_id=%s AND platform='github'",
-            [post_id],
-        ).fetchone()
-        reply_count = int(row[0] or 0)
+        # reply_count is folded into the active-for-stats list via a correlated
+        # subquery, so no per-post COUNT round trip is needed.
+        reply_count = int(post.get("reply_count") or 0)
 
-        db.execute(
-            "UPDATE posts SET upvotes=%s, comments_count=%s, "
-            "engagement_updated_at=NOW(), status_checked_at=NOW(), "
-            "deletion_detect_count=0 WHERE id=%s",
-            [total_reactions, reply_count, post_id],
-        )
+        _http_patch_post(post_id, {
+            "upvotes": total_reactions,
+            "comments_count": reply_count,
+            "stamp_engagement_now": True,
+            "stamp_status_checked_now": True,
+            "reset_deletion_detect_count": True,
+        })
         updated += 1
         if total_reactions or reply_count:
             results.append({
@@ -1496,7 +1473,6 @@ def refresh_github(db, quiet=False, limit=None):
         time.sleep(0.1)
 
         if total % 100 == 0:
-            db.commit()
             progress.tick("github", total, len(posts),
                           updated=updated, deleted=deleted, errors=errors)
             if not quiet:
@@ -1506,7 +1482,6 @@ def refresh_github(db, quiet=False, limit=None):
                       f"errors={errors})",
                       flush=True)
 
-    db.commit()
     progress.done("github", len(posts),
                   updated=updated, deleted=deleted, errors=errors)
     if not quiet:
