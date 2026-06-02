@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Send a founder reply on a web-chat thread.
+"""Send a founder reply on a web-chat thread (HTTP-only DB layer).
 
-Mirror of ~/fazm/inbox/scripts/send-chat-reply.js. Three things:
-  1. INSERT a new web_chat_messages row with sender='agent' (or 'founder' if
-     the override-via-Gmail rail produced it; that path is handled in
-     ingest_web_chat_replies.py instead).
-  2. Mark all visitor messages on this thread as read_by_founder=true.
-  3. Bump web_chat_threads metadata: last_message_*, unread_by_founder=0,
-     unread_by_visitor +=1.
+Mirror of ~/fazm/inbox/scripts/send-chat-reply.js. The DB work (dedup guard,
+insert the agent/founder message, mark visitor messages read, bump thread
+metadata) runs through POST /api/v1/web-chat/threads/<id>/reply. The Resend
+email forward to the visitor stays local (send-email.js), and the resulting
+Resend id is stamped back onto the message via PATCH
+/api/v1/web-chat/messages/<id>.
 
-Also fires a Resend email to the visitor's email so they receive the reply
-even when the widget is closed (this is the key UX win over the Fazm in-app
-chat: visitors don't need to be on the page to see the answer).
-
-Dedup guard: skip if a founder/agent message was already sent in the last 60
-seconds (matches Fazm behaviour).
+Dedup guard (server-side): skip if a founder/agent message was already sent in
+the last 60 seconds (matches Fazm behaviour).
 
 Usage:
   python3 send_web_chat_reply.py --thread <thread_id> --text "reply" [--name "matt"]
                                  [--sender agent|founder] [--no-email]
+                                 [--ingested-gmail-id <gmail_id>]
 """
 
 import argparse
@@ -27,7 +23,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_post, api_patch
 
 SEND_EMAIL_SCRIPT = os.path.expanduser("~/analytics/scripts/send-email.js")
 NODE_BIN = os.path.expanduser("~/.nvm/versions/node/v20.19.4/bin/node")
@@ -87,92 +83,45 @@ def main():
     parser.add_argument("--sender", default="agent", choices=["agent", "founder"])
     parser.add_argument("--no-email", action="store_true",
                         help="Skip Resend forward to visitor (used when ingest already emailed)")
+    parser.add_argument("--ingested-gmail-id", default=None,
+                        help="Stamp this Gmail id on the inserted message (Gmail-ingest rail dedup)")
     args = parser.parse_args()
 
-    dbmod.load_env()
-    conn = dbmod.get_conn()
+    # 1-3 (dedup + insert + mark-read + bump) all happen server-side.
+    body = {
+        "text": args.text,
+        "name": args.name,
+        "sender": args.sender,
+    }
+    if args.ingested_gmail_id:
+        body["ingested_gmail_id"] = args.ingested_gmail_id
 
-    # Dedup guard: skip if any founder/agent message in last 60s.
-    recent = conn.execute(
-        """
-        SELECT id, EXTRACT(EPOCH FROM (NOW() - created_at)) AS age_s
-          FROM web_chat_messages
-         WHERE thread_id = %s
-           AND sender IN ('agent', 'founder')
-           AND created_at > NOW() - INTERVAL '60 seconds'
-         ORDER BY created_at DESC
-         LIMIT 1
-        """,
-        (args.thread,),
-    ).fetchone()
-    if recent:
-        print(f"dedup: founder/agent message sent {int(recent['age_s'])}s ago, skipping")
-        return
-
-    # Look up thread metadata for visitor email forwarding.
-    thread = conn.execute(
-        """
-        SELECT visitor_email, visitor_name, project_name
-          FROM web_chat_threads
-         WHERE thread_id = %s
-        """,
-        (args.thread,),
-    ).fetchone()
-    if not thread:
+    resp = api_post(
+        f"/api/v1/web-chat/threads/{args.thread}/reply", body, ok_on_404=True,
+    )
+    if resp.get("_not_found"):
         print(f"ERROR: thread {args.thread} not found", file=sys.stderr)
         sys.exit(1)
 
-    # 1. Insert agent/founder message.
-    msg_cur = conn.execute(
-        """
-        INSERT INTO web_chat_messages (thread_id, sender, sender_name, text)
-        VALUES (%s, %s, %s, %s)
-        RETURNING id
-        """,
-        (args.thread, args.sender, args.name, args.text),
-    )
-    msg_id = msg_cur.fetchone()["id"]
+    data = resp.get("data") or {}
+    if data.get("deduped"):
+        print(f"dedup: founder/agent message sent {int(data.get('age_s', 0))}s ago, skipping")
+        return
 
-    # 2. Mark visitor messages read.
-    conn.execute(
-        """
-        UPDATE web_chat_messages
-           SET read_by_founder = TRUE
-         WHERE thread_id = %s
-           AND sender = 'visitor'
-           AND read_by_founder = FALSE
-        """,
-        (args.thread,),
-    )
+    msg_id = data.get("message_id")
+    visitor_email = data.get("visitor_email") or ""
+    project_name = data.get("project_name")
 
-    # 3. Bump thread metadata.
-    conn.execute(
-        """
-        UPDATE web_chat_threads
-           SET last_message_text = %s,
-               last_message_at = NOW(),
-               last_message_sender = %s,
-               unread_by_founder = 0,
-               unread_by_visitor = unread_by_visitor + 1
-         WHERE thread_id = %s
-        """,
-        (args.text[:300], args.sender, args.thread),
-    )
-    conn.commit()
-
-    # 4. Forward to visitor email so they get reply when widget is closed.
+    # 4. Forward to visitor email so they get the reply when widget is closed.
     visitor_resend_id = None
-    if not args.no_email and thread["visitor_email"]:
-        cfg = project_config(thread["project_name"])
-        visitor_resend_id = email_visitor(
-            thread["visitor_email"], thread["project_name"], args.text, cfg
-        )
-        if visitor_resend_id:
-            conn.execute(
-                "UPDATE web_chat_messages SET visitor_email_id = %s WHERE id = %s",
-                (visitor_resend_id, msg_id),
+    if not args.no_email and visitor_email:
+        cfg = project_config(project_name)
+        visitor_resend_id = email_visitor(visitor_email, project_name, args.text, cfg)
+        if visitor_resend_id and msg_id:
+            api_patch(
+                f"/api/v1/web-chat/messages/{msg_id}",
+                {"visitor_email_id": visitor_resend_id},
             )
-            conn.commit()
 
     print(f"sent reply (msg #{msg_id}, visitor_email_id={visitor_resend_id or '-'})")
 
