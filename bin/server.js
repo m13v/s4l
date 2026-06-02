@@ -586,6 +586,104 @@ async function pqScalar(query, params) {
   return keys.length ? row[keys[0]] : null;
 }
 
+// --- HTTP API client (s4l.ai /api/v1/*) -------------------------------------
+// The dashboard is a CLIENT of the s4l.ai HTTP API, not a direct Postgres
+// consumer. Every read/write goes through these helpers, which carry the same
+// X-Installation identity header as scripts/http_api.py so the website's
+// resolveAuth scopes rows to this install. Mirrors the Python envelope
+// handling: success bodies are { ok: true, data: ... } and these helpers
+// return the unwrapped `data` payload. 4xx throws; 5xx/network retries 3x.
+function apiBase() {
+  const env = loadEnv();
+  const b = env.AUTOPOSTER_API_BASE || process.env.AUTOPOSTER_API_BASE || 'https://s4l.ai';
+  return b.replace(/\/+$/, '');
+}
+
+let _installHeader = null;
+function apiInstallHeader() {
+  if (_installHeader !== null) return _installHeader;
+  try {
+    _installHeader = execSync(
+      `/usr/bin/python3 ${path.join(DEST, 'scripts', 'identity.py')} header`,
+      { stdio: 'pipe', timeout: 10000 },
+    ).toString().trim();
+  } catch (e) {
+    console.error('[apiInstallHeader] identity.py failed:', e.message);
+    _installHeader = '';
+  }
+  return _installHeader;
+}
+
+function apiHeaders() {
+  const env = loadEnv();
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Installation': apiInstallHeader(),
+  };
+  const bearer = (env.AUTOPOSTER_API_KEY || process.env.AUTOPOSTER_API_KEY || '').trim();
+  if (bearer) {
+    headers['Authorization'] = `Bearer ${bearer}`;
+    headers['x-api-key'] = bearer;
+  }
+  return headers;
+}
+
+async function apiRequest(method, apiPath, { query, body, okOn404 = false, okOnConflict = false } = {}) {
+  let url = `${apiBase()}${apiPath}`;
+  if (query) {
+    const usp = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === null) continue;
+      if (Array.isArray(v)) { for (const item of v) usp.append(k, String(item)); }
+      else usp.append(k, String(v));
+    }
+    const qs = usp.toString();
+    if (qs) url += (url.includes('?') ? '&' : '?') + qs;
+  }
+  const init = { method, headers: apiHeaders() };
+  if (body !== undefined) init.body = JSON.stringify(body);
+
+  const delays = [1000, 3000, 9000];
+  let lastErr = null;
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 30000);
+      let resp;
+      try {
+        resp = await fetch(url, { ...init, signal: ctl.signal });
+      } finally { clearTimeout(timer); }
+      const text = await resp.text();
+      if (resp.ok) {
+        if (!text) return null;
+        const json = JSON.parse(text);
+        return json && Object.prototype.hasOwnProperty.call(json, 'data') ? json.data : json;
+      }
+      if (resp.status === 404 && okOn404) return null;
+      if (resp.status === 409 && okOnConflict) {
+        try { const j = JSON.parse(text); return Object.prototype.hasOwnProperty.call(j, 'data') ? j.data : j; }
+        catch { return null; }
+      }
+      if (resp.status >= 400 && resp.status < 500) {
+        throw new Error(`[apiRequest] ${method} ${apiPath} HTTP ${resp.status}: ${text.slice(0, 160)}`);
+      }
+      lastErr = new Error(`HTTP ${resp.status}: ${text.slice(0, 120)}`);
+      console.error(`[apiRequest] ${method} ${apiPath} HTTP ${resp.status} attempt ${attempt + 1}`);
+    } catch (e) {
+      if (e.message && e.message.startsWith('[apiRequest]')) throw e;
+      lastErr = e;
+      console.error(`[apiRequest] ${method} ${apiPath} attempt ${attempt + 1}: ${e.message}`);
+    }
+    if (attempt < delays.length - 1) await new Promise(r => setTimeout(r, delays[attempt]));
+  }
+  throw new Error(`[apiRequest] ${method} ${apiPath} failed after ${delays.length} attempts: ${lastErr && lastErr.message}`);
+}
+
+function apiGet(apiPath, query, opts) { return apiRequest('GET', apiPath, { query, ...(opts || {}) }); }
+function apiPost(apiPath, body, opts) { return apiRequest('POST', apiPath, { body, ...(opts || {}) }); }
+function apiPatch(apiPath, body, opts) { return apiRequest('PATCH', apiPath, { body, ...(opts || {}) }); }
+function apiDelete(apiPath, query, opts) { return apiRequest('DELETE', apiPath, { query, ...(opts || {}) }); }
+
 function getLaunchAgentPath(unitFile) {
   return path.join(AGENT_DIR, driver.unitFileName(unitFile));
 }
