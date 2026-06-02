@@ -37,6 +37,7 @@ import {
   type ProjectInput,
 } from "./setup.js";
 import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
+import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
 
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
@@ -46,9 +47,12 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
   `${TWITTER_AUTOPILOT_LABEL}.plist`
 );
 
+// version is resolved at runtime from the real shipped package (see version.ts),
+// so serverInfo.version finally reflects what the user actually has installed
+// instead of a frozen literal.
 const server = new McpServer({
   name: "social-autoposter",
-  version: "0.1.0",
+  version: VERSION,
 });
 
 function jsonContent(obj: unknown) {
@@ -382,11 +386,20 @@ server.registerTool(
     if (args.status === true || !args.name) {
       const projects = listManagedProjectStatus();
       const x = await xStatus();
+      const ver = await versionStatus();
       return jsonContent({
         configured: projects.some((p) => p.ready),
         projects,
         x_connected: x.connected,
         x_state: x.state,
+        mcp_version: ver.installed,
+        latest_version: ver.latest,
+        update_available: ver.update_available,
+        update_hint: ver.update_available
+          ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
+            `Tell the user and offer to run the \`version\` tool with action:'update' ` +
+            `(or \`npx social-autoposter@latest update\`).`
+          : undefined,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: CONFIG_PATH,
