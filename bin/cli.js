@@ -1022,11 +1022,136 @@ function removeLegacyEngagementStylesSidecar() {
   }
 }
 
+// `doctor` (#6, added 2026-06-02) — single command that probes every known
+// failure mode of the install so the user can SEE what's broken instead of
+// learning about it via "Phase 1 returned 0 tweets" or "needs_login" with a
+// silent keychain failure underneath. Each check returns either ok=true or a
+// {ok:false, detail, fix} record. We print a green/red checklist and exit
+// non-zero if anything failed, so CI / setup wizards can gate on it.
+function doctor() {
+  console.log('social-autoposter doctor — probing install health\n');
+
+  const checks = [];
+  const add = (name, runner) => checks.push({ name, runner });
+
+  add('Node.js on PATH', () => ({ ok: true, detail: process.version }));
+
+  add('python3 on PATH', () => {
+    const r = spawnSync('python3', ['--version'], { encoding: 'utf8' });
+    if (r.status === 0) return { ok: true, detail: (r.stdout || r.stderr).trim() };
+    return { ok: false, detail: 'python3 not found', fix: 'install Python 3 (brew install python3 / xcode-select --install)' };
+  });
+
+  add('uv tool on PATH', () => {
+    const uv = findUvBin();
+    if (!uv) return { ok: false, detail: 'uv not found', fix: 'curl -LsSf https://astral.sh/uv/install.sh | sh' };
+    return { ok: true, detail: uv };
+  });
+
+  add('browser-harness CLI installed', () => {
+    const bh = path.join(HOME, '.local', 'bin', 'browser-harness');
+    if (!fs.existsSync(bh)) return { ok: false, detail: `not found at ${bh}`, fix: 'npx social-autoposter init' };
+    return { ok: true, detail: bh };
+  });
+
+  add('browser-harness CLI shape (stdin / -c)', () => {
+    const bh = path.join(HOME, '.local', 'bin', 'browser-harness');
+    if (!fs.existsSync(bh)) return { ok: false, detail: 'binary missing' };
+    const probe = spawnSync(bh, [], { encoding: 'utf8', timeout: 15000 });
+    const usage = `${probe.stdout || ''}${probe.stderr || ''}`;
+    const dashC = /\b-c\b/.test(usage);
+    const stdin = /<<'PY'|<<"PY"|<<PY\b/.test(usage);
+    if (!dashC && !stdin) return { ok: false, detail: 'CLI advertises neither shape', fix: 'reinstall via npx social-autoposter init' };
+    return { ok: true, detail: stdin ? 'stdin heredoc' : '-c flag' };
+  });
+
+  add('macOS Keychain: Chrome Safe Storage readable', () => {
+    if (process.platform !== 'darwin') return { ok: true, detail: 'skipped (non-macOS)' };
+    const r = spawnSync('security', ['find-generic-password', '-s', 'Chrome Safe Storage', '-a', 'Chrome', '-w'], {
+      encoding: 'utf8', timeout: 10000,
+    });
+    if (r.status === 0) return { ok: true, detail: 'accessible (cookie import will work)' };
+    const tail = (r.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${r.status}`;
+    return {
+      ok: false,
+      detail: tail,
+      fix: 'security unlock-keychain ~/Library/Keychains/login.keychain-db   (then retry)',
+    };
+  });
+
+  add('harness Chrome on :9555', () => {
+    try {
+      const probe = spawnSync('curl', ['-sf', '--max-time', '2', '-o', '/dev/null', 'http://127.0.0.1:9555/json/version'], {
+        encoding: 'utf8',
+      });
+      if (probe.status === 0) return { ok: true, detail: 'CDP responding' };
+      return { ok: false, detail: 'no CDP on 9555', fix: 'will auto-launch on next cycle / connect_x call' };
+    } catch (e) {
+      return { ok: false, detail: e.message };
+    }
+  });
+
+  add('X session in harness Chrome', () => {
+    const setup = path.join(HOME, 'social-autoposter', 'scripts', 'setup_twitter_auth.py');
+    if (!fs.existsSync(setup)) return { ok: false, detail: 'setup script missing' };
+    const py = findPythonBin();
+    const r = spawnSync(py, [setup, 'status'], { encoding: 'utf8', timeout: 60000 });
+    let out;
+    try { out = JSON.parse((r.stdout || '').trim()); } catch { out = null; }
+    if (!out) return { ok: false, detail: 'status probe did not return JSON' };
+    if (out.connected) return { ok: true, detail: `state=${out.state}` };
+    return {
+      ok: false,
+      detail: `state=${out.state}`,
+      fix: 'python3 ~/social-autoposter/scripts/setup_twitter_auth.py connect',
+    };
+  });
+
+  add('x.com cookies persisted to SQLite', () => {
+    const cookiesDb = path.join(HOME, '.claude', 'browser-profiles', 'browser-harness', 'Default', 'Cookies');
+    if (!fs.existsSync(cookiesDb)) return { ok: false, detail: `${cookiesDb} missing`, fix: 'connect_x will create it' };
+    const py = findPythonBin();
+    const r = spawnSync(py, ['-c',
+      `import sqlite3; c=sqlite3.connect(${JSON.stringify(cookiesDb)}); ` +
+      `print(c.execute("SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%x.com' OR host_key LIKE '%twitter.com'").fetchone()[0])`,
+    ], { encoding: 'utf8', timeout: 10000 });
+    const n = parseInt((r.stdout || '0').trim(), 10);
+    if (n > 0) return { ok: true, detail: `${n} rows persisted (durable across Chrome restart)` };
+    return {
+      ok: false,
+      detail: '0 x.com rows in SQLite',
+      fix: 'run setup_twitter_auth.py connect to import + auto-flush via #2 (1.6.34+)',
+    };
+  });
+
+  let pass = 0, fail = 0;
+  for (const c of checks) {
+    let res;
+    try { res = c.runner(); } catch (e) { res = { ok: false, detail: e.message }; }
+    if (res.ok) {
+      console.log(`  [OK]   ${c.name}: ${res.detail || ''}`);
+      pass++;
+    } else {
+      console.log(`  [FAIL] ${c.name}: ${res.detail || ''}`);
+      if (res.fix) console.log(`         fix: ${res.fix}`);
+      fail++;
+    }
+  }
+
+  console.log(`\n${pass}/${checks.length} checks passed.`);
+  if (fail > 0) {
+    console.log('Address the failures above and re-run `npx social-autoposter doctor`.');
+    process.exit(1);
+  }
+}
+
 const cmd = process.argv[2];
 if (cmd === 'init') {
   init();
 } else if (cmd === 'update') {
   update();
+} else if (cmd === 'doctor') {
+  doctor();
 } else if (cmd === 'bootstrap-vm') {
   bootstrapVm();
 } else if (cmd === 'export-cookies') {
@@ -1056,6 +1181,7 @@ if (cmd === 'init') {
   console.log('  npx social-autoposter              open the dashboard');
   console.log('  npx social-autoposter init          first-time setup');
   console.log('  npx social-autoposter update        update scripts, preserve config');
+  console.log('  npx social-autoposter doctor        probe install health (#6, 1.6.34+)');
   console.log('  npx social-autoposter bootstrap-vm  AppMaker VM self-bootstrap (DB-driven)');
   console.log('  npx social-autoposter export-cookies [dir]  export browser cookies');
   console.log('  npx social-autoposter import-cookies [dir]  import browser cookies');
