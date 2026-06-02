@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from project_topics import topics_for_project  # noqa: E402
+from http_api import api_get, api_post  # noqa: E402
 
 
 def slugify(keyword: str) -> str:
@@ -345,86 +346,30 @@ def generate_keyword_templates(project):
     return unique
 
 
-def get_db_connection():
-    """Get a Postgres connection using DATABASE_URL from .env."""
-    try:
-        import psycopg2
-        return psycopg2.connect(os.environ["DATABASE_URL"])
-    except ImportError:
-        print("ERROR: psycopg2 not installed. Run: pip install psycopg2-binary")
-        sys.exit(1)
-    except KeyError:
-        print("ERROR: DATABASE_URL not set in .env")
-        sys.exit(1)
-
-
 def merge_keywords_db(product_name, new_candidates):
-    """Merge new candidates into Postgres, skip existing keywords and existing page slugs."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    added = 0
-    updated = 0
-
-    # Get existing keywords and slugs for this product
-    cur.execute("SELECT keyword, slug FROM seo_keywords WHERE product = %s", (product_name,))
-    existing_keywords = set()
-    existing_slugs = set()
-    for row in cur.fetchall():
-        existing_keywords.add(row[0].lower())
-        existing_slugs.add(row[1].lower())
-
+    """Merge new candidates via the keywords API, which skips existing keywords
+    and existing page slugs and bumps volume via GREATEST. Server-side mirror of
+    the former direct-Postgres merge."""
+    candidates = []
     for candidate in new_candidates:
         key = candidate["keyword"].lower()
-        slug = candidate.get("slug") or slugify(key)
+        candidates.append({
+            "keyword": candidate["keyword"],
+            "slug": candidate.get("slug") or slugify(key),
+            "source": candidate.get("source", "dataforseo"),
+            "volume": candidate.get("volume"),
+            "competition": candidate.get("competition"),
+        })
 
-        if key in existing_keywords:
-            # Update volume/competition if we have newer data
-            if candidate.get("volume"):
-                cur.execute("""
-                    UPDATE seo_keywords SET volume = GREATEST(volume, %s), competition = %s,
-                           updated_at = NOW()
-                    WHERE product = %s AND LOWER(keyword) = %s AND (volume IS NULL OR volume < %s)
-                """, (candidate["volume"], candidate.get("competition"),
-                      product_name, key, candidate["volume"]))
-                if cur.rowcount > 0:
-                    updated += 1
-            continue
-
-        # Skip if a page with this slug already exists
-        if slug.lower() in existing_slugs:
-            continue
-
-        try:
-            cur.execute("""
-                INSERT INTO seo_keywords (product, keyword, slug, source, volume, competition, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'unscored')
-                ON CONFLICT (product, keyword) DO NOTHING
-            """, (product_name, candidate["keyword"], slug,
-                  candidate.get("source", "dataforseo"),
-                  candidate.get("volume"), candidate.get("competition")))
-            if cur.rowcount > 0:
-                added += 1
-                existing_keywords.add(key)
-                existing_slugs.add(slug.lower())
-        except Exception as e:
-            conn.rollback()
-            print(f"  Error inserting {candidate['keyword']}: {e}")
-            continue
-
-    conn.commit()
-
-    # Return summary
-    cur.execute("""
-        SELECT status, count(*) FROM seo_keywords WHERE product = %s GROUP BY status
-    """, (product_name,))
-    statuses = dict(cur.fetchall())
-
-    cur.execute("SELECT count(*) FROM seo_keywords WHERE product = %s", (product_name,))
-    total = cur.fetchone()[0]
-
-    cur.close()
-    conn.close()
-    return added, updated, total, statuses
+    resp = api_post("/api/v1/seo/keywords",
+                    {"product": product_name, "candidates": candidates})
+    data = resp.get("data") or {}
+    return (
+        int(data.get("added") or 0),
+        int(data.get("updated") or 0),
+        int(data.get("total") or 0),
+        data.get("statuses") or {},
+    )
 
 
 def main():
@@ -468,21 +413,14 @@ def main():
     print(f"  Total in DB: {total}")
     print(f"  Status breakdown: {json.dumps(statuses)}")
 
-    # Show top unscored by volume from DB
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT keyword, volume, status FROM seo_keywords
-        WHERE product = %s AND volume IS NOT NULL
-        ORDER BY volume DESC LIMIT 10
-    """, (project["name"],))
-    rows = cur.fetchall()
+    # Show top keywords by volume from the API
+    resp = api_get("/api/v1/seo/keywords",
+                   query={"mode": "top_volume", "product": project["name"], "limit": 10})
+    rows = (resp.get("data") or {}).get("rows") or []
     if rows:
         print(f"\n  Top keywords by volume:")
-        for kw, vol, status in rows:
-            print(f"    {vol:>6} | {kw:50s} | {status}")
-    cur.close()
-    conn.close()
+        for r in rows:
+            print(f"    {int(r.get('volume') or 0):>6} | {str(r.get('keyword') or ''):50s} | {r.get('status')}")
 
 
 if __name__ == "__main__":
