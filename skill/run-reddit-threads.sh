@@ -205,38 +205,25 @@ echo "--- Context block ---" | tee -a "$LOG_FILE"
 echo "$CONTEXT_BLOCK" | tee -a "$LOG_FILE"
 echo "---------------------" | tee -a "$LOG_FILE"
 
+# HTTP-only lane (2026-06-01): the four prompt-context reads go through the
+# s4l.ai API via scripts/reddit_threads_helper.py. No DATABASE_URL, no psql,
+# no fallback. Each subcommand prints exactly what the psql -t -A call printed
+# (one row per line, `|`-delimited) so the prompt context is byte-identical.
+RT_HELPER="$REPO_DIR/scripts/reddit_threads_helper.py"
+
 # Recent posts in THIS sub (avoid repeats - include endings for closer variation)
-RECENT_POSTS_SUB=$(psql "$DATABASE_URL" -t -A -c "
-  SELECT thread_title || ' |ENDING| ' || RIGHT(our_content, 200) FROM posts
-  WHERE thread_url ILIKE '%/r/${SUB_SLUG}/%' AND thread_url = our_url
-  ORDER BY posted_at DESC LIMIT 10
-" 2>/dev/null || echo "(psql error)")
+RECENT_POSTS_SUB=$(python3 "$RT_HELPER" recent-posts-sub --sub "$SUB_SLUG" --limit 10 2>/dev/null || echo "(api error)")
 
 # Recent posts project-wide (cross-sub dedup - include endings)
-RECENT_POSTS_PROJECT=$(psql "$DATABASE_URL" -t -A -c "
-  SELECT thread_title || ' |ENDING| ' || RIGHT(our_content, 200) FROM posts
-  WHERE project_name='${PROJECT}' AND thread_url = our_url
-    AND posted_at > NOW() - INTERVAL '14 days'
-  ORDER BY posted_at DESC LIMIT 15
-" 2>/dev/null || echo "(psql error)")
+RECENT_POSTS_PROJECT=$(python3 "$RT_HELPER" recent-posts-project --project "$PROJECT" --days 14 --limit 15 2>/dev/null || echo "(api error)")
 
 # Recent engagement styles for this project on THIS platform (avoid repeating).
 # Scoped to platform='reddit' because cross-platform history conflated tiers —
 # a Moltbook post yesterday was blocking a Reddit style today for no reason.
-RECENT_STYLES=$(psql "$DATABASE_URL" -t -A -c "
-  SELECT engagement_style FROM posts
-  WHERE project_name='${PROJECT}' AND platform='reddit' AND thread_url = our_url
-    AND engagement_style IS NOT NULL AND engagement_style != ''
-  ORDER BY posted_at DESC LIMIT 5
-" 2>/dev/null || echo "(psql error)")
+RECENT_STYLES=$(python3 "$RT_HELPER" recent-styles --project "$PROJECT" --limit 5 2>/dev/null || echo "(api error)")
 
 # Top performers (tone calibration)
-TOP_POSTS=$(psql "$DATABASE_URL" -t -A -c "
-  SELECT thread_title, upvotes, comments_count, views FROM posts
-  WHERE project_name='${PROJECT}' AND thread_url=our_url AND status='active'
-    AND (COALESCE(upvotes,0) + COALESCE(comments_count,0)*3) > 5
-  ORDER BY (COALESCE(upvotes,0) + COALESCE(comments_count,0)*3) DESC LIMIT 10
-" 2>/dev/null || echo "(psql error)")
+TOP_POSTS=$(python3 "$RT_HELPER" top-posts --project "$PROJECT" --min-score 5 --limit 10 2>/dev/null || echo "(api error)")
 
 if [ "$IS_OWN" = "True" ]; then
   CADENCE_NOTE="This is our OWNED subreddit. Daily cadence (1-day floor). Be yourself, no product pitches."
@@ -554,7 +541,7 @@ if [ "$PERMALINK" != "null" ] && [ "$PERMALINK" != "PARSE_ERROR" ]; then
   /usr/bin/python3 <<'PYEOF' 2>&1 | tee -a "$LOG_FILE" || true
 import json, os, sys
 sys.path.insert(0, os.path.join(os.environ["REPO_DIR"], "scripts"))
-import db as dbmod
+from http_api import api_post
 import pending_threads as pt
 
 parsed = json.loads(os.environ.get("PARSED") or "{}")
