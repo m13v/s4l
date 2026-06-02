@@ -153,32 +153,13 @@ if (ok === targets.length) {
     console.log("server: " + distEntry);
     console.log("");
     console.log(
-      "AGENT INSTRUCTION: The MCP server is registered but is NOT loaded in this",
+      "The MCP server is registered but not yet loaded (MCP servers load at launch,",
     );
-    console.log(
-      "session yet (MCP servers load at launch, not per-tab). End your reply to the",
-    );
-    console.log(
-      "user with EXACTLY the following three steps as the FINAL lines of your response,",
-    );
-    console.log(
-      "each on its own line, in bold, numbered, with nothing after them:",
-    );
+    console.log("not per-tab). To finish setup:");
     console.log("");
-    console.log(
-      "  **1. Fully quit Claude now: press Cmd+Q (closing the window is not enough).**",
-    );
-    console.log("  **2. Reopen Claude.**");
-    console.log(
-      '  **3. In the message box, type:  Set me up on social-autoposter.  and send it.**',
-    );
-    console.log("");
-    console.log(
-      "Do not paraphrase those three lines, do not add commentary after them, and do",
-    );
-    console.log(
-      "not skip the bold. They are the only way the user can start the autoposter.",
-    );
+    console.log("  1. Fully quit Claude (Cmd+Q; closing the window is not enough).");
+    console.log("  2. Reopen Claude.");
+    console.log('  3. Send: "Set me up on social-autoposter."');
   }
 } else {
   console.error(
