@@ -128,12 +128,36 @@ function pipSupportsBreakSystemPackages(pythonBin) {
   return parseInt(m[1], 10) >= 23;
 }
 
+// True if the interpreter carries a PEP 668 EXTERNALLY-MANAGED marker in its
+// stdlib dir (Homebrew python, Debian/Ubuntu 23+). On these, a bare
+// `pip install` is GUARANTEED to fail with a loud "externally-managed-environment"
+// wall of text. Detecting it up front lets pipInstall skip that doomed first
+// attempt and go straight to --break-system-packages, so init output stays clean
+// and doesn't falsely look like a failed dependency install when it recovers.
+function pipIsExternallyManaged(pythonBin) {
+  const r = spawnSync(pythonBin, ['-c',
+    "import os,sys,sysconfig\n" +
+    "p=os.path.join(sysconfig.get_path('stdlib'),'EXTERNALLY-MANAGED')\n" +
+    "sys.exit(0 if os.path.exists(p) else 1)",
+  ]);
+  return r.status === 0;
+}
+
 // Install Python packages into a specific interpreter via `<py> -m pip install`.
-// Retries with --break-system-packages only when the resolved pip supports it
-// (PEP 668 environments: Homebrew python, Debian/Ubuntu 23+). Returns the
-// spawnSync result of the last attempt.
+// Behaviour by environment:
+//   - PEP 668 externally-managed interpreter (Homebrew python, Debian/Ubuntu 23+)
+//     with pip>=23: go STRAIGHT to --break-system-packages. The bare attempt
+//     would always fail loudly with externally-managed-environment, which made
+//     init look like "Python deps failed" even though the (silent) retry actually
+//     installed everything. No doomed first attempt, no false-alarm output.
+//   - Everything else: bare attempt, then retry with --break-system-packages only
+//     if it failed and pip supports the flag.
+// Returns the spawnSync result of the last attempt.
 function pipInstall(pythonBin, args) {
   const base = ['-m', 'pip', 'install', ...args];
+  if (pipIsExternallyManaged(pythonBin) && pipSupportsBreakSystemPackages(pythonBin)) {
+    return spawnSync(pythonBin, [...base, '--break-system-packages'], { stdio: 'inherit' });
+  }
   let r = spawnSync(pythonBin, base, { stdio: 'inherit' });
   if (r.status !== 0 && pipSupportsBreakSystemPackages(pythonBin)) {
     r = spawnSync(pythonBin, [...base, '--break-system-packages'], { stdio: 'inherit' });
