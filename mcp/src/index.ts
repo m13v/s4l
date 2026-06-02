@@ -177,6 +177,39 @@ async function postApproved(batchId: string, plan: Plan) {
   };
 }
 
+// ---- getting-started: discoverable front door (USER-invoked, no side effects)
+// This is NOT a tool — the model never auto-calls it. It surfaces in clients
+// that render prompts as slash-commands / starters (e.g. Claude Desktop's "/"
+// menu). When the user picks it, it injects the message below into the chat,
+// which nudges the agent to start the real onboarding via the `setup` tool.
+// Deliberately a DUMB POINTER: it names no fields and no steps, so it can never
+// drift from REQUIRED_FIELDS / the setup tool's flow. All real logic stays in
+// `setup`; this is just a convenience handle to begin.
+server.registerPrompt(
+  "getting-started",
+  {
+    title: "Set up social-autoposter",
+    description:
+      "Start here. Walks you through configuring a product and connecting your X/Twitter " +
+      "account so the autoposter can draft and post for you.",
+  },
+  async () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text:
+            "I just installed social-autoposter and want to get set up. Call the `setup` tool " +
+            "(status mode) to see what's still needed, then walk me through it conversationally — " +
+            "ask me about my product and connect my X/Twitter account, one thing at a time. " +
+            "Don't dump a form at me, and explain the X connection before doing it.",
+        },
+      },
+    ],
+  })
+);
+
 // ---- setup: per-project config (the "brain": project, website, voice) -----
 // Run this FIRST. The action tools refuse until at least one project is ready.
 // You can set up MULTIPLE products and fill each project's fields INCREMENTALLY
