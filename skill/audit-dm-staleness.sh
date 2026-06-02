@@ -16,34 +16,21 @@ LOG_FILE="$LOG_DIR/audit-dm-staleness-$(date +%Y-%m-%d_%H%M%S).log"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
-if [ -z "${DATABASE_URL:-}" ]; then
-    log "ERROR: DATABASE_URL not set"
-    exit 1
-fi
+# HTTP-only lane (2026-06-01): both staleness UPDATEs run server-side via the
+# s4l.ai API (POST /api/v1/dms/staleness-sweep). No DATABASE_URL, no psql.
+AUDIT_HELPER="$REPO_DIR/scripts/audit_helper.py"
 
 RUN_START=$(date +%s)
 log "=== DM staleness audit: $(date) ==="
 
-# 1. Ghosted outreach: no_response + active + older than 14 days -> stale.
-AGED=$(psql "$DATABASE_URL" -t -A -c "
-WITH u AS (
-    UPDATE dms SET conversation_status='stale'
-    WHERE conversation_status='active'
-      AND interest_level='no_response'
-      AND discovered_at < NOW() - INTERVAL '14 days'
-    RETURNING 1
-) SELECT COUNT(*) FROM u;" 2>/dev/null || echo "0")
+# Both sweeps run in one POST and return {aged, downgraded}:
+#   1. Ghosted outreach: no_response + active + older than 14 days -> stale.
+#   2. Reverse-pitchers the reply bot escalated (needs_human + not_our_prospect)
+#      -> active; next inbound re-evaluates via classifier and re-escalates if needed.
+SWEEP_JSON=$(python3 "$AUDIT_HELPER" dm-staleness-sweep 2>/dev/null || echo '{"aged":0,"downgraded":0}')
+AGED=$(echo "$SWEEP_JSON" | python3 -c "import json,sys; print(int(json.load(sys.stdin).get('aged') or 0))" 2>/dev/null || echo "0")
+DOWNGRADED=$(echo "$SWEEP_JSON" | python3 -c "import json,sys; print(int(json.load(sys.stdin).get('downgraded') or 0))" 2>/dev/null || echo "0")
 log "Aged ghosted outreach to stale: $AGED"
-
-# 2. Reverse-pitchers that the reply bot escalated: flip back to active.
-#    Next inbound will re-evaluate via classifier and re-escalate if truly needed.
-DOWNGRADED=$(psql "$DATABASE_URL" -t -A -c "
-WITH u AS (
-    UPDATE dms SET conversation_status='active'
-    WHERE conversation_status='needs_human'
-      AND interest_level='not_our_prospect'
-    RETURNING 1
-) SELECT COUNT(*) FROM u;" 2>/dev/null || echo "0")
 log "Downgraded not_our_prospect escalations: $DOWNGRADED"
 
 RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
