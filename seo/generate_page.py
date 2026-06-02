@@ -55,7 +55,9 @@ if ENV_PATH.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "scripts"))
 import db_helpers  # noqa: E402
+from http_api import api_get, api_patch, api_post  # noqa: E402
 from claude_wait import wait_for_claude  # noqa: E402
 from verify_facts import (  # noqa: E402
     verify_dead_urls,
@@ -2671,159 +2673,37 @@ def update_state(trigger: str, product: str, keyword: str, status: str,
             kwargs["claude_session_id"] = claude_session_id
         db_helpers.update_status(product, keyword, status, **kwargs)
     elif trigger == "gsc":
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
-        sets = ["status = %s", "updated_at = NOW()"]
-        vals: list = [status]
+        body = {"product": product, "query": keyword, "status": status}
         if page_url is not None:
-            sets.append("page_url = %s"); vals.append(page_url)
+            body["page_url"] = page_url
         if slug is not None:
-            sets.append("page_slug = %s"); vals.append(slug)
+            body["page_slug"] = slug
         if notes is not None:
-            sets.append("notes = %s"); vals.append(notes)
+            body["notes"] = notes
         if content_type is not None:
-            sets.append("content_type = %s"); vals.append(content_type)
+            body["content_type"] = content_type
         if claude_session_id is not None:
-            sets.append("claude_session_id = %s"); vals.append(claude_session_id)
-        if status == "done":
-            sets.append("completed_at = NOW()")
-        vals.extend([product, keyword])
-        cur.execute(
-            f"UPDATE gsc_queries SET {', '.join(sets)} WHERE product = %s AND query = %s",
-            vals,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    elif trigger == "reddit":
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO seo_keywords (product, keyword, slug, source, status) "
-            "VALUES (%s, %s, %s, 'reddit', %s) "
-            "ON CONFLICT (product, keyword) DO NOTHING",
-            (product, keyword, slug or "", status),
-        )
-        sets = ["status = %s", "updated_at = NOW()"]
-        vals: list = [status]
+            body["claude_session_id"] = claude_session_id
+        api_patch("/api/v1/seo/gsc-queries", body)
+    elif trigger in ("reddit", "twitter", "top_page", "roundup"):
+        # Reply/topic-driven landing pages. source tags the keyword row by its
+        # origin rail; upsert ensures the row exists (ON CONFLICT DO NOTHING)
+        # before the status/metadata UPDATE. Mirrors db_helpers.update_status.
+        body = {
+            "product": product, "keyword": keyword, "status": status,
+            "upsert": True, "source": trigger,
+        }
+        if slug is not None:
+            body["slug"] = slug
         if page_url is not None:
-            sets.append("page_url = %s"); vals.append(page_url)
-        if slug is not None:
-            sets.append("slug = %s"); vals.append(slug)
+            body["page_url"] = page_url
         if notes is not None:
-            sets.append("notes = %s"); vals.append(notes)
+            body["notes"] = notes
         if content_type is not None:
-            sets.append("content_type = %s"); vals.append(content_type)
+            body["content_type"] = content_type
         if claude_session_id is not None:
-            sets.append("claude_session_id = %s"); vals.append(claude_session_id)
-        if status == "done":
-            sets.append("completed_at = NOW()")
-        vals.extend([product, keyword])
-        cur.execute(
-            f"UPDATE seo_keywords SET {', '.join(sets)} WHERE product = %s AND keyword = %s",
-            vals,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    elif trigger == "twitter":
-        # Per-thread SEO landing page generated synchronously inside
-        # run-twitter-cycle.sh Phase 2b-gen. The page is anchored on the
-        # essence of our reply text, not a pre-existing keyword backlog,
-        # so source='twitter' tags it as a reply-driven page rather than
-        # a SERP/GSC backlog item. Mirrors the reddit branch above.
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO seo_keywords (product, keyword, slug, source, status) "
-            "VALUES (%s, %s, %s, 'twitter', %s) "
-            "ON CONFLICT (product, keyword) DO NOTHING",
-            (product, keyword, slug or "", status),
-        )
-        sets = ["status = %s", "updated_at = NOW()"]
-        vals: list = [status]
-        if page_url is not None:
-            sets.append("page_url = %s"); vals.append(page_url)
-        if slug is not None:
-            sets.append("slug = %s"); vals.append(slug)
-        if notes is not None:
-            sets.append("notes = %s"); vals.append(notes)
-        if content_type is not None:
-            sets.append("content_type = %s"); vals.append(content_type)
-        if claude_session_id is not None:
-            sets.append("claude_session_id = %s"); vals.append(claude_session_id)
-        if status == "done":
-            sets.append("completed_at = NOW()")
-        vals.extend([product, keyword])
-        cur.execute(
-            f"UPDATE seo_keywords SET {', '.join(sets)} WHERE product = %s AND keyword = %s",
-            vals,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    elif trigger == "top_page":
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO seo_keywords (product, keyword, slug, source, status) "
-            "VALUES (%s, %s, %s, 'top_page', %s) "
-            "ON CONFLICT (product, keyword) DO NOTHING",
-            (product, keyword, slug or "", status),
-        )
-        sets = ["status = %s", "updated_at = NOW()"]
-        vals: list = [status]
-        if page_url is not None:
-            sets.append("page_url = %s"); vals.append(page_url)
-        if slug is not None:
-            sets.append("slug = %s"); vals.append(slug)
-        if notes is not None:
-            sets.append("notes = %s"); vals.append(notes)
-        if content_type is not None:
-            sets.append("content_type = %s"); vals.append(content_type)
-        if claude_session_id is not None:
-            sets.append("claude_session_id = %s"); vals.append(claude_session_id)
-        if status == "done":
-            sets.append("completed_at = NOW()")
-        vals.extend([product, keyword])
-        cur.execute(
-            f"UPDATE seo_keywords SET {', '.join(sets)} WHERE product = %s AND keyword = %s",
-            vals,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    elif trigger == "roundup":
-        conn = db_helpers.get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO seo_keywords (product, keyword, slug, source, status) "
-            "VALUES (%s, %s, %s, 'roundup', %s) "
-            "ON CONFLICT (product, keyword) DO NOTHING",
-            (product, keyword, slug or "", status),
-        )
-        sets = ["status = %s", "updated_at = NOW()"]
-        vals: list = [status]
-        if page_url is not None:
-            sets.append("page_url = %s"); vals.append(page_url)
-        if slug is not None:
-            sets.append("slug = %s"); vals.append(slug)
-        if notes is not None:
-            sets.append("notes = %s"); vals.append(notes)
-        if content_type is not None:
-            sets.append("content_type = %s"); vals.append(content_type)
-        if claude_session_id is not None:
-            sets.append("claude_session_id = %s"); vals.append(claude_session_id)
-        if status == "done":
-            sets.append("completed_at = NOW()")
-        vals.extend([product, keyword])
-        cur.execute(
-            f"UPDATE seo_keywords SET {', '.join(sets)} WHERE product = %s AND keyword = %s",
-            vals,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+            body["claude_session_id"] = claude_session_id
+        api_patch("/api/v1/seo/keywords", body)
     elif trigger == "manual":
         pass  # caller manages state
 
@@ -3476,20 +3356,18 @@ def main() -> int:
     slug = args.slug
 
     if escalation_id is not None:
-        import db_helpers as _db
-        conn = _db.get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT product, keyword, slug, status, human_reply, source_table "
-            "FROM seo_escalations WHERE id = %s",
-            (escalation_id,),
-        )
-        row = cur.fetchone()
-        cur.close(); conn.close()
+        resp = api_get("/api/v1/seo/escalations",
+                       query={"mode": "show", "id": escalation_id}, ok_on_404=True)
+        row = None if resp.get("_not_found") else (resp.get("data") or {}).get("row")
         if not row:
             print(f"ERROR: escalation #{escalation_id} not found", file=sys.stderr)
             return 1
-        e_product, e_keyword, e_slug, e_status, e_reply, e_source_table = row
+        e_product = row.get("product")
+        e_keyword = row.get("keyword")
+        e_slug = row.get("slug")
+        e_status = row.get("status")
+        e_reply = row.get("human_reply")
+        e_source_table = row.get("source_table")
         if e_status != "replied":
             print(f"ERROR: escalation #{escalation_id} status={e_status} (expected 'replied')",
                   file=sys.stderr)
