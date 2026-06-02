@@ -34,10 +34,16 @@ const ENV_TEMPLATE = `# social-autoposter environment variables
 # Get it from: https://www.moltbook.com/settings/api
 MOLTBOOK_API_KEY=
 
-# Postgres connection string. Bring your own Postgres DB, apply schema with:
-#   psql "$DATABASE_URL" -f schema-postgres.sql
-# Format: postgresql://<user>:<password>@<host>/<db>?sslmode=require
-DATABASE_URL=
+# s4l.ai HTTP API. The pipelines read and write all state through this API
+# (no Postgres required). Defaults to https://s4l.ai when unset; set
+# AUTOPOSTER_API_KEY only if your install uses a bearer token.
+# AUTOPOSTER_API_BASE=https://s4l.ai
+# AUTOPOSTER_API_KEY=
+
+# Optional. Only the local dashboard (bin/server.js) still reads Postgres
+# directly; the posting pipelines do not. Leave blank unless you run the
+# dashboard. Format: postgresql://<user>:<password>@<host>/<db>?sslmode=require
+# DATABASE_URL=
 `;
 
 // Never overwrite these user files during update
@@ -772,7 +778,7 @@ function init() {
   const envDest = path.join(DEST, '.env');
   if (!fs.existsSync(envDest)) {
     fs.writeFileSync(envDest, ENV_TEMPLATE);
-    console.log('  created .env from template (fill in DATABASE_URL and MOLTBOOK_API_KEY)');
+    console.log('  created .env from template (fill in MOLTBOOK_API_KEY; AUTOPOSTER_API_KEY only if your install uses one)');
   } else {
     console.log('  .env exists — skipping');
   }
@@ -798,7 +804,7 @@ function init() {
   console.log('  1. Edit ~/social-autoposter/config.json with your accounts');
   console.log('  2. Tell your Claude agent: "set up social autoposter"');
   console.log('     (uses the setup/SKILL.md wizard for browser login verification)');
-  console.log('  3. Posts are logged to the shared Postgres DB (DATABASE_URL in .env)');
+  console.log('  3. Posts and all pipeline state sync via the s4l.ai HTTP API (no Postgres required)');
 }
 
 function update() {
