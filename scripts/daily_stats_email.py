@@ -45,8 +45,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -88,10 +86,8 @@ if ENV_FILE.exists():
                 key, val = line.split("=", 1)
                 os.environ.setdefault(key.strip(), val.strip())
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    print("ERROR: DATABASE_URL not set", file=sys.stderr)
-    sys.exit(1)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from http_api import api_get  # noqa: E402
 
 
 # Mirrors bin/server.js EVENT_TYPES order so card layout matches the dashboard.
