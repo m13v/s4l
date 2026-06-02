@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Social Autoposter</title>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="head">
+        <div class="title">Social Autoposter</div>
+        <div class="ver" id="ver"></div>
+      </header>
+
+      <section class="status">
+        <div class="card">
+          <div class="k">Projects</div>
+          <div class="v" id="st-proj">&mdash;</div>
+          <div class="sub" id="st-proj-sub"></div>
+        </div>
+        <div class="card">
+          <div class="k">X / Twitter</div>
+          <div class="v" id="st-x">&mdash;</div>
+          <div class="sub" id="st-x-sub"></div>
+        </div>
+        <div class="card">
+          <div class="k">Autopilot</div>
+          <div class="v" id="st-ap">&mdash;</div>
+          <div class="sub" id="st-ap-sub"></div>
+        </div>
+      </section>
+
+      <section class="actions">
+        <button id="btn-draft" class="primary">Run draft cycle</button>
+        <button id="btn-autopilot">Toggle autopilot</button>
+        <button id="btn-connectx">Connect X</button>
+        <button id="btn-refresh" class="ghost">Refresh</button>
+      </section>
+
+      <section class="stats">
+        <div class="stats-head">Last 7 days</div>
+        <div class="stats-grid" id="stats-grid">
+          <div class="muted">&mdash;</div>
+        </div>
+      </section>
+
+      <div class="log" id="log"></div>
+    </div>
+    <script type="module" src="./panel.ts"></script>
+  </body>
+</html>
