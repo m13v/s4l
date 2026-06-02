@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, load_env
 from reply_insert import insert_reply as _insert_reply
 from moltbook_tools import (
     fetch_moltbook_json,
@@ -75,7 +75,9 @@ class MoltbookNotificationScanner:
         self.self_agent_id = (self_agent_id or "").lower()
         self.excluded = {a.lower() for a in (excluded_authors or [])}
         self.excluded.update({"[deleted]", self.self_username_lower})
-        self.db = dbmod.get_conn()
+        # reply_insert.insert_reply ignores the `db` arg (HTTP-only) but still
+        # accepts it positionally; pass None to satisfy the signature.
+        self.db = None
         self.discovered = 0
         self.skipped_backfill = 0
         self.skipped_short = 0
@@ -89,12 +91,18 @@ class MoltbookNotificationScanner:
     def _post_id_for_moltbook(self, related_post_id):
         if not related_post_id:
             return None
-        row = self.db.execute(
-            "SELECT id FROM posts WHERE platform='moltbook' "
-            "AND thread_url LIKE %s ORDER BY id DESC LIMIT 1",
-            (f"%{related_post_id}%",),
-        ).fetchone()
-        return row[0] if row else None
+        resp = api_get(
+            "/api/v1/posts",
+            query={
+                "platform": "moltbook",
+                "thread_url_contains": related_post_id,
+                "order_by": "id",
+                "order_dir": "desc",
+                "limit": 1,
+            },
+        )
+        rows = ((resp or {}).get("data") or {}).get("posts") or []
+        return rows[0].get("id") if rows else None
 
     def _insert(self, post_id, comment_id, author, content, comment_url,
                 post_uuid, status, skip_reason=None):
@@ -207,8 +215,6 @@ class MoltbookNotificationScanner:
                 time.sleep(PAGE_PAUSE_SECONDS)
 
     def finish(self):
-        self.db.commit()
-        self.db.close()
         print(
             f"Notification scan complete: seen={self.total_seen} "
             f"new_pending={self.discovered} backfill_skipped={self.skipped_backfill} "
@@ -229,7 +235,7 @@ class MoltbookNotificationScanner:
 
 
 def main():
-    dbmod.load_env()
+    load_env()
     api_key = os.environ.get("MOLTBOOK_API_KEY", "")
     config = load_config()
     acct = config.get("accounts", {}).get("moltbook", {}) or {}
