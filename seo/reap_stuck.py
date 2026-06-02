@@ -26,91 +26,28 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 
+sys.path.insert(0, os.path.join(ROOT_DIR, "scripts"))
+from http_api import api_post, load_env  # noqa: E402
 
-def load_env():
-    env_path = os.path.join(ROOT_DIR, ".env")
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-
-
-def get_conn():
-    import psycopg2
-    load_env()
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+load_env()
 
 
 def reap(minutes: int, dry_run: bool = False) -> int:
     """Return number of rows reset."""
-    conn = get_conn()
-    cur = conn.cursor()
-    total = 0
+    resp = api_post("/api/v1/seo/reap", {"minutes": int(minutes), "dry_run": bool(dry_run)})
+    data = resp.get("data") or {}
 
-    interval = f"{minutes} minutes"
+    for r in data.get("scoring") or []:
+        print(f"  [seo_keywords] scoring→unscored | age={float(r.get('age_min') or 0):.0f}min | "
+              f"[{r.get('product')}] {str(r.get('keyword') or '')[:60]}")
+    for r in data.get("in_progress") or []:
+        print(f"  [seo_keywords] in_progress→{r.get('target')} | age={float(r.get('age_min') or 0):.0f}min | "
+              f"score={r.get('score')} | [{r.get('product')}] {str(r.get('keyword') or '')[:60]}")
+    for r in data.get("gsc") or []:
+        print(f"  [gsc_queries] in_progress→pending | age={float(r.get('age_min') or 0):.0f}min | "
+              f"[{r.get('product')}] {str(r.get('query') or '')[:60]}")
 
-    # 1. seo_keywords.scoring → unscored
-    cur.execute(f"""
-        SELECT product, keyword, EXTRACT(EPOCH FROM (NOW()-updated_at))/60
-        FROM seo_keywords
-        WHERE status = 'scoring' AND updated_at < NOW() - INTERVAL '{interval}'
-    """)
-    scoring_rows = cur.fetchall()
-    for product, kw, age in scoring_rows:
-        print(f"  [seo_keywords] scoring→unscored | age={age:.0f}min | [{product}] {kw[:60]}")
-
-    if not dry_run and scoring_rows:
-        cur.execute(f"""
-            UPDATE seo_keywords SET status='unscored', updated_at=NOW()
-            WHERE status='scoring' AND updated_at < NOW() - INTERVAL '{interval}'
-        """)
-    total += len(scoring_rows)
-
-    # 2. seo_keywords.in_progress → pending (if scored) or unscored
-    cur.execute(f"""
-        SELECT product, keyword, score, EXTRACT(EPOCH FROM (NOW()-updated_at))/60
-        FROM seo_keywords
-        WHERE status = 'in_progress' AND updated_at < NOW() - INTERVAL '{interval}'
-    """)
-    ip_rows = cur.fetchall()
-    for product, kw, score, age in ip_rows:
-        target = "pending" if (score is not None and score >= 1.5) else "unscored"
-        print(f"  [seo_keywords] in_progress→{target} | age={age:.0f}min | score={score} | [{product}] {kw[:60]}")
-
-    if not dry_run and ip_rows:
-        cur.execute(f"""
-            UPDATE seo_keywords
-            SET status = CASE WHEN score IS NOT NULL AND score >= 1.5 THEN 'pending' ELSE 'unscored' END,
-                updated_at = NOW()
-            WHERE status='in_progress' AND updated_at < NOW() - INTERVAL '{interval}'
-        """)
-    total += len(ip_rows)
-
-    # 3. gsc_queries.in_progress → pending
-    cur.execute(f"""
-        SELECT product, query, EXTRACT(EPOCH FROM (NOW()-updated_at))/60
-        FROM gsc_queries
-        WHERE status = 'in_progress' AND updated_at < NOW() - INTERVAL '{interval}'
-    """)
-    gsc_rows = cur.fetchall()
-    for product, q, age in gsc_rows:
-        print(f"  [gsc_queries] in_progress→pending | age={age:.0f}min | [{product}] {q[:60]}")
-
-    if not dry_run and gsc_rows:
-        cur.execute(f"""
-            UPDATE gsc_queries SET status='pending', updated_at=NOW()
-            WHERE status='in_progress' AND updated_at < NOW() - INTERVAL '{interval}'
-        """)
-    total += len(gsc_rows)
-
-    if not dry_run:
-        conn.commit()
-    cur.close()
-    conn.close()
-    return total
+    return int(data.get("total") or 0)
 
 
 def main():
