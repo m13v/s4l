@@ -48,8 +48,7 @@ if ENV_PATH.exists():
 
 sys.path.insert(0, str(ROOT_DIR / "scripts"))
 from project_slugs import get_client_slug as _client_slug  # noqa: E402
-
-import psycopg2  # noqa: E402
+from http_api import api_get  # noqa: E402
 
 
 METRIC_EVENTS = {
@@ -195,18 +194,11 @@ def _recent_improved_paths(product, cooldown_days=3):
     to a different page today.
     """
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT page_path FROM seo_page_improvements "
-            "WHERE product = %s "
-            f"AND created_at >= NOW() - INTERVAL '{int(cooldown_days)} days'",
-            (product,),
-        )
-        paths = {r[0] for r in cur.fetchall() if r and r[0]}
-        cur.close()
-        conn.close()
-        return paths
+        resp = api_get("/api/v1/seo/page-improvements",
+                       query={"mode": "recent_paths", "product": product,
+                              "cooldown_days": int(cooldown_days)})
+        paths = (resp.get("data") or {}).get("paths") or []
+        return {p for p in paths if p}
     except Exception as e:
         print(f"  cooldown lookup failed (continuing without rotation): {e}", file=sys.stderr)
         return set()
@@ -238,25 +230,12 @@ def _metric_counts_for_path(api_key, project_id, domain, path, days):
 def _bookings_counts(client_slug, days):
     """Count real (non-test) bookings in the window. Return None on any failure
     so the brief records 'unknown' rather than a misleading 0."""
-    url = os.environ.get("BOOKINGS_DATABASE_URL")
-    if not url or not client_slug:
+    if not client_slug:
         return None
     try:
-        conn = psycopg2.connect(url)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FILTER (WHERE attendee_email NOT LIKE '%%test%%' "
-            "AND attendee_email NOT LIKE '%%example%%' "
-            "AND attendee_name NOT LIKE '%%TEST%%' "
-            "AND attendee_name NOT LIKE '%%John Doe%%') "
-            "FROM cal_bookings WHERE client_slug = %s "
-            "AND created_at >= NOW() - INTERVAL '" + str(int(days)) + " days'",
-            (client_slug,),
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        return int(row[0] or 0)
+        resp = api_get("/api/v1/seo/bookings",
+                       query={"mode": "counts", "client": client_slug, "days": int(days)})
+        return int((resp.get("data") or {}).get("count") or 0)
     except Exception as e:
         print(f"  bookings query failed: {e}", file=sys.stderr)
         return None
@@ -264,28 +243,10 @@ def _bookings_counts(client_slug, days):
 
 def _history_for_page(product, page_path, limit=5):
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT created_at, status, diff_summary, rationale, commit_sha "
-            "FROM seo_page_improvements "
-            "WHERE product = %s AND page_path = %s "
-            "ORDER BY created_at DESC LIMIT %s",
-            (product, page_path, limit),
-        )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return [
-            {
-                "at": r[0].isoformat() if r[0] else None,
-                "status": r[1],
-                "diff_summary": r[2],
-                "rationale": r[3],
-                "commit_sha": r[4],
-            }
-            for r in rows
-        ]
+        resp = api_get("/api/v1/seo/page-improvements",
+                       query={"mode": "history", "product": product,
+                              "page_path": page_path, "limit": int(limit)})
+        return (resp.get("data") or {}).get("rows") or []
     except Exception as e:
         print(f"  history lookup failed: {e}", file=sys.stderr)
         return []
