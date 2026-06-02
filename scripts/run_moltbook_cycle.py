@@ -324,22 +324,31 @@ def post_and_log(decisions, claude_session_id):
             assigned_mode=(style_assignment or {}).get("mode"),
         )
 
+        # POST /api/v1/posts requires a valid http(s) our_url for active rows
+        # (it derives thread_author_handle from thread_author and hardcodes
+        # feedback_report_used=TRUE, so those are omitted here). A blank
+        # our_url would 400 and crash the loop; the comment is already live,
+        # so on the rare parse miss we log a warning and skip the DB row
+        # rather than abort the cycle. `project` is the endpoint's key name.
+        if not our_url:
+            log(f"  WARNING: posted to {tid} but could not parse our_url; "
+                f"skipping DB log for this row")
+            posted += 1
+            continue
         api_post(
             "/api/v1/posts",
             {
                 "platform": "moltbook",
                 "thread_url": p.get("thread_url", ""),
                 "thread_author": p.get("thread_author", "various"),
-                "thread_author_handle": p.get("thread_author", "various"),
                 "thread_title": p.get("thread_title", ""),
                 "thread_content": "",
                 "our_url": our_url,
                 "our_content": text,
                 "our_account": "matthew-autoposter",
                 "source_summary": "moltbook cycle comment",
-                "project_name": p.get("matched_project", ""),
+                "project": p.get("matched_project", ""),
                 "engagement_style": validated_style or "",
-                "feedback_report_used": True,
                 "language": p.get("language", "en"),
                 "status": "active",
                 "claude_session_id": claude_session_id,
@@ -516,28 +525,14 @@ def main():
     elapsed = int(time.time() - run_start)
     log(f"=== Cycle complete: posted={posted}, failed={failed}, elapsed={elapsed}s ===")
 
-    # Fetch real Claude cost from the session we ran.
+    # Fetch real Claude cost from the session we ran (orchestrator/SDK billing).
     cycle_cost = 0.0
     try:
-        import psycopg2
-        _env_path = os.path.join(REPO_DIR, '.env')
-        if os.path.exists(_env_path):
-            with open(_env_path) as _f:
-                for _line in _f:
-                    _line = _line.strip()
-                    if _line and not _line.startswith('#') and '=' in _line:
-                        _k, _v = _line.split('=', 1)
-                        os.environ.setdefault(_k.strip(), _v.strip())
-        _conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        _cur = _conn.cursor()
-        _cur.execute(
-            "SELECT COALESCE(orchestrator_cost_usd, 0) FROM claude_sessions WHERE session_id = %s",
-            (claude_session_id,),
+        _resp = api_get(
+            "/api/v1/claude-sessions/cost",
+            query={"session_id": claude_session_id},
         )
-        _row = _cur.fetchone()
-        cycle_cost = float(_row[0]) if _row else 0.0
-        _cur.close()
-        _conn.close()
+        cycle_cost = float(((_resp or {}).get("data") or {}).get("parent_cost") or 0.0)
     except Exception as _e:
         log(f"WARNING: could not fetch session cost: {_e}")
 
