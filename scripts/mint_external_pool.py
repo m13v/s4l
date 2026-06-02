@@ -115,57 +115,32 @@ def mint_pool(*, project_name: str, platforms: list, per_platform: int,
 
 
 def pool_status(project_filter: str | None = None) -> list[dict]:
-    conn = dbmod.get_conn()
-    try:
-        cur = conn.execute(
-            "SELECT project_name, platform, "
-            "       COUNT(*) FILTER (WHERE post_id IS NULL AND reply_id IS NULL) AS available, "
-            "       COUNT(*) FILTER (WHERE post_id IS NOT NULL OR reply_id IS NOT NULL) AS claimed, "
-            "       COUNT(*) AS total, "
-            "       MAX(minted_at) AS last_minted "
-            "FROM post_links "
-            "WHERE minted_session LIKE 'pool:%%' "
-            + ("AND project_name = %s " if project_filter else "")
-            + "GROUP BY project_name, platform ORDER BY project_name, platform",
-            (project_filter,) if project_filter else (),
-        )
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
+    query = {"project_name": project_filter} if project_filter else None
+    resp = api_get("/api/v1/post-links/pool-status", query=query)
+    return (resp.get("data") or {}).get("rows") or []
 
 
 def export_csv(out_dir: str, project_filter: str | None = None) -> dict:
     os.makedirs(out_dir, exist_ok=True)
-    conn = dbmod.get_conn()
+    query = {"project_name": project_filter} if project_filter else None
+    resp = api_get("/api/v1/post-links/pool-export", query=query)
+    all_rows = (resp.get("data") or {}).get("rows") or []
+
+    by_project: dict[str, list[dict]] = {}
+    for r in all_rows:
+        by_project.setdefault(r['project_name'], []).append(r)
+
     written = {}
-    try:
-        cur = conn.execute(
-            "SELECT DISTINCT project_name FROM post_links "
-            "WHERE minted_session LIKE 'pool:%%' "
-            + ("AND project_name = %s " if project_filter else "")
-            + "ORDER BY project_name",
-            (project_filter,) if project_filter else (),
-        )
-        projects = [dict(r)['project_name'] for r in cur.fetchall()]
-        for project_name in projects:
-            cur = conn.execute(
-                "SELECT code, platform, target_url FROM post_links "
-                "WHERE minted_session LIKE 'pool:%%' AND project_name = %s "
-                "ORDER BY platform, code",
-                (project_name,),
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-            slug = _slug(project_name)
-            path = os.path.join(out_dir, f"kent-shortlinks-{slug}.csv")
-            with open(path, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['short_path', 'destination_url', 'platform', 'project'])
-                for r in rows:
-                    w.writerow([f"/r/{r['code']}", r['target_url'], r['platform'], project_name])
-            written[project_name] = {'path': path, 'rows': len(rows)}
-        return written
-    finally:
-        conn.close()
+    for project_name, rows in by_project.items():
+        slug = _slug(project_name)
+        path = os.path.join(out_dir, f"kent-shortlinks-{slug}.csv")
+        with open(path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['short_path', 'destination_url', 'platform', 'project'])
+            for r in rows:
+                w.writerow([f"/r/{r['code']}", r['target_url'], r['platform'], project_name])
+        written[project_name] = {'path': path, 'rows': len(rows)}
+    return written
 
 
 def main():
