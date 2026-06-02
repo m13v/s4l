@@ -102,14 +102,15 @@ log "target_account=$TARGET_ACCOUNT"
 # Step 1: compute target type + exclusion lists (scoped to TARGET_ACCOUNT)
 log "step 1: querying Postgres for target_type, draft_count, exclusions (account=$TARGET_ACCOUNT)"
 /opt/homebrew/bin/python3.11 - > "$PICK_FILE" 2>>"$LOG_FILE" <<'PY'
-import glob, json, os, random, psycopg2
-env = {}
-for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
-    if '=' in ln and not ln.strip().startswith('#'):
-        k, v = ln.split('=', 1)
-        env[k.strip()] = v.strip()
-conn = psycopg2.connect(env['DATABASE_URL'])
-c = conn.cursor()
+import glob, json, os, random, sys
+from datetime import datetime
+# HTTP-only (2026-06-01): all media_posts reads route through
+# /api/v1/media-posts/picker-context via http_api. No DATABASE_URL, no
+# psycopg2, no fallback. The api_get call happens once below (after
+# target_account + recent_window_days are known) and every aggregate the
+# picker needs is read out of the returned context dict.
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_get
 
 # Inverse-recent-share weighting at TWO levels, mirroring the Twitter pipeline
 # (scripts/pick_project.py). Effective weight = config_weight / (1 + posts in
@@ -153,26 +154,20 @@ if account_record.get('post_type_weights'):
     post_type_weights_cfg = account_record['post_type_weights']
 account_tlh_config = account_record.get('tlh') or {}
 
-# Last-N posted descriptor (kept for telemetry / log readability).
-c.execute(
-    "SELECT post_type FROM media_posts "
-    "WHERE status='posted' AND posted_urls ? 'instagram' "
-    "  AND target_account=%s "
-    "ORDER BY posted_at DESC LIMIT 10",
-    (target_account,),
+# Single HTTP read: every media_posts aggregate the picker needs, scoped to
+# this account + recency window. Local weighting / glob / JSON shaping below
+# is unchanged; only the data source moved from psycopg2 to the API.
+_pc = api_get(
+    '/api/v1/media-posts/picker-context',
+    query={'target_account': target_account, 'window_days': recent_window_days},
 )
-last10 = [r[0] for r in c.fetchall()]
+ctx = (_pc.get('data') or {})
+
+# Last-N posted descriptor (kept for telemetry / log readability).
+last10 = list(ctx.get('last10_posted') or [])
 
 # ---- LEVEL 1: organic vs product, inverse-recent-share (or FORCE_TYPE) ----
-c.execute(
-    "SELECT post_type, COUNT(*) FROM media_posts "
-    "WHERE status='posted' AND posted_urls ? 'instagram' "
-    "  AND target_account=%s "
-    "  AND posted_at > NOW() - INTERVAL %s "
-    "GROUP BY post_type",
-    (target_account, f'{recent_window_days} days'),
-)
-recent_type_counts = {r[0]: r[1] for r in c.fetchall() if r[0]}
+recent_type_counts = {k: v for k, v in (ctx.get('recent_type_counts') or {}).items() if k}
 for t in ('organic', 'product'):
     recent_type_counts.setdefault(t, 0)
 type_weights = {
@@ -208,17 +203,7 @@ if target == 'product':
         enabled = [{'name': 'mk0r', 'weight': 1}]
         mixer_enabled_projects = ['mk0r']
 
-    c.execute(
-        "SELECT project_name, COUNT(*) FROM media_posts "
-        "WHERE post_type='product' AND status='posted' "
-        "  AND posted_urls ? 'instagram' "
-        "  AND target_account=%s "
-        "  AND posted_at > NOW() - INTERVAL %s "
-        "  AND project_name IS NOT NULL "
-        "GROUP BY project_name",
-        (target_account, f'{recent_window_days} days'),
-    )
-    recent_proj_counts = {r[0]: r[1] for r in c.fetchall()}
+    recent_proj_counts = dict(ctx.get('recent_product_counts_by_project') or {})
     for p in enabled:
         project_post_counts[p['name']] = recent_proj_counts.get(p['name'], 0)
     project_weights = {
@@ -239,24 +224,22 @@ if target == 'product':
 
 # Per-(account, type, project) draft buffer. Each account has its own
 # rotation; a build-up on matt_diak should not block a heartfulmatthew render.
+# draft_counts comes back grouped by (post_type, project_name); sum the rows
+# the same way the two SQL variants did (product = type+project, organic =
+# type only, project-agnostic).
+_draft_rows = ctx.get('draft_counts') or []
 if target == 'product':
-    c.execute(
-        "SELECT COUNT(*) FROM media_posts "
-        "WHERE status='draft' AND post_type=%s AND project_name=%s "
-        "  AND target_account=%s",
-        (target, selected_project, target_account),
+    draft_count = sum(
+        int(r.get('count') or 0) for r in _draft_rows
+        if r.get('post_type') == target and r.get('project_name') == selected_project
     )
 else:
-    c.execute(
-        "SELECT COUNT(*) FROM media_posts "
-        "WHERE status='draft' AND post_type=%s "
-        "  AND target_account=%s",
-        (target, target_account),
+    draft_count = sum(
+        int(r.get('count') or 0) for r in _draft_rows
+        if r.get('post_type') == target
     )
-draft_count = c.fetchone()[0]
 
-c.execute("SELECT COALESCE(MAX(post_number), 0) + 1 FROM media_posts")
-next_num = c.fetchone()[0]
+next_num = int(ctx.get('next_post_number') or 1)
 
 # Audio policy: local-only, least-recently-used rotation. The render must
 # reuse the existing mixer/audio/ pool and NEVER source fresh audio from the
@@ -268,13 +251,17 @@ next_num = c.fetchone()[0]
 audio_dir = os.path.expanduser('~/social-autoposter/mixer/audio')
 local_files = sorted(glob.glob(os.path.join(audio_dir, '*.m4a')))
 
-c.execute(
-    "SELECT audio_source, COALESCE(posted_at, created_at) "
-    "FROM media_posts WHERE audio_source IS NOT NULL "
-    "  AND target_account=%s",
-    (target_account,),
-)
-audio_usage = [(r[0] or '', r[1]) for r in c.fetchall()]
+# audio_usage rows arrive as [audio_source, used_at_iso]; parse the ISO
+# timestamp back to a datetime so the LRU comparison + .isoformat() sort below
+# work exactly as they did with psycopg2-returned datetimes.
+def _parse_dt(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace('Z', '+00:00'))
+    except Exception:
+        return None
+audio_usage = [(r[0] or '', _parse_dt(r[1])) for r in (ctx.get('audio_usage') or [])]
 
 
 def _audio_token(path):
@@ -299,21 +286,9 @@ for f in local_files:
 audio_lru.sort(key=lambda x: (1, x[1].isoformat()) if x[1] else (0, ''))
 local_audio_lru = [f for f, _ in audio_lru]
 
-c.execute(
-    "SELECT DISTINCT metadata->>'theme_angle' FROM media_posts "
-    "WHERE created_at > NOW() - INTERVAL '14 days' "
-    "  AND metadata->>'theme_angle' IS NOT NULL "
-    "  AND target_account=%s",
-    (target_account,),
-)
-used_angles = sorted({r[0] for r in c.fetchall() if r[0]})
+used_angles = sorted({a for a in (ctx.get('used_theme_angles_14d') or []) if a})
 
-c.execute(
-    "SELECT DISTINCT variant_id FROM media_posts "
-    "WHERE variant_id IS NOT NULL AND target_account=%s",
-    (target_account,),
-)
-used_variants = sorted({r[0] for r in c.fetchall()})
+used_variants = sorted({v for v in (ctx.get('used_variant_ids') or []) if v is not None})
 
 print(json.dumps({
     'target_account': target_account,
@@ -339,7 +314,6 @@ print(json.dumps({
     # these overrides for source_dir, variant_prefix, and story_brief.
     'account_tlh_config': account_tlh_config,
 }, indent=2))
-conn.close()
 PY
 
 if [ ! -s "$PICK_FILE" ]; then
