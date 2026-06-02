@@ -1,7 +1,8 @@
 # social-autoposter Python deps.
-# Installed by bin/cli.js via `pip3 install -r requirements.txt` on init/update.
-# Playwright browser binaries are downloaded separately (CLI runs
-# `python3 -m playwright install chromium`).
+# Installed by bin/cli.js on init/update into the SAPS_PYTHON interpreter
+# (Homebrew python), via `<saps_python> -m pip install -r requirements.txt`.
+# Playwright browser binaries are downloaded separately (same interpreter:
+# `<saps_python> -m playwright install chromium`).
 
 psycopg2-binary
 playwright
