@@ -34,7 +34,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
+from http_api import api_get, api_patch, api_post
 
 
 IG_ENV_PATH = Path.home() / "instagram-graph-api" / ".env"
@@ -149,18 +149,18 @@ def main():
         cfg = {}
     accounts_cfg = ((cfg.get("instagram") or {}).get("accounts") or [])
 
-    db = dbmod.get_conn()
-
-    rows = db.execute(
-        """
-        SELECT id, our_url, our_account, upvotes, comments_count, views
-        FROM posts
-        WHERE platform = 'instagram'
-          AND status = 'active'
-          AND our_url IS NOT NULL
-        ORDER BY engagement_updated_at ASC NULLS FIRST
-        """
-    ).fetchall()
+    resp = api_get(
+        "/api/v1/posts",
+        query={
+            "platform": "instagram",
+            "status": "active",
+            "has_our_url": "true",
+            "order_by": "id",
+            "order_dir": "asc",
+            "limit": 500,
+        },
+    )
+    rows = (resp.get("data") or {}).get("posts") or []
     if args.limit:
         rows = rows[: args.limit]
 
@@ -218,18 +218,22 @@ def main():
             old = (r["upvotes"] or 0, r["comments_count"] or 0, r["views"] or 0)
             new = (likes, comments, views or 0)
 
-            db.execute(
-                """
-                UPDATE posts
-                SET upvotes=%s, comments_count=%s, views=%s,
-                    engagement_updated_at=NOW(), status_checked_at=NOW(),
-                    deletion_detect_count=0
-                WHERE id=%s
-                """,
-                (likes, comments, views, r["id"]),
+            api_patch(
+                f"/api/v1/posts/{r['id']}",
+                {
+                    "upvotes": likes,
+                    "comments_count": comments,
+                    "views": views,
+                    "stamp_engagement_now": True,
+                    "stamp_status_checked_now": True,
+                    "reset_deletion_detect_count": True,
+                },
             )
             if views is not None:
-                dbmod.snapshot_post_views(db, r["id"], views)
+                api_post(
+                    "/api/v1/post-views-daily/snapshot",
+                    {"post_id": r["id"], "views": views},
+                )
                 views_refreshed += 1
             if new != old:
                 updated += 1
@@ -240,10 +244,6 @@ def main():
             )
             # Be polite to the Graph API.
             time.sleep(0.2)
-
-        db.commit()
-
-    db.close()
 
     log(
         f"[stats-ig] done: checked={checked} updated={updated} "
