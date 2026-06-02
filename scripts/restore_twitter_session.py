@@ -56,7 +56,12 @@ def _attach():
         new = json.load(urllib.request.urlopen(
             urllib.request.Request(f"{CDP}/json/new?about:blank", method="PUT"), timeout=10))
         page = new
-    ws = create_connection(page["webSocketDebuggerUrl"], timeout=20)
+    # suppress_origin: Chrome 111+ enforces CDP WebSocket origin checking and
+    # rejects the handshake with 403 unless Chrome was launched with
+    # --remote-allow-origins. The harness Chrome (twitter-backend.sh) is launched
+    # without that flag, so we must suppress the Origin header (localhost CDP is
+    # already privileged), matching setup_twitter_auth.py / copy_browser_cookies.py.
+    ws = create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
     state = {"id": 0}
 
     def send(method, params=None):
