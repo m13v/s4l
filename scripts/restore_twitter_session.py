@@ -31,6 +31,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get  # noqa: E402
 from twitter_account import resolve_handle  # noqa: E402
 
+# Local 0600 cookie mirror — the keychain-independent restore source for
+# persistent machines (Gap B). Tried before the server store. Stdlib-only;
+# guarded so a path quirk never breaks the cycle preflight.
+try:
+    import twitter_cookie_mirror  # noqa: E402
+except Exception:
+    twitter_cookie_mirror = None
+
 try:
     from websocket import create_connection
 except ImportError:
@@ -96,12 +104,50 @@ def _logged_in(send):
     return _has_auth_cookie(send)
 
 
-def main():
-    handle = resolve_handle()
-    if not handle:
-        print("restore_twitter_session: no handle configured; skipping", file=sys.stderr)
-        return 0
+def _inject(send, cookies) -> int:
+    """Inject CDP-shaped cookies via Network.setCookie. Returns accepted count."""
+    send("Network.enable")
+    ok_count = 0
+    for c in cookies:
+        params = {k: c[k] for k in (
+            "name", "value", "domain", "path", "secure", "httpOnly",
+            "sameSite", "expires") if k in c and c[k] is not None}
+        r = send("Network.setCookie", params)
+        if r.get("result", {}).get("success", True):
+            ok_count += 1
+    return ok_count
 
+
+def _stored_cookies():
+    """Return (cookies, source). Tries the LOCAL mirror first — it's the only
+    durable source on a persistent machine, where the server store is skipped
+    for lack of a social_accounts row — then falls back to the server store
+    (the durable source on hourly-reseeded AppMaker VMs)."""
+    if twitter_cookie_mirror is not None:
+        try:
+            mirrored = twitter_cookie_mirror.load_cookies()
+        except Exception:
+            mirrored = []
+        if mirrored:
+            return mirrored, f"local mirror ({twitter_cookie_mirror.MIRROR_PATH.name})"
+
+    handle = None
+    try:
+        handle = resolve_handle()
+    except Exception:
+        handle = None
+    if handle:
+        try:
+            resp = api_get("/api/v1/twitter/session-cookies", query={"handle": handle})
+            cookies = ((resp or {}).get("data") or {}).get("cookies") or []
+            if cookies:
+                return cookies, f"server store (@{handle})"
+        except Exception as e:
+            print(f"restore_twitter_session: server store fetch failed ({e})", file=sys.stderr)
+    return [], None
+
+
+def main():
     try:
         ws, send = _attach()
     except Exception as e:
@@ -110,34 +156,24 @@ def main():
 
     try:
         if _logged_in(send):
-            print(f"restore_twitter_session: already logged in as @{handle}; no-op")
+            print("restore_twitter_session: already logged in; no-op")
             return 0
 
-        print(f"restore_twitter_session: logged out, fetching stored cookies for @{handle}...")
-        resp = api_get("/api/v1/twitter/session-cookies", query={"handle": handle})
-        data = (resp or {}).get("data") or {}
-        cookies = data.get("cookies") or []
+        cookies, source = _stored_cookies()
         if not cookies:
-            print("restore_twitter_session: no stored cookies; manual re-login required", file=sys.stderr)
+            print("restore_twitter_session: no stored cookies (local mirror empty + no "
+                  "server store); manual connect_x required", file=sys.stderr)
             return 1
 
-        # CDP Network.setCookies wants url or domain/path. The stored cookies are
-        # already CDP-shaped (from Network.getAllCookies), so pass them straight.
-        send("Network.enable")
-        ok_count = 0
-        for c in cookies:
-            params = {k: c[k] for k in (
-                "name", "value", "domain", "path", "secure", "httpOnly",
-                "sameSite", "expires") if k in c and c[k] is not None}
-            r = send("Network.setCookie", params)
-            if r.get("result", {}).get("success", True):
-                ok_count += 1
+        print(f"restore_twitter_session: logged out, restoring from {source}...")
+        ok_count = _inject(send, cookies)
         print(f"restore_twitter_session: injected {ok_count}/{len(cookies)} cookies")
 
         if _logged_in(send):
-            print(f"restore_twitter_session: RESTORED @{handle} session")
+            print(f"restore_twitter_session: RESTORED session from {source}")
             return 0
-        print("restore_twitter_session: injection done but still logged out (cookies may be expired)", file=sys.stderr)
+        print("restore_twitter_session: injection done but still logged out "
+              "(cookies may be expired); manual connect_x required", file=sys.stderr)
         return 1
     finally:
         try:
