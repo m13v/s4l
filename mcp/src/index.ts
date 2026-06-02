@@ -39,6 +39,17 @@ import {
 } from "./setup.js";
 import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
+import {
+  registerAppTool,
+  registerAppResource,
+  RESOURCE_MIME_TYPE,
+} from "@modelcontextprotocol/ext-apps/server";
+import { fileURLToPath } from "node:url";
+
+// MCP Apps control panel. The self-contained HTML is built by vite
+// (vite-plugin-singlefile) into dist/panel.html alongside this compiled file.
+const DIST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PANEL_URI = "ui://social-autoposter/panel.html";
 
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
@@ -808,6 +819,100 @@ server.registerTool(
             : "You are on the latest published version.",
     });
   }
+);
+
+// ---- panel: MCP Apps control surface --------------------------------------
+// A self-contained HTML view rendered by hosts that support MCP Apps (Claude
+// desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
+// the tools above (draft_cycle / autopilot / setup / get_stats) through the host
+// and re-reads status. The tool itself returns the first-paint snapshot so the
+// view has data the instant it loads.
+
+// Is either launchd job (cycle / daily updater) currently loaded?
+async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
+  try {
+    const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
+    const lines = res.stdout.split("\n");
+    return {
+      autopilot_on: lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL)),
+      auto_update_on: lines.some((l) => l.includes(UPDATER_LABEL)),
+    };
+  } catch {
+    return { autopilot_on: false, auto_update_on: false };
+  }
+}
+
+// Assemble everything the panel needs in one shot (projects + X + autopilot +
+// version). Resilient: any probe that throws degrades to a safe default rather
+// than failing the whole snapshot.
+async function buildSnapshot() {
+  const projects = listManagedProjectStatus().map((p) => ({
+    name: p.name,
+    ready: p.ready,
+    missing_required: p.missing_required,
+  }));
+  const [x, ap, ver] = await Promise.all([
+    xStatus().catch(() => ({ connected: false, state: "" }) as any),
+    autopilotLoaded(),
+    versionStatus().catch(() => ({ installed: VERSION, latest: null, update_available: false }) as any),
+  ]);
+  return {
+    projects,
+    projects_total: projects.length,
+    projects_ready: projects.filter((p) => p.ready).length,
+    x_connected: !!x.connected,
+    x_state: x.state || "",
+    autopilot_on: ap.autopilot_on,
+    auto_update_on: ap.auto_update_on,
+    version: ver.installed || VERSION,
+    latest_version: ver.latest ?? null,
+    update_available: !!ver.update_available,
+  };
+}
+
+registerAppTool(
+  server,
+  "panel",
+  {
+    title: "Social Autoposter panel",
+    description:
+      "Open the Social Autoposter control panel: a visual dashboard showing project setup, X " +
+      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle " +
+      "autopilot, connect X, and refresh. Use when the user asks to see the panel, dashboard, " +
+      "status, or controls. Hosts without UI support get the same data as text.",
+    inputSchema: {},
+    outputSchema: { snapshot: z.string() },
+    _meta: { ui: { resourceUri: PANEL_URI } },
+  },
+  async () => {
+    const snap = await buildSnapshot();
+    const human =
+      `Social Autoposter v${snap.version}` +
+      (snap.update_available && snap.latest_version ? ` (update to ${snap.latest_version})` : "") +
+      ` — projects ${snap.projects_ready}/${snap.projects_total} ready, ` +
+      `X ${snap.x_connected ? "connected" : "not connected"}, ` +
+      `autopilot ${snap.autopilot_on ? "on" : "off"}.`;
+    return {
+      content: [{ type: "text" as const, text: human }],
+      structuredContent: { snapshot: JSON.stringify(snap) },
+    };
+  }
+);
+
+registerAppResource(
+  server,
+  "Social Autoposter panel",
+  PANEL_URI,
+  { mimeType: RESOURCE_MIME_TYPE },
+  async () => ({
+    contents: [
+      {
+        uri: PANEL_URI,
+        mimeType: RESOURCE_MIME_TYPE,
+        text: fs.readFileSync(path.join(DIST_DIR, "panel.html"), "utf-8"),
+      },
+    ],
+  })
 );
 
 async function main() {
