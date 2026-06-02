@@ -51,7 +51,7 @@
     "saps_python": {
       "type": "string",
       "title": "Python interpreter",
-      "description": "Python used by the pipeline (must have psycopg2 etc). Leave as default unless you know you need a different one.",
+      "description": "Python used by the pipeline (needs the deps in requirements.txt). Leave as default unless you know you need a different one.",
       "required": false,
       "default": "/opt/homebrew/bin/python3"
     }
