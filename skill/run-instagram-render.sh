@@ -383,13 +383,12 @@ UNPROVEN_JSON_FILE="/tmp/ig_unproven_pick_$(date +%s)_$$.json"
 echo '{"use": false, "reason": "default"}' > "$UNPROVEN_JSON_FILE"
 if [ "$TARGET" = "organic" ]; then
   /opt/homebrew/bin/python3.11 - "$UNPROVEN_JSON_FILE" > /dev/null 2>>"$LOG_FILE" <<'PY'
-import json, os, random, sys, glob, psycopg2
+import json, os, random, sys, glob
+# HTTP-only (2026-06-01): used-clip basenames come from
+# /api/v1/media-posts/unproven-clips. No DATABASE_URL, no psycopg2.
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_get
 out_path = sys.argv[1]
-env = {}
-for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
-    if '=' in ln and not ln.strip().startswith('#'):
-        k, v = ln.split('=', 1)
-        env[k.strip()] = v.strip()
 # Resolve per-account unproven_dir override from config.json. If the
 # account opts out (tlh.unproven_dir == null) the step short-circuits.
 cfg = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
@@ -413,20 +412,14 @@ if unproven_dir is None:
         json.dump(result, f, indent=2)
     raise SystemExit(0)
 try:
-    conn = psycopg2.connect(env['DATABASE_URL'])
-    c = conn.cursor()
     target_account = os.environ.get('TARGET_ACCOUNT', '').strip()
     if not target_account:
         raise SystemExit("TARGET_ACCOUNT env var missing in unproven-clip step")
-    c.execute(
-        "SELECT DISTINCT metadata->>'unproven_clip_basename' "
-        "FROM media_posts "
-        "WHERE metadata ? 'unproven_clip_basename' "
-        "  AND target_account=%s",
-        (target_account,),
+    _uc = api_get(
+        '/api/v1/media-posts/unproven-clips',
+        query={'target_account': target_account},
     )
-    used = {r[0] for r in c.fetchall() if r[0]}
-    conn.close()
+    used = {b for b in ((_uc.get('data') or {}).get('basenames') or []) if b}
     if not os.path.isdir(unproven_dir):
         result = {"use": False, "reason": "unproven dir missing", "dir": unproven_dir}
     else:
@@ -703,26 +696,21 @@ if [ ! -f "$OUT_CAP" ]; then
 fi
 
 ROW_OK=$(/opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$TARGET" 2>>"$LOG_FILE" <<'PY'
-import json, os, psycopg2, sys
-env = {}
-for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
-    if '=' in ln and not ln.strip().startswith('#'):
-        k, v = ln.split('=', 1)
-        env[k.strip()] = v.strip()
-c = psycopg2.connect(env['DATABASE_URL']).cursor()
-c.execute(
-    "SELECT post_number, post_type, variant_id, status FROM media_posts WHERE post_number=%s",
-    (int(sys.argv[1]),),
-)
-r = c.fetchone()
-if not r:
+import os, sys
+# HTTP-only (2026-06-01): row check via /api/v1/media-posts/by-number/<n>.
+# No DATABASE_URL, no psycopg2. ok_on_404 lets us print MISSING ourselves.
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_get
+resp = api_get(f"/api/v1/media-posts/by-number/{int(sys.argv[1])}", ok_on_404=True)
+row = None if resp.get('_not_found') else (resp.get('data') or {}).get('media_post')
+if not row:
     print("MISSING")
-elif r[1] != sys.argv[2]:
-    print(f"BAD_TYPE got={r[1]} want={sys.argv[2]}")
-elif r[3] != 'draft':
-    print(f"BAD_STATUS got={r[3]} want=draft")
+elif row.get('post_type') != sys.argv[2]:
+    print(f"BAD_TYPE got={row.get('post_type')} want={sys.argv[2]}")
+elif row.get('status') != 'draft':
+    print(f"BAD_STATUS got={row.get('status')} want=draft")
 else:
-    print(f"OK variant={r[2]}")
+    print(f"OK variant={row.get('variant_id')}")
 PY
 )
 
@@ -822,22 +810,14 @@ PY
     log "flipping media_posts row to status='caption_too_long' so picker skips it"
     FAILED_CT=1
     /opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$CAP_LEN" 2>>"$LOG_FILE" <<'PY'
-import os, sys, psycopg2
-env = {}
-for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
-    if '=' in ln and not ln.strip().startswith('#'):
-        k, v = ln.split('=', 1)
-        env[k.strip()] = v.strip()
-conn = psycopg2.connect(env['DATABASE_URL'])
-c = conn.cursor()
-c.execute(
-    "UPDATE media_posts SET status='caption_too_long', "
-    "metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('caption_too_long_len', %s::int, 'caption_too_long_at', NOW()::text), "
-    "updated_at=NOW() WHERE post_number=%s",
-    (int(sys.argv[2]), int(sys.argv[1])),
+import os, sys
+# HTTP-only (2026-06-01): status flip via PATCH /api/v1/media-posts/by-number.
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_patch
+api_patch(
+    f"/api/v1/media-posts/by-number/{int(sys.argv[1])}",
+    {"action": "caption_too_long", "caption_len": int(sys.argv[2])},
 )
-conn.commit()
-conn.close()
 print(f"flipped post-{int(sys.argv[1]):03d} to caption_too_long (len={sys.argv[2]})")
 PY
     exit 1
@@ -846,18 +826,15 @@ PY
   # Sync tightened caption into DB row.
   log "tighten loop succeeded; syncing caption_text column"
   /opt/homebrew/bin/python3.11 - "$NEXT_NUM" "$OUT_CAP" 2>>"$LOG_FILE" <<'PY'
-import os, sys, psycopg2
-env = {}
-for ln in open(os.path.expanduser('~/social-autoposter/.env')).read().splitlines():
-    if '=' in ln and not ln.strip().startswith('#'):
-        k, v = ln.split('=', 1)
-        env[k.strip()] = v.strip()
-conn = psycopg2.connect(env['DATABASE_URL'])
-c = conn.cursor()
+import os, sys
+# HTTP-only (2026-06-01): caption sync via PATCH /api/v1/media-posts/by-number.
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_patch
 cap = open(sys.argv[2]).read()
-c.execute("UPDATE media_posts SET caption_text=%s, updated_at=NOW() WHERE post_number=%s", (cap, int(sys.argv[1])))
-conn.commit()
-conn.close()
+api_patch(
+    f"/api/v1/media-posts/by-number/{int(sys.argv[1])}",
+    {"action": "sync_caption", "caption_text": cap},
+)
 print(f"synced post-{int(sys.argv[1]):03d} caption_text (len={len(cap)})")
 PY
   log "caption tightened OK (final len=${CAP_LEN})"
