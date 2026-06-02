@@ -309,31 +309,93 @@ def _terminate(pid: int, grace: float = 5.0) -> None:
         pass
 
 
+def _cdp_browser_close() -> bool:
+    """Ask Chrome to quit via CDP Browser.close. This is Chrome's own
+    graceful-shutdown RPC: it tears down renderers in order and flushes the
+    cookie store before exiting, which signal-based termination does not
+    reliably guarantee. Returns True if the RPC was issued; False if the
+    browser-harness CLI was missing, CDP was unreachable, or the call errored.
+    Issuing the RPC does NOT mean Chrome has exited yet — poll the pid."""
+    if not shutil.which(BROWSER_HARNESS_BIN) and not Path(BROWSER_HARNESS_BIN).exists():
+        return False
+    env = os.environ.copy()
+    env["BU_CDP_URL"] = CDP_URL
+    env["PATH"] = f"{Path.home()}/.local/bin:" + env.get("PATH", "")
+    try:
+        proc = subprocess.run(
+            [BROWSER_HARNESS_BIN],
+            input="cdp('Browser.close')\n",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return proc.returncode == 0
+
+
 def stop_chrome() -> dict:
     """Gracefully stop the managed Chrome — the tracked process AND any orphan
     still LISTENing on the debug port — so connect_x-launched Chromes can't
-    strand the port. SIGTERM-with-grace lets Chrome persist cookies to disk."""
-    targets: list[int] = []
-    pid = _read_pid()
-    if pid and _pid_alive(pid):
-        targets.append(pid)
-    for owner in _port_owner_pids():
-        if owner not in targets and _pid_alive(owner):
-            targets.append(owner)
+    strand the port.
 
-    for t in targets:
-        _terminate(t)
+    Two-stage shutdown: first ask Chrome to quit itself via CDP `Browser.close`
+    (its own graceful-quit RPC, which flushes the cookie SQLite synchronously
+    before exit). If the process exits within `CDP_QUIT_DEADLINE_SEC`, we're
+    done — cookies are durable. Only if CDP refuses or the process doesn't
+    exit in time do we fall back to SIGTERM-with-grace, then SIGKILL. The old
+    SIGTERM+5s+SIGKILL path lost cookies because Chrome's shutdown sequence
+    sometimes outlasts the 5s window; CDP-first removes that race."""
+    CDP_QUIT_DEADLINE_SEC = 20.0
+    POLL_INTERVAL_SEC = 0.5
 
-    try:
-        PID_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    for stale in ("/tmp/bu-default.sock", "/tmp/bu-default.pid"):
+    tracked_pid = _read_pid()
+    initial_owners = _port_owner_pids()
+    initial_targets: list[int] = []
+    if tracked_pid and _pid_alive(tracked_pid):
+        initial_targets.append(tracked_pid)
+    for owner in initial_owners:
+        if owner not in initial_targets and _pid_alive(owner):
+            initial_targets.append(owner)
+
+    cdp_attempted = False
+    cdp_issued = False
+    if initial_targets and _cdp_alive():
+        cdp_attempted = True
+        cdp_issued = _cdp_browser_close()
+        if cdp_issued:
+            deadline = time.time() + CDP_QUIT_DEADLINE_SEC
+            while time.time() < deadline:
+                still_alive = [p for p in initial_targets if _pid_alive(p)]
+                if not still_alive:
+                    break
+                time.sleep(POLL_INTERVAL_SEC)
+
+    reaped: list[int] = []
+    survivors = [p for p in initial_targets if _pid_alive(p)]
+    for p in survivors:
+        _terminate(p, grace=15.0)
+        reaped.append(p)
+
+    for stale in (PID_FILE, Path("/tmp/bu-default.sock"), Path("/tmp/bu-default.pid")):
         try:
-            os.unlink(stale)
+            stale.unlink()
         except FileNotFoundError:
             pass
-    return {"status": "stopped", "reaped": targets, "tracked_pid": pid}
+
+    via = "cdp_browser_close" if (cdp_issued and not survivors) else (
+        "sigterm_fallback" if cdp_attempted else "sigterm"
+    )
+    return {
+        "status": "stopped",
+        "via": via,
+        "tracked_pid": tracked_pid,
+        "initial_targets": initial_targets,
+        "cdp_attempted": cdp_attempted,
+        "cdp_issued": cdp_issued,
+        "sigterm_reaped": reaped,
+    }
 
 
 # --- browser-harness exec wrapper ---
