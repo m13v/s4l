@@ -30,6 +30,16 @@ from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E
 from project_topics import topics_for_project  # noqa: E402
 
 
+# Freshness window (in hours) for the expire-stale gate that flips stale
+# pending rows to status='expired'. Sourced from the FRESHNESS_HOURS env the
+# cycle exports (run-twitter-cycle.sh) so the expiry ceiling is configured in
+# ONE place. Falls back to 18 when unset (e.g. ad-hoc / --expire-only runs) to
+# preserve the historical default. NOTE: the gate is on discovered_at
+# (discovery age), not tweet_posted_at; for logic D (≤1h discovery freshness)
+# the two are within ~1h of each other.
+EXPIRE_FRESHNESS_HOURS = int(os.environ.get("FRESHNESS_HOURS") or "18")
+
+
 # Real Twitter snowflake IDs are 18-19 digit numbers with full entropy in the
 # low bits (sequence counter + worker/datacenter ID = bottom 22 bits ≈ bottom
 # 7 decimal digits). An ID ending in 6+ zeros is statistically impossible
@@ -505,9 +515,10 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
             print(f"  Error inserting {url}: {e}", file=sys.stderr)
             continue
 
-    # Expire old pending candidates (> 18h). This is a freshness GATE
-    # (status flip), not a delete — we keep the row forever for analytics.
-    api_post("/api/v1/twitter-candidates/expire-stale", {"freshness_hours": 18})
+    # Expire old pending candidates past the freshness window. This is a
+    # freshness GATE (status flip), not a delete — we keep the row forever
+    # for analytics.
+    api_post("/api/v1/twitter-candidates/expire-stale", {"freshness_hours": EXPIRE_FRESHNESS_HOURS})
 
     # NO PRUNING. We keep every twitter_candidates row forever (chosen, skipped,
     # expired) so we can audit project routing, skip reasons, growth dynamics,
@@ -570,7 +581,7 @@ def main():
         # it off and prints the count.
         resp = api_post(
             "/api/v1/twitter-candidates/expire-stale",
-            {"freshness_hours": 18},
+            {"freshness_hours": EXPIRE_FRESHNESS_HOURS},
         )
         expired = (resp.get("data") or {}).get("expired_count", 0)
         print(f"Expired {expired} old pending candidates (no row deletion)")
