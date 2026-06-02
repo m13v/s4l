@@ -39,6 +39,10 @@
     {
       "name": "get_stats",
       "description": "Read-only post and engagement stats for the X/Twitter rail over the last N days."
+    },
+    {
+      "name": "panel",
+      "description": "Open the visual control panel (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle autopilot, connect X, and refresh."
     }
   ],
   "user_config": {
