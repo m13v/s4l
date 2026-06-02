@@ -319,10 +319,15 @@ async function postApproved(batchId: string, plan: Plan) {
   if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
   const approvedBatch = `${batchId}_approved`;
   writePlan(approvedBatch, { ...plan, candidates: approved });
+  // SAPS_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
+  // never get the active-campaign suffix (e.g. " written with ai") appended.
+  // twitter_browser.py's reply handler reads this env (inherited through
+  // twitter_post_plan.py's subprocess). The cron pipeline doesn't set it, so the
+  // A/B disclosure experiment keeps running on autopilot/cron and on Reddit.
   const res = await runPython(
     "scripts/twitter_post_plan.py",
     ["--plan", planPath(approvedBatch)],
-    { timeoutMs: 900_000 }
+    { timeoutMs: 900_000, env: { SAPS_SKIP_CAMPAIGN_SUFFIX: "1" } }
   );
   let summary: unknown = res.stdout.trim();
   try {
