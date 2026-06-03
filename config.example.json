@@ -8,8 +8,9 @@
       "login_method": "browser"
     },
     "twitter": {
-      "handle": "@your-twitter-handle",
-      "login_method": "browser"
+      "handle": "",
+      "login_method": "browser",
+      "_handle_note": "Leave empty. connect_x auto-detects and writes your real @handle here on first connect. A non-empty placeholder would poison our_account (attribution / own-reply dedup)."
     },
     "linkedin": {
       "name": "Your Name",
