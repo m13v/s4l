@@ -36,10 +36,21 @@ export interface RunResult {
 
 // Spawn a process inside the repo, inheriting the repo env (API base + keys
 // come from the install's environment / .env loaded by the scripts themselves).
+//
+// `onLine` (optional) fires once per COMPLETE line as the child emits output,
+// so a long-running script (e.g. run-twitter-cycle.sh, which can churn for
+// minutes) can be followed live instead of going dark until it exits. The full
+// buffered stdout/stderr are still returned unchanged, so existing callers are
+// unaffected. A throwing sink never breaks the run.
 export function run(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}
+  opts: {
+    cwd?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    onLine?: (line: string, stream: "stdout" | "stderr") => void;
+  } = {}
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
@@ -48,16 +59,58 @@ export function run(
     });
     let stdout = "";
     let stderr = "";
+    // Per-stream partial-line buffers so onLine fires on whole lines only,
+    // regardless of how the OS chunks the pipe reads.
+    let outBuf = "";
+    let errBuf = "";
+    const pump = (chunk: string, which: "stdout" | "stderr", buf: string): string => {
+      if (!opts.onLine) return buf;
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        try {
+          opts.onLine(line, which);
+        } catch {
+          /* a progress sink must never break the wrapped command */
+        }
+      }
+      return buf;
+    };
     let timer: NodeJS.Timeout | undefined;
     if (opts.timeoutMs) {
       timer = setTimeout(() => {
         child.kill("SIGTERM");
       }, opts.timeoutMs);
     }
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.stdout.on("data", (d) => {
+      const s = d.toString();
+      stdout += s;
+      outBuf = pump(s, "stdout", outBuf);
+    });
+    child.stderr.on("data", (d) => {
+      const s = d.toString();
+      stderr += s;
+      errBuf = pump(s, "stderr", errBuf);
+    });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
+      // Flush any trailing partial line (output with no terminating newline).
+      if (opts.onLine) {
+        if (outBuf)
+          try {
+            opts.onLine(outBuf, "stdout");
+          } catch {
+            /* ignore */
+          }
+        if (errBuf)
+          try {
+            opts.onLine(errBuf, "stderr");
+          } catch {
+            /* ignore */
+          }
+      }
       resolve({ code: code ?? -1, stdout, stderr });
     });
     child.on("error", (err) => {
