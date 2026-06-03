@@ -258,6 +258,135 @@ def engage(signal, detail="", run_log_path="", extra=None, send_email=True):
     return on_disk
 
 
+_LOGIN_MARKERS = ("/login", "/checkpoint", "/uas/login", "linkedin.com/authwall")
+
+
+def _probe_linkedin_health(cdp_url):
+    """Gentle, read-only health probe of the LinkedIn session.
+
+    Attaches (CDP) to the already-running linkedin-harness Chrome and does the
+    minimal nav set the anti-bot carve-out allows: ONE nav to /feed/ (confirms
+    we are logged in) and ONE nav to the exact /in/me/recent-activity/comments/
+    endpoint that trips the killswitch (confirms it no longer bounces to the
+    authwall). No Voyager calls, no scroll loops, no permalink fan-out, no
+    clicks/typing, no programmatic login. Reuses an existing tab and never
+    closes the shared context.
+
+    Returns (healthy: bool, detail: str). Never raises.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        return False, "playwright import failed: {}".format(e)
+
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.connect_over_cdp(cdp_url, timeout=8000)
+            except Exception as e:
+                return False, "cdp attach failed ({}): {}".format(cdp_url, e)
+            contexts = browser.contexts
+            if not contexts:
+                return False, "cdp attach: zero contexts"
+            ctx = contexts[0]
+
+            page = None
+            reused = False
+            for pg in ctx.pages:
+                u = pg.url or ""
+                if "linkedin.com" in u and "login" not in u and "checkpoint" not in u:
+                    page, reused = pg, True
+                    break
+            if page is None and ctx.pages:
+                page, reused = ctx.pages[0], True
+            if page is None:
+                page = ctx.new_page()
+
+            try:
+                # Nav 1: /feed/ — are we still logged in?
+                page.goto(
+                    "https://www.linkedin.com/feed/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                page.wait_for_timeout(2000)
+                u1 = page.url or ""
+                if any(m in u1 for m in _LOGIN_MARKERS):
+                    return False, "feed redirected to auth: {}".format(u1)
+
+                # Nav 2: the exact endpoint that engaged the killswitch.
+                page.goto(
+                    "https://www.linkedin.com/in/me/recent-activity/comments/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                page.wait_for_timeout(2000)
+                u2 = page.url or ""
+                if any(m in u2 for m in _LOGIN_MARKERS):
+                    return False, "activity endpoint redirected to auth: {}".format(u2)
+
+                title = ""
+                try:
+                    title = page.title() or ""
+                except Exception:
+                    pass
+                return True, "feed+activity render (title={!r}, url={})".format(title, u2)
+            finally:
+                if page is not None and not reused:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+    except Exception as e:
+        return False, "probe exception: {}: {}".format(type(e).__name__, e)
+
+
+def _send_recovery_email(detail, age_sec):
+    """Notify that the killswitch auto-cleared after a healthy probe."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not os.path.isfile(GMAIL_TOKEN_PATH):
+            return False, "gmail token missing"
+
+        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(GMAIL_TOKEN_PATH, "w") as f:
+                f.write(creds.to_json())
+
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        age_h = round(age_sec / 3600.0, 1) if age_sec else "?"
+        subject = "[LI KILL] RECOVERED auto-probe healthy"
+        body_lines = [
+            "LinkedIn killswitch auto-cleared.",
+            "",
+            "The hourly recovery probe found the session healthy after the",
+            "killswitch had been active for " + str(age_h) + "h, so it cleared",
+            "the flag. Every LinkedIn pipeline resumes on its next launchd fire.",
+            "",
+            "Probe detail: " + str(detail),
+            "",
+            "If LinkedIn was NOT actually healthy, re-engage manually:",
+            "  python3 ~/social-autoposter/scripts/linkedin_killswitch.py \\",
+            "    engage --signal manual --detail 'auto-recovery false positive'",
+            "",
+            "State file: " + STATE_FILE,
+            "Trail file: " + TRAIL_FILE,
+        ]
+        body = _scrub_dashes("\n".join(body_lines))
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["to"] = NOTIFICATION_EMAIL
+        msg["subject"] = _scrub_dashes(subject)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True, "sent"
+    except Exception as exc:
+        return False, "send failed: " + str(exc)
+
+
 def clear():
     """Human ack: remove the flag. Trail row records who cleared it."""
     if not is_active():
@@ -315,6 +444,78 @@ def _cmd_clear(args):
     sys.exit(0)
 
 
+def _cmd_recover_check(args):
+    """Gate for the hourly recovery job: exit 0 only if the killswitch is
+    active AND has been so for >= RECOVERY_MIN_AGE_HOURS. Lets the shell
+    wrapper decide whether to even bring up Chrome (no-op most hours)."""
+    if not is_active():
+        print("recover-check: killswitch not active, nothing to recover", file=sys.stderr)
+        sys.exit(1)
+    age = age_seconds()
+    min_age = RECOVERY_MIN_AGE_HOURS * 3600
+    if age is None:
+        print(
+            "recover-check: active but ts unparseable, manual clear required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if age < min_age:
+        print(
+            "recover-check: active but only {:.1f}h old (< {}h), waiting".format(
+                age / 3600.0, RECOVERY_MIN_AGE_HOURS
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(
+        "recover-check: eligible (active {:.1f}h >= {}h)".format(
+            age / 3600.0, RECOVERY_MIN_AGE_HOURS
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(0)
+
+
+def _cmd_recover(args):
+    """Run the gentle probe (Chrome must already be up); clear + email on health.
+
+    Re-checks the age gate itself (unless --force) so it is safe to call
+    directly, not just behind recover-check."""
+    if not is_active():
+        print(json.dumps({"recovered": False, "reason": "not_active"}))
+        sys.exit(0)
+    age = age_seconds()
+    min_age = RECOVERY_MIN_AGE_HOURS * 3600
+    if not args.force and (age is None or age < min_age):
+        print(json.dumps({
+            "recovered": False,
+            "reason": "too_young",
+            "age_hours": (round(age / 3600.0, 2) if age else None),
+        }))
+        sys.exit(0)
+
+    cdp_url = args.cdp_url or LINKEDIN_CDP_URL
+    healthy, detail = _probe_linkedin_health(cdp_url)
+    _append_trail({
+        "event": "recover_probe",
+        "ts": _now_iso(),
+        "healthy": healthy,
+        "detail": detail,
+        "age_hours": (round(age / 3600.0, 2) if age else None),
+    })
+    if not healthy:
+        print(json.dumps({"recovered": False, "reason": "probe_unhealthy", "detail": detail}))
+        sys.exit(0)
+
+    clear()
+    _append_trail({"event": "recover_clear", "ts": _now_iso(), "detail": detail})
+    if not args.no_email:
+        ok, msg = _send_recovery_email(detail, age)
+        _append_trail({"event": "recover_email", "ok": ok, "msg": msg})
+    print(json.dumps({"recovered": True, "detail": detail}))
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn pipeline killswitch")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -331,12 +532,27 @@ def main():
 
     sub.add_parser("clear", help="clear the killswitch (human ack)")
 
+    sub.add_parser(
+        "recover-check",
+        help="exit 0 if active AND >= RECOVERY_MIN_AGE_HOURS old (else 1)",
+    )
+
+    r = sub.add_parser(
+        "recover",
+        help="gentle probe; clear + email on health (Chrome must be up)",
+    )
+    r.add_argument("--cdp-url", default="", help="harness CDP URL (default $LINKEDIN_CDP_URL)")
+    r.add_argument("--no-email", action="store_true", help="skip recovery email")
+    r.add_argument("--force", action="store_true", help="skip the age gate")
+
     args = parser.parse_args()
     {
         "check": _cmd_check,
         "status": _cmd_status,
         "engage": _cmd_engage,
         "clear": _cmd_clear,
+        "recover-check": _cmd_recover_check,
+        "recover": _cmd_recover,
     }[args.cmd](args)
 
 
