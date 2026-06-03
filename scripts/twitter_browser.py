@@ -1917,7 +1917,11 @@ THREAD_EXTRACTOR_JS = r"""() => {
       if (vid) {
         const poster = vid.getAttribute('poster') || (img ? img.getAttribute('src') : '') || '';
         const alt = img ? (img.getAttribute('alt') || '') : '';
-        push(poster, alt, 'gif');
+        // Twitter thumb URLs disambiguate the kind: tweet_video_thumb is an
+        // animated GIF; amplify_video_thumb / ext_tw_video_thumb is a real
+        // (uploaded) video. Default to video when the pattern is unknown.
+        const isGif = /tweet_video_thumb/.test(poster);
+        push(poster, alt, isGif ? 'gif' : 'video');
       } else if (img) {
         push(img.getAttribute('src') || '', img.getAttribute('alt') || '', 'image');
       }
