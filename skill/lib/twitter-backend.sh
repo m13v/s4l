@@ -196,10 +196,20 @@ ensure_twitter_browser_for_backend() {
                 _extra+=(--window-size="${BH_WINDOW_SIZE:-1024,1013}")
                 ;;
         esac
+        # --password-store=basic + --use-mock-keychain: encrypt the cookie store
+        # with Chrome's fixed obfuscation key instead of the macOS Keychain
+        # ("Chrome Safe Storage"). Without this, a keychain lock/re-lock leaves
+        # Chrome unable to decrypt its Cookies SQLite on the next launch, so it
+        # discards the session and the harness comes up logged out. With it, the
+        # x.com cookies persist + decrypt across restarts natively, no
+        # re-injection needed. Matches the flags the Playwright browser agents
+        # already use. (Root-cause persistence fix, 2026-06-02; the cookie
+        # mirror + restore_twitter_session.py remain as the safety net.)
         "$_chrome_bin" \
             --remote-debugging-port=9555 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
             --no-first-run --no-default-browser-check \
+            --password-store=basic --use-mock-keychain \
             --disable-features=ChromeWhatsNewUI \
             "${_extra[@]}" \
             about:blank >/dev/null 2>&1 &
