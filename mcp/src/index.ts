@@ -250,7 +250,36 @@ function blockedReasonMessage(reason: string): string {
   }
 }
 
-async function produceDrafts(project?: string): Promise<DraftResult> {
+// Turn a raw run-twitter-cycle.sh stdout line into a short, user-facing
+// progress message — or null when the line isn't a milestone worth surfacing.
+// The cycle script logs every phase via `log()` (tee'd to stdout), so we can
+// follow along live instead of going dark for the minutes Phase 2b-prep takes.
+// Keep this list tight: only lines a *user* benefits from seeing, phrased for
+// someone who has no idea what "phase2a" means.
+function cycleProgressMessage(line: string): string | null {
+  const l = line.trim();
+  let m: RegExpExecArray | null;
+  if (/=== Twitter Cycle \(batch=/.test(l)) return "Starting draft cycle…";
+  if ((m = /^Selected projects?:\s*(.+)$/.exec(l))) return `Selected project: ${m[1]}`;
+  if (/phase=phase1\b/.test(l) || /Phase 1: drafting queries/.test(l))
+    return "Searching X for fresh threads…";
+  if ((m = /Phase 1 complete.*?has (\d+) candidates?/.exec(l)))
+    return `Found ${m[1]} candidate thread${m[1] === "1" ? "" : "s"} — ranking them…`;
+  if (/phase=phase2a\b/.test(l) || /candidates by virality_score selected/.test(l))
+    return "Scoring and ranking candidates…";
+  if (/Phase 2b-prep: Claude reading threads and drafting replies/.test(l))
+    return "Drafting replies (the long step — this can take a few minutes)…";
+  if ((m = /Engagement style assigned:.*?style=(\S+)/.exec(l)))
+    return `Drafting in style: ${m[1]}…`;
+  if (/DRAFT_ONLY_PLAN=/.test(l)) return "Drafts ready — assembling the review table…";
+  if ((m = /DRAFT_ONLY_BLOCKED=([a-z0-9_]+)/.exec(l))) return `Cycle stopped (${m[1]}).`;
+  return null;
+}
+
+async function produceDrafts(
+  project?: string,
+  onProgress?: (message: string, step: number) => void
+): Promise<DraftResult> {
   // Run the real pipeline in DRAFT_ONLY mode: scan -> score -> draft -> link-gen,
   // then STOP before posting. The script prints `DRAFT_ONLY_PLAN=<path>` and
   // leaves the plan on disk for us to review + post. SAPS_FORCE_PROJECT scopes
@@ -260,9 +289,21 @@ async function produceDrafts(project?: string): Promise<DraftResult> {
     TWITTER_PAGE_GEN_RATE: "0",
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
+  let step = 0;
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000, // scan+draft can take several minutes
+    // Mirror the cycle's own log lines to THIS server's stderr (so they land
+    // in the host's mcp-server-social-autoposter.log, which used to show only
+    // the JSON-RPC handshake) AND forward milestone lines to the live progress
+    // sink so the chat spinner stops looking frozen.
+    onLine: (line) => {
+      const t = line.replace(/\s+$/, "");
+      if (t.trim()) console.error(`[draft_cycle] ${t}`);
+      if (!onProgress) return;
+      const msg = cycleProgressMessage(t);
+      if (msg) onProgress(msg, ++step);
+    },
   });
   // Prefer the explicit marker; fall back to the newest plan file on disk.
   const marker = /DRAFT_ONLY_PLAN=\/tmp\/twitter_cycle_plan_(.+)\.json/.exec(
@@ -608,11 +649,43 @@ server.registerTool(
         .describe("Which configured project to draft for. Optional when only one project is set up; required when several are."),
     },
   },
-  async ({ project }) => {
+  async ({ project }, extra) => {
     const r = resolveProject(project);
     if (!r.ok) return textContent(r.message!);
     const proj = r.project!;
-    const drafted = await produceDrafts(proj);
+
+    // Live progress so the chat doesn't sit on a frozen spinner for minutes.
+    // Two channels, both best-effort (a sink failure must never fail the cycle):
+    //   1. notifications/message — a log line; the host records it (and some
+    //      clients show it in a log view). Works with no client opt-in.
+    //   2. notifications/progress — drives the status text under the running
+    //      tool. Only valid when the client supplied a progressToken on the
+    //      request, so it's guarded on that.
+    const progressToken = extra?._meta?.progressToken;
+    const sendProgress = async (message: string, step: number) => {
+      try {
+        await extra.sendNotification({
+          method: "notifications/message",
+          params: { level: "info", logger: "draft_cycle", data: message },
+        });
+      } catch {
+        /* ignore */
+      }
+      if (progressToken !== undefined) {
+        try {
+          await extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: step, message },
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+
+    const drafted = await produceDrafts(proj, (message, step) => {
+      void sendProgress(message, step);
+    });
     if (drafted.blocked || !drafted.batchId) {
       return textContent(drafted.blocked ?? "No drafts produced.");
     }
