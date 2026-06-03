@@ -1,271 +1,93 @@
 ---
 name: social-autoposter-setup
-description: "Set up social-autoposter for a new user. Interactive wizard that installs via npm, creates the database, configures accounts, verifies browser logins, and optionally sets up scheduled automation. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
+description: "Set up social-autoposter for a new user. Configures the product (website, ICP, voice, search topics), seeds search topics into the backend, connects X/Twitter (auto-detecting the real handle), and verifies with a draft cycle. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
 ---
 
 # Social Autoposter Setup
 
-Interactive setup wizard for social-autoposter. Walk the user through configuration step by step.
+Set up social-autoposter for a new user. Walk them through it conversationally — don't dump a form.
 
-## When to use
+## Architecture (read this first)
 
-- First-time setup of social-autoposter
-- Reconfiguring accounts or adding new platforms
-- Troubleshooting a broken setup
+- **Config**: `~/social-autoposter/config.json` — `projects[]` (what to post about) and `accounts` (where to post).
+- **Data + stats**: a backend HTTP API (`https://s4l.ai`), scoped by a **stable per-install identity** auto-created in `identity.json`. There is **NO local Postgres and no `DATABASE_URL`** to configure — that was the old architecture; ignore any reference to psycopg2 / `SELECT ... FROM posts`.
+- **Search topics**: the X cycle's search queries live in the DB table `project_search_topics`, **seeded from each project's `search_topics`** at setup. A project with no seeded topics has nothing to scan and the draft cycle returns empty — so topics are required.
 
-## Prerequisites
+## Which path to use
 
-- Node.js 16+ (for `npx`)
-- Python 3.9+ with `pip3` for running helper scripts
-- A browser automation tool (Playwright MCP, Selenium, etc.) for platform login verification
-
----
-
-## Setup Flow
-
-Run these steps in order. Ask the user for input at each step. Don't skip ahead.
-
-### Step 1: Install via npm
-
-Check if already installed:
-
-```bash
-ls ~/social-autoposter/schema-postgres.sql 2>/dev/null && echo "FOUND" || echo "NOT_FOUND"
-```
-
-If NOT_FOUND, install:
-```bash
-npx social-autoposter init
-```
-
-This copies all scripts, skill files, and config templates to `~/social-autoposter/`. It also:
-- Creates `config.json` from `config.example.json` (if missing)
-- Creates `.env` from `.env.example` (if missing) — includes pre-filled `DATABASE_URL`
-- Installs `psycopg2-binary` (Python driver for Postgres)
-- Symlinks `~/.claude/skills/social-autoposter` → `~/social-autoposter/skill`
-
-To update scripts later without touching config/data:
-```bash
-npx social-autoposter update
-```
-
-Set `SKILL_DIR=~/social-autoposter` for the rest of this wizard.
-
-### Step 2: Verify the Postgres database connection
-
-Load the env and test the connection:
-
-```bash
-source "$SKILL_DIR/.env"
-python3 -c "
-import psycopg2, os
-conn = psycopg2.connect(os.environ['DATABASE_URL'])
-cur = conn.cursor()
-cur.execute(\"SELECT COUNT(*) FROM posts\")
-print('Connected. Posts in DB:', cur.fetchone()[0])
-conn.close()
-"
-```
-
-Expected: `Connected. Posts in DB: <number>` (any number is fine, including 0).
-
-If psycopg2 is missing: `pip3 install psycopg2-binary`
-
-If the connection fails, check that `DATABASE_URL` is set in `$SKILL_DIR/.env`.
-
-### Step 3: Configure accounts
-
-`config.json` already exists at `$SKILL_DIR/config.json`. Edit it with the user's accounts.
-
-Ask the user for each platform they want to use:
-
-**Reddit:**
-- "What's your Reddit username?" → set `accounts.reddit.username`
-- Login method is always `browser` (Reddit has no public posting API)
-
-**X/Twitter:**
-- "What's your X handle?" → set `accounts.twitter.handle`
-- Login method is always `browser`
-
-**LinkedIn:**
-- "What's your LinkedIn name?" → set `accounts.linkedin.name`
-- Login method is always `browser`
-
-**Moltbook** (optional):
-- "Do you want to set up Moltbook? (y/n)"
-- If yes: "What's your Moltbook username?" and "What's your Moltbook API key?"
-- Edit `$SKILL_DIR/.env` and set `MOLTBOOK_API_KEY=<key>` (the file already exists from init)
-- Set `accounts.moltbook.username` and `accounts.moltbook.api_key_env` in `config.json`
-
-### Step 4: Configure content
-
-This step is the most important one. Take your time. The quality of every future post depends on it.
+- **If the social-autoposter MCP is connected** (you can see the tools `setup`, `draft_cycle`, `autopilot`, `get_stats`): use the MCP tools. They write config, **seed topics into the DB**, and **auto-detect the X handle** for you. Do NOT hand-edit `config.json`. This is the primary path — follow "MCP path" below.
+- **If only the CLI/skill is installed** (no MCP tools): use the "CLI fallback" at the end.
 
 ---
 
-**4a. Subreddits**
+## MCP path (primary)
 
-Ask: "Which subreddits do you want to post in? (comma-separated, or press enter for defaults)"
+### Step 1: Interview the user, one question at a time
 
-Default suggestion: `ClaudeAI, ClaudeCode, programming, webdev, devops`
+Gather the fields the `setup` tool needs. Ask conversationally, wait for each answer.
 
-Write the list to `config.json` under `subreddits`.
+1. **Website** — "What's the product's website?"
+2. **Description** — "In 1-3 sentences, what does it do?"
+3. **ICP** — "Who's the ideal customer you want to engage on X?"
+4. **Voice** — "What tone should replies have? Any words/claims to avoid?"
+5. **Differentiator** (recommended) — "What makes it different from the alternatives?"
+6. **Search topics** (required) — "What phrases or keywords do your buyers actually tweet about? Give me 5-15, comma-separated." These become the literal X searches the cycle runs. **Without them there is nothing to scan**, so don't skip this.
+7. **Get-started link** (recommended) — "Primary call-to-action link (signup / get started)?"
 
----
+For the voice/angle, it helps to draft a short first-person `voice`/`differentiator` from their answers and confirm it reads like them before saving. Aim for specific (names tools, numbers, real experience), not generic.
 
-**4b. Content angle — interview the user**
+### Step 2: Create the project with `setup`
 
-Don't just ask for a one-liner. Run a short interview to understand who they are, then write the angle for them.
+Call the `setup` tool with a short slug `name` plus the fields above. Pass `search_topics` as a comma-separated string or array. You can fill fields incrementally across calls — it merges and reports what's still missing. A project is **ready** only once it has name, website, description, icp, voice, **and search_topics**.
 
-Ask these questions one at a time. Wait for each answer before asking the next.
+When the project becomes ready, `setup` **automatically seeds its `search_topics` into the DB** (`project_search_topics`) and tells you how many it seeded. You do not run any seed script by hand.
 
-**Question 1:** "What are you currently working on or building? Be specific — what does it actually do?"
+### Step 3: Connect X/Twitter
 
-**Question 2:** "What's your technical background? What languages, tools, or domains do you know well?"
+Call `setup` with `action:'connect_x'` (no `confirm`) first — it returns an explanation of what will happen (it imports your x.com/twitter.com cookies into the autoposter's managed Chrome). Relay that to the user, get their OK, then call again with `action:'connect_x', confirm:true`.
 
-**Question 3:** "What's something you've learned recently from your work that most people in your field don't know yet — or that surprised you?"
+This imports the session **and auto-detects + records your real `@handle`** into `config.json` (`accounts.twitter.handle`). That handle scopes attribution, own-reply skipping, and account-keyed operations — so do not hand-edit it to a placeholder.
 
-**Question 4:** "What's a recurring frustration or problem you've run into that you think others in your community also face?"
+### Step 4: Verify with a draft cycle
 
-**Question 5:** "Do you have any unusual setup or workflow? (e.g. running multiple AI agents, building on niche platforms, working solo on something usually done by teams)"
+Run the `draft_cycle` tool. It scans X, drafts replies, and shows them for your approval — it **posts nothing** until you approve. If it comes back empty with a clear reason (e.g. "no search topics"), fix that (re-run `setup` with topics) and try again. A non-empty review form means the pipeline is healthy end-to-end.
 
-After collecting all answers, synthesize them into a `content_angle` that:
-- Is 2-4 sentences
-- Is written in first person
-- Names specific tools, numbers, and experiences (not generic claims)
-- Captures what makes their perspective genuinely different from a typical developer
+### Step 5 (optional): Autopilot
 
-Show the draft to the user:
-> "Here's the content angle I'll use to write comments in your voice:
-> [DRAFT]
-> Does this sound like you? Want to change anything?"
-
-Refine based on their feedback. Only save to `config.json` when they confirm it.
-
-**Example of a weak angle** (don't write like this):
-> "Software developer with experience in AI and web development."
-
-**Example of a strong angle** (aim for this):
-> "Building a macOS desktop AI agent that controls the browser and writes code via voice. Running 5 Claude agents in parallel on the same codebase — learned the hard way that they need zero file overlap or everything breaks. API costs hit $800/month before I got aggressive about caching."
+If the user wants hands-free posting, call `autopilot` with `action:'enable'` — it loads the background cycle and daily auto-updates. `action:'status'` reports whether it's loaded; `action:'disable'` turns it off (manual `draft_cycle` still works).
 
 ---
 
-**4c. Projects**
+## CLI fallback (no MCP)
 
-Ask: "Do you have any open source projects or products you'd want to mention naturally when the topic comes up? (y/n)"
+Only if the MCP tools aren't available.
 
-If yes, for each project run through:
-- "What's the name?"
-- "One sentence: what does it do?"
-- "Website URL? (or leave blank)"
-- "GitHub URL? (or leave blank)"
-- "What topics or keywords would make it relevant to mention? (e.g. 'desktop automation, macOS, accessibility APIs')"
+1. **Install**: `npx social-autoposter init` (creates `config.json` from the template and `.env`; symlinks the skill). Update later with `npx social-autoposter update`.
+2. **Configure the project**: edit `~/social-autoposter/config.json` `projects[]` with `name`, `website`, `description`, `icp`, `voice`, and `search_topics` (array). Leave `accounts.twitter.handle` empty — it's filled on connect.
+3. **Seed topics into the DB** (the cycle reads the DB, not config): `python3 scripts/seed_search_topics.py --project <name>`.
+4. **Connect X**: `python3 scripts/setup_twitter_auth.py connect` — imports the session and records the real handle.
+5. **Verify**: `DRAFT_ONLY=1 TWITTER_PAGE_GEN_RATE=0 bash skill/run-twitter-cycle.sh` — drafts without posting; it prints `DRAFT_ONLY_PLAN=<path>` on success.
+6. **Automation** (optional): on macOS, symlink + load the launchd plists in `skill/launchd/`; on Linux, add the matching cron entries.
 
-After each project, ask: "Any more projects to add? (y/n)"
+---
 
-Store each under `config.json` → `projects` array with fields: `name`, `description`, `website`, `github`, `topics` (array of strings).
+## Summary to show the user
 
-The `topics` keywords are what trigger natural mentions — when someone in a thread mentions one of these topics, the agent knows this project is relevant to bring up.
-
-### Step 5: Verify browser logins
-
-For each configured platform, verify the user is logged in:
-
-**Reddit:**
-- Navigate to `https://old.reddit.com` using browser automation
-- Check if a username appears in the top-right (logged in) or a "login" link (not logged in)
-- If not logged in: "Please log into Reddit in your browser, then say 'done'"
-- Re-check after they confirm
-
-**X/Twitter:**
-- Navigate to `https://x.com/home`
-- Check if the home timeline loads (logged in) or a login page appears
-- Same flow if not logged in
-
-**LinkedIn:**
-- Navigate to `https://www.linkedin.com/feed/`
-- Check if the feed loads or a login page appears
-
-**Moltbook:**
-- Source the env file and test the API key:
-  ```bash
-  source ~/social-autoposter/.env
-  curl -s -H "Authorization: Bearer $MOLTBOOK_API_KEY" "https://www.moltbook.com/api/v1/posts?limit=1"
-  ```
-- Check for a successful response (not an auth error)
-
-Report which platforms are ready and which need attention.
-
-### Step 6: Test run (dry run)
-
-Run the thread finder to verify everything works:
-```bash
-python3 "$SKILL_DIR/scripts/find_threads.py" --limit 3
-```
-
-Show the user the candidate threads found. Don't post anything — just verify the pipeline works.
-
-### Step 7: Set up automation (optional)
-
-Ask: "Do you want posts to run automatically on a schedule? (y/n)"
-
-If yes, and on macOS:
-- The launchd plists are already in `$SKILL_DIR/launchd/` (one per platform: reddit-search, reddit-threads, twitter-cycle, linkedin, moltbook, github, plus system jobs: stats, engage, audit, octolens, scan-*, dm-replies-*, link-edit-*)
-- Symlink and load all of them:
-  ```bash
-  for plist in "$SKILL_DIR"/launchd/com.m13v.social-*.plist; do
-    ln -sf "$plist" ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/$(basename "$plist")
-  done
-  ```
-- Cadences: Twitter cycle every 20 min, Reddit search every 30 min, Reddit threads 4x/day, reply scans 2x/day, engage loop every 4 h, stats refresh 4x/day, DM outreach and link-edit 4x/day.
-
-If yes, and on Linux:
-- Generate crontab entries (pick the platforms you use):
-  ```
-  */20 * * * * cd ~/social-autoposter && bash skill/run-twitter-cycle.sh
-  */30 * * * * cd ~/social-autoposter && bash skill/run-reddit-search.sh
-  10 */6 * * * cd ~/social-autoposter && bash skill/run-reddit-threads.sh
-  0 */6 * * * cd ~/social-autoposter && bash skill/stats.sh
-  0 */4 * * * cd ~/social-autoposter && bash skill/engage.sh
-  ```
-
-If no: "You can run manually anytime with `/social-autoposter`"
-
-### Step 8: Summary
-
-Read `config.json` accounts and compute each platform's stats URL:
-- Twitter/X handle (strip leading `@`): `https://s4l.ai/stats/HANDLE`
-- Reddit username: `https://s4l.ai/stats/USERNAME`
-- LinkedIn name (URL-encoded spaces as `%20`): `https://s4l.ai/stats/NAME`
-- Moltbook username: `https://s4l.ai/stats/MOLTBOOK_USERNAME`
-
-Print a summary with real values substituted:
 ```
 Social Autoposter Setup Complete
 
-  Installed:   ~/social-autoposter  (v1.0.9 via npm)
-  Database:    Postgres (DATABASE_URL in .env)
+  Installed:   ~/social-autoposter  (via npm)
   Config:      ~/social-autoposter/config.json
-  Env:         ~/social-autoposter/.env
-  Skill:       ~/.claude/skills/social-autoposter
+  Backend:     s4l.ai HTTP API (per-install identity; no local DB)
 
-  Platforms:
-    Reddit:    u/USERNAME ✓
-    X/Twitter: @HANDLE ✓
-    LinkedIn:  NAME ✓
-    Moltbook:  USERNAME ✓
+  Project:     NAME — ready
+  Search topics seeded: N
+  X/Twitter:   @HANDLE (auto-detected on connect)
 
-  Automation:  launchd (hourly post, 6h stats, 2h engage)
-
-  Your live stats pages:
-    X/Twitter: https://s4l.ai/stats/HANDLE
-    Reddit:    https://s4l.ai/stats/USERNAME
-    LinkedIn:  https://s4l.ai/stats/NAME
-    Moltbook:  https://s4l.ai/stats/MOLTBOOK_USERNAME
-
-  Try it:      /social-autoposter
+  Verify:      draft_cycle  (drafts for review, posts nothing)
+  Autopilot:   autopilot action:'enable'  (hands-free)
+  Stats:       https://s4l.ai/stats/HANDLE
   Update:      npx social-autoposter update
 ```
 
-Tell the user: "Your stats pages are ready — they'll show posts as soon as your first run completes and syncs to Postgres (happens automatically after each post run). Bookmark the links above."
+Tell the user their stats page (`https://s4l.ai/stats/<handle>`) populates after the first real post.
