@@ -2376,6 +2376,53 @@ def main():
         result = scrape_many_thread_followups(urls, scroll_count=scroll_count)
         print(json.dumps(result, indent=2))
 
+    elif cmd == "thread-media":
+        # Single-URL anchor media fetch (deterministic, model-free).
+        # Usage: twitter_browser.py thread-media <tweet_url> [scroll_count]
+        if len(sys.argv) < 3:
+            print(
+                "Usage: twitter_browser.py thread-media <tweet_url> [scroll_count]\n"
+                "  Returns {thread_url, anchor_tweet_id, media:[{url,alt,type}]}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        scroll_count = 1
+        if len(sys.argv) >= 4:
+            try:
+                scroll_count = int(sys.argv[3])
+            except ValueError:
+                print(f"thread-media: scroll_count must be int, got {sys.argv[3]!r}", file=sys.stderr)
+                sys.exit(1)
+        result = scrape_thread_media(sys.argv[2], scroll_count=scroll_count)
+        print(json.dumps(result, indent=2))
+
+    elif cmd == "thread-media-batch":
+        # Batch anchor media fetch over a file of candidate URLs in ONE session.
+        # Usage: twitter_browser.py thread-media-batch <urls_file.txt> [scroll_count]
+        if len(sys.argv) < 3:
+            print(
+                "Usage: twitter_browser.py thread-media-batch <urls_file.txt> [scroll_count]\n"
+                "  urls_file.txt: one candidate tweet permalink per line\n"
+                "  Returns {results:[{thread_url, anchor_tweet_id, media:[...]}], urls_visited}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        urls_path = sys.argv[2]
+        scroll_count = 1
+        if len(sys.argv) >= 4:
+            try:
+                scroll_count = int(sys.argv[3])
+            except ValueError:
+                print(f"thread-media-batch: scroll_count must be int, got {sys.argv[3]!r}", file=sys.stderr)
+                sys.exit(1)
+        with open(urls_path) as f:
+            urls = [line.strip() for line in f if line.strip()]
+        if not urls:
+            print(json.dumps({"results": [], "urls_visited": 0}, indent=2))
+            sys.exit(0)
+        result = scrape_many_thread_media(urls, scroll_count=scroll_count)
+        print(json.dumps(result, indent=2))
+
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         print(__doc__)
