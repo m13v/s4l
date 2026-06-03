@@ -82,6 +82,14 @@ NOTIFICATION_EMAIL = os.environ.get("NOTIFICATION_EMAIL", "i@m13v.com")
 RECOVERY_MIN_AGE_HOURS = float(os.environ.get("LINKEDIN_RECOVERY_MIN_AGE_HOURS", "24"))
 LINKEDIN_CDP_URL = os.environ.get("LINKEDIN_CDP_URL", "http://127.0.0.1:9556")
 
+# Stop-completely policy (2026-06-03): after the 24h wait, the recovery job runs
+# a read-only probe to see if the session healed on its own. We NEVER attempt a
+# programmatic login (anti-bot rule). If the probe still shows logged-out after
+# this many failed attempts, the session is genuinely dead: we mark the
+# killswitch terminal so the hourly job stops probing entirely and a human must
+# re-auth + clear. Default 1 == "wait 24h, try once, then stop completely".
+RECOVERY_MAX_ATTEMPTS = int(os.environ.get("LINKEDIN_RECOVERY_MAX_ATTEMPTS", "1"))
+
 VALID_SIGNALS = {
     "http_999",
     "authwall_redirect",
@@ -261,16 +269,20 @@ def engage(signal, detail="", run_log_path="", extra=None, send_email=True):
 _LOGIN_MARKERS = ("/login", "/checkpoint", "/uas/login", "linkedin.com/authwall")
 
 
-def _probe_linkedin_health(cdp_url):
+def _probe_linkedin_health(cdp_url, feed_only=False):
     """Gentle, read-only health probe of the LinkedIn session.
 
     Attaches (CDP) to the already-running linkedin-harness Chrome and does the
     minimal nav set the anti-bot carve-out allows: ONE nav to /feed/ (confirms
-    we are logged in) and ONE nav to the exact /in/me/recent-activity/comments/
-    endpoint that trips the killswitch (confirms it no longer bounces to the
-    authwall). No Voyager calls, no scroll loops, no permalink fan-out, no
-    clicks/typing, no programmatic login. Reuses an existing tab and never
-    closes the shared context.
+    we are logged in) and, unless feed_only, ONE nav to the exact
+    /in/me/recent-activity/comments/ endpoint that trips the killswitch (confirms
+    it no longer bounces to the authwall). No Voyager calls, no scroll loops, no
+    permalink fan-out, no clicks/typing, no programmatic login. Reuses an
+    existing tab and never closes the shared context.
+
+    feed_only=True is the per-run detection gate: a single /feed/ nav is enough
+    to tell "are we still logged in?" without touching the activity endpoint on
+    every healthy pipeline fire.
 
     Returns (healthy: bool, detail: str). Never raises.
     """
@@ -313,6 +325,14 @@ def _probe_linkedin_health(cdp_url):
                 u1 = page.url or ""
                 if any(m in u1 for m in _LOGIN_MARKERS):
                     return False, "feed redirected to auth: {}".format(u1)
+
+                if feed_only:
+                    title = ""
+                    try:
+                        title = page.title() or ""
+                    except Exception:
+                        pass
+                    return True, "feed renders (title={!r}, url={})".format(title, u1)
 
                 # Nav 2: the exact endpoint that engaged the killswitch.
                 page.goto(
