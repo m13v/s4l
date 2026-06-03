@@ -1537,7 +1537,17 @@ HIGH_DELTA_COUNT=$(printf '%s\n' "$CANDIDATES" | awk -F'|' '$1 ~ /^[0-9]+$/ && $
 log "Candidates with Δ≥10 (momentum diagnostic only, not a cap): $HIGH_DELTA_COUNT"
 
 CANDIDATE_BLOCK=""
+# Thread-media capture (2026-06-03): collect each candidate's id|url so that,
+# AFTER the browser lock is acquired, we can deterministically pre-fetch the
+# media (images/videos/GIFs/link-cards) of every thread the model is about to
+# draft against and feed it into the prep prompt. Gated by
+# SAPS_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
+# set_media action + thread_media column) deploys. Populated in the loop below.
+MEDIA_URLS_FILE=$(mktemp -t saps_twitter_media_urls_XXXXXX.tsv)
 while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clikes crts creplies cviews cfollowers cage cdraft cdraftstyle cdraftage; do
+    if [ -n "$cid" ] && [ -n "$curl" ]; then
+        printf '%s\t%s\n' "$cid" "$curl" >> "$MEDIA_URLS_FILE"
+    fi
     DRAFT_LINE=""
     if [ -n "$cdraft" ] && [ "$cdraftage" != "-1" ]; then
         # Round draft age to whole minutes for the prompt.
