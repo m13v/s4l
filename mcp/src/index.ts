@@ -769,6 +769,18 @@ server.registerTool(
         batch_id: drafted.batchId,
         drafted: count,
         status: "awaiting_decision",
+        // Include the actual draft text here, not just a count. Some hosts
+        // (e.g. Claude Desktop) surface ONLY structuredContent to the model and
+        // drop the human-readable `content` table — which left the agent saying
+        // "drafted: 2" with no way to show the drafts. Carrying the drafts in
+        // structuredContent makes them available regardless of host behavior.
+        drafts: (plan.candidates || []).map((c: PlanCandidate, i: number) => ({
+          n: i + 1,
+          author: c.thread_author,
+          tweet_url: c.candidate_url,
+          reply_text: c.reply_text,
+          language: c.language,
+        })),
       },
     };
   }
