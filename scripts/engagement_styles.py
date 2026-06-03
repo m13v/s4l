@@ -221,19 +221,27 @@ STYLES = {
     },
     "ig_studyly_failing_student_arc": {
         "description": (
-            "Failing-student outcome arc for studyly: 'i was [age], [program]. "
-            "i [failed/scored low] on [exam]. i [reread/flashcards/highlights] "
-            "for weeks. nothing worked. a friend sent me studyly.io. i pasted "
-            "my [notes/chapter] in. it quizzed me until i could answer without "
-            "looking. i got [higher score].' Closes with rereading-is-theater "
-            "lesson + studyly.io footer."
+            "Study-method arc for studyly: 'i was [age], [program]. i was "
+            "[rereading/highlighting/making flashcards] for hours and still "
+            "blanking the moment the wording changed. a friend sent me "
+            "studyly.io. i pasted my [notes/chapter] in and it quizzed me on "
+            "my own material until i could answer without looking, rewording "
+            "each question so i couldnt pattern-match. for the first time i "
+            "could tell what i actually knew from what i only recognized.' "
+            "Focus on the METHOD shift (active recall vs rereading, testing on "
+            "your own deck). Closes with the rereading-is-theater lesson + "
+            "studyly.io footer. Do NOT promise or fabricate specific "
+            "before/after exam scores as a typical result."
         ),
         "example": (
-            "i was 19. premed track, third semester, organic chemistry. i "
-            "failed the first orgo exam. 47 out of 100. ... i pasted my notes "
-            "into studyly.io at 2am. ... i got 78 on the second exam. ... the "
-            "lesson is rereading is recognizing. close the book. let something "
-            "ask you. studyly.io"
+            "i was 19. premed, third semester, organic chemistry. i had reread "
+            "the chapter four times and could still blank on a mechanism the "
+            "second the wording changed. i pasted my notes into studyly.io at "
+            "2am and it asked me the things i thought i knew, rewording each "
+            "one so i couldnt coast on the first three words. that was the "
+            "first night i could actually tell what i knew from what i only "
+            "recognized. the lesson is rereading is recognizing. close the "
+            "book. let something ask you. studyly.io"
         ),
         "best_in": {
             "instagram": [
@@ -244,8 +252,13 @@ STYLES = {
         "note": (
             "Caption is shorter than mk0r (1400-1900 chars). 'here is a story.' "
             "opener optional. MUST include 'studyly.io' footer. "
-            "project_name='studyly'. Lesson is always rereading-is-theater. "
-            "Fires when TARGET=product AND selected_project=studyly."
+            "project_name='studyly'. Lesson is always rereading-is-theater. NO "
+            "specific before/after exam scores or 'failed -> passed/topped the "
+            "class' miracle jumps presented as a typical/guaranteed outcome -- "
+            "exaggerated-results claims are a deceptive-practices signal (same "
+            "Meta rail that restricted mk0r 2026-06-02); keep outcomes "
+            "qualitative and personal. Fires when TARGET=product AND "
+            "selected_project=studyly."
         ),
         "target_chars": 1650,
     },
