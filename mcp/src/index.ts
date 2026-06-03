@@ -417,7 +417,18 @@ async function postApproved(batchId: string, plan: Plan) {
   const res = await runPython(
     "scripts/twitter_post_plan.py",
     ["--plan", planPath(approvedBatch)],
-    { timeoutMs: 900_000, env: { SAPS_SKIP_CAMPAIGN_SUFFIX: "1" } }
+    {
+      timeoutMs: 900_000,
+      env: {
+        SAPS_SKIP_CAMPAIGN_SUFFIX: "1",
+        // The poster attaches to the twitter-harness Chrome over CDP. The cron
+        // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
+        // must set it explicitly or twitter_browser.py fails with "No twitter-
+        // harness Chrome reachable". Honor an inherited value (AppMaker / VM
+        // BYO-Chrome), else default to the local harness on port 9555.
+        TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
+      },
+    }
   );
   let summary: unknown = res.stdout.trim();
   try {
