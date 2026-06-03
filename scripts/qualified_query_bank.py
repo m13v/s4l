@@ -243,14 +243,35 @@ def main():
                 continue
             bank = build_bank(name, args.min_likes, args.min_clicks, args.limit)
             proven_size = len(bank)
+            invent_added = 0
             if not args.no_invented:
                 invented = fetch_invented_queries(name, args.invent_min_supply)
                 bank = merge_invented(bank, invented)
+                invent_added = len(bank) - proven_size
+            # Cold-start bootstrap: a freshly-configured project has no proven
+            # queries (no post history) AND no invented ones (invent_topics.py
+            # hasn't run for it yet), so the bank is empty -> the cycle scans
+            # nothing and returns 0 drafts on every early cycle (the dead-on-
+            # arrival problem). Fall back to the project's seeded search_topic AS
+            # the query so there's something to scrape on day one. Proven +
+            # invented queries supersede this automatically as they accumulate.
+            # (cold-start fallback, 2026-06-03)
+            cold_start = False
+            if not bank:
+                topic = ((p.get("search_topic") if isinstance(p, dict) else "") or "").strip()
+                if topic:
+                    bank = [{
+                        "project": name,
+                        "query": f"{topic} -filter:replies",
+                        "search_topic": topic,
+                        "likes": 0, "clicks": 0, "posts": 0,
+                    }]
+                    cold_start = True
             combined.extend(bank)
-            invent_added = len(bank) - proven_size
             print(f"qualified_query_bank: project={name!r} -> {proven_size} proven "
-                  f"+ {invent_added} invented = {len(bank)} queries",
-                  file=sys.stderr)
+                  f"+ {invent_added} invented"
+                  + (" + 1 cold-start(topic)" if cold_start else "")
+                  + f" = {len(bank)} queries", file=sys.stderr)
         json.dump(combined, sys.stdout)
         print()
         print(f"qualified_query_bank: combined bank = {len(combined)} queries across "
