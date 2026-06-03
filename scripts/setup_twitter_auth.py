@@ -172,6 +172,15 @@ def _launch_chrome() -> bool:
         f"--user-data-dir={PROFILE_DIR}",
         "--no-first-run",
         "--no-default-browser-check",
+        # Encrypt the cookie store with Chrome's fixed obfuscation key instead of
+        # the macOS Keychain ("Chrome Safe Storage"). Without this, a keychain
+        # lock/re-lock leaves Chrome unable to decrypt its Cookies SQLite on the
+        # next launch and the imported session is discarded. Must match the cycle
+        # launcher (skill/lib/twitter-backend.sh) so the session connected here
+        # actually survives the pipeline's later relaunches. (Persistence fix,
+        # 2026-06-02.)
+        "--password-store=basic",
+        "--use-mock-keychain",
         "--disable-features=ChromeWhatsNewUI",
     ]
     is_linux = sys.platform.startswith("linux")
