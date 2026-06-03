@@ -50,7 +50,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 
@@ -89,6 +89,27 @@ LINKEDIN_CDP_URL = os.environ.get("LINKEDIN_CDP_URL", "http://127.0.0.1:9556")
 # killswitch terminal so the hourly job stops probing entirely and a human must
 # re-auth + clear. Default 1 == "wait 24h, try once, then stop completely".
 RECOVERY_MAX_ATTEMPTS = int(os.environ.get("LINKEDIN_RECOVERY_MAX_ATTEMPTS", "1"))
+
+# Claude-driven re-login (2026-06-03): the read-only probe above only detects a
+# self-healed session. The active recovery path instead has the hourly job spin
+# up a Claude session that drives the real harness Chrome (the allowed pattern;
+# scripted Python login is the banned one) to actually log back in. That session
+# returns one of three verdicts, recorded via `recover-record`:
+#   - held       -> login succeeded; enter a "pending hold" window and re-verify
+#                   (read-only) after RECOVERY_HOLD_CHECK_MINUTES that it STUCK.
+#                   Only after a clean hold-check do we clear the flag + resume.
+#   - hard_block -> checkpoint / captcha / restriction / wrong creds / 2FA wall.
+#                   Terminal immediately: do NOT poke a restricted account again.
+#   - transient  -> page didn't load / ambiguous. Re-anchor the 24h clock and let
+#                   the next eligible cycle try again, up to RECOVERY_TRANSIENT_MAX.
+# If a login held but the session drops during the hold window ("logged out
+# shortly after"), the hold-check goes terminal too: try once, don't keep trying.
+RECOVERY_HOLD_CHECK_MINUTES = float(
+    os.environ.get("LINKEDIN_RECOVERY_HOLD_CHECK_MINUTES", "45")
+)
+RECOVERY_TRANSIENT_MAX_ATTEMPTS = int(
+    os.environ.get("LINKEDIN_RECOVERY_TRANSIENT_MAX_ATTEMPTS", "3")
+)
 
 VALID_SIGNALS = {
     "http_999",
@@ -503,6 +524,113 @@ def _send_terminal_email(detail, attempts, age_sec):
         return False, "send failed: " + str(exc)
 
 
+def _write_state(p):
+    """Atomically persist the killswitch state dict."""
+    _ensure_dir()
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(p, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, STATE_FILE)
+
+
+def _record_login_held():
+    """Claude reported a successful re-login. Don't clear the flag yet: enter a
+    pending-hold window and re-verify (read-only) after RECOVERY_HOLD_CHECK_MINUTES
+    that the session actually stuck. Returns the hold_check_due ISO ts."""
+    p = read() or {}
+    due = datetime.now(timezone.utc) + timedelta(minutes=RECOVERY_HOLD_CHECK_MINUTES)
+    due_iso = due.strftime("%Y-%m-%dT%H:%M:%SZ")
+    p["recovery_pending_hold"] = True
+    p["hold_check_due"] = due_iso
+    p["login_held_ts"] = _now_iso()
+    p["recovery_transient_attempts"] = 0
+    p.pop("recovery_terminal", None)
+    _write_state(p)
+    _append_trail({
+        "event": "login_held",
+        "ts": _now_iso(),
+        "hold_check_due": due_iso,
+    })
+    return due_iso
+
+
+def _record_hard_block(detail):
+    """Claude hit a wall it cannot pass (checkpoint / captcha / restriction /
+    wrong creds / 2FA). Go terminal: never auto-poke a restricted account again."""
+    p = read() or {}
+    p["recovery_terminal"] = True
+    p["recovery_terminal_ts"] = _now_iso()
+    p["recovery_terminal_reason"] = "hard_block"
+    p["last_recovery_detail"] = str(detail)[:2000]
+    p.pop("recovery_pending_hold", None)
+    p.pop("hold_check_due", None)
+    _write_state(p)
+    _append_trail({
+        "event": "recovery_hard_block",
+        "ts": _now_iso(),
+        "detail": str(detail)[:500],
+    })
+
+
+def _record_transient(detail):
+    """Claude couldn't conclusively log in or fail (page didn't load, ambiguous).
+    Re-anchor the 24h clock so the next eligible cycle tries again, up to
+    RECOVERY_TRANSIENT_MAX_ATTEMPTS, after which we go terminal.
+    Returns (transient_attempts: int, terminal: bool)."""
+    p = read() or {}
+    attempts = int(p.get("recovery_transient_attempts", 0)) + 1
+    p["recovery_transient_attempts"] = attempts
+    p["last_recovery_ts"] = _now_iso()
+    p["last_recovery_detail"] = str(detail)[:2000]
+    terminal = attempts >= RECOVERY_TRANSIENT_MAX_ATTEMPTS
+    if terminal:
+        p["recovery_terminal"] = True
+        p["recovery_terminal_ts"] = _now_iso()
+        p["recovery_terminal_reason"] = "transient_exhausted"
+    else:
+        # Re-anchor age so we wait another full RECOVERY_MIN_AGE_HOURS before the
+        # next attempt rather than retrying on the next hourly tick.
+        p["ts"] = _now_iso()
+    p.pop("recovery_pending_hold", None)
+    p.pop("hold_check_due", None)
+    _write_state(p)
+    _append_trail({
+        "event": "recovery_transient",
+        "ts": _now_iso(),
+        "transient_attempts": attempts,
+        "terminal": terminal,
+        "detail": str(detail)[:500],
+    })
+    return attempts, terminal
+
+
+def _send_simple_email(subject, body_lines):
+    """Best-effort plain-text alert to NOTIFICATION_EMAIL. Never raises."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not os.path.isfile(GMAIL_TOKEN_PATH):
+            return False, "gmail token missing"
+        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(GMAIL_TOKEN_PATH, "w") as f:
+                f.write(creds.to_json())
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        body = _scrub_dashes("\n".join(body_lines))
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["to"] = NOTIFICATION_EMAIL
+        msg["subject"] = _scrub_dashes(subject)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True, "sent"
+    except Exception as exc:
+        return False, "send failed: " + str(exc)
+
+
 def clear():
     """Human ack: remove the flag. Trail row records who cleared it."""
     if not is_active():
@@ -607,20 +735,61 @@ def _cmd_detect_gate(args):
     sys.exit(2)
 
 
+def _hold_check_due_seconds():
+    """Seconds until (negative) / since (positive) the pending-hold re-verify is
+    due. None if not in a pending-hold window or the ts is unparseable."""
+    p = read()
+    if not p or not p.get("recovery_pending_hold"):
+        return None
+    due = _parse_ts(p.get("hold_check_due", ""))
+    if due is None:
+        return None
+    return (datetime.now(timezone.utc) - due).total_seconds()
+
+
 def _cmd_recover_check(args):
-    """Gate for the hourly recovery job: exit 0 only if the killswitch is
-    active AND has been so for >= RECOVERY_MIN_AGE_HOURS. Lets the shell
-    wrapper decide whether to even bring up Chrome (no-op most hours)."""
+    """Gate for the hourly recovery job. Exits 0 when there is work to do and
+    prints the MODE on stdout so the shell knows which path to drive:
+
+      "login" -> killswitch active >= RECOVERY_MIN_AGE_HOURS and not mid-hold:
+                 spin up the Claude re-login session, then `recover-record`.
+      "hold"  -> a prior login succeeded and the hold window has elapsed: run the
+                 read-only `recover-hold` re-verify (no Claude, no login).
+
+    Exits 1 (no stdout) when there is nothing to do this hour (inactive,
+    terminal, too young, or still inside an unelapsed hold window)."""
     if not is_active():
         print("recover-check: killswitch not active, nothing to recover", file=sys.stderr)
         sys.exit(1)
     if is_terminal():
         print(
-            "recover-check: TERMINAL (auto-recovery gave up after failed re-login); "
+            "recover-check: TERMINAL (auto-recovery gave up); "
             "manual re-auth + clear required, not probing",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Pending-hold takes priority: a login already succeeded; we are only waiting
+    # to confirm it stuck. No new login attempt while in this window.
+    hold_age = _hold_check_due_seconds()
+    if hold_age is not None:
+        if hold_age >= 0:
+            print(
+                "recover-check: hold-check due ({:.0f}m past due), re-verifying".format(
+                    hold_age / 60.0
+                ),
+                file=sys.stderr,
+            )
+            print("hold")
+            sys.exit(0)
+        print(
+            "recover-check: login holding, hold-check in {:.0f}m".format(
+                -hold_age / 60.0
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     age = age_seconds()
     min_age = RECOVERY_MIN_AGE_HOURS * 3600
     if age is None:
@@ -638,11 +807,12 @@ def _cmd_recover_check(args):
         )
         sys.exit(1)
     print(
-        "recover-check: eligible (active {:.1f}h >= {}h)".format(
+        "recover-check: eligible for re-login (active {:.1f}h >= {}h)".format(
             age / 3600.0, RECOVERY_MIN_AGE_HOURS
         ),
         file=sys.stderr,
     )
+    print("login")
     sys.exit(0)
 
 
