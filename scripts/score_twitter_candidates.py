@@ -301,9 +301,53 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
         flush=True,
     )
 
+    # Skip threads whose author is someone we already follow. We don't need to
+    # win over accounts already in our network — the comment buys no new reach.
+    # The follow list is harvested out-of-band (scripts/harvest_twitter_following.py
+    # scrapes x.com/<handle>/following) and stored server-side; we just read the
+    # set here, scoped to our posting handle. Fail-open exactly like the skip gate
+    # above: a missing endpoint / 429 / unresolved handle leaves the set empty so
+    # the cycle behaves exactly as it did before this guardrail (2026-06-03).
+    followed_handles = set()
+    if _twitter_handle:
+        try:
+            _foll_resp = api_get(
+                "/api/v1/followed-accounts",
+                query={"platform": "twitter", "our_account": _twitter_handle},
+                ok_on_404=True,
+            )
+            if _foll_resp.get("_not_found"):
+                print(
+                    f"[follow_gate] fail-open: followed-accounts endpoint 404 "
+                    f"(not deployed) our_account={_twitter_handle}; "
+                    f"follow filter inactive this cycle",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                for _fh in (_foll_resp.get("data") or {}).get("handles") or []:
+                    _fhs = (_fh or "").strip().lstrip("@").lower()
+                    if _fhs:
+                        followed_handles.add(_fhs)
+        except SystemExit as _foll_err:
+            followed_handles = set()
+            print(
+                f"[follow_gate] fail-open: followed-accounts fetch failed "
+                f"({_foll_err}); follow filter inactive this cycle",
+                file=sys.stderr,
+                flush=True,
+            )
+    print(
+        f"[follow_gate] loaded {len(followed_handles)} followed handles "
+        f"for our_account={_twitter_handle or '(unresolved)'}",
+        file=sys.stderr,
+        flush=True,
+    )
+
     inserted = updated = skipped = 0
     skipped_fake_id = 0
     skipped_already_rejected = 0
+    skipped_followed_author = 0
 
     for tweet in tweets:
         url = (tweet.get("tweet_url") or tweet.get("tweetUrl") or "").strip()
@@ -322,6 +366,23 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
         # Skip if we already posted on this thread
         if url in posted:
             skipped += 1
+            continue
+
+        # Skip threads authored by someone we already follow (guardrail
+        # 2026-06-03). Same class as the posted-dedup above: an identity-based
+        # global skip, independent of project, so it lives here (before age math
+        # and scoring). followed_handles is the harvested set loaded once above
+        # (empty => gate inert, fail-open). enrich_twitter_candidates.py has
+        # already canonicalized tweet["handle"] to the author's screen_name.
+        _cand_handle = (tweet.get("handle") or "").strip().lstrip("@").lower()
+        if _cand_handle and _cand_handle in followed_handles:
+            skipped += 1
+            skipped_followed_author += 1
+            print(
+                f"[follow_gate] skip @{tweet.get('handle')} (followed) url={url}",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
 
         # Calculate age
@@ -525,7 +586,7 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # and engagement curves over time. Per user instruction (2026-05-08): never
     # add DELETE-by-age back here, regardless of retention window.
 
-    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id}, already rejected for project: {skipped_already_rejected})")
+    print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id}, already rejected for project: {skipped_already_rejected}, followed authors: {skipped_followed_author})")
 
     # Emit the verdict sidecar for the retry loop's directional feedback. Best
     # effort: never fatal if the path is unwritable, never overwrites the
