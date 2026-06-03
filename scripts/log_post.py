@@ -58,6 +58,29 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import http_api
+
+# --- API error-envelope helpers (2026-06-02) -------------------------------
+# The API returns failures as a NESTED object: {"ok": false, "error": {"code",
+# "message", "details"}} (see social-autoposter-website response.ts). http_api
+# may also surface a FLAT {"error": "conflict"} on a 409 it couldn't parse. The
+# old `resp.get("error") in (...)` string check missed the nested shape, so a
+# duplicate_thread 409 fell through and printed {"logged": true, "post_id":
+# null} -- a false success that looked like a logging gap. These helpers read
+# either shape so dedups are recognized and reported correctly.
+def _api_error_code(resp):
+    e = (resp or {}).get("error")
+    if isinstance(e, dict):
+        return e.get("code")
+    return e  # flat string or None
+
+def _api_error_detail(resp, key):
+    e = (resp or {}).get("error")
+    if isinstance(e, dict):
+        d = e.get("details")
+        if isinstance(d, dict) and d.get(key) is not None:
+            return d.get(key)
+    return (resp or {}).get(key)
+
 import linkedin_url as li_url
 from db import load_env
 from twitter_account import resolve_handle as resolve_twitter_handle
@@ -283,11 +306,11 @@ def log_rejected(args):
         body["autoposter_version"] = autoposter_version
 
     resp = http_api.api_post("/api/v1/posts", body, ok_on_conflict=True)
-    if resp and resp.get("error") in ("duplicate_thread", "conflict"):
+    if resp and _api_error_code(resp) in ("duplicate_thread", "conflict"):
         print(json.dumps({
             "error": "DUPLICATE_THREAD",
             "message": "Already have a row for this thread",
-            "existing_post_id": resp.get("existing_post_id"),
+            "existing_post_id": _api_error_detail(resp, "existing_post_id"),
         }))
         return
     # See note in main() about the resp.data.post.id shape.
@@ -540,12 +563,12 @@ def main():
             }), file=sys.stderr)
 
     resp = http_api.api_post("/api/v1/posts", body, ok_on_conflict=True)
-    if resp and resp.get("error") in ("duplicate_thread", "conflict"):
+    if resp and _api_error_code(resp) in ("duplicate_thread", "conflict"):
         print(json.dumps({
             "error": "DUPLICATE_THREAD",
             "message": "Already posted in this thread",
-            "existing_post_id": resp.get("existing_post_id"),
-            "content_preview": resp.get("content_preview"),
+            "existing_post_id": _api_error_detail(resp, "existing_post_id"),
+            "content_preview": _api_error_detail(resp, "content_preview"),
         }))
         return
     # API response shape is {"ok":true,"data":{"post":{"id":N,...}}}.
