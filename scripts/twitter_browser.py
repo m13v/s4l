@@ -1891,6 +1891,116 @@ def discover_notifications(scroll_count=8, tab="all"):
                 browser.close()
 
 
+# Single source of truth for the per-article extractor used by every thread
+# reader below (scrape_thread_followups, scrape_many_thread_followups,
+# scrape_thread_media, scrape_many_thread_media). Was previously duplicated
+# inline in two places, which drifted. It extracts the same text fields as
+# before PLUS a `media` array [{url, alt, type}] per tweet so the reply-writer
+# can "see" images / video / GIF / link-card content instead of replying
+# text-blind (2026-06-03 thread-media feature). `type` is image|video|gif|card;
+# `alt` is the DOM alt-text / aria-label / card title (empty string when the
+# DOM gives none, a flag a later vision pass can escalate on).
+THREAD_EXTRACTOR_JS = r"""() => {
+  function extractMedia(article) {
+    const media = [];
+    const seen = new Set();
+    const push = (url, alt, type) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      media.push({ url: url, alt: (alt || '').trim(), type: type });
+    };
+    // Photos and animated GIFs live in tweetPhoto containers. A <video> inside
+    // one is an animated GIF; a bare <img> is a still photo.
+    for (const ph of article.querySelectorAll('[data-testid="tweetPhoto"]')) {
+      const img = ph.querySelector('img');
+      const vid = ph.querySelector('video');
+      if (vid) {
+        const poster = vid.getAttribute('poster') || (img ? img.getAttribute('src') : '') || '';
+        const alt = img ? (img.getAttribute('alt') || '') : '';
+        push(poster, alt, 'gif');
+      } else if (img) {
+        push(img.getAttribute('src') || '', img.getAttribute('alt') || '', 'image');
+      }
+    }
+    // Inline videos. Use the poster frame as the URL and the aria-label
+    // (often a human description) as alt-text.
+    for (const vp of article.querySelectorAll('[data-testid="videoPlayer"], [data-testid="videoComponent"]')) {
+      const vid = vp.querySelector('video');
+      const poster = vid ? (vid.getAttribute('poster') || '') : '';
+      push(poster, vp.getAttribute('aria-label') || '', 'video');
+    }
+    // Link-preview card. URL = card href; alt = card image alt or the first
+    // few text spans (title / domain / description).
+    const card = article.querySelector('[data-testid="card.wrapper"]');
+    if (card) {
+      let curl = '';
+      const a = card.querySelector('a[href]');
+      if (a) curl = a.getAttribute('href') || '';
+      let alt = '';
+      const cimg = card.querySelector('img');
+      if (cimg && cimg.getAttribute('alt')) alt = cimg.getAttribute('alt');
+      if (!alt) {
+        const txts = [];
+        for (const span of card.querySelectorAll('span')) {
+          const t = (span.textContent || '').trim();
+          if (t) txts.push(t);
+        }
+        alt = txts.slice(0, 3).join(' | ');
+      }
+      push(curl, alt, 'card');
+    }
+    return media;
+  }
+  const out = [];
+  for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
+    try {
+      let handle = '';
+      let displayName = '';
+      for (const link of article.querySelectorAll('a[role="link"]')) {
+        const href = link.getAttribute('href');
+        if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/i/') && href.length > 1 && href.split('/').length === 2) {
+          handle = href.replace('/', '');
+          const nameEl = link.querySelector('span');
+          if (nameEl) displayName = nameEl.textContent || '';
+          break;
+        }
+      }
+      const tweetText = article.querySelector('[data-testid="tweetText"]');
+      const text = tweetText ? tweetText.textContent : '';
+      const timeEl = article.querySelector('time');
+      const timeParent = timeEl ? timeEl.closest('a') : null;
+      const tweetHref = timeParent ? timeParent.getAttribute('href') : '';
+      const tweetUrl = tweetHref ? ('https://x.com' + tweetHref) : '';
+      const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
+      const idMatch = tweetHref ? tweetHref.match(/\/status\/(\d+)/) : null;
+      const tweetId = idMatch ? idMatch[1] : '';
+      // Detect reply-to target (article with "Replying to" block)
+      let replyingTo = '';
+      for (const span of article.querySelectorAll('a[href^="/"]')) {
+        const href = span.getAttribute('href') || '';
+        if (!href.includes('/status/') && span.textContent && span.textContent.trim().startsWith('@')) {
+          replyingTo = span.textContent.trim().replace(/^@/, '');
+          break;
+        }
+      }
+      if (tweetId && handle) {
+        out.push({
+          tweet_id: tweetId,
+          handle: handle,
+          display_name: displayName.trim(),
+          text: (text || ''),
+          tweet_url: tweetUrl,
+          datetime: datetime,
+          replying_to: replyingTo,
+          media: extractMedia(article)
+        });
+      }
+    } catch(e) {}
+  }
+  return out;
+}"""
+
+
 def scrape_thread_followups(thread_url, scroll_count=3):
     """Navigate to a tweet's permalink and extract reply articles below it.
 
@@ -1898,7 +2008,8 @@ def scrape_thread_followups(thread_url, scroll_count=3):
     tab may not surface (X default behavior drops @-tags inside active threads).
 
     Returns: {"thread_url": "...", "anchor_tweet_id": "...", "followups": [...]}
-             where each followup has the same shape as a notifications record.
+             where each followup has the same shape as a notifications record,
+             plus a `media` array [{url, alt, type}] per article.
     """
     print(f"[twitter_browser] scrape_thread_followups({thread_url!r}, scroll={scroll_count})", file=sys.stderr)
     from playwright.sync_api import sync_playwright
@@ -1906,54 +2017,7 @@ def scrape_thread_followups(thread_url, scroll_count=3):
     anchor_match = re.search(r"/status/(\d+)", thread_url or "")
     anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
 
-    EXTRACTOR_JS = r"""() => {
-      const out = [];
-      for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
-        try {
-          let handle = '';
-          let displayName = '';
-          for (const link of article.querySelectorAll('a[role="link"]')) {
-            const href = link.getAttribute('href');
-            if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/i/') && href.length > 1 && href.split('/').length === 2) {
-              handle = href.replace('/', '');
-              const nameEl = link.querySelector('span');
-              if (nameEl) displayName = nameEl.textContent || '';
-              break;
-            }
-          }
-          const tweetText = article.querySelector('[data-testid="tweetText"]');
-          const text = tweetText ? tweetText.textContent : '';
-          const timeEl = article.querySelector('time');
-          const timeParent = timeEl ? timeEl.closest('a') : null;
-          const tweetHref = timeParent ? timeParent.getAttribute('href') : '';
-          const tweetUrl = tweetHref ? ('https://x.com' + tweetHref) : '';
-          const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
-          const idMatch = tweetHref ? tweetHref.match(/\/status\/(\d+)/) : null;
-          const tweetId = idMatch ? idMatch[1] : '';
-          // Detect reply-to target (article with "Replying to" block)
-          let replyingTo = '';
-          for (const span of article.querySelectorAll('a[href^="/"]')) {
-            const href = span.getAttribute('href') || '';
-            if (!href.includes('/status/') && span.textContent && span.textContent.trim().startsWith('@')) {
-              replyingTo = span.textContent.trim().replace(/^@/, '');
-              break;
-            }
-          }
-          if (tweetId && handle) {
-            out.push({
-              tweet_id: tweetId,
-              handle: handle,
-              display_name: displayName.trim(),
-              text: (text || ''),
-              tweet_url: tweetUrl,
-              datetime: datetime,
-              replying_to: replyingTo
-            });
-          }
-        } catch(e) {}
-      }
-      return out;
-    }"""
+    EXTRACTOR_JS = THREAD_EXTRACTOR_JS
 
     with sync_playwright() as p:
         browser, page, is_cdp = get_browser_and_page(p)
@@ -1982,10 +2046,12 @@ def scrape_thread_followups(thread_url, scroll_count=3):
             # First article on a permalink page is the conversation root (OP).
             # Already scraped above — capture for free for thread_author_handle.
             root_author = (all_tweets[0].get('handle') or '').lstrip('@') if all_tweets else ''
+            root_media = (all_tweets[0].get('media') or []) if all_tweets else []
             return {
                 "thread_url": thread_url,
                 "anchor_tweet_id": anchor_tweet_id,
                 "root_author": root_author,
+                "root_media": root_media,
                 "followups": followups,
                 "total": len(followups),
             }
@@ -2013,47 +2079,7 @@ def scrape_many_thread_followups(thread_urls, scroll_count=3, per_url_delay_ms=2
                     anchor_match = re.search(r"/status/(\d+)", url or "")
                     anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
 
-                    EXTRACTOR_JS = r"""() => {
-                      const out = [];
-                      for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
-                        try {
-                          let handle = '';
-                          let displayName = '';
-                          for (const link of article.querySelectorAll('a[role="link"]')) {
-                            const href = link.getAttribute('href');
-                            if (href && href.startsWith('/') && !href.includes('/status/') && !href.includes('/i/') && href.length > 1 && href.split('/').length === 2) {
-                              handle = href.replace('/', '');
-                              const nameEl = link.querySelector('span');
-                              if (nameEl) displayName = nameEl.textContent || '';
-                              break;
-                            }
-                          }
-                          const tweetText = article.querySelector('[data-testid="tweetText"]');
-                          const text = tweetText ? tweetText.textContent : '';
-                          const timeEl = article.querySelector('time');
-                          const timeParent = timeEl ? timeEl.closest('a') : null;
-                          const tweetHref = timeParent ? timeParent.getAttribute('href') : '';
-                          const tweetUrl = tweetHref ? ('https://x.com' + tweetHref) : '';
-                          const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
-                          const idMatch = tweetHref ? tweetHref.match(/\/status\/(\d+)/) : null;
-                          const tweetId = idMatch ? idMatch[1] : '';
-                          let replyingTo = '';
-                          for (const span of article.querySelectorAll('a[href^="/"]')) {
-                            const href = span.getAttribute('href') || '';
-                            if (!href.includes('/status/') && span.textContent && span.textContent.trim().startsWith('@')) {
-                              replyingTo = span.textContent.trim().replace(/^@/, '');
-                              break;
-                            }
-                          }
-                          if (tweetId && handle) {
-                            out.push({tweet_id: tweetId, handle, display_name: displayName.trim(),
-                                      text: (text || ''), tweet_url: tweetUrl,
-                                      datetime, replying_to: replyingTo});
-                          }
-                        } catch(e) {}
-                      }
-                      return out;
-                    }"""
+                    EXTRACTOR_JS = THREAD_EXTRACTOR_JS
 
                     seen = set()
                     collected = []
@@ -2075,16 +2101,141 @@ def scrape_many_thread_followups(thread_urls, scroll_count=3, per_url_delay_ms=2
                     # First article on a permalink page is the conversation root (OP).
                     # Already scraped above — capture for free for thread_author_handle.
                     root_author = (collected[0].get('handle') or '').lstrip('@') if collected else ''
+                    root_media = (collected[0].get('media') or []) if collected else []
                     print(f"[thread_followups] {url}: {len(followups)} candidate follow-ups", file=sys.stderr)
                     results.append({
                         "thread_url": url,
                         "anchor_tweet_id": anchor_tweet_id,
                         "root_author": root_author,
+                        "root_media": root_media,
                         "followups": followups,
                     })
                 except Exception as e:
                     print(f"[thread_followups] error on {url}: {e}", file=sys.stderr)
                     results.append({"thread_url": url, "error": str(e), "followups": []})
+                page.wait_for_timeout(per_url_delay_ms)
+            return {"results": results, "urls_visited": len(thread_urls)}
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+
+def _anchor_media_from_tweets(tweets, anchor_tweet_id):
+    """Pick the media of the anchor tweet from a list of scraped articles.
+
+    The anchor is the tweet we plan to reply to (the candidate URL's /status/ID).
+    Match by tweet_id; if the anchor article is not found (X sometimes renders
+    the focused tweet without a resolvable status href in the first paint), fall
+    back to the first article on the page, which on a permalink is the focused
+    tweet. Returns a list [{url, alt, type}] (possibly empty).
+    """
+    if not tweets:
+        return []
+    if anchor_tweet_id:
+        for t in tweets:
+            if t.get("tweet_id") == anchor_tweet_id:
+                return t.get("media") or []
+    return tweets[0].get("media") or []
+
+
+def scrape_thread_media(thread_url, scroll_count=1):
+    """Navigate to a tweet's permalink and return the media of the anchor tweet.
+
+    Deterministic, model-free media capture for the MAIN posting cycle: the
+    reply-writer needs to "see" the image / video / GIF / link-card on the tweet
+    it is about to reply to. Returns:
+        {"thread_url": ..., "anchor_tweet_id": ..., "media": [{url,alt,type}, ...]}
+    media is [] when the tweet has none. Cheap: one navigation, minimal scroll
+    (the anchor is at the top of a permalink page).
+    """
+    print(f"[twitter_browser] scrape_thread_media({thread_url!r})", file=sys.stderr)
+    from playwright.sync_api import sync_playwright
+
+    anchor_match = re.search(r"/status/(\d+)", thread_url or "")
+    anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
+
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            page.goto(thread_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(3500)
+            tweets = []
+            try:
+                tweets = page.evaluate(THREAD_EXTRACTOR_JS)
+            except Exception as e:
+                print(f"[thread_media] extractor error: {e}", file=sys.stderr)
+            # One short scroll can help lazy-loaded media of the focused tweet
+            # render; re-extract and prefer the richer result.
+            for _ in range(max(0, scroll_count - 1)):
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+                page.wait_for_timeout(900)
+                try:
+                    more = page.evaluate(THREAD_EXTRACTOR_JS)
+                    if more and len(more) >= len(tweets):
+                        tweets = more
+                except Exception:
+                    pass
+                _refresh_browser_lock()
+            media = _anchor_media_from_tweets(tweets, anchor_tweet_id)
+            print(f"[thread_media] {thread_url}: {len(media)} media item(s)", file=sys.stderr)
+            return {
+                "thread_url": thread_url,
+                "anchor_tweet_id": anchor_tweet_id,
+                "media": media,
+            }
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+
+def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500):
+    """Batch scrape_thread_media over a list of candidate URLs in ONE session.
+
+    Used by the main cycle (run-twitter-cycle.sh Phase 2b-prep) to pre-fetch the
+    media of every candidate the model is about to draft against, in a single
+    cheap browser pass, then persist each via scripts/log_thread_media.py.
+
+    Returns: {"results": [{thread_url, anchor_tweet_id, media: [...]}], "urls_visited": N}
+    """
+    from playwright.sync_api import sync_playwright
+
+    results = []
+    with sync_playwright() as p:
+        browser, page, is_cdp = get_browser_and_page(p)
+        try:
+            for url in thread_urls:
+                anchor_match = re.search(r"/status/(\d+)", url or "")
+                anchor_tweet_id = anchor_match.group(1) if anchor_match else ""
+                try:
+                    page.goto(url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(3000)
+                    tweets = []
+                    try:
+                        tweets = page.evaluate(THREAD_EXTRACTOR_JS)
+                    except Exception:
+                        tweets = []
+                    for _ in range(max(0, scroll_count - 1)):
+                        page.evaluate("window.scrollBy(0, window.innerHeight)")
+                        page.wait_for_timeout(800)
+                        try:
+                            more = page.evaluate(THREAD_EXTRACTOR_JS)
+                            if more and len(more) >= len(tweets):
+                                tweets = more
+                        except Exception:
+                            pass
+                        _refresh_browser_lock()
+                    media = _anchor_media_from_tweets(tweets, anchor_tweet_id)
+                    print(f"[thread_media] {url}: {len(media)} media item(s)", file=sys.stderr)
+                    results.append({
+                        "thread_url": url,
+                        "anchor_tweet_id": anchor_tweet_id,
+                        "media": media,
+                    })
+                except Exception as e:
+                    print(f"[thread_media] error on {url}: {e}", file=sys.stderr)
+                    results.append({"thread_url": url, "anchor_tweet_id": anchor_tweet_id, "error": str(e), "media": []})
                 page.wait_for_timeout(per_url_delay_ms)
             return {"results": results, "urls_visited": len(thread_urls)}
         finally:
