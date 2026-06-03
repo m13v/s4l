@@ -44,10 +44,20 @@ from mcp.server.fastmcp import FastMCP
 # --- Config ---
 
 PORT = int(os.environ.get("BH_PORT", "9555"))
-PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / "browser-harness"
-PID_FILE = Path.home() / ".claude" / "browser-profiles" / "browser-harness.chrome.pid"
-LOG_FILE = Path.home() / ".claude" / "browser-profiles" / "browser-harness.chrome.log"
-MCP_LOG_FILE = Path.home() / ".claude" / "browser-profiles" / "browser-harness.mcp.log"
+
+# Profile name can be overridden via BH_PROFILE_NAME env so multiple harness
+# instances (twitter-harness on 9555, linkedin-harness on 9556, reddit-harness
+# on 9557) can run side by side on SEPARATE persistent profiles + PID files
+# without stomping each other's cookies/sessions. If this is hardcoded to
+# "browser-harness", every non-default-port instance lands on the Twitter
+# profile and shares one PID_FILE, so the per-instance ensure_chrome() calls
+# SIGKILL each other's Chrome (regression 2026-06-02, fixed by restoring this).
+# Default "browser-harness" keeps the existing Twitter setup unchanged.
+PROFILE_NAME = os.environ.get("BH_PROFILE_NAME", "browser-harness")
+PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / PROFILE_NAME
+PID_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.chrome.pid"
+LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.chrome.log"
+MCP_LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.mcp.log"
 
 
 def _detect_chrome_bin() -> str:
