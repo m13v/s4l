@@ -24,7 +24,6 @@ import {
   readPlan,
   writePlan,
   planPath,
-  latestBatchId,
   type Plan,
   type PlanCandidate,
 } from "./repo.js";
@@ -288,6 +287,13 @@ async function produceDrafts(
   const env: NodeJS.ProcessEnv = {
     DRAFT_ONLY: "1",
     TWITTER_PAGE_GEN_RATE: "0",
+    // Interactive draft_cycle: launch the harness Chrome ON-SCREEN so the user
+    // can watch the scan/scrape happen live. Cron/autopilot do NOT set these, so
+    // background runs keep the off-screen default in twitter-backend.sh and don't
+    // hijack the screen. (Only affects a fresh Chrome launch; an already-running
+    // harness window keeps its current position.)
+    BH_WINDOW_POS: "60,60",
+    BH_WINDOW_SIZE: "1280,900",
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
   let step = 0;
@@ -356,13 +362,18 @@ async function produceDrafts(
   if (blockedMarker && blockedMarker[1]) {
     return { batchId: null, blocked: blockedReasonMessage(blockedMarker[1]) };
   }
-  const existing = latestBatchId();
-  if (existing) return { batchId: existing };
+  // No `DRAFT_ONLY_PLAN=` marker from THIS run => this run produced no drafts.
+  // We MUST NOT fall back to the newest plan file on disk (`latestBatchId()`):
+  // that's a *previous* run's batch, so a 5-second empty cycle would echo an old
+  // 7-draft batch and report phantom success. Report 0 drafts honestly, with the
+  // pipeline's own reason (e.g. cold-start project with no seeded queries).
   return {
     batchId: null,
     blocked:
-      `Draft cycle produced no plan (exit ${res.code}). This usually means scan ` +
-      `found no fresh candidates, or the pipeline errored. Tail:\n` +
+      `This run produced no drafts (exit ${res.code}). The scan found no fresh ` +
+      `candidates for the selected project — usually a cold-start project with ` +
+      `no seeded search queries/topics, or a pipeline error. This is NOT a ` +
+      `previous batch. Tail:\n` +
       res.stderr.split("\n").slice(-12).join("\n"),
   };
 }
