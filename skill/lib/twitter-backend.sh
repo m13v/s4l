@@ -205,6 +205,26 @@ ensure_twitter_browser_for_backend() {
         # re-injection needed. Matches the flags the Playwright browser agents
         # already use. (Root-cause persistence fix, 2026-06-02; the cookie
         # mirror + restore_twitter_session.py remain as the safety net.)
+        # Self-heal (2026-06-03): if a Chrome already holds THIS profile dir but
+        # is not answering CDP on our port, a fresh launch hands off to it via
+        # Chrome's SingletonLock and exits without ever binding our port — the
+        # old "failed to start within 12s" loop (8h Twitter outage overnight
+        # 2026-06-02/03, root cause: a server.py regression that dropped
+        # BH_PROFILE_NAME and collapsed the linkedin/twitter harness profiles
+        # onto this one, stranding an orphan on 9556). Reap the stale owner of
+        # our EXACT profile dir (trailing space in the pattern so browser-harness
+        # never matches browser-harness-linkedin) before relaunching.
+        local _prof_dir="$HOME/.claude/browser-profiles/browser-harness"
+        local _stale_pids
+        _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
+        if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
+            kill $_stale_pids 2>/dev/null || true
+            sleep 2
+            _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
+            [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
+            rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
+        fi
         "$_chrome_bin" \
             --remote-debugging-port=9555 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
