@@ -260,7 +260,8 @@ function cycleProgressMessage(line: string): string | null {
   const l = line.trim();
   let m: RegExpExecArray | null;
   if (/=== Twitter Cycle \(batch=/.test(l)) return "Starting draft cycle…";
-  if ((m = /^Selected projects?:\s*(.+)$/.exec(l))) return `Selected project: ${m[1]}`;
+  // NB: lines carry a `[HH:MM:SS] ` timestamp prefix, so don't anchor on ^.
+  if ((m = /Selected projects?:\s*(.+)$/.exec(l))) return `Selected project: ${m[1]}`;
   if (/phase=phase1\b/.test(l) || /Phase 1: drafting queries/.test(l))
     return "Searching X for fresh threads…";
   if ((m = /Phase 1 complete.*?has (\d+) candidates?/.exec(l)))
@@ -290,6 +291,7 @@ async function produceDrafts(
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
   let step = 0;
+  let lastMsg = "";
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000, // scan+draft can take several minutes
@@ -302,7 +304,11 @@ async function produceDrafts(
       if (t.trim()) console.error(`[draft_cycle] ${t}`);
       if (!onProgress) return;
       const msg = cycleProgressMessage(t);
-      if (msg) onProgress(msg, ++step);
+      // Skip consecutive duplicates (a phase can log a couple matching lines).
+      if (msg && msg !== lastMsg) {
+        lastMsg = msg;
+        onProgress(msg, ++step);
+      }
     },
   });
   // Prefer the explicit marker; fall back to the newest plan file on disk.
