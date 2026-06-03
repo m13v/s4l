@@ -117,6 +117,33 @@ def cmd_reply_counts() -> int:
     return 0
 
 
+def _render_media_block(media) -> str:
+    """Render replies.their_media ([{url,alt,type}]) into a short, self-titled
+    text block for the Phase B prompt (2026-06-03 thread-media feature). Empty
+    string when the comment had no media (or media was never captured), so it
+    stays invisible in the embedded JSON for text-only comments.
+    """
+    if not isinstance(media, list) or not media:
+        return ""
+    lines = []
+    for it in media:
+        if not isinstance(it, dict):
+            continue
+        t = (it.get("type") or "media").strip()
+        alt = (it.get("alt") or "").strip()
+        url = (it.get("url") or "").strip()
+        alt_part = f'"{alt}"' if alt else "[no description]"
+        lines.append(f"  - {t}: {alt_part} ({url})")
+    if not lines:
+        return ""
+    return (
+        "## Media in the comment you are replying to\n"
+        "React to what it VISUALLY shows, not just the text. "
+        "[no description] = no alt-text; infer from the comment + media type.\n"
+        + "\n".join(lines)
+    )
+
+
 def cmd_pending_data(batch_size: int) -> int:
     try:
         from account_resolver import resolve as _resolve_account  # noqa: WPS433
@@ -204,6 +231,7 @@ def cmd_pending_data(batch_size: int) -> int:
             "is_our_original_post": int(r.get("is_our_original_post") or 0),
             "project_name": r.get("project_name"),
             "counterparty_history_block": history_block,
+            "their_media_block": _render_media_block(r.get("their_media")),
         })
     # json_agg(...) returns null when the array is empty; engage-twitter.sh's
     # downstream prompt-template expects an empty array instead, which is
