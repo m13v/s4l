@@ -531,9 +531,10 @@ def _wait_for_reply_textbox(page, total_timeout_ms=45000):
 
 # Post-action interstitials X shows AFTER a successful reply (e.g. the
 # "Unlock more on X" graduated-access sheet). They don't block the post that
-# triggered them, but the sheet stays up and overlays the composer on the NEXT
-# reply in a batch -> spurious reply_box_not_found for posts 2..N. We dismiss
-# them deterministically before looking for the reply box. Targeted by the
+# triggered them, but the sheet stays up on screen and would overlay the
+# composer on the NEXT reply in a batch -> spurious reply_box_not_found for
+# posts 2..N. We dismiss them deterministically right after each successful
+# post (not before the next reply), so the sheet never lingers. Targeted by the
 # sheet's CTA label so we never touch a real compose/confirm dialog (those have
 # no "Got it"); best-effort, fast, never raises.
 _OVERLAY_DISMISS_LABELS = ("Got it", "Dismiss")
@@ -841,12 +842,6 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                     tweet_not_found = True
                     break
 
-                # A nudge sheet left over from the previous reply in this batch
-                # (e.g. "Unlock more on X") can sit on top of the composer and
-                # mask tweetTextarea_0. Clear it first so the wait below sees the
-                # real reply box instead of failing reply_box_not_found.
-                _dismiss_known_overlays(page)
-
                 reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
                 if reply_box:
                     break
@@ -903,6 +898,14 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 verified = len(box_text.strip()) == 0 or text not in box_text
             except Exception:
                 verified = True
+
+            # Dismiss the post-success interstitial X shows right after a reply
+            # (e.g. the "Unlock more on X" graduated-access sheet). It animates
+            # in on top of the composer once the reply lands, so we close it
+            # here, immediately after the post succeeds, rather than before the
+            # next reply -> the sheet never lingers on screen and never masks
+            # the next reply box. Best-effort, fast, never raises.
+            _dismiss_known_overlays(page)
 
             # Clean up CDP session
             if _cdp_session:
