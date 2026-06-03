@@ -881,6 +881,178 @@ def _cmd_recover(args):
     sys.exit(0)
 
 
+def _cmd_recover_record(args):
+    """Record the verdict of a Claude-driven re-login attempt and apply the
+    matching state transition. Called by skill/linkedin-recovery.sh after it runs
+    the login session. Verdicts:
+
+      held       -> enter the pending-hold window; do NOT resume yet.
+      hard_block -> terminal (manual re-auth required), no further auto-attempts.
+      transient  -> re-anchor the 24h clock and try again later, up to the cap.
+    """
+    if not is_active():
+        print(json.dumps({"recorded": False, "reason": "not_active"}))
+        sys.exit(0)
+    if is_terminal():
+        print(json.dumps({"recorded": False, "reason": "already_terminal"}))
+        sys.exit(0)
+
+    verdict = args.verdict
+    detail = args.detail or ""
+    age = age_seconds()
+
+    if verdict == "held":
+        due_iso = _record_login_held()
+        if not args.no_email:
+            ok, msg = _send_simple_email(
+                "[LI KILL] re-login OK, verifying it holds",
+                [
+                    "A Claude-driven re-login into LinkedIn SUCCEEDED.",
+                    "",
+                    "Pipelines stay paused for now: we re-verify (read-only) at",
+                    str(due_iso) + " that the session actually held before",
+                    "clearing the flag. If it dropped by then, we stop completely.",
+                    "",
+                    "Login detail: " + str(detail),
+                    "State file: " + STATE_FILE,
+                ],
+            )
+            _append_trail({"event": "pending_hold_email", "ok": ok, "msg": msg})
+        print(json.dumps({
+            "recorded": True,
+            "verdict": "held",
+            "pending_hold": True,
+            "hold_check_due": due_iso,
+        }))
+        sys.exit(0)
+
+    if verdict == "hard_block":
+        _record_hard_block(detail)
+        if not args.no_email:
+            age_h = round(age / 3600.0, 1) if age else "?"
+            ok, msg = _send_simple_email(
+                "[LI KILL] re-login BLOCKED, manual re-auth required",
+                [
+                    "A Claude-driven re-login into LinkedIn hit a hard block and",
+                    "auto-recovery has STOPPED COMPLETELY (no further attempts).",
+                    "",
+                    "This is a checkpoint / captcha / account restriction / wrong",
+                    "credentials / 2FA wall: poking it again only deepens the block.",
+                    "",
+                    "Killswitch age: " + str(age_h) + "h",
+                    "Block detail: " + str(detail),
+                    "",
+                    "To resume:",
+                    "  1. Open the linkedin-harness Chrome (port 9556), sign in,",
+                    "     and clear any checkpoint by hand.",
+                    "  2. Confirm /feed/ renders.",
+                    "  3. python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear",
+                    "",
+                    "State file: " + STATE_FILE,
+                ],
+            )
+            _append_trail({"event": "terminal_email", "ok": ok, "msg": msg})
+        print(json.dumps({
+            "recorded": True,
+            "verdict": "hard_block",
+            "terminal": True,
+        }))
+        sys.exit(0)
+
+    # transient
+    attempts, terminal = _record_transient(detail)
+    if terminal and not args.no_email:
+        ok, msg = _send_simple_email(
+            "[LI KILL] re-login gave up after repeated inconclusive attempts",
+            [
+                "Claude-driven re-login could not conclusively log in after",
+                str(attempts) + " transient attempt(s); auto-recovery STOPPED.",
+                "",
+                "Last detail: " + str(detail),
+                "Manual re-auth + clear required.",
+                "State file: " + STATE_FILE,
+            ],
+        )
+        _append_trail({"event": "terminal_email", "ok": ok, "msg": msg})
+    print(json.dumps({
+        "recorded": True,
+        "verdict": "transient",
+        "transient_attempts": attempts,
+        "terminal": terminal,
+    }))
+    sys.exit(0)
+
+
+def _cmd_recover_hold(args):
+    """Read-only re-verify that a successful re-login actually held. Run after the
+    pending-hold window elapses (recover-check prints mode "hold"). No login, no
+    Claude: just the gentle probe.
+
+      healthy             -> clear the flag + resume the fleet (the win).
+      conclusively out    -> terminal: the session dropped shortly after login,
+                             which is exactly the "doesn't hold -> stop" rule.
+      inconclusive (infra) -> leave pending; the next hourly tick re-checks.
+    """
+    if not is_active():
+        print(json.dumps({"held": False, "reason": "not_active"}))
+        sys.exit(0)
+    if is_terminal():
+        print(json.dumps({"held": False, "reason": "already_terminal"}))
+        sys.exit(0)
+    p = read() or {}
+    if not p.get("recovery_pending_hold"):
+        print(json.dumps({"held": False, "reason": "not_pending_hold"}))
+        sys.exit(0)
+
+    cdp_url = args.cdp_url or LINKEDIN_CDP_URL
+    healthy, detail, conclusive = _probe_linkedin_health(cdp_url)
+    age = age_seconds()
+    _append_trail({
+        "event": "hold_check_probe",
+        "ts": _now_iso(),
+        "healthy": healthy,
+        "conclusive": conclusive,
+        "detail": detail,
+    })
+
+    if healthy:
+        clear()
+        _append_trail({"event": "recover_clear", "ts": _now_iso(), "detail": "hold_check: " + str(detail)})
+        if not args.no_email:
+            ok, msg = _send_recovery_email("re-login held: " + str(detail), age)
+            _append_trail({"event": "recover_email", "ok": ok, "msg": msg})
+        print(json.dumps({"held": True, "recovered": True, "detail": detail}))
+        sys.exit(0)
+
+    if not conclusive:
+        # Infra hiccup during the hold-check; don't punish the session, retry next hour.
+        print(json.dumps({"held": False, "reason": "hold_check_inconclusive", "detail": detail}))
+        sys.exit(0)
+
+    # Conclusively logged out again -> the login did not hold. Stop completely.
+    _record_hard_block("login did not hold: " + str(detail))
+    p2 = read() or {}
+    p2["recovery_terminal_reason"] = "login_dropped_after_hold"
+    _write_state(p2)
+    if not args.no_email:
+        ok, msg = _send_simple_email(
+            "[LI KILL] re-login did NOT hold, stopping completely",
+            [
+                "A re-login succeeded but the session dropped within the hold",
+                "window. Per the 'if it doesn't hold, don't try again' rule,",
+                "auto-recovery has STOPPED COMPLETELY.",
+                "",
+                "Hold-check detail: " + str(detail),
+                "Manual re-auth + clear required:",
+                "  python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear",
+                "State file: " + STATE_FILE,
+            ],
+        )
+        _append_trail({"event": "terminal_email", "ok": ok, "msg": msg})
+    print(json.dumps({"held": False, "terminal": True, "reason": "login_dropped_after_hold", "detail": detail}))
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn pipeline killswitch")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -911,11 +1083,31 @@ def main():
 
     r = sub.add_parser(
         "recover",
-        help="gentle probe; clear + email on health (Chrome must be up)",
+        help="gentle read-only self-heal probe; clear + email on health (legacy)",
     )
     r.add_argument("--cdp-url", default="", help="harness CDP URL (default $LINKEDIN_CDP_URL)")
     r.add_argument("--no-email", action="store_true", help="skip recovery email")
     r.add_argument("--force", action="store_true", help="skip the age gate")
+
+    rr = sub.add_parser(
+        "recover-record",
+        help="record the verdict of a Claude re-login attempt + transition state",
+    )
+    rr.add_argument(
+        "--verdict",
+        required=True,
+        choices=["held", "hard_block", "transient"],
+        help="held=login ok (verify hold); hard_block=terminal; transient=retry later",
+    )
+    rr.add_argument("--detail", default="", help="human-readable detail for the trail/email")
+    rr.add_argument("--no-email", action="store_true", help="skip the alert email")
+
+    rh = sub.add_parser(
+        "recover-hold",
+        help="read-only re-verify a prior re-login held; clear or go terminal",
+    )
+    rh.add_argument("--cdp-url", default="", help="harness CDP URL (default $LINKEDIN_CDP_URL)")
+    rh.add_argument("--no-email", action="store_true", help="skip the alert email")
 
     args = parser.parse_args()
     {
@@ -926,6 +1118,8 @@ def main():
         "detect-gate": _cmd_detect_gate,
         "recover-check": _cmd_recover_check,
         "recover": _cmd_recover,
+        "recover-record": _cmd_recover_record,
+        "recover-hold": _cmd_recover_hold,
     }[args.cmd](args)
 
 
