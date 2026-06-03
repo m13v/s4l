@@ -470,7 +470,8 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 # mechanically append these as `-term` operators to whatever query it drafts
 # for the project. See scripts/project_excludes.py for proposal/activation/
 # decay rules.
-PROJECTS_JSON=$(python3 - <<'PY'
+_PJ_ERR="$(mktemp)"
+PROJECTS_JSON=$(python3 - 2>"$_PJ_ERR" <<'PY'
 import json, os, subprocess, sys
 REPO = os.path.expanduser('~/social-autoposter')
 sys.path.insert(0, os.path.join(REPO, 'scripts'))
@@ -549,6 +550,37 @@ for p in picked:
 print(json.dumps(chosen, indent=2))
 PY
 )
+_PJ_RC=$?
+# Fail loud when the project/topic universe can't be built. The heredoc above
+# exits non-zero (PROJECTS_JSON empty) when pick_topic_for_project finds zero
+# active rows in project_search_topics for the selected project, or the topics
+# API is unreachable; it also yields "[]" when no project is eligible. Without
+# this guard the empty PROJECTS_JSON silently falls through to "0 queries -> 0
+# tweets -> batch expired -> zero", which reads to the user as "nothing to post"
+# when the real cause is "this project was never seeded with search topics".
+# Seeding now happens in the MCP setup tool; this is the defense-in-depth net
+# so a missing universe is surfaced, never swallowed. (2026-06-02)
+if [ "$_PJ_RC" -ne 0 ] || ! printf '%s' "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) and d else 1)' 2>/dev/null; then
+    _PJ_REASON="project_selection_failed"
+    if grep -q "no active search topics" "$_PJ_ERR" 2>/dev/null; then
+        _PJ_REASON="no_search_topics"
+    elif grep -qiE "project-search-topics API|API unreachable" "$_PJ_ERR" 2>/dev/null; then
+        _PJ_REASON="topics_api_unreachable"
+    fi
+    log "Project/topic universe build FAILED (reason=$_PJ_REASON); stopping cycle before scan. Last error lines:"
+    tail -15 "$_PJ_ERR" 2>/dev/null | sed 's/^/    /' | tee -a "$LOG_FILE"
+    rm -f "$_PJ_ERR"
+    # Surface the reason to the MCP draft_cycle wrapper (stdout marker) in manual mode.
+    if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+        echo "DRAFT_ONLY_BLOCKED=$_PJ_REASON"
+    fi
+    # Record a dashboard-visible failure row (best-effort) and exit cleanly.
+    python3 "$REPO_DIR/scripts/log_run.py" --script "post_twitter" --posted 0 --skipped 0 --failed 1 \
+        --failure-reasons "${_PJ_REASON}:1" --cost "0.0000" --elapsed $(( $(date +%s) - RUN_START )) 2>/dev/null || true
+    _SA_RUN_SUMMARY_EMITTED=1
+    exit 0
+fi
+rm -f "$_PJ_ERR"
 
 log "Selected projects: $(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; print(", ".join(p["name"] for p in json.load(sys.stdin)))')"
 EXCLUDES_TOTAL=$(echo "$PROJECTS_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(p.get("excludes_for_search") or []) for p in d))')
