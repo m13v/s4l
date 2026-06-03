@@ -26,20 +26,6 @@ const COPY_TARGETS = [
   'mcp',
 ];
 
-const ENV_TEMPLATE = `# social-autoposter environment variables
-# Fill in your values below.
-
-# Moltbook API key (required for Moltbook posting/scanning)
-# Get it from: https://www.moltbook.com/settings/api
-MOLTBOOK_API_KEY=
-
-# s4l.ai HTTP API. The pipelines read and write all state through this API
-# (no Postgres required). Defaults to https://s4l.ai when unset; set
-# AUTOPOSTER_API_KEY only if your install uses a bearer token.
-# AUTOPOSTER_API_BASE=https://s4l.ai
-# AUTOPOSTER_API_KEY=
-`;
-
 // Never overwrite these user files during update
 const USER_FILES = new Set(['config.json', '.env', 'SKILL.md']);
 
@@ -843,15 +829,12 @@ function init() {
     console.log('  config.json exists — skipping');
   }
 
-  // .env — only if it doesn't exist. Written from an in-package template so
-  // the NPM tarball no longer ships a credential-bearing .env.example file.
-  const envDest = path.join(DEST, '.env');
-  if (!fs.existsSync(envDest)) {
-    fs.writeFileSync(envDest, ENV_TEMPLATE);
-    console.log('  created .env from template (fill in MOLTBOOK_API_KEY; AUTOPOSTER_API_KEY only if your install uses one)');
-  } else {
-    console.log('  .env exists — skipping');
-  }
+  // No .env is created. X/Twitter and the rest of the pipeline run with zero
+  // keys — state syncs through the s4l.ai HTTP API and the browser session
+  // lives in the harness Chrome profile. Optional integrations read their keys
+  // straight from the environment when set (MOLTBOOK_API_KEY for Moltbook,
+  // AUTOPOSTER_API_KEY only if your s4l.ai install uses a bearer token); every
+  // script guards `.env` with `[ -f .env ]`, so its absence is a no-op.
 
   installPythonDeps();
   removeLegacyEngagementStylesSidecar();
