@@ -337,6 +337,46 @@ def fetch_thread_engagement_snapshot(cid: int) -> str | None:
     return json.dumps(snap, separators=(",", ":"))
 
 
+def fetch_thread_media_snapshot(cid: int) -> str | None:
+    """Fetch the candidate's thread_media (captured in Phase 2b-prep by
+    capture_thread_media.py) as a compact JSON-array string, ready for the
+    posts.thread_media JSONB column (2026-06-03 thread-media feature).
+
+    Reads from /api/v1/twitter-candidates/by-id?id=<cid>, the same endpoint the
+    engagement snapshot uses. No browser, no live refresh: whatever media the
+    prep step persisted onto the candidate row is what gets frozen onto the
+    post as an immutable audit record of what the thread visually showed.
+
+    Returns:
+      - A JSON array string (e.g. '[{"url":"...","alt":"...","type":"image"}]')
+        when the candidate has a non-empty thread_media array.
+      - '[]' when media was captured but the thread had none (captured-none is
+        meaningful and worth recording, distinct from never-captured).
+      - None when the row is missing, thread_media is NULL (never captured), or
+        any error occurs. We never block the post on this.
+    """
+    try:
+        resp = api_get(
+            "/api/v1/twitter-candidates/by-id",
+            query={"id": int(cid)},
+            ok_on_404=True,
+        )
+    except SystemExit as e:
+        print(f"[post] candidate {cid} thread_media fetch failed: {e}", flush=True)
+        return None
+    if resp.get("_not_found"):
+        return None
+    cand = (resp.get("data") or {}).get("candidate") or {}
+    media = cand.get("thread_media")
+    # NULL on the row = never captured (capture disabled or pre-feature row):
+    # leave posts.thread_media NULL too. An empty list = captured-none: record it.
+    if media is None:
+        return None
+    if not isinstance(media, list):
+        return None
+    return json.dumps(media, separators=(",", ":"))
+
+
 def update_candidate_posted(cid: int, post_id: int,
                             matched_project=None, search_topic=None) -> None:
     """Mark the candidate posted via /api/v1/twitter-candidates/by-id.
@@ -743,6 +783,16 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     else:
         print(f"[post] candidate {cid} thread_engagement snapshot: none "
               f"(no T0 data on candidate row)", flush=True)
+
+    # Thread media snapshot (2026-06-03): freeze the candidate's captured media
+    # onto posts.thread_media. Reads thread_media off the candidate row (set in
+    # Phase 2b-prep by capture_thread_media.py). None when capture was disabled
+    # or the row pre-dates the feature; '[]' when the thread genuinely had none.
+    thread_media_json = fetch_thread_media_snapshot(cid)
+    if thread_media_json is not None:
+        log_args += ["--thread-media", thread_media_json]
+        print(f"[post] candidate {cid} thread_media snapshot: "
+              f"{thread_media_json}", flush=True)
 
     rc, out, err = run_subprocess(log_args, timeout_sec=60)
     if err:
