@@ -159,6 +159,21 @@ def main():
         # product->organic fallback this preserves cadence without weakening
         # the cooldown.
         other = "product" if target == "organic" else "organic"
+        # ...but ONLY if the other type is still eligible (config weight > 0).
+        # A type explicitly disabled via post_type_weights=0 (e.g. product
+        # paused during an IG link-sharing restriction) must NEVER be posted
+        # through the empty-queue fallback, otherwise weight=0 is not a real
+        # off switch. If the only eligible type's queue is empty, exit 2
+        # (nothing to post this fire) rather than leak the disabled type.
+        if other not in eligible:
+            sys.stderr.write(
+                f"queue empty for eligible type '{target}'; fallback type "
+                f"'{other}' is disabled (config_weights={type_weights_cfg}), "
+                "not leaking it"
+                + (f" (target_account={account})" if account else "")
+                + "\n"
+            )
+            sys.exit(2)
         if other == "product":
             row = _pick_product_with_cooldown()
         else:
