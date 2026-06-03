@@ -455,6 +455,14 @@ def main():
                              "No live refresh, no extra API calls; whatever the "
                              "candidate row already had under *_t0 is what gets "
                              "recorded. Capped at 2 KB by the API.")
+    parser.add_argument("--thread-media", default=None,
+                        help="JSON array snapshot of the original thread's media "
+                             "([{\"url\":...,\"alt\":...,\"type\":\"image|video|gif|card\"}]) "
+                             "captured at draft time. Stored in posts.thread_media "
+                             "(JSONB) as the immutable record of what the thread "
+                             "visually showed when we replied. An empty array [] is "
+                             "valid (captured-none). Omitted/None leaves the column "
+                             "NULL (never captured). 2026-06-03 thread-media feature.")
     args = parser.parse_args()
 
     if args.mark_self_reply:
@@ -541,6 +549,21 @@ def main():
         body["length_arm"] = args.length_arm
     if args.thread_engagement:
         body["thread_engagement"] = args.thread_engagement
+    # Thread media snapshot (2026-06-03): the media of the thread we replied to,
+    # frozen onto posts.thread_media as an immutable audit record. Read from the
+    # candidate row by twitter_post_plan.py and forwarded here as a JSON array
+    # string. Parse defensively: a malformed value must NOT block the post, so on
+    # any parse error we skip the field (column stays NULL) rather than failing.
+    if args.thread_media is not None:
+        try:
+            parsed_media = json.loads(args.thread_media)
+            if isinstance(parsed_media, list):
+                body["thread_media"] = parsed_media
+        except (TypeError, ValueError) as e:
+            print(json.dumps({
+                "warning": "THREAD_MEDIA_PARSE_FAILED",
+                "message": f"could not parse --thread-media: {e}",
+            }), file=sys.stderr)
     # autoposter_version: stamped on every write so we can attribute
     # engagement back to the release of the autoposter code that produced
     # this row. None when package.json + env are both missing.
