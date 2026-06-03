@@ -284,22 +284,27 @@ def _probe_linkedin_health(cdp_url, feed_only=False):
     to tell "are we still logged in?" without touching the activity endpoint on
     every healthy pipeline fire.
 
-    Returns (healthy: bool, detail: str). Never raises.
+    Returns (healthy: bool, detail: str, conclusive: bool). Never raises.
+    conclusive=True means we definitively observed login state (healthy feed, or
+    a redirect to the authwall/login/checkpoint). conclusive=False means we
+    could not determine it (CDP attach failed, nav timeout, Chrome down): an
+    infra hiccup, NOT evidence the session is dead, so callers must not engage
+    the killswitch or count it as a failed re-login attempt on this.
     """
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
-        return False, "playwright import failed: {}".format(e)
+        return False, "playwright import failed: {}".format(e), False
 
     try:
         with sync_playwright() as p:
             try:
                 browser = p.chromium.connect_over_cdp(cdp_url, timeout=8000)
             except Exception as e:
-                return False, "cdp attach failed ({}): {}".format(cdp_url, e)
+                return False, "cdp attach failed ({}): {}".format(cdp_url, e), False
             contexts = browser.contexts
             if not contexts:
-                return False, "cdp attach: zero contexts"
+                return False, "cdp attach: zero contexts", False
             ctx = contexts[0]
 
             page = None
@@ -324,7 +329,7 @@ def _probe_linkedin_health(cdp_url, feed_only=False):
                 page.wait_for_timeout(2000)
                 u1 = page.url or ""
                 if any(m in u1 for m in _LOGIN_MARKERS):
-                    return False, "feed redirected to auth: {}".format(u1)
+                    return False, "feed redirected to auth: {}".format(u1), True
 
                 if feed_only:
                     title = ""
@@ -332,7 +337,7 @@ def _probe_linkedin_health(cdp_url, feed_only=False):
                         title = page.title() or ""
                     except Exception:
                         pass
-                    return True, "feed renders (title={!r}, url={})".format(title, u1)
+                    return True, "feed renders (title={!r}, url={})".format(title, u1), True
 
                 # Nav 2: the exact endpoint that engaged the killswitch.
                 page.goto(
@@ -343,14 +348,14 @@ def _probe_linkedin_health(cdp_url, feed_only=False):
                 page.wait_for_timeout(2000)
                 u2 = page.url or ""
                 if any(m in u2 for m in _LOGIN_MARKERS):
-                    return False, "activity endpoint redirected to auth: {}".format(u2)
+                    return False, "activity endpoint redirected to auth: {}".format(u2), True
 
                 title = ""
                 try:
                     title = page.title() or ""
                 except Exception:
                     pass
-                return True, "feed+activity render (title={!r}, url={})".format(title, u2)
+                return True, "feed+activity render (title={!r}, url={})".format(title, u2), True
             finally:
                 if page is not None and not reused:
                     try:
@@ -358,7 +363,7 @@ def _probe_linkedin_health(cdp_url, feed_only=False):
                     except Exception:
                         pass
     except Exception as e:
-        return False, "probe exception: {}: {}".format(type(e).__name__, e)
+        return False, "probe exception: {}: {}".format(type(e).__name__, e), False
 
 
 def _send_recovery_email(detail, age_sec):
@@ -392,6 +397,97 @@ def _send_recovery_email(detail, age_sec):
             "If LinkedIn was NOT actually healthy, re-engage manually:",
             "  python3 ~/social-autoposter/scripts/linkedin_killswitch.py \\",
             "    engage --signal manual --detail 'auto-recovery false positive'",
+            "",
+            "State file: " + STATE_FILE,
+            "Trail file: " + TRAIL_FILE,
+        ]
+        body = _scrub_dashes("\n".join(body_lines))
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["to"] = NOTIFICATION_EMAIL
+        msg["subject"] = _scrub_dashes(subject)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True, "sent"
+    except Exception as exc:
+        return False, "send failed: " + str(exc)
+
+
+def is_terminal():
+    """True if auto-recovery has given up (failed re-login after the 24h wait)
+    and a human must re-auth + clear. Once terminal, the hourly recovery job
+    stops probing entirely."""
+    p = read()
+    return bool(p and p.get("recovery_terminal"))
+
+
+def _record_failed_recovery(detail):
+    """A read-only recovery probe conclusively showed still-logged-out after the
+    24h wait. Increment the attempt counter on the live state file (preserving
+    the original ts so age keeps accruing) and, once attempts reach
+    RECOVERY_MAX_ATTEMPTS, flip recovery_terminal so we stop completely.
+
+    Returns (attempts: int, terminal: bool)."""
+    p = read() or {}
+    attempts = int(p.get("recovery_attempts", 0)) + 1
+    p["recovery_attempts"] = attempts
+    p["last_recovery_ts"] = _now_iso()
+    p["last_recovery_detail"] = str(detail)[:2000]
+    terminal = attempts >= RECOVERY_MAX_ATTEMPTS
+    if terminal:
+        p["recovery_terminal"] = True
+        p["recovery_terminal_ts"] = _now_iso()
+    _ensure_dir()
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(p, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, STATE_FILE)
+    _append_trail({
+        "event": "recovery_failed",
+        "ts": _now_iso(),
+        "attempts": attempts,
+        "terminal": terminal,
+        "detail": str(detail)[:500],
+    })
+    return attempts, terminal
+
+
+def _send_terminal_email(detail, attempts, age_sec):
+    """Notify that auto-recovery gave up; manual re-auth required."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not os.path.isfile(GMAIL_TOKEN_PATH):
+            return False, "gmail token missing"
+
+        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(GMAIL_TOKEN_PATH, "w") as f:
+                f.write(creds.to_json())
+
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        age_h = round(age_sec / 3600.0, 1) if age_sec else "?"
+        subject = "[LI KILL] AUTO-RECOVERY FAILED, manual re-auth required"
+        body_lines = [
+            "LinkedIn auto-recovery has STOPPED COMPLETELY.",
+            "",
+            "After the " + str(RECOVERY_MIN_AGE_HOURS) + "h wait, the read-only probe",
+            "ran " + str(attempts) + " attempt(s) and the session was still logged out",
+            "(redirected to the authwall/login). Per the anti-bot rule we never",
+            "log in programmatically, so the hourly recovery job will now stop",
+            "probing and every LinkedIn pipeline stays paused until you act.",
+            "",
+            "Killswitch age at give-up: " + str(age_h) + "h",
+            "Last probe detail: " + str(detail),
+            "",
+            "To resume:",
+            "  1. Open the linkedin-harness Chrome (port 9556) and sign back in.",
+            "  2. Confirm /feed/ renders without an authwall.",
+            "  3. Clear the killswitch:",
+            "       python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear",
             "",
             "State file: " + STATE_FILE,
             "Trail file: " + TRAIL_FILE,
@@ -471,6 +567,13 @@ def _cmd_recover_check(args):
     if not is_active():
         print("recover-check: killswitch not active, nothing to recover", file=sys.stderr)
         sys.exit(1)
+    if is_terminal():
+        print(
+            "recover-check: TERMINAL (auto-recovery gave up after failed re-login); "
+            "manual re-auth + clear required, not probing",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     age = age_seconds()
     min_age = RECOVERY_MIN_AGE_HOURS * 3600
     if age is None:
@@ -504,6 +607,9 @@ def _cmd_recover(args):
     if not is_active():
         print(json.dumps({"recovered": False, "reason": "not_active"}))
         sys.exit(0)
+    if is_terminal():
+        print(json.dumps({"recovered": False, "reason": "terminal_manual_required"}))
+        sys.exit(0)
     age = age_seconds()
     min_age = RECOVERY_MIN_AGE_HOURS * 3600
     if not args.force and (age is None or age < min_age):
@@ -515,16 +621,38 @@ def _cmd_recover(args):
         sys.exit(0)
 
     cdp_url = args.cdp_url or LINKEDIN_CDP_URL
-    healthy, detail = _probe_linkedin_health(cdp_url)
+    healthy, detail, conclusive = _probe_linkedin_health(cdp_url)
     _append_trail({
         "event": "recover_probe",
         "ts": _now_iso(),
         "healthy": healthy,
+        "conclusive": conclusive,
         "detail": detail,
         "age_hours": (round(age / 3600.0, 2) if age else None),
     })
     if not healthy:
-        print(json.dumps({"recovered": False, "reason": "probe_unhealthy", "detail": detail}))
+        # Inconclusive (CDP down, nav timeout): infra hiccup, not a dead
+        # session. Do NOT count it as a failed re-login; just retry next hour.
+        if not conclusive:
+            print(json.dumps({
+                "recovered": False,
+                "reason": "probe_inconclusive",
+                "detail": detail,
+            }))
+            sys.exit(0)
+        # Conclusively still logged out after the 24h wait. Record the failed
+        # attempt; once we hit RECOVERY_MAX_ATTEMPTS we stop completely.
+        attempts, terminal = _record_failed_recovery(detail)
+        if terminal and not args.no_email:
+            ok, msg = _send_terminal_email(detail, attempts, age)
+            _append_trail({"event": "terminal_email", "ok": ok, "msg": msg})
+        print(json.dumps({
+            "recovered": False,
+            "reason": ("recovery_terminal" if terminal else "relogin_failed_retrying"),
+            "attempts": attempts,
+            "terminal": terminal,
+            "detail": detail,
+        }))
         sys.exit(0)
 
     clear()
