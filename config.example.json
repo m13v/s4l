@@ -26,23 +26,8 @@
 
   "content_angle": "Describe your unique experience/perspective that gives you authentic angles for comments. Example: 'Building a macOS desktop AI agent. Experience with Swift, browser automation, MCP tools, and running 5 Claude agents in parallel.'",
 
-  "projects": [
-    {
-      "name": "My Main Project",
-      "description": "One-line description of what it does",
-      "website": "https://example.com",
-      "github": "",
-      "topics": ["desktop automation", "AI agents", "browser control"],
-      "_comment": "Topics are keywords that trigger mentioning this project in replies. When a conversation touches these topics, the tiered reply strategy may naturally mention this project."
-    },
-    {
-      "name": "My Open Source Tool",
-      "description": "What the tool does",
-      "website": "",
-      "github": "https://github.com/you/your-repo",
-      "topics": ["macOS automation", "accessibility APIs"]
-    }
-  ],
+  "projects": [],
+  "_projects_help": "Projects are created via the social-autoposter MCP `setup` tool, not by hand. setup collects name, website, description, icp, voice, and search_topics, writes them here, and seeds search_topics into the DB (project_search_topics) that the draft cycle reads. Leave this empty on a fresh install: a hand-added project with no seeded search_topics is skipped by the cycle (and used to crash it to an empty result).",
 
   "exclusions": {
     "authors": ["spambot123", "annoying_user"],
