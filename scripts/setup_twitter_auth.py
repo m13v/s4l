@@ -303,6 +303,80 @@ def _collect_x_cookies(send) -> list:
     return [c for c in cks if any(w in (c.get("domain") or "") for w in wanted)]
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CONFIG_JSON = os.path.join(_REPO_ROOT, "config.json")
+_HANDLE_PLACEHOLDERS = {"", "your-twitter-handle", "@your-twitter-handle"}
+
+
+def _resolve_live_handle(send) -> "str | None":
+    """Read the logged-in @handle from the LIVE x.com session via CDP DOM.
+
+    resolve_handle() only reads config.json (which on a fresh install is the
+    template placeholder), so it can't discover the real account. This reads the
+    actual logged-in handle from the page so connect_x can persist it. Best
+    effort: returns None on any failure and never raises into the connect flow.
+    """
+    js = r"""(function(){
+      function fromHref(sel){var a=document.querySelector(sel);if(a){var h=a.getAttribute('href')||'';var m=h.match(/^\/([A-Za-z0-9_]{1,15})$/);if(m)return m[1];}return '';}
+      var h=fromHref('a[data-testid="AppTabBar_Profile_Link"]');
+      if(h)return h;
+      var b=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+      if(b){var m=(b.textContent||'').match(/@([A-Za-z0-9_]{1,15})/);if(m)return m[1];}
+      return '';
+    })()"""
+    try:
+        send("Page.enable")
+        u = _current_url(send)
+        if "x.com" not in u and "twitter.com" not in u:
+            send("Page.navigate", {"url": "https://x.com/home"})
+            time.sleep(3)
+        for _ in range(8):
+            r = send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+            v = (r.get("result", {}).get("result", {}) or {}).get("value", "") or ""
+            v = v.strip().lstrip("@")
+            if v:
+                return v
+            time.sleep(1)
+    except Exception:
+        return None
+    return None
+
+
+def _write_handle_to_config(handle: "str | None") -> bool:
+    """Persist the discovered handle to config.json accounts.twitter.handle, but
+    ONLY when the configured value is empty or the template placeholder, so we
+    never clobber a handle the user set on purpose. Returns True if written.
+
+    This is what makes account_resolver.resolve('twitter') return the REAL
+    account, so our_account (attribution, own-reply skip, account-keyed ops) is
+    correct instead of the poisonous 'your-twitter-handle' default. (2026-06-02)
+    """
+    if not handle:
+        return False
+    try:
+        with open(_CONFIG_JSON, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    accounts = cfg.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        return False
+    tw = accounts.setdefault("twitter", {})
+    if not isinstance(tw, dict):
+        return False
+    cur = (tw.get("handle") or "").strip()
+    if cur.lower() not in _HANDLE_PLACEHOLDERS:
+        return False  # a real handle is already set; do not overwrite
+    tw["handle"] = "@" + handle.lstrip("@")
+    try:
+        with open(_CONFIG_JSON, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        return True
+    except Exception:
+        return False
+
+
 def _persist_session() -> None:
     """Persist the validated live X session for auto-restore after ANY logout
     (hard kill, crash, keychain re-lock wiping Chrome's Cookies DB, or AppMaker
@@ -334,8 +408,16 @@ def _persist_session() -> None:
     if not cookies:
         return
 
-    handle = None
-    if resolve_handle is not None:
+    # Prefer the LIVE logged-in handle so a fresh install records the real
+    # account instead of the config.json placeholder; persist it so the cycle's
+    # account_resolver (our_account) is correct. Fall back to the configured
+    # handle. All best-effort: never abort connect_x.
+    handle = _resolve_live_handle(send)
+    if handle and _write_handle_to_config(handle):
+        print(f"setup_twitter_auth: recorded live X handle @{handle} in config.json "
+              "(accounts.twitter.handle); attribution + own-reply dedup now scoped "
+              "to the real account", file=sys.stderr)
+    if not handle and resolve_handle is not None:
         try:
             handle = resolve_handle()
         except Exception:
