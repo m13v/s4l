@@ -36,8 +36,21 @@ def main() -> int:
     if len(pages) <= 1:
         print(f"[cleanup_harness_tabs] {len(pages)} page tab(s), no cleanup needed")
         return 0
+    # Keep a REAL (http/https) tab when one exists, not blindly pages[0]. The
+    # /json order is roughly most-recently-active first, so a freshly-spawned
+    # about:blank can sit at index 0 and the old code would keep the blank and
+    # close the live x.com tab the harness daemon is attached to. Closing the
+    # daemon's tab forces it to re-attach and re-spawn another about:blank, which
+    # is exactly the orphan-tab churn this script is meant to clean up. Falling
+    # back to pages[0] preserves the prior behavior when every tab is blank.
+    def _is_real(t):
+        return (t.get("url") or "").startswith(("http://", "https://"))
+
+    keep = next((t for t in pages if _is_real(t)), pages[0])
     closed = 0
-    for t in pages[1:]:
+    for t in pages:
+        if t is keep:
+            continue
         tid = t.get("id")
         if not tid:
             continue
@@ -46,7 +59,8 @@ def main() -> int:
             closed += 1
         except Exception:
             pass
-    print(f"[cleanup_harness_tabs] closed {closed}/{len(pages) - 1} extra page tabs (kept 1)")
+    kept_kind = "1 real" if _is_real(keep) else "1"
+    print(f"[cleanup_harness_tabs] closed {closed}/{len(pages) - 1} extra page tabs (kept {kept_kind})")
     return 0
 
 
