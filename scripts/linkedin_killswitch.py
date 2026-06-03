@@ -54,13 +54,33 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
 
-STATE_DIR = os.path.expanduser("~/.claude/social-autoposter")
-STATE_FILE = os.path.join(STATE_DIR, "linkedin.killswitch")
-TRAIL_FILE = os.path.join(STATE_DIR, "linkedin.killswitch.trail.jsonl")
+# State paths are env-overridable so the auto-recovery job can be tested
+# against a throwaway killswitch file without touching the live one.
+STATE_DIR = os.path.expanduser(
+    os.environ.get("LINKEDIN_KILLSWITCH_DIR", "~/.claude/social-autoposter")
+)
+STATE_FILE = os.path.expanduser(
+    os.environ.get("LINKEDIN_KILLSWITCH_FILE", os.path.join(STATE_DIR, "linkedin.killswitch"))
+)
+TRAIL_FILE = os.path.expanduser(
+    os.environ.get(
+        "LINKEDIN_KILLSWITCH_TRAIL", os.path.join(STATE_DIR, "linkedin.killswitch.trail.jsonl")
+    )
+)
 
 GMAIL_TOKEN_PATH = os.path.expanduser("~/gmail-api/token_i_at_m13v.com.json")
 GMAIL_SCOPES = ["https://mail.google.com/"]
 NOTIFICATION_EMAIL = os.environ.get("NOTIFICATION_EMAIL", "i@m13v.com")
+
+# Auto-recovery (2026-06-03): after the killswitch has been active this long,
+# an hourly launchd job (skill/linkedin-recovery.sh) runs a gentle read-only
+# probe of LinkedIn. If the session is healthy again, it clears the flag, which
+# resumes every LinkedIn pipeline on its next fire (they all gate on this file).
+# The wait protects the account: per the anti-bot rule we let the session sit
+# idle ~24h after a 999/authwall before re-touching it, rather than hammering
+# the login wall on every cron tick. Override for testing.
+RECOVERY_MIN_AGE_HOURS = float(os.environ.get("LINKEDIN_RECOVERY_MIN_AGE_HOURS", "24"))
+LINKEDIN_CDP_URL = os.environ.get("LINKEDIN_CDP_URL", "http://127.0.0.1:9556")
 
 VALID_SIGNALS = {
     "http_999",
@@ -95,6 +115,25 @@ def read():
             return json.load(f)
     except Exception:
         return {"signal": "unknown", "detail": "state file unreadable"}
+
+
+def _parse_ts(ts):
+    """Parse an ISO Z timestamp like 2026-06-03T07:23:10Z. None on failure."""
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def age_seconds():
+    """Seconds since the killswitch engaged, or None if inactive/unparseable."""
+    p = read()
+    if not p:
+        return None
+    dt = _parse_ts(p.get("ts", ""))
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
 def _append_trail(payload):
