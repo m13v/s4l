@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // social-autoposter MCP server (X/Twitter rail).
 //
-// Three tools, nothing more:
-//   draft_cycle  - scan + draft, surface each thread + drafted reply, run an
-//                  elicitation approve/skip per draft, then post the approved ones.
+// Core tools:
+//   draft_cycle  - scan + draft, return all drafts as a numbered table for the
+//                  user to review in chat (posts nothing).
+//   post_drafts  - post the drafts the user chose by number from a batch.
 //   autopilot    - one tool, action = enable | disable | status (launchd job).
 //   get_stats    - read-only post + engagement stats.
 //
@@ -192,7 +193,7 @@ function textContent(text: string) {
 // The drafting orchestration lives in the locked run-twitter-cycle.sh, which
 // today runs scan->score->draft->POST straight through with NO draft-only stop.
 // Until that gate exists, produceDrafts reports the decision instead of guessing
-// or posting unreviewed. Everything downstream of this (elicit + post) is real.
+// or posting unreviewed. Everything downstream of this (review + post) is real.
 // ---------------------------------------------------------------------------
 interface DraftResult {
   batchId: string | null;
@@ -288,100 +289,30 @@ async function produceDrafts(project?: string): Promise<DraftResult> {
   };
 }
 
-// One BATCHED elicitation: present every draft at once as a checkbox grid with
-// an optional inline edit per draft, submitted in a single round trip. The user
-// ticks which to post (all pre-checked, so the common path is just "submit"),
-// optionally rewrites any reply, and confirms ONCE — collapsing N popups into 1.
+// Render every draft in a batch as a numbered, human-readable table. This IS the
+// review surface now: the model relays this table to the user and asks which
+// numbers to post / edit, then posts the chosen ones via the `post_drafts` tool.
 //
-// MCP elicitation schemas must be FLAT primitives (no arrays / nested objects),
-// so we generate one `post_<n>` boolean + one `edit_<n>` string per draft.
-async function reviewDrafts(
-  plan: Plan
-): Promise<{ approved: number; skipped: number; edited: number; aborted: boolean }> {
+// We used to gather approvals through MCP elicitation (a checkbox form), but the
+// desktop "Code tab" host doesn't advertise the `elicitation` capability (only
+// `io.modelcontextprotocol/ui`), so the form never rendered and cycles silently
+// posted nothing. Approval is conversational instead — numbers in chat.
+function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
-  if (candidates.length === 0) return { approved: 0, skipped: 0, edited: 0, aborted: false };
-
-  // Build the flat schema + a human-readable table for the form header.
-  // Each property is a primitive elicitation schema (boolean checkbox or
-  // optional string), the only shapes MCP elicitation allows.
-  type ElicitProp =
-    | { type: "boolean"; title?: string; description?: string; default?: boolean }
-    | { type: "string"; title?: string; description?: string };
-  const properties: Record<string, ElicitProp> = {};
-  const rows: string[] = [];
-  candidates.forEach((c, i) => {
-    const n = i + 1;
-    const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
-    const style = c.engagement_style ?? "?";
-    const reply = c.reply_text ?? "(empty)";
-    const link = c.link_url ? `  ·  link: ${c.link_url}` : "";
-    rows.push(
-      `[${n}] ${author}  (style: ${style})${link}\n` +
+  return candidates
+    .map((c, i) => {
+      const n = i + 1;
+      const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
+      const style = c.engagement_style ?? "?";
+      const reply = c.reply_text ?? "(empty)";
+      const link = c.link_url ? `  ·  link: ${c.link_url}` : "";
+      return (
+        `[${n}] ${author}  (style: ${style})${link}\n` +
         `    ${reply.replace(/\n/g, "\n    ")}\n` +
         `    thread: ${c.candidate_url ?? "?"}`
-    );
-    const preview = reply.length > 140 ? `${reply.slice(0, 140)}…` : reply;
-    properties[`post_${n}`] = {
-      type: "boolean",
-      title: `Post [${n}] ${author}`,
-      description: preview,
-      default: true,
-    };
-    properties[`edit_${n}`] = {
-      type: "string",
-      title: `Rewrite [${n}] (optional)`,
-      description:
-        "Leave blank to post as drafted. Type your own wording to replace this reply before posting.",
-    };
-  });
-
-  const message =
-    `Review ${candidates.length} drafted ` +
-    `${candidates.length === 1 ? "reply" : "replies"}. ` +
-    `Every draft is pre-checked to post — untick the ones you don't want, ` +
-    `optionally rewrite any, then submit once.\n\n` +
-    rows.join("\n\n");
-
-  let res;
-  try {
-    res = await server.server.elicitInput({
-      message,
-      requestedSchema: { type: "object", properties, required: [] },
-    });
-  } catch (e) {
-    // Host doesn't support elicitation (some Claude Desktop builds). Bail out
-    // rather than silently posting or silently skipping everything.
-    return { approved: 0, skipped: 0, edited: 0, aborted: true };
-  }
-  if (res.action !== "accept") {
-    // User cancelled/declined the whole review -> post nothing.
-    candidates.forEach((c) => (c.approved = false));
-    return { approved: 0, skipped: 0, edited: 0, aborted: res.action === "cancel" };
-  }
-
-  const content = (res.content as Record<string, unknown>) || {};
-  let approved = 0;
-  let skipped = 0;
-  let edited = 0;
-  candidates.forEach((c, i) => {
-    const n = i + 1;
-    // Pre-checked (default:true): treat anything but an explicit false as "post".
-    const wantPost = content[`post_${n}`] !== false;
-    const rawEdit = content[`edit_${n}`];
-    const edit = typeof rawEdit === "string" ? rawEdit.trim() : "";
-    if (edit) {
-      c.reply_text = edit; // inline correction replaces the drafted reply
-      edited++;
-    }
-    if (wantPost) {
-      c.approved = true;
-      approved++;
-    } else {
-      c.approved = false;
-      skipped++;
-    }
-  });
-  return { approved, skipped, edited, aborted: false };
+      );
+    })
+    .join("\n\n");
 }
 
 async function postApproved(batchId: string, plan: Plan) {
@@ -657,16 +588,19 @@ server.registerTool(
   }
 );
 
-// ---- draft_cycle: the whole manual loop in one tool -----------------------
+// ---- draft_cycle: scan + draft, then hand the batch to the user for review.
+// Posting is a SEPARATE step (post_drafts) so the user picks by number in chat.
+// This host doesn't support elicitation, so there is no in-tool form: the model
+// relays the table and asks which to post / edit, then calls post_drafts.
 server.registerTool(
   "draft_cycle",
   {
     title: "Draft an X reply cycle",
     description:
-      "Scan X, draft replies on this machine, then show ALL drafts at once in a single " +
-      "checkbox form: tick which to post (every draft pre-checked), optionally rewrite any " +
-      "reply inline, and submit once. Only the ticked ones post. The entire manual loop in " +
-      "one call: discover -> draft -> review -> post. Nothing posts without your approval.",
+      "Scan X and draft replies on this machine, then return ALL drafts as a numbered table " +
+      "for review. This tool POSTS NOTHING. Show the table to the user and ask which numbers " +
+      "to post and which to rewrite, then call `post_drafts` with their decision and the " +
+      "returned batch_id. Flow: discover -> draft -> review in chat -> post_drafts.",
     inputSchema: {
       project: z
         .string()
@@ -686,26 +620,118 @@ server.registerTool(
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(`No drafts in batch ${drafted.batchId}.`);
     }
-    const review = await reviewDrafts(plan);
-    writePlan(drafted.batchId, plan);
-    if (review.aborted && review.approved === 0) {
-      return jsonContent({
+    const count = plan.candidates.length;
+    const table = renderDraftsTable(plan);
+    const message =
+      `Drafted ${count} ${count === 1 ? "reply" : "replies"} for "${proj}" ` +
+      `(batch ${drafted.batchId}). NOTHING has been posted yet.\n\n` +
+      `${table}\n\n` +
+      `Show this list to the user and ask which to post and which to edit. They can reply ` +
+      `however is natural, e.g. "post 1, 3 and 5", "edit 2: <new wording>", "post all", or ` +
+      `"skip all". Editing a draft also posts it. Then call the post_drafts tool with ` +
+      `batch_id "${drafted.batchId}" and their decision (post: [numbers], edits: [{n, text}], ` +
+      `or post_all: true). Do not post anything the user didn't ask for.`;
+    return {
+      content: [{ type: "text" as const, text: message }],
+      structuredContent: {
         batch_id: drafted.batchId,
-        drafted: plan.candidates.length,
-        review_aborted: true,
-        note:
-          "Review did not complete (host may not support elicitation, or you cancelled). " +
-          "Nothing was posted.",
+        drafted: count,
+        status: "awaiting_decision",
+      },
+    };
+  }
+);
+
+// ---- post_drafts: post the user's chosen drafts from a batch ---------------
+// Second half of the manual loop. The user reviewed the table from draft_cycle
+// and said which numbers to post / edit; this posts exactly those. Editing a
+// draft implies posting it. Indices are 1-based, matching the table.
+server.registerTool(
+  "post_drafts",
+  {
+    title: "Post chosen drafts",
+    description:
+      "Post the drafts the user approved from a draft_cycle batch. Pass the batch_id from " +
+      "draft_cycle and the user's decision by NUMBER (1-based, matching the table): `post` is " +
+      "the list of draft numbers to post as drafted; `edits` rewrites a draft's text before " +
+      "posting it (editing implies posting); `post_all` posts every draft. Only the chosen " +
+      "drafts post; anything not listed is left unposted. Call this ONLY after the user has " +
+      "told you which drafts they want.",
+    inputSchema: {
+      batch_id: z.string().describe("The batch_id returned by draft_cycle."),
+      post: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe("1-based draft numbers to post as drafted, e.g. [1, 3, 5]."),
+      edits: z
+        .array(z.object({ n: z.number().int().positive(), text: z.string() }))
+        .optional()
+        .describe("Rewrites: each {n, text} replaces draft n's wording, then posts it."),
+      post_all: z.boolean().optional().describe("Post every draft in the batch."),
+    },
+  },
+  async ({ batch_id, post, edits, post_all }) => {
+    const plan = readPlan(batch_id);
+    if (!plan || !(plan.candidates && plan.candidates.length)) {
+      return textContent(
+        `No drafts found for batch ${batch_id}. Run draft_cycle again to produce a fresh batch.`
+      );
+    }
+    const candidates = plan.candidates;
+    const total = candidates.length;
+    const warnings: string[] = [];
+    const inRange = (n: number) => n >= 1 && n <= total;
+
+    // Apply edits first; an edited draft is always posted.
+    const approve = new Set<number>();
+    let editedCount = 0;
+    (edits || []).forEach((e) => {
+      if (!inRange(e.n)) {
+        warnings.push(`ignored edit for #${e.n}: out of range (1-${total})`);
+        return;
+      }
+      const text = (e.text ?? "").trim();
+      if (!text) {
+        warnings.push(`ignored empty edit for #${e.n}`);
+        return;
+      }
+      candidates[e.n - 1].reply_text = text;
+      approve.add(e.n);
+      editedCount++;
+    });
+
+    if (post_all) {
+      for (let i = 1; i <= total; i++) approve.add(i);
+    }
+    (post || []).forEach((n) => {
+      if (inRange(n)) approve.add(n);
+      else warnings.push(`ignored #${n}: out of range (1-${total})`);
+    });
+
+    candidates.forEach((c, i) => (c.approved = approve.has(i + 1)));
+    writePlan(batch_id, plan);
+
+    if (approve.size === 0) {
+      return jsonContent({
+        batch_id,
+        drafted: total,
+        posted: 0,
+        skipped: total,
+        edited: editedCount,
+        note: "No drafts selected to post. Nothing was posted.",
+        warnings,
       });
     }
-    const posted = await postApproved(drafted.batchId, plan);
+
+    const result = await postApproved(batch_id, plan);
     return jsonContent({
-      batch_id: drafted.batchId,
-      drafted: plan.candidates.length,
-      approved: review.approved,
-      skipped: review.skipped,
-      edited: review.edited,
-      posted,
+      batch_id,
+      drafted: total,
+      posted: approve.size,
+      skipped: total - approve.size,
+      edited: editedCount,
+      result,
+      warnings,
     });
   }
 );
