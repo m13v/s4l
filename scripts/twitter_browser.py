@@ -529,6 +529,35 @@ def _wait_for_reply_textbox(page, total_timeout_ms=45000):
     return None
 
 
+# Post-action interstitials X shows AFTER a successful reply (e.g. the
+# "Unlock more on X" graduated-access sheet). They don't block the post that
+# triggered them, but the sheet stays up and overlays the composer on the NEXT
+# reply in a batch -> spurious reply_box_not_found for posts 2..N. We dismiss
+# them deterministically before looking for the reply box. Targeted by the
+# sheet's CTA label so we never touch a real compose/confirm dialog (those have
+# no "Got it"); best-effort, fast, never raises.
+_OVERLAY_DISMISS_LABELS = ("Got it", "Dismiss")
+
+
+def _dismiss_known_overlays(page) -> bool:
+    """Click-dismiss any known X nudge sheet currently covering the page.
+
+    Returns True if something was dismissed. Safe to call on every reply: it is
+    a no-op when no known overlay is present and swallows all errors."""
+    for label in _OVERLAY_DISMISS_LABELS:
+        try:
+            btn = page.get_by_role("button", name=label, exact=True).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(timeout=2000)
+                page.wait_for_timeout(800)
+                print(f"[overlay] dismissed known interstitial via '{label}' button",
+                      file=sys.stderr)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _dump_reply_failure_diag(page, tweet_url):
     """Dump screenshot + DOM state on reply_box_not_found. Returns a diag dict."""
     import time as _t
@@ -811,6 +840,12 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 if "this page doesn't exist" in page_text.lower():
                     tweet_not_found = True
                     break
+
+                # A nudge sheet left over from the previous reply in this batch
+                # (e.g. "Unlock more on X") can sit on top of the composer and
+                # mask tweetTextarea_0. Clear it first so the wait below sees the
+                # real reply box instead of failing reply_box_not_found.
+                _dismiss_known_overlays(page)
 
                 reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
                 if reply_box:
