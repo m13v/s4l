@@ -112,11 +112,33 @@ def main():
                 "engagement_style": engagement_style,
             },
         )
-        if not (result.get("data") or {}).get("inserted"):
+        rdata = result.get("data") or {}
+        posts_id = rdata.get("id")
+        if not rdata.get("inserted"):
             skipped += 1
             continue
         inserted += 1
         log(f"[sync] inserted post-{r['post_number']} ({r['target_account']}) -> {ig_url}", args.quiet)
+
+        # Attribute the freshly-mirrored posts row to any campaign that fired
+        # at post time. post_to_ig.py records metadata.applied_campaign_ids on
+        # the media_posts row (AI-disclosure labeling experiment etc.); forward
+        # each to /api/v1/campaigns/bump, which is idempotent (sets
+        # posts.campaign_id and advances the counter only on first attribution).
+        # Best-effort: a bump failure must not abort the sync.
+        applied = metadata.get("applied_campaign_ids") or []
+        if applied and posts_id:
+            for cid in applied:
+                try:
+                    api_post(
+                        "/api/v1/campaigns/bump",
+                        {"table": "posts", "id": int(posts_id), "campaign_id": int(cid)},
+                    )
+                    log(f"[sync]   campaign {cid} -> posts.id={posts_id}", args.quiet)
+                except SystemExit as e:
+                    log(f"[sync]   WARNING campaign {cid} bump failed: {e}", args.quiet)
+                except Exception as e:
+                    log(f"[sync]   WARNING campaign {cid} bump failed: {e}", args.quiet)
 
     log(f"[sync] done: inserted={inserted} skipped_existing={skipped} total_scanned={len(rows)}", args.quiet)
 
