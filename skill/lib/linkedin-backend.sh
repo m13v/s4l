@@ -276,6 +276,22 @@ ensure_linkedin_browser_for_backend() {
                 _extra+=(--window-size="${BH_LINKEDIN_WINDOW_SIZE:-1024,1013}")
                 ;;
         esac
+        # Self-heal (2026-06-03): reap any stale Chrome holding THIS profile dir
+        # but not answering CDP on our port, else the relaunch hands off via the
+        # SingletonLock and loops "failed to start within 12s". Exact-dir match
+        # (trailing space) so this never touches the twitter browser-harness
+        # profile. See twitter-backend.sh for the regression that motivated this.
+        local _prof_dir="$HOME/.claude/browser-profiles/browser-harness-linkedin"
+        local _stale_pids
+        _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
+        if [ -n "$_stale_pids" ] && ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] CDP down but Chrome still holds $_prof_dir (pids: $(echo $_stale_pids | tr '\n' ' ')); reaping stale profile owner before relaunch" >&2
+            kill $_stale_pids 2>/dev/null || true
+            sleep 2
+            _stale_pids=$(pgrep -f -- "--user-data-dir=$_prof_dir " 2>/dev/null || true)
+            [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
+            rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
+        fi
         "$_chrome_bin" \
             --remote-debugging-port=9556 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
