@@ -1694,6 +1694,31 @@ log "twitter-browser lock held (pid=$$) Phase 2b-prep"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
+# Thread-media capture (2026-06-03, gated by SAPS_TWITTER_CAPTURE_MEDIA, default
+# OFF). Now that the browser lock is held and the harness Chrome is up, do ONE
+# cheap deterministic pass over every candidate thread to pull its media
+# (images/videos/GIFs/link-cards), persist each into
+# twitter_candidates.thread_media, and build a MEDIA CONTEXT block injected into
+# the prep prompt so the reply-writer can react to what the tweet visually shows
+# instead of replying text-blind. Must be deterministic (Python pre-fetch) because
+# the prep prompt forbids the model from calling twitter_browser.py. Entirely
+# best-effort: any failure leaves MEDIA_BLOCK empty and the cycle proceeds.
+MEDIA_BLOCK=""
+if [ "${SAPS_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${SAPS_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+    if [ -s "$MEDIA_URLS_FILE" ]; then
+        log "Phase 2b-prep: capturing thread media for $(wc -l < "$MEDIA_URLS_FILE" | tr -d ' ') candidate(s)..."
+        MEDIA_BLOCK=$(python3 "$REPO_DIR/scripts/capture_thread_media.py" --urls-file "$MEDIA_URLS_FILE" --scroll 1 2>>"$LOG_FILE" || true)
+        if [ -n "$MEDIA_BLOCK" ]; then
+            log "Phase 2b-prep: media context captured ($(printf '%s' "$MEDIA_BLOCK" | grep -c '^Candidate ') thread(s) with media)."
+        else
+            log "Phase 2b-prep: no media captured (none found or capture skipped)."
+        fi
+    fi
+else
+    log "Phase 2b-prep: thread-media capture disabled (SAPS_TWITTER_CAPTURE_MEDIA not set)."
+fi
+rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
+
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
 
 # Pre-assign the prep session UUID in the parent shell so it survives the
@@ -1730,6 +1755,7 @@ Read $REPO_DIR/config.json for project metadata.
 ## PRE-SCORED CANDIDATES (sorted by Virality DESC, highest first)
 Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
 $CANDIDATE_BLOCK
+$MEDIA_BLOCK
 
 ## PROJECT ROUTING (per-candidate)
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
