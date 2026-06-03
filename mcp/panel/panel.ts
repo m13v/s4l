@@ -215,11 +215,12 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
 }));
 
 btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
-  log("Running draft cycle \u2014 review prompt will appear in the chat\u2026");
+  log("Drafting\u2026 the draft list appears in the chat for review.");
   try {
     const r = await call("draft_cycle");
-    if (r.review_aborted) log("Draft review didn't complete \u2014 nothing posted.");
-    else log(`Done: drafted ${r.drafted ?? 0}, posted ${r.approved ?? 0}, skipped ${r.skipped ?? 0}.`);
+    const n = r.drafted ?? 0;
+    if (n) log(`Drafted ${n} \u2014 review them in the chat and choose which to post.`);
+    else log("No drafts produced.");
     void loadStats();
   } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
 }));
