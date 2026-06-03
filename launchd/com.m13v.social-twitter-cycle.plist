@@ -23,6 +23,8 @@
 		<string>/Users/matthewdi</string>
 		<key>TWITTER_PAGE_GEN_RATE</key>
 		<string>0</string>
+		<key>SAPS_TWITTER_CAPTURE_MEDIA</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
