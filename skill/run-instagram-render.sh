@@ -582,9 +582,30 @@ variant.project === '${SELECTED_PROJECT}'. Variants are pre-registered in
 Remotion via Root.tsx; you re-render an existing variant, write a fresh
 caption targeted at the selected project, and log the row.
 
-For mk0r: 4 niche variants (spa/autoshop/hotel/mk0r-retail) with the niche
-walk-in story arc ("find a business with no website -> go to mk0r.com ->
-prompt -> publish") and the 🔗 mk0r.com line in the caption.
+For mk0r: 4 niche variants (spa/autoshop/hotel/mk0r-retail). The reel shows the
+mk0r workflow ("find a local business with no website -> go to mk0r.com ->
+prompt it -> publish"). Each render MUST generate fresh TITLE-OVERLAY text that
+fits the caption: before running npx remotion render, edit
+mixer/remotion/src/mixer/data.ts and update MK0R_OVERLAY_TEXT["<picked-variant-id>"]
+with three model-generated values:
+  - headline: 2-3 short lines, with __ACCENT__ marking the accented line
+    (e.g. "build an auto shop\n__ACCENT__\nin minutes")
+  - accentText: 1-4 words shown in accent color (e.g. "a real website")
+  - tagline: 3-7 word subtitle (e.g. "no agency, no template")
+All three MUST describe the CAPABILITY (mk0r builds a real site fast, in one
+prompt) and vary from the current defaults and across runs. Only edit the
+picked variant's entry; leave the other 3 untouched.
+
+CAPTION RULES (mk0r) -- HARD, do NOT violate:
+The caption is a PRODUCT DEMO: a real local business that has no website, mk0r
+builds it a real site from one prompt, and what that means for the owner. You
+may reference mk0r.com plainly. You MUST NOT write any income/earnings framing:
+no "$X a month", no "they paid me", no "recurring revenue", no "signed N
+clients", no "make money / side income / quit your job / flip websites", no
+fabricated dollar amounts or client counts. That get-rich-quick framing tripped
+a Meta fraud-and-deceptive-practices restriction on 2026-06-02 and is
+permanently banned from mk0r captions. Keep it about what mk0r BUILDS, never
+about money the viewer earns.
 
 For studyly: 8 generated variants (studyly-i{1,2}-r{1,2,3,4}). Each render
 MUST generate fresh overlay text that fits the caption story arc. Before
@@ -749,8 +770,11 @@ Your single job: rewrite the caption below so total length is <= ${CAP_LIMIT}
 characters, while preserving the voice and ALL 8 beats of the caption arc
 (opener "here is a story.", age+setup, wrong-about-AI moment, breaking event,
 felt sense, workflow change, contrarian lesson in one sharp line, closing
-instruction). For Mixer/product captions, preserve the niche walk-in story
-structure and the 🔗 mk0r.com line if present.
+instruction). For Mixer/product captions, preserve the product-demo structure
+and the plain product reference (mk0r.com / studyly.io) if present. NEVER add
+income/earnings framing ("$X a month", "they paid me", "recurring revenue",
+"signed N clients") to an mk0r caption while tightening -- that framing is
+banned (Meta fraud restriction 2026-06-02).
 
 RULES (hard):
 - Total length MUST be <= ${CAP_LIMIT} chars. Count and verify before responding.
