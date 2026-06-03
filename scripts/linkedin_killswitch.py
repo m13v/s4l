@@ -560,6 +560,53 @@ def _cmd_clear(args):
     sys.exit(0)
 
 
+def _cmd_detect_gate(args):
+    """Per-run logout detector, called by ensure_linkedin_browser_for_backend so
+    ANY LinkedIn pipeline trips the killswitch on its natural next fire.
+
+    - If the killswitch is already active: no-op, exit 0 (the file gate / hourly
+      recovery already own the situation; don't double-probe).
+    - Otherwise run a single read-only /feed/ probe. If it CONCLUSIVELY shows
+      logged-out (redirect to authwall/login/checkpoint), engage the killswitch
+      (signal login_redirect) and exit 2 so the caller can abort this fire. The
+      flag pauses every other pipeline on its next fire and starts the 24h
+      recovery clock. Healthy or inconclusive (infra) -> exit 0, proceed."""
+    if is_active():
+        # Already flagged: nothing to detect. Stay silent + cheap.
+        sys.exit(0)
+    cdp_url = args.cdp_url or LINKEDIN_CDP_URL
+    healthy, detail, conclusive = _probe_linkedin_health(cdp_url, feed_only=True)
+    _append_trail({
+        "event": "detect_gate",
+        "ts": _now_iso(),
+        "healthy": healthy,
+        "conclusive": conclusive,
+        "detail": detail,
+    })
+    if healthy:
+        print("detect-gate: session healthy ({})".format(detail), file=sys.stderr)
+        sys.exit(0)
+    if not conclusive:
+        # Couldn't determine (CDP down, nav timeout). Don't engage on infra
+        # noise; let the pipeline's own SESSION_INVALID handling deal with it.
+        print("detect-gate: inconclusive ({}), proceeding".format(detail), file=sys.stderr)
+        sys.exit(0)
+    # Conclusively logged out. Trip the killswitch for the whole fleet.
+    run_log_path = os.environ.get("SAPS_RUN_LOG_PATH", "")
+    engage(
+        signal="login_redirect",
+        detail="detect-gate: {}".format(detail),
+        run_log_path=run_log_path,
+        extra={"detected_by": os.environ.get("SAPS_PIPELINE_NAME", "?"), "probe": "feed_only"},
+        send_email=not args.no_email,
+    )
+    print(
+        "detect-gate: LOGGED OUT, killswitch ENGAGED ({}); aborting this fire".format(detail),
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _cmd_recover_check(args):
     """Gate for the hourly recovery job: exit 0 only if the killswitch is
     active AND has been so for >= RECOVERY_MIN_AGE_HOURS. Lets the shell
@@ -680,6 +727,13 @@ def main():
 
     sub.add_parser("clear", help="clear the killswitch (human ack)")
 
+    dg = sub.add_parser(
+        "detect-gate",
+        help="per-run logout probe; engage + exit 2 if conclusively logged out",
+    )
+    dg.add_argument("--cdp-url", default="", help="harness CDP URL (default $LINKEDIN_CDP_URL)")
+    dg.add_argument("--no-email", action="store_true", help="skip engage alert email")
+
     sub.add_parser(
         "recover-check",
         help="exit 0 if active AND >= RECOVERY_MIN_AGE_HOURS old (else 1)",
@@ -699,6 +753,7 @@ def main():
         "status": _cmd_status,
         "engage": _cmd_engage,
         "clear": _cmd_clear,
+        "detect-gate": _cmd_detect_gate,
         "recover-check": _cmd_recover_check,
         "recover": _cmd_recover,
     }[args.cmd](args)
