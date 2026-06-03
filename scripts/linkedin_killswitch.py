@@ -48,6 +48,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -94,14 +95,23 @@ RECOVERY_MAX_ATTEMPTS = int(os.environ.get("LINKEDIN_RECOVERY_MAX_ATTEMPTS", "1"
 # self-healed session. The active recovery path instead has the hourly job spin
 # up a Claude session that drives the real harness Chrome (the allowed pattern;
 # scripted Python login is the banned one) to actually log back in. That session
-# returns one of three verdicts, recorded via `recover-record`:
-#   - held       -> login succeeded; enter a "pending hold" window and re-verify
-#                   (read-only) after RECOVERY_HOLD_CHECK_MINUTES that it STUCK.
-#                   Only after a clean hold-check do we clear the flag + resume.
-#   - hard_block -> checkpoint / captcha / restriction / wrong creds / 2FA wall.
-#                   Terminal immediately: do NOT poke a restricted account again.
-#   - transient  -> page didn't load / ambiguous. Re-anchor the 24h clock and let
-#                   the next eligible cycle try again, up to RECOVERY_TRANSIENT_MAX.
+# returns one of four verdicts, recorded via `recover-record`:
+#   - held            -> login succeeded; enter a "pending hold" window and
+#                        re-verify (read-only) after RECOVERY_HOLD_CHECK_MINUTES
+#                        that it STUCK. Only after a clean hold-check do we clear
+#                        the flag + resume.
+#   - hard_block      -> checkpoint / captcha / wrong creds / 2FA wall, or a
+#                        restriction with NO stated lift time. Terminal
+#                        immediately: do NOT poke a blocked account again.
+#   - restricted_temp -> a TEMPORARY restriction that states an explicit lift
+#                        time (e.g. "restricted until June 03 2026 4:05 PM PDT").
+#                        We don't go terminal: we dip until that time + a buffer,
+#                        then make ONE more attempt, up to RECOVERY_RESTRICTED_MAX.
+#                        The model passes the lift time as `lift=<ISO8601>` in the
+#                        detail; if it is unparseable we dip a fixed fallback.
+#   - transient       -> page didn't load / ambiguous. Re-anchor the 24h clock and
+#                        let the next eligible cycle try again, up to
+#                        RECOVERY_TRANSIENT_MAX.
 # If a login held but the session drops during the hold window ("logged out
 # shortly after"), the hold-check goes terminal too: try once, don't keep trying.
 RECOVERY_HOLD_CHECK_MINUTES = float(
@@ -109,6 +119,20 @@ RECOVERY_HOLD_CHECK_MINUTES = float(
 )
 RECOVERY_TRANSIENT_MAX_ATTEMPTS = int(
     os.environ.get("LINKEDIN_RECOVERY_TRANSIENT_MAX_ATTEMPTS", "3")
+)
+# Timed-dip retries for temporary restrictions before we give up and go terminal.
+RECOVERY_RESTRICTED_MAX_ATTEMPTS = int(
+    os.environ.get("LINKEDIN_RECOVERY_RESTRICTED_MAX_ATTEMPTS", "3")
+)
+# Buffer added past the stated lift time before the retry fires (clock skew +
+# LinkedIn not lifting exactly on the dot).
+RECOVERY_RESTRICTED_BUFFER_MINUTES = float(
+    os.environ.get("LINKEDIN_RECOVERY_RESTRICTED_BUFFER_MINUTES", "30")
+)
+# Fallback dip when the model reports a temporary restriction but we cannot parse
+# a lift time from the detail. We still avoid terminal, just wait a fixed window.
+RECOVERY_RESTRICTED_FALLBACK_HOURS = float(
+    os.environ.get("LINKEDIN_RECOVERY_RESTRICTED_FALLBACK_HOURS", "24")
 )
 
 VALID_SIGNALS = {
@@ -545,6 +569,8 @@ def _record_login_held():
     p["hold_check_due"] = due_iso
     p["login_held_ts"] = _now_iso()
     p["recovery_transient_attempts"] = 0
+    p["recovery_restricted_attempts"] = 0
+    p.pop("recovery_restricted_until", None)
     p.pop("recovery_terminal", None)
     _write_state(p)
     _append_trail({
@@ -565,6 +591,7 @@ def _record_hard_block(detail):
     p["last_recovery_detail"] = str(detail)[:2000]
     p.pop("recovery_pending_hold", None)
     p.pop("hold_check_due", None)
+    p.pop("recovery_restricted_until", None)
     _write_state(p)
     _append_trail({
         "event": "recovery_hard_block",
@@ -594,6 +621,7 @@ def _record_transient(detail):
         p["ts"] = _now_iso()
     p.pop("recovery_pending_hold", None)
     p.pop("hold_check_due", None)
+    p.pop("recovery_restricted_until", None)
     _write_state(p)
     _append_trail({
         "event": "recovery_transient",
@@ -603,6 +631,93 @@ def _record_transient(detail):
         "detail": str(detail)[:500],
     })
     return attempts, terminal
+
+
+def _parse_lift_time(detail):
+    """Extract a restriction lift time from the verdict detail. The model is asked
+    to embed it as `lift=<ISO8601>` (with a timezone offset or trailing Z), e.g.
+    `lift=2026-06-03T16:05:00-07:00`. Returns a tz-aware UTC datetime, or None if
+    absent/unparseable (caller falls back to a fixed dip)."""
+    if not detail:
+        return None
+    m = re.search(r"lift=([0-9T:\-\+\.Zz]+)", str(detail))
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    # Try the strict Z form first, then full ISO (handles +/-HH:MM offsets).
+    dt = _parse_ts(raw)
+    if dt is None:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _record_restricted_temp(detail):
+    """Claude hit a TEMPORARY restriction that states an explicit lift time. Don't
+    go terminal: dip until that time + a buffer, then allow ONE more attempt, up to
+    RECOVERY_RESTRICTED_MAX_ATTEMPTS (after which we do go terminal). Returns
+    (restricted_attempts: int, terminal: bool, retry_at_iso: str)."""
+    p = read() or {}
+    attempts = int(p.get("recovery_restricted_attempts", 0)) + 1
+    p["recovery_restricted_attempts"] = attempts
+    p["last_recovery_ts"] = _now_iso()
+    p["last_recovery_detail"] = str(detail)[:2000]
+
+    terminal = attempts >= RECOVERY_RESTRICTED_MAX_ATTEMPTS
+    retry_at_iso = ""
+    if terminal:
+        p["recovery_terminal"] = True
+        p["recovery_terminal_ts"] = _now_iso()
+        p["recovery_terminal_reason"] = "restricted_exhausted"
+        p.pop("recovery_restricted_until", None)
+    else:
+        lift = _parse_lift_time(detail)
+        if lift is not None:
+            retry_at = lift + timedelta(minutes=RECOVERY_RESTRICTED_BUFFER_MINUTES)
+            # Never schedule the retry in the past (stated lift already elapsed):
+            # give it at least the buffer from now so we don't immediately re-poke.
+            floor = datetime.now(timezone.utc) + timedelta(
+                minutes=RECOVERY_RESTRICTED_BUFFER_MINUTES
+            )
+            if retry_at < floor:
+                retry_at = floor
+        else:
+            retry_at = datetime.now(timezone.utc) + timedelta(
+                hours=RECOVERY_RESTRICTED_FALLBACK_HOURS
+            )
+        retry_at_iso = retry_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        p["recovery_restricted_until"] = retry_at_iso
+    p.pop("recovery_pending_hold", None)
+    p.pop("hold_check_due", None)
+    _write_state(p)
+    _append_trail({
+        "event": "recovery_restricted_temp",
+        "ts": _now_iso(),
+        "restricted_attempts": attempts,
+        "terminal": terminal,
+        "retry_at": retry_at_iso,
+        "detail": str(detail)[:500],
+    })
+    return attempts, terminal, retry_at_iso
+
+
+def _restricted_until_seconds():
+    """Seconds until (negative) / since (positive) the restricted-dip retry is due.
+    None if no restricted-dip window is set or its ts is unparseable."""
+    p = read()
+    if not p:
+        return None
+    until_iso = p.get("recovery_restricted_until")
+    if not until_iso:
+        return None
+    until = _parse_ts(until_iso)
+    if until is None:
+        return None
+    return (datetime.now(timezone.utc) - until).total_seconds()
 
 
 def _send_simple_email(subject, body_lines):
@@ -785,6 +900,29 @@ def _cmd_recover_check(args):
         print(
             "recover-check: login holding, hold-check in {:.0f}m".format(
                 -hold_age / 60.0
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Temporary-restriction dip: a prior attempt hit a restriction with a stated
+    # lift time, so we are waiting for that time (+ buffer) rather than the flat
+    # 24h gate. This window takes precedence over the age gate: once the lift time
+    # passes we allow ONE more login attempt regardless of flag age.
+    restr_age = _restricted_until_seconds()
+    if restr_age is not None:
+        if restr_age >= 0:
+            print(
+                "recover-check: restriction lift passed ({:.0f}m ago), retrying login".format(
+                    restr_age / 60.0
+                ),
+                file=sys.stderr,
+            )
+            print("login")
+            sys.exit(0)
+        print(
+            "recover-check: temporarily restricted, retry in {:.0f}m".format(
+                -restr_age / 60.0
             ),
             file=sys.stderr,
         )
