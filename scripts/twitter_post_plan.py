@@ -858,6 +858,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True,
                     help="Path to the plan JSON file (read-only here)")
+    ap.add_argument("--post-unapproved", action="store_true",
+                    help="Post candidates even when the plan marks them "
+                         "approved=false. The MCP review path already filters to "
+                         "approved-only, and autopilot/legacy plans omit the key; "
+                         "this is the explicit override for an intentional direct run.")
     args = ap.parse_args()
 
     plan_path = Path(args.plan)
@@ -908,6 +913,25 @@ def main() -> int:
     # "failed: duplicate_thread_pre_post 3" which is exactly the wrong signal.
     fail_reasons: dict[str, int] = {}
     skip_reasons: dict[str, int] = {}
+
+    # Approval gate. A plan that went through the MCP review carries an
+    # `approved` flag per candidate (set in mcp/dist/index.js). Honor it here so
+    # a DIRECT `--plan` run — bypassing the elicitation form — can't publish
+    # drafts the user never ticked. Plans that never had review (autopilot,
+    # legacy) omit the key entirely and pass through untouched. Override with
+    # --post-unapproved.
+    if not args.post_unapproved:
+        _kept = []
+        for c in candidates:
+            if "approved" in c and not c.get("approved"):
+                skipped += 1
+                skip_reasons["not_approved"] = skip_reasons.get("not_approved", 0) + 1
+            else:
+                _kept.append(c)
+        if skip_reasons.get("not_approved"):
+            print(f"[post] {skip_reasons['not_approved']} candidate(s) skipped: not "
+                  f"approved in plan (pass --post-unapproved to override)", flush=True)
+        candidates = _kept
 
     for c in candidates:
         try:
