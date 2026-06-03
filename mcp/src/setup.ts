@@ -32,10 +32,14 @@ export const REQUIRED_FIELDS = [
   "description",
   "icp",
   "voice",
+  // search_topics is required: the cycle's topic picker reads the DB universe
+  // (project_search_topics) seeded FROM these on setup. With zero topics the
+  // picker raises and the whole draft cycle silently returns nothing, so a
+  // project is NOT ready until it has at least one topic to seed. (2026-06-02)
+  "search_topics",
 ] as const;
 export const RECOMMENDED_FIELDS = [
   "differentiator",
-  "search_topics",
   "get_started_link",
   "content_guardrails",
 ] as const;
