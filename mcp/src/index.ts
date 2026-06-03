@@ -292,16 +292,44 @@ async function produceDrafts(
   if (project) env.SAPS_FORCE_PROJECT = project;
   let step = 0;
   let lastMsg = "";
+  // ONE predictable, host-independent place to watch a draft_cycle run, so any
+  // agent (or human) debugging "the cycle looks stuck" has an obvious path:
+  //   ~/social-autoposter/skill/logs/draft_cycle-mcp.log
+  // It lives right next to the cycle's own twitter-cycle-*.log. We append the
+  // full live cycle output here (not just milestones) plus a clear run banner.
+  // Best-effort: a logging failure must never break the cycle.
+  const mcpLog = path.join(REPO_DIR, "skill", "logs", "draft_cycle-mcp.log");
+  const appendLog = (s: string) => {
+    try {
+      fs.appendFileSync(mcpLog, s);
+    } catch {
+      /* ignore — never fail the cycle over a log write */
+    }
+  };
+  try {
+    fs.mkdirSync(path.dirname(mcpLog), { recursive: true });
+  } catch {
+    /* ignore */
+  }
+  appendLog(
+    `\n===== draft_cycle start ${new Date().toISOString()} ` +
+      `project=${project ?? "(default)"} =====\n`
+  );
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000, // scan+draft can take several minutes
-    // Mirror the cycle's own log lines to THIS server's stderr (so they land
-    // in the host's mcp-server-social-autoposter.log, which used to show only
-    // the JSON-RPC handshake) AND forward milestone lines to the live progress
-    // sink so the chat spinner stops looking frozen.
+    // Fan every cycle line out to THREE sinks so progress is never a black box:
+    //   1. draft_cycle-mcp.log  — the stable, documented, host-independent file.
+    //   2. this server's stderr — lands in the host's MCP server log
+    //      (mcp-server-social-autoposter.log on Desktop), which used to show
+    //      only the JSON-RPC handshake.
+    //   3. the live progress sink — milestone messages under the chat spinner.
     onLine: (line) => {
       const t = line.replace(/\s+$/, "");
-      if (t.trim()) console.error(`[draft_cycle] ${t}`);
+      if (t.trim()) {
+        appendLog(`${t}\n`);
+        console.error(`[draft_cycle] ${t}`);
+      }
       if (!onProgress) return;
       const msg = cycleProgressMessage(t);
       // Skip consecutive duplicates (a phase can log a couple matching lines).
@@ -311,6 +339,9 @@ async function produceDrafts(
       }
     },
   });
+  appendLog(
+    `===== draft_cycle end ${new Date().toISOString()} exit=${res.code} =====\n`
+  );
   // Prefer the explicit marker; fall back to the newest plan file on disk.
   const marker = /DRAFT_ONLY_PLAN=\/tmp\/twitter_cycle_plan_(.+)\.json/.exec(
     res.stdout + "\n" + res.stderr
