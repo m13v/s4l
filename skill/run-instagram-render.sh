@@ -621,8 +621,14 @@ STUDYLY_OVERLAY_TEXT["<picked-variant-id>"] with five model-generated values:
     (e.g. "and actually remember it this time")
 All five values MUST vary from the current defaults and from each other across
 runs. Only edit the picked variant's entry; leave the other 7 untouched.
-The caption arc is: struggling student moment -> opens studyly.io -> result/
-grade improvement -> the lesson. Reference studyly.io as the product.
+The caption arc is: a real study-method frustration (rereading / flashcards not
+sticking, blanking when the wording changes) -> opens studyly.io -> the method
+shift (it tests you on your OWN notes, rewording so you cant pattern-match) ->
+the lesson. Reference studyly.io as the product. Do NOT fabricate specific
+before/after exam scores or "failed -> passed / topped the class" miracle jumps
+as a typical result; keep any outcome qualitative and personal (exaggerated-
+results claims are a deceptive-practices signal, the same Meta rail that
+restricted mk0r 2026-06-02).
 Studyly variants are intentionally simpler/shorter (15-25s vs mk0r's 26-28s).
 
 Pick the variant within the selected project that is least-recently-rendered
