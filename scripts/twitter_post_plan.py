@@ -242,13 +242,16 @@ def already_posted_to_thread(thread_url: str) -> tuple[bool, int | None]:
     that fires once per cycle. log_post.py's post-INSERT dedup is still
     the final backstop.
     """
-    # Scope per-account so the pre-post race guard only fires when THIS
-    # machine's handle already has a post in the thread. Otherwise the mk0r
-    # VM (@matt_diak) would skip every thread @m13v_ already touched.
+    # Scope MUST match the server-side insert dedup, which is keyed on
+    # (platform, thread_url) ONLY -- NOT our_account (see social-autoposter-
+    # website /api/v1/posts route: "Enforces dedup on (platform, thread_url)").
+    # The old per-account scoping here made the probe NARROWER than the server:
+    # it passed when a post existed under a different/placeholder our_account,
+    # so the cycle posted a SECOND reply to a thread the server then rejected
+    # with duplicate_thread -- after the reply was already live on X. Querying
+    # thread-only makes the pre-post guard catch exactly what the insert would
+    # reject, so we never burn that wasted second reply. (2026-06-02)
     dedupe_q = {"platform": "twitter", "thread_url": thread_url}
-    _twitter_handle = _resolve_account("twitter")
-    if _twitter_handle:
-        dedupe_q["our_account"] = _twitter_handle
     try:
         resp = api_get(
             "/api/v1/posts/lookup",
