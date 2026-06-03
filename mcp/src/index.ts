@@ -223,6 +223,19 @@ function blockedReasonMessage(reason: string): string {
         `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
         "Wait for the limit to reset, then run draft_cycle again."
       );
+    case "no_search_topics":
+      return (
+        "This project has no search topics yet, so there was nothing to scan. Topics live in the " +
+        "DB (project_search_topics) and are seeded from your project's `search_topics` during setup. " +
+        "Re-run the `setup` tool for this project with a `search_topics` list (comma-separated keywords/" +
+        "phrases your buyers tweet about); setup seeds them automatically, then run draft_cycle again."
+      );
+    case "topics_api_unreachable":
+      return (
+        "Couldn't reach the search-topics service to load this project's topics, so the cycle stopped " +
+        "before scanning. This is usually a transient backend/network issue. Try draft_cycle again in a " +
+        "moment; if it persists, check connectivity to the autoposter backend."
+      );
     case "credit_balance":
       return (
         "The drafting step failed because the Anthropic account is out of credits. " +
@@ -599,15 +612,40 @@ server.registerTool(
     // named project, then report whether it's now ready or still missing fields.
     try {
       const result = applySetup(args as ProjectInput);
+      // Seed this project's search_topics into the DB universe the cycle reads
+      // (project_search_topics). Without this a freshly-configured project has
+      // topics in config.json but ZERO rows in the DB, so draft_cycle's topic
+      // picker raises and the cycle silently returns nothing. Best-effort: a
+      // seed hiccup never fails setup — the cycle's fail-loud path still tells
+      // the user if topics are missing. Only runs once the project is ready
+      // (i.e. it actually has search_topics to seed). (2026-06-02)
+      let seedNote = "";
+      if (result.ready) {
+        const seed = await runPython(
+          "scripts/seed_search_topics.py",
+          ["--project", result.project],
+          { timeoutMs: 60_000 }
+        );
+        if (seed.code === 0) {
+          const m = /planned=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(seed.stdout);
+          seedNote = m
+            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so draft_cycle has a topic universe to work with.`
+            : " Seeded search topics into the DB so draft_cycle has a topic universe to work with.";
+        } else {
+          const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. draft_cycle will tell you clearly if topics are missing.)`;
+        }
+      }
       return jsonContent({
         ok: true,
         project: result.project,
         action: result.created ? "created" : "updated",
         ready: result.ready,
         missing_required: result.missing_required,
+        topics_seeded: result.ready,
         config_path: CONFIG_PATH,
         note: result.ready
-          ? `Project '${result.project}' is fully set up. Next: connect X so the autoposter can post — ` +
+          ? `Project '${result.project}' is fully set up.${seedNote} Next: connect X so the autoposter can post — ` +
             `call setup with action:'connect_x' (it explains itself, then run again with confirm:true). ` +
             `Once X is connected you can run draft_cycle, autopilot, and get_stats.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
