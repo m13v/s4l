@@ -180,6 +180,17 @@ def insert_followup(followup, parent_reply_id, post_id, parent_depth, root_autho
     root_author = (root_author or "").lstrip("@")
     if root_author:
         body["thread_author_handle"] = root_author
+    # Media of the followup tweet itself (images/videos/GIFs/link-cards),
+    # captured for free during the same DOM pass in
+    # twitter_browser.scrape_thread_followups (2026-06-03 thread-media feature).
+    # The engage prompt reads this back via /api/v1/replies/next-pending so it
+    # can reply to what the comment VISUALLY shows, not just its text. An empty
+    # list [] is meaningful ("captured, none found"); only omit when the
+    # extractor returned nothing parseable (None). Harmless no-op against the
+    # pre-deploy API, which simply ignores the unknown field.
+    media = followup.get("media")
+    if isinstance(media, list):
+        body["their_media"] = media
     resp = api_post("/api/v1/replies", body, ok_on_conflict=True)
     if (resp.get("error") or {}).get("code") == "duplicate_reply":
         return False
