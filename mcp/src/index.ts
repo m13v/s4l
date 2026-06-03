@@ -394,11 +394,23 @@ function renderDraftsTable(plan: Plan): string {
       const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
       const style = c.engagement_style ?? "?";
       const reply = c.reply_text ?? "(empty)";
-      const link = c.link_url ? `  ·  link: ${c.link_url}` : "";
+      // The literal tail URL is NOT known yet: at post time a short link is minted
+      // from this target (e.g. fazm.ai/cc -> s4l.ai/r/<code>) and an A/B gate may
+      // skip it entirely. Show the TARGET only; never pre-mint the real /r/ code.
+      const link = c.link_url
+        ? `\n    + link (may be appended as a short link at post time): ${c.link_url}`
+        : "";
+      // The original tweet we're replying to — context the reviewer needs to judge
+      // the draft. Already in the plan; just surface it.
+      const threadText = c.thread_text
+        ? `\n    in reply to: ${c.thread_text.replace(/\s+/g, " ").trim().slice(0, 280)}`
+        : "";
       return (
-        `[${n}] ${author}  (style: ${style})${link}\n` +
-        `    ${reply.replace(/\n/g, "\n    ")}\n` +
-        `    thread: ${c.candidate_url ?? "?"}`
+        `[${n}] ${author}  (style: ${style})` +
+        `${threadText}\n` +
+        `    draft: ${reply.replace(/\n/g, "\n    ")}` +
+        `${link}\n` +
+        `    thread url: ${c.candidate_url ?? "?"}`
       );
     })
     .join("\n\n");
@@ -700,7 +712,9 @@ server.registerTool(
       "Scan X and draft replies on this machine, then return ALL drafts as a numbered table " +
       "for review. This tool POSTS NOTHING. Show the table to the user and ask which numbers " +
       "to post and which to rewrite, then call `post_drafts` with their decision and the " +
-      "returned batch_id. Flow: discover -> draft -> review in chat -> post_drafts.",
+      "returned batch_id. The table MUST show, per draft: the thread being replied to " +
+      "(thread_text), the draft reply, and the link target (link_url) when present; never " +
+      "drop those columns. Flow: discover -> draft -> review in chat -> post_drafts.",
     inputSchema: {
       project: z
         .string()
@@ -758,11 +772,15 @@ server.registerTool(
       `Drafted ${count} ${count === 1 ? "reply" : "replies"} for "${proj}" ` +
       `(batch ${drafted.batchId}). NOTHING has been posted yet.\n\n` +
       `${table}\n\n` +
-      `Show this list to the user and ask which to post and which to edit. They can reply ` +
-      `however is natural, e.g. "post 1, 3 and 5", "edit 2: <new wording>", "post all", or ` +
-      `"skip all". Editing a draft also posts it. Then call the post_drafts tool with ` +
-      `batch_id "${drafted.batchId}" and their decision (post: [numbers], edits: [{n, text}], ` +
-      `or post_all: true). Do not post anything the user didn't ask for.`;
+      `Show this list to the user and ask which to post and which to edit. When you render ` +
+      `the table, ALWAYS include, for every draft: the thread it replies to (in reply to / ` +
+      `thread_text), the draft text, and the link target (link_url) if present. Do NOT drop ` +
+      `the thread or link columns. Note the literal short link is appended at post time and ` +
+      `an A/B gate may omit it, so present link_url as the target, not a guaranteed final URL. ` +
+      `They can reply however is natural, e.g. "post 1, 3 and 5", "edit 2: <new wording>", ` +
+      `"post all", or "skip all". Editing a draft also posts it. Then call the post_drafts ` +
+      `tool with batch_id "${drafted.batchId}" and their decision (post: [numbers], ` +
+      `edits: [{n, text}], or post_all: true). Do not post anything the user didn't ask for.`;
     return {
       content: [{ type: "text" as const, text: message }],
       structuredContent: {
@@ -778,7 +796,15 @@ server.registerTool(
           n: i + 1,
           author: c.thread_author,
           tweet_url: c.candidate_url,
+          // The original tweet being replied to — reviewer context. Hosts that
+          // surface ONLY structuredContent (Claude Desktop, Fazm Code tab) need
+          // this here or the relayed table loses the thread it's responding to.
+          thread_text: c.thread_text,
           reply_text: c.reply_text,
+          // Target link only. The literal /r/<code> short link is minted at post
+          // time and an A/B gate may omit it; do not pre-mint here.
+          link_url: c.link_url,
+          style: c.engagement_style,
           language: c.language,
         })),
       },
