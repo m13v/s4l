@@ -313,6 +313,40 @@ ensure_linkedin_browser_for_backend() {
     # Always close leftover tabs from prior runs. Safe under acquire_lock
     # "linkedin-browser" serialization.
     cleanup_harness_tabs
+
+    # Per-run logout detection (2026-06-03). Every browser pipeline funnels
+    # through here before it touches LinkedIn, so this single call makes ANY
+    # pipeline trip the killswitch on its natural next fire if the harness
+    # Chrome has been logged out (999 / authwall / checkpoint), without editing
+    # the chflags-locked top-level scripts. detect-gate is a no-op when the
+    # killswitch is already active, and only ENGAGES on a CONCLUSIVE /feed/
+    # redirect to auth (infra hiccups -> proceed, so a flaky render never
+    # strands the pipeline). On a confirmed logout it engages the flag (which
+    # pauses every pipeline on its next fire + starts the 24h recovery clock)
+    # and returns 2, so we abort this fire instead of burning a Claude session
+    # on a dead session.
+    _linkedin_session_detect_gate
+}
+
+# Once-per-process guard mirrors _LI_PIPELINE_LOCK_HELD: run-linkedin.sh calls
+# ensure_linkedin_browser_for_backend in both Phase A and Phase B, and we do not
+# want two /feed/ probes per fire.
+_linkedin_session_detect_gate() {
+    if [ "${_LI_SESSION_PROBED:-0}" = "1" ]; then
+        return 0
+    fi
+    export _LI_SESSION_PROBED=1
+    local _py="${LINKEDIN_DISCOVER_PYTHON:-python3}"
+    # `|| _rc=$?` so a nonzero exit (e.g. 2 = logged out) is "handled" and does
+    # not trip a caller's `set -e` before we inspect the code ourselves.
+    local _rc=0
+    "$_py" "$HOME/social-autoposter/scripts/linkedin_killswitch.py" detect-gate \
+        --cdp-url "${LINKEDIN_CDP_URL:-$_BH_LINKEDIN_DEFAULT_URL}" >&2 || _rc=$?
+    if [ "$_rc" = "2" ]; then
+        echo "[$(date +%H:%M:%S)] detect-gate tripped the LinkedIn killswitch; aborting this fire" >&2
+        return 1
+    fi
+    return 0
 }
 
 defer_if_foreign_for_backend() {
