@@ -1024,9 +1024,11 @@ def _cmd_recover_record(args):
     matching state transition. Called by skill/linkedin-recovery.sh after it runs
     the login session. Verdicts:
 
-      held       -> enter the pending-hold window; do NOT resume yet.
-      hard_block -> terminal (manual re-auth required), no further auto-attempts.
-      transient  -> re-anchor the 24h clock and try again later, up to the cap.
+      held            -> enter the pending-hold window; do NOT resume yet.
+      hard_block      -> terminal (manual re-auth required), no further attempts.
+      restricted_temp -> temporary restriction with a stated lift time: dip until
+                         that time + buffer, then retry once, up to the cap.
+      transient       -> re-anchor the 24h clock and try again later, up to the cap.
     """
     if not is_active():
         print(json.dumps({"recorded": False, "reason": "not_active"}))
@@ -1094,6 +1096,50 @@ def _cmd_recover_record(args):
             "recorded": True,
             "verdict": "hard_block",
             "terminal": True,
+        }))
+        sys.exit(0)
+
+    if verdict == "restricted_temp":
+        attempts, terminal, retry_at = _record_restricted_temp(detail)
+        if not args.no_email:
+            if terminal:
+                ok, msg = _send_simple_email(
+                    "[LI KILL] temporary restriction kept recurring, stopping",
+                    [
+                        "A Claude-driven re-login hit a TEMPORARY restriction again",
+                        "after " + str(attempts) + " timed retries; auto-recovery has",
+                        "STOPPED COMPLETELY. The restriction is not clearing on its own.",
+                        "",
+                        "Last detail: " + str(detail),
+                        "Manual re-auth + clear required:",
+                        "  python3 ~/social-autoposter/scripts/linkedin_killswitch.py clear",
+                        "State file: " + STATE_FILE,
+                    ],
+                )
+            else:
+                ok, msg = _send_simple_email(
+                    "[LI KILL] temporarily restricted, will retry after lift time",
+                    [
+                        "A Claude-driven re-login found the account TEMPORARILY",
+                        "restricted (automated-activity flag with a stated lift time).",
+                        "",
+                        "We are NOT giving up: pipelines stay paused and we will make",
+                        "one more login attempt after the restriction lifts, at",
+                        "  " + str(retry_at) + " (UTC)",
+                        "This is attempt " + str(attempts) + " of "
+                        + str(RECOVERY_RESTRICTED_MAX_ATTEMPTS) + ".",
+                        "",
+                        "Restriction detail: " + str(detail),
+                        "State file: " + STATE_FILE,
+                    ],
+                )
+            _append_trail({"event": "restricted_temp_email", "ok": ok, "msg": msg})
+        print(json.dumps({
+            "recorded": True,
+            "verdict": "restricted_temp",
+            "restricted_attempts": attempts,
+            "terminal": terminal,
+            "retry_at": retry_at,
         }))
         sys.exit(0)
 
@@ -1234,8 +1280,12 @@ def main():
     rr.add_argument(
         "--verdict",
         required=True,
-        choices=["held", "hard_block", "transient"],
-        help="held=login ok (verify hold); hard_block=terminal; transient=retry later",
+        choices=["held", "hard_block", "restricted_temp", "transient"],
+        help=(
+            "held=login ok (verify hold); hard_block=terminal; "
+            "restricted_temp=temporary restriction, dip until lift time then retry; "
+            "transient=retry later"
+        ),
     )
     rr.add_argument("--detail", default="", help="human-readable detail for the trail/email")
     rr.add_argument("--no-email", action="store_true", help="skip the alert email")
