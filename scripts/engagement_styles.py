@@ -182,20 +182,24 @@ STYLES = {
     },
     "ig_walkin_storefront_playbook": {
         "description": (
-            "Door-to-door SMB story for mk0r: 'i was [working-class role]. i "
-            "drove past N businesses with no website every day. a friend told "
-            "me about mk0r. i walked in / sat at the counter. i opened mk0r.com, "
-            "typed one prompt, the site built itself while [owner] watched. "
-            "they paid me $[300-500] cash from a [coffee tin / register]. N "
-            "months later i've signed [N] of these = $[N]/mo recurring.' Ends "
-            "with the mk0r.com footer."
+            "Product demo for mk0r: show mk0r building a REAL website for a "
+            "local business that has none. 'i noticed [a local spot] near me "
+            "with no website, just a maps pin and one blurry photo. i opened "
+            "mk0r.com, described the place in one prompt, and watched it build "
+            "a real site, hero, services, hours, a call button, live in "
+            "minutes.' Focus on the CAPABILITY and the speed, and what it "
+            "means for a small business to finally have a real site online. NO "
+            "earnings, NO 'they paid me', NO recurring-revenue or 'signed N "
+            "clients' totals. Reference mk0r.com plainly."
         ),
         "example": (
-            "i was 27. shipping clerk at a parts warehouse outside fresno for "
-            "4 years, $21 an hour. i drove past 14 auto shops on the way home "
-            "every night. ... i opened mk0r.com on his waiting room table and "
-            "turned it around. he paid me from the register drawer. ... 23 "
-            "auto shops signed since march. 🔗 mk0r.com"
+            "there's a tire shop two blocks from me thats been open fifteen "
+            "years. i went to send a friend the link and there was no link, "
+            "just a maps pin and one blurry photo someone else uploaded. so i "
+            "opened mk0r.com and described the shop in one prompt, brakes, "
+            "tires, the hours, the phone number. it built the whole site while "
+            "i watched, a hero, a services list, a map, one big call button. "
+            "fifteen years open and it finally has a front door online. mk0r.com"
         ),
         "best_in": {
             "instagram": [
@@ -204,11 +208,14 @@ STYLES = {
             ],
         },
         "note": (
-            "Caption is the niche walk-in arc (working-class persona, drive-by "
-            "niche, first walk-in success, recurring revenue total). Overlay "
-            "is the 5-beat playbook (title card + 4 step cards). MUST include "
-            "'mk0r.com' in caption and the mk0r.com footer. project_name='mk0r' "
-            "on the row. Fires when TARGET=product AND selected_project=mk0r."
+            "Caption is the product-demo arc: a real local business with no "
+            "website, mk0r builds a real site from one prompt, what it means "
+            "for the owner to finally be online. NO income/earnings/'they paid "
+            "me'/recurring-revenue/'signed N clients' framing -- that arc "
+            "tripped a Meta fraud-and-deceptive-practices restriction on "
+            "2026-06-02 (matt_diak link-sharing restricted 30d). Reference "
+            "'mk0r.com' plainly in the caption. project_name='mk0r' on the "
+            "row. Fires when TARGET=product AND selected_project=mk0r."
         ),
         "target_chars": 1800,
     },
