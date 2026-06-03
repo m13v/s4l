@@ -137,11 +137,13 @@ export interface PlanCandidate {
   candidate_id?: string | number;
   candidate_url?: string;
   thread_author?: string;
+  thread_text?: string;
   reply_text?: string;
   engagement_style?: string;
   link_url?: string;
   link_keyword?: string;
   search_topic?: string;
+  language?: string;
   approved?: boolean;
   [k: string]: unknown;
 }
