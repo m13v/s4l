@@ -270,6 +270,8 @@ Returns JSON: {"project": "fazm", "our_content": "...full text...", "thread_url"
 Here are the replies to process:
 $PENDING_DATA
 
+NOTE ON MEDIA: a row may include a non-empty \`their_media_block\` describing images / videos / GIFs / link-cards attached to the comment you are replying to (captured at scan time). When present, treat it as part of the comment: react to what it VISUALLY shows, not just the text. When absent or empty, the comment was text-only (or media was not captured), so reply to the text as usual. You will also see the media live when you navigate the thread in Step 2; the block is the persisted fallback.
+
 CRITICAL: Reply in the SAME LANGUAGE as the message you are responding to. Match the language exactly.
 CRITICAL: Process EVERY reply. For each: either post a response and mark as 'replied', OR mark as 'skipped' with a skip_reason.
 
