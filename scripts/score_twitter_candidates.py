@@ -26,6 +26,13 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post  # noqa: E402
+
+# Best-effort dedicated logger for the follow-gate -> skill/logs/follow-gate.log.
+# Guarded so a missing/older helper file can never break scoring (fail-open).
+try:
+    import follow_gate_log as _fgl  # noqa: E402
+except Exception:
+    _fgl = None
 from twitter_account import resolve_handle as _resolve_twitter_handle  # noqa: E402
 from project_topics import topics_for_project  # noqa: E402
 
@@ -309,6 +316,7 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # above: a missing endpoint / 429 / unresolved handle leaves the set empty so
     # the cycle behaves exactly as it did before this guardrail (2026-06-03).
     followed_handles = set()
+    _follow_source = "unresolved"
     if _twitter_handle:
         try:
             _foll_resp = api_get(
@@ -317,6 +325,7 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
                 ok_on_404=True,
             )
             if _foll_resp.get("_not_found"):
+                _follow_source = "404"
                 print(
                     f"[follow_gate] fail-open: followed-accounts endpoint 404 "
                     f"(not deployed) our_account={_twitter_handle}; "
@@ -325,11 +334,13 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
                     flush=True,
                 )
             else:
+                _follow_source = "ok"
                 for _fh in (_foll_resp.get("data") or {}).get("handles") or []:
                     _fhs = (_fh or "").strip().lstrip("@").lower()
                     if _fhs:
                         followed_handles.add(_fhs)
         except SystemExit as _foll_err:
+            _follow_source = "error"
             followed_handles = set()
             print(
                 f"[follow_gate] fail-open: followed-accounts fetch failed "
@@ -383,6 +394,8 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
                 file=sys.stderr,
                 flush=True,
             )
+            if _fgl:
+                _fgl.record_skip(_twitter_handle, _cand_handle, url, batch_id)
             continue
 
         # Calculate age
@@ -586,6 +599,8 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
     # and engagement curves over time. Per user instruction (2026-05-08): never
     # add DELETE-by-age back here, regardless of retention window.
 
+    if _fgl:
+        _fgl.record_cycle(_twitter_handle, len(followed_handles), _follow_source, len(tweets), skipped_followed_author, batch_id)
     print(f"Scored: {inserted} upserted, {skipped} skipped (already posted or fabricated ID: {skipped_fake_id}, already rejected for project: {skipped_already_rejected}, followed authors: {skipped_followed_author})")
 
     # Emit the verdict sidecar for the retry loop's directional feedback. Best
