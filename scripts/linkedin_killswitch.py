@@ -152,6 +152,24 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _fmt_local(iso_or_dt):
+    """Render a UTC ISO string (or datetime) in the machine's local timezone for
+    human-readable emails, e.g. '2026-06-03 16:35 PDT'. Falls back to the raw
+    input on any parse failure so the email still goes out."""
+    try:
+        dt = iso_or_dt
+        if isinstance(dt, str):
+            dt = _parse_ts(dt)
+        if dt is None:
+            return str(iso_or_dt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone()
+        return local.strftime("%Y-%m-%d %I:%M %p %Z").replace(" 0", " ")
+    except Exception:
+        return str(iso_or_dt)
+
+
 def _ensure_dir():
     os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -1125,7 +1143,7 @@ def _cmd_recover_record(args):
                         "",
                         "We are NOT giving up: pipelines stay paused and we will make",
                         "one more login attempt after the restriction lifts, at",
-                        "  " + str(retry_at) + " (UTC)",
+                        "  " + _fmt_local(retry_at) + "  (" + str(retry_at) + " UTC)",
                         "This is attempt " + str(attempts) + " of "
                         + str(RECOVERY_RESTRICTED_MAX_ATTEMPTS) + ".",
                         "",
