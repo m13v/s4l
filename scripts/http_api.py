@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -22,6 +23,45 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Pin a known-good trust store, immune to a bad inherited SSL_CERT_FILE.
+
+    The MCP/host app can inject SSL_CERT_FILE / SSL_CERT_DIR pointing at a
+    bundle that lacks the right roots, which makes urllib raise
+    CERTIFICATE_VERIFY_FAILED only inside the spawned subprocess (TLS works
+    fine in a normal shell). We resolve the trust store deliberately here
+    instead of trusting whatever env we inherit:
+
+      1. inherited SSL_CERT_FILE, but only if the path exists AND yields a
+         context with at least one trusted root;
+      2. the platform default store;
+      3. certifi, if installed.
+
+    The get_ca_certs() check is what rejects a bad inherited path: an empty
+    trust store silently falls through to the next candidate.
+    """
+    candidates = []
+    env_file = os.environ.get("SSL_CERT_FILE")
+    if env_file and os.path.exists(env_file):
+        candidates.append(env_file)
+    candidates.append(None)  # platform default
+    for cafile in candidates:
+        try:
+            ctx = ssl.create_default_context(cafile=cafile)
+            if ctx.get_ca_certs():
+                return ctx
+        except Exception:
+            continue
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+_SSL_CONTEXT = _build_ssl_context()
 
 ENV_PATH = os.path.expanduser("~/social-autoposter/.env")
 
@@ -94,7 +134,9 @@ def _request(method: str, path: str, body: dict | None = None,
             req = urllib.request.Request(
                 url, data=data, headers=_headers(), method=method,
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(
+                req, timeout=30, context=_SSL_CONTEXT
+            ) as resp:
                 raw = resp.read()
                 if not raw:
                     return {}
