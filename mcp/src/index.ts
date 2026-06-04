@@ -1154,7 +1154,7 @@ server.registerTool(
   },
   async () => {
     if (runtimeReady()) {
-      return jsonContent({ runtime_ready: true, already_installed: true, ...runtimeSnapshot() });
+      return jsonContent({ already_installed: true, ...runtimeSnapshot() });
     }
     const progress = startProvisioning();
     return jsonContent({
