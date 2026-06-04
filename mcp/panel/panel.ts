@@ -193,9 +193,14 @@ app.ontoolresult = (result) => {
   const data = parseResult(result as CallToolResult);
   if (data && typeof data.projects_total === "number") {
     applyState(data as Snapshot);
-    // If a runtime install is already underway (started from another surface or
-    // a prior open), resume following it without waiting for a click.
-    if (!data.runtime_ready && data.runtime_provisioning) void pollInstall();
+    if (data.runtime_ready) {
+      // Stats need the runtime; load them once it's confirmed ready.
+      void loadStats();
+    } else if (data.runtime_provisioning) {
+      // An install is already underway (another surface / prior open) — resume
+      // following it without waiting for a click.
+      void pollInstall();
+    }
   }
 };
 
@@ -375,7 +380,6 @@ btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", 
 app.connect().then(() => {
   const ctx = app.getHostContext();
   if (ctx) applyHostContext(ctx);
-  // Stats need the runtime (the pipeline can't run without it). Skip the call
-  // while the Install gate is up; refresh() pulls them once it clears.
-  if (state?.runtime_ready) void loadStats();
+  // Stats load from ontoolresult once the first snapshot confirms the runtime is
+  // ready (the pipeline can't run without it), so nothing to do here.
 });
