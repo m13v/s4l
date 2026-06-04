@@ -304,7 +304,9 @@ async function loadStats() {
 function busy(btn: HTMLButtonElement, label: string, fn: () => Promise<void>) {
   const prev = btn.textContent;
   btn.disabled = true; btn.textContent = label;
-  fn().finally(() => { btn.textContent = prev; render(); });
+  // Re-enable BEFORE render() so render() can re-apply readiness gating to the
+  // buttons it owns; buttons it doesn't own (Refresh, config) just come back on.
+  fn().finally(() => { btn.disabled = false; btn.textContent = prev; render(); });
 }
 
 // ---- button handlers ------------------------------------------------------
