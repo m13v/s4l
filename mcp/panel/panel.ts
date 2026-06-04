@@ -191,7 +191,12 @@ app.onerror = (e) => console.error(e);
 // The `panel` tool that spawned this view returns the initial snapshot.
 app.ontoolresult = (result) => {
   const data = parseResult(result as CallToolResult);
-  if (data && typeof data.projects_total === "number") applyState(data as Snapshot);
+  if (data && typeof data.projects_total === "number") {
+    applyState(data as Snapshot);
+    // If a runtime install is already underway (started from another surface or
+    // a prior open), resume following it without waiting for a click.
+    if (!data.runtime_ready && data.runtime_provisioning) void pollInstall();
+  }
 };
 
 async function call(name: string, args: Record<string, unknown> = {}): Promise<any> {
@@ -370,6 +375,7 @@ btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", 
 app.connect().then(() => {
   const ctx = app.getHostContext();
   if (ctx) applyHostContext(ctx);
-  // Stats aren't in the spawn snapshot; pull them once on open.
-  void loadStats();
+  // Stats need the runtime (the pipeline can't run without it). Skip the call
+  // while the Install gate is up; refresh() pulls them once it clears.
+  if (state?.runtime_ready) void loadStats();
 });
