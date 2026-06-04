@@ -391,7 +391,8 @@ def main():
         seed_added = len(bank) - pre_seed
     json.dump(bank, sys.stdout)
     print()
-    print(f"qualified_query_bank: {proven_size} proven + {invent_added} invented = "
+    print(f"qualified_query_bank: {proven_size} proven + {invent_added} invented "
+          f"+ {seed_added} seed = "
           f"{len(bank)} queries for project={args.project!r} "
           f"(min_likes={args.min_likes} OR min_clicks={args.min_clicks}, "
           f"invent_min_supply={args.invent_min_supply}"
