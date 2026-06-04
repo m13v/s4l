@@ -72,7 +72,7 @@ function looksLikeRepo(dir: string | undefined): boolean {
 //   3. the materialized path on disk even if runtime.json is missing.
 //   4. SAPS_REPO_DIR as-is, then the two-levels-up dev default.
 // Dynamic (not a load-time const) so a first-run materialize is picked up
-// without a server restart — same property resolvePython() relies on.
+// without a server restart (same property resolvePython() relies on).
 export function resolveRepoDir(): string {
   const env = process.env.SAPS_REPO_DIR;
   if (looksLikeRepo(env)) return env as string;
