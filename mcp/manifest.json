@@ -4,7 +4,7 @@
   "display_name": "Social Autoposter (X / Twitter)",
   "version": "0.0.1",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
-  "long_description": "A guided X/Twitter posting assistant. Run setup once to tell it your website, what you do, who to target, and your brand voice. Then draft_cycle scans X, drafts replies, and walks you through each one (approve or skip) before anything is posted. Flip to autopilot when you trust it, and check get_stats to see how your posts perform. Everything runs locally on your machine; the pipeline source ships inside this extension and a self-contained Python runtime is provisioned on first run, so no separate clone or Python install is required.\n\n**To get started:**\n\n**1. Click the Enable toggle in this tab.**\n\n**2. Fully quit and restart Claude (quit and reopen, not just close the window).**\n\n**3. Start a new session and type `run social-autoposter panel`, then click Install to set up the local runtime.**",
+  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Click the Enable toggle in this tab.\n2. Fully quit and restart Claude (quit and reopen, not just close the window).\n3. Start a new session and type **run social-autoposter panel**, then click Install to set up the local runtime.",
   "author": {
     "name": "m13v",
     "email": "i@m13v.com",
