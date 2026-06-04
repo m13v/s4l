@@ -600,7 +600,7 @@ CAPTION RULES (mk0r) -- HARD, do NOT violate:
 The caption is a PRODUCT DEMO: a real local business that has no website, mk0r
 builds it a real site from one prompt, and what that means for the owner. You
 may reference mk0r.com plainly. You MUST NOT write any income/earnings framing:
-no "$X a month", no "they paid me", no "recurring revenue", no "signed N
+no "\$X a month", no "they paid me", no "recurring revenue", no "signed N
 clients", no "make money / side income / quit your job / flip websites", no
 fabricated dollar amounts or client counts. That get-rich-quick framing tripped
 a Meta fraud-and-deceptive-practices restriction on 2026-06-02 and is
@@ -778,7 +778,7 @@ characters, while preserving the voice and ALL 8 beats of the caption arc
 felt sense, workflow change, contrarian lesson in one sharp line, closing
 instruction). For Mixer/product captions, preserve the product-demo structure
 and the plain product reference (mk0r.com / studyly.io) if present. NEVER add
-income/earnings framing ("$X a month", "they paid me", "recurring revenue",
+income/earnings framing ("\$X a month", "they paid me", "recurring revenue",
 "signed N clients") to an mk0r caption while tightening -- that framing is
 banned (Meta fraud restriction 2026-06-02).
 
