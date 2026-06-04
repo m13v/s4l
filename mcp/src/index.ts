@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import {
-  REPO_DIR,
+  repoDir,
   runPython,
   run,
   readPlan,
@@ -34,7 +34,7 @@ import {
   listManagedProjectStatus,
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
-  CONFIG_PATH,
+  configPath,
   type ProjectInput,
 } from "./setup.js";
 import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
