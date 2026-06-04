@@ -66,6 +66,14 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get, api_post
+try:  # author exclusion is fail-open: never let it break scoring
+    from linkedin_exclusions import load_exclusions, classify_author
+except Exception:  # pragma: no cover - helper missing -> exclusion is a no-op
+    def load_exclusions(platform="linkedin"):
+        return {"hard_slugs": set(), "soft_slugs": set(), "soft_names": set()}
+
+    def classify_author(author_name, author_profile_url, excl=None):
+        return None, ""
 try:
     from account_resolver import resolve as _resolve_account
 except Exception:
@@ -257,9 +265,18 @@ def upsert_candidates(candidates, batch_id=None):
     posted_urls = _fetch_posted_urls()
 
     inserted = skipped = errors = 0
+    _excl = load_exclusions()
 
     for cand in candidates:
         if not isinstance(cand, dict):
+            continue
+        # Author exclusion (config.json + author_blocklist, slug-keyed). The
+        # POST-rail discover step already drops these, but guard here too so the
+        # linkedin_candidates table never accrues an excluded author regardless
+        # of which caller fed us (hand-fed batches, future rails, etc.).
+        if classify_author(cand.get("author_name"),
+                            cand.get("author_profile_url"), _excl)[0] == "hard":
+            skipped += 1
             continue
         post_url = _normalize_post_url(cand.get("post_url"))
         if not post_url:
