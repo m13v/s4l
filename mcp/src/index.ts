@@ -395,10 +395,12 @@ function renderDraftsTable(plan: Plan): string {
       const style = c.engagement_style ?? "?";
       const reply = c.reply_text ?? "(empty)";
       // The literal tail URL is NOT known yet: at post time a short link is minted
-      // from this target (e.g. fazm.ai/cc -> s4l.ai/r/<code>) and an A/B gate may
-      // skip it entirely. Show the TARGET only; never pre-mint the real /r/ code.
+      // from this target (e.g. fazm.ai/cc -> s4l.ai/r/<code>). Approved drafts
+      // always carry the link (post_drafts forces TWITTER_TAIL_LINK_RATE=1.0), so
+      // this is the target that WILL be appended. Show the TARGET only; never
+      // pre-mint the real /r/ code (that would waste pool codes / split clicks).
       const link = c.link_url
-        ? `\n    + link (may be appended as a short link at post time): ${c.link_url}`
+        ? `\n    + link (appended as a short link at post time): ${c.link_url}`
         : "";
       // The original tweet we're replying to — context the reviewer needs to judge
       // the draft. Already in the plan; just surface it.
@@ -433,6 +435,16 @@ async function postApproved(batchId: string, plan: Plan) {
       timeoutMs: 900_000,
       env: {
         SAPS_SKIP_CAMPAIGN_SUFFIX: "1",
+        // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
+        // runs TWITTER_TAIL_LINK_RATE=0.9 (from .env) so ~10% of autopilot posts
+        // ship link-less as an experiment arm. But when the user hand-reviews a
+        // draft, sees the link target in the table, and approves it, dropping the
+        // link is surprising and unwanted. Force 1.0 here so every approved draft
+        // carries its link. This wins over .env / process.env because run() spreads
+        // opts.env AFTER process.env, and twitter_post_plan.py never load_dotenv's
+        // with override, so nothing clobbers it. Cron is untouched (it never goes
+        // through this MCP path), so the 0.9 experiment keeps running there.
+        TWITTER_TAIL_LINK_RATE: "1.0",
         // The poster attaches to the twitter-harness Chrome over CDP. The cron
         // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
         // must set it explicitly or twitter_browser.py fails with "No twitter-
