@@ -818,6 +818,7 @@ server.registerTool(
         ready: result.ready,
         missing_required: result.missing_required,
         topics_seeded: result.ready,
+        search_queries: searchQueries,
         config_path: configPath(),
         note: result.ready
           ? `Project '${result.project}' is fully set up.${seedNote} Next: connect X so the autoposter can post — ` +
