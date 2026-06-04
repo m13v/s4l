@@ -6,6 +6,7 @@
 /tsconfig.json
 /package-lock.json
 /install.mjs
+/bundle-pipeline.mjs
 /*.mcpb
 /*.mcpb.bak
 *.log
