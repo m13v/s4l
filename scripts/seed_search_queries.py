@@ -39,6 +39,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -111,6 +112,26 @@ def _load_existing_seed_cores(project: str) -> set[str]:
     return {normalize_query(r.get("query") or "") for r in rows if r.get("query")}
 
 
+def _fetch_active_queries(project: str) -> list[dict]:
+    """The project's current ACTIVE seed-query bank (query + topic), so a caller
+    can show the user exactly what the cycle will fan out over. Best-effort:
+    returns [] on read failure."""
+    try:
+        resp = api_get(
+            "/api/v1/project-search-queries",
+            {"project": project, "status": "active"},
+        )
+    except SystemExit:
+        return []
+    data = (resp or {}).get("data") or {}
+    out = []
+    for r in (data.get("queries") or []):
+        q = (r.get("query") or "").strip()
+        if q:
+            out.append({"query": q, "topic": (r.get("topic") or "").strip()})
+    return out
+
+
 def _find_project(cfg: dict, name: str) -> dict | None:
     for p in cfg.get("projects", []):
         if (p.get("name") or "").strip().lower() == name.strip().lower():
@@ -155,6 +176,11 @@ def main() -> int:
                          "up; on: require it; off: skip and seed all drafts.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Draft + (maybe) supply-test, but do NOT persist.")
+    ap.add_argument("--emit-json", action="store_true",
+                    help="After seeding, print the project's full ACTIVE seed-query "
+                         "bank as JSON on a sentinel line (===QUERIES_JSON===) so a "
+                         "caller (e.g. the MCP setup tool) can hand the queries back "
+                         "to the user.")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -296,6 +322,20 @@ def main() -> int:
         f"inserted={inserted} updated={updated} failed={failed}"
         + (" [dry-run]" if args.dry_run else "")
     )
+
+    # Hand the resulting bank back to the caller (MCP setup tool) so it can show
+    # the user exactly which queries the cycle will run. Sentinel-delimited so it
+    # survives alongside the human/stderr log noise. On --dry-run we report what
+    # we drafted (nothing persisted yet); otherwise the live active bank.
+    if args.emit_json:
+        if args.dry_run:
+            queries = [{"query": q, "topic": t} for q, t in drafted]
+        else:
+            queries = _fetch_active_queries(project)
+        print("===QUERIES_JSON===")
+        print(json.dumps({"project": project, "count": len(queries),
+                          "queries": queries}))
+
     return 1 if (failed and not (inserted or updated)) else 0
 
 
