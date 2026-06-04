@@ -75,24 +75,12 @@ trap _preflight_combined_exit EXIT INT TERM HUP
 # 1. Memory-pressure preflight
 # ---------------------------------------------------------------------------
 preflight_skip_if_jetsam_pressure() {
-    # kern.memorystatus_vm_pressure_level is sticky: it can latch at 2 (warn)
-    # for hours after a transient spike while RAM is actually healthy, which
-    # false-positive-skipped legitimate cycles. So pressure alone is no longer
-    # the gate. We ALSO require the real free-memory percentage
-    # (kern.memorystatus_level) to be genuinely low, and only skip when both
-    # the system reports elevated pressure AND free memory is truly scarce.
-    local pressure free_pct min_free
-    min_free="${SA_PREFLIGHT_MIN_FREE_PCT:-12}"
-    pressure=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)
-    free_pct=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo 100)
-    # Unparseable -> fail-open (do not skip): pressure is unreliable on its own.
-    case "$pressure" in ''|*[!0-9]*) pressure=1 ;; esac
-    case "$free_pct" in ''|*[!0-9]*) free_pct=100 ;; esac
-    if [ "$pressure" -ge 2 ] && [ "$free_pct" -lt "$min_free" ]; then
-        local script_tag="${SA_PREFLIGHT_SCRIPT:-${SCRIPT_TAG:-$(basename "$0")}}"
-        echo "[skipped: jetsam_pressure level=$pressure free_pct=$free_pct min_free=$min_free script=$script_tag] $(date)" >&2
-        exit 0
-    fi
+    # DISABLED (2026-06-04, by user request): this guard kept false-positive-
+    # skipping healthy cycles because kern.memorystatus_vm_pressure_level is
+    # sticky (latches at 2 for hours after a transient spike while RAM is
+    # actually fine). Now a no-op so it never blocks a cycle. Kept as a
+    # named function because run-twitter-cycle.sh (locked) still calls it.
+    return 0
 }
 
 # ---------------------------------------------------------------------------
