@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { REPO_DIR } from "./repo.js";
+import { repoDir } from "./repo.js";
 
 // Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
@@ -20,9 +20,12 @@ const STATE_DIR =
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 
 // The pipeline reads projects[] from config.json. Override for tests / custom
-// installs; defaults to the repo's config.json.
-export const CONFIG_PATH =
-  process.env.SAPS_CONFIG_PATH || path.join(REPO_DIR, "config.json");
+// installs; defaults to the (dynamically resolved) repo's config.json. Resolved
+// per call, not a load-time const, because a bare .mcpb install materializes the
+// repo after boot and setup must write config.json into THAT repo.
+export function configPath(): string {
+  return process.env.SAPS_CONFIG_PATH || path.join(repoDir(), "config.json");
+}
 
 // Fields the X drafting prompts genuinely consume. Required ones must all be
 // present before a project is "ready"; recommended ones improve draft quality.
@@ -109,8 +112,9 @@ interface ConfigFile {
 }
 
 function readConfig(): ConfigFile {
-  if (!fs.existsSync(CONFIG_PATH)) return { projects: [] };
-  const raw = fs.readFileSync(CONFIG_PATH, "utf-8").trim();
+  const cfgPath = configPath();
+  if (!fs.existsSync(cfgPath)) return { projects: [] };
+  const raw = fs.readFileSync(cfgPath, "utf-8").trim();
   if (!raw) return { projects: [] };
   return JSON.parse(raw) as ConfigFile;
 }
@@ -188,12 +192,13 @@ export function applySetup(input: ProjectInput): {
     cfg.projects.push(buildProjectEntry(input));
     created = true;
   }
-  if (fs.existsSync(CONFIG_PATH)) {
+  const cfgPath = configPath();
+  if (fs.existsSync(cfgPath)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.copyFileSync(CONFIG_PATH, `${CONFIG_PATH}.bak-${stamp}`);
+    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
   }
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 
   recordManagedProject(input.name);
   const missing = missingForProject(input.name) ?? [];
