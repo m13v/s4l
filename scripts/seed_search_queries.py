@@ -199,21 +199,29 @@ def main() -> int:
         return 3
 
     target = max(1, args.target)
-    per_topic = math.ceil(target / len(topics))
-    per_topic = max(MIN_PER_TOPIC, min(MAX_PER_TOPIC, per_topic))
+
+    # Idempotency: aim for `target` TOTAL active queries, not `target` NEW per
+    # run. A project that already has >= target active seed queries needs no
+    # drafting — re-running reseed just re-emits the existing bank instead of
+    # ballooning it. Otherwise we only draft the shortfall. (2026-06-04)
+    active_now = len(_fetch_active_queries(project))
+    need = max(0, target - active_now)
+    per_topic = math.ceil(need / len(topics)) if need else 0
+    per_topic = max(MIN_PER_TOPIC, min(MAX_PER_TOPIC, per_topic)) if need else 0
 
     # Dedup against (a) every query EVER attempted for this project and (b) seed
     # queries already persisted. Accumulates as we go so topics don't overlap.
     avoid_cores = load_existing_query_cores(project) | _load_existing_seed_cores(project)
 
     print(f"seed_search_queries: project={project!r} topics={len(topics)} "
-          f"target={target} per_topic={per_topic} "
-          f"existing_cores={len(avoid_cores)}", file=sys.stderr)
+          f"target={target} active_now={active_now} need={need} "
+          f"per_topic={per_topic} existing_cores={len(avoid_cores)}",
+          file=sys.stderr)
 
     # --- Draft queries topic by topic ------------------------------------
     drafted: list[tuple[str, str]] = []  # (query, topic)
     for topic in topics:
-        if len({normalize_query(q) for q, _ in drafted}) >= target:
+        if need <= 0 or len({normalize_query(q) for q, _ in drafted}) >= need:
             break
         prompt = build_query_prompt(
             project_entry, topic, per_topic, avoid_queries=avoid_cores
@@ -233,6 +241,25 @@ def main() -> int:
               f"dupes={len(dupes)}", file=sys.stderr)
 
     if not drafted:
+        # Two cases: (a) the bank already meets target (need==0) — that's a
+        # healthy no-op, re-emit the existing bank and succeed; (b) we wanted
+        # queries but drafting produced none (every draft failed/duped) — that's
+        # a real failure.
+        if need <= 0:
+            print(f"seed_search_queries: project={project} already has "
+                  f"{active_now} active queries (>= target {target}); nothing to "
+                  f"draft.", file=sys.stderr)
+            print(
+                f"seed_search_queries: project={project} topics={len(topics)} "
+                f"drafted=0 supply_ran=0 dropped_zero=0 seeded=0 inserted=0 "
+                f"updated=0 failed=0 (already_full)"
+            )
+            if args.emit_json:
+                queries = _fetch_active_queries(project)
+                print("===QUERIES_JSON===")
+                print(json.dumps({"project": project, "count": len(queries),
+                                  "queries": queries}))
+            return 0
         print("seed_search_queries: drafted 0 queries — nothing to seed.",
               file=sys.stderr)
         return 1
