@@ -58,6 +58,29 @@
         </div>
       </section>
 
+      <section class="config" id="config-card">
+        <div class="config-head">
+          <span>Configuration</span>
+          <div class="config-head-actions">
+            <button id="btn-config-load" class="ghost">View config</button>
+            <button id="btn-config-save" class="primary" hidden>Save</button>
+            <button id="btn-config-cancel" class="ghost" hidden>Cancel</button>
+          </div>
+        </div>
+        <div class="config-desc" id="config-desc">
+          The full config.json: every project, account handle, topics, and
+          exclusions. Editing saves a timestamped backup before overwriting.
+        </div>
+        <textarea
+          id="config-editor"
+          class="config-editor"
+          spellcheck="false"
+          autocomplete="off"
+          hidden
+        ></textarea>
+        <div class="config-status" id="config-status"></div>
+      </section>
+
       <div class="log" id="log"></div>
     </div>
     <script type="module" src="./panel.ts"></script>
