@@ -491,6 +491,44 @@ def _show_window_and_open_login() -> bool:
             pass
 
 
+def _poll_for_login(timeout: float = 90.0, interval: float = 2.0) -> bool:
+    """Wait for the user to finish a MANUAL login, up to `timeout` seconds.
+
+    Why this exists: connect_x used to return `needs_login` the instant it found
+    no session, then relied on the agent driving the setup wizard to re-check
+    only after the human had logged in. The agent loops faster than a person can
+    type a password + 2FA, so it would re-run, still see `connected: false`, and
+    misreport the handle as missing (a detection race, not a bad write).
+
+    By owning the wait HERE, the tool blocks until the auth cookie actually
+    appears (or the bounded window elapses), so no caller can race ahead of the
+    human. Read-only: polls the auth_token cookie without navigating, so it never
+    disrupts the login flow the user is in the middle of. Stays well under the
+    MCP call timeout. Returns True once logged in, False if the window elapsed.
+    """
+    try:
+        ws, send = _attach()
+    except Exception:
+        return False
+    try:
+        send("Network.enable")
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            try:
+                if _has_auth_cookie(send):
+                    return True
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(max(0.5, interval))
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 # --- Cookie import from the user's everyday browser -------------------------
 
 def _import_from(source: str) -> dict:
@@ -847,6 +885,34 @@ def cmd_connect(args) -> dict:
     #    in by hand, then re-run connect_x. We never ask for their password and
     #    never hand-decrypt cookies; they log into their own browser themselves.
     shown = _show_window_and_open_login()
+
+    # Own the wait: block here until the user finishes the manual login (or the
+    # bounded window elapses) instead of returning `needs_login` instantly and
+    # letting the caller re-check faster than a human can type a password + 2FA.
+    # That race is what made setup misreport the handle as "missing." If the
+    # cookie appears, fall through to the same connected/persist/handle path the
+    # auto-import success branch uses.
+    login_wait = getattr(args, "login_wait", 90.0)
+    if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
+        try:
+            if _is_session_valid():
+                _persist_session()
+                flush_ok, flush_detail = _force_cookie_flush()
+                return {
+                    "ok": True,
+                    "connected": True,
+                    "state": "logged_in",
+                    "source": "manual_login",
+                    "attempts": attempts,
+                    "flushed_to_disk": flush_ok,
+                    "flush_detail": flush_detail,
+                    "note": "You logged in manually; the autoposter detected the live X "
+                            "session and saved it to its own profile.",
+                    "cdp": CDP,
+                }
+        except Exception:
+            pass
+
     note = (
         "A Chrome window for the autoposter is open at the X login page"
         + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
@@ -867,6 +933,10 @@ def cmd_connect(args) -> dict:
         "ok": True,
         "connected": False,
         "state": "needs_login",
+        # null = the handle is UNKNOWN because no session exists yet, NOT that a
+        # configured handle is missing/wrong. Callers must never treat a
+        # logged-out result as a handle-remediation trigger.
+        "handle": None,
         "error_type": rolled_up_error_type,
         "attempts": attempts,
         "login_window_opened": shown,
@@ -886,6 +956,10 @@ def main() -> int:
                         "Default: auto-detect chrome/arc/brave/edge.")
     c.add_argument("--no-launch", action="store_true",
                    help="Do not launch Chrome if it's down (probe only).")
+    c.add_argument("--login-wait", type=float, default=90.0,
+                   help="Seconds to wait for a MANUAL login to complete before "
+                        "returning needs_login (default 90; 0 disables the wait). "
+                        "Prevents the detection race that misreports the handle as missing.")
     args = ap.parse_args()
 
     if args.cmd == "status":
