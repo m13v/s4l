@@ -38,6 +38,13 @@ import {
   type ProjectInput,
 } from "./setup.js";
 import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
+import {
+  startProvisioning,
+  isProvisioning,
+  readProgress,
+  runtimeReady,
+  readRuntime,
+} from "./runtime.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
 import {
   registerAppTool,
@@ -1113,6 +1120,65 @@ server.registerTool(
   }
 );
 
+// ---- runtime installer ----------------------------------------------------
+// The pipeline runs Python locally. Rather than depend on the user's system
+// Python (the #1 source of install failures), the first run provisions a fully
+// OWNED uv runtime: standalone CPython + owned venv + deps + Chromium. These two
+// tools drive it. They are plain (non-UI) tools so EVERY host can install — the
+// panel's Install card is just a skin that calls install_runtime then polls
+// install_status. See runtime.ts for the provisioning + progress contract.
+
+function runtimeSnapshot() {
+  const rt = readRuntime();
+  const progress = readProgress();
+  return {
+    runtime_ready: runtimeReady(),
+    provisioning: isProvisioning(),
+    python: rt?.python ?? null,
+    python_version: rt?.python_version ?? null,
+    progress: progress ?? null,
+  };
+}
+
+server.registerTool(
+  "install_runtime",
+  {
+    title: "Install the Python runtime",
+    description:
+      "One-time setup that provisions the self-contained runtime the autoposter needs: a private " +
+      "Python (via uv, not your system Python), its dependencies, and the Chromium browser. Runs in " +
+      "the background and returns immediately; poll `install_status` for progress. Safe to call " +
+      "repeatedly — it resumes/repairs and is a no-op once everything is installed. Use this the " +
+      "first time the user sets up, or if other tools report the runtime isn't ready.",
+    inputSchema: {},
+  },
+  async () => {
+    if (runtimeReady()) {
+      return jsonContent({ runtime_ready: true, already_installed: true, ...runtimeSnapshot() });
+    }
+    const progress = startProvisioning();
+    return jsonContent({
+      started: true,
+      runtime_ready: false,
+      note: "Runtime install started. Poll install_status every ~1.5s for progress.",
+      progress,
+    });
+  }
+);
+
+server.registerTool(
+  "install_status",
+  {
+    title: "Runtime install status",
+    description:
+      "Report whether the self-contained Python/Chromium runtime is installed and, if an install is " +
+      "in progress, the per-step progress (uv, Python, venv, dependencies, Chromium). Poll this after " +
+      "install_runtime to follow the install to completion.",
+    inputSchema: {},
+  },
+  async () => jsonContent(runtimeSnapshot())
+);
+
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
@@ -1159,6 +1225,10 @@ async function buildSnapshot() {
     version: ver.installed || VERSION,
     latest_version: ver.latest ?? null,
     update_available: !!ver.update_available,
+    // Runtime install gate: the panel shows the Install card (and disables the
+    // action buttons) until the owned Python/Chromium runtime is provisioned.
+    runtime_ready: runtimeReady(),
+    runtime_provisioning: isProvisioning(),
   };
 }
 
