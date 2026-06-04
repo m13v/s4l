@@ -29,7 +29,6 @@ const PYTHON_VERSION = "3.12";
 
 // dist/runtime.js -> repo root is two levels up (mcp/dist -> mcp -> repo root).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_DIR = process.env.SAPS_REPO_DIR || path.resolve(__dirname, "..", "..");
 
 // Everything we own lives under one state dir (next to setup-state.json).
 const STATE_DIR =
@@ -44,6 +43,45 @@ const VENV_PYTHON =
   process.platform === "win32"
     ? path.join(VENV_DIR, "Scripts", "python.exe")
     : path.join(VENV_DIR, "bin", "python3");
+
+// Where the pipeline source is materialized for a bare .mcpb install (no clone).
+// The embedded tarball is the EXACT `npm pack` output (same `files` allowlist as
+// the published package), so the unpacked source is byte-identical to what npm
+// users run (no second curation list, no drift). npm tarballs unpack under a
+// top-level `package/` dir, so the repo root is REPO_MATERIALIZED/package.
+const REPO_MATERIALIZE_DIR = path.join(STATE_DIR, "repo");
+const MATERIALIZED_REPO = path.join(REPO_MATERIALIZE_DIR, "package");
+// dist/runtime.js sits beside the embedded tarball produced at build time.
+const EMBEDDED_TARBALL = path.join(__dirname, "pipeline.tgz");
+
+// A directory is a usable pipeline clone only if it carries requirements.txt
+// (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
+// empty extension dir or a half-deleted state dir.
+function looksLikeRepo(dir: string | undefined): boolean {
+  if (!dir) return false;
+  return (
+    fs.existsSync(path.join(dir, "requirements.txt")) &&
+    fs.existsSync(path.join(dir, "scripts"))
+  );
+}
+
+// Resolve the pipeline repo the server shells out to, preferring (in order):
+//   1. SAPS_REPO_DIR when it's a real clone (npm/git install, Story A); never
+//      overwritten, power users keep their working tree.
+//   2. runtime.json's repo_dir (the materialized repo from a .mcpb install).
+//   3. the materialized path on disk even if runtime.json is missing.
+//   4. SAPS_REPO_DIR as-is, then the two-levels-up dev default.
+// Dynamic (not a load-time const) so a first-run materialize is picked up
+// without a server restart — same property resolvePython() relies on.
+export function resolveRepoDir(): string {
+  const env = process.env.SAPS_REPO_DIR;
+  if (looksLikeRepo(env)) return env as string;
+  const rt = readRuntime();
+  if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir)) return rt.repo_dir;
+  if (looksLikeRepo(MATERIALIZED_REPO)) return MATERIALIZED_REPO;
+  if (env) return env;
+  return path.resolve(__dirname, "..", "..");
+}
 
 export interface RuntimeInfo {
   python: string;
@@ -76,6 +114,7 @@ export interface InstallProgress {
 }
 
 const STEP_DEFS: Array<{ id: string; label: string }> = [
+  { id: "repo", label: "Unpack pipeline source" },
   { id: "uv", label: "Install uv (Python launcher)" },
   { id: "python", label: `Download standalone Python ${PYTHON_VERSION}` },
   { id: "venv", label: "Create owned virtual environment" },
@@ -236,6 +275,41 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
 
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
 
+  // --- Step 0: materialize the pipeline repo --------------------------------
+  // If SAPS_REPO_DIR is already a real clone (npm/git install), use it untouched.
+  // Otherwise (bare .mcpb double-click) unpack the embedded npm tarball so the
+  // pipeline source lands on disk and every later step + the server agree on one
+  // repo path. requirements.txt MUST exist after this for the deps step.
+  setStep("repo", "running");
+  let resolvedRepo: string;
+  if (looksLikeRepo(process.env.SAPS_REPO_DIR)) {
+    resolvedRepo = process.env.SAPS_REPO_DIR as string;
+    setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
+  } else {
+    if (!fs.existsSync(EMBEDDED_TARBALL)) {
+      return fail(
+        `no pipeline source: SAPS_REPO_DIR is not a clone and the embedded ` +
+          `tarball is missing (${EMBEDDED_TARBALL}). Reinstall the extension or ` +
+          `set SAPS_REPO_DIR to a social-autoposter clone.`
+      );
+    }
+    // Clean any half-unpacked previous attempt, then extract fresh (idempotent).
+    try {
+      fs.rmSync(MATERIALIZED_REPO, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+    fs.mkdirSync(REPO_MATERIALIZE_DIR, { recursive: true });
+    const r = await sh("tar", ["xzf", EMBEDDED_TARBALL, "-C", REPO_MATERIALIZE_DIR], {
+      timeoutMs: 120000,
+    });
+    if (r.code !== 0 || !looksLikeRepo(MATERIALIZED_REPO)) {
+      return fail(`unpacking pipeline source failed (exit ${r.code}). ${r.out.slice(-400)}`);
+    }
+    resolvedRepo = MATERIALIZED_REPO;
+    setStep("repo", "done", `unpacked to ${resolvedRepo}`);
+  }
+
   // --- Step 1: uv -----------------------------------------------------------
   setStep("uv", "running");
   let uv = findUv();
@@ -283,7 +357,7 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // --- Step 4: pipeline deps ------------------------------------------------
   setStep("deps", "running");
   {
-    const reqPath = path.join(REPO_DIR, "requirements.txt");
+    const reqPath = path.join(resolvedRepo, "requirements.txt");
     const args = fs.existsSync(reqPath)
       ? ["pip", "install", "--python", VENV_PYTHON, "-r", reqPath]
       : ["pip", "install", "--python", VENV_PYTHON, "playwright", "websocket-client", "cryptography"];
@@ -311,6 +385,7 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     python: VENV_PYTHON,
     uv,
     python_version: PYTHON_VERSION,
+    repo_dir: resolvedRepo,
     ready: true,
     provisioned_at: new Date().toISOString(),
   };
