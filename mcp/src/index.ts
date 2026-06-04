@@ -656,7 +656,7 @@ server.registerTool(
           : undefined,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
-        config_path: CONFIG_PATH,
+        config_path: configPath(),
         next_step:
           projects.length === 0
             ? "No projects yet. Ask the user about a product (website, what it does, who to target, " +
@@ -736,7 +736,7 @@ server.registerTool(
         ready: result.ready,
         missing_required: result.missing_required,
         topics_seeded: result.ready,
-        config_path: CONFIG_PATH,
+        config_path: configPath(),
         note: result.ready
           ? `Project '${result.project}' is fully set up.${seedNote} Next: connect X so the autoposter can post — ` +
             `call setup with action:'connect_x' (it explains itself, then run again with confirm:true). ` +
@@ -1230,12 +1230,13 @@ server.registerTool(
   },
   async (args: { action?: "get" | "save"; content?: string }) => {
     const action = args.action || "get";
+    const cfgPath = configPath();
     if (action === "get") {
       try {
-        const content = fs.readFileSync(CONFIG_PATH, "utf-8");
-        return jsonContent({ ok: true, path: CONFIG_PATH, bytes: content.length, content });
+        const content = fs.readFileSync(cfgPath, "utf-8");
+        return jsonContent({ ok: true, path: cfgPath, bytes: content.length, content });
       } catch (e: any) {
-        return jsonContent({ ok: false, path: CONFIG_PATH, error: String(e?.message || e) });
+        return jsonContent({ ok: false, path: cfgPath, error: String(e?.message || e) });
       }
     }
     // save
@@ -1255,9 +1256,9 @@ server.registerTool(
     }
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backup = `${CONFIG_PATH}.bak-panel-${stamp}`;
+      const backup = `${cfgPath}.bak-panel-${stamp}`;
       try {
-        fs.copyFileSync(CONFIG_PATH, backup);
+        fs.copyFileSync(cfgPath, backup);
       } catch {
         /* first-write / missing original is non-fatal */
       }
@@ -1265,8 +1266,8 @@ server.registerTool(
       // 2-space-indented JSON with a trailing newline (matches the Python
       // writers), regardless of how the user formatted their paste.
       const out = JSON.stringify(parsed, null, 2) + "\n";
-      fs.writeFileSync(CONFIG_PATH, out, "utf-8");
-      return jsonContent({ ok: true, path: CONFIG_PATH, bytes: out.length, backup });
+      fs.writeFileSync(cfgPath, out, "utf-8");
+      return jsonContent({ ok: true, path: cfgPath, bytes: out.length, backup });
     } catch (e: any) {
       return jsonContent({ ok: false, error: "Write failed: " + String(e?.message || e) });
     }
