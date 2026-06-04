@@ -54,11 +54,13 @@ def _excluded_repos_and_authors(config):
 # Auto-blocklist: any owner where >= DYNAMIC_BLOCK_THRESHOLD of our github
 # posts under that owner have been moderated (status='deleted' OR
 # deletion_detect_count > 0) within the last DYNAMIC_BLOCK_WINDOW_DAYS days.
-# Two strikes = stop posting under that owner. The cost of one extra burned
+# One strike = stop posting under that owner. The cost of one extra burned
 # comment is much higher than the cost of skipping a borderline-friendly
 # repo. Tuned 2026-05-01 after the antiwork/gumroad block: deletion of #4677
-# alone should have stopped us before #4915.
-DYNAMIC_BLOCK_THRESHOLD = 2
+# alone should have stopped us before #4915. Tightened 2->1 on 2026-06-04
+# after rausermack22-dotcom content-farm repo burned 2 mk0r comments before
+# the owner hit the threshold.
+DYNAMIC_BLOCK_THRESHOLD = 1
 DYNAMIC_BLOCK_WINDOW_DAYS = 90
 
 
