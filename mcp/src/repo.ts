@@ -6,15 +6,19 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
-import { resolvePython } from "./runtime.js";
+import { resolvePython, resolveRepoDir } from "./runtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// dist/repo.js -> repo root is two levels up (mcp/dist -> mcp -> repo root).
-// Override with SAPS_REPO_DIR for non-standard installs.
-export const REPO_DIR =
-  process.env.SAPS_REPO_DIR || path.resolve(__dirname, "..", "..");
+// The pipeline repo the wrapper shells out to. Resolved DYNAMICALLY per call (a
+// getter, not a load-time const) because a bare .mcpb double-click materializes
+// the repo AFTER the server boots; the very next shell-out must pick it up
+// without a restart. resolveRepoDir() prefers a real SAPS_REPO_DIR clone, then
+// the materialized repo recorded in runtime.json, then a dev fallback.
+export function repoDir(): string {
+  return resolveRepoDir();
+}
 
 // Python used by the pipeline. Resolved DYNAMICALLY per call (not a load-time
 // const) because the owned uv runtime can be provisioned AFTER the server boots
@@ -58,7 +62,7 @@ export function run(
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
-      cwd: opts.cwd || REPO_DIR,
+      cwd: opts.cwd || repoDir(),
       env: { ...process.env, ...(opts.env || {}) },
     });
     let stdout = "";
