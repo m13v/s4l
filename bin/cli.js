@@ -520,31 +520,43 @@ function installBrowserHarness() {
   }
 
   // Step 2 + 3: clone + `uv tool install -e .` browser-harness.
+  //
+  // PINNED to a known-good upstream commit instead of tracking origin/HEAD.
+  // The installer used to fetch+reset --hard to HEAD on every run, so any
+  // upstream change shipped to users untested (this is how the two-blank-tab
+  // regression in upstream daemon.py attach behavior could reach users). Our
+  // launch-at-real-URL fix in server.py/twitter-backend.sh neutralizes that
+  // class of bug regardless, but pinning stops surprise upstream drift. Bump
+  // BROWSER_HARNESS_PIN deliberately after validating a newer upstream against
+  // the shipped server.py contract.
+  const BROWSER_HARNESS_PIN = '6d20866664ea3d9691b27bbf64f42ae097437dc3';
   const harnessDir = path.join(HOME, 'Developer', 'browser-harness');
+  const pinHarness = () => {
+    // Fetch the exact pinned commit (GitHub serves arbitrary SHAs) and hard-
+    // reset onto it. Works for a fresh clone and an existing checkout alike.
+    const fetch = spawnSync('git', ['-C', harnessDir, 'fetch', '--depth', '1', 'origin', BROWSER_HARNESS_PIN], { stdio: 'inherit' });
+    if (fetch.status !== 0) {
+      console.warn(`    WARNING: could not fetch pinned browser-harness commit ${BROWSER_HARNESS_PIN.slice(0, 9)}; using existing checkout.`);
+      return;
+    }
+    const reset = spawnSync('git', ['-C', harnessDir, 'reset', '--hard', 'FETCH_HEAD'], { stdio: 'inherit' });
+    if (reset.status !== 0) {
+      console.warn('    WARNING: could not reset browser-harness clone to pinned commit; using existing checkout.');
+    }
+  };
   if (!fs.existsSync(harnessDir)) {
     fs.mkdirSync(path.dirname(harnessDir), { recursive: true });
     console.log('    cloning browser-harness from GitHub...');
     const clone = spawnSync('git', ['clone', '--depth', '1', 'https://github.com/browser-use/browser-harness', harnessDir], { stdio: 'inherit' });
     if (clone.status !== 0) {
       console.warn('    WARNING: git clone failed; twitter-harness will not work until you clone manually.');
+    } else {
+      console.log(`    pinning browser-harness to ${BROWSER_HARNESS_PIN.slice(0, 9)}...`);
+      pinHarness();
     }
   } else {
-    // Refresh the existing clone instead of silently reusing it. server.py
-    // invokes `browser-harness -c <script>`; a stale checkout that predates the
-    // `-c` interface (or otherwise drifted from upstream) makes every bh_run
-    // return the CLI usage string while looking "installed". fetch+reset --hard
-    // to current upstream so the installed CLI always matches the shipped
-    // server.py contract.
-    console.log(`    browser-harness clone exists -> ${harnessDir}; updating to latest...`);
-    const fetch = spawnSync('git', ['-C', harnessDir, 'fetch', '--depth', '1', 'origin', 'HEAD'], { stdio: 'inherit' });
-    if (fetch.status === 0) {
-      const reset = spawnSync('git', ['-C', harnessDir, 'reset', '--hard', 'FETCH_HEAD'], { stdio: 'inherit' });
-      if (reset.status !== 0) {
-        console.warn('    WARNING: could not reset browser-harness clone to latest; using existing checkout.');
-      }
-    } else {
-      console.warn('    WARNING: could not fetch browser-harness updates; using existing checkout.');
-    }
+    console.log(`    browser-harness clone exists -> ${harnessDir}; pinning to ${BROWSER_HARNESS_PIN.slice(0, 9)}...`);
+    pinHarness();
   }
 
   if (uvBin && fs.existsSync(harnessDir)) {
