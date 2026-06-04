@@ -743,12 +743,31 @@ def _force_cookie_flush() -> tuple[bool, str]:
 
 # --- Commands ---------------------------------------------------------------
 
+def _configured_handle() -> "str | None":
+    """The handle persisted in config.json (accounts.twitter.handle), or None if
+    it's empty / still the template placeholder. Used to surface a `handle` on
+    status WITHOUT navigating the live browser. None means UNKNOWN, never that a
+    real handle is missing."""
+    try:
+        with open(_CONFIG_JSON, encoding="utf-8") as f:
+            cfg = json.load(f)
+        h = ((cfg.get("accounts") or {}).get("twitter") or {}).get("handle") or ""
+    except Exception:
+        return None
+    h = h.strip()
+    if h.lower() in _HANDLE_PLACEHOLDERS:
+        return None
+    return "@" + h.lstrip("@")
+
+
 def cmd_status(args) -> dict:
     if not ensure_chrome(launch=False):
         return {
             "ok": True,
             "connected": False,
             "state": "browser_not_running",
+            # null = unknown (browser down), NOT a missing/wrong handle.
+            "handle": None,
             "note": "The autoposter's X browser isn't running yet. Run connect_x to "
             "start it and check/import your session.",
             "cdp": CDP,
@@ -756,11 +775,16 @@ def cmd_status(args) -> dict:
     try:
         valid = _has_session_quick()
     except Exception as e:
-        return {"ok": False, "connected": False, "state": "error", "error": str(e), "cdp": CDP}
+        return {"ok": False, "connected": False, "state": "error",
+                "handle": None, "error": str(e), "cdp": CDP}
     return {
         "ok": True,
         "connected": valid,
         "state": "connected" if valid else "logged_out",
+        # Only report a handle when a session exists; logged_out -> null (unknown,
+        # not missing). Callers must not treat a logged_out result as a reason to
+        # ask for / overwrite the handle.
+        "handle": _configured_handle() if valid else None,
         "cdp": CDP,
     }
 
@@ -901,7 +925,7 @@ def cmd_connect(args) -> dict:
                 return {
                     "ok": True,
                     "connected": True,
-                    "state": "logged_in",
+                    "state": "connected",
                     "source": "manual_login",
                     "attempts": attempts,
                     "flushed_to_disk": flush_ok,
