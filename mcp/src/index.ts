@@ -539,11 +539,14 @@ server.registerTool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["connect_x"])
+        .enum(["connect_x", "reseed_queries"])
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
-            "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first)."
+            "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first). " +
+            "reseed_queries = (re-)expand an EXISTING project's search topics into ~30 real X search " +
+            "queries and return them. Use for projects configured before query-expansion existed, or " +
+            "to refresh the query bank. Requires name. Returns the resulting query list."
         ),
       confirm: z
         .boolean()
@@ -635,6 +638,75 @@ server.registerTool(
       });
     }
 
+    // ---- Reseed search queries: (re-)expand an existing project's topics ----
+    // For projects configured before query-expansion shipped (their topics live
+    // in the DB but the seed-query bank is empty, so the cycle cold-starts on one
+    // crude query), or to refresh the bank on demand. Idempotent: the seeder
+    // dedups against what's already there. Returns the resulting queries so the
+    // agent can show the user exactly what the cycle will fan out over.
+    if (args.action === "reseed_queries") {
+      if (!args.name) {
+        return jsonContent({
+          action: "reseed_queries",
+          error: "name is required — tell me which configured project to reseed.",
+        });
+      }
+      try {
+        const qseed = await runPython(
+          "scripts/seed_search_queries.py",
+          ["--project", args.name, "--supply-test", "auto", "--emit-json"],
+          { timeoutMs: 600_000 }
+        );
+        const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
+        let queries: Array<{ query: string; topic: string }> = [];
+        const jm = qseed.stdout.split("===QUERIES_JSON===")[1];
+        if (jm) {
+          try {
+            queries = (JSON.parse(jm.trim()).queries ?? []) as typeof queries;
+          } catch {
+            /* leave queries empty; count note below still informs the user */
+          }
+        }
+        if (qseed.code !== 0 && queries.length === 0) {
+          const qtail =
+            (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] ||
+            "unknown error";
+          return jsonContent({
+            action: "reseed_queries",
+            project: args.name,
+            ok: false,
+            error: qtail,
+            note:
+              `Couldn't expand search queries for '${args.name}' — ${qtail}. ` +
+              `Common causes: the project has no search topics seeded yet (run setup with name='${args.name}' ` +
+              `and its search_topics first), or X/Claude wasn't reachable. The cycle still runs off the seeded topics.`,
+          });
+        }
+        return jsonContent({
+          action: "reseed_queries",
+          project: args.name,
+          ok: true,
+          seeded: qm ? Number(qm[1]) : queries.length,
+          inserted: qm ? Number(qm[2]) : undefined,
+          updated: qm ? Number(qm[3]) : undefined,
+          query_count: queries.length,
+          queries,
+          note:
+            `Expanded '${args.name}' into ${queries.length} active search quer` +
+            `${queries.length === 1 ? "y" : "ies"}. The cycle now fans out over these instead of ` +
+            `running a single query. Show the user the list so they can confirm they look on-target; ` +
+            `re-run this anytime to refresh, or run draft_cycle to use them.`,
+        });
+      } catch (e) {
+        return jsonContent({
+          action: "reseed_queries",
+          project: args.name,
+          ok: false,
+          error: (e as Error).message,
+        });
+      }
+    }
+
     // Status / discovery mode: no project name supplied, or explicitly asked.
     if (args.status === true || !args.name) {
       const projects = listManagedProjectStatus();
@@ -686,6 +758,7 @@ server.registerTool(
       // the user if topics are missing. Only runs once the project is ready
       // (i.e. it actually has search_topics to seed). (2026-06-02)
       let seedNote = "";
+      let searchQueries: Array<{ query: string; topic: string }> = [];
       if (result.ready) {
         const seed = await runPython(
           "scripts/seed_search_topics.py",
@@ -714,12 +787,21 @@ server.registerTool(
           try {
             const qseed = await runPython(
               "scripts/seed_search_queries.py",
-              ["--project", result.project, "--supply-test", "auto"],
+              ["--project", result.project, "--supply-test", "auto", "--emit-json"],
               { timeoutMs: 600_000 }
             );
             const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
+            const qjson = qseed.stdout.split("===QUERIES_JSON===")[1];
+            if (qjson) {
+              try {
+                searchQueries = (JSON.parse(qjson.trim()).queries ?? []) as typeof searchQueries;
+              } catch {
+                /* leave empty; count note still informs the user */
+              }
+            }
             if (qseed.code === 0 && qm) {
-              seedNote += ` Expanded them into ${qm[1]} search quer${qm[1] === "1" ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
+              const n = searchQueries.length || Number(qm[1]);
+              seedNote += ` Expanded them into ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
             } else if (qseed.code !== 0) {
               const qtail = (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
               seedNote += ` (Search queries not expanded yet — ${qtail}. The cycle still runs off the seeded topics.)`;
