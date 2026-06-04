@@ -843,7 +843,7 @@ class _DebugRecorder:
         "captcha_or_checkpoint": "captcha_detected",
     }
 
-    def maybe_detect_throttle(self) -> None:
+    def maybe_detect_throttle(self, with_impressions: int = 0) -> None:
         """Post-evaluate throttle detection.
 
         Called after page.evaluate() returns. If the scroll loop ran for
@@ -852,8 +852,21 @@ class _DebugRecorder:
         LinkedIn is silently dropping our pagination XHRs and the session
         is being shadow-throttled. Trip the killswitch signal so the
         next failure() call (or the post-evaluate engagement below)
-        engages the killswitch."""
+        engages the killswitch.
+
+        HEALTHY-BUNDLE GUARD (2026-06-04): a low pagination count is only
+        evidence of throttling when the scrape ALSO came back thin/empty.
+        An account with few recent comments legitimately needs just one
+        voyager page: all records fit on page 1, so paginate_calls==1 even
+        though nothing was dropped. If we harvested >=1 record carrying
+        impressions AND saw zero 429s, pagination demonstrably worked and
+        the session is healthy; never trip the killswitch on that. This
+        fixes the false positive that latched the killswitch on a 5-record
+        bundle (with_impressions=5, saw_429=0) and froze every LinkedIn
+        pipeline for ~8h on 2026-06-04."""
         if self._kill_signal is not None:
+            return
+        if with_impressions > 0 and self._saw_429_count == 0:
             return
         runtime = time.time() - self._scrape_started_at
         if runtime < THROTTLE_MIN_RUNTIME_SEC:
@@ -1573,7 +1586,7 @@ def scrape(
             # any signal is set (this covers HTTP 999 / authwall /
             # li_at_cleared / throttle paths where the scroll loop
             # otherwise returned cleanly).
-            dbg.maybe_detect_throttle()
+            dbg.maybe_detect_throttle(with_impressions=with_imp)
             if dbg._kill_signal and not early_stop_reason:
                 early_stop_reason = f"kill_signal={dbg._kill_signal}"
             if dbg._kill_signal:
