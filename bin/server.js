@@ -770,14 +770,9 @@ const AI_DISCLOSURE_VARIANT_DEFS = {
   untagged: { label: 'No AI label',     desc: 'reply posted as-is, no disclosure suffix' },
 };
 
-// twitter length-control variant defs (shipped 2026-06-01, split went live
-// 2026-06-02 after a PATH bug was fixed). Per-cycle 50/50 split in
-// skill/run-twitter-cycle.sh from the last digit of BATCH_ID, gated by
-// LENGTH_AB_ENABLED (default 1). The arm is exported as LENGTH_ARM and stamped
-// on posts.length_arm at post time (log_post.py --length-arm). Keys match the
-// DB values verbatim. treatment ENFORCES the assigned style's target_chars (a
-// per-style target line injected into the prompt + a post-time truncation
-// gate, yielding shorter replies); control leaves length unconstrained.
+// twitter length-control variant defs (experiment ran 2026-06-02..2026-06-04).
+// The live LENGTH_ARM branch is retired; keys remain for the frozen shipped
+// Experiments-card snapshot sourced from historical posts.length_arm rows.
 const LENGTH_VARIANT_DEFS = {
   treatment: { label: 'Enforced length',   desc: 'per-style target_chars enforced (shorter replies)' },
   control:   { label: 'Unconstrained',     desc: 'no length target (legacy, longer replies)' },
@@ -6584,99 +6579,56 @@ async function handleApi(req, res) {
           console.error('[api/experiments] ai-disclosure block failed:', e3 && e3.message || e3);
         }
 
-        // Fourth experiment: twitter length control (shipped 2026-06-01, live
-        // 2026-06-02). Per-cycle 50/50 arm on posts.length_arm: treatment
-        // enforces the assigned style's target_chars (shorter replies), control
-        // leaves length unconstrained. Mirrors the tail-link block (post-time
-        // assignment, so the candidate funnel collapses to the post count and
-        // funnel columns render "—"). We also surface realized avg reply length
-        // per arm (LENGTH(TRIM(our_content))) baked into the variant desc so the
-        // operator can confirm the manipulation actually moved length, which is
-        // the whole point of the test. 30-day window matches the other two
-        // live experiments. Click attribution joins post_links + clicks
-        // (is_bot=false) exactly like tail-link.
-        try {
-          const lenRows = await pq(`
-            SELECT p.length_arm AS variant,
-                   COUNT(*) AS n_posts,
-                   AVG(LENGTH(TRIM(p.our_content))) AS avg_chars,
-                   AVG(p.views) AS avg_views,
-                   AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
-                   AVG(p.comments_count) AS avg_replies,
-                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
-                   MIN(p.posted_at) AS started_at
-            FROM posts p
-            LEFT JOIN (
-              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
-              FROM post_links pl2
-              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
-              WHERE pl2.post_id IS NOT NULL
-              GROUP BY pl2.post_id
-            ) pl ON pl.post_id = p.id
-            WHERE p.length_arm IS NOT NULL
-              AND p.posted_at > NOW() - INTERVAL '30 days'
-              AND LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) = 'twitter'
-              AND p.our_content <> '(mention - no original post)'
-            GROUP BY p.length_arm
-          `, []);
-          const lenDefs = LENGTH_VARIANT_DEFS;
-          const lenVariants = ['treatment', 'control'].map(k => {
-            const row = (lenRows || []).find(r => r.variant === k) || {};
-            const n = Number(row.n_posts || 0);
-            const avgChars = row.avg_chars != null ? Math.round(Number(row.avg_chars)) : null;
-            const desc = avgChars != null
-              ? `${lenDefs[k].desc} — avg ${avgChars} chars`
-              : lenDefs[k].desc;
-            return {
-              key: k,
-              label: lenDefs[k].label,
-              desc,
-              n_candidates: n,
-              n_batches: null,
-              n_posted: n,
-              n_skipped: 0,
-              n_expired: 0,
-              n_pending: 0,
-              post_rate_pct: null,
-              thread_age_min_p50: null,
-              avg_views: row.avg_views != null ? Number(row.avg_views) : null,
-              avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
-              avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
-              avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
-              started_at: row.started_at || null,
-            };
-          });
-          const lenTotals = lenVariants.reduce((acc, v) => {
-            acc.n_candidates += v.n_candidates;
-            acc.n_posted += v.n_posted;
-            return acc;
-          }, { n_candidates: 0, n_posted: 0, n_batches: null });
-          // Assignment is a fixed 50/50 digit split (not a configurable rate),
-          // gated by LENGTH_AB_ENABLED. When the gate is off, every cycle runs
-          // treatment (full length-enforcement behavior), so reflect that in
-          // the weight column rather than a stale 50/50.
-          const lenEnabled = (() => {
-            const raw = (loadEnv().LENGTH_AB_ENABLED || '1').trim();
-            return raw !== '0' && raw !== 'false';
-          })();
-          lenVariants.forEach(v => {
-            v.weight_pct = lenEnabled ? 50.0 : (v.key === 'treatment' ? 100.0 : 0.0);
-          });
-          const lenStartedAt = lenVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
-          experiments.push({
-            id: 'twitter-length-control',
-            name: 'Twitter reply length (enforced / unconstrained)',
-            status: lenEnabled ? 'running' : 'paused',
-            started_at: lenStartedAt,
-            hypothesis: 'Enforcing a per-style target_chars budget produces shorter replies that convert better (more clicks and replies) than unconstrained, longer replies. The realized avg-chars per arm confirms the manipulation took effect.',
-            primary_metric: 'avg_clicks',
-            progress: null,  // no fixed target
-            totals: lenTotals,
-            variants: lenVariants,
-          });
-        } catch (e5) {
-          console.error('[api/experiments] length-control block failed:', e5 && e5.message || e5);
-        }
+        // Fourth experiment: twitter-length-control (concluded 2026-06-04).
+        // FROZEN SNAPSHOT from posts.length_arm at conclusion. The treatment
+        // did shorten replies, but control won the configured primary metric
+        // (avg_clicks), so the live LENGTH_ARM assignment + truncation branch
+        // has been removed from the posting pipeline. Keep this static card so
+        // the test remains inspectable without future one-arm traffic changing
+        // the numbers.
+        const lenDefs = LENGTH_VARIANT_DEFS;
+        const lenVariants = [
+          { key: 'treatment', n_posts: 298, avg_chars: 171.5, avg_views: 70.77, avg_likes: 0.02, avg_replies: 0.17, avg_clicks: 0.10, started_at: '2026-06-02T03:56:02.989Z' },
+          { key: 'control',   n_posts: 553, avg_chars: 257.8, avg_views: 49.33, avg_likes: 0.06, avg_replies: 0.26, avg_clicks: 0.22, started_at: '2026-06-02T04:11:24.708Z' },
+        ].map(v => ({
+          key: v.key,
+          label: lenDefs[v.key].label,
+          desc: `${lenDefs[v.key].desc} — avg ${v.avg_chars} chars`,
+          n_candidates: v.n_posts,
+          n_batches: null,
+          n_posted: v.n_posts,
+          n_skipped: 0,
+          n_expired: 0,
+          n_pending: 0,
+          post_rate_pct: null,
+          thread_age_min_p50: null,
+          avg_views: v.avg_views,
+          avg_likes: v.avg_likes,
+          avg_replies: v.avg_replies,
+          avg_clicks: v.avg_clicks,
+          started_at: v.started_at,
+          weight_pct: null,
+          is_winner: v.key === 'control',
+        }));
+        const lenTotals = lenVariants.reduce((acc, v) => {
+          acc.n_candidates += v.n_candidates;
+          acc.n_posted += v.n_posted;
+          return acc;
+        }, { n_candidates: 0, n_posted: 0, n_batches: null });
+        experiments.push({
+          id: 'twitter-length-control',
+          name: 'Twitter reply length (enforced / unconstrained)',
+          status: 'shipped',
+          winner: 'control',
+          started_at: '2026-06-02T03:56:02.989Z',
+          concluded_at: '2026-06-04T12:00:00',
+          hypothesis: 'Enforcing a per-style target_chars budget produces shorter replies that convert better (more clicks and replies) than unconstrained, longer replies. The realized avg-chars per arm confirms the manipulation took effect.',
+          result: 'Control won on the configured primary metric: avg clicks 0.22 vs 0.10 for enforced length, with higher avg replies too (0.26 vs 0.17). Treatment proved the manipulation by shortening replies (171.5 vs 257.8 chars) and led on avg views (70.77 vs 49.33), but the enforced-length prompt and truncation gate were retired; legacy short guidance shipped permanently 2026-06-04.',
+          primary_metric: 'avg_clicks',
+          progress: null,
+          totals: lenTotals,
+          variants: lenVariants,
+        });
 
         const payload = { experiments };
         experimentsCache.set('all', { at: Date.now(), value: payload });
