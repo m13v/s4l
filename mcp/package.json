@@ -11,6 +11,8 @@
     "build": "vite build && tsc",
     "build:panel": "vite build",
     "build:server": "tsc",
+    "bundle:pipeline": "node bundle-pipeline.mjs",
+    "build:bundle": "vite build && tsc && node bundle-pipeline.mjs",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "install-clients": "node install.mjs",
