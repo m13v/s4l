@@ -209,6 +209,22 @@ def get_excluded_authors(config, platform):
         for t in config.get("exclusions", {}).get("twitter_accounts", []):
             excluded.add(t.lower())
 
+    # Dynamic exclusion list: fold in author_blocklist HARD handles for this
+    # platform (the config above covers static entries; this adds runtime blocks
+    # added via reply_db.py or the velocity gate). Fail-open: a website hiccup
+    # never breaks or widens scanning.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get
+        _resp = api_get("/api/v1/blocklist", query={"platform": platform},
+                        ok_on_404=True)
+        for _r in (((_resp or {}).get("data") or {}).get("rows") or []):
+            _h = (_r.get("handle") or "").strip().lstrip("@").lower()
+            if _h and _r.get("severity") == "hard":
+                excluded.add(_h)
+    except Exception:
+        pass
+
     return excluded
 
 
