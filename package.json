@@ -124,6 +124,7 @@
     "mcp/package.json",
     "mcp/manifest.json",
     "mcp/install.mjs",
+    "mcp/install-runtime.mjs",
     "!**/__pycache__/**",
     "!**/*.pyc"
   ],
