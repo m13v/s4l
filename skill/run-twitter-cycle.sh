@@ -66,43 +66,11 @@ export BATCH_ID
 # rollout (started on reddit, extended here).
 export SA_CYCLE_ID="$BATCH_ID"
 
-# LENGTH A/B (2026-06-01): split each cycle ~50/50 into a length-control
-# experiment arm and hand it to both the draft render (engagement_styles.py
-# get_assigned_style_prompt) and the post-time gate (twitter_post_plan.py) via
-# LENGTH_ARM. One style block is rendered per cycle for the whole batch, so the
-# arm is a per-cycle decision (per BATCH_ID), not per-post.
-#   treatment = per-style target line in the prompt + post-time truncation gate
-#   control   = generic "keep it tight" guidance, no per-style number, no gate
-#               (reproduces pre-length-project length behavior WITHOUT reverting
-#                the bug fixes shipped alongside the length project)
-# Assignment is deterministic from BATCH_ID's trailing timestamp digit (parity)
-# so a re-run of the same cycle id lands the same arm. Set LENGTH_AB_ENABLED=0
-# to disable the experiment: every cycle then runs treatment (full length
-# control behavior).
-#
-# DO NOT switch this back to md5/md5sum. Those binaries live in /sbin on macOS
-# (and /usr/bin/md5sum-only on Linux), and /sbin is NOT on the launchd PATH
-# (node/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin). On 2026-06-02 an
-# md5-based split silently produced an EMPTY hash under cron, fell through the
-# case to control, and stamped 173/173 control in 12h (a dead experiment that
-# looked alive). tr + tail live in /usr/bin (on the launchd PATH, and present
-# on both macOS and the Linux VMs), so the digit split is PATH- and platform-
-# safe. Empty/garbage fails OPEN to treatment (full length behavior), never
-# silently to one arm.
-LENGTH_AB_ENABLED="${LENGTH_AB_ENABLED:-1}"
-if [ "$LENGTH_AB_ENABLED" = "1" ]; then
-  _len_digits=$(printf '%s' "$BATCH_ID" | tr -cd '0-9')
-  _len_last=$(printf '%s' "$_len_digits" | tail -c 1)
-  case "$_len_last" in
-    [13579]) LENGTH_ARM="treatment" ;;
-    [02468]) LENGTH_ARM="control" ;;
-    *)       LENGTH_ARM="treatment" ;;
-  esac
-else
-  LENGTH_ARM="treatment"
-  _len_last="off"
-fi
-export LENGTH_ARM
+# LENGTH A/B CONCLUDED 2026-06-04: control won the configured primary metric
+# (avg_clicks) and the enforcement branch is retired. New cycles no longer
+# export LENGTH_ARM, so engagement_styles.py renders the legacy "keep it tight"
+# prompt and twitter_post_plan.py does not stamp posts.length_arm. Historical
+# arm stats stay preserved as a frozen shipped card in /api/experiments.
 
 LOG_FILE="$LOG_DIR/twitter-cycle-$(date +%Y-%m-%d_%H%M%S).log"
 RAW_FILE="/tmp/twitter_cycle_raw_$(date +%s).json"
@@ -169,7 +137,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
 log "=== Twitter Cycle (batch=$BATCH_ID): $(date) ==="
 log "Logic=D (no-ripen + 1h freshness + 2k_view_cap; experiment concluded 2026-05-31); discover_freshness=${FRESHNESS_HOURS_DISCOVER}h"
-log "[length-ab] enabled=$LENGTH_AB_ENABLED arm=$LENGTH_ARM (batch=$BATCH_ID, last_digit=${_len_last:-none})"
+log "Length-control experiment concluded 2026-06-04; winner=control; LENGTH_ARM retired"
 
 # --- Preflight (added 2026-05-02) -----------------------------------------
 # Three early-exit gates BEFORE we open the DB, set up traps, or touch the
