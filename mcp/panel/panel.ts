@@ -18,6 +18,15 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import "./panel.css";
 
 interface ProjStatus { name: string; ready: boolean; missing_required: string[] }
+type StepStatus = "pending" | "running" | "done" | "error";
+interface ProgressStep { id: string; label: string; status: StepStatus; detail?: string }
+interface InstallProgress {
+  running: boolean;
+  done: boolean;
+  ok: boolean;
+  error?: string;
+  steps: ProgressStep[];
+}
 interface Snapshot {
   projects: ProjStatus[];
   projects_ready: number;
@@ -29,6 +38,8 @@ interface Snapshot {
   version: string;
   latest_version: string | null;
   update_available: boolean;
+  runtime_ready: boolean;
+  runtime_provisioning?: boolean;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -62,11 +73,42 @@ const btnX = $("btn-connectx") as HTMLButtonElement;
 const btnRefresh = $("btn-refresh") as HTMLButtonElement;
 const statsGrid = $("stats-grid");
 const logEl = $("log");
+const installCard = $("install-card");
+const installSteps = $("install-steps");
+const installErr = $("install-err");
+const btnInstall = $("btn-install") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
 let xConfirmPending = false; // two-step connect-X (explain -> confirm)
+let installPolling = false; // guard against overlapping poll loops
 
 function log(msg: string) { logEl.textContent = msg; }
+
+// Glyph for each step status. Grayscale only — meaning carried by symbol, never
+// color (matches the panel palette rule).
+function stepGlyph(s: StepStatus): string {
+  switch (s) {
+    case "done": return "\u2713";      // check
+    case "running": return "\u2026";   // ellipsis (in progress)
+    case "error": return "\u00d7";     // cross
+    default: return "\u00b7";          // middot (pending)
+  }
+}
+
+function renderInstallProgress(p: InstallProgress | null) {
+  if (!p || !Array.isArray(p.steps)) { installSteps.innerHTML = ""; return; }
+  installSteps.innerHTML = p.steps
+    .map((s) => {
+      const detail = s.detail && s.status !== "pending"
+        ? ` <span class="detail">${s.status === "error" ? s.detail : ""}</span>`
+        : "";
+      return `<li class="${s.status}"><span class="glyph">${stepGlyph(s.status)}</span>` +
+        `<span>${s.label}${detail}</span></li>`;
+    })
+    .join("");
+  if (p.error) { installErr.textContent = p.error; installErr.hidden = false; }
+  else installErr.hidden = true;
+}
 
 function render() {
   if (!state) return;
@@ -74,6 +116,12 @@ function render() {
   verEl.innerHTML = state.update_available && state.latest_version
     ? `v${state.version} \u00b7 <span class="update">update to ${state.latest_version}</span>`
     : `v${state.version}`;
+
+  // Runtime install gate: until the owned Python/Chromium runtime exists, the
+  // Install card is the primary (and only enabled) surface. Everything else is
+  // disabled because no pipeline tool can run without the interpreter.
+  const needsRuntime = !state.runtime_ready;
+  installCard.hidden = !needsRuntime;
 
   // Projects.
   stProj.textContent = `${state.projects_ready}/${state.projects_total}`;
@@ -92,16 +140,21 @@ function render() {
   stApSub.textContent = state.auto_update_on ? "auto-update on" : "";
   btnAuto.textContent = state.autopilot_on ? "Disable autopilot" : "Enable autopilot";
 
-  // Gate actions on readiness.
+  // Gate actions on readiness. Nothing below works without the runtime, so when
+  // it's missing every action is disabled and the Install card carries the only
+  // live button.
   const hasReady = state.projects_ready > 0;
-  btnDraft.disabled = !hasReady;
-  btnAuto.disabled = !hasReady;
+  btnSetup.disabled = needsRuntime;
+  btnDraft.disabled = needsRuntime || !hasReady;
+  btnAuto.disabled = needsRuntime || !hasReady;
+  btnX.disabled = needsRuntime;
   // When nothing is configured yet, Set up is the obvious next action, so
   // promote it to the primary (filled) style and demote draft (which is
-  // disabled anyway). Once a project is ready, draft regains the emphasis.
+  // disabled anyway). Once a project is ready, draft regains the emphasis. While
+  // the runtime is missing, neither gets emphasis — the Install button does.
   const needsSetup = !hasReady;
-  btnSetup.classList.toggle("primary", needsSetup);
-  btnDraft.classList.toggle("primary", !needsSetup);
+  btnSetup.classList.toggle("primary", !needsRuntime && needsSetup);
+  btnDraft.classList.toggle("primary", !needsRuntime && !needsSetup);
 }
 
 function applyState(snap: Partial<Snapshot>) {
@@ -149,15 +202,56 @@ async function call(name: string, args: Record<string, unknown> = {}): Promise<a
 async function refresh() {
   log("Refreshing\u2026");
   try {
-    const [setupStatus, ap] = await Promise.all([
+    // install_status is cheap and tells us whether the runtime gate is cleared;
+    // pull it alongside the usual status so a refresh re-evaluates the gate.
+    const [setupStatus, ap, rt] = await Promise.all([
       call("setup", { status: true }),
       call("autopilot", { action: "status" }),
+      call("install_status").catch(() => ({})),
     ]);
-    applyState({ ...fromSetupStatus(setupStatus), autopilot_on: !!ap.loaded, auto_update_on: !!ap.auto_update_loaded });
+    applyState({
+      ...fromSetupStatus(setupStatus),
+      autopilot_on: !!ap.loaded,
+      auto_update_on: !!ap.auto_update_loaded,
+      ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
+    });
+    if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
     void loadStats();
   } catch (e: any) {
     log("Refresh failed: " + (e?.message || e));
+  }
+}
+
+// Poll install_status until the runtime is ready or the install errors out.
+// Single active loop (installPolling guard); the panel renders each step's
+// progress as it lands.
+async function pollInstall() {
+  if (installPolling) return;
+  installPolling = true;
+  btnInstall.disabled = true;
+  btnInstall.textContent = "Installing\u2026";
+  try {
+    for (;;) {
+      const rt = await call("install_status").catch(() => ({} as any));
+      renderInstallProgress(rt.progress ?? null);
+      if (rt.runtime_ready) {
+        applyState({ runtime_ready: true });
+        log("Runtime installed \u2014 you're ready to set up.");
+        void refresh();
+        return;
+      }
+      const p: InstallProgress | null = rt.progress ?? null;
+      if (p && p.done && !p.ok) {
+        btnInstall.disabled = false;
+        btnInstall.textContent = "Retry install";
+        log("Install failed \u2014 see the step above, then Retry.");
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } finally {
+    installPolling = false;
   }
 }
 
@@ -251,6 +345,24 @@ btnX.addEventListener("click", () => busy(btnX, "Working\u2026", async () => {
     }
   } catch (e: any) { xConfirmPending = false; log("Connect X failed: " + (e?.message || e)); }
 }));
+
+btnInstall.addEventListener("click", async () => {
+  installErr.hidden = true;
+  btnInstall.disabled = true;
+  btnInstall.textContent = "Starting\u2026";
+  log("Installing the runtime \u2014 this is a one-time download (~150MB+).");
+  try {
+    const r = await call("install_runtime");
+    if (r.runtime_ready) { applyState({ runtime_ready: true }); void refresh(); return; }
+    renderInstallProgress(r.progress ?? null);
+    void pollInstall();
+  } catch (e: any) {
+    btnInstall.disabled = false;
+    btnInstall.textContent = "Retry install";
+    installErr.textContent = "Couldn't start install: " + (e?.message || e);
+    installErr.hidden = false;
+  }
+});
 
 btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", refresh));
 
