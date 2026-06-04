@@ -18,6 +18,9 @@ export interface XAuthResult {
   // browser_not_running | logged_out | connected | imported | needs_login |
   // browser_launch_failed | error
   state: string;
+  // The logged-in @handle when a valid session exists; null = unknown (logged
+  // out / browser down), NEVER "missing". setup_twitter_auth.py owns this.
+  handle?: string | null;
   source?: string;
   note?: string;
   error?: string;
