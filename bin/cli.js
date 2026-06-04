@@ -1205,6 +1205,24 @@ function doctor() {
   }
 }
 
+// Provision the owned Python/Chromium runtime from the terminal. This is the
+// panel-free path: it runs the EXACT same provisioning logic the panel's
+// "Install runtime" button and the install_runtime MCP tool use (mcp/src/
+// runtime.ts -> dist/runtime.js), via the thin ESM wrapper mcp/install-runtime.mjs.
+// Use it when the UI panel can't render (Claude Code/Cowork), on a bare VM, or
+// when an agent wants to install head-less. Idempotent: re-running repairs.
+function installRuntime() {
+  const wrapper = path.join(__dirname, '..', 'mcp', 'install-runtime.mjs');
+  if (!fs.existsSync(wrapper)) {
+    console.error(`Cannot find ${wrapper}. Re-run \`npx social-autoposter update\` to repair the install.`);
+    process.exit(1);
+  }
+  // process.execPath is the Node already running this CLI, so we reuse it
+  // rather than hunting for a node on PATH.
+  const res = spawnSync(process.execPath, [wrapper], { stdio: 'inherit' });
+  process.exit(res.status == null ? 1 : res.status);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'init') {
   init();
@@ -1214,6 +1232,8 @@ if (cmd === 'init') {
   doctor();
 } else if (cmd === 'bootstrap-vm') {
   bootstrapVm();
+} else if (cmd === 'install-runtime') {
+  installRuntime();
 } else if (cmd === 'export-cookies') {
   // Forward to cookie-helper with 'export' + remaining args
   process.argv = [process.argv[0], process.argv[1], 'export', ...process.argv.slice(3)];
@@ -1243,6 +1263,7 @@ if (cmd === 'init') {
   console.log('  npx social-autoposter update        update scripts, preserve config');
   console.log('  npx social-autoposter doctor        probe install health (#6, 1.6.34+)');
   console.log('  npx social-autoposter bootstrap-vm  AppMaker VM self-bootstrap (DB-driven)');
+  console.log('  npx social-autoposter install-runtime  provision owned Python + Chromium (panel-free)');
   console.log('  npx social-autoposter export-cookies [dir]  export browser cookies');
   console.log('  npx social-autoposter import-cookies [dir]  import browser cookies');
 }
