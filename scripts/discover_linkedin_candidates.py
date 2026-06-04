@@ -119,6 +119,14 @@ from linkedin_browser import (  # noqa: E402
     _is_login_or_checkpoint,
 )
 from score_linkedin_candidates import calculate_velocity_score  # noqa: E402
+try:  # author exclusion is fail-open: never let it break discovery
+    from linkedin_exclusions import load_exclusions, classify_author  # noqa: E402
+except Exception:  # pragma: no cover - helper missing -> exclusion becomes a no-op
+    def load_exclusions(platform="linkedin"):
+        return {"hard_slugs": set(), "soft_slugs": set(), "soft_names": set()}
+
+    def classify_author(author_name, author_profile_url, excl=None):
+        return None, ""
 from http_api import api_get, api_post  # noqa: E402
 
 DEVTOOLS_ACTIVE_PORT = os.path.join(PROFILE_DIR, "DevToolsActivePort")
@@ -815,6 +823,29 @@ def search(vertical: str, query: str) -> dict:
             except json.JSONDecodeError:
                 results = []
 
+            # Author exclusion (ALL verticals). Drop hard-excluded authors
+            # (config.json exclusions + author_blocklist, slug-keyed) before the
+            # Phase A picker, scoring, or the comment_gated logic can see them.
+            # Slug is the reliable key; display-name matches are intentionally
+            # soft (many real namesakes), so only "hard" verdicts drop here.
+            # The helper is fail-open, so a blocklist-API hiccup can't wedge
+            # discovery.
+            _excl = load_exclusions()
+            before_excl = len(results)
+            results = [
+                r for r in results
+                if classify_author(
+                    r.get("author_name"), r.get("author_profile_url"), _excl
+                )[0] != "hard"
+            ]
+            dropped_excluded = before_excl - len(results)
+            if dropped_excluded:
+                print(
+                    f"[discover_linkedin_candidates] dropped_excluded="
+                    f"{dropped_excluded} (author on exclusion list)",
+                    file=sys.stderr,
+                )
+
             dropped_comment_gated = 0
             if vertical == "content":
                 # Programmatic comment-gate pre-filter (Phase A). Posts whose
@@ -850,6 +881,7 @@ def search(vertical: str, query: str) -> dict:
                 "result_count": len(results),
                 "dropped_below_virality_floor": 0,
                 "dropped_comment_gated": dropped_comment_gated,
+                "dropped_excluded": dropped_excluded,
                 "virality_floor": None,
                 "results": results,
                 "rate_budget": {
