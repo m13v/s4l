@@ -4,7 +4,7 @@
   "display_name": "Social Autoposter (X / Twitter)",
   "version": "0.0.1",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
-  "long_description": "A guided X/Twitter posting assistant. Run setup once to tell it your website, what you do, who to target, and your brand voice. Then draft_cycle scans X, drafts replies, and walks you through each one (approve or skip) before anything is posted. Flip to autopilot when you trust it, and check get_stats to see how your posts perform. This is a thin client: it shells out to the social-autoposter pipeline scripts in a repo clone on your machine, so it needs SAPS_REPO_DIR to point at that clone.\n\n**To get started:**\n\n**1. Click the Enable toggle in this tab.**\n\n**2. Fully quit and restart Claude (quit and reopen, not just close the window).**\n\n**3. Start a new session and type `run social-autoposter panel`.**",
+  "long_description": "A guided X/Twitter posting assistant. Run setup once to tell it your website, what you do, who to target, and your brand voice. Then draft_cycle scans X, drafts replies, and walks you through each one (approve or skip) before anything is posted. Flip to autopilot when you trust it, and check get_stats to see how your posts perform. Everything runs locally on your machine; the pipeline source ships inside this extension and a self-contained Python runtime is provisioned on first run, so no separate clone or Python install is required.\n\n**To get started:**\n\n**1. Click the Enable toggle in this tab.**\n\n**2. Fully quit and restart Claude (quit and reopen, not just close the window).**\n\n**3. Start a new session and type `run social-autoposter panel`, then click Install to set up the local runtime.**",
   "author": {
     "name": "m13v",
     "email": "i@m13v.com",
@@ -48,17 +48,15 @@
   "user_config": {
     "saps_repo_dir": {
       "type": "directory",
-      "title": "Social Autoposter repo path",
-      "description": "Absolute path to your social-autoposter repo clone (the folder that contains config.json, scripts/, skill/). The MCP shells out to the pipeline scripts in this folder.",
-      "required": true,
-      "default": "/Users/matthewdi/social-autoposter"
+      "title": "Social Autoposter repo path (optional)",
+      "description": "Leave blank to use the pipeline bundled with this extension (recommended). Only set this to an absolute path if you have your own social-autoposter clone (the folder that contains config.json, scripts/, skill/) and want the MCP to shell out to that copy instead.",
+      "required": false
     },
     "saps_python": {
       "type": "string",
-      "title": "Python interpreter",
-      "description": "Python used by the pipeline (needs the deps in requirements.txt). Leave as default unless you know you need a different one.",
-      "required": false,
-      "default": "/opt/homebrew/bin/python3"
+      "title": "Python interpreter (optional)",
+      "description": "Leave blank to use the Python runtime this extension provisions for itself. Only set this if you want the pipeline to use a specific interpreter that already has the deps in requirements.txt.",
+      "required": false
     }
   },
   "keywords": ["twitter", "x", "social", "autoposter", "marketing"],
