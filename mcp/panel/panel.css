@@ -95,6 +95,44 @@ button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: 
 button.ghost { background: transparent; }
 button[hidden] { display: none; }
 
+/* First-run runtime installer. Grayscale only; status is shown via glyphs +
+ * weight, never color. */
+.install {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.install[hidden] { display: none; }
+.install-head { font-size: 14px; font-weight: 650; }
+.install-desc { font-size: 12px; color: var(--muted); }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.steps li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.steps li .glyph {
+  width: 1.1em;
+  flex: none;
+  text-align: center;
+  font-weight: 650;
+  color: var(--fg);
+}
+.steps li.running { color: var(--fg); }
+.steps li.done { color: var(--fg); }
+.steps li.pending { opacity: 0.55; }
+.steps li.error { color: var(--fg); font-weight: 600; }
+.steps li .detail { font-size: 11px; color: var(--muted); }
+.install-actions { display: flex; gap: 8px; }
+.install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
+.install-err[hidden] { display: none; }
+
 .stats { display: flex; flex-direction: column; gap: 8px; }
 .stats-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
