@@ -203,6 +203,70 @@ def merge_invented(bank: list[dict], invented: list[dict]) -> list[dict]:
     return bank + appended
 
 
+# Cold-start seed-query backfill target. A freshly-configured project has no
+# proven queries (no post history) and no invented ones (invent_topics.py
+# hasn't run for it yet), so build_bank + merge_invented yield an empty (or very
+# thin) bank and the cycle runs ONE crude topic-as-query. setup seeds >=30 real
+# X queries into project_search_queries (scripts/seed_search_queries.py); we
+# backfill from those ACTIVE rows up to SEED_BACKFILL_TARGET so a new project
+# fans out on day one. As proven+invented winners accumulate past the target,
+# this fetch is skipped entirely and the seed rows fade out of the bank with no
+# deletion. (2026-06-04)
+SEED_BACKFILL_TARGET = 30
+SEED_FETCH_LIMIT = 200
+
+
+def fetch_seed_queries(project: str, limit: int = SEED_FETCH_LIMIT) -> list[dict]:
+    """Fetch active source='seed' queries for a project from
+    /api/v1/project-search-queries. Bank-shaped (likes/clicks/posts=0). Returns
+    [] on API failure so a transient read degrades to 'no backfill' rather than
+    crashing the cycle."""
+    try:
+        resp = api_get(
+            "/api/v1/project-search-queries",
+            {"project": project, "status": "active"},
+        )
+    except SystemExit as e:
+        print(f"qualified_query_bank: seed-queries fetch failed for "
+              f"{project!r}: {e}", file=sys.stderr)
+        return []
+    data = (resp or {}).get("data") or {}
+    rows = list(data.get("queries") or [])[:limit]
+    out = []
+    for r in rows:
+        q = (r.get("query") or "").strip()
+        if not q:
+            continue
+        out.append({
+            "project": project,
+            "query": q,
+            "search_topic": (r.get("topic") or "").strip(),
+            "likes": 0, "clicks": 0, "posts": 0,
+        })
+    return out
+
+
+def backfill_seed(bank: list[dict], seed: list[dict],
+                  target: int = SEED_BACKFILL_TARGET) -> list[dict]:
+    """Append active seed queries to fill a thin bank up to `target`, skipping
+    any whose normalized core already appears (proven/invented > seed). Once the
+    bank already has >= target proven+invented entries, nothing is added — seed
+    queries fade out naturally as real winners accumulate."""
+    if len(bank) >= target:
+        return bank
+    existing_cores = {normalize(b["query"]) for b in bank}
+    appended = []
+    for s in seed:
+        if len(bank) + len(appended) >= target:
+            break
+        core = normalize(s.get("query", ""))
+        if not core or core in existing_cores:
+            continue
+        existing_cores.add(core)
+        appended.append(s)
+    return bank + appended
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", help="Project name (config.json casing).")
@@ -226,6 +290,14 @@ def main():
                     help=f"Min sum(tweets_found) for an invented query to enter the "
                          f"bank tail (default {INVENT_MIN_SUPPLY}, matches "
                          f"invent_topics.py SUPPLY_FLOOR).")
+    ap.add_argument("--no-seed", action="store_true",
+                    help="Skip the seed-query backfill (proven+invented only). The "
+                         "seed bank exists to cover cold-start projects with no post "
+                         "history; this disables it.")
+    ap.add_argument("--seed-target", type=int, default=SEED_BACKFILL_TARGET,
+                    help=f"Backfill the bank from active seed queries up to this many "
+                         f"total queries when the proven+invented set is thin "
+                         f"(default {SEED_BACKFILL_TARGET}).")
     args = ap.parse_args()
 
     if args.from_projects_json:
@@ -248,14 +320,25 @@ def main():
                 invented = fetch_invented_queries(name, args.invent_min_supply)
                 bank = merge_invented(bank, invented)
                 invent_added = len(bank) - proven_size
-            # Cold-start bootstrap: a freshly-configured project has no proven
-            # queries (no post history) AND no invented ones (invent_topics.py
-            # hasn't run for it yet), so the bank is empty -> the cycle scans
-            # nothing and returns 0 drafts on every early cycle (the dead-on-
-            # arrival problem). Fall back to the project's seeded search_topic AS
-            # the query so there's something to scrape on day one. Proven +
-            # invented queries supersede this automatically as they accumulate.
-            # (cold-start fallback, 2026-06-03)
+            # Seed-query backfill: when proven+invented is still thin, fan out
+            # from the >=30 real X queries setup persisted into
+            # project_search_queries (scripts/seed_search_queries.py). This is
+            # the cold-start QUERY supply — it turns a 1-query early cycle into a
+            # ~30-query one. Skipped entirely once the proven+invented bank
+            # already meets the target. (2026-06-04)
+            seed_added = 0
+            if not args.no_seed:
+                pre_seed = len(bank)
+                seed_q = fetch_seed_queries(name)
+                bank = backfill_seed(bank, seed_q, args.seed_target)
+                seed_added = len(bank) - pre_seed
+            # Cold-start bootstrap: even seed queries can be empty (setup's
+            # query-expansion failed, or this is a legacy project configured
+            # before seed_search_queries.py existed). Last resort: fall back to
+            # the project's single picked search_topic AS the query so there's
+            # something to scrape. Proven + invented + seed queries supersede
+            # this automatically as they accumulate. (cold-start fallback,
+            # 2026-06-03)
             cold_start = False
             if not bank:
                 topic = ((p.get("search_topic") if isinstance(p, dict) else "") or "").strip()
@@ -269,7 +352,7 @@ def main():
                     cold_start = True
             combined.extend(bank)
             print(f"qualified_query_bank: project={name!r} -> {proven_size} proven "
-                  f"+ {invent_added} invented"
+                  f"+ {invent_added} invented + {seed_added} seed"
                   + (" + 1 cold-start(topic)" if cold_start else "")
                   + f" = {len(bank)} queries", file=sys.stderr)
         json.dump(combined, sys.stdout)
@@ -301,6 +384,11 @@ def main():
         invented = fetch_invented_queries(args.project, args.invent_min_supply)
         bank = merge_invented(bank, invented)
     invent_added = len(bank) - proven_size
+    seed_added = 0
+    if not args.no_seed:
+        pre_seed = len(bank)
+        bank = backfill_seed(bank, fetch_seed_queries(args.project), args.seed_target)
+        seed_added = len(bank) - pre_seed
     json.dump(bank, sys.stdout)
     print()
     print(f"qualified_query_bank: {proven_size} proven + {invent_added} invented = "
