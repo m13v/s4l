@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+import { resolvePython } from "./runtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,8 +16,11 @@ const __dirname = path.dirname(__filename);
 export const REPO_DIR =
   process.env.SAPS_REPO_DIR || path.resolve(__dirname, "..", "..");
 
-// Python used by the pipeline (deps from requirements.txt). Override per-install.
-export const PYTHON = process.env.SAPS_PYTHON || "python3";
+// Python used by the pipeline. Resolved DYNAMICALLY per call (not a load-time
+// const) because the owned uv runtime can be provisioned AFTER the server boots
+// — the first-run installer writes runtime.json and the very next runPython
+// call must pick up the owned interpreter without a server restart.
+// resolvePython() prefers the owned runtime, then SAPS_PYTHON, then python3.
 
 // The locked pipeline script (run-twitter-cycle.sh) writes the draft plan to a
 // HARDCODED /tmp path (`PLAN_FILE="/tmp/twitter_cycle_plan_<batch>.json"`), and the
@@ -125,7 +129,7 @@ export function runPython(
   args: string[],
   opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}
 ): Promise<RunResult> {
-  return run(PYTHON, [scriptRelPath, ...args], opts);
+  return run(resolvePython(), [scriptRelPath, ...args], opts);
 }
 
 // ---- Plan file helpers (the manual-mode draft envelope) --------------------
