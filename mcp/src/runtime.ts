@@ -49,6 +49,11 @@ export interface RuntimeInfo {
   python: string;
   uv: string;
   python_version: string;
+  // Absolute path to the pipeline repo the server shells out to. For a npm /
+  // git install this is the user's clone (SAPS_REPO_DIR); for a bare .mcpb
+  // double-click it's the repo we materialize from the embedded tarball under
+  // the state dir. Persisted so resolveRepoDir() finds it on later boots.
+  repo_dir?: string;
   ready: boolean;
   provisioned_at: string;
 }
