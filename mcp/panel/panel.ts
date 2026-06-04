@@ -33,6 +33,7 @@ interface Snapshot {
   projects_total: number;
   x_connected: boolean;
   x_state: string;
+  x_handle?: string | null;
   autopilot_on: boolean;
   auto_update_on?: boolean;
   version: string;
