@@ -249,9 +249,30 @@ def _build_chrome_cmd() -> list[str]:
         cmd.append(f"--window-position={win_pos}")
         cmd.append(f"--window-size={win_size}")
 
-    # Open a real tab so CDP has something to attach to immediately.
-    cmd.append("about:blank")
+    # Open a REAL http(s) page (NOT about:blank) so the harness daemon's
+    # attach_first_page() finds an existing real tab and reuses it. Upstream
+    # browser-harness creates a throwaway about:blank on every re-attach where
+    # is_real_page() is false (which about:blank is); launching blank feeds that
+    # loop, piling up orphan tabs that cleanup_harness_tabs then has to sweep.
+    # Landing URL is derived from the profile's platform; BH_LAUNCH_URL overrides.
+    cmd.append(_launch_url())
     return cmd
+
+
+def _launch_url() -> str:
+    """Initial tab URL for the managed Chrome. MUST be a real http(s) page, not
+    about:blank, so the browser-harness daemon reuses it instead of spawning
+    throwaway blank tabs (see _build_chrome_cmd). Derived from PROFILE_NAME;
+    BH_LAUNCH_URL overrides for non-standard profiles."""
+    override = os.environ.get("BH_LAUNCH_URL", "").strip()
+    if override:
+        return override
+    name = PROFILE_NAME.lower()
+    if "linkedin" in name:
+        return "https://www.linkedin.com/feed/"
+    if "reddit" in name:
+        return "https://www.reddit.com/"
+    return "https://x.com"
 
 
 def ensure_chrome() -> dict:
