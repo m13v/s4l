@@ -1,0 +1,49 @@
+name: release-mcpb
+
+# Build and publish the social-autoposter .mcpb (Story B double-click install)
+# to a GitHub Release. Mirrors scripts/release-mcpb.sh so local and CI produce
+# the same artifact.
+#
+# Trigger: push a tag like v1.6.56, or run manually from the Actions tab.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.6.56). Defaults to package.json version."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install mcpb CLI
+        run: npm i -g @anthropic-ai/mcpb
+
+      - name: Install MCP deps
+        working-directory: mcp
+        run: npm ci || npm install
+
+      - name: Build, pack, verify, release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARGS=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            ARGS+=(--tag "${{ github.event.inputs.tag }}")
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            ARGS+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          bash scripts/release-mcpb.sh "${ARGS[@]}"
