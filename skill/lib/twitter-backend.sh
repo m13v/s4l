@@ -232,7 +232,7 @@ ensure_twitter_browser_for_backend() {
             --password-store=basic --use-mock-keychain \
             --disable-features=ChromeWhatsNewUI \
             "${_extra[@]}" \
-            about:blank >/dev/null 2>&1 &
+            "${BH_LAUNCH_URL:-https://x.com}" >/dev/null 2>&1 &
         disown
         for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9555/json/version 2>/dev/null && break
