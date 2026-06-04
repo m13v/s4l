@@ -78,10 +78,16 @@ const installCard = $("install-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
+const configEditor = $("config-editor") as HTMLTextAreaElement;
+const configStatus = $("config-status");
+const btnConfigLoad = $("btn-config-load") as HTMLButtonElement;
+const btnConfigSave = $("btn-config-save") as HTMLButtonElement;
+const btnConfigCancel = $("btn-config-cancel") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
 let xConfirmPending = false; // two-step connect-X (explain -> confirm)
 let installPolling = false; // guard against overlapping poll loops
+let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
 
 function log(msg: string) { logEl.textContent = msg; }
 
@@ -130,9 +136,16 @@ function render() {
     ? "none configured"
     : state.projects.map((p) => p.name + (p.ready ? "" : " (incomplete)")).join(", ");
 
-  // X / Twitter.
+  // X / Twitter. When connected, prefer showing the resolved @handle (the
+  // account we post as); fall back to the raw state string. A null handle while
+  // connected just means it wasn't resolved this read — never "missing".
   stX.textContent = state.x_connected ? "Connected" : "Not connected";
-  stXSub.textContent = state.x_state || "";
+  const handle = state.x_handle
+    ? (state.x_handle.startsWith("@") ? state.x_handle : "@" + state.x_handle)
+    : "";
+  stXSub.textContent = state.x_connected
+    ? (handle || state.x_state || "")
+    : (state.x_state || "");
   btnX.hidden = state.x_connected;
   if (!xConfirmPending) btnX.textContent = "Connect X";
 
@@ -172,6 +185,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     projects_ready: projects.filter((p) => p.ready).length,
     x_connected: !!o.x_connected,
     x_state: o.x_state || "",
+    x_handle: o.x_handle ?? null,
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
@@ -248,7 +262,7 @@ async function pollInstall() {
       renderInstallProgress(rt.progress ?? null);
       if (rt.runtime_ready) {
         applyState({ runtime_ready: true });
-        log("Runtime installed \u2014 you're ready to set up.");
+        log("Runtime installed; you're ready to set up.");
         void refresh();
         return;
       }
@@ -256,7 +270,7 @@ async function pollInstall() {
       if (p && p.done && !p.ok) {
         btnInstall.disabled = false;
         btnInstall.textContent = "Retry install";
-        log("Install failed \u2014 see the step above, then Retry.");
+        log("Install failed; see the step above, then Retry.");
         return;
       }
       await new Promise((r) => setTimeout(r, 1500));
@@ -353,6 +367,9 @@ btnX.addEventListener("click", () => busy(btnX, "Working\u2026", async () => {
       xConfirmPending = false;
       applyState({ x_connected: !!r.connected, x_state: r.state || "" });
       log(r.summary || (r.connected ? "X connected." : "X not connected \u2014 see chat."));
+      // The connect result doesn't carry the @handle; re-read status so the X
+      // card shows which account we're now posting as.
+      if (r.connected) void refresh();
     }
   } catch (e: any) { xConfirmPending = false; log("Connect X failed: " + (e?.message || e)); }
 }));
@@ -374,6 +391,56 @@ btnInstall.addEventListener("click", async () => {
     installErr.hidden = false;
   }
 });
+
+// ---- config view / edit ---------------------------------------------------
+// Read-only by default; the textarea opens on "View config" and becomes
+// editable. Save round-trips through the `config` tool, which validates JSON and
+// writes a timestamped backup before overwriting config.json.
+function showConfigEditing(on: boolean) {
+  configEditor.hidden = !on;
+  btnConfigSave.hidden = !on;
+  btnConfigCancel.hidden = !on;
+  btnConfigLoad.hidden = on;
+}
+
+btnConfigLoad.addEventListener("click", () => busy(btnConfigLoad, "Loading\u2026", async () => {
+  configStatus.textContent = "";
+  try {
+    const r = await call("config", { action: "get" });
+    if (!r.ok) { configStatus.textContent = "Couldn't load config: " + (r.error || "unknown error"); return; }
+    configLoaded = r.content || "";
+    configEditor.value = configLoaded;
+    showConfigEditing(true);
+    configStatus.textContent = `Loaded ${r.bytes ?? configLoaded.length} bytes. Edit and Save, or Cancel.`;
+  } catch (e: any) {
+    configStatus.textContent = "Couldn't load config: " + (e?.message || e);
+  }
+}));
+
+btnConfigCancel.addEventListener("click", () => {
+  configEditor.value = configLoaded;
+  showConfigEditing(false);
+  configStatus.textContent = "";
+});
+
+btnConfigSave.addEventListener("click", () => busy(btnConfigSave, "Saving\u2026", async () => {
+  const content = configEditor.value;
+  if (content === configLoaded) { configStatus.textContent = "No changes to save."; return; }
+  // Client-side parse first so an obvious typo is caught before the round-trip.
+  try { JSON.parse(content); }
+  catch (e: any) { configStatus.textContent = "Invalid JSON, not saved: " + (e?.message || e); return; }
+  try {
+    const r = await call("config", { action: "save", content });
+    if (!r.ok) { configStatus.textContent = "Save failed: " + (r.error || "unknown error"); return; }
+    configLoaded = content;
+    showConfigEditing(false);
+    configStatus.textContent = `Saved ${r.bytes ?? content.length} bytes. Backup: ${r.backup || "(none)"}`;
+    // Project list / handle may have changed; re-read status.
+    void refresh();
+  } catch (e: any) {
+    configStatus.textContent = "Save failed: " + (e?.message || e);
+  }
+}));
 
 btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", refresh));
 
