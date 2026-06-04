@@ -17,9 +17,7 @@
       "command": "node",
       "args": ["${__dirname}/dist/index.js"],
       "env": {
-        "SAPS_REPO_DIR": "${user_config.saps_repo_dir}",
-        "SAPS_PYTHON": "${user_config.saps_python}",
-        "PATH": "${user_config.saps_repo_dir}/../node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       }
     }
   },
@@ -45,20 +43,6 @@
       "description": "Open the visual control panel (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle autopilot, connect X, and refresh."
     }
   ],
-  "user_config": {
-    "saps_repo_dir": {
-      "type": "directory",
-      "title": "Social Autoposter repo path (optional)",
-      "description": "Leave blank to use the pipeline bundled with this extension (recommended). Only set this to an absolute path if you have your own social-autoposter clone (the folder that contains config.json, scripts/, skill/) and want the MCP to shell out to that copy instead.",
-      "required": false
-    },
-    "saps_python": {
-      "type": "string",
-      "title": "Python interpreter (optional)",
-      "description": "Leave blank to use the Python runtime this extension provisions for itself. Only set this if you want the pipeline to use a specific interpreter that already has the deps in requirements.txt.",
-      "required": false
-    }
-  },
   "keywords": ["twitter", "x", "social", "autoposter", "marketing"],
   "license": "UNLICENSED",
   "repository": {
