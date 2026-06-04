@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node bin/server.js",
     "dev": "node --watch bin/server.js",
+    "release:mcpb": "bash scripts/release-mcpb.sh",
     "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js"
   },
   "files": [
