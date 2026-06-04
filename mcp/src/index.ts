@@ -698,6 +698,33 @@ server.registerTool(
           const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
           seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. draft_cycle will tell you clearly if topics are missing.)`;
         }
+
+        // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
+        // search queries (project_search_queries) so the deterministic Phase 1
+        // bank (qualified_query_bank.py) has something to run on day one.
+        // Without this, a freshly-configured project's bank is empty and the
+        // cycle falls back to ONE crude topic-as-query. Best-effort: a failure
+        // here never fails setup; the topic-as-query fallback still works, just
+        // narrower. Supply-test is auto (only if the harness is up), so this
+        // stays fast when X isn't connected yet. (2026-06-04)
+        if (seed.code === 0) {
+          try {
+            const qseed = await runPython(
+              "scripts/seed_search_queries.py",
+              ["--project", result.project, "--supply-test", "auto"],
+              { timeoutMs: 600_000 }
+            );
+            const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
+            if (qseed.code === 0 && qm) {
+              seedNote += ` Expanded them into ${qm[1]} search quer${qm[1] === "1" ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
+            } else if (qseed.code !== 0) {
+              const qtail = (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+              seedNote += ` (Search queries not expanded yet — ${qtail}. The cycle still runs off the seeded topics.)`;
+            }
+          } catch (e) {
+            seedNote += ` (Search-query expansion skipped — ${(e as Error).message}.)`;
+          }
+        }
       }
       return jsonContent({
         ok: true,
