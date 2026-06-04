@@ -642,6 +642,7 @@ server.registerTool(
         projects,
         x_connected: x.connected,
         x_state: x.state,
+        x_handle: x.handle ?? null,
         mcp_version: ver.installed,
         latest_version: ver.latest,
         update_available: ver.update_available,
@@ -1148,7 +1149,7 @@ server.registerTool(
       "One-time setup that provisions the self-contained runtime the autoposter needs: a private " +
       "Python (via uv, not your system Python), its dependencies, and the Chromium browser. Runs in " +
       "the background and returns immediately; poll `install_status` for progress. Safe to call " +
-      "repeatedly — it resumes/repairs and is a no-op once everything is installed. Use this the " +
+      "repeatedly; it resumes/repairs and is a no-op once everything is installed. Use this the " +
       "first time the user sets up, or if other tools report the runtime isn't ready.",
     inputSchema: {},
   },
@@ -1177,6 +1178,69 @@ server.registerTool(
     inputSchema: {},
   },
   async () => jsonContent(runtimeSnapshot())
+);
+
+// ---- config: read / edit the raw config.json ------------------------------
+// The panel renders the full config and lets the user edit it. Writing is
+// guarded: the new content must parse as JSON, and we always drop a timestamped
+// backup next to config.json before overwriting, so a bad paste is recoverable.
+server.registerTool(
+  "config",
+  {
+    title: "View or edit config.json",
+    description:
+      "Read or update the autoposter's config.json (the source of truth for every project, the X/" +
+      "Reddit/LinkedIn account handles, topics, and exclusions). action:'get' (default) returns the " +
+      "full raw JSON; action:'save' validates the supplied `content` as JSON, writes a timestamped " +
+      "backup, then overwrites config.json. Use when the user asks to see, edit, or fix their config.",
+    inputSchema: {
+      action: z.enum(["get", "save"]).optional(),
+      content: z.string().optional(),
+    },
+  },
+  async (args: { action?: "get" | "save"; content?: string }) => {
+    const action = args.action || "get";
+    if (action === "get") {
+      try {
+        const content = fs.readFileSync(CONFIG_PATH, "utf-8");
+        return jsonContent({ ok: true, path: CONFIG_PATH, bytes: content.length, content });
+      } catch (e: any) {
+        return jsonContent({ ok: false, path: CONFIG_PATH, error: String(e?.message || e) });
+      }
+    }
+    // save
+    const content = args.content;
+    if (typeof content !== "string" || content.trim() === "") {
+      return jsonContent({ ok: false, error: "Nothing to save: `content` was empty." });
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e: any) {
+      // Don't write a config that won't parse — every pipeline reads this file.
+      return jsonContent({ ok: false, error: "Invalid JSON, not saved: " + String(e?.message || e) });
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return jsonContent({ ok: false, error: "Top level of config.json must be a JSON object." });
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backup = `${CONFIG_PATH}.bak-panel-${stamp}`;
+      try {
+        fs.copyFileSync(CONFIG_PATH, backup);
+      } catch {
+        /* first-write / missing original is non-fatal */
+      }
+      // Re-serialize the parsed object so what lands on disk is canonical,
+      // 2-space-indented JSON with a trailing newline (matches the Python
+      // writers), regardless of how the user formatted their paste.
+      const out = JSON.stringify(parsed, null, 2) + "\n";
+      fs.writeFileSync(CONFIG_PATH, out, "utf-8");
+      return jsonContent({ ok: true, path: CONFIG_PATH, bytes: out.length, backup });
+    } catch (e: any) {
+      return jsonContent({ ok: false, error: "Write failed: " + String(e?.message || e) });
+    }
+  }
 );
 
 // ---- panel: MCP Apps control surface --------------------------------------
@@ -1220,6 +1284,7 @@ async function buildSnapshot() {
     projects_ready: projects.filter((p) => p.ready).length,
     x_connected: !!x.connected,
     x_state: x.state || "",
+    x_handle: x.handle ?? null,
     autopilot_on: ap.autopilot_on,
     auto_update_on: ap.auto_update_on,
     version: ver.installed || VERSION,
