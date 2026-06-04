@@ -420,15 +420,11 @@ def main():
                              "column empty; the report falls back to the live "
                              "registry target for NULL rows.")
     parser.add_argument("--length-arm", default=None,
-                        help="Twitter length-control A/B arm stamped at post time: "
-                             "'treatment' (per-style target line injected into the "
-                             "draft prompt AND the post-time truncation gate runs) "
-                             "or 'control' (neither; generic 'keep it tight' "
-                             "guidance, gate skipped, reproduces pre-2026-06-01 "
-                             "length behavior). Assigned per cycle from BATCH_ID "
-                             "when LENGTH_AB_ENABLED=1. NULL for non-Twitter rows "
-                             "and rows pre-dating the experiment. Stored in "
-                             "posts.length_arm.")
+                        help="Historical Twitter length-control A/B arm. The live "
+                             "experiment concluded 2026-06-04 and production no "
+                             "longer passes this flag; keep it for old rows and "
+                             "manual/backfill writes to posts.length_arm. Expected "
+                             "values: 'treatment' or 'control'.")
     parser.add_argument("--urns", default=None,
                         help="LinkedIn-only: comma- or whitespace-separated list "
                              "of 16-19 digit URN IDs that identify this post "
