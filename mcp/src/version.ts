@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { REPO_DIR, run } from "./repo.js";
+import { repoDir, run } from "./repo.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,7 +33,7 @@ function readJsonVersion(p: string): string | null {
 export function resolveVersion(): string {
   return (
     readJsonVersion(path.join(__dirname, "version.json")) ||
-    readJsonVersion(path.join(REPO_DIR, "package.json")) ||
+    readJsonVersion(path.join(repoDir(), "package.json")) ||
     readJsonVersion(path.join(__dirname, "..", "package.json")) ||
     "0.0.0-unknown"
   );
