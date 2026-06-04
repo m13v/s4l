@@ -44,6 +44,7 @@ import {
   readProgress,
   runtimeReady,
   readRuntime,
+  resolvePython,
 } from "./runtime.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
 import {
@@ -121,7 +122,9 @@ ${args}
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
 \t\t<key>SAPS_REPO_DIR</key>
-\t\t<string>${REPO_DIR}</string>
+\t\t<string>${repoDir()}</string>
+\t\t<key>SAPS_PYTHON</key>
+\t\t<string>${resolvePython()}</string>
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<${opts.runAtLoad ? "true" : "false"}/>
@@ -311,7 +314,7 @@ async function produceDrafts(
   // It lives right next to the cycle's own twitter-cycle-*.log. We append the
   // full live cycle output here (not just milestones) plus a clear run banner.
   // Best-effort: a logging failure must never break the cycle.
-  const mcpLog = path.join(REPO_DIR, "skill", "logs", "draft_cycle-mcp.log");
+  const mcpLog = path.join(repoDir(), "skill", "logs", "draft_cycle-mcp.log");
   const appendLog = (s: string) => {
     try {
       fs.appendFileSync(mcpLog, s);
@@ -975,7 +978,7 @@ server.registerTool(
       );
     }
     const uid = process.getuid ? process.getuid() : 0;
-    const logDir = path.join(REPO_DIR, "skill", "logs");
+    const logDir = path.join(repoDir(), "skill", "logs");
 
     if (action === "status") {
       const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
@@ -997,7 +1000,7 @@ server.registerTool(
         TWITTER_AUTOPILOT_PLIST,
         plistXml({
           label: TWITTER_AUTOPILOT_LABEL,
-          programArgs: ["/bin/bash", path.join(REPO_DIR, "skill", "run-cycle-update-guard.sh")],
+          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "run-cycle-update-guard.sh")],
           intervalSecs: 60,
           runAtLoad: false,
           stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
@@ -1012,7 +1015,7 @@ server.registerTool(
         UPDATER_PLIST,
         plistXml({
           label: UPDATER_LABEL,
-          programArgs: ["/bin/bash", path.join(REPO_DIR, "skill", "social-autoposter-update.sh")],
+          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "social-autoposter-update.sh")],
           intervalSecs: 86_400,
           runAtLoad: true,
           stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
@@ -1372,7 +1375,7 @@ registerAppResource(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${REPO_DIR}`);
+  console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
 }
 
 main().catch((err) => {
