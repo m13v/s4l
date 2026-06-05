@@ -48,20 +48,17 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# websocket-client is needed for CDP (status/connect). It is NOT needed for
+# `detect-sources` (pure filesystem), so don't hard-exit at import time — defer
+# the error to the commands that actually attach to Chrome.
 try:
     from websocket import create_connection  # websocket-client
+    _WEBSOCKET_IMPORT_ERROR = None
 except ImportError:
-    print(
-        json.dumps(
-            {
-                "ok": False,
-                "state": "error",
-                "error": "websocket-client not installed (needed for CDP). "
-                "pip install websocket-client",
-            }
-        )
+    create_connection = None  # type: ignore[assignment]
+    _WEBSOCKET_IMPORT_ERROR = (
+        "websocket-client not installed (needed for CDP). pip install websocket-client"
     )
-    sys.exit(0)
 
 # Optional server-side session-cookie store (best-effort). Lets connect_x persist
 # the validated X cookies so restore_twitter_session.py can auto-re-inject them
@@ -80,6 +77,16 @@ try:
     import twitter_cookie_mirror  # noqa: E402
 except Exception:
     twitter_cookie_mirror = None
+
+# Vendored cookie copier — also gives us stdlib-only browser/profile detection
+# (detect_browsers, copy_db) used to (a) pick the RIGHT browser to import from so
+# we trigger exactly ONE keychain prompt, and (b) populate the panel's
+# "import from" dropdown. These helpers touch the filesystem only (no keychain
+# read, no decryption), so importing/using them never shows a Safe Storage prompt.
+try:
+    import copy_browser_cookies as _cbc  # noqa: E402
+except Exception:
+    _cbc = None
 
 # --- Config -----------------------------------------------------------------
 
@@ -529,6 +536,92 @@ def _poll_for_login(timeout: float = 90.0, interval: float = 2.0) -> bool:
             pass
 
 
+# --- Source detection (no keychain, no decryption) --------------------------
+# These let us prompt the OS keychain for exactly ONE browser (the one that
+# actually holds an x.com session) instead of blindly walking all four, and
+# power the panel's "import from" dropdown. They read the Cookies SQLite for the
+# PRESENCE of an auth_token ROW; the value stays encrypted, so no Safe Storage
+# prompt is shown.
+
+def _profile_has_x_session(profile) -> bool:
+    """True if `profile`'s Cookies DB has an x.com/twitter.com auth_token row.
+
+    Filesystem + SQLite only — never reads the keychain or decrypts a value, so
+    it triggers NO macOS Safe Storage prompt. Used to pick the right import
+    source and to flag browsers in the dropdown."""
+    if _cbc is None:
+        return False
+    cookies_path = profile.path / "Cookies"
+    if not cookies_path.exists():
+        nested = profile.path / "Network" / "Cookies"
+        cookies_path = nested if nested.exists() else cookies_path
+    if not cookies_path.exists():
+        return False
+    tmp = _cbc.copy_db(cookies_path)
+    if tmp is None:
+        return False
+    import shutil
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM cookies WHERE name='auth_token' "
+                "AND (host_key LIKE '%x.com' OR host_key LIKE '%twitter.com') LIMIT 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+
+
+def _list_sources() -> list[dict]:
+    """Every installed Chromium-family profile with an `x_session` flag.
+
+    Sorted Chrome-first, then sessions-found-first. Pure filesystem detection;
+    no keychain prompt."""
+    if _cbc is None:
+        return []
+    out: list[dict] = []
+    for p in _cbc.detect_browsers():
+        out.append({
+            "spec": f"{p.browser}:{p.name}",
+            "browser": p.browser,
+            "profile": p.name,
+            "label": f"{p.browser.capitalize()} \u2014 {p.name}",
+            "x_session": _profile_has_x_session(p),
+        })
+    out.sort(key=lambda s: (s["browser"] != "chrome", not s["x_session"]))
+    return out
+
+
+def _auto_pick_sources() -> list[str]:
+    """Default import order when the user didn't pick a browser. Prefer the
+    browser(s) that actually have an x.com session so the keychain prompts for
+    exactly the right one(s); fall back to Chrome. This is what replaces the old
+    blind walk over all four browsers (which fired a keychain prompt per
+    installed browser)."""
+    srcs = _list_sources()
+    with_session = [s["spec"] for s in srcs if s["x_session"]]
+    if with_session:
+        return with_session
+    return ["chrome:Default"]
+
+
+def cmd_detect_sources(args) -> dict:
+    """List browsers/profiles the X session can be imported from (for the panel
+    dropdown). Read-only, no keychain prompt."""
+    sources = _list_sources()
+    recommended = next((s["spec"] for s in sources if s["x_session"]), None)
+    if not recommended:
+        recommended = next((s["spec"] for s in sources if s["spec"] == "chrome:Default"),
+                           sources[0]["spec"] if sources else "chrome:Default")
+    return {"ok": True, "sources": sources, "recommended": recommended}
+
+
 # --- Cookie import from the user's everyday browser -------------------------
 
 def _import_from(source: str) -> dict:
@@ -850,7 +943,17 @@ def cmd_connect(args) -> dict:
             }
 
     # 2. Import from the user's everyday browser.
-    sources = [args.source] if args.source else AUTO_SOURCES
+    #    - explicit --source X        -> just that one (one keychain prompt)
+    #    - --source all               -> the full chrome/arc/brave/edge sweep (legacy)
+    #    - no --source (the default)  -> auto-pick the browser(s) that ACTUALLY
+    #      hold an x.com session, so we prompt the keychain for exactly the right
+    #      one instead of blindly walking all four and prompting per browser.
+    if args.source == "all":
+        sources = AUTO_SOURCES
+    elif args.source:
+        sources = [args.source]
+    else:
+        sources = _auto_pick_sources()
     attempts = []
     for src in sources:
         res = _import_from(src)
@@ -974,10 +1077,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Twitter/X session bootstrap for MCP setup.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="Report whether the managed X session is valid.")
+    sub.add_parser("detect-sources",
+                   help="List browsers/profiles to import the X session from "
+                        "(JSON, for the panel dropdown). No keychain prompt.")
     c = sub.add_parser("connect", help="Ensure browser + import/validate the X session.")
     c.add_argument("--source", default=None,
-                   help="Browser profile to import from (e.g. chrome:Default, arc:Default). "
-                        "Default: auto-detect chrome/arc/brave/edge.")
+                   help="Browser profile to import from (e.g. chrome:Default, arc:Default), "
+                        "or 'all' for the full chrome/arc/brave/edge sweep. Default: "
+                        "auto-pick the browser that actually holds an x.com session "
+                        "(one keychain prompt for the right browser).")
     c.add_argument("--no-launch", action="store_true",
                    help="Do not launch Chrome if it's down (probe only).")
     c.add_argument("--login-wait", type=float, default=90.0,
@@ -986,7 +1094,13 @@ def main() -> int:
                         "Prevents the detection race that misreports the handle as missing.")
     args = ap.parse_args()
 
-    if args.cmd == "status":
+    if args.cmd == "detect-sources":
+        # Pure filesystem; never needs CDP/websocket.
+        out = cmd_detect_sources(args)
+    elif _WEBSOCKET_IMPORT_ERROR is not None:
+        # status/connect attach to Chrome over CDP — websocket-client is required.
+        out = {"ok": False, "state": "error", "error": _WEBSOCKET_IMPORT_ERROR}
+    elif args.cmd == "status":
         out = cmd_status(args)
     else:
         out = cmd_connect(args)
