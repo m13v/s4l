@@ -30,7 +30,15 @@ PER_SCRIPT_CAP_SEC = {
     # 2026-04-27: extend 120 min cap to remaining stats / audit / link-edit jobs.
     # 45 min was killing audit-twitter mid-run and starving link-edit-* of time
     # to actually post replies + verify SEO deploys.
-    ("stats.sh", "twitter"): 120 * 60,
+    # 2026-06-04: raised 120 -> 180 min. stats_twitter's total fxtwitter
+    # working set (posts + thread_top_replies + twitter replies + parent
+    # threads, ~1600-1900 polls @ ~1 req/s) crept past 7200s (~7400-7500s)
+    # as the post corpus grew, so every 6h run was SIGKILLed at the cap
+    # before stamping the final lanes -> the unstamped tail stayed stale ->
+    # the next run re-polled the same backlog and died again (death spiral).
+    # The job completes cleanly in <2.1h when not killed; 180 min gives
+    # durable headroom and the cron fires every 6h so there is no overlap.
+    ("stats.sh", "twitter"): 180 * 60,
     ("stats.sh", "linkedin"): 120 * 60,
     ("stats.sh", "moltbook"): 120 * 60,
     ("audit.sh", None): 120 * 60,
