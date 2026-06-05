@@ -216,3 +216,7 @@ button[hidden] { display: none; }
   border-radius: 6px;
   background: #000;
 }
+/* `display:block` above would otherwise defeat the HTML `hidden` attribute,
+   leaving an empty <img> that renders a broken-image icon when there's no
+   frame. This higher-specificity rule keeps `hidden` working: no frame, no box. */
+.live-img[hidden] { display: none; }
