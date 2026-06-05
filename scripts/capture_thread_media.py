@@ -34,7 +34,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from http_api import api_patch  # noqa: E402
+from http_api import api_get, api_patch  # noqa: E402
 
 # Imported lazily inside main() so --help works without a browser / playwright.
 
@@ -62,13 +62,18 @@ def _load_pairs(urls_file):
 def _persist(candidate_id, media, repost=None):
     """Persist media (+ repost provenance) onto twitter_candidates via set_media.
 
-    repost is {"is_repost": bool, "reposted_by": str} or None. The set_media
-    by-id action persists thread_media AND, when provided, is_repost/reposted_by
-    (COALESCE-guarded server-side, so omitting them never clobbers prior values).
+    repost is {"is_repost": bool, "reposted_by": str} or None.
+
+    POSITIVE-ONLY for repost: we send is_repost/reposted_by ONLY when we detected
+    a repost (is_repost True). The candidate URL is the ORIGINAL tweet permalink,
+    where X does NOT render the "<X> reposted" timeline banner, so fresh detection
+    here is almost always False; sending that False would clobber the authoritative
+    flag set at discovery time (the server COALESCEs only on null, not on false).
+    Omitting the keys leaves COALESCE(null, is_repost) = the stored value intact.
     """
     payload = {"id": int(candidate_id), "action": "set_media", "thread_media": media}
-    if repost is not None:
-        payload["is_repost"] = bool(repost.get("is_repost", False))
+    if repost is not None and bool(repost.get("is_repost", False)):
+        payload["is_repost"] = True
         payload["reposted_by"] = repost.get("reposted_by", "") or ""
     resp = api_patch(
         "/api/v1/twitter-candidates/by-id", payload,
@@ -79,6 +84,31 @@ def _persist(candidate_id, media, repost=None):
     if not (resp or {}).get("ok"):
         return False, (resp or {}).get("error") or "SET_MEDIA_FAILED"
     return True, None
+
+
+def _fetch_stored_repost(candidate_id):
+    """Read the repost flag stored at discovery time for one candidate.
+
+    Repost provenance is detected and stored by the DISCOVERY scan (the timeline
+    is the only place X renders the "<X> reposted" banner). The prep step runs on
+    the original-tweet permalink, which never shows that banner, so we read the
+    authoritative stored value here to surface it to the model in the prompt block.
+
+    Returns {"is_repost": bool, "reposted_by": str}; defaults to a non-repost on
+    any error / missing candidate (fail-open: never block the cycle).
+    """
+    try:
+        resp = api_get(
+            "/api/v1/twitter-candidates/by-id",
+            {"id": int(candidate_id)}, ok_on_404=True,
+        )
+    except Exception:
+        return {"is_repost": False, "reposted_by": ""}
+    cand = (resp or {}).get("candidate") or {}
+    return {
+        "is_repost": bool(cand.get("is_repost", False)),
+        "reposted_by": cand.get("reposted_by", "") or "",
+    }
 
 
 def _format_item(item):
@@ -176,14 +206,26 @@ def main():
     for cid, url in pairs:
         rec = by_url.get(url) or {}
         media = rec.get("media", [])
-        repost = rec.get("repost", {"is_repost": False, "reposted_by": ""})
+        fresh = rec.get("repost", {"is_repost": False, "reposted_by": ""})
+        # Authoritative repost flag comes from discovery (stored). Fresh permalink
+        # detection is a rare bonus; prefer stored, fall back to fresh.
+        stored = _fetch_stored_repost(cid)
+        if stored.get("is_repost"):
+            repost = stored
+        elif fresh.get("is_repost"):
+            repost = fresh
+        else:
+            repost = {"is_repost": False, "reposted_by": ""}
         captured.append((cid, media, repost))
         if media:
             with_media += 1
         if repost.get("is_repost"):
             reposts += 1
         if not args.no_persist:
-            ok, err = _persist(cid, media, repost)
+            # _persist is positive-only for repost: pass the FRESH detection (so a
+            # newly-seen banner is recorded) but never the stored value back (no
+            # round-trip clobber). Media is always persisted.
+            ok, err = _persist(cid, media, fresh)
             if ok:
                 persisted += 1
             else:
