@@ -233,25 +233,33 @@ _TIMELINE_JS_TMPL = r"""(function(){
 })()"""
 
 
-def scrape_timeline(send, me: str, want: int, max_scrolls: int = 16,
+def scrape_timeline(send, me: str, want: int, max_scrolls: int = 30,
                     exclude_ids: "set | None" = None) -> list:
     """Scroll the current timeline, collecting up to `want` of the user's OWN
     authored articles (in DOM order = newest first). `exclude_ids` drops items
     already captured elsewhere — that's how the comments pass (/with_replies)
     subtracts the original posts to leave just replies. We do NOT rely on a
     'Replying to' header: the profile /with_replies timeline doesn't render one
-    per article, so post-vs-reply is decided by set subtraction, not DOM text."""
+    per article, so post-vs-reply is decided by set subtraction, not DOM text.
+
+    End-of-feed is detected by COLLECTED-COUNT STALL, not scrollHeight: x.com
+    virtualizes the timeline (unloads off-screen articles and keeps total height
+    ~constant while swapping content), so scrollHeight plateaus even mid-feed and
+    would false-trigger an early stop. We instead stop when no NEW item has been
+    captured for `STALL_LIMIT` consecutive scrolls (after a min number of scrolls),
+    scrolling to the bottom each step to force the next lazy-load batch."""
     seen: dict[str, dict] = {}
     exclude_ids = exclude_ids or set()
     expr = _TIMELINE_JS_TMPL % json.dumps(me.lower())
-    last_h = 0
-    stale = 0
-    for _ in range(max_scrolls):
+    STALL_LIMIT = 4
+    stall = 0
+    for n in range(max_scrolls):
         raw = _eval(send, expr) or "[]"
         try:
             batch = json.loads(raw)
         except Exception:
             batch = []
+        before = len(seen)
         for item in batch:
             key = item.get("id") or item.get("url") or item.get("text", "")[:80]
             if not key or key in seen or key in exclude_ids:
@@ -259,20 +267,18 @@ def scrape_timeline(send, me: str, want: int, max_scrolls: int = 16,
             seen[key] = item
         if len(seen) >= want:
             break
-        # scroll + detect end-of-feed
-        h = _eval(send, "(function(){window.scrollBy(0,document.documentElement.clientHeight*0.9);return document.body.scrollHeight;})()") or 0
-        try:
-            h = int(h)
-        except Exception:
-            h = 0
-        if h == last_h:
-            stale += 1
-            if stale >= 3:
+        # No new items this pass? Count it as a stall. Give the feed a few
+        # consecutive empty scrolls (lazy-load can lag) before declaring the end.
+        if len(seen) == before and n > 0:
+            stall += 1
+            if stall >= STALL_LIMIT:
                 break
         else:
-            stale = 0
-            last_h = h
-        time.sleep(1.6)
+            stall = 0
+        # Scroll to the bottom of currently-loaded content to trigger the next
+        # batch, then wait for it to render before the next read.
+        _eval(send, "window.scrollTo(0, document.documentElement.scrollHeight);")
+        time.sleep(2.0)
     items = list(seen.values())
     return items[:want]
 
