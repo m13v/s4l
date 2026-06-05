@@ -1223,6 +1223,25 @@ function installRuntime() {
   process.exit(res.status == null ? 1 : res.status);
 }
 
+// Wipe a social-autoposter install back to factory-fresh (test machines /
+// uninstall). Shells out to the bundled scripts/reset-test-machine.sh, which is
+// the single source of truth: it removes the owned state dir (~/.social-
+// autoposter-mcp), packaged Chrome profiles + imported cookies, the browser-
+// harness clone/CLI/server.py, the global npm package, and the MCP registration.
+// DEFAULT IS A DRY RUN (prints what WOULD be removed); pass --yes to apply, and
+// --deep to also remove the shared uv toolchain + Chromium cache. Forwarding to
+// the shell script keeps npm and .mcpb installs behaving identically.
+function reset() {
+  const script = path.join(PKG_ROOT, 'scripts', 'reset-test-machine.sh');
+  if (!fs.existsSync(script)) {
+    console.error(`Cannot find ${script}. Re-run \`npx social-autoposter update\` to repair the install.`);
+    process.exit(1);
+  }
+  // Forward everything after `reset` (e.g. --yes, --deep) straight to the script.
+  const res = spawnSync('bash', [script, ...process.argv.slice(3)], { stdio: 'inherit' });
+  process.exit(res.status == null ? 1 : res.status);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'init') {
   init();
@@ -1234,6 +1253,8 @@ if (cmd === 'init') {
   bootstrapVm();
 } else if (cmd === 'install-runtime') {
   installRuntime();
+} else if (cmd === 'reset' || cmd === 'uninstall') {
+  reset();
 } else if (cmd === 'export-cookies') {
   // Forward to cookie-helper with 'export' + remaining args
   process.argv = [process.argv[0], process.argv[1], 'export', ...process.argv.slice(3)];
@@ -1266,4 +1287,5 @@ if (cmd === 'init') {
   console.log('  npx social-autoposter install-runtime  provision owned Python + Chromium (panel-free)');
   console.log('  npx social-autoposter export-cookies [dir]  export browser cookies');
   console.log('  npx social-autoposter import-cookies [dir]  import browser cookies');
+  console.log('  npx social-autoposter reset [--yes] [--deep]  uninstall/wipe the install (dry-run unless --yes)');
 }
