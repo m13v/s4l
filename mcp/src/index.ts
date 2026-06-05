@@ -1465,6 +1465,121 @@ async function buildSnapshot() {
   };
 }
 
+// ---- dashboard localhost fallback -----------------------------------------
+// When the connected host doesn't support MCP Apps UI (Claude Code / Cowork
+// today), serve the SAME dist/panel.html from a loopback HTTP server. The page
+// detects it's running over HTTP (window.__SAPS_BRIDGE__) and routes every
+// app.callServerTool through POST /tool/<name>, which replays the exact captured
+// handler in TOOL_HANDLERS. No pipeline or front-end logic is duplicated.
+
+// True if the host advertised it can render our ui:// HTML resource inline.
+function hostRendersAppUi(): boolean {
+  try {
+    const caps = (server.server.getClientCapabilities?.() ?? null) as any;
+    const uiCap = getUiCapability(caps);
+    return !!uiCap?.mimeTypes?.includes(RESOURCE_MIME_TYPE);
+  } catch {
+    return false;
+  }
+}
+
+let localPanel: { url: string; server: http.Server } | null = null;
+
+// Read the built panel.html and flip it into HTTP-bridge mode by injecting a
+// flag the front-end reads at boot. Same bytes as the inline ui:// resource,
+// minus the postMessage host (there's none over loopback).
+function panelHtmlForHttp(): string {
+  const html = fs.readFileSync(path.join(DIST_DIR, "panel.html"), "utf-8");
+  const inject = `<script>window.__SAPS_BRIDGE__=${JSON.stringify("http")};</script>`;
+  if (html.includes("</head>")) return html.replace("</head>", inject + "</head>");
+  return inject + html;
+}
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(Buffer.from(c)));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
+
+// Start (or reuse) the loopback HTTP server that serves the dashboard plus a
+// /tool/<name> dispatch endpoint backed by TOOL_HANDLERS. Bound to 127.0.0.1 on
+// an OS-assigned ephemeral port so nothing is exposed off-box.
+function startLocalPanel(): Promise<string> {
+  if (localPanel) return Promise.resolve(localPanel.url);
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url || "/", "http://127.0.0.1");
+        if (
+          req.method === "GET" &&
+          (url.pathname === "/" || url.pathname === "/panel" || url.pathname === "/index.html")
+        ) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(panelHtmlForHttp());
+          return;
+        }
+        if (req.method === "GET" && url.pathname === "/health") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+        if (req.method === "POST" && url.pathname.startsWith("/tool/")) {
+          const name = decodeURIComponent(url.pathname.slice("/tool/".length));
+          const handler = TOOL_HANDLERS[name];
+          if (!handler) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({ isError: true, content: [{ type: "text", text: `Unknown tool: ${name}` }] })
+            );
+            return;
+          }
+          const raw = await readBody(req);
+          let args: any = {};
+          if (raw.trim()) { try { args = JSON.parse(raw); } catch { args = {}; } }
+          let result: any;
+          try {
+            result = await handler(args ?? {}, {});
+          } catch (e: any) {
+            result = { isError: true, content: [{ type: "text", text: String(e?.message || e) }] };
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result ?? {}));
+          return;
+        }
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("not found");
+      } catch (e: any) {
+        try {
+          res.writeHead(500, { "Content-Type": "text/plain" });
+          res.end(String(e?.message || e));
+        } catch { /* response already sent */ }
+      }
+    });
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      localPanel = { url: `http://127.0.0.1:${port}/`, server: srv };
+      resolve(localPanel.url);
+    });
+  });
+}
+
+// Open a URL in the user's default browser, cross-platform.
+async function openInBrowser(url: string): Promise<void> {
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    await run(cmd, args, { timeoutMs: 10_000 });
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] openInBrowser failed:", e?.message || e);
+  }
+}
+
 appTool(
   "dashboard",
   {
