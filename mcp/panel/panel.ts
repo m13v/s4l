@@ -66,10 +66,10 @@ const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
 const stX = $("st-x"), stXSub = $("st-x-sub");
-const stAp = $("st-ap"), stApSub = $("st-ap-sub");
+const stApSub = $("st-ap-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
-const btnAuto = $("btn-autopilot") as HTMLButtonElement;
+const apToggle = $("ap-checkbox") as HTMLInputElement;
 const btnX = $("btn-connectx") as HTMLButtonElement;
 const xSourceSel = $("x-source") as HTMLSelectElement;
 const btnRefresh = $("btn-refresh") as HTMLButtonElement;
@@ -158,10 +158,12 @@ function render() {
   xSourceSel.hidden = state.x_connected || xSourceSel.options.length === 0;
   if (!xConfirmPending) btnX.textContent = "Connect X";
 
-  // Autopilot.
-  stAp.textContent = state.autopilot_on ? "On" : "Off";
-  stApSub.textContent = state.auto_update_on ? "auto-update on" : "";
-  btnAuto.textContent = state.autopilot_on ? "Disable autopilot" : "Enable autopilot";
+  // Autopilot. Rendered as an on/off switch in the status card rather than a
+  // button — checked == hands-free posting is live.
+  apToggle.checked = !!state.autopilot_on;
+  stApSub.textContent = state.autopilot_on
+    ? (state.auto_update_on ? "on \u00b7 auto-update on" : "on")
+    : "off";
 
   // Gate actions on readiness. Nothing below works without the runtime, so when
   // it's missing every action is disabled and the Install card carries the only
@@ -169,7 +171,7 @@ function render() {
   const hasReady = state.projects_ready > 0;
   btnSetup.disabled = needsRuntime;
   btnDraft.disabled = needsRuntime || !hasReady;
-  btnAuto.disabled = needsRuntime || !hasReady;
+  apToggle.disabled = needsRuntime || !hasReady;
   btnX.disabled = needsRuntime;
   // When nothing is configured yet, Set up is the obvious next action, so
   // promote it to the primary (filled) style and demote draft (which is
@@ -388,15 +390,27 @@ btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async 
   } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
 }));
 
-btnAuto.addEventListener("click", () => busy(btnAuto, "Working\u2026", async () => {
-  const action = state?.autopilot_on ? "disable" : "enable";
+// The autopilot switch flips state directly. We disable it during the round-trip
+// and revert the checkbox if the tool call fails, so it never shows a state the
+// server didn't confirm.
+apToggle.addEventListener("change", async () => {
+  if (!state) return;
+  const desired = apToggle.checked;
+  const action = desired ? "enable" : "disable";
+  apToggle.disabled = true;
+  log(desired ? "Enabling autopilot\u2026" : "Disabling autopilot\u2026");
   try {
     const r = await call("autopilot", { action });
     const on = action === "enable" ? !!(r.autopilot?.loaded) : !(r.autopilot_unloaded);
     applyState({ autopilot_on: on });
     log(`Autopilot ${on ? "enabled" : "disabled"}.`);
-  } catch (e: any) { log("Autopilot toggle failed: " + (e?.message || e)); }
-}));
+  } catch (e: any) {
+    apToggle.checked = state.autopilot_on; // revert to last confirmed state
+    log("Autopilot toggle failed: " + (e?.message || e));
+  } finally {
+    render(); // re-applies readiness gating to the switch
+  }
+});
 
 btnX.addEventListener("click", () => busy(btnX, "Working\u2026", async () => {
   try {
