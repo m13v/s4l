@@ -530,6 +530,13 @@ def upsert_candidates(tweets, config, batch_id=None, attempts_map=None, scored_s
             # Defaults server-side to 'm13v_' if omitted; new callers should
             # always pass it explicitly.
             "our_account": _twitter_handle or "",
+            # Repost provenance (2026-06-04). The scan derives the author from
+            # the status URL, so author_handle/tweet_url already point at the
+            # ORIGINAL tweet; is_repost flags that it surfaced via a repost and
+            # reposted_by names the account that reposted. Only sent when the
+            # scan evaluated it (presence-detected server-side).
+            "is_repost": bool(tweet.get("is_repost", False)),
+            "reposted_by": tweet.get("reposted_by", "") or "",
         }
         # Stamp the exact discovering search_attempt when the scanner gave us
         # the literal query that surfaced this tweet AND the log script wrote
