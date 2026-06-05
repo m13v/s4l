@@ -321,6 +321,32 @@ function cycleProgressMessage(line: string): string | null {
   return null;
 }
 
+// Start the twitter-harness on-screen overlay watcher if it isn't already up.
+// The overlay (status banner + interactive draft sidebar) only renders WHILE
+// `harness_overlay.py watch` runs. The supervisor script is idempotent (pgrep
+// guard), so calling this on every draft_cycle / autopilot-enable / show-browser
+// is safe: it spawns at most one detached watcher and is a fast no-op otherwise.
+//
+// We thread SAPS_PYTHON (the owned uv runtime, so the watcher resolves a
+// playwright-capable interpreter on Lane B / .mcpb installs that have no system
+// python) and SAPS_LOG_DIR (the materialized repo's skill/logs, so the watcher
+// reads the SAME cycle logs this run writes to decide busy/idle). Fire-and-forget:
+// a failure here must never break the cycle it's decorating.
+async function ensureOverlayWatch(): Promise<void> {
+  try {
+    await run("bash", ["skill/run-overlay-watch.sh"], {
+      timeoutMs: 20_000,
+      env: {
+        SAPS_PYTHON: resolvePython(),
+        SAPS_LOG_DIR: path.join(repoDir(), "skill", "logs"),
+        TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
+      },
+    });
+  } catch {
+    /* best-effort: the overlay is a nicety, never a blocker */
+  }
+}
+
 async function produceDrafts(
   project?: string,
   onProgress?: (message: string, step: number) => void
@@ -341,6 +367,9 @@ async function produceDrafts(
     BH_WINDOW_SIZE: "1280,900",
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
+  // Bring the on-screen overlay up alongside the live harness window so the user
+  // watching the scan/scrape sees status + queued drafts. Idempotent + detached.
+  await ensureOverlayWatch();
   let step = 0;
   let lastMsg = "";
   // ONE predictable, host-independent place to watch a draft_cycle run, so any
@@ -1140,6 +1169,9 @@ tool(
     }
 
     if (action === "enable") {
+      // Bring up the on-screen overlay watcher so background autopilot cycles
+      // still paint the harness status/sidebar. Idempotent + detached.
+      await ensureOverlayWatch();
       // 1) Cycle plist. Write one pointing at the self-update guard ONLY if no
       //    plist exists yet; never overwrite a hand-tuned/dev plist.
       const createdCycle = ensurePlist(
@@ -1700,6 +1732,9 @@ tool(
       }
       return jsonContent({ ok: true, brought_to_front: true, port: res.port });
     }
+    // If the user is about to watch the live browser, make sure the on-screen
+    // overlay watcher is up too so the harness window carries status + drafts.
+    if (action === "start") await ensureOverlayWatch();
     const ensured = await screencast.ensure(typeof args?.port === "number" ? args.port : undefined);
     if (!ensured.ok) {
       const message =
