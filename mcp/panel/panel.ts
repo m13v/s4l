@@ -217,7 +217,6 @@ app.ontoolresult = (result) => {
     if (data.runtime_ready) {
       // Stats need the runtime; load them once it's confirmed ready.
       void loadStats();
-      if (!data.x_connected) void populateXSources();
     } else if (data.runtime_provisioning) {
       // An install is already underway (another surface / prior open) — resume
       // following it without waiting for a click.
@@ -229,33 +228,6 @@ app.ontoolresult = (result) => {
 async function call(name: string, args: Record<string, unknown> = {}): Promise<any> {
   const res = await app.callServerTool({ name, arguments: args });
   return parseResult(res as CallToolResult);
-}
-
-// Populate the "import from" dropdown with the browser/profile to pull the X
-// session from. Read-only detection (no keychain prompt). The profile that
-// already holds an x.com session is marked and pre-selected, so the user (and
-// the keychain) only deal with the right browser instead of all of them.
-let xSourcesLoaded = false;
-async function populateXSources(force = false) {
-  if (xSourcesLoaded && !force) return;
-  try {
-    const r = await call("setup", { action: "detect_x_sources" });
-    const sources: Array<{ spec: string; label: string; x_session: boolean }> =
-      Array.isArray(r.sources) ? r.sources : [];
-    if (!sources.length) { xSourceSel.hidden = true; return; }
-    xSourceSel.innerHTML = sources
-      .map((s) => {
-        const tag = s.x_session ? "  (X session found)" : "";
-        const sel = s.spec === r.recommended ? " selected" : "";
-        return `<option value="${s.spec}"${sel}>${s.label}${tag}</option>`;
-      })
-      .join("");
-    xSourcesLoaded = true;
-    // Only reveal it when X isn't connected (nothing to import otherwise).
-    xSourceSel.hidden = !!state?.x_connected;
-  } catch {
-    xSourceSel.hidden = true;
-  }
 }
 
 async function refresh() {
@@ -275,9 +247,6 @@ async function refresh() {
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
-    // Once the runtime is ready and X still isn't connected, offer the
-    // import-source dropdown (read-only detection, no keychain prompt).
-    if (state?.runtime_ready && !state.x_connected) void populateXSources();
     log("");
     void loadStats();
   } catch (e: any) {
@@ -405,32 +374,37 @@ apToggle.addEventListener("change", async () => {
   }
 });
 
-btnX.addEventListener("click", () => busy(btnX, "Working\u2026", async () => {
+// In-header update button. Created fresh by render() whenever an update is
+// available, so the click is delegated off verEl rather than bound to the
+// (recreated) button element. Calls `version` action:update, which pulls + installs
+// the latest release; it takes effect after the client restarts.
+verEl.addEventListener("click", (e) => {
+  const t = e.target as HTMLElement | null;
+  if (t && t.id === "btn-update") void runUpdate();
+});
+
+async function runUpdate() {
+  if (updating) return;
+  updating = true;
+  const btn = document.getElementById("btn-update") as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = "Updating\u2026"; }
+  log("Installing the latest release\u2026 this can take a minute.");
   try {
-    if (!xConfirmPending) {
-      const r = await call("setup", { action: "connect_x" });
-      if (r.already_connected) { applyState({ x_connected: true }); log("X already connected."); return; }
-      xConfirmPending = true;
-      btnX.textContent = "Confirm: import X session";
-      log(r.what_will_happen || "This imports your x.com cookies into the autoposter's browser. Click again to confirm.");
+    const r = await call("version", { action: "update" });
+    if (r.ok) {
+      log(`Updated to ${r.latest_published || "the latest version"}. ${r.takes_effect || "Restart the client to apply."}`);
+      if (btn) btn.textContent = "Update installed \u2014 restart to apply";
     } else {
-      // Pass the chosen browser/profile (if the dropdown is populated) so the
-      // import targets the right one and the keychain prompts only for it.
-      const chosen = !xSourceSel.hidden && xSourceSel.value ? xSourceSel.value : undefined;
-      const r = await call("setup", {
-        action: "connect_x",
-        confirm: true,
-        ...(chosen ? { x_source: chosen } : {}),
-      });
-      xConfirmPending = false;
-      applyState({ x_connected: !!r.connected, x_state: r.state || "" });
-      log(r.summary || (r.connected ? "X connected." : "X not connected \u2014 see chat."));
-      // The connect result doesn't carry the @handle; re-read status so the X
-      // card shows which account we're now posting as.
-      if (r.connected) void refresh();
+      log("Update failed (exit " + (r.exit_code ?? "?") + "). Try `npx social-autoposter@latest update` in a terminal.");
+      if (btn) { btn.disabled = false; btn.textContent = "Retry update"; }
     }
-  } catch (e: any) { xConfirmPending = false; log("Connect X failed: " + (e?.message || e)); }
-}));
+  } catch (e: any) {
+    log("Update failed: " + (e?.message || e));
+    if (btn) { btn.disabled = false; btn.textContent = "Retry update"; }
+  } finally {
+    updating = false;
+  }
+}
 
 btnInstall.addEventListener("click", async () => {
   installErr.hidden = true;
@@ -563,8 +537,6 @@ btnLiveFront.addEventListener("click", () => busy(btnLiveFront, "Bringing\u2026"
     ? "Brought the browser to the front."
     : (r?.message || "Couldn't bring the browser to the front.");
 }));
-
-btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", refresh));
 
 // ---- boot -----------------------------------------------------------------
 app.connect().then(() => {
