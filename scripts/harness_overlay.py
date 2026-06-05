@@ -517,12 +517,29 @@ def _fetch_drafts(limit: int = 40) -> list:
 
 # --- cycle-log -> friendly status -------------------------------------------
 
+def _safe_mtime(p: str) -> float:
+    """getmtime that tolerates the file vanishing mid-scan (log rotation race).
+
+    The watch loop runs forever while cycles rotate/delete logs underneath it.
+    A bare os.path.getmtime on a path that disappeared between the glob and the
+    stat raises FileNotFoundError and (previously) killed the whole watcher,
+    dropping the overlay until something restarted it. Treat a gone file as
+    infinitely old so it just loses the max() race instead of crashing.
+    """
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0.0
+
+
 def _latest_cycle_log() -> Path | None:
     files = glob.glob(str(LOG_DIR / "twitter-cycle-*.log"))
     if not files:
         return None
-    newest = max(files, key=lambda f: os.path.getmtime(f))
-    return Path(newest)
+    newest = max(files, key=_safe_mtime)
+    # The winner could STILL have been deleted between selection and use; the
+    # caller (_current_status) stats it again, so hand back None if it's gone.
+    return Path(newest) if os.path.exists(newest) else None
 
 
 _RE_SCAN = re.compile(r"project='([^']+)'\s+q=(['\"])(.*?)\2\s+kept=(\d+)")
@@ -575,7 +592,7 @@ def _current_status() -> str:
     log = _latest_cycle_log()
     if not log:
         return "Idle \u2014 waiting for the next cycle\u2026"
-    age = time.time() - os.path.getmtime(log)
+    age = time.time() - _safe_mtime(str(log))
     if age > IDLE_AFTER_SEC:
         return "Idle \u2014 waiting for the next cycle\u2026"
     return _tail_last_meaningful(log) or "Working\u2026"
@@ -638,7 +655,12 @@ def cmd_watch(interval: float = 2.0) -> int:
     last_sb_sig = None
     try:
         while True:
-            status = _current_status()
+            # Never let status computation (log globbing/stat, all racing against
+            # live log rotation) kill the watcher; fall back to a neutral status.
+            try:
+                status = _current_status()
+            except Exception:
+                status = "Working\u2026"
             try:
                 if h is None:
                     h = Harness().__enter__()
