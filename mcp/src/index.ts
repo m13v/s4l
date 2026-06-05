@@ -547,6 +547,32 @@ server.registerPrompt(
   })
 );
 
+// Instruction (NOT a script) the agent follows to research the product website
+// after the profile scan. The agent uses ITS OWN browser/fetch tools — the MCP
+// ships no scraper. The goal is to fill the PRODUCT half of the config (what it
+// does, how it's different, who it's for, the CTA link, claims to avoid) from the
+// site itself, written in the user's voice captured by the profile scan.
+const WEBSITE_RESEARCH_INSTRUCTIONS =
+  "PRODUCT RESEARCH (do this before saving the product fields):\n" +
+  "1. Ask the user for the URL of the product/website they want to market on X.\n" +
+  "2. Visit it with your OWN browser/fetch tools (no scraper is provided) and read " +
+  "AT LEAST 5 pages if the site has them — follow the internal nav/footer links. " +
+  "Prioritize: homepage, pricing, features/product, about, docs or changelog or blog, " +
+  "FAQ, customers/testimonials/case-studies. Read as many as you can find (5+ is the " +
+  "floor, not the cap) to learn the product deeply.\n" +
+  "3. From what you actually read, extract the PRODUCT fields: `description` (what it " +
+  "does, concretely), `differentiator` (how it's genuinely different from alternatives), " +
+  "`icp` (who it's for — cross-check against who the user engages with on X), " +
+  "`get_started_link` (the primary signup/CTA URL), and `content_guardrails` (claims, " +
+  "competitors, or wording the site avoids — never overclaim beyond the site).\n" +
+  "4. WRITE these fields in the USER'S voice from the profile scan (their phrasing, " +
+  "register, vibe) while keeping every product CLAIM factual to the site. Don't invent " +
+  "features, metrics, or guarantees the site doesn't state.\n" +
+  "5. Show the user your draft of the product fields for confirmation, then call setup " +
+  "with name + the product fields (plus the voice/search_topics from the profile scan) " +
+  "to save. If the site is thin or unreachable, tell the user and ask them to fill the " +
+  "gaps rather than guessing.";
+
 // ---- setup: per-project config (the "brain": project, website, voice) -----
 // Run this FIRST. The action tools refuse until at least one project is ready.
 // You can set up MULTIPLE products and fill each project's fields INCREMENTALLY
@@ -560,9 +586,11 @@ tool(
     description:
       "Run this FIRST, before any drafting or autopilot. Two jobs:\n" +
       "1) Configure a project this install posts for: its website, what it does (description), who " +
-      "to target (icp), and brand voice. Set up MULTIPLE products (call once per product, identified " +
-      "by name); fill a project's fields INCREMENTALLY across several calls — pass whatever you have, " +
-      "it merges and tells you what's still missing.\n" +
+      "to target (icp), and brand voice. To fill the PRODUCT fields, get the product URL and visit " +
+      "it with your own browser/fetch tools — read 5+ pages (home, pricing, features, about, docs/" +
+      "blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE products " +
+      "(call once per product, identified by name); fill a project's fields INCREMENTALLY across " +
+      "several calls — pass whatever you have, it merges and tells you what's still missing.\n" +
       "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
       "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
       "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
@@ -724,13 +752,18 @@ tool(
         posts: scan.posts,
         comments: scan.comments,
         grounding_instructions: scan.grounding_instructions,
+        website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
         next_step:
-          "Read the bio, posts, and comments as GROUND TRUTH. Following grounding_instructions, " +
-          "extract: (1) their profession/identity, (2) their voice & vibe (tone, phrasing, casing, " +
-          "tics), (3) 2-4 verbatim golden-rule example replies, (4) a phrase bank + things they " +
-          "avoid, (5) their icp, (6) recurring themes -> search_topics. Show the user your read " +
-          "('here's the voice/topics I picked up, sound like you?'), then call setup with the " +
-          "confirmed name/voice/icp/differentiator/search_topics/content_guardrails to save.",
+          "TWO steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
+          "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
+          "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
+          "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
+          "SECOND (product, from their website): then follow website_research_instructions — ask " +
+          "the user for the product URL and read 5+ of its pages to fill description, " +
+          "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
+          "just captured. Show the user your combined read ('here's the voice/topics from your " +
+          "profile and what I learned from your site — accurate?'), then call setup with the " +
+          "confirmed fields to save.",
       });
     }
 
