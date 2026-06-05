@@ -17,6 +17,8 @@
  * this module is the robust baseline that works regardless.
  */
 
+import { execFile } from "node:child_process";
+
 // Untyped indirection: Node ships a global WebSocket at runtime (>=21) but
 // @types/node doesn't always declare it as a value, and MessageEvent isn't typed
 // without the DOM lib. Reach for it dynamically and keep the event handlers `any`.
@@ -218,3 +220,79 @@ class Screencast {
 }
 
 export const screencast = new Screencast();
+
+// ---- bring browser to front ------------------------------------------------
+// Raise the managed Chrome above other apps so the user can interact with it
+// directly. Two steps: (1) CDP Page.bringToFront raises the active TAB inside
+// the browser; (2) on macOS, raise the browser's OS WINDOW above Claude Desktop
+// by activating the process that owns the CDP port. Without (2), the tab would
+// be focused but the window could still sit behind the panel.
+
+// Fire a single CDP command on a target's debugger websocket and resolve once it
+// acknowledges (or times out). Used for one-shot commands like Page.bringToFront
+// where we don't need a persistent connection.
+function cdpCommand(wsUrl: string, method: string, params?: any, timeoutMs = 3000): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!WS) { resolve(false); return; }
+    let ws: any;
+    try { ws = new WS(wsUrl); } catch { resolve(false); return; }
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch { /* ignore */ }
+      resolve(ok);
+    };
+    const to = setTimeout(() => finish(false), timeoutMs);
+    ws.onopen = () => {
+      try { ws.send(JSON.stringify({ id: 1, method, params: params || {} })); }
+      catch { clearTimeout(to); finish(false); }
+    };
+    ws.onmessage = (ev: any) => {
+      try {
+        const raw = typeof ev?.data === "string" ? ev.data : String(ev?.data ?? "");
+        const msg = JSON.parse(raw);
+        if (msg && msg.id === 1) { clearTimeout(to); finish(!msg.error); }
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => { clearTimeout(to); finish(false); };
+    ws.onclose = () => { clearTimeout(to); finish(done); };
+  });
+}
+
+// macOS only: activate the GUI process that owns the CDP port so its window
+// rises above everything else. We find the PID via the listener on the port
+// (not the established CDP client connections) and activate it by unix id, which
+// works regardless of the app's display name (Chrome vs Chromium vs harness).
+function raiseMacWindow(port: number): Promise<void> {
+  return new Promise((resolve) => {
+    execFile("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { timeout: 2500 }, (_err, stdout) => {
+      const pid = String(stdout || "").split(/\s+/).filter(Boolean)[0];
+      if (!pid) { resolve(); return; }
+      const osa = `tell application "System Events" to set frontmost of (first process whose unix id is ${pid}) to true`;
+      // execFile (no shell) passes the AppleScript as one argv, so its inner
+      // double quotes need no escaping.
+      execFile("osascript", ["-e", osa], { timeout: 2500 }, () => resolve());
+    });
+  });
+}
+
+export async function bringBrowserToFront(
+  port?: number
+): Promise<{ ok: boolean; error?: string; port?: number }> {
+  let chosenPort = port || screencast.port || 0;
+  let target = chosenPort ? await findPageTarget(chosenPort) : null;
+  if (!target) {
+    const found = await findActivePort();
+    if (!found) return { ok: false, error: "no_browser" };
+    chosenPort = found.port;
+    target = found.target;
+  }
+  if (target.webSocketDebuggerUrl) {
+    await cdpCommand(target.webSocketDebuggerUrl, "Page.bringToFront");
+  }
+  if (process.platform === "darwin") {
+    await raiseMacWindow(chosenPort);
+  }
+  return { ok: true, port: chosenPort };
+}
