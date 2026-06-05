@@ -463,6 +463,10 @@ btnConfigLoad.addEventListener("click", () => busy(btnConfigLoad, "Loading\u2026
     configEditor.value = configLoaded;
     showConfigEditing(true);
     configStatus.textContent = `Loaded ${r.bytes ?? configLoaded.length} bytes. Edit and Save, or Cancel.`;
+    // The config card sits near the bottom of a tall panel; in a constrained
+    // host viewport the freshly-opened editor lands below the fold, so the click
+    // looks like a no-op. Pull it into view so the user actually sees it open.
+    try { configEditor.scrollIntoView({ behavior: "smooth", block: "center" }); } catch { /* older host */ }
   } catch (e: any) {
     configStatus.textContent = "Couldn't load config: " + (e?.message || e);
   }
