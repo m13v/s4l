@@ -343,8 +343,18 @@ def load_config():
 
 
 class HttpNotFoundError(Exception):
-    """Raised when a fetch returns HTTP 404."""
-    pass
+    """Raised when a fetch returns HTTP 404.
+
+    Carries the parsed JSON body (when present) on .body. fxtwitter serves
+    its *tombstone* objects (type="tombstone", reason="unavailable" -- guest-API
+    blind spot, the tweet is ALIVE to a logged-in viewer) WITH an HTTP 404
+    status, so discarding the body here is what produced false deletion strikes.
+    Preserve the body so refresh_twitter's tombstone guard can see it.
+    """
+
+    def __init__(self, url, body=None):
+        super().__init__(url)
+        self.body = body
 
 
 def fetch_json(url, headers=None, user_agent="social-autoposter/1.0"):
@@ -357,7 +367,12 @@ def fetch_json(url, headers=None, user_agent="social-autoposter/1.0"):
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            raise HttpNotFoundError(url)
+            body = None
+            try:
+                body = json.loads(e.read())
+            except Exception:
+                body = None
+            raise HttpNotFoundError(url, body=body)
         return None
     except Exception as e:
         return None
@@ -1603,16 +1618,20 @@ def refresh_twitter(db, config=None, quiet=False, audit_mode=False):
         # not abort the whole pipeline.
         try:
             data = fetch_json(url)
-        except HttpNotFoundError:
-            data = {"code": 404, "tweet": None}
+        except HttpNotFoundError as e:
+            # Preserve fxtwitter's 404 body: a tombstone (guest-API blind spot)
+            # is ALIVE and must reach the tombstone guard below, NOT be treated
+            # as a deletion. Only fall back to a synthetic null-tweet 404 when
+            # the body was genuinely empty (true NOT_FOUND).
+            data = e.body or {"code": 404, "tweet": None}
 
         if not data:
             # Retry once
             time.sleep(2)
             try:
                 data = fetch_json(url)
-            except HttpNotFoundError:
-                data = {"code": 404, "tweet": None}
+            except HttpNotFoundError as e:
+                data = e.body or {"code": 404, "tweet": None}
             if not data:
                 errors += 1
                 continue
