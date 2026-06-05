@@ -186,3 +186,33 @@ button[hidden] { display: none; }
   white-space: pre-wrap;
 }
 .muted { color: var(--muted); }
+
+/* Live browser view: a CDP screencast of the managed Chrome, polled by the
+   panel and painted into an <img>. Grayscale chrome only — the frame itself
+   carries the color. */
+.live {
+  margin-top: 14px;
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.live-head-actions { display: flex; gap: 6px; }
+.live-status { font-size: 11px; color: var(--muted); margin-top: 6px; min-height: 14px; }
+.live-img {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #000;
+}
