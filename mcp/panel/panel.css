@@ -11,6 +11,9 @@
   --border: var(--border, #e2e2e2);
   --btn-fg: var(--primary-foreground, #ffffff);
   --btn-bg: var(--primary, #111111);
+  /* Buttons need a visibly stronger frame than card/separator borders, or a
+   * near-white fill on a white page reads as plain text, not a button. */
+  --btn-border: var(--border, #c4c4c4);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,6 +25,7 @@
     --border: var(--border, #3a3a3a);
     --btn-fg: var(--primary-foreground, #111111);
     --btn-bg: var(--primary, #f2f2f2);
+    --btn-border: var(--border, #555555);
   }
 }
 
@@ -79,7 +83,7 @@ html, body {
 }
 button {
   appearance: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--btn-border);
   background: var(--card);
   color: var(--fg);
   border-radius: 8px;
