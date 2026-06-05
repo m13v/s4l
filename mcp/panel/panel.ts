@@ -81,6 +81,7 @@ const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
 const btnLive = $("btn-live") as HTMLButtonElement;
 const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
+const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
 const configEditor = $("config-editor") as HTMLTextAreaElement;
@@ -541,6 +542,16 @@ function stopLive(tellServer = true) {
 
 btnLive.addEventListener("click", startLive);
 btnLiveStop.addEventListener("click", () => { stopLive(true); liveStatus.textContent = ""; });
+
+// "Bring to front": close the in-panel live view and raise the real browser
+// window above everything so the user can interact with it directly.
+btnLiveFront.addEventListener("click", () => busy(btnLiveFront, "Bringing\u2026", async () => {
+  stopLive(true);
+  const r = await call("show_browser_to_user", { action: "front" });
+  liveStatus.textContent = r?.ok
+    ? "Brought the browser to the front."
+    : (r?.message || "Couldn't bring the browser to the front.");
+}));
 
 btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", refresh));
 
