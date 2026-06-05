@@ -38,7 +38,7 @@ import {
   configPath,
   type ProjectInput,
 } from "./setup.js";
-import { xStatus, xConnect, xDetectSources, summarizeXAuth } from "./twitterAuth.js";
+import { xStatus, xConnect, xDetectSources, xScanProfile, summarizeXAuth } from "./twitterAuth.js";
 import {
   startProvisioning,
   isProvisioning,
@@ -574,7 +574,7 @@ tool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["connect_x", "detect_x_sources", "reseed_queries"])
+        .enum(["connect_x", "detect_x_sources", "profile_scan", "reseed_queries"])
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
@@ -582,6 +582,10 @@ tool(
             "detect_x_sources = list the browsers/profiles the X session can be imported from " +
             "(read-only, no keychain prompt) so the user can pick the right one; returns " +
             "{sources:[{spec,label,x_session}], recommended}. " +
+            "profile_scan = AFTER connect_x, read the connected account's bio + recent posts + recent " +
+            "replies to build a 'grounding truth' corpus. Use it to draft voice/icp/search_topics in " +
+            "the USER'S OWN register (their phrases, vibe, profession), then confirm with the user " +
+            "before calling setup to save. Returns {profile, posts, comments, grounding_instructions}. " +
             "reseed_queries = (re-)expand an EXISTING project's search topics into ~30 real X search " +
             "queries and return them. Use for projects configured before query-expansion existed, or " +
             "to refresh the query bank. Requires name. Returns the resulting query list."
@@ -683,11 +687,53 @@ tool(
         note: r.note,
         attempts: r.attempts,
         next_step: r.connected
-          ? "X is connected. You can run draft_cycle (and enable autopilot) once a project is fully set up."
+          ? "X is connected. Next, run setup action:'profile_scan' to read this account's bio + recent " +
+            "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
+            "before saving. Then run draft_cycle once the project is fully set up."
           : r.state === "needs_login"
             ? "Ask the user to sign in to x.com in the Chrome window that just opened, then call setup " +
               "action:'connect_x', confirm:true again to confirm."
             : "X is not connected yet. " + summarizeXAuth(r),
+      });
+    }
+
+    // ---- Profile scan: grounding-truth corpus from the connected account ----
+    // Reuses the authenticated managed-Chrome session (so it must run AFTER a
+    // successful connect_x) to read the user's bio + recent posts + recent
+    // replies. Returns the raw corpus plus grounding_instructions; synthesis of
+    // voice/icp/topics happens IN THIS CONVERSATION (no nested model), then the
+    // agent confirms with the user and calls setup to persist. Read-only.
+    if (args.action === "profile_scan") {
+      // Handle is auto-detected from the live logged-in session by the scanner.
+      const scan = await xScanProfile();
+      if (!scan.ok) {
+        const hint =
+          scan.state === "browser_not_running" || scan.state === "no_handle"
+            ? " Run setup action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
+            : "";
+        return jsonContent({
+          action: "profile_scan",
+          ok: false,
+          state: scan.state,
+          error: (scan.error || "profile scan failed") + hint,
+        });
+      }
+      return jsonContent({
+        action: "profile_scan",
+        ok: true,
+        handle: scan.handle,
+        profile: scan.profile,
+        counts: scan.counts,
+        posts: scan.posts,
+        comments: scan.comments,
+        grounding_instructions: scan.grounding_instructions,
+        next_step:
+          "Read the bio, posts, and comments as GROUND TRUTH. Following grounding_instructions, " +
+          "extract: (1) their profession/identity, (2) their voice & vibe (tone, phrasing, casing, " +
+          "tics), (3) 2-4 verbatim golden-rule example replies, (4) a phrase bank + things they " +
+          "avoid, (5) their icp, (6) recurring themes -> search_topics. Show the user your read " +
+          "('here's the voice/topics I picked up, sound like you?'), then call setup with the " +
+          "confirmed name/voice/icp/differentiator/search_topics/content_guardrails to save.",
       });
     }
 
