@@ -88,10 +88,23 @@ def _current_url(send) -> str:
     return _eval(send, "location.href") or ""
 
 
-def _navigate(send, url: str, settle: float = 3.5) -> None:
+def _navigate(send, url: str, settle: float = 3.5, expect: "str | None" = None,
+              attempts: int = 3) -> bool:
+    """Navigate and (optionally) assert we actually landed on `expect` (a substring
+    of the URL). The managed Chrome is shared with the posting cycle, so another
+    process can yank the page mid-load; retry instead of scraping the wrong page.
+    Returns True if the expected URL was reached (or no expectation given)."""
     send("Page.enable")
-    send("Page.navigate", {"url": url})
-    time.sleep(settle)
+    for _ in range(attempts):
+        send("Page.navigate", {"url": url})
+        time.sleep(settle)
+        if not expect:
+            return True
+        for _ in range(6):
+            if expect in (_current_url(send) or ""):
+                return True
+            time.sleep(1.5)
+    return expect in (_current_url(send) or "")
 
 
 # --------------------------------------------------------------------------- #
@@ -220,10 +233,16 @@ _TIMELINE_JS_TMPL = r"""(function(){
 })()"""
 
 
-def scrape_timeline(send, me: str, want: int, want_replies: bool, max_scrolls: int = 14) -> list:
-    """Scroll the current timeline, collecting up to `want` items. When
-    want_replies is True keep replies; else keep authored (non-reply) posts."""
+def scrape_timeline(send, me: str, want: int, max_scrolls: int = 16,
+                    exclude_ids: "set | None" = None) -> list:
+    """Scroll the current timeline, collecting up to `want` of the user's OWN
+    authored articles (in DOM order = newest first). `exclude_ids` drops items
+    already captured elsewhere — that's how the comments pass (/with_replies)
+    subtracts the original posts to leave just replies. We do NOT rely on a
+    'Replying to' header: the profile /with_replies timeline doesn't render one
+    per article, so post-vs-reply is decided by set subtraction, not DOM text."""
     seen: dict[str, dict] = {}
+    exclude_ids = exclude_ids or set()
     expr = _TIMELINE_JS_TMPL % json.dumps(me.lower())
     last_h = 0
     stale = 0
@@ -234,13 +253,10 @@ def scrape_timeline(send, me: str, want: int, want_replies: bool, max_scrolls: i
         except Exception:
             batch = []
         for item in batch:
-            if want_replies and not item.get("is_reply"):
-                continue
-            if not want_replies and item.get("is_reply"):
-                continue
             key = item.get("id") or item.get("url") or item.get("text", "")[:80]
-            if key and key not in seen:
-                seen[key] = item
+            if not key or key in seen or key in exclude_ids:
+                continue
+            seen[key] = item
         if len(seen) >= want:
             break
         # scroll + detect end-of-feed
@@ -319,15 +335,22 @@ def main() -> int:
             return 1
 
         # 1. Profile header (also lands us on the posts tab).
-        _navigate(send, f"https://x.com/{handle}", settle=4.0)
-        profile = scrape_profile(send)
+        on_profile = _navigate(send, f"https://x.com/{handle}", settle=4.0,
+                               expect=f"/{handle}")
+        profile = scrape_profile(send) if on_profile else {}
 
         # 2. Original posts (current page = posts tab).
-        posts = scrape_timeline(send, handle, args.posts, want_replies=False)
+        posts = scrape_timeline(send, handle, args.posts) if on_profile else []
+        post_ids = {p.get("id") for p in posts if p.get("id")}
 
-        # 3. Replies / comments.
-        _navigate(send, f"https://x.com/{handle}/with_replies", settle=4.0)
-        comments = scrape_timeline(send, handle, args.comments, want_replies=True)
+        # 3. Replies / comments = the user's own articles on /with_replies that
+        #    are NOT among the original posts (set subtraction, not DOM text).
+        on_replies = _navigate(send, f"https://x.com/{handle}/with_replies",
+                               settle=4.0, expect=f"/{handle}/with_replies")
+        comments = (
+            scrape_timeline(send, handle, args.comments, exclude_ids=post_ids)
+            if on_replies else []
+        )
 
         result = {
             "ok": True,
