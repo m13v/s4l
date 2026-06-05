@@ -209,17 +209,19 @@ const server = new McpServer(
 // ---------------------------------------------------------------------------
 type ToolHandler = (args: any, extra?: any) => Promise<any> | any;
 const TOOL_HANDLERS: Record<string, ToolHandler> = {};
-// Bound before any replace so the pattern `tool(` only matches
-// real call sites, not this wrapper (which would otherwise self-recurse).
 const baseRegisterTool = server.registerTool.bind(server);
-function tool(name: string, config: any, cb: ToolHandler) {
+// `tool` is TYPED as server.registerTool so every call site keeps the exact
+// same input-schema -> callback-arg inference it had before; the body is `any`
+// and just additionally stashes the callback by name. `appTool` drops the
+// leading `server` arg of registerAppTool (its callback takes no typed args).
+const tool: typeof server.registerTool = ((name: string, config: any, cb: ToolHandler) => {
   TOOL_HANDLERS[name] = cb;
   return (baseRegisterTool as any)(name, config, cb);
-}
-function appTool(name: string, config: any, cb: ToolHandler) {
+}) as any;
+const appTool = ((name: string, config: any, cb: ToolHandler) => {
   TOOL_HANDLERS[name] = cb;
   return registerAppTool(server as any, name, config as any, cb as any);
-}
+}) as any;
 
 function jsonContent(obj: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] };
@@ -1568,8 +1570,11 @@ function startLocalPanel(): Promise<string> {
   });
 }
 
-// Open a URL in the user's default browser, cross-platform.
+// Open a URL in the user's default browser, cross-platform. Honors
+// SAPS_PANEL_NO_OPEN (set on headless autopilot boxes or in tests) to skip the
+// actual open while still returning the URL to the caller.
 async function openInBrowser(url: string): Promise<void> {
+  if (process.env.SAPS_PANEL_NO_OPEN) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
