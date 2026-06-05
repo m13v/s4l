@@ -64,6 +64,41 @@ export async function xConnect(source?: string): Promise<XAuthResult> {
   return parse(res.stdout, res.stderr, res.code);
 }
 
+// A browser/profile the X session can be imported from (for the panel dropdown).
+export interface XSource {
+  spec: string;        // e.g. "chrome:Profile 1"
+  browser: string;     // chrome | arc | brave | edge | chromium
+  profile: string;     // Default | Profile 1 ...
+  label: string;       // "Chrome — Profile 1"
+  x_session: boolean;  // does this profile already hold an x.com auth_token?
+}
+export interface XSourcesResult {
+  ok: boolean;
+  sources: XSource[];
+  recommended?: string;
+  error?: string;
+}
+
+// List browsers/profiles to import from. Read-only: NEVER reads the keychain or
+// decrypts a cookie, so it shows no macOS Safe Storage prompt. Used to populate
+// the panel's "import from" dropdown and to flag which profile has a live session.
+export async function xDetectSources(): Promise<XSourcesResult> {
+  const res = await runPython("scripts/setup_twitter_auth.py", ["detect-sources"], {
+    timeoutMs: 30_000,
+  });
+  try {
+    return JSON.parse(res.stdout.trim().split("\n").slice(-200).join("\n")) as XSourcesResult;
+  } catch {
+    return {
+      ok: false,
+      sources: [],
+      error:
+        `detect-sources produced no parseable JSON (exit ${res.code}).\n` +
+        (res.stderr || res.stdout).split("\n").slice(-8).join("\n"),
+    };
+  }
+}
+
 // One-line human summary for tool output.
 export function summarizeXAuth(r: XAuthResult): string {
   switch (r.state) {
