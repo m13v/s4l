@@ -37,6 +37,7 @@ down it sleeps and retries; it never crashes the pipeline.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import sys
@@ -81,13 +82,14 @@ REASSURE = (
 )
 
 # --- the page-side overlay builder ------------------------------------------
-# A single JS function installed on `window`. Called with the current title,
-# reassurance line, status line, and an epoch ms timestamp. Idempotent: it
-# creates the DOM on first call and only updates text thereafter. A lone
-# setInterval drives both the pulse and the "updated Ns ago" ticker so the
-# overlay always looks alive between status pushes.
-OVERLAY_JS = r"""
-(function(payload){
+# `_BODY` defines window.__sapsPaint(payload): idempotently creates the overlay
+# DOM, then updates its text. A lone setInterval drives both the pulse and the
+# "updated Ns ago" ticker so the overlay always looks alive between status
+# pushes. Built with createElement + element.style.<prop> + textContent only
+# (CSP-safe; no <style> tag, no innerHTML-with-style-attrs). pointer-events is
+# none so the overlay can never intercept the automation's own clicks.
+_BODY = r"""
+window.__sapsPaint = function(payload){
   try {
     var ID = "__saps_overlay";
     var st = window.__sapsOverlayState || (window.__sapsOverlayState = {});
@@ -97,7 +99,7 @@ OVERLAY_JS = r"""
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
     var root = document.getElementById(ID);
-    if(!root){
+    if(!root || !root.isConnected){
       root = mk("div", document.documentElement); root.id = ID;
       var s = root.style;
       s.position="fixed"; s.top="12px"; s.left="50%"; s.transform="translateX(-50%)";
@@ -130,8 +132,7 @@ OVERLAY_JS = r"""
         try{
           var dt = Math.max(0, Math.round((Date.now()-st.ts)/1000));
           st._ago.textContent = dt < 1 ? "now" : (dt < 60 ? dt+"s ago" : Math.round(dt/60)+"m ago");
-          // breathe the dot; fade it once activity goes stale
-          var stale = dt > 90;
+          var stale = dt > 90;                       // fade the dot once activity goes quiet
           var phase = (Date.now()/650) % 2;
           st._dot.style.opacity = stale ? "0.3" : (phase < 1 ? "1" : "0.35");
         }catch(e){}
@@ -141,34 +142,26 @@ OVERLAY_JS = r"""
     st._reassure.textContent = st.reassure;
     st._status.textContent = st.status;
   } catch(e) { /* overlay is best-effort, never throw into the page */ }
-})(arguments[0]);
+};
 """
 
-# The same builder, wrapped so add_init_script can register it for every future
-# document. On a fresh document there is no status yet, so it seeds a generic
-# "starting up" line; the watch loop overwrites it within a couple seconds.
-INIT_SCRIPT = (
-    "window.__sapsOverlayBuild = function(p){ var f = "
-    + OVERLAY_JS.strip()
-    + "; };\n"
-    "try { window.__sapsOverlayBuild(); } catch(e){}\n"
+# Playwright evaluate expression: (re)define the painter, then call it with the
+# arg Playwright passes. Used for live updates on existing pages.
+PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__sapsPaint(payload); } catch(e){} }"
+
+# Removes the overlay from a page.
+CLEAR_EXPR = (
+    "() => { var e=document.getElementById('__saps_overlay'); if(e&&e.remove)e.remove(); "
+    "var s=window.__sapsOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
 )
 
 
 def _build_init_script(title: str, reassure: str, status: str) -> str:
-    # Register a re-runner on new documents that paints with the latest known
-    # text. We inline the payload so even a navigation that happens between
-    # watch ticks shows the right thing immediately.
-    payload = {
-        "title": title.replace("\\", "\\\\").replace('"', '\\"'),
-        "reassure": reassure.replace("\\", "\\\\").replace('"', '\\"'),
-        "status": status.replace("\\", "\\\\").replace('"', '\\"'),
-    }
-    fn = "(function(p)" + OVERLAY_JS.strip()[len("(function(payload)"):]
-    return (
-        f'var __p = {{title:"{payload["title"]}",reassure:"{payload["reassure"]}",'
-        f'status:"{payload["status"]}",ts:Date.now()}};\n'
-        f'({fn})(__p);\n'
+    """add_init_script body: define the painter on every new document and seed
+    it with the latest known text so a mid-cycle navigation paints instantly."""
+    seed = json.dumps({"title": title, "reassure": reassure, "status": status})
+    return _BODY + (
+        "try { var __p = " + seed + "; __p.ts = Date.now(); window.__sapsPaint(__p); } catch(e){}"
     )
 
 
@@ -223,7 +216,7 @@ class Harness:
         payload = {"title": title, "reassure": reassure, "status": status, "ts": int(time.time() * 1000)}
         for p in self._pages():
             try:
-                p.evaluate(OVERLAY_JS, payload)
+                p.evaluate(PAINT_EXPR, payload)
                 n += 1
             except Exception:
                 pass
@@ -231,10 +224,9 @@ class Harness:
 
     def clear(self) -> int:
         n = 0
-        js = "(function(){var e=document.getElementById('__saps_overlay');if(e&&e.remove)e.remove();var s=window.__sapsOverlayState;if(s&&s._iv)clearInterval(s._iv);})()"
         for p in self._pages():
             try:
-                p.evaluate(js)
+                p.evaluate(CLEAR_EXPR)
                 n += 1
             except Exception:
                 pass
