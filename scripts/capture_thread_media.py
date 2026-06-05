@@ -59,9 +59,17 @@ def _load_pairs(urls_file):
     return pairs
 
 
-def _persist(candidate_id, media):
-    """Persist media onto twitter_candidates.thread_media via the set_media action."""
+def _persist(candidate_id, media, repost=None):
+    """Persist media (+ repost provenance) onto twitter_candidates via set_media.
+
+    repost is {"is_repost": bool, "reposted_by": str} or None. The set_media
+    by-id action persists thread_media AND, when provided, is_repost/reposted_by
+    (COALESCE-guarded server-side, so omitting them never clobbers prior values).
+    """
     payload = {"id": int(candidate_id), "action": "set_media", "thread_media": media}
+    if repost is not None:
+        payload["is_repost"] = bool(repost.get("is_repost", False))
+        payload["reposted_by"] = repost.get("reposted_by", "") or ""
     resp = api_patch(
         "/api/v1/twitter-candidates/by-id", payload,
         ok_on_conflict=True, ok_on_404=True,
@@ -83,23 +91,40 @@ def _format_item(item):
 
 
 def _build_block(captured):
-    """captured: list of (candidate_id, media_list). Returns prompt block str."""
+    """captured: list of (candidate_id, media_list, repost). Returns prompt block.
+
+    A section is emitted for any candidate that has media OR is a repost, so the
+    model is told about repost provenance even when the tweet carries no media.
+    """
     sections = []
-    for cid, media in captured:
-        if not media:
+    for cid, media, repost in captured:
+        is_repost = bool((repost or {}).get("is_repost"))
+        if not media and not is_repost:
             continue
-        lines = "\n".join(_format_item(it) for it in media)
-        sections.append(f"Candidate {cid}:\n{lines}")
+        body = []
+        if is_repost:
+            rb = ((repost or {}).get("reposted_by") or "").strip()
+            who = f"@{rb}" if rb else "another account"
+            body.append(
+                f"  - REPOST: this is a repost surfaced by {who}. The tweet text "
+                "and any media below were written by the ORIGINAL author, not the "
+                "reposter. Reply to the original author's content; do not address "
+                "the reposter."
+            )
+        if media:
+            body.extend(_format_item(it) for it in media)
+        sections.append(f"Candidate {cid}:\n" + "\n".join(body))
     if not sections:
         return ""
     header = (
         "## MEDIA IN THESE THREADS\n"
-        "Some candidate threads contain images, videos, GIFs, or link-cards. "
-        "This is part of the content you are replying to: react to what the tweet "
-        "VISUALLY shows, not just its text. A candidate NOT listed here had no "
-        "media (or capture was skipped); reply to its text as usual. Descriptions "
-        "marked [no description] mean the media had no alt-text, so infer from the "
-        "thread text and the media type."
+        "Some candidate threads contain images, videos, GIFs, link-cards, or are "
+        "reposts. This is part of the content you are replying to: react to what "
+        "the tweet VISUALLY shows, not just its text, and treat reposted content "
+        "as the original author's. A candidate NOT listed here had no media and is "
+        "not a repost (or capture was skipped); reply to its text as usual. "
+        "Descriptions marked [no description] mean the media had no alt-text, so "
+        "infer from the thread text and the media type."
     )
     return header + "\n\n" + "\n".join(sections) + "\n"
 
@@ -118,7 +143,7 @@ def main():
     if not pairs:
         # Nothing to do; emit empty block, exit clean so the shell continues.
         print("", end="")
-        print(json.dumps({"captured": 0, "persisted": 0, "with_media": 0}), file=sys.stderr)
+        print(json.dumps({"captured": 0, "persisted": 0, "with_media": 0, "reposts": 0}), file=sys.stderr)
         return
 
     # Lazy import so an empty/short-circuit run never pays the playwright cost.
@@ -133,21 +158,32 @@ def main():
         print(json.dumps({"error": "SCRAPE_FAILED", "detail": str(e)}), file=sys.stderr)
         return
 
-    # Map url -> media (results echo the input url verbatim as thread_url).
+    # Map url -> {media, repost} (results echo the input url verbatim as thread_url).
     by_url = {}
     for r in (batch or {}).get("results", []):
-        by_url[r.get("thread_url")] = r.get("media") or []
+        by_url[r.get("thread_url")] = {
+            "media": r.get("media") or [],
+            "repost": {
+                "is_repost": bool(r.get("is_repost", False)),
+                "reposted_by": r.get("reposted_by", "") or "",
+            },
+        }
 
-    captured = []          # (cid, media) for ALL pairs (media may be [])
+    captured = []          # (cid, media, repost) for ALL pairs (media may be [])
     persisted = 0
     with_media = 0
+    reposts = 0
     for cid, url in pairs:
-        media = by_url.get(url, [])
-        captured.append((cid, media))
+        rec = by_url.get(url) or {}
+        media = rec.get("media", [])
+        repost = rec.get("repost", {"is_repost": False, "reposted_by": ""})
+        captured.append((cid, media, repost))
         if media:
             with_media += 1
+        if repost.get("is_repost"):
+            reposts += 1
         if not args.no_persist:
-            ok, err = _persist(cid, media)
+            ok, err = _persist(cid, media, repost)
             if ok:
                 persisted += 1
             else:
@@ -161,6 +197,7 @@ def main():
         "captured": len(captured),
         "persisted": persisted,
         "with_media": with_media,
+        "reposts": reposts,
         "urls_visited": (batch or {}).get("urls_visited", 0),
     }), file=sys.stderr)
 
