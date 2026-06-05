@@ -184,13 +184,13 @@ window.__sapsPaintSidebar = function(payload){
     if(!root || !root.isConnected){
       root = mk("div", document.documentElement); root.id = ID;
       var s = root.style;
-      s.position="fixed"; s.top="0"; s.left="0"; s.height="100vh"; s.width="264px";
+      s.position="fixed"; s.top="0"; s.right="0"; s.height="100vh"; s.width="264px";
       s.zIndex="2147483646"; s.pointerEvents="auto"; s.boxSizing="border-box";
       s.padding="14px 12px"; s.overflowY="auto";
       s.background="rgba(15,15,17,0.96)"; s.color="#fff";
       s.font="13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
-      s.borderRight="1px solid rgba(255,255,255,0.12)";
-      s.boxShadow="2px 0 18px rgba(0,0,0,0.40)";
+      s.borderLeft="1px solid rgba(255,255,255,0.12)";
+      s.boxShadow="-2px 0 18px rgba(0,0,0,0.40)";
       s.backdropFilter="blur(6px)"; s.webkitBackdropFilter="blur(6px)";
       rebuilt = true;
     }
