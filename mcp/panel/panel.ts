@@ -79,6 +79,10 @@ const installCard = $("install-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
+const btnLive = $("btn-live") as HTMLButtonElement;
+const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
+const liveStatus = $("live-status");
+const liveImg = $("live-img") as HTMLImageElement;
 const configEditor = $("config-editor") as HTMLTextAreaElement;
 const configStatus = $("config-status");
 const btnConfigLoad = $("btn-config-load") as HTMLButtonElement;
@@ -487,6 +491,56 @@ btnConfigSave.addEventListener("click", () => busy(btnConfigSave, "Saving\u2026"
     configStatus.textContent = "Save failed: " + (e?.message || e);
   }
 }));
+
+// ---- live browser view ----------------------------------------------------
+// Polls the show_browser_to_user tool, which keeps a CDP screencast of the
+// active managed Chrome and returns the newest frame as a data: URL. We just
+// swap it into an <img> on a short interval — the screencast runs at ~30fps on
+// the server, the panel refresh rate is bounded by the tool round-trip.
+let liveTimer: ReturnType<typeof setInterval> | null = null;
+let liveTicking = false;
+
+async function liveTick() {
+  if (liveTicking) return; // don't stack calls if one round-trip is slow
+  liveTicking = true;
+  try {
+    const r = await call("show_browser_to_user", { action: "frame" });
+    if (!r.ok) {
+      liveStatus.textContent = r.message || "No active browser session.";
+      stopLive(false);
+      return;
+    }
+    if (r.frame) { liveImg.src = r.frame; liveImg.hidden = false; }
+    const where = r.title || r.url || (r.port ? "port " + r.port : "");
+    liveStatus.textContent = r.frame
+      ? "Watching" + (where ? ": " + where : "")
+      : "Connecting\u2026";
+  } catch (e: any) {
+    liveStatus.textContent = "Live view error: " + (e?.message || e);
+  } finally {
+    liveTicking = false;
+  }
+}
+
+function startLive() {
+  btnLive.hidden = true;
+  btnLiveStop.hidden = false;
+  liveStatus.textContent = "Attaching to the browser\u2026";
+  void liveTick();
+  liveTimer = setInterval(liveTick, 450);
+}
+
+function stopLive(tellServer = true) {
+  if (liveTimer != null) { clearInterval(liveTimer); liveTimer = null; }
+  btnLive.hidden = false;
+  btnLiveStop.hidden = true;
+  liveImg.hidden = true;
+  liveImg.removeAttribute("src");
+  if (tellServer) void call("show_browser_to_user", { action: "stop" }).catch(() => {});
+}
+
+btnLive.addEventListener("click", startLive);
+btnLiveStop.addEventListener("click", () => { stopLive(true); liveStatus.textContent = ""; });
 
 btnRefresh.addEventListener("click", () => busy(btnRefresh, "Refreshing\u2026", refresh));
 
