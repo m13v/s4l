@@ -64,6 +64,58 @@ export async function xConnect(source?: string): Promise<XAuthResult> {
   return parse(res.stdout, res.stderr, res.code);
 }
 
+// ---------------------------------------------------------------------------
+// Profile scan: build a "grounding truth" corpus from the connected account.
+// ---------------------------------------------------------------------------
+// Runs right after connect_x detects the @handle. Reuses the SAME authenticated
+// managed-Chrome session to read the user's bio + recent posts + recent replies,
+// so the setup conversation can draft voice/icp/topics in the user's own register
+// instead of generic marketing copy. Read-only: never posts, clicks, or writes.
+export interface XProfileScan {
+  ok: boolean;
+  state: string; // scanned | browser_not_running | no_handle | error
+  handle?: string;
+  profile?: {
+    name?: string;
+    bio?: string;
+    location?: string;
+    url?: string;
+    join?: string;
+    followers?: string;
+    following?: string;
+    pinned?: string;
+  };
+  posts?: Array<{ text: string; url?: string; id?: string; likes?: number }>;
+  comments?: Array<{ text: string; url?: string; id?: string; reply_to?: string }>;
+  counts?: { posts: number; comments: number };
+  grounding_instructions?: string;
+  error?: string;
+}
+
+export async function xScanProfile(opts?: {
+  handle?: string;
+  posts?: number;
+  comments?: number;
+}): Promise<XProfileScan> {
+  const args: string[] = [];
+  if (opts?.handle) args.push("--handle", opts.handle);
+  args.push("--posts", String(opts?.posts ?? 20));
+  args.push("--comments", String(opts?.comments ?? 50));
+  // The scan scrolls two timelines; give it room but keep it bounded.
+  const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 180_000 });
+  try {
+    return JSON.parse(res.stdout.trim().split("\n").slice(-1).join("\n")) as XProfileScan;
+  } catch {
+    return {
+      ok: false,
+      state: "error",
+      error:
+        `scan_x_profile.py produced no parseable JSON (exit ${res.code}).\n` +
+        (res.stderr || res.stdout).split("\n").slice(-8).join("\n"),
+    };
+  }
+}
+
 // A browser/profile the X session can be imported from (for the panel dropdown).
 export interface XSource {
   spec: string;        // e.g. "chrome:Profile 1"
