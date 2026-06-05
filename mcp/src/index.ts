@@ -1597,7 +1597,10 @@ appTool(
       "action (draft_cycle, post_drafts, autopilot enable/disable, get_stats) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
-    outputSchema: { snapshot: z.string() },
+    // fallback_url is set only when the host can't render the ui:// resource and
+    // we open the dashboard via the loopback HTTP server instead. Declared
+    // optional so the SDK's strict output-schema check accepts both shapes.
+    outputSchema: { snapshot: z.string(), fallback_url: z.string().optional() },
     _meta: { ui: { resourceUri: PANEL_URI } },
   },
   async () => {
