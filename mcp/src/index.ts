@@ -51,8 +51,10 @@ import {
   registerAppTool,
   registerAppResource,
   RESOURCE_MIME_TYPE,
+  getUiCapability,
 } from "@modelcontextprotocol/ext-apps/server";
 import { fileURLToPath } from "node:url";
+import http from "node:http";
 
 // MCP Apps control panel. The self-contained HTML is built by vite
 // (vite-plugin-singlefile) into dist/panel.html alongside this compiled file.
@@ -192,6 +194,32 @@ const server = new McpServer(
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
 );
+
+// ---------------------------------------------------------------------------
+// Tool dispatch capture.
+//
+// Every tool's handler is recorded in TOOL_HANDLERS at registration time so the
+// localhost dashboard-fallback HTTP server (startLocalPanel) can replay the
+// EXACT same handler when the host can't render the ui:// resource inline. This
+// is the no-duplication guarantee on the backend: there is one set of handlers,
+// reached either through MCP (callServerTool over the host bridge) or through
+// the loopback HTTP server (fetch from the same panel.html). The wrappers below
+// `tool()` / `appTool()` are drop-in replacements for server.registerTool /
+// registerAppTool that additionally stash the callback by name.
+// ---------------------------------------------------------------------------
+type ToolHandler = (args: any, extra?: any) => Promise<any> | any;
+const TOOL_HANDLERS: Record<string, ToolHandler> = {};
+// Bound before any replace so the pattern `tool(` only matches
+// real call sites, not this wrapper (which would otherwise self-recurse).
+const baseRegisterTool = server.registerTool.bind(server);
+function tool(name: string, config: any, cb: ToolHandler) {
+  TOOL_HANDLERS[name] = cb;
+  return (baseRegisterTool as any)(name, config, cb);
+}
+function appTool(name: string, config: any, cb: ToolHandler) {
+  TOOL_HANDLERS[name] = cb;
+  return registerAppTool(server as any, name, config as any, cb as any);
+}
 
 function jsonContent(obj: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] };
@@ -522,7 +550,7 @@ server.registerPrompt(
 // across several calls — readiness is derived from config.json, never a stored
 // flag. Call with status:true (or just no name) to list every project this
 // install manages and what each still needs.
-server.registerTool(
+tool(
   "setup",
   {
     title: "Set up a project",
@@ -841,7 +869,7 @@ server.registerTool(
 // Posting is a SEPARATE step (post_drafts) so the user picks by number in chat.
 // This host doesn't support elicitation, so there is no in-tool form: the model
 // relays the table and asks which to post / edit, then calls post_drafts.
-server.registerTool(
+tool(
   "draft_cycle",
   {
     title: "Draft an X reply cycle",
@@ -954,7 +982,7 @@ server.registerTool(
 // Second half of the manual loop. The user reviewed the table from draft_cycle
 // and said which numbers to post / edit; this posts exactly those. Editing a
 // draft implies posting it. Indices are 1-based, matching the table.
-server.registerTool(
+tool(
   "post_drafts",
   {
     title: "Post chosen drafts",
@@ -1046,7 +1074,7 @@ server.registerTool(
 );
 
 // ---- autopilot: one tool, three actions -----------------------------------
-server.registerTool(
+tool(
   "autopilot",
   {
     title: "X autopilot",
@@ -1150,7 +1178,7 @@ server.registerTool(
 );
 
 // ---- get_stats: read-only -------------------------------------------------
-server.registerTool(
+tool(
   "get_stats",
   {
     title: "Get X/Twitter stats",
@@ -1185,7 +1213,7 @@ server.registerTool(
 );
 
 // ---- version: report installed version + deliver updates on demand ---------
-server.registerTool(
+tool(
   "version",
   {
     title: "Version & updates",
@@ -1262,7 +1290,7 @@ function runtimeSnapshot() {
   };
 }
 
-server.registerTool(
+tool(
   "install_runtime",
   {
     title: "Install the Python runtime",
@@ -1288,7 +1316,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+tool(
   "install_status",
   {
     title: "Runtime install status",
@@ -1305,7 +1333,7 @@ server.registerTool(
 // The panel renders the full config and lets the user edit it. Writing is
 // guarded: the new content must parse as JSON, and we always drop a timestamped
 // backup next to config.json before overwriting, so a bad paste is recoverable.
-server.registerTool(
+tool(
   "config",
   {
     title: "View or edit config.json",
