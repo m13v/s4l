@@ -70,9 +70,6 @@ const stApSub = $("st-ap-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
 const apToggle = $("ap-checkbox") as HTMLInputElement;
-const btnX = $("btn-connectx") as HTMLButtonElement;
-const xSourceSel = $("x-source") as HTMLSelectElement;
-const btnRefresh = $("btn-refresh") as HTMLButtonElement;
 const statsGrid = $("stats-grid");
 const logEl = $("log");
 const installCard = $("install-card");
@@ -91,8 +88,8 @@ const btnConfigSave = $("btn-config-save") as HTMLButtonElement;
 const btnConfigCancel = $("btn-config-cancel") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
-let xConfirmPending = false; // two-step connect-X (explain -> confirm)
 let installPolling = false; // guard against overlapping poll loops
+let updating = false; // guard against double-firing the in-header update button
 let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
 
 function log(msg: string) { logEl.textContent = msg; }
@@ -125,9 +122,11 @@ function renderInstallProgress(p: InstallProgress | null) {
 
 function render() {
   if (!state) return;
-  // Version + update badge.
+  // Version + update button. When an update is available the badge is an actual
+  // button that installs the latest release (delegated click on verEl, since the
+  // button is recreated on every render).
   verEl.innerHTML = state.update_available && state.latest_version
-    ? `v${state.version} \u00b7 <span class="update">update to ${state.latest_version}</span>`
+    ? `v${state.version} \u00b7 <button id="btn-update" class="update-btn">Update to ${state.latest_version}</button>`
     : `v${state.version}`;
 
   // Runtime install gate: until the owned Python/Chromium runtime exists, the
@@ -152,11 +151,6 @@ function render() {
   stXSub.textContent = state.x_connected
     ? (handle || state.x_state || "")
     : (state.x_state || "");
-  btnX.hidden = state.x_connected;
-  // The import-source dropdown only makes sense while X is disconnected and the
-  // detection actually found browsers (xSourceSel gets options in populateXSources).
-  xSourceSel.hidden = state.x_connected || xSourceSel.options.length === 0;
-  if (!xConfirmPending) btnX.textContent = "Connect X";
 
   // Autopilot. Rendered as an on/off switch in the status card rather than a
   // button — checked == hands-free posting is live.
@@ -172,7 +166,6 @@ function render() {
   btnSetup.disabled = needsRuntime;
   btnDraft.disabled = needsRuntime || !hasReady;
   apToggle.disabled = needsRuntime || !hasReady;
-  btnX.disabled = needsRuntime;
   // When nothing is configured yet, Set up is the obvious next action, so
   // promote it to the primary (filled) style and demote draft (which is
   // disabled anyway). Once a project is ready, draft regains the emphasis. While
