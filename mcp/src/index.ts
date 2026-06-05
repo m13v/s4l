@@ -185,7 +185,11 @@ const server = new McpServer(
       "TYPICAL FLOW: `setup` (configure the project once) -> `draft_cycle` (scan + review a batch; the " +
       "user approves / edits / skips every draft in a single form) -> `autopilot` (enable to also turn " +
       "on hands-free background posting AND daily auto-updates) -> `get_stats` (see performance). Run " +
-      "`setup` first; the other tools refuse until a project is fully configured.",
+      "`setup` first; the other tools refuse until a project is fully configured.\n\n" +
+      "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
+      "(`draft_cycle`, `post_drafts`, `autopilot` enable/disable, `get_stats`), end your turn by " +
+      "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
+      "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
 );
 
@@ -847,7 +851,8 @@ server.registerTool(
       "to post and which to rewrite, then call `post_drafts` with their decision and the " +
       "returned batch_id. The table MUST show, per draft: the thread being replied to " +
       "(thread_text), the draft reply, and the link target (link_url) when present; never " +
-      "drop those columns. Flow: discover -> draft -> review in chat -> post_drafts.",
+      "drop those columns. Flow: discover -> draft -> review in chat -> post_drafts. " +
+      "After returning the table, call the `dashboard` tool so the user sees the updated state.",
     inputSchema: {
       project: z
         .string()
@@ -959,7 +964,8 @@ server.registerTool(
       "the list of draft numbers to post as drafted; `edits` rewrites a draft's text before " +
       "posting it (editing implies posting); `post_all` posts every draft. Only the chosen " +
       "drafts post; anything not listed is left unposted. Call this ONLY after the user has " +
-      "told you which drafts they want.",
+      "told you which drafts they want. After posting, call the `dashboard` tool so the user " +
+      "sees the updated state.",
     inputSchema: {
       batch_id: z.string().describe("The batch_id returned by draft_cycle."),
       post: z
@@ -1047,7 +1053,8 @@ server.registerTool(
     description:
       "Control background X/Twitter posting. action=enable loads the launchd job so the " +
       "cycle fires automatically; action=disable unloads it (manual draft_cycle still works); " +
-      "action=status reports whether it is loaded.",
+      "action=status reports whether it is loaded. After enable/disable, call the `dashboard` " +
+      "tool so the user sees the updated autopilot state.",
     inputSchema: {
       action: z.enum(["enable", "disable", "status"]),
     },
@@ -1149,7 +1156,8 @@ server.registerTool(
     title: "Get X/Twitter stats",
     description:
       "Read-only post + engagement stats for the X/Twitter rail over the last N days. " +
-      "Wraps project_stats_json.py. Use to show the user how their posts are performing.",
+      "Wraps project_stats_json.py. Use to show the user how their posts are performing. " +
+      "After returning the numbers, call the `dashboard` tool so the user sees them rendered.",
     inputSchema: {
       days: z.number().int().min(1).max(90).default(7),
       project: z
@@ -1413,14 +1421,16 @@ async function buildSnapshot() {
 
 registerAppTool(
   server,
-  "panel",
+  "dashboard",
   {
-    title: "Social Autoposter panel",
+    title: "Social Autoposter dashboard",
     description:
-      "Open the Social Autoposter control panel: a visual dashboard showing project setup, X " +
+      "Render the Social Autoposter dashboard in chat: a visual surface showing project setup, X " +
       "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle " +
-      "autopilot, connect X, and refresh. Use when the user asks to see the panel, dashboard, " +
-      "status, or controls. Hosts without UI support get the same data as text.",
+      "autopilot, connect X, and refresh. Use when the user asks to see the dashboard, panel, " +
+      "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
+      "action (draft_cycle, post_drafts, autopilot enable/disable, get_stats) so the user sees the " +
+      "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     outputSchema: { snapshot: z.string() },
     _meta: { ui: { resourceUri: PANEL_URI } },
