@@ -14,7 +14,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { screencast } from "./screencast.js";
+import { screencast, bringBrowserToFront } from "./screencast.js";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -1662,10 +1662,11 @@ tool(
       "is doing in the browser right now). Attaches a CDP screencast to the active " +
       "browser session and returns the newest frame as a data: image. Actions: " +
       "'start' begins the screencast, 'frame' returns the latest frame (poll this on " +
-      "a short interval to animate), 'stop' ends it. Use when the user asks to see / " +
-      "watch the browser, or to show what's happening on screen during a cycle.",
+      "a short interval to animate), 'stop' ends it, 'front' raises the real browser " +
+      "window above everything else so the user can interact with it directly. Use when " +
+      "the user asks to see / watch the browser, or to bring the browser to the front.",
     inputSchema: {
-      action: z.enum(["start", "frame", "stop"]).optional(),
+      action: z.enum(["start", "frame", "stop", "front"]).optional(),
       port: z.number().int().optional().describe("CDP debugging port to attach to; auto-detected if omitted."),
     },
   },
@@ -1674,6 +1675,17 @@ tool(
     if (action === "stop") {
       screencast.stop();
       return jsonContent({ ok: true, running: false });
+    }
+    if (action === "front") {
+      const res = await bringBrowserToFront(typeof args?.port === "number" ? args.port : undefined);
+      if (!res.ok) {
+        const message =
+          res.error === "no_browser"
+            ? "No managed Chrome is running right now, so there's nothing to bring to the front. Start a draft cycle or autopilot first."
+            : "Couldn't bring the browser to the front: " + String(res.error);
+        return jsonContent({ ok: false, brought_to_front: false, message });
+      }
+      return jsonContent({ ok: true, brought_to_front: true, port: res.port });
     }
     const ensured = await screencast.ensure(typeof args?.port === "number" ? args.port : undefined);
     if (!ensured.ok) {
