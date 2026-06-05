@@ -192,24 +192,57 @@ _acquire_linkedin_pipeline_lock() {
         return 0
     fi
     local _who="${SAPS_PIPELINE_NAME:-$(basename "${0:-linkedin-pipeline}")}"
+    # WAIT, don't bail. Aligned 2026-06-04 with Twitter's skill/lock.sh::acquire_lock
+    # so an overlapping LinkedIn fire (e.g. stats-linkedin's :23 slot landing on
+    # top of run-linkedin's :14 post still finishing) queues for the 9556 Chrome
+    # instead of `exit 0`-skipping. Previously the live-holder branch bailed, which
+    # systematically starved stats-linkedin every time its slot collided with the
+    # ~9min post pipeline, so comment-stats never refreshed. Bounded by a timeout
+    # (default 1h) and a 3h lock-age safety net, matching lock.sh.
+    local _waited=0
+    local _timeout="${SAPS_LINKEDIN_PIPELINE_LOCK_TIMEOUT:-3600}"
+    local _logged_wait=false
     while : ; do
         if mkdir "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null; then
             echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
             echo "$_who" > "$_LI_PIPELINE_LOCK_DIR/holder"
             export _LI_PIPELINE_LOCK_HELD=1
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$)" >&2
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$) waited=${_waited}s" >&2
             return 0
         fi
         local _h_pid _h_who
         _h_pid="$(cat "$_LI_PIPELINE_LOCK_DIR/pid" 2>/dev/null || echo "")"
         _h_who="$(cat "$_LI_PIPELINE_LOCK_DIR/holder" 2>/dev/null || echo "?")"
+        # Reclaim a stale lock left by a dead holder (no release trap by design).
         if [ -z "$_h_pid" ] || ! kill -0 "$_h_pid" 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
             rm -rf "$_LI_PIPELINE_LOCK_DIR"
             continue
         fi
-        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} exiting this fire to avoid two drivers on the 9556 Chrome" >&2
-        exit 0
+        # Safety net: reclaim any lock older than 3h regardless of holder liveness.
+        # watchdog_hung_runs.py SIGTERMs a hung holder long before this fires;
+        # mirrors the 10800s ceiling in lock.sh::acquire_lock.
+        if [ -d "$_LI_PIPELINE_LOCK_DIR" ]; then
+            local _lock_age
+            _lock_age=$(( $(date +%s) - $(stat -f %m "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null || stat -c %Y "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null || date +%s) ))
+            if [ "$_lock_age" -gt 10800 ]; then
+                echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: removing lock older than 3h (age ${_lock_age}s, holder ${_h_who})" >&2
+                rm -rf "$_LI_PIPELINE_LOCK_DIR"
+                continue
+            fi
+        fi
+        # Timed out waiting -> skip this fire (launchd will re-fire next slot).
+        if [ "$_waited" -ge "$_timeout" ]; then
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: still held by ${_h_who} (pid ${_h_pid}) after $((_timeout/60))min; ${_who} skipping this fire" >&2
+            exit 0
+        fi
+        # Surface the holder once when we first start waiting.
+        if [ "$_logged_wait" = "false" ]; then
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} waiting (timeout $((_timeout/60))min)..." >&2
+            _logged_wait=true
+        fi
+        sleep 2
+        _waited=$((_waited + 2))
     done
 }
 
