@@ -81,10 +81,15 @@ _SIDECAR = (
     / "twitter-scan-attempts.jsonl"
 )
 
-# Byte-identical to skill/run-twitter-cycle.sh:666-708. Kept verbatim so
+# Derived from skill/run-twitter-cycle.sh:666-708 (the legacy inline scan JS).
 # twitter_candidates fields (handle, text, tweetUrl, datetime, engagement
 # counters) land in the same shape the scorer and dashboard already consume.
-# Re-derive nothing here; if the legacy JS gets updated, mirror it here.
+# 2026-06-04 DIVERGENCE: this copy adds repost awareness on top of the legacy
+# JS — `handle` is now taken from the status URL (authoritative original author,
+# since on a repost the first profile link is the REPOSTER), plus `is_repost`
+# and `reposted_by` from the "<X> reposted" socialContext banner. This is the
+# live data path (the cycle reads SCAN_TWEETS_FILE written here); the locked
+# shell's inline JS is the inert fallback and simply omits the two new fields.
 _SCRAPE_JS = r"""
 (() => {
   const SNOWFLAKE = /\/status\/(\d{15,19})(?:[\/?#]|$)/;
@@ -108,6 +113,23 @@ _SCRAPE_JS = r"""
       const sm = tweetUrl.match(SNOWFLAKE);
       if (!sm || FAKE_TAIL.test(sm[1])) continue;
       if (!datetime || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(datetime)) continue;
+      // Author = first path segment of the status URL. This is authoritative:
+      // on a repost the displayed/first-link handle above is the REPOSTER, not
+      // the original author, so prefer the URL author and keep the link-scan
+      // handle only as a fallback when the URL can't be parsed.
+      const authorM = tweetUrl.match(/x\.com\/([^\/]+)\/status\//);
+      if (authorM && authorM[1]) handle = authorM[1];
+      // Repost detection: a "<X> reposted" banner lives in socialContext. The
+      // SAME testid is reused for "Pinned", so match the text, not presence.
+      // reposted_by = the account whose profile link wraps the banner.
+      let is_repost = false, reposted_by = '';
+      const sc = article.querySelector('[data-testid="socialContext"]');
+      if (sc && /\breposted\b/i.test(sc.textContent || '')) {
+        is_repost = true;
+        const a = sc.closest('a');
+        const rh = a ? (a.getAttribute('href') || '') : '';
+        if (rh.startsWith('/') && rh.split('/').length === 2) reposted_by = rh.replace('/', '');
+      }
       let replies=0, retweets=0, likes=0, views=0, bookmarks=0;
       for (const btn of article.querySelectorAll('[role="group"] button')) {
         const al = btn.getAttribute('aria-label') || '';
@@ -118,7 +140,7 @@ _SCRAPE_JS = r"""
         if (m=al.match(/([\d,]+)\s*view/i)) views=parseInt(m[1].replace(/,/g,''));
         if (m=al.match(/([\d,]+)\s*bookmark/i)) bookmarks=parseInt(m[1].replace(/,/g,''));
       }
-      results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks});
+      results.push({handle, text, tweetUrl, datetime, replies, retweets, likes, views, bookmarks, is_repost, reposted_by});
     } catch(e) {}
   }
   return results;
