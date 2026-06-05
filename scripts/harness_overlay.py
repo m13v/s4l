@@ -40,6 +40,7 @@ import glob
 import json
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -338,36 +339,63 @@ def cmd_clear() -> int:
 
 def cmd_watch(interval: float = 2.0) -> int:
     """Continuously stream the live cycle status into the overlay. Self-healing:
-    reconnects when the harness Chrome comes and goes; never raises."""
+    holds ONE CDP connection open across ticks (light, and friendly to the
+    poster's concurrent CDP session) and only reconnects when the harness Chrome
+    comes/goes. Never raises into the pipeline."""
     print(f"watching {LOG_DIR}/twitter-cycle-*.log -> overlay on {CDP_URL} (Ctrl-C to stop)")
+    # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
+    # cleared on the way out instead of lingering until the next navigation.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     last_status = None
-    while True:
-        try:
+    h: Harness | None = None
+    registered = False
+    try:
+        while True:
             status = _current_status()
-            with Harness() as h:
-                # Re-register init on every (re)connect so fresh tabs are covered.
-                h.register_init(TITLE, REASSURE, status)
-                # Keep painting even when text is unchanged: the timestamp reset
-                # keeps the heartbeat fresh so the dot never looks dead.
-                h.paint(TITLE, REASSURE, status)
+            try:
+                if h is None:
+                    h = Harness().__enter__()
+                    registered = False
+                if not registered:
+                    # Re-register init on each (re)connect so fresh tabs inherit it.
+                    h.register_init(TITLE, REASSURE, status)
+                    registered = True
+                # Repaint every tick even when text is unchanged: the timestamp
+                # reset keeps the heartbeat fresh so the dot never looks dead.
+                if h.paint(TITLE, REASSURE, status) == 0:
+                    # No live page (all tabs closed/navigating) -> drop & retry.
+                    raise RuntimeError("no live page")
+            except Exception:
+                # Harness down or transient CDP hiccup; tear down and retry next tick.
+                if h is not None:
+                    try:
+                        h.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    h = None
+                registered = False
             if status != last_status:
                 print(f"[{time.strftime('%H:%M:%S')}] {status}")
                 last_status = status
-        except KeyboardInterrupt:
-            print("\nstopping watch; clearing overlay")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nstopping watch; clearing overlay")
+    finally:
+        if h is not None:
+            try:
+                h.clear()
+            except Exception:
+                pass
+            try:
+                h.__exit__(None, None, None)
+            except Exception:
+                pass
+        else:
             try:
                 cmd_clear()
             except Exception:
                 pass
-            return 0
-        except Exception:
-            # Harness down or transient CDP hiccup; back off and retry.
-            pass
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            cmd_clear()
-            return 0
+    return 0
 
 
 def main(argv: list[str]) -> int:
