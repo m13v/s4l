@@ -705,6 +705,22 @@ function generatePlists() {
       stdoutLog: `${DEST}/skill/logs/launchd-self-update-stdout.log`,
       stderrLog: `${DEST}/skill/logs/launchd-self-update-stderr.log`,
     },
+    {
+      // On-screen overlay watcher supervisor. The overlay (harness status banner
+      // + interactive draft sidebar) only renders WHILE harness_overlay.py watch
+      // runs. The supervisor is idempotent (pgrep guard), so a 60s StartInterval
+      // is a no-op while the watcher is up and re-spawns it within a minute if it
+      // ever dies. RunAtLoad starts it right after install. This is what makes the
+      // overlay appear on headless / remote installs (Lane A); the MCP covers the
+      // pure-.mcpb lane by calling the same script on draft_cycle / autopilot.
+      file: 'com.m13v.social-overlay-watch.plist',
+      label: 'com.m13v.social-overlay-watch',
+      script: `${DEST}/skill/run-overlay-watch.sh`,
+      interval: 60,
+      runAtLoad: true,
+      stdoutLog: `${DEST}/skill/logs/launchd-overlay-watch-stdout.log`,
+      stderrLog: `${DEST}/skill/logs/launchd-overlay-watch-stderr.log`,
+    },
   ];
 
   const driver = scheduler.driverFor();
