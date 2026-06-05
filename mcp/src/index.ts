@@ -574,7 +574,7 @@ tool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["connect_x", "detect_x_sources", "profile_scan", "reseed_queries"])
+        .enum(["connect_x", "detect_x_sources", "profile_scan"])
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
@@ -585,10 +585,7 @@ tool(
             "profile_scan = AFTER connect_x, read the connected account's bio + recent posts + recent " +
             "replies to build a 'grounding truth' corpus. Use it to draft voice/icp/search_topics in " +
             "the USER'S OWN register (their phrases, vibe, profession), then confirm with the user " +
-            "before calling setup to save. Returns {profile, posts, comments, grounding_instructions}. " +
-            "reseed_queries = (re-)expand an EXISTING project's search topics into ~30 real X search " +
-            "queries and return them. Use for projects configured before query-expansion existed, or " +
-            "to refresh the query bank. Requires name. Returns the resulting query list."
+            "before calling setup to save. Returns {profile, posts, comments, grounding_instructions}."
         ),
       confirm: z
         .boolean()
@@ -735,75 +732,6 @@ tool(
           "('here's the voice/topics I picked up, sound like you?'), then call setup with the " +
           "confirmed name/voice/icp/differentiator/search_topics/content_guardrails to save.",
       });
-    }
-
-    // ---- Reseed search queries: (re-)expand an existing project's topics ----
-    // For projects configured before query-expansion shipped (their topics live
-    // in the DB but the seed-query bank is empty, so the cycle cold-starts on one
-    // crude query), or to refresh the bank on demand. Idempotent: the seeder
-    // dedups against what's already there. Returns the resulting queries so the
-    // agent can show the user exactly what the cycle will fan out over.
-    if (args.action === "reseed_queries") {
-      if (!args.name) {
-        return jsonContent({
-          action: "reseed_queries",
-          error: "name is required — tell me which configured project to reseed.",
-        });
-      }
-      try {
-        const qseed = await runPython(
-          "scripts/seed_search_queries.py",
-          ["--project", args.name, "--supply-test", "auto", "--emit-json"],
-          { timeoutMs: 600_000 }
-        );
-        const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
-        let queries: Array<{ query: string; topic: string }> = [];
-        const jm = qseed.stdout.split("===QUERIES_JSON===")[1];
-        if (jm) {
-          try {
-            queries = (JSON.parse(jm.trim()).queries ?? []) as typeof queries;
-          } catch {
-            /* leave queries empty; count note below still informs the user */
-          }
-        }
-        if (qseed.code !== 0 && queries.length === 0) {
-          const qtail =
-            (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] ||
-            "unknown error";
-          return jsonContent({
-            action: "reseed_queries",
-            project: args.name,
-            ok: false,
-            error: qtail,
-            note:
-              `Couldn't expand search queries for '${args.name}' — ${qtail}. ` +
-              `Common causes: the project has no search topics seeded yet (run setup with name='${args.name}' ` +
-              `and its search_topics first), or X/Claude wasn't reachable. The cycle still runs off the seeded topics.`,
-          });
-        }
-        return jsonContent({
-          action: "reseed_queries",
-          project: args.name,
-          ok: true,
-          seeded: qm ? Number(qm[1]) : queries.length,
-          inserted: qm ? Number(qm[2]) : undefined,
-          updated: qm ? Number(qm[3]) : undefined,
-          query_count: queries.length,
-          queries,
-          note:
-            `Expanded '${args.name}' into ${queries.length} active search quer` +
-            `${queries.length === 1 ? "y" : "ies"}. The cycle now fans out over these instead of ` +
-            `running a single query. Show the user the list so they can confirm they look on-target; ` +
-            `re-run this anytime to refresh, or run draft_cycle to use them.`,
-        });
-      } catch (e) {
-        return jsonContent({
-          action: "reseed_queries",
-          project: args.name,
-          ok: false,
-          error: (e as Error).message,
-        });
-      }
     }
 
     // Status / discovery mode: no project name supplied, or explicitly asked.
