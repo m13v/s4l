@@ -1647,7 +1647,13 @@ appTool(
 // travel back through the normal tool-result channel as a data: URL (which the
 // default panel CSP already permits), so this needs no CSP widening and no
 // direct network access from the iframe. The panel polls action:"frame".
-appTool(
+//
+// This is a PLAIN tool (not appTool): it renders nothing of its own, it only
+// feeds frames into the existing `dashboard` panel via callServerTool. Registering
+// it as an app-tool requires a `_meta.ui.resourceUri`; without one,
+// registerAppTool throws "Cannot read properties of undefined (reading 'ui')" at
+// startup and the whole server fails to connect. So keep it a regular tool.
+tool(
   "show_browser_to_user",
   {
     title: "Show browser to user",
