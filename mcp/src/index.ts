@@ -1591,11 +1591,17 @@ appTool(
       structuredContent: { snapshot: JSON.stringify(snap) },
     };
     // If the host can render MCP Apps UI inline, the _meta.ui.resourceUri above
-    // makes it paint the panel; just return the snapshot. If it CAN'T (Claude
-    // Code / Cowork today), fall back to serving the identical panel.html from a
-    // loopback HTTP server and opening it in the browser, so the user still gets
-    // the visual surface instead of a wall of text.
-    if (hostRendersAppUi()) return base;
+    // makes it paint the panel. Don't ALSO emit the human text line: the host
+    // shows tool-result content next to the rendered panel, so returning `human`
+    // here duplicates the dashboard as an annoying text "fallback" beside it.
+    // Keep the snapshot in structuredContent (the model still reads it) and emit
+    // no text content so the chat shows ONLY the panel.
+    if (hostRendersAppUi()) {
+      return { content: [], structuredContent: { snapshot: JSON.stringify(snap) } };
+    }
+    // Host CAN'T render inline (Claude Code / Cowork today): serve the identical
+    // panel.html from a loopback HTTP server and open it in the browser, so the
+    // user still gets the visual surface instead of a wall of text.
     try {
       const url = await startLocalPanel();
       await openInBrowser(url);
