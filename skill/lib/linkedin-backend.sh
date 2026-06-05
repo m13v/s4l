@@ -198,16 +198,35 @@ _acquire_linkedin_pipeline_lock() {
     # instead of `exit 0`-skipping. Previously the live-holder branch bailed, which
     # systematically starved stats-linkedin every time its slot collided with the
     # ~9min post pipeline, so comment-stats never refreshed. Bounded by a timeout
-    # (default 1h) and a 3h lock-age safety net, matching lock.sh.
+    # (default ~100min, > run-linkedin's 120min hold is impossible to fully cover
+    # but covers the common case) and a 3h lock-age safety net, matching lock.sh.
+    #
+    # LOCK ORDERING (added 2026-06-05): every LinkedIn top-level script acquires
+    # the linkedin-browser lock (skill/lock.sh) BEFORE calling
+    # ensure_linkedin_browser_for_backend, which calls us. If we blocked on the
+    # pipeline lock while still holding the browser lock, we'd deadlock the
+    # current pipeline-lock holder (run-linkedin re-acquires the browser lock
+    # every phase). Observed live 2026-06-05 00:23-01:09: stats held the browser
+    # lock, waited 46min on the pipeline lock, stalled run-linkedin, and was
+    # SIGTERMed by the watchdog. Fix: drop the browser lock before waiting and
+    # re-take it once we own the (outermost) pipeline lock, enforcing a global
+    # pipeline->browser acquisition order with no cycle.
     local _waited=0
-    local _timeout="${SAPS_LINKEDIN_PIPELINE_LOCK_TIMEOUT:-3600}"
+    local _timeout="${SAPS_LINKEDIN_PIPELINE_LOCK_TIMEOUT:-6000}"
     local _logged_wait=false
+    local _released_browser=false
+    local _br_lock_dir="/tmp/social-autoposter-linkedin-browser.lock"
     while : ; do
         if mkdir "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null; then
             echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
             echo "$_who" > "$_LI_PIPELINE_LOCK_DIR/holder"
             export _LI_PIPELINE_LOCK_HELD=1
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$) waited=${_waited}s" >&2
+            # Re-take the browser lock we dropped to avoid the ordering deadlock.
+            if [ "$_released_browser" = "true" ] && command -v acquire_lock >/dev/null 2>&1; then
+                echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: re-acquiring linkedin-browser after pipeline-lock wait" >&2
+                acquire_lock "linkedin-browser" 3600
+            fi
             return 0
         fi
         local _h_pid _h_who
@@ -236,10 +255,21 @@ _acquire_linkedin_pipeline_lock() {
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: still held by ${_h_who} (pid ${_h_pid}) after $((_timeout/60))min; ${_who} skipping this fire" >&2
             exit 0
         fi
-        # Surface the holder once when we first start waiting.
+        # Surface the holder once when we first start waiting, and drop the
+        # browser lock once so we don't hold it across the wait (deadlock fix).
         if [ "$_logged_wait" = "false" ]; then
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} waiting (timeout $((_timeout/60))min)..." >&2
             _logged_wait=true
+            # Only release if THIS process holds the browser lock (pid file == $$).
+            if [ "$_released_browser" = "false" ] && [ -f "$_br_lock_dir/pid" ]; then
+                local _br_pid
+                _br_pid="$(cat "$_br_lock_dir/pid" 2>/dev/null || echo "")"
+                if [ "$_br_pid" = "$$" ] && command -v release_lock >/dev/null 2>&1; then
+                    echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: dropping linkedin-browser while waiting (avoid ordering deadlock)" >&2
+                    release_lock "linkedin-browser"
+                    _released_browser=true
+                fi
+            fi
         fi
         sleep 2
         _waited=$((_waited + 2))
