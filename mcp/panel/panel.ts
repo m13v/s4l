@@ -8,13 +8,13 @@
  * structuredContent snapshot; Refresh re-reads via setup(status) + autopilot.
  */
 import {
-  App,
   applyDocumentTheme,
   applyHostFonts,
   applyHostStyleVariables,
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createBridge } from "./bridge";
 import "./panel.css";
 
 interface ProjStatus { name: string; ready: boolean; missing_required: string[] }
@@ -71,6 +71,7 @@ const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
 const btnAuto = $("btn-autopilot") as HTMLButtonElement;
 const btnX = $("btn-connectx") as HTMLButtonElement;
+const xSourceSel = $("x-source") as HTMLSelectElement;
 const btnRefresh = $("btn-refresh") as HTMLButtonElement;
 const statsGrid = $("stats-grid");
 const logEl = $("log");
@@ -147,6 +148,9 @@ function render() {
     ? (handle || state.x_state || "")
     : (state.x_state || "");
   btnX.hidden = state.x_connected;
+  // The import-source dropdown only makes sense while X is disconnected and the
+  // detection actually found browsers (xSourceSel gets options in populateXSources).
+  xSourceSel.hidden = state.x_connected || xSourceSel.options.length === 0;
   if (!xConfirmPending) btnX.textContent = "Connect X";
 
   // Autopilot.
@@ -193,7 +197,9 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
 }
 
 // ---- App wiring -----------------------------------------------------------
-const app = new App({ name: "Social Autoposter Panel", version: "1.0.0" });
+// Picks the MCP Apps bridge (inline render) or the HTTP bridge (localhost
+// fallback) based on the flag the loopback server injects. Same code either way.
+const app = createBridge();
 
 function applyHostContext(ctx: McpUiHostContext) {
   if (ctx.theme) applyDocumentTheme(ctx.theme);
@@ -211,6 +217,7 @@ app.ontoolresult = (result) => {
     if (data.runtime_ready) {
       // Stats need the runtime; load them once it's confirmed ready.
       void loadStats();
+      if (!data.x_connected) void populateXSources();
     } else if (data.runtime_provisioning) {
       // An install is already underway (another surface / prior open) — resume
       // following it without waiting for a click.
@@ -222,6 +229,33 @@ app.ontoolresult = (result) => {
 async function call(name: string, args: Record<string, unknown> = {}): Promise<any> {
   const res = await app.callServerTool({ name, arguments: args });
   return parseResult(res as CallToolResult);
+}
+
+// Populate the "import from" dropdown with the browser/profile to pull the X
+// session from. Read-only detection (no keychain prompt). The profile that
+// already holds an x.com session is marked and pre-selected, so the user (and
+// the keychain) only deal with the right browser instead of all of them.
+let xSourcesLoaded = false;
+async function populateXSources(force = false) {
+  if (xSourcesLoaded && !force) return;
+  try {
+    const r = await call("setup", { action: "detect_x_sources" });
+    const sources: Array<{ spec: string; label: string; x_session: boolean }> =
+      Array.isArray(r.sources) ? r.sources : [];
+    if (!sources.length) { xSourceSel.hidden = true; return; }
+    xSourceSel.innerHTML = sources
+      .map((s) => {
+        const tag = s.x_session ? "  (X session found)" : "";
+        const sel = s.spec === r.recommended ? " selected" : "";
+        return `<option value="${s.spec}"${sel}>${s.label}${tag}</option>`;
+      })
+      .join("");
+    xSourcesLoaded = true;
+    // Only reveal it when X isn't connected (nothing to import otherwise).
+    xSourceSel.hidden = !!state?.x_connected;
+  } catch {
+    xSourceSel.hidden = true;
+  }
 }
 
 async function refresh() {
@@ -241,6 +275,9 @@ async function refresh() {
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
+    // Once the runtime is ready and X still isn't connected, offer the
+    // import-source dropdown (read-only detection, no keychain prompt).
+    if (state?.runtime_ready && !state.x_connected) void populateXSources();
     log("");
     void loadStats();
   } catch (e: any) {
@@ -365,7 +402,14 @@ btnX.addEventListener("click", () => busy(btnX, "Working\u2026", async () => {
       btnX.textContent = "Confirm: import X session";
       log(r.what_will_happen || "This imports your x.com cookies into the autoposter's browser. Click again to confirm.");
     } else {
-      const r = await call("setup", { action: "connect_x", confirm: true });
+      // Pass the chosen browser/profile (if the dropdown is populated) so the
+      // import targets the right one and the keychain prompts only for it.
+      const chosen = !xSourceSel.hidden && xSourceSel.value ? xSourceSel.value : undefined;
+      const r = await call("setup", {
+        action: "connect_x",
+        confirm: true,
+        ...(chosen ? { x_source: chosen } : {}),
+      });
       xConfirmPending = false;
       applyState({ x_connected: !!r.connected, x_state: r.state || "" });
       log(r.summary || (r.connected ? "X connected." : "X not connected \u2014 see chat."));
