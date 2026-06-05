@@ -492,7 +492,10 @@ def _fetch_drafts(limit: int = 40) -> list:
             "/api/v1/twitter-candidates",
             query={"status": "drafted", "limit": str(limit)},
         )
-    except Exception:
+    except BaseException:
+        # api_get raises SystemExit (a BaseException, NOT Exception) on terminal
+        # HTTP failure; a transient 500 must yield [] for this tick, never kill
+        # the watch loop. Catch BaseException so the sidebar degrades gracefully.
         return []
     rows = (resp.get("data") or {}).get("candidates") if isinstance(resp, dict) else None
     rows = rows or (resp.get("candidates") if isinstance(resp, dict) else None) or []
