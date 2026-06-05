@@ -92,8 +92,33 @@ button {
 button:hover:not(:disabled) { opacity: 0.82; }
 button:disabled { opacity: 0.45; cursor: default; }
 button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
-button.ghost { background: transparent; }
+/* Secondary buttons still read as buttons: solid (page-bg) fill + visible border,
+ * so they stand out both on the page and on top of cards. The CTA stays black. */
+button.ghost { background: var(--bg); }
 button[hidden] { display: none; }
+
+/* Autopilot on/off switch. Grayscale only: track fills to --fg when on, sits at
+ * --border when off; the knob is the page background. State carried by position
+ * + fill weight, never color. */
+.toggle { position: relative; display: inline-block; width: 40px; height: 22px; margin-top: 4px; }
+.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.toggle .slider {
+  position: absolute; inset: 0; cursor: pointer;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  transition: background 0.15s ease;
+}
+.toggle .slider::before {
+  content: ""; position: absolute;
+  height: 16px; width: 16px; left: 2px; top: 2px;
+  background: var(--bg);
+  border-radius: 50%;
+  transition: transform 0.15s ease;
+}
+.toggle input:checked + .slider { background: var(--fg); border-color: var(--fg); }
+.toggle input:checked + .slider::before { transform: translateX(18px); }
+.toggle input:disabled + .slider { opacity: 0.45; cursor: default; }
 
 /* First-run runtime installer. Grayscale only; status is shown via glyphs +
  * weight, never color. */
