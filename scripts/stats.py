@@ -1620,6 +1620,27 @@ def refresh_twitter(db, config=None, quiet=False, audit_mode=False):
         code = data.get("code", 0)
         tweet = data.get("tweet")
 
+        # fxtwitter is an UNAUTHENTICATED guest API. For tweets it cannot read
+        # as a logged-out viewer (Community-scoped posts, some replies,
+        # protected / age-gated contexts) it returns code 404 with a
+        # *tombstone* object (type="tombstone", reason="unavailable") instead
+        # of a null tweet. Those tweets are alive to a logged-in viewer, so
+        # treating the tombstone as a deletion produced false strikes: on
+        # 2026-06-05, 5 of 6 twitter strike emails were tombstone-unavailable
+        # rows that were LIVE in the authenticated harness (#35715/#35712
+        # Community posts; #31131/#31130/#29509 normal replies). Only a genuine
+        # NOT_FOUND (tweet is None / no tombstone) is a real deletion signal.
+        # Skip tombstones WITHOUT bumping deletion_detect_count, mirroring the
+        # Reddit "bias: don't falsely mark deleted" rule. strike_alert.py's
+        # twitter live-recheck is the second safety net for anything that slips.
+        if isinstance(tweet, dict) and tweet.get("type") == "tombstone":
+            skipped += 1
+            if not quiet:
+                _reason = tweet.get("reason") or "?"
+                print(f"TOMBSTONE [{post_id}] reason={_reason} "
+                      f"(guest-API blind spot, not a deletion)")
+            continue
+
         if code == 404 or tweet is None:
             # Tweet not found, could be deleted or suspended. Run the 2-strike
             # confirmation atomically server-side via /detect-deletion so the
