@@ -1478,6 +1478,21 @@ $STYLES_BLOCK
          (d) editor textbox cleared
    5d. SUCCESS = all four pass. REJECTED = toast present OR count unchanged.
 
+   5e. ON SUCCESS ONLY — capture OUR comment's full comment URN so stats can
+       later match it. The post-stats pipeline keys engagement on the numeric
+       comment id embedded in our_url's commentUrn; without it our comment's
+       impressions/reactions/replies can NEVER be matched (they stay frozen).
+       Read every rendered comment node WITH its text:
+         bh_run js("""return JSON.stringify(Array.from(document.querySelectorAll('[data-id^="urn:li:comment:"]')).map(n=>({id:n.getAttribute('data-id'),text:(n.innerText||'').replace(/\\s+/g,' ').slice(0,160)})))""")
+       From that array pick the ONE entry whose text matches the comment YOU
+       just posted (YOUR_COMMENT_TEXT, possibly link-wrapped). Take its 'id' —
+       it is the full parenthesized comment URN, e.g.
+         urn:li:comment:(activity:7468708028956016640,7468710512147460096)
+       (the trailing number is OUR comment id). Store it verbatim as
+       OUR_COMMENT_URN. If you cannot confidently identify our comment (no
+       data-id match), set OUR_COMMENT_URN to empty and proceed — step 7 falls
+       back to the bare thread URL.
+
 6. If REJECTED, do NOT call the success log path. Mark candidate skipped:
      python3 -c "import sys; sys.path.insert(0,'$REPO_DIR/scripts'); from http_api import api_patch; api_patch('/api/v1/linkedin-candidates', {'activity_id': '$PA_ACTIVITY_ID', 'status': 'skipped'}, ok_on_404=True)"
    Then ledger the soft-block:
@@ -1497,11 +1512,16 @@ $STYLES_BLOCK
        --network-response 'NETWORK_RESPONSE'
    Then STOP with '## Comment soft-blocked, ledgered'.
 
-7. If SUCCESS, log the post and mark candidate posted:
+7. If SUCCESS, log the post and mark candidate posted. First build OUR_URL so
+   it carries our comment's commentUrn (REQUIRED for stats matching). Substitute
+   the OUR_COMMENT_URN you captured in step 5e in place of the literal token
+   below, then run:
+     OUR_URL=\$(python3 -c "import urllib.parse,sys; cu=sys.argv[1].strip(); base=sys.argv[2]; print(base + '?commentUrn=' + urllib.parse.quote(cu, safe='') if cu.startswith('urn:li:comment:(') else base)" 'OUR_COMMENT_URN' '$PA_URL')
+   If OUR_COMMENT_URN was empty, OUR_URL falls back to the bare thread URL.
      LOG_RESULT=\$(python3 $REPO_DIR/scripts/log_post.py \\
        --platform linkedin \\
        --thread-url '$PA_URL' \\
-       --our-url '$PA_URL' \\
+       --our-url "\$OUR_URL" \\
        --our-content 'YOUR_COMMENT_TEXT' \\
        --project '$PA_PROJECT' \\
        --thread-author '$PA_AUTHOR_NAME' \\
