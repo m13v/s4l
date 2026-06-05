@@ -40,6 +40,17 @@ PER_SCRIPT_CAP_SEC = {
     # durable headroom and the cron fires every 6h so there is no overlap.
     ("stats.sh", "twitter"): 180 * 60,
     ("stats.sh", "linkedin"): 120 * 60,
+    # 2026-06-05: the unified LinkedIn stats pipeline is its own script
+    # (stats-linkedin.sh), NOT stats.sh --platform linkedin, so it was falling
+    # through to the 45 min global. After the pipeline lock was changed to WAIT
+    # for an in-flight run-linkedin (instead of bailing), a stats run that
+    # legitimately queued behind a long post run (run-linkedin holds the
+    # pipeline lock up to its own 120 min cap) was SIGTERMed at 45 min mid-wait
+    # and never scraped (observed 06-05 00:23->01:09, "Terminated: 15"). Give it
+    # the same 120 min headroom so a queued stats run can outwait the holder and
+    # then scrape; the wait is cheap (idle sleep, no LLM) and the cron fires
+    # every 6h so there is no self-overlap.
+    ("stats-linkedin.sh", None): 120 * 60,
     ("stats.sh", "moltbook"): 120 * 60,
     ("audit.sh", None): 120 * 60,
     ("audit-twitter.sh", None): 120 * 60,
