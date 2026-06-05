@@ -1958,6 +1958,21 @@ THREAD_EXTRACTOR_JS = r"""() => {
     }
     return media;
   }
+  // Repost detection mirrors extractMedia: read the "<X> reposted" banner from
+  // the same already-loaded DOM. socialContext is ALSO used for "Pinned", so
+  // match the text /reposted/i, not mere presence. reposted_by = the account
+  // whose profile link wraps the banner.
+  function extractRepost(article) {
+    const sc = article.querySelector('[data-testid="socialContext"]');
+    if (!sc || !/\breposted\b/i.test(sc.textContent || '')) {
+      return { is_repost: false, reposted_by: '' };
+    }
+    let reposted_by = '';
+    const a = sc.closest('a');
+    const rh = a ? (a.getAttribute('href') || '') : '';
+    if (rh.startsWith('/') && rh.split('/').length === 2) reposted_by = rh.replace('/', '');
+    return { is_repost: true, reposted_by: reposted_by };
+  }
   const out = [];
   for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
     try {
