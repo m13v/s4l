@@ -338,6 +338,84 @@ def _reddit_live_recheck(our_url, our_account, user_agent):
         return "unknown"
 
 
+def _twitter_live_recheck(our_url):
+    """Pre-send Twitter live re-check (added 2026-06-05).
+
+    Mirrors _reddit_live_recheck. stats.py marks a tweet 'deleted' after 2
+    fxtwitter 404s, but fxtwitter is an UNAUTHENTICATED guest API: for
+    Community-scoped posts and some replies it returns a *tombstone*
+    (type="tombstone", reason="unavailable") even though the tweet is alive
+    to a logged-in viewer. On 2026-06-05, 5 of 6 twitter strike emails were
+    tombstone-unavailable rows that were live in the authenticated harness
+    (#35715/#35712 Community posts; #31131/#31130/#29509 normal replies).
+
+    stats.py was patched the same day to stop counting tombstones as
+    deletions; this is the second safety net for rows that were flagged
+    before that fix shipped, or for any future guest-API blind spot. We re-hit
+    fxtwitter and key on the SAME signal:
+
+      'alive'   - fxtwitter returns a real tweet OR a tombstone (guest-API
+                  blind spot, not a deletion). Caller flips status back to
+                  'active', resets deletion_detect_count, skips the email.
+      'dead'    - genuine NOT_FOUND (code 404 with tweet=None, no tombstone).
+                  Real deletion, send the email.
+      'unknown' - network error / unparseable. Fail-open: send the email.
+                  Mirrors the github 'unknown' graceful-degradation pattern.
+    """
+    if not our_url or not our_url.startswith("http"):
+        return "unknown"
+    m = re.search(r"(?:twitter|x)\.com/([^/]+)/status/(\d+)", our_url)
+    if not m:
+        return "unknown"
+    username, tweet_id = m.group(1), m.group(2)
+    api_url = f"https://api.fxtwitter.com/{username}/status/{tweet_id}"
+    req = urllib.request.Request(
+        api_url, headers={"User-Agent": "social-autoposter/1.0"}
+    )
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read()
+                try:
+                    data = json.loads(body) if body else None
+                except Exception:
+                    return "unknown"
+                break
+        except urllib.error.HTTPError as e:
+            # fxtwitter answers 404 with a JSON body (tombstone OR null tweet).
+            # Read it so we can distinguish the two; a bare HTTPError without a
+            # parseable body is 'unknown'.
+            try:
+                data = json.loads(e.read() or b"")
+            except Exception:
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                return "unknown"
+            break
+        except Exception:
+            if attempt == 0:
+                time.sleep(3)
+                continue
+            return "unknown"
+    else:
+        return "unknown"
+
+    if not isinstance(data, dict):
+        return "unknown"
+    tweet = data.get("tweet")
+    if isinstance(tweet, dict) and tweet.get("type") == "tombstone":
+        # Guest-API blind spot (Community post / restricted reply). Alive.
+        return "alive"
+    if isinstance(tweet, dict):
+        # Real tweet object came back -> definitely alive.
+        return "alive"
+    code = data.get("code", 0)
+    if code == 404 or tweet is None:
+        return "dead"
+    return "unknown"
+
+
 def _resurrect_post(post_id):
     """Flip a Reddit strike row back to 'active' after a live re-check confirms
     the comment is still visible. Mirrors update_reddit_resurrect's UPDATE."""
@@ -608,6 +686,30 @@ def main():
                 filtered += 1
                 print(
                     f"[strike_alert] filtered id={r['id']} reason=reddit-alive "
+                    f"(false positive, status flipped back to active, no email)",
+                    flush=True,
+                )
+                continue
+
+        # Twitter live re-check (added 2026-06-05). stats.py marks a tweet
+        # 'deleted' after 2 fxtwitter 404s, but fxtwitter's guest API returns a
+        # tombstone for Community posts and some replies that are alive to a
+        # logged-in viewer (5 of 6 strikes on 2026-06-05 were this false
+        # positive). Re-hit fxtwitter; if it's a tombstone or a real tweet the
+        # row is alive, flip it back to 'active' and skip the email.
+        if args.post_id is None and r["platform"] == "twitter":
+            live_state = _twitter_live_recheck(r["our_url"])
+            print(
+                f"[strike_alert] id={r['id']} platform=twitter "
+                f"live_recheck={live_state} url={r['our_url']}",
+                flush=True,
+            )
+            if live_state == "alive":
+                if not args.dry_run:
+                    _resurrect_post(r["id"])
+                filtered += 1
+                print(
+                    f"[strike_alert] filtered id={r['id']} reason=twitter-alive "
                     f"(false positive, status flipped back to active, no email)",
                     flush=True,
                 )
