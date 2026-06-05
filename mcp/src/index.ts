@@ -37,7 +37,7 @@ import {
   configPath,
   type ProjectInput,
 } from "./setup.js";
-import { xStatus, xConnect, summarizeXAuth } from "./twitterAuth.js";
+import { xStatus, xConnect, xDetectSources, summarizeXAuth } from "./twitterAuth.js";
 import {
   startProvisioning,
   isProvisioning,
@@ -571,11 +571,14 @@ tool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["connect_x", "reseed_queries"])
+        .enum(["connect_x", "detect_x_sources", "reseed_queries"])
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
             "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first). " +
+            "detect_x_sources = list the browsers/profiles the X session can be imported from " +
+            "(read-only, no keychain prompt) so the user can pick the right one; returns " +
+            "{sources:[{spec,label,x_session}], recommended}. " +
             "reseed_queries = (re-)expand an EXISTING project's search topics into ~30 real X search " +
             "queries and return them. Use for projects configured before query-expansion existed, or " +
             "to refresh the query bank. Requires name. Returns the resulting query list."
@@ -621,6 +624,21 @@ tool(
     },
   },
   async (args) => {
+    // ---- List import sources (for the panel dropdown) ---------------------
+    // Read-only browser/profile detection. Never reads the keychain or decrypts
+    // a cookie, so it shows no macOS Safe Storage prompt. Lets the user pick the
+    // exact browser+profile that holds their X session.
+    if (args.action === "detect_x_sources") {
+      const r = await xDetectSources();
+      return jsonContent({
+        action: "detect_x_sources",
+        ok: r.ok,
+        sources: r.sources,
+        recommended: r.recommended,
+        error: r.error,
+      });
+    }
+
     // ---- Connect X/Twitter: import the user's session into our browser ----
     // Explain-then-confirm: the first call (no confirm) describes exactly what
     // will happen so the agent can get the user's OK; confirm:true runs it.
@@ -1447,8 +1465,7 @@ async function buildSnapshot() {
   };
 }
 
-registerAppTool(
-  server,
+appTool(
   "dashboard",
   {
     title: "Social Autoposter dashboard",
@@ -1471,10 +1488,33 @@ registerAppTool(
       ` — projects ${snap.projects_ready}/${snap.projects_total} ready, ` +
       `X ${snap.x_connected ? "connected" : "not connected"}, ` +
       `autopilot ${snap.autopilot_on ? "on" : "off"}.`;
-    return {
+    const base = {
       content: [{ type: "text" as const, text: human }],
       structuredContent: { snapshot: JSON.stringify(snap) },
     };
+    // If the host can render MCP Apps UI inline, the _meta.ui.resourceUri above
+    // makes it paint the panel; just return the snapshot. If it CAN'T (Claude
+    // Code / Cowork today), fall back to serving the identical panel.html from a
+    // loopback HTTP server and opening it in the browser, so the user still gets
+    // the visual surface instead of a wall of text.
+    if (hostRendersAppUi()) return base;
+    try {
+      const url = await startLocalPanel();
+      await openInBrowser(url);
+      return {
+        content: [{
+          type: "text" as const,
+          text:
+            human +
+            `\n\nThis host can't render the dashboard inline, so I opened it in your browser: ${url}`,
+        }],
+        structuredContent: { snapshot: JSON.stringify(snap), fallback_url: url },
+      };
+    } catch (e: any) {
+      // Loopback server failed to start; degrade to the text-only snapshot.
+      console.error("[social-autoposter-mcp] local panel fallback failed:", e?.message || e);
+      return base;
+    }
   }
 );
 
