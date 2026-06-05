@@ -4,7 +4,7 @@
   "display_name": "Social Autoposter (X / Twitter)",
   "version": "0.0.1",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
-  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\n\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Start a new session and type **run social-autoposter dashboard**, then click Install to set up the local runtime.",
+  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Start a new session and type **run social autoposter dashboard now** to set up the local runtime.",
   "author": {
     "name": "m13v",
     "email": "i@m13v.com",
