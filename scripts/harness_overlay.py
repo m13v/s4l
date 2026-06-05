@@ -707,6 +707,10 @@ def cmd_watch(interval: float = 2.0) -> int:
             except Exception:
                 pass
             try:
+                h.clear_sidebar()
+            except Exception:
+                pass
+            try:
                 h.__exit__(None, None, None)
             except Exception:
                 pass
@@ -715,6 +719,17 @@ def cmd_watch(interval: float = 2.0) -> int:
                 cmd_clear()
             except Exception:
                 pass
+    return 0
+
+
+def cmd_drafts() -> int:
+    """Print the drafts the sidebar would show (debug helper, no browser needed)."""
+    drafts = _fetch_drafts()
+    print(f"{len(drafts)} draft(s) waiting:")
+    for d in drafts:
+        short = (d["draft_text"][:70] + "\u2026") if len(d["draft_text"]) > 70 else d["draft_text"]
+        print(f"  [{d['id']}] {d['project']} @{d['handle']}: {short}")
+        print(f"        {d['tweet_url']}")
     return 0
 
 
@@ -735,6 +750,8 @@ def main(argv: list[str]) -> int:
     if cmd == "watch":
         iv = float(argv[1]) if len(argv) > 1 else 2.0
         return cmd_watch(iv)
+    if cmd == "drafts":
+        return cmd_drafts()
     print(f"unknown command: {cmd}", file=sys.stderr)
     print(__doc__)
     return 2
