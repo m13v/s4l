@@ -134,11 +134,18 @@ export function readRuntime(): RuntimeInfo | null {
   }
 }
 
-// The runtime is "ready" only if runtime.json says so AND the interpreter it
-// points at still exists on disk (catches a half-deleted state dir).
+// The runtime is "ready" only if runtime.json says so, the interpreter it
+// points at still exists on disk (catches a half-deleted state dir), AND a
+// usable pipeline repo resolves. The repo check catches a pre-Story-B runtime
+// that was marked ready before Step 0 ("Unpack pipeline source") existed: the
+// venv is present so the old check passed, but the embedded tarball was never
+// materialized, so the server shells out to an empty repo and the panel reads a
+// blank "0/1, not set up" world. Returning false here forces install_runtime to
+// re-provision, which runs Step 0 and materializes the repo (idempotent).
 export function runtimeReady(): boolean {
   const rt = readRuntime();
-  return !!(rt && rt.ready && rt.python && fs.existsSync(rt.python));
+  if (!(rt && rt.ready && rt.python && fs.existsSync(rt.python))) return false;
+  return looksLikeRepo(resolveRepoDir());
 }
 
 // Resolve the interpreter the pipeline should run under, preferring the owned
