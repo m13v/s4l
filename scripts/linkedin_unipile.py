@@ -294,10 +294,10 @@ def to_pipeline_results(items):
 
 
 def _extract_comment_urn(resp):
-    """Best-effort: pull a comment URN from the create-comment response.
-    UniPile's documented success body is just {object:"CommentSent"} with no
-    URN, so this usually returns None; we parse anyway in case the live
-    response is richer."""
+    """Best-effort: pull an explicit comment URN string from the create-comment
+    response. UniPile's documented success body is just {object:"CommentSent"}
+    (plus a numeric comment_id) with no URN string, so this usually returns
+    None; we parse anyway in case the live response is richer."""
     if not isinstance(resp, dict):
         return None
     for key in ("comment_id", "comment_urn", "social_id", "id", "urn"):
@@ -305,6 +305,50 @@ def _extract_comment_urn(resp):
         if isinstance(val, str) and "urn:li:comment" in val:
             return val
     return None
+
+
+def _numeric_comment_id(resp):
+    """Pull UniPile's numeric comment id (16-19 digits) out of a create-comment
+    response. UniPile returns this as response.comment_id on success; it is the
+    same canonical LinkedIn comment id the stats scrape reads from the activity
+    feed DOM, which is why post-submit read-back (comment_exists) keys on it."""
+    if not isinstance(resp, dict):
+        return None
+    for key in ("comment_id", "id", "comment_urn", "social_id", "urn"):
+        val = resp.get(key)
+        if val is None:
+            continue
+        m = re.search(r"(\d{16,19})", str(val))
+        if m:
+            return m.group(1)
+    nested = resp.get("comment")
+    if isinstance(nested, dict):
+        return _numeric_comment_id(nested)
+    return None
+
+
+def _build_comment_urn(social_id, resp):
+    """Return a urn:li:comment:(<kind>:<parent>,<cid>) identifying OUR new
+    comment, or None.
+
+    Prefers an explicit URN string in the response; otherwise constructs one
+    from the parent post's namespace/id (parsed from social_id) plus UniPile's
+    numeric comment id. This is what lets make_our_url embed a ?commentUrn= that
+    update_linkedin_stats_from_feed.py can key on (it matches purely on the
+    trailing <cid>, so the parent kind/id portion only needs to be parseable).
+    Without this, every UniPile-posted comment stored a bare parent URL with no
+    commentUrn and could never be matched back to its engagement stats."""
+    explicit = _extract_comment_urn(resp)
+    if explicit:
+        return explicit
+    cid = _numeric_comment_id(resp)
+    if not cid:
+        return None
+    m = re.match(r"urn:li:(activity|share|ugcPost):(\d{16,19})", social_id or "")
+    if not m:
+        return None
+    kind, parent = m.group(1), m.group(2)
+    return "urn:li:comment:(%s:%s,%s)" % (kind, parent, cid)
 
 
 REACTION_TYPES = ("like", "celebrate", "support", "love", "insightful", "funny")
