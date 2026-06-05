@@ -1996,6 +1996,13 @@ THREAD_EXTRACTOR_JS = r"""() => {
       const datetime = timeEl ? timeEl.getAttribute('datetime') : '';
       const idMatch = tweetHref ? tweetHref.match(/\/status\/(\d+)/) : null;
       const tweetId = idMatch ? idMatch[1] : '';
+      // The status URL's first path segment is the AUTHORITATIVE author. The
+      // bare-link scan above grabs the first /handle link, which on a repost is
+      // the REPOSTER, not the author. Override from the URL so author + tweet_id
+      // always agree (matches twitter_scan.py).
+      const authorM = tweetHref ? tweetHref.match(/^\/([^\/]+)\/status\//) : null;
+      if (authorM && authorM[1]) handle = authorM[1];
+      const repost = extractRepost(article);
       // Detect reply-to target (article with "Replying to" block)
       let replyingTo = '';
       for (const span of article.querySelectorAll('a[href^="/"]')) {
@@ -2014,7 +2021,9 @@ THREAD_EXTRACTOR_JS = r"""() => {
           tweet_url: tweetUrl,
           datetime: datetime,
           replying_to: replyingTo,
-          media: extractMedia(article)
+          media: extractMedia(article),
+          is_repost: repost.is_repost,
+          reposted_by: repost.reposted_by
         });
       }
     } catch(e) {}
@@ -2161,6 +2170,29 @@ def _anchor_media_from_tweets(tweets, anchor_tweet_id):
     return tweets[0].get("media") or []
 
 
+def _anchor_repost_from_tweets(tweets, anchor_tweet_id):
+    """Pick the repost provenance of the anchor tweet from scraped articles.
+
+    Mirrors _anchor_media_from_tweets: match the anchor by tweet_id, else fall
+    back to the first article (the focused tweet on a permalink). Returns
+    {"is_repost": bool, "reposted_by": str}; defaults to a non-repost.
+    """
+    if not tweets:
+        return {"is_repost": False, "reposted_by": ""}
+    chosen = None
+    if anchor_tweet_id:
+        for t in tweets:
+            if t.get("tweet_id") == anchor_tweet_id:
+                chosen = t
+                break
+    if chosen is None:
+        chosen = tweets[0]
+    return {
+        "is_repost": bool(chosen.get("is_repost", False)),
+        "reposted_by": chosen.get("reposted_by", "") or "",
+    }
+
+
 def scrape_thread_media(thread_url, scroll_count=1):
     """Navigate to a tweet's permalink and return the media of the anchor tweet.
 
@@ -2200,11 +2232,15 @@ def scrape_thread_media(thread_url, scroll_count=1):
                     pass
                 _refresh_browser_lock()
             media = _anchor_media_from_tweets(tweets, anchor_tweet_id)
-            print(f"[thread_media] {thread_url}: {len(media)} media item(s)", file=sys.stderr)
+            repost = _anchor_repost_from_tweets(tweets, anchor_tweet_id)
+            print(f"[thread_media] {thread_url}: {len(media)} media item(s)"
+                  f"{' [repost]' if repost['is_repost'] else ''}", file=sys.stderr)
             return {
                 "thread_url": thread_url,
                 "anchor_tweet_id": anchor_tweet_id,
                 "media": media,
+                "is_repost": repost["is_repost"],
+                "reposted_by": repost["reposted_by"],
             }
         finally:
             if not is_cdp:
@@ -2249,15 +2285,19 @@ def scrape_many_thread_media(thread_urls, scroll_count=1, per_url_delay_ms=1500)
                             pass
                         _refresh_browser_lock()
                     media = _anchor_media_from_tweets(tweets, anchor_tweet_id)
-                    print(f"[thread_media] {url}: {len(media)} media item(s)", file=sys.stderr)
+                    repost = _anchor_repost_from_tweets(tweets, anchor_tweet_id)
+                    print(f"[thread_media] {url}: {len(media)} media item(s)"
+                          f"{' [repost]' if repost['is_repost'] else ''}", file=sys.stderr)
                     results.append({
                         "thread_url": url,
                         "anchor_tweet_id": anchor_tweet_id,
                         "media": media,
+                        "is_repost": repost["is_repost"],
+                        "reposted_by": repost["reposted_by"],
                     })
                 except Exception as e:
                     print(f"[thread_media] error on {url}: {e}", file=sys.stderr)
-                    results.append({"thread_url": url, "anchor_tweet_id": anchor_tweet_id, "error": str(e), "media": []})
+                    results.append({"thread_url": url, "anchor_tweet_id": anchor_tweet_id, "error": str(e), "media": [], "is_repost": False, "reposted_by": ""})
                 page.wait_for_timeout(per_url_delay_ms)
             return {"results": results, "urls_visited": len(thread_urls)}
         finally:
