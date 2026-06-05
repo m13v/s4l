@@ -215,7 +215,7 @@ _acquire_linkedin_pipeline_lock() {
     local _timeout="${SAPS_LINKEDIN_PIPELINE_LOCK_TIMEOUT:-6000}"
     local _logged_wait=false
     local _released_browser=false
-    local _br_lock_dir="/tmp/social-autoposter-linkedin-browser.lock"
+    local _br_lock_dir="${SAPS_LINKEDIN_BROWSER_LOCK_DIR:-/tmp/social-autoposter-linkedin-browser.lock}"
     while : ; do
         if mkdir "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null; then
             echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
