@@ -192,87 +192,31 @@ _acquire_linkedin_pipeline_lock() {
         return 0
     fi
     local _who="${SAPS_PIPELINE_NAME:-$(basename "${0:-linkedin-pipeline}")}"
-    # WAIT, don't bail. Aligned 2026-06-04 with Twitter's skill/lock.sh::acquire_lock
-    # so an overlapping LinkedIn fire (e.g. stats-linkedin's :23 slot landing on
-    # top of run-linkedin's :14 post still finishing) queues for the 9556 Chrome
-    # instead of `exit 0`-skipping. Previously the live-holder branch bailed, which
-    # systematically starved stats-linkedin every time its slot collided with the
-    # ~9min post pipeline, so comment-stats never refreshed. Bounded by a timeout
-    # (default ~100min, > run-linkedin's 120min hold is impossible to fully cover
-    # but covers the common case) and a 3h lock-age safety net, matching lock.sh.
-    #
-    # LOCK ORDERING (added 2026-06-05): every LinkedIn top-level script acquires
-    # the linkedin-browser lock (skill/lock.sh) BEFORE calling
-    # ensure_linkedin_browser_for_backend, which calls us. If we blocked on the
-    # pipeline lock while still holding the browser lock, we'd deadlock the
-    # current pipeline-lock holder (run-linkedin re-acquires the browser lock
-    # every phase). Observed live 2026-06-05 00:23-01:09: stats held the browser
-    # lock, waited 46min on the pipeline lock, stalled run-linkedin, and was
-    # SIGTERMed by the watchdog. Fix: drop the browser lock before waiting and
-    # re-take it once we own the (outermost) pipeline lock, enforcing a global
-    # pipeline->browser acquisition order with no cycle.
-    local _waited=0
-    local _timeout="${SAPS_LINKEDIN_PIPELINE_LOCK_TIMEOUT:-6000}"
-    local _logged_wait=false
-    local _released_browser=false
-    local _br_lock_dir="${SAPS_LINKEDIN_BROWSER_LOCK_DIR:-/tmp/social-autoposter-linkedin-browser.lock}"
+    # BAIL, don't wait. Reverted 2026-06-05 to the original behavior: if another
+    # LinkedIn pipeline already drives the 9556 Chrome, this fire exits 0 and
+    # launchd re-fires on its next cadence. The 2026-06-04/05 "wait + drop/retake
+    # browser lock" experiment starved the 15-min run-linkedin comment poster by
+    # making it queue (and risk a lock-ordering deadlock) behind stats/dm jobs.
+    # No indefinite wait, so the per-phase FIFO linkedin-browser lock can't
+    # deadlock against this coarse one-driver-per-Chrome lock.
     while : ; do
         if mkdir "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null; then
             echo "$$" > "$_LI_PIPELINE_LOCK_DIR/pid"
             echo "$_who" > "$_LI_PIPELINE_LOCK_DIR/holder"
             export _LI_PIPELINE_LOCK_HELD=1
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$) waited=${_waited}s" >&2
-            # Re-take the browser lock we dropped to avoid the ordering deadlock.
-            if [ "$_released_browser" = "true" ] && command -v acquire_lock >/dev/null 2>&1; then
-                echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: re-acquiring linkedin-browser after pipeline-lock wait" >&2
-                acquire_lock "linkedin-browser" 3600
-            fi
+            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock ACQUIRED by $_who (pid $$)" >&2
             return 0
         fi
         local _h_pid _h_who
         _h_pid="$(cat "$_LI_PIPELINE_LOCK_DIR/pid" 2>/dev/null || echo "")"
         _h_who="$(cat "$_LI_PIPELINE_LOCK_DIR/holder" 2>/dev/null || echo "?")"
-        # Reclaim a stale lock left by a dead holder (no release trap by design).
         if [ -z "$_h_pid" ] || ! kill -0 "$_h_pid" 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
             rm -rf "$_LI_PIPELINE_LOCK_DIR"
             continue
         fi
-        # Safety net: reclaim any lock older than 3h regardless of holder liveness.
-        # watchdog_hung_runs.py SIGTERMs a hung holder long before this fires;
-        # mirrors the 10800s ceiling in lock.sh::acquire_lock.
-        if [ -d "$_LI_PIPELINE_LOCK_DIR" ]; then
-            local _lock_age
-            _lock_age=$(( $(date +%s) - $(stat -f %m "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null || stat -c %Y "$_LI_PIPELINE_LOCK_DIR" 2>/dev/null || date +%s) ))
-            if [ "$_lock_age" -gt 10800 ]; then
-                echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: removing lock older than 3h (age ${_lock_age}s, holder ${_h_who})" >&2
-                rm -rf "$_LI_PIPELINE_LOCK_DIR"
-                continue
-            fi
-        fi
-        # Timed out waiting -> skip this fire (launchd will re-fire next slot).
-        if [ "$_waited" -ge "$_timeout" ]; then
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: still held by ${_h_who} (pid ${_h_pid}) after $((_timeout/60))min; ${_who} skipping this fire" >&2
-            exit 0
-        fi
-        # Surface the holder once when we first start waiting, and drop the
-        # browser lock once so we don't hold it across the wait (deadlock fix).
-        if [ "$_logged_wait" = "false" ]; then
-            echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} waiting (timeout $((_timeout/60))min)..." >&2
-            _logged_wait=true
-            # Only release if THIS process holds the browser lock (pid file == $$).
-            if [ "$_released_browser" = "false" ] && [ -f "$_br_lock_dir/pid" ]; then
-                local _br_pid
-                _br_pid="$(cat "$_br_lock_dir/pid" 2>/dev/null || echo "")"
-                if [ "$_br_pid" = "$$" ] && command -v release_lock >/dev/null 2>&1; then
-                    echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: dropping linkedin-browser while waiting (avoid ordering deadlock)" >&2
-                    release_lock "linkedin-browser"
-                    _released_browser=true
-                fi
-            fi
-        fi
-        sleep 2
-        _waited=$((_waited + 2))
+        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} exiting this fire to avoid two drivers on the 9556 Chrome" >&2
+        exit 0
     done
 }
 
