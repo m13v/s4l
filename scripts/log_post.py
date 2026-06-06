@@ -55,6 +55,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import http_api
@@ -500,7 +501,31 @@ def main():
     # captured after posting drops its commentUrn query string.
     urn_ids = []
     if args.platform == "linkedin":
-        args.our_url = li_url.canonicalize(args.our_url)
+        # Preserve a ?commentUrn= query (it identifies OUR engagement-comment)
+        # across canonicalization. canonicalize() runs ACTIVITY_URN_RE over the
+        # whole URL and, when the URL carries
+        #   ?commentUrn=urn:li:comment:(activity:<parent>,<cid>)
+        # it matches the INNER parent activity and collapses the entire URL to
+        # /feed/update/urn:li:activity:<parent>/, dropping both the base post
+        # URN and our comment id. That breaks the stats matcher
+        # (update_linkedin_stats_from_feed.py keys on the numeric comment id
+        # inside commentUrn). Fix: canonicalize the PATH-ONLY base, then
+        # re-attach the original commentUrn so the stored our_url keeps it.
+        _split = urllib.parse.urlsplit(args.our_url or "")
+        _qs = urllib.parse.parse_qs(_split.query)
+        _comment_urn = (_qs.get("commentUrn") or [None])[0]
+        _base = urllib.parse.urlunsplit(
+            (_split.scheme, _split.netloc, _split.path, "", "")
+        )
+        _canon = li_url.canonicalize(_base)
+        if _comment_urn:
+            _sep = "&" if "?" in _canon else "?"
+            args.our_url = (
+                _canon + _sep + "commentUrn="
+                + urllib.parse.quote(_comment_urn, safe="")
+            )
+        else:
+            args.our_url = _canon
         # Build the full URN-ID set for this post: --urns input plus
         # everything we can extract from thread_url and our_url. Stored in
         # posts.urns so future dedup queries catch any URN form (activity,
