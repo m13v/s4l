@@ -70,6 +70,26 @@ launchd  ──▶  skill/run-{platform}.sh  ──▶  claude -p  --strict-mcp-
                        └──▶  S4L HTTP API                       (AUTOPOSTER_API_BASE in .env)
 ```
 
+Optional X/Twitter source import from TweetClaw:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+python3 ~/social-autoposter/scripts/tweetclaw_candidates.py \
+  --file /path/to/reviewed-tweetclaw-results.json \
+  --project "PROJECT_NAME" \
+  --search-topic "agent workflows" \
+  --query "agent workflows min_faves:10" \
+  | python3 ~/social-autoposter/scripts/score_twitter_candidates.py
+```
+
+Use this when an OpenClaw run has already reviewed TweetClaw search tweets,
+search tweet replies, user lookup, follower export, media links, monitor tweets,
+or webhook evidence and you want those public X/Twitter records scored by the
+existing candidate pipeline. The importer only normalizes local JSON and prints
+candidate rows; the existing scorer in the second command performs the normal
+scoring and upsert step. The importer does not post tweets, post tweet replies,
+send direct messages, upload media, call the S4L API, or drive the browser.
+
 Each `skill/run-*.sh`:
 
 1. Controlled by launchd (load/unload). Use the dashboard Pause All / Resume All button, or `launchctl unload/load` directly
@@ -115,6 +135,7 @@ social-autoposter/
 ├── config.example.json       config template
 ├── setup/SKILL.md            interactive setup wizard skill (locked)
 ├── scripts/                  Python and JS helpers (no browser, no LLM)
+│   └── tweetclaw_candidates.py optional TweetClaw JSON import for X/Twitter candidates
 ├── skill/                    shell wrappers invoked by launchd
 └── launchd/                  generated macOS LaunchAgent plists
 ```

@@ -58,6 +58,25 @@ python3 ~/social-autoposter/scripts/scan_moltbook_replies.py
 python3 ~/social-autoposter/scripts/update_stats.py --quiet
 ```
 
+Optional reviewed TweetClaw import for X/Twitter source discovery:
+
+```bash
+python3 ~/social-autoposter/scripts/tweetclaw_candidates.py \
+  --file /path/to/reviewed-tweetclaw-results.json \
+  --project "PROJECT_NAME" \
+  --search-topic "agent workflows" \
+  --query "agent workflows min_faves:10" \
+  | python3 ~/social-autoposter/scripts/score_twitter_candidates.py
+```
+
+Use this only after a human or agent has reviewed public TweetClaw results from
+OpenClaw. It turns search tweets, search tweet replies, user lookup, follower
+export, media links, monitor tweets, or webhook evidence into the same candidate
+shape used by the existing scorer. It does not post tweets, post tweet replies,
+send direct messages, upload media, call the S4L API, or drive the browser. The
+existing scorer in the second command performs the normal scoring and upsert
+step.
+
 ---
 
 ## Workflow: Post (`/social-autoposter`)
