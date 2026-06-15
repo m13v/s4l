@@ -11,6 +11,7 @@ twitter_browser.get_browser_and_page(), but returns a small access diagnosis:
   blocked           - X rendered a block-specific message
   protected         - X rendered protected-account copy
   unavailable       - X rendered deleted/suspended/not-found/unavailable copy
+  app_error         - X rendered a generic retry/error state
   logged_out        - the harness session is no longer logged in
   app_not_hydrated  - X served the app shell but no DOM content rendered
   unknown           - no reliable signal
@@ -167,9 +168,14 @@ def classify_current_page(page, tweet_url: str, tweets: list[dict] | None = None
         "this page doesn't exist",
         "account suspended",
         "this account doesn't exist",
-        "something went wrong",
     ]):
         status, reason = "unavailable", "unavailable_phrase_rendered"
+    elif has_any([
+        "something went wrong",
+        "try reloading",
+        "retry",
+    ]):
+        status, reason = "app_error", "generic_x_error_rendered"
     elif "/login" in href or "/i/flow/login" in href:
         status, reason = "logged_out", "login_url"
     elif (state.get("article_count") or 0) > 0:
