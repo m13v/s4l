@@ -156,3 +156,4 @@ scripts/_browser_use_test/
 scripts/*storage_state*.json
 scripts/scratch_*.py
 scripts/db_direct.py
+*.mcpb
