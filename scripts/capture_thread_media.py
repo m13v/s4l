@@ -234,7 +234,7 @@ def main():
             status = access.get("status")
             if status not in ("visible", "visible_no_anchor", "unchecked"):
                 access_not_visible += 1
-                if status in ("app_not_hydrated", "logged_out", "access_check_failed", "unknown"):
+                if status in ("app_not_hydrated", "app_error", "logged_out", "access_check_failed", "unknown"):
                     empty_capture_unreliable = access
                 print(
                     f"[capture_thread_media] cid={cid} url={url} "
