@@ -654,12 +654,27 @@ def _import_from(source: str) -> dict:
             f"(vendored script missing at {VENDORED_COOKIE_SCRIPT} and "
             f"ai-browser-profile venv not found at {ABP_PYTHON})",
         }
+    # The copier's first step is `security find-generic-password` on the
+    # browser's Safe Storage entry, which can pop a macOS Keychain auth dialog
+    # the user has to click ("Always Allow"). That dialog often opens unfocused
+    # or behind the autoposter's own Chrome window, so a human needs real time
+    # to find and click it. A 60s cap killed it mid-prompt and dumped the user
+    # into the manual-login fallback. Give the dialog room; override with
+    # SAPS_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
+    _raw_to = os.environ.get("SAPS_COOKIE_COPY_TIMEOUT", "600").strip()
+    try:
+        copy_timeout = float(_raw_to) if _raw_to else None
+    except ValueError:
+        copy_timeout = 600.0
+    if copy_timeout is not None and copy_timeout <= 0:
+        copy_timeout = None
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
+            cmd, capture_output=True, text=True, timeout=copy_timeout, cwd=cwd,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"cookie copy from {source} timed out after 60s"}
+        _to_label = f"{copy_timeout:g}s" if copy_timeout is not None else "no limit"
+        return {"ok": False, "error": f"cookie copy from {source} timed out ({_to_label})"}
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
