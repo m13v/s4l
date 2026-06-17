@@ -11,6 +11,7 @@ const server = read("mcp/src/index.ts");
 const panel = read("mcp/panel/panel.ts");
 const panelHtml = read("mcp/panel/panel.html");
 const guide = read("GETTING_STARTED.md");
+const privacy = read("PRIVACY.md");
 const manifest = JSON.parse(read("mcp/manifest.json"));
 
 assert.match(skill, /Treat the user's setup request as a terminal\s+goal/);
@@ -20,12 +21,17 @@ assert.match(server, /ONBOARDING IS A TERMINAL GOAL/);
 assert.match(server, /confirm:true without waiting for another yes\/no reply/);
 assert.match(server, /ready_for_verification/);
 assert.match(server, /state: "runtime_not_ready"/);
+assert.match(server, /runDoctorPhase\("full"\)/);
 assert.match(panel, /Set up social autoposter end to end now/);
 assert.match(panel, /btnSetup\.disabled = false/);
 assert.match(panelHtml, /The Set up button handles this automatically/);
+assert.match(panelHtml, /Setup progress/);
 assert.match(guide, /gives the agent a\s+terminal goal/);
+assert.match(guide, /onboarding-progress\.json/);
+assert.match(privacy, /Doctor check IDs and pass\/fail\/expected status/);
 assert.ok(manifest.tools.some((tool) => tool.name === "install_runtime"));
 assert.ok(manifest.tools.some((tool) => tool.name === "install_status"));
+assert.ok(manifest.tools.some((tool) => tool.name === "doctor"));
 
 for (const [file, text] of [
   ["setup/SKILL.md", skill],
