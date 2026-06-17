@@ -1430,10 +1430,12 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase p
 # acquire_lock timeout if another pipeline is mid-run.
 log "Releasing twitter-browser lock for the T1 wait window (5min sleep + HTTP fxtwitter poll)..."
 release_lock "twitter-browser" 2>>"$LOG_FILE"
-# Defense-in-depth: clear the twitter_browser.py process lockfile so the next
-# cycle's writer never sees a stale entry from us. run_claude.sh's exit trap
-# already does this; explicit repeat covers SIGKILL of the wrapper.
-rm -f "$HOME/.claude/twitter-browser-lock.json"
+# (2026-06-16) NO `rm -f twitter-browser-lock.json` here. The blind rm was
+# ownership-unaware and ran AFTER release_lock, so under a pipeline handoff it
+# deleted a LIVE peer's session mutex (defect b) -> two browser ops on one X
+# tab. Dead python:PID holders are now reclaimed by _acquire_browser_lock in
+# scripts/twitter_browser.py (os.kill liveness), so the workaround is obsolete
+# AND unsafe. Do NOT re-add it. See docs/twitter_browser_lock.md.
 
 # --- No ripen wait (winning variant D) --------------------------------------
 # The 20-min ripen sleep + fetch_twitter_t1 re-measurement was removed when
@@ -1889,8 +1891,8 @@ esac
 if [ "${PLAN_COUNT:-0}" = "0" ] || ! $GEN_IS_NOOP; then
     log "Releasing twitter-browser lock (gen step is lock-free)..."
     release_lock "twitter-browser" 2>>"$LOG_FILE"
-    # Defense-in-depth: clear the twitter_browser.py process lockfile; see Phase 1 note.
-    rm -f "$HOME/.claude/twitter-browser-lock.json"
+    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
+    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
 else
     log "Keeping twitter-browser lock through Phase 2b-gen (TWITTER_PAGE_GEN_RATE=$GEN_RATE_RAW, gen is a no-op; skipping release/re-acquire dance)"
 fi
@@ -1952,7 +1954,8 @@ fi
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
     # Not posting, so the browser lock isn't needed; release it if still held.
     release_lock "twitter-browser" 2>>"$LOG_FILE" || true
-    rm -f "$HOME/.claude/twitter-browser-lock.json"
+    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
+    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
     log "DRAFT_ONLY=1: $PLAN_COUNT draft(s) ready for review at $PLAN_FILE. Stopping before post."
     # Emit a clean posted=0 run row and suppress the EXIT-trap summary oneshot, so
     # a draft-only run is NOT mis-synthesized as a phase2b_silent failure (the
