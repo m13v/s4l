@@ -20,6 +20,8 @@ This document describes exactly what data leaves your machine, when, and why.
 The pipeline keeps most of its state on your disk:
 
 - `~/.social-autoposter/identity.json` (your install fingerprint; see below)
+- `~/.social-autoposter-mcp/onboarding-progress.json` (the full local setup
+  timeline, Doctor details, attempts, and current blocker)
 - `~/social-autoposter/.env` (DATABASE_URL, API keys, browser session paths)
 - `~/.claude/browser-profiles/*` (logged-in browser sessions for Reddit, X,
   LinkedIn, etc.)
@@ -48,10 +50,24 @@ The server additionally records, at request time:
 - Country / city / region inferred from the IP if the request hits Vercel's
   edge
 
+During MCP onboarding, the client also sends append-only setup events under
+the same `install_id`. These contain only:
+
+- milestone name and coarse status (`attempt`, `completed`, `blocked`, or
+  `doctor`);
+- timestamp and attempt number;
+- short machine-readable error/state codes;
+- counts (for example topics or drafts);
+- Doctor check IDs and pass/fail/expected status.
+
+Full Doctor details, filesystem paths, browser handles, project names, and
+human-readable error messages remain only in the local onboarding ledger.
+
 ## What is NOT collected
 
 - Browser cookies or OAuth tokens (those stay in your local browser
   profile)
+- Full Doctor output or the local onboarding timeline
 - The text of your scheduled posts beyond what already goes into your own
   Postgres database via `DATABASE_URL`
 - Keystrokes, screen captures, or microphone input
@@ -75,7 +91,7 @@ deletion via API is on the roadmap.
 
 ## Rate limits
 
-Each `install_id` is capped at 5,000 write requests per rolling 24h window.
+Each `install_id` is capped at 500,000 write requests per rolling 24h window.
 The cap is shared across all `/api/v1/*` endpoints. Excess requests come
 back as `429 rate_limited`.
 
