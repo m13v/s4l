@@ -231,7 +231,10 @@ const server = new McpServer(
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
       "or pause for an unavoidable interactive login or OS prompt. Never post drafts or enable " +
-      "autopilot during setup unless the user explicitly requested that.\n\n" +
+      "autopilot during setup unless the user explicitly requested that. When setup reaches done — " +
+      "runtime ready, a project configured with seeded topics, X connected, and `draft_cycle` " +
+      "verified — call the `dashboard` tool so the user sees the finished setup rendered, then give " +
+      "the completion summary.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: offer to tell the world by running `draft_cycle` to post " +
@@ -994,7 +997,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Run draft_cycle now to verify end to end without posting."
+                  ? "All configured projects are ready and X is connected. Run draft_cycle now to verify end to end without posting. After it verifies, call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run setup action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call setup again. Ask only if a required field is genuinely unknowable." +
