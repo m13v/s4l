@@ -37,6 +37,32 @@ const BROWSER_HARNESS_REPO = "https://github.com/browser-use/browser-harness";
 const HARNESS_DIR = path.join(os.homedir(), "Developer", "browser-harness");
 const HARNESS_BIN = path.join(os.homedir(), ".local", "bin", "browser-harness");
 
+// The harness drives a REAL Google Chrome over CDP (see twitter-backend.sh
+// _resolve_chrome_bin). Nothing installs Chrome, the runtime only ever
+// downloaded Playwright's Chromium (which the cycle does NOT use), so a .mcpb
+// install on a Chrome-less Mac green-lit every step and then died mid-cycle with
+// "no Chrome/Chromium binary found." These are the paths twitter-backend.sh
+// probes (plus ~/Applications, the no-sudo fallback target we install into).
+const GOOGLE_CHROME_DMG =
+  "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg";
+const CHROME_CANDIDATES = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  path.join(
+    os.homedir(),
+    "Applications",
+    "Google Chrome.app",
+    "Contents",
+    "MacOS",
+    "Google Chrome"
+  ),
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/snap/bin/chromium",
+];
+
 // dist/runtime.js -> repo root is two levels up (mcp/dist -> mcp -> repo root).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -102,6 +128,12 @@ export interface RuntimeInfo {
   // double-click it's the repo we materialize from the embedded tarball under
   // the state dir. Persisted so resolveRepoDir() finds it on later boots.
   repo_dir?: string;
+  // Absolute path to the Google Chrome (or Chromium) binary the harness drives
+  // over CDP. Detected if already installed, else installed by provision() on
+  // macOS. Persisted so the server can export it as BH_CHROME_BIN for the cycle
+  // (the cycle's own _resolve_chrome_bin doesn't scan ~/Applications, our
+  // no-sudo fallback target). Absent on a host where Chrome resolves via PATH.
+  chrome?: string;
   ready: boolean;
   provisioned_at: string;
 }
@@ -131,6 +163,7 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
   { id: "deps", label: "Install pipeline dependencies" },
   { id: "chromium", label: "Download Chromium browser (~150MB)" },
   { id: "harness", label: "Install browser-harness (CDP scan engine)" },
+  { id: "chrome", label: "Install Google Chrome (browser the scanner drives)" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -166,6 +199,40 @@ export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
   return process.env.SAPS_PYTHON || "python3";
+}
+
+// First Chrome/Chromium binary that exists AND is executable, from the same
+// paths twitter-backend.sh probes (plus ~/Applications). Returns null when none
+// is on disk (the cycle's own PATH-based resolver may still find one).
+function detectChromeBin(): string | null {
+  const cands = [process.env.BH_CHROME_BIN, ...CHROME_CANDIDATES];
+  for (const c of cands) {
+    if (!c) continue;
+    try {
+      fs.accessSync(c, fs.constants.X_OK);
+      return c;
+    } catch {
+      /* not present / not executable; try next */
+    }
+  }
+  return null;
+}
+
+// Resolve the Chrome binary the cycle should drive: the provisioned path from
+// runtime.json first (catches our ~/Applications fallback install, which the
+// shell's _resolve_chrome_bin doesn't scan), then live detection, then the env
+// override. null means "let the shell resolve it from PATH."
+export function resolveChrome(): string | null {
+  const rt = readRuntime();
+  if (rt && rt.chrome) {
+    try {
+      fs.accessSync(rt.chrome, fs.constants.X_OK);
+      return rt.chrome;
+    } catch {
+      /* recorded path went away; fall through to live detection */
+    }
+  }
+  return detectChromeBin() || process.env.BH_CHROME_BIN || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,12 +527,78 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   }
   setStep("harness", "done", HARNESS_BIN);
 
+  // --- Step 7: Google Chrome (the browser the harness drives over CDP) ------
+  // The harness scans/scrapes X by steering a REAL Chrome over CDP. The runtime
+  // never installed one (Step 5's Playwright Chromium is a different binary the
+  // cycle doesn't use), so a Chrome-less Mac passed every step then died with
+  // "no Chrome/Chromium binary found." Detect an existing Chrome first; if none,
+  // install on macOS via the official DMG using plain `cp` (no sudo, no GUI
+  // prompt): try /Applications (group-writable for admins), else ~/Applications
+  // (always user-writable). The resolved path is recorded for BH_CHROME_BIN.
+  setStep("chrome", "running");
+  let chromeBin = detectChromeBin();
+  if (chromeBin) {
+    setStep("chrome", "done", `found: ${chromeBin}`);
+  } else if (process.platform === "darwin") {
+    // One self-contained script: download DMG, mount, copy to the first
+    // writable Applications dir, unmount, clean up. Echoes INSTALLED:<path> on
+    // success so we record the exact binary (handles the /Applications vs
+    // ~/Applications branch without re-detecting spaces-in-path quirks).
+    const script = [
+      "set -e",
+      'DMG="$(mktemp -t saps-gchrome).dmg"',
+      'MNT="$(mktemp -d -t saps-gchrome-mnt)"',
+      'cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; rm -f "$DMG"; rmdir "$MNT" 2>/dev/null || true; }',
+      "trap cleanup EXIT",
+      `curl -fsSL -o "$DMG" "${GOOGLE_CHROME_DMG}"`,
+      'hdiutil attach "$DMG" -nobrowse -quiet -mountpoint "$MNT"',
+      'if cp -R "$MNT/Google Chrome.app" /Applications/ 2>/dev/null; then',
+      '  echo "INSTALLED:/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+      "else",
+      '  mkdir -p "$HOME/Applications"',
+      '  cp -R "$MNT/Google Chrome.app" "$HOME/Applications/"',
+      '  echo "INSTALLED:$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+      "fi",
+    ].join("\n");
+    const r = await bash(script, 300000);
+    const m = r.out.match(/INSTALLED:(.+)/);
+    const installed = m ? m[1].trim() : "";
+    if (r.code === 0 && installed) {
+      try {
+        fs.accessSync(installed, fs.constants.X_OK);
+        chromeBin = installed;
+      } catch {
+        /* copied but not executable? fall through to re-detect */
+      }
+    }
+    if (!chromeBin) chromeBin = detectChromeBin();
+    if (chromeBin) {
+      setStep("chrome", "done", `installed: ${chromeBin}`);
+    } else {
+      return fail(
+        `Google Chrome install failed (exit ${r.code}). The scanner drives ` +
+          `Chrome over CDP and none was found. Install Google Chrome from ` +
+          `https://www.google.com/chrome/ and re-run setup. ${r.out.slice(-300)}`
+      );
+    }
+  } else {
+    // Non-macOS (managed Linux VMs): we don't auto-install. The cycle's own
+    // PATH-based _resolve_chrome_bin may still find one at run time, so this is
+    // a soft note, not a hard fail.
+    setStep(
+      "chrome",
+      "done",
+      "no Chrome found; on non-macOS the host must provide google-chrome/chromium on PATH"
+    );
+  }
+
   // --- Persist the result ---------------------------------------------------
   const info: RuntimeInfo = {
     python: VENV_PYTHON,
     uv,
     python_version: PYTHON_VERSION,
     repo_dir: resolvedRepo,
+    chrome: chromeBin || undefined,
     ready: true,
     provisioned_at: new Date().toISOString(),
   };
