@@ -403,8 +403,19 @@ def _persist_session() -> None:
         ws, send = _attach()
     except Exception:
         return
+    # Collect cookies AND resolve the live @handle on the SAME open connection,
+    # THEN close it. Resolving after ws.close() (the previous structure) ran every
+    # _resolve_live_handle CDP call against a dead socket, so it silently returned
+    # None on every connect — which is why config.json + the cookie mirror were
+    # perpetually handle:null. Both reads must happen before the finally closes ws.
+    handle = None
     try:
         cookies = _collect_x_cookies(send)
+        if cookies:
+            # Prefer the LIVE logged-in handle so a fresh install records the real
+            # account instead of the config.json placeholder; persist it so the
+            # cycle's account_resolver (our_account) is correct. Best-effort.
+            handle = _resolve_live_handle(send)
     except Exception:
         cookies = []
     finally:
@@ -415,11 +426,7 @@ def _persist_session() -> None:
     if not cookies:
         return
 
-    # Prefer the LIVE logged-in handle so a fresh install records the real
-    # account instead of the config.json placeholder; persist it so the cycle's
-    # account_resolver (our_account) is correct. Fall back to the configured
-    # handle. All best-effort: never abort connect_x.
-    handle = _resolve_live_handle(send)
+    # Fall back to the configured handle if live resolution came up empty.
     if handle and _write_handle_to_config(handle):
         print(f"setup_twitter_auth: recorded live X handle @{handle} in config.json "
               "(accounts.twitter.handle); attribution + own-reply dedup now scoped "
@@ -876,8 +883,69 @@ def _configured_handle() -> "str | None":
     return "@" + h.lstrip("@")
 
 
+def _mirror_handle() -> "str | None":
+    """The @handle stamped on the keychain-independent cookie mirror by connect_x,
+    or None. This is what lets status surface the real account BEFORE a project
+    (config.json) exists — the mirror is written the moment X is connected,
+    whereas accounts.twitter.handle only exists once setup writes config.json."""
+    if twitter_cookie_mirror is None:
+        return None
+    try:
+        h = (twitter_cookie_mirror.load_meta() or {}).get("handle") or ""
+    except Exception:
+        return None
+    h = str(h).strip()
+    if not h or h.lower() in _HANDLE_PLACEHOLDERS:
+        return None
+    return "@" + h.lstrip("@")
+
+
+def _durable_handle() -> "str | None":
+    """The known @handle from the most durable source available: config.json first
+    (an intentional, user-confirmed value), then the cookie mirror (stamped at
+    connect time, survives a fresh install with no config.json yet)."""
+    return _configured_handle() or _mirror_handle()
+
+
+def _mirror_has_session() -> bool:
+    """True when the durable 0600 mirror holds an x.com auth_token cookie — i.e. a
+    real X session exists ON DISK even if the managed Chrome isn't live right now.
+
+    This is the fix for the dashboard flipping back to "disconnected" the instant
+    the managed Chrome exits after a successful import: the session is durably
+    saved (and the cycle preflight restores it via restore_twitter_session.py), so
+    status must trust the mirror instead of demanding a live browser."""
+    if twitter_cookie_mirror is None:
+        return False
+    try:
+        cks = twitter_cookie_mirror.load_cookies()
+    except Exception:
+        return False
+    return any(
+        isinstance(c, dict)
+        and c.get("name") == "auth_token"
+        and "x.com" in (c.get("domain") or "")
+        for c in (cks or [])
+    )
+
+
 def cmd_status(args) -> dict:
     if not ensure_chrome(launch=False):
+        # The managed Chrome isn't live, but a durable keychain-independent session
+        # may already exist on disk (the mirror connect_x writes). Trust it so a
+        # successful import doesn't read back as "disconnected" once Chrome exits;
+        # the cycle preflight restores this same mirror before it scans.
+        if _mirror_has_session():
+            return {
+                "ok": True,
+                "connected": True,
+                "state": "connected_idle",
+                "handle": _durable_handle(),
+                "note": "X is connected (session saved). The autoposter's browser "
+                "isn't running this moment; the next cycle restores the session "
+                "from the local mirror automatically.",
+                "cdp": CDP,
+            }
         return {
             "ok": True,
             "connected": False,
@@ -893,14 +961,28 @@ def cmd_status(args) -> dict:
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error",
                 "handle": None, "error": str(e), "cdp": CDP}
+    # Live browser says logged out, but a durable mirror session can still exist
+    # (e.g. Chrome relaunched with a keychain-wiped Cookies DB before the preflight
+    # restore ran). Report it as connected_idle rather than a hard logged_out so
+    # the dashboard doesn't churn between connected and disconnected.
+    if not valid and _mirror_has_session():
+        return {
+            "ok": True,
+            "connected": True,
+            "state": "connected_idle",
+            "handle": _durable_handle(),
+            "note": "X is connected (session saved). The live browser is logged out "
+            "right now; the next cycle restores the session from the local mirror.",
+            "cdp": CDP,
+        }
     return {
         "ok": True,
         "connected": valid,
         "state": "connected" if valid else "logged_out",
-        # Only report a handle when a session exists; logged_out -> null (unknown,
-        # not missing). Callers must not treat a logged_out result as a reason to
-        # ask for / overwrite the handle.
-        "handle": _configured_handle() if valid else None,
+        # Surface the durable handle (config.json OR mirror) on a valid session;
+        # logged_out -> null (unknown, not missing). Callers must not treat a
+        # logged_out result as a reason to ask for / overwrite the handle.
+        "handle": _durable_handle() if valid else None,
         "cdp": CDP,
     }
 
