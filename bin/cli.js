@@ -882,9 +882,9 @@ function init() {
 
   console.log('');
   console.log('Done! Next steps:');
-  console.log('  1. Edit ~/social-autoposter/config.json with your accounts');
-  console.log('  2. Tell your Claude agent: "set up social autoposter"');
-  console.log('     (uses the setup/SKILL.md wizard for browser login verification)');
+  console.log('  1. Fully quit and relaunch Claude so the MCP loads');
+  console.log('  2. Tell your Claude agent: "set me up on social-autoposter end to end"');
+  console.log('     The agent will configure the product, connect X, seed topics, and verify a draft cycle');
   console.log('  3. Posts and all pipeline state sync via the s4l.ai HTTP API (no Postgres required)');
 }
 
