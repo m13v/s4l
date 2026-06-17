@@ -34,11 +34,12 @@ else
   echo "[BAD] fix MISSING from code -> reverted (re-apply from docs/twitter_browser_lock.md)"; bad=1
 fi
 
-# 2. defect-b rm -f gone from shells (anchored so the explanatory comment is not a hit)
-if grep -REq '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/ 2>/dev/null; then
-  echo "[BAD] defect-b: an actual 'rm -f ...twitter-browser-lock.json' is back in skill/"; bad=1
+# 2. defect-b rm -f gone from shells (anchored so the explanatory comment is not a hit).
+#    Scope to *.sh only -- never recurse skill/ (it holds a huge claude-sessions/ tree).
+if grep -hEq '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/*.sh skill/lib/*.sh 2>/dev/null; then
+  echo "[BAD] defect-b: an actual 'rm -f ...twitter-browser-lock.json' is back in skill/*.sh"; bad=1
 else
-  echo "[ok ] no rm -f of the session lock in skill/"
+  echo "[ok ] no rm -f of the session lock in skill/*.sh"
 fi
 
 # 3. positive: reclaim markers (each = a dead holder caught that USED to starve the fleet)
