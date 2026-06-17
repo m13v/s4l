@@ -14,8 +14,9 @@ or "dm-replies keeps giving up on the browser lock", start here before re-invest
 cd ~/social-autoposter
 # (1) fix present in code?
 grep -q "_is_python_holder_alive" scripts/twitter_browser.py && grep -q "O_EXCL" scripts/twitter_browser.py && echo "code: present" || echo "code: REVERTED"
-# (2) the unsafe shell workaround is gone? (expect 0)
-grep -REc 'rm -f .*twitter-browser-lock\.json' skill/run-twitter-cycle.sh skill/engage-twitter.sh | awk -F: '{s+=$2} END{print "live rm -f count:", s, (s==0?"(good)":"(REGRESSED)")}'
+# (2) the unsafe shell workaround is gone? anchor on ^ so the explanatory COMMENT
+#     (which contains the literal phrase) is not miscounted. expect 0.
+grep -REc '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/run-twitter-cycle.sh skill/engage-twitter.sh | awk -F: '{s+=$2} END{print "live rm -f count:", s, (s==0?"(good)":"(REGRESSED)")}'
 # (3) behavior still correct?
 /opt/homebrew/bin/python3 scripts/test_browser_lock.py | tail -1   # expect: RESULT: ALL PASS
 ```
@@ -131,7 +132,9 @@ stream, the tab should no longer flip between two pipelines' actions.
 - A twitter giveup message **without** `peer alive` (old format `locked by session X (Ns);
   waited 45s, giving up.`) -> the python fix was reverted; defect (a) is back.
 - Any **actual** `rm -f ...twitter-browser-lock.json` command (not the comment) in any
-  `skill/*.sh` -> defect (b) was re-introduced. The auto-commit agent has historically
+  `skill/*.sh` -> defect (b) was re-introduced. Detect with the anchored grep
+  `grep -REn '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/` (expect no hits; an
+  unanchored grep also matches the explanatory comment). The auto-commit agent has historically
   "simplified" locked files; revert it and tell the user.
 - `scripts/test_browser_lock.py` prints `RESULT: N FAILED` -> read the FAIL lines; the path
   they name (atomicity / reclaim / etc.) tells you which defect returned.
