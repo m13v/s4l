@@ -12,8 +12,8 @@ or "dm-replies keeps giving up on the browser lock", start here before re-invest
 
 ```bash
 cd ~/social-autoposter
-# (1) fix present in code?
-grep -q "_is_python_holder_alive" scripts/twitter_browser.py && grep -q "O_EXCL" scripts/twitter_browser.py && echo "code: present" || echo "code: REVERTED"
+# (1) fix present in code? (twitter + linkedin share the fix)
+grep -q "_is_python_holder_alive" scripts/twitter_browser.py && grep -q "_is_python_holder_alive" scripts/linkedin_browser.py && echo "code: present" || echo "code: REVERTED"
 # (2) the unsafe shell workaround is gone? anchor on ^ so the explanatory COMMENT
 #     (which contains the literal phrase) is not miscounted. expect 0.
 grep -REc '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/run-twitter-cycle.sh skill/engage-twitter.sh | awk -F: '{s+=$2} END{print "live rm -f count:", s, (s==0?"(good)":"(REGRESSED)")}'
@@ -141,13 +141,23 @@ stream, the tab should no longer flip between two pipelines' actions.
 - dm-replies-twitter logs again showing a holder whose `age` climbs and never refreshes while
   peers wait 45s and drop -> defect (a) starvation; check the python fingerprints in §3.
 
-## 6. Follow-up (NOT done here; Twitter-only was the ask)
+## 6. Sibling pipelines
 
-`scripts/linkedin_browser.py` and `scripts/reddit_browser.py` carry their **own copies** of
-this lock pattern ("Mirror twitter_browser._acquire_browser_lock semantics"). LinkedIn's copy
-has the same latent defect (a)/(c). Reddit uses a more elaborate lease/heartbeat scheme
-(`scripts/reddit_browser_lock.py` + `scripts/mcp_lock_proxy.py`), so verify before assuming.
-If LinkedIn shows the same starvation, port `_is_python_holder_alive` + `_try_take_lock` there.
+- **LinkedIn — FIXED 2026-06-16 (same fix ported).** `scripts/linkedin_browser.py` had the
+  identical defects (a)+(c); it did NOT have defect (b) (no shell `rm -f` of its lockfile).
+  Ported `_is_python_holder_alive` + `_try_take_lock` + the atomic, deadline-bounded acquire
+  loop. Two LinkedIn-specific things preserved: (i) its distinct giveup contract
+  `{"ok":false,"error":"profile_locked","detail":"... peer_alive=1"}` — `peer_alive=1` is the
+  regression tell (a giveup without it = python fix reverted); (ii) the lockfile JSON shape
+  `{"session_id","timestamp"}` that the `~/.claude/hooks/linkedin-agent-lock.sh` PreToolUse
+  hook co-writes (UUID holders), so the inherit/reclaim interop is intact. LinkedIn's lockfile
+  is `~/.claude/linkedin-agent-lock.json` (NOT linkedin-browser-lock.json). Reclaim marker is
+  tagged `platform=linkedin`. `scripts/test_browser_lock.py` runs the full suite against BOTH
+  modules. Fingerprint: `grep -q _is_python_holder_alive scripts/linkedin_browser.py`.
+- **Reddit — intentionally NOT changed (Matthew's call, 2026-06-16).** `scripts/reddit_browser.py`
+  uses a different lease/heartbeat scheme (`scripts/reddit_browser_lock.py` +
+  `scripts/mcp_lock_proxy.py` with an `expires_at` lease + heartbeat). Do NOT port this fix
+  there unless explicitly asked.
 
 ## 7. Do NOT re-add the `rm -f`
 
