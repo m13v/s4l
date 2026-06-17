@@ -167,6 +167,10 @@ Do not enable autopilot automatically. Offer it only after setup is verified,
 or enable it when the user's original request explicitly included hands-free
 posting.
 
+Once verification passes (or you reach a precise blocker), call the `dashboard`
+tool so the user sees the finished setup rendered visually, then give the
+completion summary below.
+
 ## CLI fallback
 
 Use only when MCP tools are unavailable. Execute the flow yourself rather than
@@ -189,7 +193,8 @@ turning it into instructions for the user.
 
 ## Completion summary
 
-Report outcomes, not a recap of every prompt:
+Render the `dashboard` tool once setup is verified, then report outcomes (not a
+recap of every prompt):
 
 ```text
 Social Autoposter Setup Complete
