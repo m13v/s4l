@@ -27,6 +27,16 @@ import { fileURLToPath } from "node:url";
 // Pin the standalone CPython series the venv is built from. Bump deliberately.
 const PYTHON_VERSION = "3.12";
 
+// The CDP scan engine the twitter cycle shells out to (~/.local/bin/browser-harness).
+// The npm front door (bin/cli.js) clones + `uv tool install -e` this; a bare
+// .mcpb install never did, so draft_cycle's scan found no engine and produced
+// zero drafts. KEEP BROWSER_HARNESS_PIN IN SYNC WITH bin/cli.js (pinned so
+// upstream drift can't reach users untested).
+const BROWSER_HARNESS_PIN = "6d20866664ea3d9691b27bbf64f42ae097437dc3";
+const BROWSER_HARNESS_REPO = "https://github.com/browser-use/browser-harness";
+const HARNESS_DIR = path.join(os.homedir(), "Developer", "browser-harness");
+const HARNESS_BIN = path.join(os.homedir(), ".local", "bin", "browser-harness");
+
 // dist/runtime.js -> repo root is two levels up (mcp/dist -> mcp -> repo root).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -120,6 +130,7 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
   { id: "venv", label: "Create owned virtual environment" },
   { id: "deps", label: "Install pipeline dependencies" },
   { id: "chromium", label: "Download Chromium browser (~150MB)" },
+  { id: "harness", label: "Install browser-harness (CDP scan engine)" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -314,6 +325,25 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       return fail(`unpacking pipeline source failed (exit ${r.code}). ${r.out.slice(-400)}`);
     }
     resolvedRepo = MATERIALIZED_REPO;
+    // Compatibility symlink: the pipeline scripts (run-twitter-cycle.sh and ~40
+    // siblings) hardcode $HOME/social-autoposter for REPO_DIR. A bare .mcpb
+    // materializes the repo under the state dir, so those paths don't resolve.
+    // Plant ~/social-autoposter -> materialized repo so every hardcoded
+    // reference resolves at once. Only when the path is entirely free: never
+    // clobber a real npm/git clone or any pre-existing entry (lstat catches
+    // dirs, files, and dangling symlinks; existsSync would miss a dangling one).
+    try {
+      const compat = path.join(os.homedir(), "social-autoposter");
+      let occupied = true;
+      try {
+        fs.lstatSync(compat);
+      } catch {
+        occupied = false;
+      }
+      if (!occupied) fs.symlinkSync(MATERIALIZED_REPO, compat);
+    } catch {
+      /* best effort; SAPS_REPO_DIR + the run-*.sh fallback also resolve the repo */
+    }
     setStep("repo", "done", `unpacked to ${resolvedRepo}`);
   }
 
@@ -386,6 +416,49 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     }
   }
   setStep("chromium", "done");
+
+  // --- Step 6: browser-harness CLI -----------------------------------------
+  // The twitter cycle (run-twitter-cycle.sh) drives Chrome over CDP by shelling
+  // out to ~/.local/bin/browser-harness. The npm installer (bin/cli.js) clones
+  // browser-use/browser-harness and `uv tool install -e`s it; a bare .mcpb
+  // install never provisioned it, so the scan engine was missing and every
+  // draft_cycle returned "no candidates". This brings .mcpb to parity with npm.
+  setStep("harness", "running");
+  {
+    // Clone if absent (mkdir parent first), else reuse the checkout.
+    if (!fs.existsSync(HARNESS_DIR)) {
+      fs.mkdirSync(path.dirname(HARNESS_DIR), { recursive: true });
+      const clone = await sh(
+        "git",
+        ["clone", "--depth", "1", BROWSER_HARNESS_REPO, HARNESS_DIR],
+        { timeoutMs: 180000 }
+      );
+      if (clone.code !== 0) {
+        return fail(`browser-harness clone failed (exit ${clone.code}). ${clone.out.slice(-400)}`);
+      }
+    }
+    // Pin to the known-good commit (fetch the exact SHA, hard-reset). Best
+    // effort: a transient fetch failure falls back to the existing checkout.
+    await sh("git", ["-C", HARNESS_DIR, "fetch", "--depth", "1", "origin", BROWSER_HARNESS_PIN], {
+      timeoutMs: 120000,
+    });
+    await sh("git", ["-C", HARNESS_DIR, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: 60000 });
+    // Install the CLI via uv tool (lands at ~/.local/bin/browser-harness).
+    // --force so a refreshed source / changed entry point is reinstalled.
+    const inst = await sh(uv, ["tool", "install", "--force", "-e", HARNESS_DIR], {
+      env: uvEnv,
+      timeoutMs: 300000,
+    });
+    if (inst.code !== 0 || !fs.existsSync(HARNESS_BIN)) {
+      return fail(
+        `browser-harness CLI install failed (exit ${inst.code}); ${HARNESS_BIN} missing. ` +
+          `${inst.out.slice(-400)}`
+      );
+    }
+    // Drop the harness daemon's cached code so the next run loads fresh (best effort).
+    await sh(HARNESS_BIN, ["--reload"], { timeoutMs: 30000 });
+  }
+  setStep("harness", "done", HARNESS_BIN);
 
   // --- Persist the result ---------------------------------------------------
   const info: RuntimeInfo = {
