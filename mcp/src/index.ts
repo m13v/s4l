@@ -1555,6 +1555,7 @@ function runtimeSnapshot() {
     python: rt?.python ?? null,
     python_version: rt?.python_version ?? null,
     progress: progress ?? null,
+    onboarding: onboardingSnapshot(),
   };
 }
 
@@ -1572,8 +1573,10 @@ tool(
   },
   async () => {
     if (runtimeReady()) {
+      completeOnboardingMilestone("runtime_ready");
       return jsonContent({ already_installed: true, ...runtimeSnapshot() });
     }
+    recordOnboardingAttempt("runtime_ready");
     const progress = startProvisioning();
     return jsonContent({
       started: true,
@@ -1594,7 +1597,60 @@ tool(
       "install_runtime to follow the install to completion.",
     inputSchema: {},
   },
-  async () => jsonContent(runtimeSnapshot())
+  async () => {
+    const snapshot = runtimeSnapshot();
+    if (snapshot.runtime_ready) {
+      completeOnboardingMilestone("runtime_ready");
+    } else if (snapshot.progress?.done && !snapshot.progress.ok) {
+      blockOnboardingMilestone(
+        "runtime_ready",
+        "runtime_install_failed",
+        snapshot.progress.error || "Runtime installation failed",
+        { outcome: "failed" }
+      );
+    }
+    return jsonContent({ ...snapshot, onboarding: onboardingSnapshot() });
+  }
+);
+
+// ---- doctor: structured environment diagnostics --------------------------
+// Uses the same shared engine as `npx social-autoposter doctor`. Pre-connect
+// avoids invasive keychain access and classifies not-yet-created X artifacts as
+// expected; full verifies the completed browser/session/cookie environment.
+tool(
+  "doctor",
+  {
+    title: "Diagnose the onboarding environment",
+    description:
+      "Run the structured social-autoposter Doctor and persist the result in the onboarding " +
+      "ledger. phase:'pre_connect' is safe at onboarding start and treats the missing X session/" +
+      "cookie artifacts as expected. phase:'full' verifies the completed environment after X is " +
+      "connected. action:'status' returns the most recent persisted result without re-running checks.",
+    inputSchema: {
+      action: z.enum(["run", "status"]).optional(),
+      phase: z.enum(["pre_connect", "full"]).optional(),
+    },
+  },
+  async ({
+    action,
+    phase,
+  }: {
+    action?: "run" | "status";
+    phase?: DoctorPhase;
+  }) => {
+    if (action === "status") {
+      return jsonContent({
+        doctor: onboardingLedger()?.doctor?.latest ?? null,
+        onboarding: onboardingSnapshot(),
+      });
+    }
+    const selected = phase || "pre_connect";
+    const report = await runDoctorPhase(selected);
+    return jsonContent({
+      doctor: report,
+      onboarding: onboardingSnapshot(),
+    });
+  }
 );
 
 // ---- config: read / edit the raw config.json ------------------------------
@@ -1691,11 +1747,22 @@ async function buildSnapshot() {
     ready: p.ready,
     missing_required: p.missing_required,
   }));
+  const rtReady = runtimeReady();
   const [x, ap, ver] = await Promise.all([
-    xStatus().catch(() => ({ connected: false, state: "" }) as any),
+    rtReady
+      ? xStatus().catch(() => ({ connected: false, state: "" }) as any)
+      : Promise.resolve({ connected: false, state: "runtime_not_ready" } as any),
     autopilotLoaded(),
     versionStatus().catch(() => ({ installed: VERSION, latest: null, update_available: false }) as any),
   ]);
+  await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
+  if (rtReady) completeOnboardingMilestone("runtime_ready");
+  if (x.connected) {
+    completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
+  }
+  if (projects.some((project) => project.ready)) {
+    completeOnboardingMilestone("project_ready", { missing_count: 0 });
+  }
   return {
     projects,
     projects_total: projects.length,
@@ -1710,8 +1777,9 @@ async function buildSnapshot() {
     update_available: !!ver.update_available,
     // Runtime install gate: the panel shows the Install card (and disables the
     // action buttons) until the owned Python/Chromium runtime is provisioned.
-    runtime_ready: runtimeReady(),
+    runtime_ready: rtReady,
     runtime_provisioning: isProvisioning(),
+    onboarding: onboardingSnapshot(),
   };
 }
 
