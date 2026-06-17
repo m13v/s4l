@@ -337,11 +337,24 @@ def _acquire_browser_lock():
     """
     global _LOCK_SESSION_ID, _LOCK_INHERITED
     deadline = time.time() + LOCK_WAIT_MAX
+    # Guarantee the lock dir exists so _try_take_lock's O_EXCL create can't fail
+    # for a missing-parent reason (which would otherwise spin the no-file path).
+    try:
+        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    except OSError:
+        pass
     while True:
         if not os.path.exists(LOCK_FILE):
             if _try_take_lock():
                 break
-            # Lost the create race to a peer; re-loop and re-evaluate them.
+            # Lost the create race to a peer (or a persistent create failure).
+            # Bound by `deadline` so this path can never spin forever.
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "success": False,
+                    "error": f"Twitter browser lock contended on create; waited {LOCK_WAIT_MAX}s, giving up."
+                }))
+                sys.exit(1)
             time.sleep(LOCK_POLL_INTERVAL)
             continue
         try:
@@ -350,10 +363,16 @@ def _acquire_browser_lock():
         except (json.JSONDecodeError, OSError):
             # Corrupt / half-written / vanished between exists() and open().
             # Try to claim atomically; if a peer holds a valid lock our O_EXCL
-            # create fails and we re-loop (the normal path re-applies `deadline`
-            # once a valid lock reappears).
+            # create fails and we re-loop. Bounded by `deadline` so a persistently
+            # unreadable lockfile gives up instead of hanging the pipeline.
             if _try_take_lock():
                 break
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "success": False,
+                    "error": f"Twitter browser lock unreadable; waited {LOCK_WAIT_MAX}s, giving up."
+                }))
+                sys.exit(1)
             time.sleep(LOCK_POLL_INTERVAL)
             continue
         age = time.time() - lock.get("timestamp", 0)
