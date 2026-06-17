@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/matthewdi</string>
+		<key>PATH</key>
+		<string>/Users/matthewdi/.nvm/versions/node/v20.19.4/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.m13v.social-reply-risk-digest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/matthewdi/social-autoposter/skill/reply-risk-digest.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-reply-risk-digest-stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-reply-risk-digest-stdout.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>35</integer>
+	</dict>
+</dict>
+</plist>
