@@ -35,11 +35,40 @@ try {
   );
   ledger.recordDoctorReport(report, opts);
 
+  ledger.recordDoctorReport(
+    {
+      ...report,
+      phase: "full",
+      ok: false,
+      summary: { ...report.summary, fail: 1 },
+    },
+    opts,
+  );
+  assert.equal(
+    ledger.readLedger(opts).current_blocker.code,
+    "doctor_full_failed",
+  );
+  // A later pre-connect probe must not erase a failed full verification.
+  ledger.recordDoctorReport(report, opts);
+  assert.equal(
+    ledger.readLedger(opts).current_blocker.code,
+    "doctor_full_failed",
+  );
+  ledger.recordDoctorReport(
+    {
+      ...report,
+      phase: "full",
+      ok: true,
+      summary: { ...report.summary, fail: 0 },
+    },
+    opts,
+  );
+
   const saved = ledger.readLedger(opts);
   assert.equal(saved.milestones.runtime_ready.status, "complete");
   assert.equal(saved.milestones.runtime_ready.attempts, 2);
   assert.equal(saved.milestones.environment_checked.status, "complete");
-  assert.equal(saved.doctor.runs.length, 1);
+  assert.equal(saved.doctor.runs.length, 4);
   assert.equal(saved.current_blocker, null);
   assert.ok(saved.events.length >= 5);
   assert.ok(saved.events.every((event) => event.backend_sent_at === null));
