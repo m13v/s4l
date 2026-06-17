@@ -8,6 +8,8 @@ const { spawnSync } = require('child_process');
 
 const platform = require('./platform');
 const scheduler = require('./scheduler');
+const { formatDoctorReport, runDoctorSync } = require('../mcp/shared/doctor.cjs');
+const { recordDoctorReport } = require('../mcp/shared/onboarding-ledger.cjs');
 
 const DEST = path.join(os.homedir(), 'social-autoposter');
 const PKG_ROOT = path.join(__dirname, '..');
@@ -1060,165 +1062,35 @@ function removeLegacyEngagementStylesSidecar() {
   }
 }
 
-// `doctor` (#6, added 2026-06-02) — single command that probes every known
-// failure mode of the install so the user can SEE what's broken instead of
-// learning about it via "Phase 1 returned 0 tweets" or "needs_login" with a
-// silent keychain failure underneath. Each check returns either ok=true or a
-// {ok:false, detail, fix} record. We print a green/red checklist and exit
-// non-zero if anything failed, so CI / setup wizards can gate on it.
+// `doctor` is a structured diagnostic engine shared with MCP onboarding.
+// Human-readable output remains the default; --json gives setup tools and CI a
+// stable machine-readable report. --phase pre_connect treats the not-yet-created
+// X session/cookie artifacts as expected, while full verifies the completed
+// environment after connect_x.
 function doctor() {
-  console.log('social-autoposter doctor — probing install health\n');
-
-  const checks = [];
-  const add = (name, runner) => checks.push({ name, runner });
-
-  add('Node.js on PATH', () => ({ ok: true, detail: process.version }));
-
-  add('python3 on PATH', () => {
-    const r = spawnSync('python3', ['--version'], { encoding: 'utf8' });
-    if (r.status === 0) return { ok: true, detail: (r.stdout || r.stderr).trim() };
-    return { ok: false, detail: 'python3 not found', fix: 'install Python 3 (brew install python3 / xcode-select --install)' };
-  });
-
-  add('uv tool on PATH', () => {
-    const uv = findUvBin();
-    if (!uv) return { ok: false, detail: 'uv not found', fix: 'curl -LsSf https://astral.sh/uv/install.sh | sh' };
-    return { ok: true, detail: uv };
-  });
-
-  add('browser-harness CLI installed', () => {
-    const bh = path.join(HOME, '.local', 'bin', 'browser-harness');
-    if (!fs.existsSync(bh)) return { ok: false, detail: `not found at ${bh}`, fix: 'npx social-autoposter init' };
-    return { ok: true, detail: bh };
-  });
-
-  add('browser-harness CLI shape (stdin / -c)', () => {
-    const bh = path.join(HOME, '.local', 'bin', 'browser-harness');
-    if (!fs.existsSync(bh)) return { ok: false, detail: 'binary missing' };
-    const probe = spawnSync(bh, [], { encoding: 'utf8', timeout: 15000 });
-    const usage = `${probe.stdout || ''}${probe.stderr || ''}`;
-    const dashC = /\b-c\b/.test(usage);
-    const stdin = /<<'PY'|<<"PY"|<<PY\b/.test(usage);
-    if (!dashC && !stdin) return { ok: false, detail: 'CLI advertises neither shape', fix: 'reinstall via npx social-autoposter init' };
-    return { ok: true, detail: stdin ? 'stdin heredoc' : '-c flag' };
-  });
-
-  add('macOS Keychain: Chrome Safe Storage readable', () => {
-    if (process.platform !== 'darwin') return { ok: true, detail: 'skipped (non-macOS)' };
-    const r = spawnSync('security', ['find-generic-password', '-s', 'Chrome Safe Storage', '-a', 'Chrome', '-w'], {
-      encoding: 'utf8', timeout: 10000,
-    });
-    if (r.status === 0) return { ok: true, detail: 'accessible (cookie import will work)' };
-    const tail = (r.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${r.status}`;
-    return {
-      ok: false,
-      detail: tail,
-      fix: 'security unlock-keychain ~/Library/Keychains/login.keychain-db   (then retry)',
-    };
-  });
-
-  add('harness Chrome on :9555', () => {
-    try {
-      const probe = spawnSync('curl', ['-sf', '--max-time', '2', '-o', '/dev/null', 'http://127.0.0.1:9555/json/version'], {
-        encoding: 'utf8',
-      });
-      if (probe.status === 0) return { ok: true, detail: 'CDP responding' };
-      return { ok: false, detail: 'no CDP on 9555', fix: 'will auto-launch on next cycle / connect_x call' };
-    } catch (e) {
-      return { ok: false, detail: e.message };
-    }
-  });
-
-  add('X session in harness Chrome', () => {
-    const setup = path.join(HOME, 'social-autoposter', 'scripts', 'setup_twitter_auth.py');
-    if (!fs.existsSync(setup)) return { ok: false, detail: 'setup script missing' };
-    const py = findPythonBin();
-    const r = spawnSync(py, [setup, 'status'], { encoding: 'utf8', timeout: 60000 });
-    let out;
-    try { out = JSON.parse((r.stdout || '').trim()); } catch { out = null; }
-    if (!out) return { ok: false, detail: 'status probe did not return JSON' };
-    if (out.connected) return { ok: true, detail: `state=${out.state}` };
-    return {
-      ok: false,
-      detail: `state=${out.state}`,
-      fix: 'python3 ~/social-autoposter/scripts/setup_twitter_auth.py connect',
-    };
-  });
-
-  add('x.com cookies persisted to SQLite', () => {
-    const cookiesDb = path.join(HOME, '.claude', 'browser-profiles', 'browser-harness', 'Default', 'Cookies');
-    if (!fs.existsSync(cookiesDb)) return { ok: false, detail: `${cookiesDb} missing`, fix: 'connect_x will create it' };
-    const py = findPythonBin();
-    const r = spawnSync(py, ['-c',
-      `import sqlite3; c=sqlite3.connect(${JSON.stringify(cookiesDb)}); ` +
-      `print(c.execute("SELECT COUNT(*) FROM cookies WHERE host_key LIKE '%x.com' OR host_key LIKE '%twitter.com'").fetchone()[0])`,
-    ], { encoding: 'utf8', timeout: 10000 });
-    const n = parseInt((r.stdout || '0').trim(), 10);
-    if (n > 0) return { ok: true, detail: `${n} rows persisted (Chrome's encrypted store)` };
-    return {
-      ok: false,
-      detail: '0 x.com rows in SQLite',
-      fix: 'run setup_twitter_auth.py connect to import (durability is backed by the cookie mirror below)',
-    };
-  });
-
-  // Gap B durability layer (1.6.35+): the keychain-independent local cookie
-  // mirror is what survives a re-locked keychain wiping Chrome's encrypted
-  // Cookies DB on relaunch. Read it directly (plaintext 0600 JSON).
-  const mirrorPath = path.join(HOME, '.claude', 'browser-profiles', 'browser-harness.x-cookies.json');
-  const mirrorCount = () => {
-    try {
-      const data = JSON.parse(fs.readFileSync(mirrorPath, 'utf8'));
-      return Array.isArray(data.cookies) ? data.cookies.length : 0;
-    } catch { return -1; }
-  };
-
-  add('X cookie mirror (durable across keychain re-lock)', () => {
-    const n = mirrorCount();
-    if (n > 0) return { ok: true, detail: `${n} cookies mirrored — cycle preflight auto-restores after a wipe` };
-    if (n === 0) return { ok: false, detail: 'mirror file present but empty', fix: 'run setup_twitter_auth.py connect to (re)populate the mirror' };
-    return { ok: false, detail: `no mirror at ${mirrorPath}`, fix: 'run setup_twitter_auth.py connect (1.6.35+) to create the durable cookie mirror' };
-  });
-
-  add('macOS Keychain: login keychain auto-lock', () => {
-    if (process.platform !== 'darwin') return { ok: true, detail: 'skipped (non-macOS)' };
-    const kc = path.join(HOME, 'Library', 'Keychains', 'login.keychain-db');
-    const r = spawnSync('security', ['show-keychain-info', kc], { encoding: 'utf8', timeout: 10000 });
-    const out = `${r.stdout || ''}${r.stderr || ''}`;
-    const m = out.match(/timeout=(\d+)s/);
-    if (!m) return { ok: true, detail: 'no auto-lock timeout (encrypted cookie store stays decryptable)' };
-    const secs = parseInt(m[1], 10);
-    // Only a real problem if the keychain re-locks AND the mirror isn't there to
-    // cover the resulting Cookies-DB wipe. With a populated mirror this is benign.
-    if (mirrorCount() > 0) {
-      return { ok: true, detail: `auto-locks after ${secs}s, but the cookie mirror covers the relaunch-wipe case` };
-    }
-    return {
-      ok: false,
-      detail: `auto-locks after ${secs}s — Chrome's encrypted cookie store can wipe on relaunch with no mirror to restore from`,
-      fix: `run connect_x to create the cookie mirror, or disable auto-lock: security set-keychain-settings "${kc}"`,
-    };
-  });
-
-  let pass = 0, fail = 0;
-  for (const c of checks) {
-    let res;
-    try { res = c.runner(); } catch (e) { res = { ok: false, detail: e.message }; }
-    if (res.ok) {
-      console.log(`  [OK]   ${c.name}: ${res.detail || ''}`);
-      pass++;
-    } else {
-      console.log(`  [FAIL] ${c.name}: ${res.detail || ''}`);
-      if (res.fix) console.log(`         fix: ${res.fix}`);
-      fail++;
-    }
+  const args = process.argv.slice(3);
+  const json = args.includes('--json');
+  const phaseArg = args.find((arg) => arg.startsWith('--phase='));
+  const phaseIndex = args.indexOf('--phase');
+  const phase =
+    (phaseArg && phaseArg.slice('--phase='.length)) ||
+    (phaseIndex >= 0 ? args[phaseIndex + 1] : null) ||
+    'full';
+  if (!['pre_connect', 'full'].includes(phase)) {
+    console.error("doctor: --phase must be 'pre_connect' or 'full'");
+    process.exit(2);
   }
-
-  console.log(`\n${pass}/${checks.length} checks passed.`);
-  if (fail > 0) {
-    console.log('Address the failures above and re-run `npx social-autoposter doctor`.');
-    process.exit(1);
-  }
+  const report = runDoctorSync({
+    phase,
+    home: HOME,
+    repoDir: fs.existsSync(DEST) ? DEST : PKG_ROOT,
+    python: findPythonBin(),
+  });
+  // Doctor runs are durable even when invoked directly from the CLI. MCP uses
+  // this same ledger, so a later onboarding session can show the historical run.
+  recordDoctorReport(report);
+  console.log(json ? JSON.stringify(report, null, 2) : formatDoctorReport(report));
+  if (!report.ok) process.exitCode = 1;
 }
 
 // Provision the owned Python/Chromium runtime from the terminal. This is the
@@ -1298,7 +1170,7 @@ if (cmd === 'init') {
   console.log('  npx social-autoposter              open the dashboard');
   console.log('  npx social-autoposter init          first-time setup');
   console.log('  npx social-autoposter update        update scripts, preserve config');
-  console.log('  npx social-autoposter doctor        probe install health (#6, 1.6.34+)');
+  console.log('  npx social-autoposter doctor [--json] [--phase pre_connect|full]');
   console.log('  npx social-autoposter bootstrap-vm  AppMaker VM self-bootstrap (DB-driven)');
   console.log('  npx social-autoposter install-runtime  provision owned Python + Chromium (panel-free)');
   console.log('  npx social-autoposter export-cookies [dir]  export browser cookies');
