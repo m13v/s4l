@@ -59,6 +59,15 @@ def save_cookies(cookies, handle: str | None = None) -> int:
     clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
     if not clean:
         return 0
+    # Never downgrade a previously-resolved @handle to null. Live handle
+    # resolution (_resolve_live_handle) is best-effort and races React hydration,
+    # so a re-import can legitimately arrive with handle=None even though we
+    # already knew the account. Clobbering it would drop the handle the dashboard
+    # + account_resolver rely on. Carry the prior handle forward in that case.
+    if not handle:
+        prev = (_read().get("handle") or "") if MIRROR_PATH.exists() else ""
+        if prev:
+            handle = prev
     MIRROR_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {"handle": handle, "saved_at": int(time.time()), "cookies": clean}
     tmp = MIRROR_PATH.with_name(MIRROR_PATH.name + ".tmp")
