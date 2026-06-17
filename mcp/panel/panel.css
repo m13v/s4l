@@ -84,6 +84,49 @@ html, body {
 .card .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .card .v { font-size: 18px; font-weight: 650; margin-top: 2px; }
 .card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+/* In-card action (e.g. Connect X when no session yet). Full-width so it reads as
+ * the card's call to action rather than a stray control. */
+.card-btn { width: 100%; margin-top: 8px; padding: 5px 10px; font-size: 12px; }
+.card-btn[hidden] { display: none; }
+
+/* Keychain heads-up modal shown before the connect-X import triggers the macOS
+ * Safe Storage prompt. Grayscale chrome; the screenshot carries the only color. */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+.modal[hidden] { display: none; }
+.modal-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  max-width: 460px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title { font-size: 15px; font-weight: 650; }
+.modal-body { font-size: 13px; color: var(--fg); display: flex; flex-direction: column; gap: 10px; }
+.modal-body p { margin: 0; }
+.modal-note { font-size: 12px; color: var(--muted); }
+.modal-img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-status { font-size: 12px; color: var(--muted); white-space: pre-wrap; min-height: 14px; }
 
 .actions {
   display: flex;
