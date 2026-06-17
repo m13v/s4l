@@ -889,9 +889,15 @@ tool(
     // Status / discovery mode: no project name supplied, or explicitly asked.
     if (args.status === true || !args.name) {
       const projects = listManagedProjectStatus();
-      const x = await xStatus();
-      const ver = await versionStatus();
       const rtReady = runtimeReady();
+      // On a bare .mcpb install the runtime step also materializes the pipeline
+      // source that xStatus shells into. Status must still work before that first
+      // install, otherwise the agent cannot discover that installation is the
+      // next milestone. Avoid probing Python until the owned runtime is ready.
+      const x = rtReady
+        ? await xStatus().catch(() => ({ connected: false, state: "status_unavailable" }) as any)
+        : ({ connected: false, state: "runtime_not_ready" } as any);
+      const ver = await versionStatus();
       const configured = projects.some((p) => p.ready);
       return jsonContent({
         configured,
