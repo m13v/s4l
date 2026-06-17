@@ -35,6 +35,7 @@
           <div class="k">X / Twitter</div>
           <div class="v" id="st-x">&mdash;</div>
           <div class="sub" id="st-x-sub"></div>
+          <button id="btn-connect-x" class="card-btn" hidden>Connect</button>
         </div>
         <div class="card">
           <div class="k">Autopilot</div>
@@ -96,6 +97,39 @@
 
       <div class="log" id="log"></div>
     </div>
+
+    <div class="modal" id="kc-modal" hidden>
+      <div class="modal-box">
+        <div class="modal-title">Connect your X account</div>
+        <div class="modal-body">
+          <p>
+            To post for you, the autoposter copies your logged-in X session from
+            your everyday browser into its own managed Chrome. Your passwords are
+            never seen, and only x.com / twitter.com cookies are read.
+          </p>
+          <p>
+            In a moment, macOS will show a keychain prompt like the one below.
+            Enter your Mac login password and click <strong>Allow</strong> (or
+            <strong>Always Allow</strong>).
+          </p>
+          <img
+            class="modal-img"
+            src="./keychain-prompt.png"
+            alt="macOS keychain prompt: enter your login password and click Allow"
+          />
+          <p class="modal-note">
+            If you use more than one browser, this prompt can appear several
+            times, once per browser. Approve each one.
+          </p>
+        </div>
+        <div class="modal-actions">
+          <button id="btn-kc-cancel" class="ghost">Cancel</button>
+          <button id="btn-kc-proceed" class="primary">Proceed</button>
+        </div>
+        <div class="modal-status" id="kc-status"></div>
+      </div>
+    </div>
+
     <script type="module" src="./panel.ts"></script>
   </body>
 </html>
