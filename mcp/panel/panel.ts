@@ -342,10 +342,11 @@ function busy(btn: HTMLButtonElement, label: string, fn: () => Promise<void>) {
 
 // ---- button handlers ------------------------------------------------------
 // Setup is the one action that genuinely needs the model in the loop (it reads
-// setup/SKILL.md and drives the browser-login wizard). Unlike the other buttons
+// setup/SKILL.md and drives autonomous discovery plus any unavoidable login).
+// Unlike the other buttons
 // (which call server tools directly via callServerTool, no model involved), this
 // injects a real user turn into the host conversation via sendMessage, so Claude
-// takes a turn and runs the wizard right there in the chat.
+// takes a turn and runs the end-to-end setup flow right there in the chat.
 btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async () => {
   log("Asking Claude to run setup\u2026");
   try {
@@ -354,13 +355,16 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       content: [{
         type: "text",
         text:
-          "Run the social autoposter setup wizard: configure my project " +
-          "(website, what I do, who to target, brand voice) and connect my X/Twitter account. " +
-          "Walk me through it step by step.",
+          "Set up social autoposter end to end now. Inspect and repair the runtime, auto-detect " +
+          "and connect my X session, scan my profile, discover and research my product, infer and " +
+          "save a conservative complete project with search topics, seed them, and run a draft-only " +
+          "verification. Keep going without asking me to approve each safe setup step. Warn me " +
+          "briefly before any macOS keychain prompt, but proceed immediately. Ask only if I must " +
+          "interactively sign in or no product can be identified. Do not post or enable autopilot.",
       }],
     });
     if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
-    else log("Setup started in the chat \u2014 follow the prompts there, then hit Refresh.");
+    else log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
   } catch (e: any) {
     log("Couldn\u2019t start setup: " + (e?.message || e));
   }
