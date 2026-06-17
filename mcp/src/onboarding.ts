@@ -247,55 +247,60 @@ export function flushOnboardingEvents(): Promise<{
 }> {
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
-    const pending = ledgerApi.pendingBackendEvents().slice(0, 50);
-    if (pending.length === 0) return { sent: 0, pending: 0 };
     const header = await identityHeader();
     if (!header) {
+      const pending = ledgerApi.pendingBackendEvents().length;
       return {
         sent: 0,
-        pending: pending.length,
+        pending,
         error: "installation identity unavailable",
       };
     }
     const base = (
       process.env.AUTOPOSTER_API_BASE || "https://s4l.ai"
     ).replace(/\/+$/, "");
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    try {
-      const response = await fetch(
-        `${base}/api/v1/installations/onboarding-events`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-installation": header,
-          },
-          body: JSON.stringify({ events: pending.map(redactEvent) }),
-          signal: controller.signal,
+    let sent = 0;
+    // Re-read after every batch. This catches milestone events appended while a
+    // prior network request was in flight, so the final onboarding event is not
+    // stranded waiting for some unrelated future tool call.
+    for (let batch = 0; batch < 10; batch += 1) {
+      const pending = ledgerApi.pendingBackendEvents().slice(0, 50);
+      if (pending.length === 0) return { sent, pending: 0 };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch(
+          `${base}/api/v1/installations/onboarding-events`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-installation": header,
+            },
+            body: JSON.stringify({ events: pending.map(redactEvent) }),
+            signal: controller.signal,
+          }
+        );
+        if (!response.ok) {
+          return {
+            sent,
+            pending: ledgerApi.pendingBackendEvents().length,
+            error: `backend returned ${response.status}`,
+          };
         }
-      );
-      if (!response.ok) {
+        ledgerApi.markBackendEventsSent(pending.map((event) => event.event_id));
+        sent += pending.length;
+      } catch (error) {
         return {
-          sent: 0,
-          pending: pending.length,
-          error: `backend returned ${response.status}`,
+          sent,
+          pending: ledgerApi.pendingBackendEvents().length,
+          error: error instanceof Error ? error.message : String(error),
         };
+      } finally {
+        clearTimeout(timeout);
       }
-      ledgerApi.markBackendEventsSent(pending.map((event) => event.event_id));
-      return {
-        sent: pending.length,
-        pending: Math.max(0, ledgerApi.pendingBackendEvents().length),
-      };
-    } catch (error) {
-      return {
-        sent: 0,
-        pending: pending.length,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    } finally {
-      clearTimeout(timeout);
     }
+    return { sent, pending: ledgerApi.pendingBackendEvents().length };
   })().finally(() => {
     flushInFlight = null;
   });
