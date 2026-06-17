@@ -40,6 +40,19 @@ _sa_lock_owner_tag() {
     printf 'owner=OTHER on_disk=%s' "${_odp:-none}"
   fi
 }
+# Ownership guard (added 2026-06-17): returns 0 (true) ONLY if the lock dir $1's
+# recorded pid is OURS. Used to gate every rm of a lock dir so we never delete a
+# lock a peer currently holds. Proven necessary: 17h of lock-events.log caught 32
+# `owner=OTHER` deletions on twitter-browser (trap + release blindly rm-ing a live
+# peer's lock), which cascaded into real double-holds (two pipelines on one Chrome).
+# Safe failure mode: if this ever wrongly returns false for OUR OWN lock (e.g. a
+# transient pid-file read miss), we just skip our own cleanup; the acquire-side
+# kill -0 stale path then reclaims it within one cycle. Never deadlocks.
+_sa_we_own_lock() {
+  local _odp=""
+  [ -f "$1/pid" ] && _odp="$(head -1 "$1/pid" 2>/dev/null || true)"
+  [ "$_odp" = "$$" ]
+}
 
 # Stack of currently-held lock directories AND outstanding queue tickets,
 # both cleaned up on exit. Declared at source time so they survive across
@@ -103,9 +116,17 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
       local _lname="${d##*/}"
       _lname="${_lname#social-autoposter-}"
       _lname="${_lname%.lock}"
-      _sa_lock_event trap_rm "$_lname" "$(_sa_lock_owner_tag "$d")"
-      echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
-      rm -rf "$d"
+      # Ownership guard: only delete the dir if WE still hold it. A peer may have
+      # legitimately re-acquired it after our mid-cycle release; deleting it here
+      # is defect "owner=OTHER" (wipes a live peer's lock -> double-hold).
+      if _sa_we_own_lock "$d"; then
+        _sa_lock_event trap_rm "$_lname" "$(_sa_lock_owner_tag "$d")"
+        echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
+        rm -rf "$d"
+      else
+        _sa_lock_event trap_rm_skipped "$_lname" "$(_sa_lock_owner_tag "$d")"
+        echo "[lock] trap-release SKIPPED $_lname pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+      fi
     done
     for t in ${_SA_LOCK_TICKETS[@]+"${_SA_LOCK_TICKETS[@]}"}; do
       rm -f "$t"
@@ -603,9 +624,18 @@ defer_if_foreign_browser_mcp_active() {
 release_lock() {
   local name="$1"
   local lock_dir="/tmp/social-autoposter-${name}.lock"
-  _sa_lock_event release "$name" "$(_sa_lock_owner_tag "$lock_dir")"
-  rm -rf "$lock_dir"
-  echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
+  # Ownership guard: only delete the dir if WE still hold it. If a peer re-acquired
+  # it after our mid-cycle release (or it was already cleared), do NOT rm — that is
+  # exactly the defect that wiped live peers' locks. The stack rebuild below still
+  # runs so we stop tracking it either way.
+  if _sa_we_own_lock "$lock_dir"; then
+    _sa_lock_event release "$name" "$(_sa_lock_owner_tag "$lock_dir")"
+    rm -rf "$lock_dir"
+    echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
+  else
+    _sa_lock_event release_skipped "$name" "$(_sa_lock_owner_tag "$lock_dir")"
+    echo "[lock] release SKIPPED $name pid=$$ (not owner) at $(date +%H:%M:%S)" >&2
+  fi
   # Rebuild the lock stack without this entry so the EXIT trap doesn't try to
   # rm it again (harmless, but keeps the stack honest if release_lock is paired
   # with a later re-acquire of the same name).
