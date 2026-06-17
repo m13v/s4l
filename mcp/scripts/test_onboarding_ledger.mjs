@@ -79,7 +79,7 @@ try {
 
   const snapshot = ledger.publicSnapshot(opts);
   assert.equal(snapshot.milestones.length, 7);
-  assert.equal(snapshot.doctor.phase, "pre_connect");
+  assert.equal(snapshot.doctor.phase, "full");
   assert.ok(fs.existsSync(path.join(stateDir, "onboarding-progress.json")));
 } finally {
   fs.rmSync(stateDir, { recursive: true, force: true });
