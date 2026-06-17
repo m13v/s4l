@@ -106,6 +106,8 @@ const installCard = $("install-card");
 const onboardingCard = $("onboarding-card");
 const onboardingSteps = $("onboarding-steps");
 const onboardingBlocker = $("onboarding-blocker");
+const onboardingCount = $("onboarding-count");
+const onboardingBarFill = $("onboarding-bar-fill");
 const statusCard = $("status-card");
 const liveCard = $("live-card");
 const statsCard = $("stats-card");
@@ -126,6 +128,7 @@ const btnConfigCancel = $("btn-config-cancel") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
+let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
 let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
 
@@ -182,6 +185,25 @@ function renderOnboarding(progress?: OnboardingSnapshot) {
     return;
   }
   onboardingCard.hidden = false;
+
+  // Headline state: a "done / total" count, a fill bar, and a one-word status.
+  // The agent runs setup in the chat; pollSetup repaints this live as each
+  // milestone lands, so the card is the user's at-a-glance progress view.
+  const total = progress.milestones.length;
+  const completed = progress.milestones.filter((m) => m.status === "complete").length;
+  const blocked = !!progress.current_blocker && !progress.complete;
+  onboardingCard.classList.toggle("complete", progress.complete);
+  onboardingCard.classList.toggle("blocked", blocked);
+  onboardingCount.textContent = progress.complete
+    ? "Complete"
+    : blocked
+      ? `${completed}/${total} · needs you`
+      : setupPolling
+        ? `${completed}/${total} · setting up…`
+        : `${completed}/${total}`;
+  onboardingBarFill.style.width =
+    total > 0 ? `${Math.round((completed / total) * 100)}%` : "0%";
+
   onboardingSteps.innerHTML = progress.milestones
     .map((milestone) => {
       const label = MILESTONE_LABELS[milestone.id] || milestone.id;
@@ -390,6 +412,42 @@ async function pollInstall() {
   }
 }
 
+// Follow the autonomous setup the agent runs in the chat. The onboarding ledger
+// advances as the agent completes each milestone (connect X, scan profile, save
+// project, seed topics, draft-verify), so we poll the cheap install_status —
+// which carries both the runtime install progress and the onboarding snapshot —
+// and repaint the Setup progress card live until every milestone is done. This
+// is pollInstall's twin, extended past runtime_ready to the end of setup.
+async function pollSetup() {
+  if (setupPolling) return;
+  setupPolling = true;
+  render(); // flip the header to "setting up…" immediately
+  const startedAt = Date.now();
+  const MAX_MS = 20 * 60 * 1000; // safety stop: setup is autonomous, not infinite
+  try {
+    for (;;) {
+      const rt = await call("install_status").catch(() => ({} as any));
+      if (rt.progress) renderInstallProgress(rt.progress);
+      const patch: Partial<Snapshot> = {};
+      if (typeof rt.runtime_ready === "boolean") patch.runtime_ready = rt.runtime_ready;
+      if (rt.onboarding) patch.onboarding = rt.onboarding;
+      if (Object.keys(patch).length) applyState(patch);
+      if ((rt.onboarding as OnboardingSnapshot | undefined)?.complete) {
+        // Final full read flips the gating (Set up -> Run draft cycle), reveals
+        // the status/stats cards, and loads 7-day stats.
+        await refresh();
+        log("Setup complete.");
+        break;
+      }
+      if (Date.now() - startedAt > MAX_MS) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } finally {
+    setupPolling = false;
+    render(); // drop the "setting up…" hint
+  }
+}
+
 async function loadStats() {
   try {
     const data = await call("get_stats", { days: 7 });
@@ -443,7 +501,12 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       }],
     });
     if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
-    else log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
+    else {
+      log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
+      // Follow the agent's progress live and repaint the Setup progress card as
+      // each milestone lands, instead of waiting for a manual Refresh.
+      void pollSetup();
+    }
   } catch (e: any) {
     log("Couldn\u2019t start setup: " + (e?.message || e));
   }
