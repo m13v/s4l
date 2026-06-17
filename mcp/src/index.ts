@@ -772,8 +772,20 @@ tool(
             "cookies from your everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into it, and " +
             "(3) verify you're logged in. No other site's cookies are read, and your passwords are never " +
             "seen. If it can't import a valid session, a Chrome window will open for you to sign in once.",
+          keychain_prompt:
+            "Reading the saved session requires macOS to unlock the browser's encrypted cookie store, so " +
+            "one or more keychain prompts will appear (\u201c... wants to use your confidential information " +
+            "stored in '... Safe Storage' in your keychain\u201d). This is expected. The user enters their Mac " +
+            "login password and clicks Allow (or Always Allow to avoid repeats). If they use more than one " +
+            "browser, the prompt can appear a few times, once per browser.",
+          say_to_user:
+            "Heads up: your Mac will pop up a keychain prompt asking to use your browser's Safe Storage. " +
+            "That's just us reading your saved X login, nothing else. Type your Mac login password and click " +
+            "Allow (or Always Allow). If you use more than one browser you may see it a couple of times, " +
+            "once per browser.",
           how_to_proceed:
-            "Tell the user the above in your own words and ask if that's OK. If yes, call setup again with " +
+            "Tell the user what_will_happen in your own words, then relay the say_to_user line so they know " +
+            "the keychain prompt is coming and what to click. Ask if that's OK. If yes, call setup again with " +
             "action:'connect_x', confirm:true (optionally x_source:'arc:Default' etc. if they use a non-Chrome browser).",
         });
       }
