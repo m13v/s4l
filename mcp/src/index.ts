@@ -46,6 +46,7 @@ import {
   runtimeReady,
   readRuntime,
   resolvePython,
+  resolveChrome,
 } from "./runtime.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
 import {
@@ -126,6 +127,14 @@ function plistXml(opts: {
   stderrLog: string;
 }): string {
   const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
+  // Background (cron/autopilot) runs get the same Chrome the interactive cycle
+  // uses, so a no-sudo ~/Applications install (which the shell's own resolver
+  // doesn't scan) is still found off-screen. Omitted when Chrome resolves via
+  // PATH, so the shell's _resolve_chrome_bin stays the fallback.
+  const chrome = resolveChrome();
+  const chromeEnv = chrome
+    ? `\n\t\t<key>BH_CHROME_BIN</key>\n\t\t<string>${chrome}</string>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -151,7 +160,7 @@ ${args}
 \t\t<key>SAPS_REPO_DIR</key>
 \t\t<string>${repoDir()}</string>
 \t\t<key>SAPS_PYTHON</key>
-\t\t<string>${resolvePython()}</string>
+\t\t<string>${resolvePython()}</string>${chromeEnv}
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<${opts.runAtLoad ? "true" : "false"}/>
@@ -397,6 +406,13 @@ async function produceDrafts(
     BH_WINDOW_SIZE: "1280,900",
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
+  // Point the harness at the Chrome the runtime detected/installed. The cycle's
+  // own _resolve_chrome_bin doesn't scan ~/Applications (our no-sudo fallback
+  // install target), so without this a non-admin .mcpb install would have Chrome
+  // on disk yet still report "no Chrome/Chromium binary found." Only set when
+  // resolved; otherwise let the shell resolve Chrome from its own probe list.
+  const chrome = resolveChrome();
+  if (chrome) env.BH_CHROME_BIN = chrome;
   // Bring the on-screen overlay up alongside the live harness window so the user
   // watching the scan/scrape sees status + queued drafts. Idempotent + detached.
   await ensureOverlayWatch();
