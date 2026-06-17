@@ -9,7 +9,7 @@
     "start": "node bin/server.js",
     "dev": "node --watch bin/server.js",
     "release:mcpb": "bash scripts/release-mcpb.sh",
-    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js && node mcp/scripts/test_onboarding_contract.mjs"
+    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js && node mcp/scripts/test_onboarding_contract.mjs && node mcp/scripts/test_onboarding_ledger.mjs"
   },
   "files": [
     "bin/",
