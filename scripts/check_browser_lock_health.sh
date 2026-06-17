@@ -19,9 +19,14 @@ LOGS="skill/logs"
 HOURS="${1:-24}"
 bad=0
 
-# Dated per-run logs touched in the window. (NOT launchd-*.log: those are append-only,
-# so their mtime says nothing about when a line inside was written.)
-recent=$(find "$LOGS" -maxdepth 1 -name '*2026-*.log' -mmin "-$((HOURS*60))" 2>/dev/null | grep -v 'launchd-' || true)
+# Dated per-run logs that are BOTH within the lookback window AND newer than the lock
+# code file. The `-newer` clause is the key: it counts only runs that started after the
+# fix (or, if the fix is ever reverted, after that revert) -- so day-one pre-fix
+# starvation noise is excluded automatically, and a real regression still surfaces.
+# (NOT launchd-*.log: those are append-only, so their mtime says nothing about when a
+# line inside was written.)
+recent=$(find "$LOGS" -maxdepth 1 -name '*2026-*.log' -mmin "-$((HOURS*60))" \
+           -newer scripts/twitter_browser.py 2>/dev/null | grep -v 'launchd-' || true)
 [ -z "$recent" ] && recent="/dev/null"   # guard: never let grep read stdin
 
 echo "== browser-lock health (last ${HOURS}h of dated per-run logs) =="
@@ -61,8 +66,8 @@ fi
 #    NOTE: 'event=stale_reclaim ... owner=OTHER' is LEGITIMATE (reclaiming a dead holder),
 #    only 'event=trap_rm ... owner=OTHER' is the bad one.
 if [ -f "$LOGS/lock-events.log" ]; then
-  to=$(grep -cE 'event=trap_rm .*owner=OTHER' "$LOGS/lock-events.log" 2>/dev/null || echo 0)
-  if [ "${to:-0}" -gt 0 ]; then
+  to=$(grep -cE 'event=trap_rm .*owner=OTHER' "$LOGS/lock-events.log" 2>/dev/null); to=${to:-0}
+  if [ "$to" -gt 0 ]; then
     echo "[BAD] shell trap_rm owner=OTHER x$to (a pipeline deleted a LIVE peer's shell lock)"; bad=1
   else
     echo "[ok ] shell-lock: no trap_rm owner=OTHER (live-lock deletes)"
