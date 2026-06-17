@@ -78,6 +78,10 @@ const apToggle = $("ap-checkbox") as HTMLInputElement;
 const statsGrid = $("stats-grid");
 const logEl = $("log");
 const installCard = $("install-card");
+const statusCard = $("status-card");
+const liveCard = $("live-card");
+const statsCard = $("stats-card");
+const configCard = $("config-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
@@ -166,20 +170,34 @@ function render() {
     ? (state.auto_update_on ? "on \u00b7 auto-update on" : "on")
     : "off";
 
-  // Gate actions on readiness. Nothing below works without the runtime, so when
-  // it's missing every action is disabled and the Install card carries the only
-  // live button.
+  // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
+  // exists, at least one project is fully configured, and the X session is
+  // connected. Until all three hold, the panel is intentionally minimal — just
+  // the Set up button (or the Install card while the runtime is missing) — and
+  // Run draft cycle is hidden. Once complete, Set up disappears and Run draft
+  // cycle is the single primary action.
   const hasReady = state.projects_ready > 0;
+  const setupComplete = !needsRuntime && hasReady && state.x_connected;
+
+  // Two mutually exclusive primary actions: Set up before completion, Run draft
+  // cycle after. Never both at once.
+  btnSetup.hidden = setupComplete;
+  btnDraft.hidden = !setupComplete;
   btnSetup.disabled = needsRuntime;
   btnDraft.disabled = needsRuntime || !hasReady;
   apToggle.disabled = needsRuntime || !hasReady;
-  // When nothing is configured yet, Set up is the obvious next action, so
-  // promote it to the primary (filled) style and demote draft (which is
-  // disabled anyway). Once a project is ready, draft regains the emphasis. While
-  // the runtime is missing, neither gets emphasis — the Install button does.
-  const needsSetup = !hasReady;
-  btnSetup.classList.toggle("primary", !needsRuntime && needsSetup);
-  btnDraft.classList.toggle("primary", !needsRuntime && !needsSetup);
+  btnSetup.classList.toggle("primary", !needsRuntime && !setupComplete);
+  btnDraft.classList.toggle("primary", setupComplete);
+
+  // Secondary surfaces (status cards, live browser, 7-day stats, config editor)
+  // are only meaningful once the product is configured and posting. Hide them
+  // until setup is complete so the pre-setup view stays a minimal "just set up"
+  // interface; the Install card (gated above) is the only thing shown while the
+  // runtime is still installing.
+  statusCard.hidden = !setupComplete;
+  liveCard.hidden = !setupComplete;
+  statsCard.hidden = !setupComplete;
+  configCard.hidden = !setupComplete;
 }
 
 function applyState(snap: Partial<Snapshot>) {
