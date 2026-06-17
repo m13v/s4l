@@ -22,6 +22,14 @@ grep -REc '^[[:space:]]*rm -f .*twitter-browser-lock\.json' skill/run-twitter-cy
 ```
 If all three say good / present / ALL PASS, the fix is intact. Done.
 
+**Ongoing production health (is it working in real runs, not just in theory?):**
+```bash
+bash scripts/check_browser_lock_health.sh    # -> RESULT: HEALTHY  (exit 0) or ATTENTION NEEDED
+```
+It only inspects dated per-run logs that are NEWER than `scripts/twitter_browser.py` (i.e.
+post-fix runs), so pre-fix starvation noise never trips it, and a revert that rewrites the
+file resets the window. [BAD] lines map to §5 regression signatures. Safe to schedule.
+
 ---
 
 ## 1. The bug (why Twitter pipelines fought over one tab)
