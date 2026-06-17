@@ -1029,63 +1029,65 @@ def cmd_connect(args) -> dict:
         except Exception:
             pass
 
-    # 4. Could not establish a valid session automatically -> manual login.
-    #    Put a real, focused X login screen in front of the user (the cron
-    #    pipeline may have parked this window off-screen) and tell them to sign
-    #    in by hand, then re-run connect_x. We never ask for their password and
-    #    never hand-decrypt cookies; they log into their own browser themselves.
-    shown = _show_window_and_open_login()
-
-    # Own the wait: block here until the user finishes the manual login (or the
-    # bounded window elapses) instead of returning `needs_login` instantly and
-    # letting the caller re-check faster than a human can type a password + 2FA.
-    # That race is what made setup misreport the handle as "missing." If the
-    # cookie appears, fall through to the same connected/persist/handle path the
-    # auto-import success branch uses.
-    login_wait = getattr(args, "login_wait", 90.0)
-    if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
-        try:
-            if _is_session_valid():
-                _persist_session()
-                flush_ok, flush_detail = _force_cookie_flush()
-                return {
-                    "ok": True,
-                    "connected": True,
-                    "state": "connected",
-                    "source": "manual_login",
-                    "attempts": attempts,
-                    "flushed_to_disk": flush_ok,
-                    "flush_detail": flush_detail,
-                    "note": "You logged in manually; the autoposter detected the live X "
-                            "session and saved it to its own profile.",
-                    "cdp": CDP,
-                }
-        except Exception:
-            pass
-
-    note = (
-        "A Chrome window for the autoposter is open at the X login page"
-        + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
-        + " and you are NOT logged in yet. Log in there yourself — username, password, "
-        "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
-        "to confirm and I'll re-check (run connect_x again). The session is saved to the "
-        "autoposter's own profile, so this is a one-time step. "
-        "(Auto-import tried: " + ", ".join(sources) + ".)"
-    )
-    # If every attempt classified to the same root cause, surface it so the
-    # caller doesn't keep telling the user "log in manually" when really the
-    # keychain is locked / no source profile exists / CDP isn't reachable.
+    # 4. Could not establish a valid session automatically.
+    #    Roll up the import failure cause FIRST, because whether we shove a Chrome
+    #    login window in front of the user depends on it. We open a focused X login
+    #    screen ONLY when either:
+    #      (a) the user actually DENIED/Cancelled the keychain prompt — auto-import
+    #          genuinely can't proceed, so manual login is the real fallback; or
+    #      (b) the caller explicitly asked for it (--manual-login).
+    #    For every other failure (no X session in the source browser, locked
+    #    keychain, CDP error, unknown) we do NOT pop an unexpected browser window;
+    #    we return needs_login and let the user opt into manual login.
     distinct_error_types = {a.get("error_type") for a in attempts if a.get("error_type")}
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
-    # If the single root cause was the user clicking Deny/Cancel on the macOS
-    # keychain prompt, the generic "log in manually" prose is misleading — the
-    # auto-import would have worked, they just refused keychain access. Tell
-    # them exactly that, with the real fix (re-run and click Allow), while still
-    # leaving the manual-login window as a fallback.
+    manual_login = bool(getattr(args, "manual_login", False))
+    open_login = manual_login or rolled_up_error_type == "keychain_acl_denied"
+
+    shown = False
+    if open_login:
+        # Put a real, focused X login screen in front of the user (the cron
+        # pipeline may have parked this window off-screen) and tell them to sign
+        # in by hand, then re-run connect_x. We never ask for their password and
+        # never hand-decrypt cookies; they log into their own browser themselves.
+        shown = _show_window_and_open_login()
+
+        # Own the wait: block here until the user finishes the manual login (or the
+        # bounded window elapses) instead of returning `needs_login` instantly and
+        # letting the caller re-check faster than a human can type a password + 2FA.
+        # That race is what made setup misreport the handle as "missing." If the
+        # cookie appears, fall through to the same connected/persist/handle path the
+        # auto-import success branch uses.
+        login_wait = getattr(args, "login_wait", 90.0)
+        if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
+            try:
+                if _is_session_valid():
+                    _persist_session()
+                    flush_ok, flush_detail = _force_cookie_flush()
+                    return {
+                        "ok": True,
+                        "connected": True,
+                        "state": "connected",
+                        "source": "manual_login",
+                        "attempts": attempts,
+                        "flushed_to_disk": flush_ok,
+                        "flush_detail": flush_detail,
+                        "note": "You logged in manually; the autoposter detected the live X "
+                                "session and saved it to its own profile.",
+                        "cdp": CDP,
+                    }
+            except Exception:
+                pass
+
+    # Build the needs_login note from the rolled-up cause + whether a window opened.
     extra = {}
     if rolled_up_error_type == "keychain_acl_denied":
+        # The user clicked Deny/Cancel on the keychain prompt. Auto-import would
+        # have worked; they just refused keychain access. Tell them the real fix
+        # (re-run and click Allow), and since we DID open a login window for this
+        # case, point at it as the keychain-free fallback.
         note = (
             "It looks like you clicked Deny (or Cancel) on the macOS Keychain prompt. "
             "To import your X session automatically, the autoposter needs to read Chrome's "
@@ -1098,6 +1100,30 @@ def cmd_connect(args) -> dict:
             "(Auto-import tried: " + ", ".join(sources) + ".)"
         )
         extra["remediation"] = "rerun_connect_x_and_click_allow"
+    elif open_login:
+        # Explicit --manual-login: a window is open and we waited; they just
+        # haven't finished signing in yet.
+        note = (
+            "A Chrome window for the autoposter is open at the X login page"
+            + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
+            + " and you are NOT logged in yet. Log in there yourself — username, password, "
+            "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
+            "to confirm and I'll re-check (run connect_x again). The session is saved to the "
+            "autoposter's own profile, so this is a one-time step. "
+            "(Auto-import tried: " + ", ".join(sources) + ".)"
+        )
+    else:
+        # Auto-import failed for a non-deny reason and the user did NOT ask for
+        # manual login. Do NOT pop a browser window. Explain what happened and
+        # offer manual login as an explicit opt-in.
+        note = (
+            "Couldn't import an X session automatically (auto-import tried: "
+            + ", ".join(sources) + "). This usually means you're not logged into X in "
+            "your everyday browser, so there was no session to copy. I did NOT open a "
+            "login window. If you want to sign in by hand, ask me to connect X with "
+            "manual login and I'll open a focused X login page for you to use."
+        )
+        extra["manual_login_hint"] = "rerun_connect_x_with_manual_login"
     return {
         "ok": True,
         "connected": False,
@@ -1131,6 +1157,12 @@ def main() -> int:
                         "(one keychain prompt for the right browser).")
     c.add_argument("--no-launch", action="store_true",
                    help="Do not launch Chrome if it's down (probe only).")
+    c.add_argument("--manual-login", action="store_true",
+                   help="Explicitly opt into manual login: open a focused X login "
+                        "window and wait for the user to sign in by hand. Without this, "
+                        "the login window only opens when the user DENIED the keychain "
+                        "prompt; every other auto-import failure returns needs_login "
+                        "without popping an unexpected browser window.")
     c.add_argument("--login-wait", type=float, default=90.0,
                    help="Seconds to wait for a MANUAL login to complete before "
                         "returning needs_login (default 90; 0 disables the wait). "
