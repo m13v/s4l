@@ -27,6 +27,30 @@ interface InstallProgress {
   error?: string;
   steps: ProgressStep[];
 }
+type MilestoneStatus = "pending" | "in_progress" | "complete" | "blocked";
+interface OnboardingMilestone {
+  id: string;
+  status: MilestoneStatus;
+  attempts: number;
+  completed_at?: string;
+  last_error?: string;
+}
+interface OnboardingSnapshot {
+  complete: boolean;
+  milestones: OnboardingMilestone[];
+  current_blocker?: {
+    milestone: string;
+    code: string;
+    message: string;
+    at: string;
+    attempt: number;
+  } | null;
+  doctor?: {
+    phase: string;
+    ok: boolean;
+    summary: { pass: number; fail: number; expected: number; total: number };
+  } | null;
+}
 interface Snapshot {
   projects: ProjStatus[];
   projects_ready: number;
@@ -41,6 +65,7 @@ interface Snapshot {
   update_available: boolean;
   runtime_ready: boolean;
   runtime_provisioning?: boolean;
+  onboarding?: OnboardingSnapshot;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -78,6 +103,9 @@ const apToggle = $("ap-checkbox") as HTMLInputElement;
 const statsGrid = $("stats-grid");
 const logEl = $("log");
 const installCard = $("install-card");
+const onboardingCard = $("onboarding-card");
+const onboardingSteps = $("onboarding-steps");
+const onboardingBlocker = $("onboarding-blocker");
 const statusCard = $("status-card");
 const liveCard = $("live-card");
 const statsCard = $("stats-card");
@@ -129,8 +157,56 @@ function renderInstallProgress(p: InstallProgress | null) {
   else installErr.hidden = true;
 }
 
+const MILESTONE_LABELS: Record<string, string> = {
+  environment_checked: "Environment checked",
+  runtime_ready: "Runtime ready",
+  x_connected: "X connected",
+  profile_scanned: "Profile scanned",
+  project_ready: "Project ready",
+  topics_seeded: "Topics seeded",
+  draft_verified: "Draft cycle verified",
+};
+
+function milestoneGlyph(status: MilestoneStatus): string {
+  switch (status) {
+    case "complete": return "\u2713";
+    case "in_progress": return "\u2026";
+    case "blocked": return "\u00d7";
+    default: return "\u00b7";
+  }
+}
+
+function renderOnboarding(progress?: OnboardingSnapshot) {
+  if (!progress || !Array.isArray(progress.milestones)) {
+    onboardingCard.hidden = true;
+    return;
+  }
+  onboardingCard.hidden = false;
+  onboardingSteps.innerHTML = progress.milestones
+    .map((milestone) => {
+      const label = MILESTONE_LABELS[milestone.id] || milestone.id;
+      const attempts = milestone.attempts > 1
+        ? ` <span class="detail">${milestone.attempts} attempts</span>`
+        : "";
+      return (
+        `<li class="${milestone.status}">` +
+        `<span class="glyph">${milestoneGlyph(milestone.status)}</span>` +
+        `<span>${label}${attempts}</span></li>`
+      );
+    })
+    .join("");
+  if (progress.current_blocker) {
+    onboardingBlocker.textContent =
+      `Current blocker: ${progress.current_blocker.message}`;
+    onboardingBlocker.hidden = false;
+  } else {
+    onboardingBlocker.hidden = true;
+  }
+}
+
 function render() {
   if (!state) return;
+  renderOnboarding(state.onboarding);
   // Version + update button. When an update is available the badge is an actual
   // button that installs the latest release (delegated click on verEl, since the
   // button is recreated on every render).
@@ -218,6 +294,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
+    onboarding: o.onboarding,
   };
 }
 
@@ -270,6 +347,7 @@ async function refresh() {
       autopilot_on: !!ap.loaded,
       auto_update_on: !!ap.auto_update_loaded,
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
+      onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
@@ -291,6 +369,7 @@ async function pollInstall() {
     for (;;) {
       const rt = await call("install_status").catch(() => ({} as any));
       renderInstallProgress(rt.progress ?? null);
+      if (rt.onboarding) applyState({ onboarding: rt.onboarding });
       if (rt.runtime_ready) {
         applyState({ runtime_ready: true });
         log("Runtime installed; you're ready to set up.");
@@ -397,7 +476,11 @@ btnKcProceed.addEventListener("click", () => busy(btnKcProceed, "Connecting\u202
   try {
     const r = await call("setup", { action: "connect_x", confirm: true });
     if (r.connected) {
-      applyState({ x_connected: true, x_state: r.state || "connected" });
+      applyState({
+        x_connected: true,
+        x_state: r.state || "connected",
+        onboarding: r.onboarding || state?.onboarding,
+      });
       kcStatus.textContent = r.summary || "X connected.";
       log(r.summary || "X connected.");
       void refresh();
@@ -420,8 +503,10 @@ btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async 
   try {
     const r = await call("draft_cycle");
     const n = r.drafted ?? 0;
+    if (r.onboarding) applyState({ onboarding: r.onboarding });
     if (n) log(`Drafted ${n} \u2014 review them in the chat and choose which to post.`);
     else log("No drafts produced.");
+    void refresh();
     void loadStats();
   } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
 }));
