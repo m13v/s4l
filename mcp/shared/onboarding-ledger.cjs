@@ -209,13 +209,38 @@ function recordDoctorReport(report, opts = {}) {
   return mutate(opts, (ledger) => {
     const milestone = ledger.milestones.environment_checked;
     const at = now();
+    const fullFailure =
+      report && report.phase === "full" && report.ok === false;
+    const preserveFullFailure =
+      report &&
+      report.phase === "pre_connect" &&
+      ledger.current_blocker?.milestone === "environment_checked" &&
+      ledger.current_blocker?.code === "doctor_full_failed";
     milestone.attempts += 1;
     milestone.last_attempt_at = at;
     milestone.first_started_at = milestone.first_started_at || at;
-    milestone.status = "complete";
-    milestone.completed_at = milestone.completed_at || at;
+    milestone.status = fullFailure || preserveFullFailure ? "blocked" : "complete";
+    milestone.completed_at = fullFailure || preserveFullFailure
+      ? milestone.completed_at
+      : milestone.completed_at || at;
     milestone.last_doctor_ok = Boolean(report && report.ok);
     milestone.last_doctor_phase = report && report.phase;
+    if (fullFailure) {
+      milestone.last_error_code = "doctor_full_failed";
+      milestone.last_error = `Full Doctor found ${report.summary?.fail ?? 1} failing check(s).`;
+      ledger.current_blocker = {
+        milestone: "environment_checked",
+        code: "doctor_full_failed",
+        message: milestone.last_error,
+        at,
+        attempt: milestone.attempts,
+      };
+    } else if (
+      !preserveFullFailure &&
+      ledger.current_blocker?.milestone === "environment_checked"
+    ) {
+      ledger.current_blocker = null;
+    }
     ledger.doctor.latest = report;
     ledger.doctor.runs.push(report);
     appendEvent(ledger, {
