@@ -66,6 +66,11 @@ const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
 const stX = $("st-x"), stXSub = $("st-x-sub");
+const btnConnectX = $("btn-connect-x") as HTMLButtonElement;
+const kcModal = $("kc-modal");
+const btnKcCancel = $("btn-kc-cancel") as HTMLButtonElement;
+const btnKcProceed = $("btn-kc-proceed") as HTMLButtonElement;
+const kcStatus = $("kc-status");
 const stApSub = $("st-ap-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
@@ -151,6 +156,8 @@ function render() {
   stXSub.textContent = state.x_connected
     ? (handle || state.x_state || "")
     : (state.x_state || "");
+  // Offer Connect only when there's no session yet and the runtime can run it.
+  btnConnectX.hidden = state.x_connected || !state.runtime_ready;
 
   // Autopilot. Rendered as an on/off switch in the status card rather than a
   // button — checked == hands-free posting is live.
@@ -338,6 +345,51 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
     else log("Setup started in the chat \u2014 follow the prompts there, then hit Refresh.");
   } catch (e: any) {
     log("Couldn\u2019t start setup: " + (e?.message || e));
+  }
+}));
+
+// ---- Connect X (keychain heads-up modal) ----------------------------------
+// The import decrypts the user's everyday-browser cookie store, which makes
+// macOS show one or more "Safe Storage" keychain prompts. We show the screenshot
+// + instructions FIRST so the prompt isn't a surprise, then run connect_x
+// (confirm:true) on Proceed. That tool opens the managed Chrome and copies only
+// the x.com/twitter.com cookies; the user approves each keychain prompt.
+function openKcModal() {
+  kcStatus.textContent = "";
+  btnKcProceed.disabled = false;
+  btnKcCancel.disabled = false;
+  btnKcProceed.textContent = "Proceed";
+  kcModal.hidden = false;
+}
+function closeKcModal() { kcModal.hidden = true; }
+
+btnConnectX.addEventListener("click", openKcModal);
+btnKcCancel.addEventListener("click", closeKcModal);
+
+btnKcProceed.addEventListener("click", () => busy(btnKcProceed, "Connecting\u2026", async () => {
+  btnKcCancel.disabled = true;
+  kcStatus.textContent =
+    "Opening the managed browser and reading your X session\u2026 approve the keychain " +
+    "prompt(s) when they appear (your Mac login password, then Allow).";
+  log("Connecting X\u2026 approve the keychain prompt(s) when macOS asks.");
+  try {
+    const r = await call("setup", { action: "connect_x", confirm: true });
+    if (r.connected) {
+      applyState({ x_connected: true, x_state: r.state || "connected" });
+      kcStatus.textContent = r.summary || "X connected.";
+      log(r.summary || "X connected.");
+      void refresh();
+      setTimeout(closeKcModal, 1200);
+    } else {
+      // needs_login / logged_out / error: keep the modal open so the user can read
+      // what to do next (e.g. finish signing in in the Chrome window that opened).
+      kcStatus.textContent = r.summary || ("Not connected yet (" + (r.state || "unknown") + ").");
+      log(r.summary || "X not connected yet.");
+    }
+  } catch (e: any) {
+    kcStatus.textContent = "Connect failed: " + (e?.message || e);
+  } finally {
+    btnKcCancel.disabled = false;
   }
 }));
 
