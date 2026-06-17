@@ -59,6 +59,7 @@ import {
   type DoctorPhase,
 } from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
+import { initSentry, sendHeartbeat, captureError, flushSentry } from "./telemetry.js";
 import {
   registerAppTool,
   registerAppResource,
@@ -279,8 +280,20 @@ const tool: typeof server.registerTool = ((name: string, config: any, cb: ToolHa
   return (baseRegisterTool as any)(name, config, cb);
 }) as any;
 const appTool = ((name: string, config: any, cb: ToolHandler) => {
-  TOOL_HANDLERS[name] = cb;
-  return registerAppTool(server as any, name, config as any, cb as any);
+  // Wrap every tool handler so any thrown error is reported to Sentry. Single
+  // chokepoint for both the MCP SDK path and the local HTTP-panel path (both
+  // dispatch through TOOL_HANDLERS / registerAppTool). Re-throws so the caller
+  // still formats the error response exactly as before.
+  const wrapped = (async (args: any, extra: any) => {
+    try {
+      return await cb(args, extra);
+    } catch (e) {
+      captureError(e, { tool: name });
+      throw e;
+    }
+  }) as ToolHandler;
+  TOOL_HANDLERS[name] = wrapped;
+  return registerAppTool(server as any, name, config as any, wrapped as any);
 }) as any;
 
 function jsonContent(obj: unknown) {
@@ -2069,12 +2082,22 @@ registerAppResource(
 );
 
 async function main() {
+  initSentry();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
+  // Phone home so this .mcpb install is visible in the install-lane digest
+  // (parity with the npx launchd heartbeat). Once on startup, then every 15m
+  // while the desktop app keeps the server alive. unref() so it never holds the
+  // process open past a normal exit.
+  void sendHeartbeat("startup");
+  const hb = setInterval(() => void sendHeartbeat("interval"), 15 * 60_000);
+  hb.unref();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("[social-autoposter-mcp] fatal:", err);
+  captureError(err, { component: "main" });
+  await flushSentry();
   process.exit(1);
 });
