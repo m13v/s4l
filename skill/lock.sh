@@ -9,6 +9,38 @@
 # shellcheck source=lib/platform.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/platform.sh"
 
+# --- Lock-event instrumentation (added 2026-06-16) ---------------------------
+# Single shared, DATED log of every lock lifecycle event from EVERY pipeline,
+# so cross-pipeline contention is reconstructable from ONE file instead of
+# merging undated per-pipeline launchd stderr streams (the exact thing that
+# made the 2026-06-15 twitter-browser double-hold so hard to prove). Purely
+# additive: best-effort, never fails the caller, changes NO lock behavior.
+# The high-value field is `owner=self|OTHER` at every deletion point: if we
+# ever delete a lock dir whose recorded pid is NOT ours, that line is the
+# red-handed proof of an ownership-blind rm.
+_SA_LOCK_EVENT_LOG="${_SA_LOCK_EVENT_LOG:-$(dirname "${BASH_SOURCE[0]}")/logs/lock-events.log}"
+mkdir -p "$(dirname "$_SA_LOCK_EVENT_LOG")" 2>/dev/null || true
+_sa_lock_event() {
+  # usage: _sa_lock_event <event> <lock_name> [extra k=v ...]
+  printf '%s pid=%s event=%s lock=%s %s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" "$2" "${*:3}" \
+    >> "$_SA_LOCK_EVENT_LOG" 2>/dev/null || true
+}
+_sa_lock_owner_tag() {
+  # echoes "owner=self on_disk=<pid>" or "owner=OTHER on_disk=<pid|none>" for $1=lock_dir.
+  # owner=OTHER means the pid recorded in the lock dir is NOT us -> we are about
+  # to delete a DIFFERENT holder's lock (the double-hold smoking gun).
+  local _odp=""
+  if [ -f "$1/pid" ]; then
+    _odp="$(head -1 "$1/pid" 2>/dev/null || true)"
+  fi
+  if [ "$_odp" = "$$" ]; then
+    printf 'owner=self on_disk=%s' "$_odp"
+  else
+    printf 'owner=OTHER on_disk=%s' "${_odp:-none}"
+  fi
+}
+
 # Stack of currently-held lock directories AND outstanding queue tickets,
 # both cleaned up on exit. Declared at source time so they survive across
 # acquire_lock calls.
@@ -71,6 +103,7 @@ if [ -z "${_SA_LOCK_DIRS+x}" ]; then
       local _lname="${d##*/}"
       _lname="${_lname#social-autoposter-}"
       _lname="${_lname%.lock}"
+      _sa_lock_event trap_rm "$_lname" "$(_sa_lock_owner_tag "$d")"
       echo "[lock] trap-released $_lname pid=$$ at $(date +%H:%M:%S)" >&2
       rm -rf "$d"
     done
@@ -170,6 +203,7 @@ acquire_lock() {
         done
         _SA_LOCK_TICKETS=(${_new_t[@]+"${_new_t[@]}"})
         echo "[lock] acquired $name pid=$$ at $(date +%H:%M:%S) waited=${waited}s" >&2
+        _sa_lock_event acquired "$name" "waited=${waited}s"
         break
       fi
 
@@ -197,6 +231,7 @@ acquire_lock() {
         fi
       fi
       if $should_remove; then
+        _sa_lock_event stale_reclaim "$name" "$(_sa_lock_owner_tag "$lock_dir")"
         echo "Removing stale $name lock"
         rm -rf "$lock_dir"
         continue
@@ -223,6 +258,7 @@ acquire_lock() {
         hscript=$(echo "$hcmd" | grep -oE '[^ /]+\.sh' | head -1)
         [ -z "$hscript" ] && hscript='(non-shell)'
         echo "[lock] waiting for $name pid=$$ held_by=$hpid script=$hscript cmd='${hcmd}'" >&2
+        _sa_lock_event waiting "$name" "held_by=$hpid script=$hscript"
         logged_holder=true
       fi
     fi
@@ -567,6 +603,7 @@ defer_if_foreign_browser_mcp_active() {
 release_lock() {
   local name="$1"
   local lock_dir="/tmp/social-autoposter-${name}.lock"
+  _sa_lock_event release "$name" "$(_sa_lock_owner_tag "$lock_dir")"
   rm -rf "$lock_dir"
   echo "[lock] released $name pid=$$ at $(date +%H:%M:%S)" >&2
   # Rebuild the lock stack without this entry so the EXIT trap doesn't try to
