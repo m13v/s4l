@@ -45,7 +45,13 @@ set -uo pipefail
 # if the kernel/account caps below this.
 ulimit -n 4096 2>/dev/null || true
 
-REPO_DIR="$HOME/social-autoposter"
+# Honor SAPS_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
+# install that materializes the repo under ~/.social-autoposter-mcp/repo/package
+# resolves correctly. Falls back to the legacy ~/social-autoposter path for
+# npm/git installs and direct invocations. Cascades to every $REPO_DIR/... ref
+# below (sourced libs + child scripts inherit it), so this one line fixes the
+# whole cycle's repo resolution on a bare .mcpb install.
+REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
