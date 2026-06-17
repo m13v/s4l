@@ -35,6 +35,10 @@
       "description": "Poll the owned runtime installation until it is ready or returns a concrete failure."
     },
     {
+      "name": "doctor",
+      "description": "Run or read structured environment diagnostics. Uses a pre-connect phase during onboarding and a full verification after X is connected."
+    },
+    {
       "name": "draft_cycle",
       "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
     },
