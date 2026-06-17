@@ -609,12 +609,19 @@ def summarize_with_claude(envelope: dict[str, Any], timeout: int) -> str | None:
     try:
         data = json.loads(proc.stdout)
         result = (data.get("result") or "").strip()
-        return result or None
+        return _strip_embedded_subject(result) or None
     except Exception:
         text = proc.stdout.strip()
         if text:
-            return text
+            return _strip_embedded_subject(text)
         return None
+
+
+def _strip_embedded_subject(text: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].strip().lower().startswith("subject:"):
+        return "\n".join(lines[1:]).lstrip()
+    return text
 
 
 def fallback_report(envelope: dict[str, Any]) -> str:
