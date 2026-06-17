@@ -93,6 +93,30 @@ const LAUNCHD_PATH = [
   "/sbin",
 ].join(":");
 
+// Bin dirs the pipeline must resolve FIRST: the owned uv venv (so the scripts'
+// bare `python3` hits the provisioned interpreter with pipeline deps, not the
+// user's system python) and ~/.local/bin (so `browser-harness`, the CDP scan
+// engine, resolves). resolvePython() is dynamic, so this re-derives per call.
+function ownedBinDirs(): string[] {
+  const dirs: string[] = [];
+  const py = resolvePython();
+  if (path.isAbsolute(py)) dirs.push(path.dirname(py));
+  dirs.push(path.join(os.homedir(), ".local", "bin"));
+  return dirs;
+}
+
+// PATH for an interactively-spawned pipeline run (draft_cycle): owned bins
+// first, then whatever PATH the MCP server inherited.
+function pipelinePath(): string {
+  return [...ownedBinDirs(), process.env.PATH || LAUNCHD_PATH].join(":");
+}
+
+// PATH baked into launchd plists (autopilot/cron): owned bins first, then the
+// sane launchd default (launchd starts with a bare PATH).
+function launchdPath(): string {
+  return [...ownedBinDirs(), LAUNCHD_PATH].join(":");
+}
+
 function plistXml(opts: {
   label: string;
   programArgs: string[];
@@ -121,7 +145,7 @@ ${args}
 \t<key>EnvironmentVariables</key>
 \t<dict>
 \t\t<key>PATH</key>
-\t\t<string>${LAUNCHD_PATH}</string>
+\t\t<string>${launchdPath()}</string>
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
 \t\t<key>SAPS_REPO_DIR</key>
@@ -358,6 +382,12 @@ async function produceDrafts(
   const env: NodeJS.ProcessEnv = {
     DRAFT_ONLY: "1",
     TWITTER_PAGE_GEN_RATE: "0",
+    // Point the cycle at the resolved repo (a bare .mcpb materializes it under
+    // the state dir, NOT ~/social-autoposter); run-twitter-cycle.sh honors
+    // SAPS_REPO_DIR for its REPO_DIR. And put the owned runtime + ~/.local/bin
+    // first on PATH so the script's bare `python3` and `browser-harness` resolve.
+    SAPS_REPO_DIR: repoDir(),
+    PATH: pipelinePath(),
     // Interactive draft_cycle: launch the harness Chrome ON-SCREEN so the user
     // can watch the scan/scrape happen live. Cron/autopilot do NOT set these, so
     // background runs keep the off-screen default in twitter-backend.sh and don't
