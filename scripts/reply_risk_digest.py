@@ -309,12 +309,10 @@ def _skip_reason_risk_score(skip_reason: str) -> int:
 
 
 def classify_row(row: dict[str, Any], author_history: dict[str, dict[str, Any]]):
-    text = " ".join(
+    inbound_and_classification = " ".join(
         [
             row.get("their_content") or "",
             row.get("skip_reason") or "",
-            row.get("our_reply_content") or "",
-            row.get("parent_our_reply_content") or "",
         ]
     )
     risk_score = _skip_reason_risk_score(row.get("skip_reason") or "")
@@ -322,7 +320,7 @@ def classify_row(row: dict[str, Any], author_history: dict[str, dict[str, Any]])
     tags: list[str] = []
 
     for tag, pattern, points in RISK_RULES:
-        if pattern.search(text):
+        if pattern.search(inbound_and_classification):
             tags.append(tag)
             risk_score += points
 
