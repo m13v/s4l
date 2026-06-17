@@ -209,6 +209,19 @@ const server = new McpServer(
     instructions:
       "social-autoposter drafts, reviews, and posts X/Twitter replies for the user's product, and " +
       "can run them hands-free on autopilot.\n\n" +
+      "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
+      "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
+      "project is fully configured with seeded search topics, X is connected with its real handle, " +
+      "and `draft_cycle` has verified the pipeline without posting. Do not ask whether to inspect " +
+      "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
+      "X, scan the profile, research the product website, save conservative inferred fields, seed " +
+      "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
+      "explicit setup request authorizes the owned runtime install and importing ONLY x.com/" +
+      "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
+      "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
+      "when no product can be identified from config, context, the X profile, or public research, " +
+      "or pause for an unavoidable interactive login or OS prompt. Never post drafts or enable " +
+      "autopilot during setup unless the user explicitly requested that.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: offer to tell the world by running `draft_cycle` to post " +
@@ -612,10 +625,14 @@ server.registerPrompt(
         content: {
           type: "text" as const,
           text:
-            "I just installed social-autoposter and want to get set up. Call the `setup` tool " +
-            "(status mode) to see what's still needed, then walk me through it conversationally — " +
-            "ask me about my product and connect my X/Twitter account, one thing at a time. " +
-            "Don't dump a form at me, and explain the X connection before doing it.",
+            "Set up social-autoposter end to end now. Treat this as a terminal goal: inspect status, " +
+            "install or repair the owned runtime, auto-detect and connect my X session, scan my " +
+            "profile, discover and research the product I most clearly represent, infer and save a " +
+            "conservative complete project with search topics, seed them, and run a draft-only " +
+            "verification. Keep going without asking me to approve each safe setup step. A brief " +
+            "heads-up before macOS keychain prompts is enough; proceed immediately. Ask only if an " +
+            "interactive login is unavoidable or no product can be identified from config, context, " +
+            "my X profile, or public research. Do not post or enable autopilot unless I explicitly ask.",
         },
       },
     ],
@@ -629,7 +646,9 @@ server.registerPrompt(
 // site itself, written in the user's voice captured by the profile scan.
 const WEBSITE_RESEARCH_INSTRUCTIONS =
   "PRODUCT RESEARCH (do this before saving the product fields):\n" +
-  "1. Ask the user for the URL of the product/website they want to market on X.\n" +
+  "1. Discover the product URL from existing config, the conversation, the connected X profile " +
+  "(bio, links, and recent posts), or public research. Use the clearest supported product without " +
+  "asking. Ask one blocking question only if no defensible product can be identified.\n" +
   "2. Visit it with your OWN browser/fetch tools (no scraper is provided) and read " +
   "AT LEAST 5 pages if the site has them — follow the internal nav/footer links. " +
   "Prioritize: homepage, pricing, features/product, about, docs or changelog or blog, " +
@@ -643,10 +662,10 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
   "4. WRITE these fields in the USER'S voice from the profile scan (their phrasing, " +
   "register, vibe) while keeping every product CLAIM factual to the site. Don't invent " +
   "features, metrics, or guarantees the site doesn't state.\n" +
-  "5. Show the user your draft of the product fields for confirmation, then call setup " +
-  "with name + the product fields (plus the voice/search_topics from the profile scan) " +
-  "to save. If the site is thin or unreachable, tell the user and ask them to fill the " +
-  "gaps rather than guessing.";
+  "5. Save the best conservative factual draft without adding a confirmation round-trip. Call " +
+  "setup with name + the product fields (plus voice/search_topics from the profile scan). If the " +
+  "site is thin or unreachable, use only supported facts and leave optional detail conservative; " +
+  "ask the user only if a required field is genuinely unknowable.";
 
 // ---- setup: per-project config (the "brain": project, website, voice) -----
 // Run this FIRST. The action tools refuse until at least one project is ready.
@@ -659,21 +678,29 @@ tool(
   {
     title: "Set up a project",
     description:
-      "Run this FIRST, before any drafting or autopilot. Two jobs:\n" +
+      "Run this FIRST, before any drafting or autopilot. A user's request to set up social-autoposter " +
+      "is a request to finish the workflow end to end, not to interview them step by step. Resume " +
+      "from current status, infer discoverable fields, and keep taking safe actions until runtime, " +
+      "project, X connection, topic seeding, and draft-only verification are complete.\n" +
+      "Two jobs:\n" +
       "1) Configure a project this install posts for: its website, what it does (description), who " +
-      "to target (icp), and brand voice. To fill the PRODUCT fields, get the product URL and visit " +
-      "it with your own browser/fetch tools — read 5+ pages (home, pricing, features, about, docs/" +
+      "to target (icp), and brand voice. To fill the PRODUCT fields, discover the product URL from " +
+      "config, conversation context, the connected X profile, or public research, then visit it " +
+      "with your own browser/fetch tools — read 5+ pages (home, pricing, features, about, docs/" +
       "blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE products " +
       "(call once per product, identified by name); fill a project's fields INCREMENTALLY across " +
       "several calls — pass whatever you have, it merges and tells you what's still missing.\n" +
       "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
       "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
       "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
-      "touched. ALWAYS explain what will happen and get the user's OK first: call with action:'connect_x' " +
-      "(no confirm) to get the explanation, relay it, then call again with action:'connect_x', confirm:true.\n" +
+      "touched. An explicit setup/connect request is authorization: briefly warn that macOS Safe " +
+      "Storage prompts may appear, then call action:'connect_x', confirm:true immediately. Use " +
+      "action:'detect_x_sources' first and choose its recommendation instead of asking the user.\n" +
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
-      "whether X is connected. Ask the user conversationally; don't dump a form. The draft_cycle, " +
-      "autopilot, and get_stats tools refuse to run until a project is fully set up.",
+      "whether X is connected. Use config, conversation context, profile_scan, and website research " +
+      "before asking for fields. Ask only if no product can be identified or an interactive login is " +
+      "unavoidable. The draft_cycle, autopilot, and get_stats tools refuse to run until a project is " +
+      "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
       action: z
@@ -681,19 +708,22 @@ tool(
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
-            "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first). " +
+            "With an explicit setup/connect request, warn about possible keychain prompts and call " +
+            "with confirm:true without waiting for another yes/no reply. Without confirm:true it " +
+            "only previews the operation for users who asked to inspect it rather than run it. " +
             "detect_x_sources = list the browsers/profiles the X session can be imported from " +
             "(read-only, no keychain prompt) so the user can pick the right one; returns " +
             "{sources:[{spec,label,x_session}], recommended}. " +
             "profile_scan = AFTER connect_x, read the connected account's bio + recent posts + recent " +
             "replies to build a 'grounding truth' corpus. Use it to draft voice/icp/search_topics in " +
-            "the USER'S OWN register (their phrases, vibe, profession), then confirm with the user " +
-            "before calling setup to save. Returns {profile, posts, comments, grounding_instructions}."
+            "the USER'S OWN register (their phrases, vibe, profession), then save a conservative best " +
+            "draft without requiring a confirmation round-trip. Returns {profile, posts, comments, " +
+            "grounding_instructions}."
         ),
       confirm: z
         .boolean()
         .optional()
-        .describe("Set true with action:'connect_x' to actually run the import after the user has agreed."),
+        .describe("Set true to run the import. An explicit setup/connect request counts as authorization."),
       x_source: z
         .string()
         .optional()
@@ -747,8 +777,9 @@ tool(
     }
 
     // ---- Connect X/Twitter: import the user's session into our browser ----
-    // Explain-then-confirm: the first call (no confirm) describes exactly what
-    // will happen so the agent can get the user's OK; confirm:true runs it.
+    // Preview-or-run: a call without confirm describes the operation. During an
+    // explicit end-to-end setup request the agent gives a short keychain heads-up
+    // and calls confirm:true immediately; no extra yes/no round-trip is needed.
     if (args.action === "connect_x") {
       if (args.confirm !== true) {
         // Cheap probe so the explanation reflects current state (no Chrome launch).
@@ -784,9 +815,10 @@ tool(
             "Allow (or Always Allow). If you use more than one browser you may see it a couple of times, " +
             "once per browser.",
           how_to_proceed:
-            "Tell the user what_will_happen in your own words, then relay the say_to_user line so they know " +
-            "the keychain prompt is coming and what to click. Ask if that's OK. If yes, call setup again with " +
-            "action:'connect_x', confirm:true (optionally x_source:'arc:Default' etc. if they use a non-Chrome browser).",
+            "If the user explicitly requested setup or connection, relay the say_to_user line as a brief " +
+            "heads-up and immediately call setup again with action:'connect_x', confirm:true; do not wait " +
+            "for another yes/no reply. Optionally pass the recommended x_source. If the user only asked " +
+            "what connection would do, stop after this preview.",
         });
       }
       const r = await xConnect(args.x_source);
@@ -803,8 +835,8 @@ tool(
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
             "before saving. Then run draft_cycle once the project is fully set up."
           : r.state === "needs_login"
-            ? "Ask the user to sign in to x.com in the Chrome window that just opened, then call setup " +
-              "action:'connect_x', confirm:true again to confirm."
+            ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
+              "them that single required action, then call setup action:'connect_x', confirm:true again."
             : "X is not connected yet. " + summarizeXAuth(r),
       });
     }
@@ -845,12 +877,12 @@ tool(
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
           "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
           "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
-          "SECOND (product, from their website): then follow website_research_instructions — ask " +
-          "the user for the product URL and read 5+ of its pages to fill description, " +
+          "SECOND (product, from their website): then follow website_research_instructions — discover " +
+          "the product URL from config, context, profile links/posts, or public research and read 5+ " +
+          "of its pages to fill description, " +
           "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
-          "just captured. Show the user your combined read ('here's the voice/topics from your " +
-          "profile and what I learned from your site — accurate?'), then call setup with the " +
-          "confirmed fields to save.",
+          "just captured. Save the best conservative supported fields without a confirmation " +
+          "round-trip. Ask only if no product can be identified or a required field is unknowable.",
       });
     }
 
@@ -859,9 +891,12 @@ tool(
       const projects = listManagedProjectStatus();
       const x = await xStatus();
       const ver = await versionStatus();
+      const rtReady = runtimeReady();
+      const configured = projects.some((p) => p.ready);
       return jsonContent({
-        configured: projects.some((p) => p.ready),
+        configured,
         projects,
+        runtime_ready: rtReady,
         x_connected: x.connected,
         x_state: x.state,
         x_handle: x.handle ?? null,
@@ -876,20 +911,20 @@ tool(
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: configPath(),
+        ready_for_verification: rtReady && configured && x.connected,
         next_step:
-          projects.length === 0
-            ? "No projects yet. Ask the user about a product (website, what it does, who to target, " +
-              "brand voice), then call setup with a short name plus those fields. Repeat per product." +
-              (x.connected ? "" : " X is not connected yet either — also run setup action:'connect_x'.")
+          !rtReady
+            ? "Runtime is not ready. Call install_runtime, poll install_status to completion, then continue setup automatically."
+            : projects.length === 0
+            ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call setup. Ask only if no product can be identified." +
+              (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Call setup again with a new name " +
-                    "to add another product, or run draft_cycle to post."
+                  ? "All configured projects are ready and X is connected. Run draft_cycle now to verify end to end without posting."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
-                    "x.com session. Run setup action:'connect_x' to import it from the user's browser.")
-              : "Some projects are missing required fields (see each project's missing_required). Ask the " +
-                "user for those and call setup again with that project's name plus the missing fields." +
-                (x.connected ? "" : " X is also not connected yet (run setup action:'connect_x')."),
+                    "x.com session. Detect sources and run setup action:'connect_x', confirm:true; do not ask whether to proceed.")
+              : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call setup again. Ask only if a required field is genuinely unknowable." +
+                (x.connected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
       });
     }
 
@@ -968,11 +1003,13 @@ tool(
         search_queries: searchQueries,
         config_path: configPath(),
         note: result.ready
-          ? `Project '${result.project}' is fully set up.${seedNote} Next: connect X so the autoposter can post — ` +
-            `call setup with action:'connect_x' (it explains itself, then run again with confirm:true). ` +
-            `Once X is connected you can run draft_cycle, autopilot, and get_stats.`
+          ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
+            `detect sources, warn about keychain prompts, and call setup with ` +
+            `action:'connect_x', confirm:true immediately. Once X is connected, run draft_cycle to ` +
+            `verify without posting. Do not enable autopilot unless explicitly requested.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
-            `Ask the user for those and call setup again with name='${result.project}' and the missing fields.`,
+            `First derive those fields from existing context, profile_scan, and website research, then ` +
+            `call setup again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`,
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
