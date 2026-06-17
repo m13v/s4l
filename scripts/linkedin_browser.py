@@ -150,55 +150,165 @@ def _release_browser_lock():
 atexit.register(_release_browser_lock)
 
 
+def _is_python_holder_alive(holder: str) -> bool:
+    """Liveness probe for a `python:PID` lock holder (defect a fix, 2026-06-16).
+
+    Mirrors twitter_browser._is_python_holder_alive (see docs/twitter_browser_lock.md).
+    Holders written by the python scripts are `python:<pid>`; the linkedin-agent
+    PreToolUse hook writes UUID holders (handled separately by _is_holder_alive).
+    A python holder whose process died without running its atexit release used to
+    starve every peer until LOCK_EXPIRY (300s); os.kill(pid, 0) lets us reclaim it
+    at once. Returns True for anything we cannot prove dead, so the worst case
+    degrades to the LOCK_EXPIRY failsafe rather than stealing a live peer's lock.
+    """
+    if not holder.startswith("python:"):
+        return True  # not a python holder; this probe makes no claim
+    try:
+        pid = int(holder.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return True  # unparseable holder -> don't steal on this basis
+    try:
+        os.kill(pid, 0)
+        return True            # process exists -> alive
+    except ProcessLookupError:
+        return False           # no such process -> dead, reclaimable
+    except PermissionError:
+        return True            # exists but another owner -> alive
+    except OSError:
+        return True            # ambiguous -> err toward NOT stealing
+
+
+def _try_take_lock() -> bool:
+    """Atomically claim LOCK_FILE for this process (defect c fix, 2026-06-16).
+    O_CREAT|O_EXCL makes "is it free? then take it" a single syscall, so two
+    python acquirers can't both win the old os.path.exists + open(w) race. A
+    False return means a peer beat us; the caller re-loops. Coexists with the
+    linkedin-agent hook (which registers UUID holders via its own write path):
+    python only takes when it has decided the lock is free or reclaimable.
+    """
+    try:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    try:
+        os.write(fd, json.dumps(
+            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}
+        ).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
 def _acquire_browser_lock():
-    """Mirror twitter_browser._acquire_browser_lock semantics."""
+    """Acquire the LinkedIn browser session mutex (~/.claude/linkedin-agent-lock.json).
+
+    Mirrors twitter_browser._acquire_browser_lock (full writeup:
+    docs/twitter_browser_lock.md). Co-managed with the linkedin-agent PreToolUse
+    hook, which registers live Claude sessions as UUID holders; we INHERIT those
+    rather than fight them. Reclaim priority (a holder PROVEN dead is taken at
+    once, so a crashed peer cannot starve the fleet for LOCK_WAIT_MAX/LOCK_EXPIRY):
+      1. holder == us           -> re-entrant; already ours.
+      2. UUID holder, pid gone  -> stale Claude session, reclaim.
+      3. python:PID, pid gone   -> dead peer (defect a fix), reclaim.
+      4. age >= LOCK_EXPIRY     -> failsafe for holders we cannot probe.
+      5. live UUID holder       -> inherit (parent Claude session / hook).
+      6. live python:PID holder -> real peer; wait, then give up (profile_locked).
+
+    Acquisition is atomic (_try_take_lock / O_EXCL). The lockfile JSON shape
+    {"session_id","timestamp"} is preserved so the hook keeps interoperating.
+    """
     global _LOCK_SESSION_ID, _LOCK_INHERITED
     deadline = time.time() + LOCK_WAIT_MAX
+    try:
+        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    except OSError:
+        pass
     while True:
-        if os.path.exists(LOCK_FILE):
+        if not os.path.exists(LOCK_FILE):
+            if _try_take_lock():
+                break
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "ok": False, "error": "profile_locked",
+                    "detail": f"create-contended waited={LOCK_WAIT_MAX}s",
+                }))
+                sys.exit(1)
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+        try:
+            with open(LOCK_FILE) as f:
+                lock = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Corrupt / half-written / vanished between exists() and open().
+            if _try_take_lock():
+                break
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "ok": False, "error": "profile_locked",
+                    "detail": f"unreadable waited={LOCK_WAIT_MAX}s",
+                }))
+                sys.exit(1)
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+        age = time.time() - lock.get("timestamp", 0)
+        holder = lock.get("session_id", "")
+
+        # 1. Re-entrant: the lock is already ours (or a stale lock left by a
+        # previous process whose PID we reused). Refresh timestamp + proceed.
+        if holder == _LOCK_SESSION_ID and not _LOCK_INHERITED:
             try:
-                with open(LOCK_FILE) as f:
-                    lock = json.load(f)
-                age = time.time() - lock.get("timestamp", 0)
-                holder = lock.get("session_id", "")
-                # pgrep alive-check is authoritative: a Claude UUID holder
-                # whose process is gone leaves a stale lockfile (the unlock
-                # hook only refreshes timestamp, not deletes). This is what
-                # caused the 2026-05-01 14:33 LinkedIn false positive.
-                if _UUID_RE.match(holder or "") and not _is_holder_alive(
-                    holder
-                ):
-                    break  # stale, take it
-                if age >= LOCK_EXPIRY:
-                    break  # stale, take it
-                if _UUID_RE.match(holder or ""):
-                    # parent Claude session holds it; inherit
-                    _LOCK_SESSION_ID = holder
-                    _LOCK_INHERITED = True
-                    break
-                if time.time() >= deadline:
-                    print(
-                        json.dumps(
-                            {
-                                "ok": False,
-                                "error": "profile_locked",
-                                "detail": (
-                                    f"holder={holder} age={int(age)}s "
-                                    f"waited={LOCK_WAIT_MAX}s"
-                                ),
-                            }
-                        )
-                    )
-                    sys.exit(1)
-                time.sleep(LOCK_POLL_INTERVAL)
-                continue
-            except (json.JSONDecodeError, OSError):
+                with open(LOCK_FILE, "w") as f:
+                    json.dump(
+                        {"session_id": _LOCK_SESSION_ID,
+                         "timestamp": int(time.time())}, f)
+            except OSError:
                 pass
-        break
-    with open(LOCK_FILE, "w") as f:
-        json.dump(
-            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f
-        )
+            break
+
+        # 2-4. Reclaim a holder we can prove dead/expired (remove + atomic take).
+        reclaim_reason = ""
+        if _UUID_RE.match(holder or "") and not _is_holder_alive(holder):
+            reclaim_reason = "dead_uuid"
+        elif holder.startswith("python:") and not _is_python_holder_alive(holder):
+            reclaim_reason = "dead_python"
+        elif age >= LOCK_EXPIRY:
+            reclaim_reason = "expired"
+        if reclaim_reason:
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
+            if _try_take_lock():
+                print(f"[browser_lock] reclaimed holder={holder or '<none>'} "
+                      f"reason={reclaim_reason} age={int(age)}s -> pid={os.getpid()} "
+                      f"platform=linkedin", file=sys.stderr)
+                break
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+
+        # 5. Live UUID holder = parent Claude session / hook -> inherit.
+        if _UUID_RE.match(holder or ""):
+            _LOCK_SESSION_ID = holder
+            _LOCK_INHERITED = True
+            break
+
+        # 6. Live python:PID peer -> real contention. Wait, then give up. Reaching
+        # the deadline now means the holder is genuinely alive (dead ones were
+        # reclaimed above), NOT the defect-a starvation. peer_alive=1 is the tell.
+        if time.time() >= deadline:
+            print(json.dumps({
+                "ok": False,
+                "error": "profile_locked",
+                "detail": (
+                    f"holder={holder} age={int(age)}s "
+                    f"waited={LOCK_WAIT_MAX}s peer_alive=1"
+                ),
+            }))
+            sys.exit(1)
+        time.sleep(LOCK_POLL_INTERVAL)
+        continue
 
 
 def _is_login_or_checkpoint(url: str) -> bool:
