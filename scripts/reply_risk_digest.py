@@ -39,10 +39,6 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
 REPO_DIR = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = REPO_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -142,6 +138,10 @@ def _as_iso(value: Any) -> str | None:
 
 
 def _gmail_service():
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
     creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -364,9 +364,14 @@ def classify_row(row: dict[str, Any], author_history: dict[str, dict[str, Any]])
         insight_score += 1
 
     hist = author_history.get((row.get("their_author") or "").lower()) or {}
-    if hist.get("blocklist"):
-        tags.append("author_blocklisted")
-        risk_score += 5
+    block = hist.get("blocklist")
+    if block:
+        if block.get("classification") == "velocity_auto":
+            tags.append("author_velocity_blocked")
+            risk_score += 1
+        else:
+            tags.append("author_blocklisted")
+            risk_score += 5
     if hist.get("riskish_skips", 0) >= 2:
         tags.append("repeat_risk_author")
         risk_score += 2
@@ -493,11 +498,16 @@ def build_envelope(rows: list[dict[str, Any]], author_history: dict[str, dict[st
     )
     repeated_authors = []
     for handle, h in author_history.items():
-        if h.get("riskish_skips", 0) or h.get("last_30d", 0) >= 4 or h.get("blocklist"):
+        block = h.get("blocklist") or {}
+        non_velocity_block = block and block.get("classification") != "velocity_auto"
+        if h.get("riskish_skips", 0) or h.get("last_30d", 0) >= 4 or non_velocity_block:
             repeated_authors.append({"handle": handle, **h})
     repeated_authors.sort(
         key=lambda h: (
-            bool(h.get("blocklist")),
+            bool(
+                h.get("blocklist")
+                and (h.get("blocklist") or {}).get("classification") != "velocity_auto"
+            ),
             h.get("riskish_skips", 0),
             h.get("last_30d", 0),
         ),
