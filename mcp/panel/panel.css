@@ -226,7 +226,32 @@ button[hidden] { display: none; }
   gap: 10px;
 }
 .onboarding[hidden] { display: none; }
-.onboarding-head { font-size: 14px; font-weight: 650; }
+.onboarding-head {
+  font-size: 14px;
+  font-weight: 650;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.onboarding-count { font-size: 12px; font-weight: 500; color: var(--muted); }
+.onboarding.complete .onboarding-count { color: var(--fg); font-weight: 600; }
+/* Thin grayscale progress bar: the track is the border tone, the fill is --fg.
+ * No accent color — meaning is carried by the fill width + the step glyphs. */
+.onboarding-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.onboarding-bar > span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--fg);
+  border-radius: inherit;
+  transition: width 0.35s ease;
+}
 .onboarding-steps {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
