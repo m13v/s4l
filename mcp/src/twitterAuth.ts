@@ -58,8 +58,11 @@ export async function xConnect(source?: string): Promise<XAuthResult> {
   const args = ["connect"];
   if (source) args.push("--source", source);
   const res = await runPython("scripts/setup_twitter_auth.py", args, {
-    // import opens a real Chrome and may navigate to x.com/home a couple times
-    timeoutMs: 180_000,
+    // import opens a real Chrome and may pop a macOS Keychain auth dialog the
+    // user has to find + click ("Always Allow"). Keep this above the Python
+    // cookie-copy timeout (SAPS_COOKIE_COPY_TIMEOUT, default 600s) so the
+    // wrapper never kills the dialog before the human can.
+    timeoutMs: 660_000,
   });
   return parse(res.stdout, res.stderr, res.code);
 }
