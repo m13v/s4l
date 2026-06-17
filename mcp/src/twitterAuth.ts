@@ -15,8 +15,11 @@ import { runPython } from "./repo.js";
 export interface XAuthResult {
   ok: boolean;
   connected: boolean;
-  // browser_not_running | logged_out | connected | imported | needs_login |
-  // browser_launch_failed | error
+  // browser_not_running | logged_out | connected | connected_idle | imported |
+  // needs_login | browser_launch_failed | error
+  // connected_idle = a durable session exists on disk (the keychain-independent
+  // cookie mirror) but the managed Chrome isn't live this moment; the cycle
+  // preflight restores it. Treated as connected (x_connected true) by the panel.
   state: string;
   // The logged-in @handle when a valid session exists; null = unknown (logged
   // out / browser down), NEVER "missing". setup_twitter_auth.py owns this.
@@ -164,6 +167,12 @@ export function summarizeXAuth(r: XAuthResult): string {
   switch (r.state) {
     case "connected":
       return "X is connected (the autoposter browser has a valid x.com session).";
+    case "connected_idle":
+      return (
+        "X is connected (your session is saved). The autoposter's browser isn't " +
+        "running this moment; the next cycle restores it from the local mirror " +
+        "automatically — no action needed."
+      );
     case "imported":
       return `X connected — imported your session from ${r.source ?? "your browser"}.`;
     case "logged_out":
