@@ -45,15 +45,19 @@ npx social-autoposter update
 
 ## Configure
 
-Tell your Claude Code agent: **"set up social autoposter"**. The interactive wizard in `setup/SKILL.md` walks through:
+Tell your Claude agent: **"set me up on social-autoposter end to end"**. The
+setup skill treats that as a terminal goal:
 
-1. Verifying the S4L API connection
-2. Filling in `~/social-autoposter/config.json` with handles for Reddit, Twitter, LinkedIn, optional Moltbook
-3. A 5-question interview to draft your `content_angle`
-4. Capturing `projects` with `topics` (used by the tiered reply strategy)
-5. Verifying browser logins per platform via the dedicated MCP agent. The first time each platform runs you'll be asked to log in once; cookies persist into the userDataDir under `~/.claude/browser-profiles/`.
-6. A dry-run of `find_threads.py --limit 3`
-7. Optional: loading the launchd plists into `~/Library/LaunchAgents/`
+1. Inspect and repair the owned runtime.
+2. Auto-detect the best browser profile and connect X/Twitter. macOS may require
+   a Safe Storage approval; a logged-out account may require one manual sign-in.
+3. Scan the X profile, discover and research the user's product, and infer a
+   conservative project, ICP, voice, and search topics without an interview.
+4. Save the project and seed its topics into the backend.
+5. Run a draft-only cycle to verify the pipeline without posting.
+
+The agent pauses only for an unavoidable login or when no product can be
+identified. Autopilot remains off until explicitly requested.
 
 ## How the runtime is wired
 
@@ -113,7 +117,7 @@ social-autoposter/
 ├── bin/cli.js                installer + dashboard launcher
 ├── browser-agent-configs/    Playwright MCP templates (twitter/reddit/linkedin)
 ├── config.example.json       config template
-├── setup/SKILL.md            interactive setup wizard skill (locked)
+├── setup/SKILL.md            autonomous end-to-end setup skill (locked)
 ├── scripts/                  Python and JS helpers (no browser, no LLM)
 ├── skill/                    shell wrappers invoked by launchd
 └── launchd/                  generated macOS LaunchAgent plists
