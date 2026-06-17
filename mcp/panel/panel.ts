@@ -138,9 +138,9 @@ function render() {
     ? `v${state.version} \u00b7 <button id="btn-update" class="update-btn">Update to ${state.latest_version}</button>`
     : `v${state.version}`;
 
-  // Runtime install gate: until the owned Python/Chromium runtime exists, the
-  // Install card is the primary (and only enabled) surface. Everything else is
-  // disabled because no pipeline tool can run without the interpreter.
+  // Show runtime status until the owned Python/Chromium runtime exists. The
+  // end-to-end Set up action remains enabled: the agent owns installation too.
+  // The direct install button is only a manual repair/fallback surface.
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
@@ -183,10 +183,10 @@ function render() {
   // cycle after. Never both at once.
   btnSetup.hidden = setupComplete;
   btnDraft.hidden = !setupComplete;
-  btnSetup.disabled = needsRuntime;
+  btnSetup.disabled = false;
   btnDraft.disabled = needsRuntime || !hasReady;
   apToggle.disabled = needsRuntime || !hasReady;
-  btnSetup.classList.toggle("primary", !needsRuntime && !setupComplete);
+  btnSetup.classList.toggle("primary", !setupComplete);
   btnDraft.classList.toggle("primary", setupComplete);
 
   // Secondary surfaces (status cards, live browser, 7-day stats, config editor)
