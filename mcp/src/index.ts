@@ -52,7 +52,6 @@ import {
   blockOnboardingMilestone,
   completeOnboardingMilestone,
   ensureDoctorPhase,
-  flushOnboardingEvents,
   onboardingLedger,
   onboardingSnapshot,
   recordOnboardingAttempt,
