@@ -65,8 +65,8 @@ Sending **"Set me up on social-autoposter end to end"** (or picking the `/`
 slash-command "Set up social-autoposter" in Claude Desktop) gives the agent a
 terminal goal. It:
 
-1. Inspects status, installs or repairs the owned runtime, and resumes existing
-   progress.
+1. Runs the pre-connect Doctor, shows a durable setup checklist, installs or
+   repairs the owned runtime, and resumes existing progress.
 2. Auto-detects the best browser profile, warns about possible macOS keychain
    prompts, then imports only x.com/twitter.com cookies into managed Chrome.
 3. Scans the connected X profile, discovers the most clearly associated
@@ -74,6 +74,10 @@ terminal goal. It:
    ICP, voice, and search topics without an interview.
 4. Saves the project and seeds its search topics.
 5. Runs `draft_cycle` to verify the pipeline without posting.
+
+The checklist and full Doctor results are stored locally in
+`~/.social-autoposter-mcp/onboarding-progress.json`. After X connects, the full
+Doctor runs again to verify the session and durable cookie mirror.
 
 It pauses only if the user must sign in interactively or no product can be
 identified. Autopilot stays off until explicitly requested.
