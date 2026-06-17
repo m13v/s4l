@@ -741,6 +741,15 @@ tool(
           "Optional browser profile to import the X session from, e.g. 'arc:Default', 'chrome:Profile 1'. " +
             "Default: auto-detect chrome/arc/brave/edge."
         ),
+      x_manual_login: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true ONLY when the user explicitly wants to sign into X by hand. It opens a focused " +
+            "X login window and waits for them to log in. By default (false), connect_x does NOT pop a " +
+            "browser window on an auto-import miss; it returns needs_login and you offer manual login as " +
+            "an opt-in. The login window still opens automatically if the user DENIED the keychain prompt."
+        ),
       name: z
         .string()
         .optional()
@@ -834,7 +843,7 @@ tool(
       recordOnboardingAttempt("x_connected", {
         state: args.x_source ? "source_selected" : "auto_detect",
       });
-      const r = await xConnect(args.x_source);
+      const r = await xConnect(args.x_source, args.x_manual_login);
       let doctorReport = null;
       if (r.connected) {
         completeOnboardingMilestone("x_connected", { state: r.state });
