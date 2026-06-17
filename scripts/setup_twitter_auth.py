@@ -718,7 +718,15 @@ def _classify_import_error(detail: str | None) -> str:
     # Keychain access issues — most common on headless runs.
     if ("user interaction is not allowed" in d) or ("interaction is not allowed" in d):
         return "keychain_locked"
-    if ("access denied" in d) or ("errsecauth" in d) or ("-25293" in d):
+    # A keychain DENY can surface two different ways depending on which dialog
+    # the user dismissed:
+    #   - ACL "allow access?" prompt, click Deny  -> errSecAuthFailed (-25293)
+    #   - unlock/confirm prompt, click Cancel/Deny -> errSecUserCanceled (-128)
+    # Both mean "the user actively refused", and both have the same fix (re-run
+    # and click Allow), so collapse them into one type.
+    if (("access denied" in d) or ("errsecauth" in d) or ("-25293" in d)
+            or ("user canceled" in d) or ("user cancelled" in d)
+            or ("errsecusercanceled" in d) or ("-128" in d)):
         return "keychain_acl_denied"
     if ("not be found in the keychain" in d) or ("errsecitemnotfound" in d):
         return "keychain_entry_missing"
@@ -1056,6 +1064,25 @@ def cmd_connect(args) -> dict:
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
+    # If the single root cause was the user clicking Deny/Cancel on the macOS
+    # keychain prompt, the generic "log in manually" prose is misleading — the
+    # auto-import would have worked, they just refused keychain access. Tell
+    # them exactly that, with the real fix (re-run and click Allow), while still
+    # leaving the manual-login window as a fallback.
+    extra = {}
+    if rolled_up_error_type == "keychain_acl_denied":
+        note = (
+            "It looks like you clicked Deny (or Cancel) on the macOS Keychain prompt. "
+            "To import your X session automatically, the autoposter needs to read Chrome's "
+            "\"Safe Storage\" key from your Keychain. Re-run connect_x and click Allow (or "
+            "Always Allow) on that prompt and the import will finish on its own. "
+            "If you'd rather not grant keychain access, there's already a Chrome window open "
+            "at the X login page"
+            + ("" if shown else " (look for a 'Google Chrome' window)")
+            + " — just log in there by hand and ask me to re-check. "
+            "(Auto-import tried: " + ", ".join(sources) + ".)"
+        )
+        extra["remediation"] = "rerun_connect_x_and_click_allow"
     return {
         "ok": True,
         "connected": False,
@@ -1070,6 +1097,7 @@ def cmd_connect(args) -> dict:
         "note": note,
         "profile_dir": str(PROFILE_DIR),
         "cdp": CDP,
+        **extra,
     }
 
 
