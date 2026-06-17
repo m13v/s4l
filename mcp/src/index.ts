@@ -48,6 +48,17 @@ import {
   resolvePython,
   resolveChrome,
 } from "./runtime.js";
+import {
+  blockOnboardingMilestone,
+  completeOnboardingMilestone,
+  ensureDoctorPhase,
+  flushOnboardingEvents,
+  onboardingLedger,
+  onboardingSnapshot,
+  recordOnboardingAttempt,
+  runDoctorPhase,
+  type DoctorPhase,
+} from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
 import {
   registerAppTool,
@@ -821,7 +832,25 @@ tool(
             "what connection would do, stop after this preview.",
         });
       }
+      recordOnboardingAttempt("x_connected", {
+        state: args.x_source ? "source_selected" : "auto_detect",
+      });
       const r = await xConnect(args.x_source);
+      let doctorReport = null;
+      if (r.connected) {
+        completeOnboardingMilestone("x_connected", { state: r.state });
+        // The pre-connect Doctor intentionally treats missing X/cookie artifacts
+        // as expected. Once connect_x succeeds, run the full phase immediately
+        // to verify persistence, CDP, and the durable cookie mirror.
+        doctorReport = await runDoctorPhase("full");
+      } else {
+        blockOnboardingMilestone(
+          "x_connected",
+          `x_${r.state || "not_connected"}`,
+          r.error || r.note || summarizeXAuth(r),
+          { state: r.state || "not_connected" }
+        );
+      }
       return jsonContent({
         action: "connect_x",
         connected: r.connected,
@@ -830,6 +859,14 @@ tool(
         summary: summarizeXAuth(r),
         note: r.note,
         attempts: r.attempts,
+        doctor: doctorReport
+          ? {
+              phase: doctorReport.phase,
+              ok: doctorReport.ok,
+              summary: doctorReport.summary,
+            }
+          : undefined,
+        onboarding: onboardingSnapshot(),
         next_step: r.connected
           ? "X is connected. Next, run setup action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
@@ -849,19 +886,30 @@ tool(
     // agent confirms with the user and calls setup to persist. Read-only.
     if (args.action === "profile_scan") {
       // Handle is auto-detected from the live logged-in session by the scanner.
+      recordOnboardingAttempt("profile_scanned");
       const scan = await xScanProfile();
       if (!scan.ok) {
         const hint =
           scan.state === "browser_not_running" || scan.state === "no_handle"
             ? " Run setup action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
             : "";
+        blockOnboardingMilestone(
+          "profile_scanned",
+          `profile_${scan.state || "failed"}`,
+          scan.error || "profile scan failed",
+          { state: scan.state || "failed" }
+        );
         return jsonContent({
           action: "profile_scan",
           ok: false,
           state: scan.state,
           error: (scan.error || "profile scan failed") + hint,
+          onboarding: onboardingSnapshot(),
         });
       }
+      completeOnboardingMilestone("profile_scanned", {
+        state: scan.state,
+      });
       return jsonContent({
         action: "profile_scan",
         ok: true,
@@ -872,6 +920,7 @@ tool(
         comments: scan.comments,
         grounding_instructions: scan.grounding_instructions,
         website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
+        onboarding: onboardingSnapshot(),
         next_step:
           "TWO steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
@@ -897,8 +946,18 @@ tool(
       const x = rtReady
         ? await xStatus().catch(() => ({ connected: false, state: "status_unavailable" }) as any)
         : ({ connected: false, state: "runtime_not_ready" } as any);
+      await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
       const ver = await versionStatus();
       const configured = projects.some((p) => p.ready);
+      if (rtReady) completeOnboardingMilestone("runtime_ready");
+      if (x.connected) {
+        completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
+      }
+      if (configured) {
+        completeOnboardingMilestone("project_ready", {
+          missing_count: 0,
+        });
+      }
       return jsonContent({
         configured,
         projects,
@@ -918,6 +977,7 @@ tool(
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: configPath(),
         ready_for_verification: rtReady && configured && x.connected,
+        onboarding: onboardingSnapshot(),
         next_step:
           !rtReady
             ? "Runtime is not ready. Call install_runtime, poll install_status to completion, then continue setup automatically."
@@ -937,7 +997,20 @@ tool(
     // Apply mode (incremental): merge whatever fields were supplied onto the
     // named project, then report whether it's now ready or still missing fields.
     try {
+      recordOnboardingAttempt("project_ready", {
+        missing_count: 0,
+      });
       const result = applySetup(args as ProjectInput);
+      if (result.ready) {
+        completeOnboardingMilestone("project_ready", { missing_count: 0 });
+      } else {
+        blockOnboardingMilestone(
+          "project_ready",
+          "missing_required_fields",
+          `Project '${result.project}' still needs: ${result.missing_required.join(", ")}`,
+          { missing_count: result.missing_required.length }
+        );
+      }
       // Seed this project's search_topics into the DB universe the cycle reads
       // (project_search_topics). Without this a freshly-configured project has
       // topics in config.json but ZERO rows in the DB, so draft_cycle's topic
@@ -946,8 +1019,11 @@ tool(
       // the user if topics are missing. Only runs once the project is ready
       // (i.e. it actually has search_topics to seed). (2026-06-02)
       let seedNote = "";
+      let topicsSeeded = false;
+      let topicCount = 0;
       let searchQueries: Array<{ query: string; topic: string }> = [];
       if (result.ready) {
+        recordOnboardingAttempt("topics_seeded");
         const seed = await runPython(
           "scripts/seed_search_topics.py",
           ["--project", result.project],
@@ -955,11 +1031,22 @@ tool(
         );
         if (seed.code === 0) {
           const m = /planned=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(seed.stdout);
+          topicCount = m ? Number(m[1]) : 0;
+          topicsSeeded = true;
+          completeOnboardingMilestone("topics_seeded", {
+            topic_count: topicCount,
+          });
           seedNote = m
             ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so draft_cycle has a topic universe to work with.`
             : " Seeded search topics into the DB so draft_cycle has a topic universe to work with.";
         } else {
           const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+          blockOnboardingMilestone(
+            "topics_seeded",
+            "topic_seed_failed",
+            tail,
+            { exit_code: seed.code }
+          );
           seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. draft_cycle will tell you clearly if topics are missing.)`;
         }
 
@@ -1005,9 +1092,11 @@ tool(
         action: result.created ? "created" : "updated",
         ready: result.ready,
         missing_required: result.missing_required,
-        topics_seeded: result.ready,
+        topics_seeded: topicsSeeded,
+        topic_count: topicCount,
         search_queries: searchQueries,
         config_path: configPath(),
+        onboarding: onboardingSnapshot(),
         note: result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call setup with ` +
@@ -1050,6 +1139,7 @@ tool(
     const r = resolveProject(project);
     if (!r.ok) return textContent(r.message!);
     const proj = r.project!;
+    recordOnboardingAttempt("draft_verified");
 
     // Live progress so the chat doesn't sit on a frozen spinner for minutes.
     // Two channels, both best-effort (a sink failure must never fail the cycle):
@@ -1084,13 +1174,29 @@ tool(
       void sendProgress(message, step);
     });
     if (drafted.blocked || !drafted.batchId) {
+      blockOnboardingMilestone(
+        "draft_verified",
+        "draft_cycle_blocked",
+        drafted.blocked ?? "No drafts produced.",
+        { outcome: "blocked" }
+      );
       return textContent(drafted.blocked ?? "No drafts produced.");
     }
     const plan = readPlan(drafted.batchId);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
+      blockOnboardingMilestone(
+        "draft_verified",
+        "draft_batch_empty",
+        `No drafts in batch ${drafted.batchId}.`,
+        { outcome: "empty_batch", draft_count: 0 }
+      );
       return textContent(`No drafts in batch ${drafted.batchId}.`);
     }
     const count = plan.candidates.length;
+    completeOnboardingMilestone("draft_verified", {
+      outcome: "review_batch",
+      draft_count: count,
+    });
     const table = renderDraftsTable(plan);
     const message =
       `Drafted ${count} ${count === 1 ? "reply" : "replies"} for "${proj}" ` +
@@ -1111,6 +1217,7 @@ tool(
         batch_id: drafted.batchId,
         drafted: count,
         status: "awaiting_decision",
+        onboarding: onboardingSnapshot(),
         // Include the actual draft text here, not just a count. Some hosts
         // (e.g. Claude Desktop) surface ONLY structuredContent to the model and
         // drop the human-readable `content` table — which left the agent saying
