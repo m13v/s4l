@@ -54,9 +54,14 @@ export async function xStatus(): Promise<XAuthResult> {
 // Ensure the browser is up, validate, and import cookies from the user's
 // everyday browser if needed. `source` optional (e.g. "arc:Default"); default
 // auto-detects chrome/arc/brave/edge.
-export async function xConnect(source?: string): Promise<XAuthResult> {
+export async function xConnect(source?: string, manualLogin?: boolean): Promise<XAuthResult> {
   const args = ["connect"];
   if (source) args.push("--source", source);
+  // Only pop a Chrome login window when the user explicitly asked to sign in by
+  // hand. Without this, auto-import failures (no X session in the browser, etc.)
+  // return needs_login WITHOUT shoving an unexpected browser window in front of
+  // the user; the login window still opens on its own if they DENIED keychain.
+  if (manualLogin) args.push("--manual-login");
   const res = await runPython("scripts/setup_twitter_auth.py", args, {
     // import opens a real Chrome and may pop a macOS Keychain auth dialog the
     // user has to find + click ("Always Allow"). Keep this above the Python
