@@ -493,11 +493,10 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
         type: "text",
         text:
           "Set up social autoposter end to end now. Inspect and repair the runtime, auto-detect " +
-          "and connect my X session, scan my profile, discover and research my product, infer and " +
-          "save a conservative complete project with search topics, seed them, and run a draft-only " +
-          "verification. Keep going without asking me to approve each safe setup step. Warn me " +
-          "briefly before any macOS keychain prompt, but proceed immediately. Ask only if I must " +
-          "interactively sign in or no product can be identified. Do not post or enable autopilot.",
+          "and connect my X session, scan my profile, discover and research my product, then infer " +
+          "and save a complete project with seeded search topics. Keep going without asking me to " +
+          "approve each safe setup step. Ask only if I must interactively sign in or no product " +
+          "can be identified.",
       }],
     });
     if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
