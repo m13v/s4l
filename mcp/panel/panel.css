@@ -52,10 +52,11 @@ html, body {
 
 .head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
+.head-left { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
 .title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
 .ver { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 /* The update indicator is an actionable button (black CTA), not just a label. */
@@ -69,11 +70,42 @@ html, body {
   border: 1px solid var(--btn-bg);
 }
 
-.status {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+/* Inline setup summary in the header: a compact "Setup N/7 ▾" dropdown that
+ * expands the milestone details below. The count is hidden once complete, so a
+ * finished setup reads as a quiet "Setup ▾" the user can still open on demand. */
+.setup-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
+.setup-summary[hidden] { display: none; }
+.setup-summary.complete { color: var(--fg); }
+.setup-summary-label { font-weight: 600; }
+.setup-summary-count { color: var(--muted); }
+.setup-summary-count[hidden] { display: none; }
+.setup-summary.blocked .setup-summary-count { color: var(--fg); font-weight: 600; }
+
+/* Grayscale expand/collapse caret (a UI affordance, not decoration). Points down
+ * when collapsed, flips up when its control carries the .expanded class. */
+.chevron {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 0.15s ease;
+}
+.expanded .chevron { transform: rotate(180deg); }
+
+.status { display: block; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -176,6 +208,22 @@ button[hidden] { display: none; }
 .toggle input:checked + .slider::before { transform: translateX(18px); }
 .toggle input:disabled + .slider { opacity: 0.45; cursor: default; }
 
+/* Autopilot lives at the very bottom as a single horizontal line: label on the
+ * left, on/off switch on the right. */
+.autopilot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.autopilot-row[hidden] { display: none; }
+.autopilot-label { font-size: 13px; font-weight: 600; }
+.autopilot-row .toggle { margin-top: 0; }
+
 /* First-run runtime installer. Grayscale only; status is shown via glyphs +
  * weight, never color. */
 .install {
@@ -214,9 +262,10 @@ button[hidden] { display: none; }
 .install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
 .install-err[hidden] { display: none; }
 
-/* Durable end-to-end onboarding checklist. Uses the same glyph language as the
- * runtime installer, but tracks the full setup history across restarts. */
-.onboarding {
+/* Durable end-to-end onboarding checklist, revealed from the header's setup
+ * dropdown. Uses the same glyph language as the runtime installer, but tracks
+ * the full setup history across restarts. */
+.onboarding-details {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -225,17 +274,7 @@ button[hidden] { display: none; }
   flex-direction: column;
   gap: 10px;
 }
-.onboarding[hidden] { display: none; }
-.onboarding-head {
-  font-size: 14px;
-  font-weight: 650;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.onboarding-count { font-size: 12px; font-weight: 500; color: var(--muted); }
-.onboarding.complete .onboarding-count { color: var(--fg); font-weight: 600; }
+.onboarding-details[hidden] { display: none; }
 /* Thin grayscale progress bar: the track is the border tone, the fill is --fg.
  * No accent color — meaning is carried by the fill width + the step glyphs. */
 .onboarding-bar {
@@ -275,8 +314,25 @@ button[hidden] { display: none; }
 }
 
 .stats { display: flex; flex-direction: column; gap: 8px; }
-.stats-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+/* Collapsed-by-default section header that doubles as the expand control. */
+.section-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
+.stats-grid[hidden] { display: none; }
 .stat {
   background: var(--card);
   border: 1px solid var(--border);
