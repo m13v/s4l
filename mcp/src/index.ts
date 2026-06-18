@@ -1136,12 +1136,12 @@ tool(
         onboarding: onboardingSnapshot(),
         note: result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
-            `detect sources, warn about keychain prompts, and call setup with ` +
+            `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, run draft_cycle to ` +
             `verify without posting. Do not enable autopilot unless explicitly requested.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
-            `call setup again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`,
+            `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`,
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
@@ -1392,7 +1392,7 @@ tool(
   async ({ action }) => {
     if (action !== "status" && !hasReadyProject()) {
       return textContent(
-        "No project is fully set up yet, so autopilot has nothing to post. Run the `setup` tool " +
+        "No project is fully set up yet, so autopilot has nothing to post. Run the `project_config` tool " +
           "first. Note: autopilot runs the background cycle across all configured projects; it is " +
           "not scoped to one project."
       );
@@ -1693,7 +1693,7 @@ tool(
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
-// the tools above (draft_cycle / autopilot / setup / get_stats) through the host
+// the tools above (draft_cycle / autopilot / project_config / get_stats) through the host
 // and re-reads status. The tool itself returns the first-paint snapshot so the
 // view has data the instant it loads.
 
