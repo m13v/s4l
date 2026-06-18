@@ -56,7 +56,7 @@ Do not report setup complete until all of these are true:
 
 ## Choose the path
 
-- If the social-autoposter MCP tools are connected (`setup`, `install_runtime`,
+- If the social-autoposter MCP tools are connected (`project_config`, `install_runtime`,
   `install_status`, `draft_cycle`, `autopilot`, `get_stats`), use the MCP path.
   Do not hand-edit `config.json`.
 - If only the CLI/skill is installed, use the CLI fallback.
@@ -65,7 +65,7 @@ Do not report setup complete until all of these are true:
 
 ### 1. Inspect and repair the environment
 
-Call `setup` in status mode and `install_status` immediately.
+Call `project_config` in status mode and `install_status` immediately.
 
 If the runtime is not ready:
 
@@ -82,13 +82,13 @@ incomplete milestone instead of restarting the interview.
 
 If X is not connected:
 
-1. Call `setup` with `action:'detect_x_sources'`.
+1. Call `project_config` with `action:'detect_x_sources'`.
 2. Choose `recommended`, preferring a source whose `x_session` is present.
    Do not ask the user to choose a browser profile when the tool can choose.
 3. Tell the user in one short progress update that macOS may show browser Safe
    Storage prompts and they should enter their Mac password and click **Allow**
    or **Always Allow**.
-4. Immediately call `setup` with `action:'connect_x', confirm:true` and the
+4. Immediately call `project_config` with `action:'connect_x', confirm:true` and the
    selected `x_source`. The setup request itself is authorization; do not add a
    separate consent round-trip.
 5. If the result is transient, retry. If it opens managed Chrome in
@@ -96,7 +96,7 @@ If X is not connected:
    This is an unavoidable user action, not a product-choice question. Re-run
    `connect_x` after sign-in and continue.
 
-Once connected, call `setup` with `action:'profile_scan'`. Treat the returned
+Once connected, call `project_config` with `action:'profile_scan'`. Treat the returned
 bio, links, recent posts, and replies as grounding truth for:
 
 - profession/identity;
@@ -142,7 +142,7 @@ details.
 
 ### 4. Save and seed
 
-Call `setup` once with the complete inferred project whenever possible. It
+Call `project_config` once with the complete inferred project whenever possible. It
 merges fields, reports missing required fields, seeds `search_topics` into
 `project_search_topics`, and expands them into search queries.
 
@@ -156,7 +156,7 @@ Run `draft_cycle`. It scans X and drafts replies for review; it posts nothing.
 
 If it returns a fixable reason, fix it and retry in the same setup run:
 
-- missing topics: derive/add topics through `setup`, then retry;
+- missing topics: derive/add topics through `project_config`, then retry;
 - runtime/browser-harness/Chrome issue: run/repair the owned runtime, then retry;
 - stale X session: reconnect X, then retry;
 - transient backend/network issue: retry once;
