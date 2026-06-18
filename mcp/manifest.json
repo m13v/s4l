@@ -27,16 +27,8 @@
       "description": "The one tool to configure, edit, and connect a project's X account. Run first and continue end to end: inspect status, connect X, discover and configure (or later edit) the product, seed topics, and proceed to draft-only verification."
     },
     {
-      "name": "install_runtime",
-      "description": "Install or repair the owned Python, Chromium, Chrome, and browser-harness runtime. Safe and idempotent."
-    },
-    {
-      "name": "install_status",
-      "description": "Poll the owned runtime installation until it is ready or returns a concrete failure."
-    },
-    {
-      "name": "doctor",
-      "description": "Run or read structured environment diagnostics. Uses a pre-connect phase during onboarding and a full verification after X is connected."
+      "name": "runtime",
+      "description": "The one plumbing tool for the local runtime lifecycle, action-based: status (is the owned Python/Chromium runtime installed, plus mid-install progress), install (provision/repair it, safe and idempotent), version + update (report and install new releases), and doctor + doctor_status (structured environment diagnostics, pre-connect during onboarding and full after X is connected)."
     },
     {
       "name": "draft_cycle",
