@@ -620,6 +620,8 @@ function showConfigEditing(on: boolean) {
   btnConfigSave.hidden = !on;
   btnConfigCancel.hidden = !on;
   btnConfigLoad.hidden = on;
+  // The descriptive blurb stays hidden until the config is actually opened.
+  configDesc.hidden = !on;
 }
 
 btnConfigLoad.addEventListener("click", () => busy(btnConfigLoad, "Loading\u2026", async () => {
