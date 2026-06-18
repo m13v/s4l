@@ -1850,13 +1850,30 @@ function startLocalPanel(): Promise<string> {
       }
     });
     srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
+    // Optional fixed port (SAPS_PANEL_PORT) for deterministic addressing; default
+    // is an OS-assigned ephemeral port.
+    const wantPort = Number(process.env.SAPS_PANEL_PORT) || 0;
+    srv.listen(wantPort, "127.0.0.1", () => {
       const addr = srv.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       localPanel = { url: `http://127.0.0.1:${port}/`, server: srv };
+      writePanelUrl(localPanel.url);
       resolve(localPanel.url);
     });
   });
+}
+
+// Publish the loopback URL to a stable file so an out-of-process reader (the
+// Claude Code side-panel reverse proxy) can find the ephemeral port without
+// scraping `lsof`. Best-effort: a write failure never blocks the panel.
+function writePanelUrl(url: string): void {
+  try {
+    const dir = path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "panel-url"), url, "utf-8");
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] writePanelUrl failed:", e?.message || e);
+  }
 }
 
 // Open a URL in the user's default browser, cross-platform. Opening is OPT-IN:
