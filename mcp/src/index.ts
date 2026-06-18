@@ -658,7 +658,10 @@ server.registerPrompt(
             "verification. Keep going without asking me to approve each safe setup step. A brief " +
             "heads-up before macOS keychain prompts is enough; proceed immediately. Ask only if an " +
             "interactive login is unavoidable or no product can be identified from config, context, " +
-            "my X profile, or public research. Do not post or enable autopilot unless I explicitly ask.",
+            "my X profile, or public research. Do not post or enable autopilot unless I explicitly ask. " +
+            "Keep every reply to me extremely concise: a few short sentences at most, no step-by-step " +
+            "narration or long status walls. If you must ask me something (e.g. the product URL), make " +
+            "it one short question.",
         },
       },
     ],
