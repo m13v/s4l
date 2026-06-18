@@ -100,6 +100,7 @@ window.__sapsAnnounce = function(payload){
     var KEY = "__saps_announce_v1";
     var dismissed = false;
     try { dismissed = window.localStorage.getItem(KEY) === "1"; } catch(e) {}
+    if(window.__sapsAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
     if(dismissed) return;
     if(document.getElementById("__saps_announce")) return;
 
@@ -137,6 +138,7 @@ window.__sapsAnnounce = function(payload){
     os_.fontWeight="600"; os_.minWidth="120px";
     ok.addEventListener("click", function(){
       try { window.localStorage.setItem(KEY, "1"); } catch(e) {}
+      window.__sapsAnnounceDismissed = true;  // session fallback if storage is blocked
       if(back && back.remove) back.remove();
     });
   } catch(e) { /* announcement is best-effort, never throw into the page */ }
