@@ -89,7 +89,6 @@ function parseResult(result: CallToolResult): any {
 // ---- DOM ------------------------------------------------------------------
 const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
-const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
 const apToggle = $("ap-checkbox") as HTMLInputElement;
@@ -104,7 +103,6 @@ const onboardingSteps = $("onboarding-steps");
 const onboardingBlocker = $("onboarding-blocker");
 const onboardingCount = $("onboarding-count");
 const onboardingBarFill = $("onboarding-bar-fill");
-const statusCard = $("status-card");
 const liveCard = $("live-card");
 const statsCard = $("stats-card");
 const configCard = $("config-card");
@@ -254,12 +252,6 @@ function render() {
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
-  // Projects.
-  stProj.textContent = `${state.projects_ready}/${state.projects_total}`;
-  stProjSub.textContent = state.projects_total === 0
-    ? "none configured"
-    : state.projects.map((p) => p.name + (p.ready ? "" : " (incomplete)")).join(", ");
-
   // Autopilot. Rendered as an on/off switch on the bottom row: checked ==
   // hands-free posting is live.
   apToggle.checked = !!state.autopilot_on;
@@ -283,12 +275,11 @@ function render() {
   btnSetup.classList.toggle("primary", !setupComplete);
   btnDraft.classList.toggle("primary", setupComplete);
 
-  // Secondary surfaces (status cards, live browser, 7-day stats, config editor)
-  // are only meaningful once the product is configured and posting. Hide them
-  // until setup is complete so the pre-setup view stays a minimal "just set up"
+  // Secondary surfaces (live browser, 7-day stats, config editor, autopilot) are
+  // only meaningful once the product is configured and posting. Hide them until
+  // setup is complete so the pre-setup view stays a minimal "just set up"
   // interface; the Install card (gated above) is the only thing shown while the
   // runtime is still installing.
-  statusCard.hidden = !setupComplete;
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
   configCard.hidden = !setupComplete;
