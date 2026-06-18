@@ -103,7 +103,17 @@ TW_ENGINE_PREFIX=""
 # because the salvage loop kept re-carrying stale low-virality junk. A 2h
 # ceiling drops that carry runway so aged-out junk expires instead of riding
 # ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
-FRESHNESS_HOURS=2
+#
+# 2026-06-17 (per user request): DRAFT mode (DRAFT_ONLY=1, the MCP draft_cycle
+# tool) widens both freshness knobs to 24h so human review surfaces more (and
+# older) candidates. Autopilot is untouched: it keeps the experiment-concluded
+# 2h expire ceiling + 1h discovery window (variant D). The branch is on
+# DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    FRESHNESS_HOURS=24
+else
+    FRESHNESS_HOURS=2
+fi
 
 # ----------------------------------------------------------------------------
 # EXPERIMENT CONCLUDED 2026-05-31: variant D won the ripen+freshness A/B/C/D
@@ -120,7 +130,15 @@ FRESHNESS_HOURS=2
 # other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
-FRESHNESS_HOURS_DISCOVER=1
+# DRAFT mode widens discovery to 24h (the twitter-search-since-rewrite.py hook
+# clamps the override to a 1-24h range, so 24 is the accepted max); autopilot
+# keeps the winning D setting of 1h. See the DRAFT_ONLY branch on
+# FRESHNESS_HOURS above (2026-06-17, per user request).
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    FRESHNESS_HOURS_DISCOVER=24
+else
+    FRESHNESS_HOURS_DISCOVER=1
+fi
 # Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
 # drives the expire-stale gate from the same knob (was hardcoded 18h there).
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
