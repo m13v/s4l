@@ -90,20 +90,16 @@ function parseResult(result: CallToolResult): any {
 const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
-const stX = $("st-x"), stXSub = $("st-x-sub");
-const btnConnectX = $("btn-connect-x") as HTMLButtonElement;
-const kcModal = $("kc-modal");
-const btnKcCancel = $("btn-kc-cancel") as HTMLButtonElement;
-const btnKcProceed = $("btn-kc-proceed") as HTMLButtonElement;
-const kcStatus = $("kc-status");
-const stApSub = $("st-ap-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
 const apToggle = $("ap-checkbox") as HTMLInputElement;
+const autopilotCard = $("autopilot-card");
 const statsGrid = $("stats-grid");
+const statsToggle = $("stats-toggle") as HTMLButtonElement;
 const logEl = $("log");
 const installCard = $("install-card");
-const onboardingCard = $("onboarding-card");
+const setupSummary = $("setup-summary") as HTMLButtonElement;
+const onboardingDetails = $("onboarding-details");
 const onboardingSteps = $("onboarding-steps");
 const onboardingBlocker = $("onboarding-blocker");
 const onboardingCount = $("onboarding-count");
@@ -112,6 +108,7 @@ const statusCard = $("status-card");
 const liveCard = $("live-card");
 const statsCard = $("stats-card");
 const configCard = $("config-card");
+const configDesc = $("config-desc");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
@@ -131,6 +128,8 @@ let installPolling = false; // guard against overlapping poll loops
 let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
 let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
+let setupDetailsOpen = false; // header setup dropdown expanded state
+let statsOpen = false; // "Last 7 days stats" dropdown expanded state
 
 function log(msg: string) { logEl.textContent = msg; }
 
@@ -179,28 +178,37 @@ function milestoneGlyph(status: MilestoneStatus): string {
   }
 }
 
+// Reflect the setupDetailsOpen flag onto the dropdown button + details panel.
+function applySetupDetails() {
+  onboardingDetails.hidden = !setupDetailsOpen;
+  setupSummary.setAttribute("aria-expanded", String(setupDetailsOpen));
+  setupSummary.classList.toggle("expanded", setupDetailsOpen);
+}
+
 function renderOnboarding(progress?: OnboardingSnapshot) {
   if (!progress || !Array.isArray(progress.milestones)) {
-    onboardingCard.hidden = true;
+    setupSummary.hidden = true;
+    onboardingDetails.hidden = true;
     return;
   }
-  onboardingCard.hidden = false;
+  // The header always carries the setup dropdown once a ledger exists, so the
+  // milestone details stay reachable even after setup completes.
+  setupSummary.hidden = false;
 
-  // Headline state: a "done / total" count, a fill bar, and a one-word status.
-  // The agent runs setup in the chat; pollSetup repaints this live as each
-  // milestone lands, so the card is the user's at-a-glance progress view.
   const total = progress.milestones.length;
   const completed = progress.milestones.filter((m) => m.status === "complete").length;
   const blocked = !!progress.current_blocker && !progress.complete;
-  onboardingCard.classList.toggle("complete", progress.complete);
-  onboardingCard.classList.toggle("blocked", blocked);
-  onboardingCount.textContent = progress.complete
-    ? "Complete"
-    : blocked
-      ? `${completed}/${total} · needs you`
-      : setupPolling
-        ? `${completed}/${total} · setting up…`
-        : `${completed}/${total}`;
+  setupSummary.classList.toggle("complete", progress.complete);
+  setupSummary.classList.toggle("blocked", blocked);
+
+  // The "N/total" counter is shown only while setup is incomplete; once complete
+  // it collapses to a bare "Setup ▾" dropdown (progress no longer surfaced inline).
+  onboardingCount.hidden = progress.complete;
+  onboardingCount.textContent = blocked
+    ? `${completed}/${total} · needs you`
+    : setupPolling
+      ? `${completed}/${total} · setting up…`
+      : `${completed}/${total}`;
   onboardingBarFill.style.width =
     total > 0 ? `${Math.round((completed / total) * 100)}%` : "0%";
 
@@ -221,9 +229,13 @@ function renderOnboarding(progress?: OnboardingSnapshot) {
     onboardingBlocker.textContent =
       `Current blocker: ${progress.current_blocker.message}`;
     onboardingBlocker.hidden = false;
+    // A blocker needs the user — force the details open so it isn't buried in a
+    // collapsed dropdown.
+    setupDetailsOpen = true;
   } else {
     onboardingBlocker.hidden = true;
   }
+  applySetupDetails();
 }
 
 function render() {
