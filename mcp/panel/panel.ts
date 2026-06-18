@@ -260,25 +260,9 @@ function render() {
     ? "none configured"
     : state.projects.map((p) => p.name + (p.ready ? "" : " (incomplete)")).join(", ");
 
-  // X / Twitter. When connected, prefer showing the resolved @handle (the
-  // account we post as); fall back to the raw state string. A null handle while
-  // connected just means it wasn't resolved this read — never "missing".
-  stX.textContent = state.x_connected ? "Connected" : "Not connected";
-  const handle = state.x_handle
-    ? (state.x_handle.startsWith("@") ? state.x_handle : "@" + state.x_handle)
-    : "";
-  stXSub.textContent = state.x_connected
-    ? (handle || state.x_state || "")
-    : (state.x_state || "");
-  // Offer Connect only when there's no session yet and the runtime can run it.
-  btnConnectX.hidden = state.x_connected || !state.runtime_ready;
-
-  // Autopilot. Rendered as an on/off switch in the status card rather than a
-  // button — checked == hands-free posting is live.
+  // Autopilot. Rendered as an on/off switch on the bottom row: checked ==
+  // hands-free posting is live.
   apToggle.checked = !!state.autopilot_on;
-  stApSub.textContent = state.autopilot_on
-    ? (state.auto_update_on ? "on \u00b7 auto-update on" : "on")
-    : "off";
 
   // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
   // exists, at least one project is fully configured, and the X session is
@@ -308,6 +292,7 @@ function render() {
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
   configCard.hidden = !setupComplete;
+  autopilotCard.hidden = !setupComplete;
 }
 
 function applyState(snap: Partial<Snapshot>) {
@@ -525,54 +510,21 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
   }
 }));
 
-// ---- Connect X (keychain heads-up modal) ----------------------------------
-// The import decrypts the user's everyday-browser cookie store, which makes
-// macOS show one or more "Safe Storage" keychain prompts. We show the screenshot
-// + instructions FIRST so the prompt isn't a surprise, then run connect_x
-// (confirm:true) on Proceed. That tool opens the managed Chrome and copies only
-// the x.com/twitter.com cookies; the user approves each keychain prompt.
-function openKcModal() {
-  kcStatus.textContent = "";
-  btnKcProceed.disabled = false;
-  btnKcCancel.disabled = false;
-  btnKcProceed.textContent = "Proceed";
-  kcModal.hidden = false;
-}
-function closeKcModal() { kcModal.hidden = true; }
+// ---- collapsible sections -------------------------------------------------
+// The header setup dropdown and the "Last 7 days stats" header are the only two
+// expand/collapse controls. Both just flip a local boolean and re-apply it; the
+// setup details panel also auto-opens on a blocker (handled in renderOnboarding).
+setupSummary.addEventListener("click", () => {
+  setupDetailsOpen = !setupDetailsOpen;
+  applySetupDetails();
+});
 
-btnConnectX.addEventListener("click", openKcModal);
-btnKcCancel.addEventListener("click", closeKcModal);
-
-btnKcProceed.addEventListener("click", () => busy(btnKcProceed, "Connecting\u2026", async () => {
-  btnKcCancel.disabled = true;
-  kcStatus.textContent =
-    "Opening the managed browser and reading your X session\u2026 approve the keychain " +
-    "prompt(s) when they appear (your Mac login password, then Allow).";
-  log("Connecting X\u2026 approve the keychain prompt(s) when macOS asks.");
-  try {
-    const r = await call("setup", { action: "connect_x", confirm: true });
-    if (r.connected) {
-      applyState({
-        x_connected: true,
-        x_state: r.state || "connected",
-        onboarding: r.onboarding || state?.onboarding,
-      });
-      kcStatus.textContent = r.summary || "X connected.";
-      log(r.summary || "X connected.");
-      void refresh();
-      setTimeout(closeKcModal, 1200);
-    } else {
-      // needs_login / logged_out / error: keep the modal open so the user can read
-      // what to do next (e.g. finish signing in in the Chrome window that opened).
-      kcStatus.textContent = r.summary || ("Not connected yet (" + (r.state || "unknown") + ").");
-      log(r.summary || "X not connected yet.");
-    }
-  } catch (e: any) {
-    kcStatus.textContent = "Connect failed: " + (e?.message || e);
-  } finally {
-    btnKcCancel.disabled = false;
-  }
-}));
+statsToggle.addEventListener("click", () => {
+  statsOpen = !statsOpen;
+  statsGrid.hidden = !statsOpen;
+  statsToggle.setAttribute("aria-expanded", String(statsOpen));
+  statsToggle.classList.toggle("expanded", statsOpen);
+});
 
 btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
   log("Drafting\u2026 the draft list appears in the chat for review.");
