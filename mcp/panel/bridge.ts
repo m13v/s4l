@@ -59,16 +59,16 @@ class HttpBridge implements PanelBridge {
   async connect(): Promise<void> {
     // First paint: in inline mode the host pushes the spawning tool's result via
     // ontoolresult. Over HTTP there is no host push, so we assemble the same
-    // snapshot ourselves from the read-only status tools (setup/autopilot/
-    // install_status) — the exact set refresh() uses. We deliberately do NOT call
+    // snapshot ourselves from the read-only status tools (project_config/autopilot/
+    // runtime) — the exact set refresh() uses. We deliberately do NOT call
     // the `dashboard` tool here: in a non-UI host it has a side effect (it opens
     // the loopback URL in the OS browser), which would pop a window every time this
     // page loads. These three tools are pure reads, so first paint is side-effect free.
     try {
       const [setupR, apR, rtR] = await Promise.all([
-        this.callServerTool({ name: "setup", arguments: { status: true } }),
+        this.callServerTool({ name: "project_config", arguments: { status: true } }),
         this.callServerTool({ name: "autopilot", arguments: { action: "status" } }),
-        this.callServerTool({ name: "install_status", arguments: {} }),
+        this.callServerTool({ name: "runtime", arguments: { action: "status" } }),
       ]);
       const setup = dataOf(setupR), ap = dataOf(apR), rt = dataOf(rtR);
       const projects = Array.isArray(setup.projects) ? setup.projects : [];
