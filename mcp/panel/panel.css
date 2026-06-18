@@ -118,6 +118,7 @@ button {
   font-size: 13px;
   font-weight: 550;
   line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
   transition: opacity 0.12s ease;
 }
@@ -150,8 +151,9 @@ button[hidden] { display: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   width: 100%;
+  flex-wrap: wrap;
 }
 .section-label { font-size: 13px; font-weight: 600; color: var(--fg); }
 .section-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
