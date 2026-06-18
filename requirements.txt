@@ -14,3 +14,7 @@ websocket-client
 # everyday browser into the autoposter's managed Chrome). Without this, the
 # MCP setup connect_x step cannot auto-import and falls back to manual login.
 cryptography
+# Error reporting for the Python posting pipeline -> Sentry (org mediar-n5),
+# initialized best-effort by scripts/sentry_init.py via scripts/http_api.py.
+# Safe no-op when absent or when no DSN is configured.
+sentry-sdk
