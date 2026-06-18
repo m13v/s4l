@@ -56,8 +56,8 @@ Do not report setup complete until all of these are true:
 
 ## Choose the path
 
-- If the social-autoposter MCP tools are connected (`project_config`, `install_runtime`,
-  `install_status`, `draft_cycle`, `autopilot`, `get_stats`), use the MCP path.
+- If the social-autoposter MCP tools are connected (`project_config`, `runtime`,
+  `draft_cycle`, `autopilot`, `get_stats`), use the MCP path.
   Do not hand-edit `config.json`.
 - If only the CLI/skill is installed, use the CLI fallback.
 
@@ -65,13 +65,13 @@ Do not report setup complete until all of these are true:
 
 ### 1. Inspect and repair the environment
 
-Call `project_config` in status mode and `install_status` immediately.
+Call `project_config` in status mode and `runtime` (action:'status') immediately.
 
 If the runtime is not ready:
 
-1. Call `install_runtime`.
-2. Poll `install_status` until it succeeds or returns a concrete failure.
-3. For a recoverable/partial failure, call `install_runtime` again and continue.
+1. Call `runtime` with action:'install'.
+2. Poll `runtime` (action:'status') until it succeeds or returns a concrete failure.
+3. For a recoverable/partial failure, call `runtime` action:'install' again and continue.
    Do not send the user away to install Chrome, Python, uv, Chromium, or
    browser-harness manually; the owned installer handles them.
 
