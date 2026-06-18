@@ -3,20 +3,32 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Social Autoposter</title>
+    <title>S4L</title>
   </head>
   <body>
     <div class="wrap">
       <header class="head">
-        <div class="title">Social Autoposter</div>
-        <div class="ver" id="ver"></div>
+        <div class="head-left">
+          <span class="title">S4L</span>
+          <span class="ver" id="ver"></span>
+        </div>
+        <!-- Inline setup summary + expand dropdown. The counter shows only while
+             setup is incomplete; once complete this collapses to just a "Setup"
+             dropdown so the milestone details stay inspectable on demand. -->
+        <button
+          class="setup-summary"
+          id="setup-summary"
+          type="button"
+          hidden
+          aria-expanded="false"
+        >
+          <span class="setup-summary-label">Setup</span>
+          <span class="setup-summary-count" id="onboarding-count"></span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
       </header>
 
-      <section class="onboarding" id="onboarding-card" hidden>
-        <div class="onboarding-head">
-          <span>Setup progress</span>
-          <span class="onboarding-count" id="onboarding-count"></span>
-        </div>
+      <section class="onboarding-details" id="onboarding-details" hidden>
         <div class="onboarding-bar"><span id="onboarding-bar-fill"></span></div>
         <ul class="steps onboarding-steps" id="onboarding-steps"></ul>
         <div class="onboarding-blocker" id="onboarding-blocker" hidden></div>
@@ -42,20 +54,6 @@
           <div class="v" id="st-proj">&mdash;</div>
           <div class="sub" id="st-proj-sub"></div>
         </div>
-        <div class="card">
-          <div class="k">X / Twitter</div>
-          <div class="v" id="st-x">&mdash;</div>
-          <div class="sub" id="st-x-sub"></div>
-          <button id="btn-connect-x" class="card-btn" hidden>Connect</button>
-        </div>
-        <div class="card">
-          <div class="k">Autopilot</div>
-          <label class="toggle" title="Turn hands-free background posting on or off">
-            <input type="checkbox" id="ap-checkbox" disabled />
-            <span class="slider"></span>
-          </label>
-          <div class="sub" id="st-ap-sub"></div>
-        </div>
       </section>
 
       <section class="actions">
@@ -77,8 +75,16 @@
       </section>
 
       <section class="stats" id="stats-card" hidden>
-        <div class="stats-head">Last 7 days</div>
-        <div class="stats-grid" id="stats-grid">
+        <button
+          class="section-toggle"
+          id="stats-toggle"
+          type="button"
+          aria-expanded="false"
+        >
+          <span>Last 7 days stats</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
+        <div class="stats-grid" id="stats-grid" hidden>
           <div class="muted">&mdash;</div>
         </div>
       </section>
@@ -87,12 +93,12 @@
         <div class="config-head">
           <span>Configuration</span>
           <div class="config-head-actions">
-            <button id="btn-config-load" class="ghost">View config</button>
+            <button id="btn-config-load" class="ghost">View agent instructions</button>
             <button id="btn-config-save" class="primary" hidden>Save</button>
             <button id="btn-config-cancel" class="ghost" hidden>Cancel</button>
           </div>
         </div>
-        <div class="config-desc" id="config-desc">
+        <div class="config-desc" id="config-desc" hidden>
           The full config.json: every project, account handle, topics, and
           exclusions. Editing saves a timestamped backup before overwriting.
         </div>
@@ -106,39 +112,15 @@
         <div class="config-status" id="config-status"></div>
       </section>
 
-      <div class="log" id="log"></div>
-    </div>
+      <section class="autopilot-row" id="autopilot-card" hidden>
+        <span class="autopilot-label">Autopilot</span>
+        <label class="toggle" title="Turn hands-free background posting on or off">
+          <input type="checkbox" id="ap-checkbox" disabled />
+          <span class="slider"></span>
+        </label>
+      </section>
 
-    <div class="modal" id="kc-modal" hidden>
-      <div class="modal-box">
-        <div class="modal-title">Connect your X account</div>
-        <div class="modal-body">
-          <p>
-            To post for you, the autoposter copies your logged-in X session from
-            your everyday browser into its own managed Chrome. Your passwords are
-            never seen, and only x.com / twitter.com cookies are read.
-          </p>
-          <p>
-            In a moment, macOS will show a keychain prompt like the one below.
-            Enter your Mac login password and click <strong>Allow</strong> (or
-            <strong>Always Allow</strong>).
-          </p>
-          <img
-            class="modal-img"
-            src="./keychain-prompt.png"
-            alt="macOS keychain prompt: enter your login password and click Allow"
-          />
-          <p class="modal-note">
-            If you use more than one browser, this prompt can appear several
-            times, once per browser. Approve each one.
-          </p>
-        </div>
-        <div class="modal-actions">
-          <button id="btn-kc-cancel" class="ghost">Cancel</button>
-          <button id="btn-kc-proceed" class="primary">Proceed</button>
-        </div>
-        <div class="modal-status" id="kc-status"></div>
-      </div>
+      <div class="log" id="log"></div>
     </div>
 
     <script type="module" src="./panel.ts"></script>
