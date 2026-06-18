@@ -806,6 +806,19 @@ tool(
         .string()
         .optional()
         .describe("Anything the posts must avoid saying / claiming"),
+      fields: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe(
+          "Escape hatch to edit ANY other project field the named props above don't cover — e.g. " +
+            "weight, platform, voice_relationship, booking_link, qualification, subreddit_bans, " +
+            "short_links_host, short_links_live, content_angle, messaging, landing_pages, posthog. " +
+            "Pass {name:'<project>', fields:{<key>:<value>, ...}}; each key SHALLOW-merges onto the " +
+            "project, REPLACING that key's whole value (read the current value via status:true first if " +
+            "you only want to tweak part of a nested object, then pass the full new value). A value of " +
+            "null DELETES the key. 'name' is ignored here (can't rename through this path). This is how " +
+            "you edit advanced config without any raw whole-file overwrite."
+        ),
     },
   },
   async (args) => {
@@ -1123,6 +1136,15 @@ tool(
           }
         }
       }
+      // Surface any advanced (escape-hatch) field edits in the note so the
+      // agent can confirm exactly what changed to the user.
+      let advancedNote = "";
+      if (result.fields_set.length || result.fields_removed.length) {
+        const parts: string[] = [];
+        if (result.fields_set.length) parts.push(`set ${result.fields_set.join(", ")}`);
+        if (result.fields_removed.length) parts.push(`removed ${result.fields_removed.join(", ")}`);
+        advancedNote = ` Advanced fields updated: ${parts.join("; ")}.`;
+      }
       return jsonContent({
         ok: true,
         project: result.project,
@@ -1132,16 +1154,19 @@ tool(
         topics_seeded: topicsSeeded,
         topic_count: topicCount,
         search_queries: searchQueries,
+        fields_set: result.fields_set,
+        fields_removed: result.fields_removed,
         config_path: configPath(),
         onboarding: onboardingSnapshot(),
-        note: result.ready
+        note: (result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, run draft_cycle to ` +
             `verify without posting. Do not enable autopilot unless explicitly requested.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
-            `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`,
+            `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
+          advancedNote,
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
