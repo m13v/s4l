@@ -29,6 +29,24 @@ export interface PanelBridge {
   sendMessage(params: any): Promise<{ isError?: boolean } & Record<string, unknown>>;
 }
 
+// Unwrap a tool result into its plain data object (mirrors parseResult in
+// panel.ts): prefer structuredContent, else parse the first text content block.
+// Kept local so the bridge stays self-contained.
+function dataOf(result: any): any {
+  const sc = result && result.structuredContent;
+  if (sc && typeof sc === "object") {
+    if (typeof sc.snapshot === "string") {
+      try { return JSON.parse(sc.snapshot); } catch { /* fall through */ }
+    }
+    return sc;
+  }
+  const block = ((result && result.content) || []).find((c: any) => c && c.type === "text");
+  if (block?.text) {
+    try { return JSON.parse(block.text); } catch { return {}; }
+  }
+  return {};
+}
+
 // HTTP transport for the localhost fallback. Same-origin (the page is served by
 // the loopback server itself), so relative URLs are correct and there is no CORS
 // concern. callServerTool maps 1:1 onto POST /tool/<name>; the body IS the
@@ -40,11 +58,38 @@ class HttpBridge implements PanelBridge {
 
   async connect(): Promise<void> {
     // First paint: in inline mode the host pushes the spawning tool's result via
-    // ontoolresult. Over HTTP there is no host push, so we actively fetch the
-    // dashboard snapshot once and fire the same callback — identical first paint.
+    // ontoolresult. Over HTTP there is no host push, so we assemble the same
+    // snapshot ourselves from the read-only status tools (setup/autopilot/
+    // install_status) — the exact set refresh() uses. We deliberately do NOT call
+    // the `dashboard` tool here: in a non-UI host it has a side effect (it opens
+    // the loopback URL in the OS browser), which would pop a window every time this
+    // page loads. These three tools are pure reads, so first paint is side-effect free.
     try {
-      const result = await this.callServerTool({ name: "dashboard", arguments: {} });
-      this.ontoolresult?.(result);
+      const [setupR, apR, rtR] = await Promise.all([
+        this.callServerTool({ name: "setup", arguments: { status: true } }),
+        this.callServerTool({ name: "autopilot", arguments: { action: "status" } }),
+        this.callServerTool({ name: "install_status", arguments: {} }),
+      ]);
+      const setup = dataOf(setupR), ap = dataOf(apR), rt = dataOf(rtR);
+      const projects = Array.isArray(setup.projects) ? setup.projects : [];
+      const snapshot = {
+        projects,
+        projects_total: projects.length,
+        projects_ready: projects.filter((p: any) => p && p.ready).length,
+        x_connected: !!setup.x_connected,
+        x_state: setup.x_state || "",
+        x_handle: setup.x_handle ?? null,
+        autopilot_on: !!ap.loaded,
+        auto_update_on: !!ap.auto_update_loaded,
+        version: setup.mcp_version || "",
+        latest_version: setup.latest_version ?? null,
+        update_available: !!setup.update_available,
+        runtime_ready: typeof rt.runtime_ready === "boolean" ? rt.runtime_ready : true,
+        runtime_provisioning: !!rt.provisioning,
+        onboarding: rt.onboarding || setup.onboarding,
+      };
+      // parseResult (panel.ts) unwraps structuredContent.snapshot — match that shape.
+      this.ontoolresult?.({ structuredContent: { snapshot: JSON.stringify(snapshot) } });
     } catch (e) {
       this.onerror?.(e);
     }
