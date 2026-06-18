@@ -242,8 +242,8 @@ const server = new McpServer(
       "about it. A feature nobody hears about is wasted distribution. Use judgment, suggest it for " +
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
-      "release, call the `version` tool (action:'status'). If `update_available` is true, tell the " +
-      "user and offer to run `version` with action:'update'. The `project_config` tool's status also " +
+      "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
+      "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
       "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `draft_cycle` " +
       "(scan + review a batch; the user approves / edits / skips every draft in a single form) -> " +
@@ -1543,33 +1543,97 @@ tool(
 );
 
 // ---- version: report installed version + deliver updates on demand ---------
+// ---- runtime: install + version/update + diagnostics ----------------------
+// ONE plumbing tool for the whole local-runtime lifecycle, action-based like
+// project_config and autopilot. The pipeline runs Python locally; rather than
+// depend on the user's system Python (the #1 source of install failures), the
+// first run provisions a fully OWNED uv runtime: standalone CPython + owned venv
+// + deps + Chromium. It also reports/installs new releases and runs the Doctor.
+// Plain (non-UI) so EVERY host can drive it — the panel's Install card and
+// Update button are just skins that call action:'install' then poll
+// action:'status'. See runtime.ts for the provisioning + progress contract.
+//
+// Actions:
+//   status (default) — is the owned runtime installed? + in-progress step detail
+//   install          — start provisioning in the background; poll status to follow
+//   version          — installed vs latest published, whether an update is available
+//   update           — pull + install the latest release (npx social-autoposter@latest update)
+//   doctor           — run structured environment diagnostics (phase: pre_connect|full)
+//   doctor_status    — last persisted Doctor result without re-running checks
 tool(
-  "version",
+  "runtime",
   {
-    title: "Version & updates",
+    title: "Runtime: install, update & diagnostics",
     description:
-      "Report the installed social-autoposter version and check npm for a newer release. " +
-      "action:'status' (default) shows installed vs latest published and whether an update is " +
-      "available. action:'update' pulls and installs the latest release (runs " +
-      "`npx social-autoposter@latest update`); the new MCP code takes effect after the client " +
-      "reconnects / restarts (this running process keeps the old code until then). Use this when " +
-      "the user asks what version they're on, or to push the latest update to their machine.",
+      "The ONE plumbing tool for the autoposter's local runtime lifecycle. action:'status' (default) " +
+      "reports whether the self-contained Python/Chromium runtime is installed and, mid-install, the " +
+      "per-step progress (uv, Python, venv, dependencies, Chromium) — poll it after action:'install'. " +
+      "action:'install' provisions that runtime (a private Python via uv, NOT your system Python, plus " +
+      "deps and Chromium); it runs in the background and returns immediately, is safe to call " +
+      "repeatedly, and is a no-op once installed. action:'version' shows installed vs latest published " +
+      "and whether an update is available; action:'update' pulls and installs the latest release (runs " +
+      "`npx social-autoposter@latest update`, taking effect after the client reconnects/restarts). " +
+      "action:'doctor' runs structured environment diagnostics (phase:'pre_connect' is safe at " +
+      "onboarding start and treats the missing X session/cookies as expected; phase:'full' verifies the " +
+      "completed environment after X is connected); action:'doctor_status' returns the last persisted " +
+      "Doctor result without re-running. Use this the first time the user sets up, when another tool " +
+      "reports the runtime isn't ready, when the user asks what version they're on or to update, or to " +
+      "diagnose a broken environment.",
     inputSchema: {
-      action: z.enum(["status", "update"]).optional(),
+      action: z
+        .enum(["status", "install", "version", "update", "doctor", "doctor_status"])
+        .optional(),
+      phase: z
+        .enum(["pre_connect", "full"])
+        .optional()
+        .describe("Only for action:'doctor' — which diagnostic phase to run (default pre_connect)."),
     },
   },
-  async ({ action }) => {
+  async ({ action, phase }: { action?: "status" | "install" | "version" | "update" | "doctor" | "doctor_status"; phase?: DoctorPhase }) => {
+    // ---- install: start provisioning the owned runtime --------------------
+    if (action === "install") {
+      if (runtimeReady()) {
+        completeOnboardingMilestone("runtime_ready");
+        return jsonContent({ already_installed: true, ...runtimeSnapshot() });
+      }
+      recordOnboardingAttempt("runtime_ready");
+      const progress = startProvisioning();
+      return jsonContent({
+        started: true,
+        runtime_ready: false,
+        note: "Runtime install started. Poll runtime action:'status' every ~1.5s for progress.",
+        progress,
+      });
+    }
+
+    // ---- version: installed vs latest published ---------------------------
+    if (action === "version") {
+      const v = await versionStatus();
+      return jsonContent({
+        installed: v.installed,
+        latest_published: v.latest,
+        update_available: v.update_available,
+        update_command: "npx social-autoposter@latest update",
+        note:
+          v.latest == null
+            ? "Could not reach npm to check for a newer version (offline or registry error)."
+            : v.update_available
+              ? `A newer version (${v.latest}) is available. Run this tool with action:'update' ` +
+                "to install it, or run `npx social-autoposter@latest update` in a terminal."
+              : "You are on the latest published version.",
+      });
+    }
+
+    // ---- update: pull + install the latest release ------------------------
     if (action === "update") {
-      // Pull + install the latest published release. This overwrites mcp/dist/
-      // (including this running file — safe; the loaded process keeps old code)
-      // and re-runs install.mjs to re-register the client config. npx is run
-      // non-interactively so it can't stall on a confirm prompt.
+      // Overwrites mcp/dist/ (including this running file — safe; the loaded
+      // process keeps old code) and re-runs install.mjs to re-register the
+      // client config. npx is non-interactive so it can't stall on a confirm.
       const before = VERSION;
       const res = await run("npx", ["-y", "social-autoposter@latest", "update"], {
         timeoutMs: 600_000,
       });
-      // Bust the latest-version cache so the post-update number is fresh.
-      const latest = await latestPublishedVersion();
+      const latest = await latestPublishedVersion(); // bust the cache
       return jsonContent({
         action: "update",
         ran: "npx social-autoposter@latest update",
@@ -1583,83 +1647,23 @@ tool(
         output_tail: (res.stdout + "\n" + res.stderr).trim().split("\n").slice(-20).join("\n"),
       });
     }
-    const v = await versionStatus();
-    return jsonContent({
-      installed: v.installed,
-      latest_published: v.latest,
-      update_available: v.update_available,
-      update_command: "npx social-autoposter@latest update",
-      note:
-        v.latest == null
-          ? "Could not reach npm to check for a newer version (offline or registry error)."
-          : v.update_available
-            ? `A newer version (${v.latest}) is available. Run this tool with action:'update' ` +
-              "to install it, or run `npx social-autoposter@latest update` in a terminal."
-            : "You are on the latest published version.",
-    });
-  }
-);
 
-// ---- runtime installer ----------------------------------------------------
-// The pipeline runs Python locally. Rather than depend on the user's system
-// Python (the #1 source of install failures), the first run provisions a fully
-// OWNED uv runtime: standalone CPython + owned venv + deps + Chromium. These two
-// tools drive it. They are plain (non-UI) tools so EVERY host can install — the
-// panel's Install card is just a skin that calls install_runtime then polls
-// install_status. See runtime.ts for the provisioning + progress contract.
-
-function runtimeSnapshot() {
-  const rt = readRuntime();
-  const progress = readProgress();
-  return {
-    runtime_ready: runtimeReady(),
-    provisioning: isProvisioning(),
-    python: rt?.python ?? null,
-    python_version: rt?.python_version ?? null,
-    progress: progress ?? null,
-    onboarding: onboardingSnapshot(),
-  };
-}
-
-tool(
-  "install_runtime",
-  {
-    title: "Install the Python runtime",
-    description:
-      "One-time setup that provisions the self-contained runtime the autoposter needs: a private " +
-      "Python (via uv, not your system Python), its dependencies, and the Chromium browser. Runs in " +
-      "the background and returns immediately; poll `install_status` for progress. Safe to call " +
-      "repeatedly; it resumes/repairs and is a no-op once everything is installed. Use this the " +
-      "first time the user sets up, or if other tools report the runtime isn't ready.",
-    inputSchema: {},
-  },
-  async () => {
-    if (runtimeReady()) {
-      completeOnboardingMilestone("runtime_ready");
-      return jsonContent({ already_installed: true, ...runtimeSnapshot() });
+    // ---- doctor: run structured diagnostics -------------------------------
+    if (action === "doctor") {
+      const selected = phase || "pre_connect";
+      const report = await runDoctorPhase(selected);
+      return jsonContent({ doctor: report, onboarding: onboardingSnapshot() });
     }
-    recordOnboardingAttempt("runtime_ready");
-    const progress = startProvisioning();
-    return jsonContent({
-      started: true,
-      runtime_ready: false,
-      note: "Runtime install started. Poll install_status every ~1.5s for progress.",
-      progress,
-    });
-  }
-);
 
-tool(
-  "install_status",
-  {
-    title: "Runtime install status",
-    description:
-      "Report whether the self-contained Python/Chromium runtime is installed and, if an install is " +
-      "in progress, the per-step progress (uv, Python, venv, dependencies, Chromium). Poll this after " +
-      "install_runtime to follow the install to completion.",
-    inputSchema: {},
-  },
-  async () => {
+    // ---- doctor_status: last persisted Doctor result ----------------------
+    if (action === "doctor_status") {
+      return jsonContent({
+        doctor: onboardingLedger()?.doctor?.latest ?? null,
+        onboarding: onboardingSnapshot(),
+      });
+    }
+
+    // ---- status (default): runtime install snapshot -----------------------
     const snapshot = runtimeSnapshot();
     if (snapshot.runtime_ready) {
       completeOnboardingMilestone("runtime_ready");
@@ -1675,45 +1679,18 @@ tool(
   }
 );
 
-// ---- doctor: structured environment diagnostics --------------------------
-// Uses the same shared engine as `npx social-autoposter doctor`. Pre-connect
-// avoids invasive keychain access and classifies not-yet-created X artifacts as
-// expected; full verifies the completed browser/session/cookie environment.
-tool(
-  "doctor",
-  {
-    title: "Diagnose the onboarding environment",
-    description:
-      "Run the structured social-autoposter Doctor and persist the result in the onboarding " +
-      "ledger. phase:'pre_connect' is safe at onboarding start and treats the missing X session/" +
-      "cookie artifacts as expected. phase:'full' verifies the completed environment after X is " +
-      "connected. action:'status' returns the most recent persisted result without re-running checks.",
-    inputSchema: {
-      action: z.enum(["run", "status"]).optional(),
-      phase: z.enum(["pre_connect", "full"]).optional(),
-    },
-  },
-  async ({
-    action,
-    phase,
-  }: {
-    action?: "run" | "status";
-    phase?: DoctorPhase;
-  }) => {
-    if (action === "status") {
-      return jsonContent({
-        doctor: onboardingLedger()?.doctor?.latest ?? null,
-        onboarding: onboardingSnapshot(),
-      });
-    }
-    const selected = phase || "pre_connect";
-    const report = await runDoctorPhase(selected);
-    return jsonContent({
-      doctor: report,
-      onboarding: onboardingSnapshot(),
-    });
-  }
-);
+function runtimeSnapshot() {
+  const rt = readRuntime();
+  const progress = readProgress();
+  return {
+    runtime_ready: runtimeReady(),
+    provisioning: isProvisioning(),
+    python: rt?.python ?? null,
+    python_version: rt?.python_version ?? null,
+    progress: progress ?? null,
+    onboarding: onboardingSnapshot(),
+  };
+}
 
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
