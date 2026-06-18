@@ -263,9 +263,9 @@ export interface Resolved {
 }
 
 const SETUP_REQUIRED_MESSAGE =
-  "No project is set up yet. Run the `setup` tool first: collect from the user their website " +
+  "No project is set up yet. Run the `project_config` tool first: collect from the user their website " +
   "URL, what the product does (description), who to target (icp), and brand voice/tone, then " +
-  "call setup with a short name plus those fields. You can set up multiple products; each is " +
+  "call project_config with a short name plus those fields. You can set up multiple products; each is " +
   "configured independently and you fill the fields incrementally.";
 
 export function resolveProject(requested?: string): Resolved {
@@ -275,7 +275,7 @@ export function resolveProject(requested?: string): Resolved {
       return {
         ok: false,
         message:
-          `Project '${requested}' isn't set up yet. Run setup with name='${requested}' plus its ` +
+          `Project '${requested}' isn't set up yet. Run project_config with name='${requested}' plus its ` +
           `website, description, icp, and voice.`,
       };
     }
@@ -284,7 +284,7 @@ export function resolveProject(requested?: string): Resolved {
         ok: false,
         message:
           `Project '${requested}' still needs: ${st.missing_required.join(", ")}. Ask the user ` +
-          `for those and call setup again with name='${requested}'.`,
+          `for those and call project_config again with name='${requested}'.`,
       };
     }
     return { ok: true, project: requested };
