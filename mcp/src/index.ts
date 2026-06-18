@@ -243,12 +243,14 @@ const server = new McpServer(
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
       "release, call the `version` tool (action:'status'). If `update_available` is true, tell the " +
-      "user and offer to run `version` with action:'update'. The `setup` tool's status also surfaces " +
-      "`update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `setup` (configure the project once) -> `draft_cycle` (scan + review a batch; the " +
-      "user approves / edits / skips every draft in a single form) -> `autopilot` (enable to also turn " +
-      "on hands-free background posting AND daily auto-updates) -> `get_stats` (see performance). Run " +
-      "`setup` first; the other tools refuse until a project is fully configured.\n\n" +
+      "user and offer to run `version` with action:'update'. The `project_config` tool's status also " +
+      "surfaces `update_available` and an `update_hint`.\n\n" +
+      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `draft_cycle` " +
+      "(scan + review a batch; the user approves / edits / skips every draft in a single form) -> " +
+      "`autopilot` (enable to also turn on hands-free background posting AND daily auto-updates) -> " +
+      "`get_stats` (see performance). Run `project_config` first; the other tools refuse until a " +
+      "project is fully configured. To change anything about a project later, call `project_config` " +
+      "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
       "(`draft_cycle`, `post_drafts`, `autopilot` enable/disable, `get_stats`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
@@ -703,22 +705,29 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
 // flag. Call with status:true (or just no name) to list every project this
 // install manages and what each still needs.
 tool(
-  "setup",
+  "project_config",
   {
-    title: "Set up a project",
+    title: "Configure or edit a project",
     description:
-      "Run this FIRST, before any drafting or autopilot. A user's request to set up social-autoposter " +
-      "is a request to finish the workflow end to end, not to interview them step by step. Resume " +
-      "from current status, infer discoverable fields, and keep taking safe actions until runtime, " +
-      "project, X connection, topic seeding, and draft-only verification are complete.\n" +
+      "The ONE tool for a project's whole lifecycle: create it, EDIT it later, and connect its X " +
+      "account. There is no separate raw-config editor — every project change goes through here so " +
+      "it validates, merges, and re-seeds the search-topic universe the cycle reads. To CHANGE an " +
+      "existing project (its website, voice, icp, differentiator, search_topics, guardrails, CTA " +
+      "link), call this with that project's `name` and ONLY the fields you want to change; it merges " +
+      "onto what's already saved and never clobbers untouched fields. Run it FIRST before any " +
+      "drafting or autopilot. A user's request to set up social-autoposter is a request to finish " +
+      "the workflow end to end, not to interview them step by step: resume from current status, " +
+      "infer discoverable fields, and keep taking safe actions until runtime, project, X connection, " +
+      "topic seeding, and draft-only verification are complete.\n" +
       "Two jobs:\n" +
-      "1) Configure a project this install posts for: its website, what it does (description), who " +
-      "to target (icp), and brand voice. To fill the PRODUCT fields, discover the product URL from " +
-      "config, conversation context, the connected X profile, or public research, then visit it " +
-      "with your own browser/fetch tools — read 5+ pages (home, pricing, features, about, docs/" +
-      "blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE products " +
-      "(call once per product, identified by name); fill a project's fields INCREMENTALLY across " +
-      "several calls — pass whatever you have, it merges and tells you what's still missing.\n" +
+      "1) Configure (or edit) a project this install posts for: its website, what it does " +
+      "(description), who to target (icp), and brand voice. To fill the PRODUCT fields, discover the " +
+      "product URL from config, conversation context, the connected X profile, or public research, " +
+      "then visit it with your own browser/fetch tools — read 5+ pages (home, pricing, features, " +
+      "about, docs/blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE " +
+      "products (call once per product, identified by name); fill or edit a project's fields " +
+      "INCREMENTALLY across several calls — pass whatever you have, it merges and tells you what's " +
+      "still missing.\n" +
       "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
       "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
       "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
@@ -1677,70 +1686,6 @@ tool(
       doctor: report,
       onboarding: onboardingSnapshot(),
     });
-  }
-);
-
-// ---- config: read / edit the raw config.json ------------------------------
-// The panel renders the full config and lets the user edit it. Writing is
-// guarded: the new content must parse as JSON, and we always drop a timestamped
-// backup next to config.json before overwriting, so a bad paste is recoverable.
-tool(
-  "config",
-  {
-    title: "View or edit config.json",
-    description:
-      "Read or update the autoposter's config.json (the source of truth for every project, the X/" +
-      "Reddit/LinkedIn account handles, topics, and exclusions). action:'get' (default) returns the " +
-      "full raw JSON; action:'save' validates the supplied `content` as JSON, writes a timestamped " +
-      "backup, then overwrites config.json. Use when the user asks to see, edit, or fix their config.",
-    inputSchema: {
-      action: z.enum(["get", "save"]).optional(),
-      content: z.string().optional(),
-    },
-  },
-  async (args: { action?: "get" | "save"; content?: string }) => {
-    const action = args.action || "get";
-    const cfgPath = configPath();
-    if (action === "get") {
-      try {
-        const content = fs.readFileSync(cfgPath, "utf-8");
-        return jsonContent({ ok: true, path: cfgPath, bytes: content.length, content });
-      } catch (e: any) {
-        return jsonContent({ ok: false, path: cfgPath, error: String(e?.message || e) });
-      }
-    }
-    // save
-    const content = args.content;
-    if (typeof content !== "string" || content.trim() === "") {
-      return jsonContent({ ok: false, error: "Nothing to save: `content` was empty." });
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch (e: any) {
-      // Don't write a config that won't parse — every pipeline reads this file.
-      return jsonContent({ ok: false, error: "Invalid JSON, not saved: " + String(e?.message || e) });
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return jsonContent({ ok: false, error: "Top level of config.json must be a JSON object." });
-    }
-    try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backup = `${cfgPath}.bak-panel-${stamp}`;
-      try {
-        fs.copyFileSync(cfgPath, backup);
-      } catch {
-        /* first-write / missing original is non-fatal */
-      }
-      // Re-serialize the parsed object so what lands on disk is canonical,
-      // 2-space-indented JSON with a trailing newline (matches the Python
-      // writers), regardless of how the user formatted their paste.
-      const out = JSON.stringify(parsed, null, 2) + "\n";
-      fs.writeFileSync(cfgPath, out, "utf-8");
-      return jsonContent({ ok: true, path: cfgPath, bytes: out.length, backup });
-    } catch (e: any) {
-      return jsonContent({ ok: false, error: "Write failed: " + String(e?.message || e) });
-    }
   }
 );
 
