@@ -109,12 +109,16 @@ window.__sapsAnnounce = function(payload){
     var back = mk("div", document.documentElement); back.id = "__saps_announce";
     var bs = back.style;
     bs.position="fixed"; bs.top="0"; bs.left="0"; bs.width="100vw"; bs.height="100vh";
-    bs.zIndex="2147483647"; bs.pointerEvents="auto"; bs.display="flex";
+    bs.zIndex="2147483647"; bs.display="flex";
     bs.alignItems="center"; bs.justifyContent="center";
     bs.background="rgba(0,0,0,0.55)";
     bs.backdropFilter="blur(3px)"; bs.webkitBackdropFilter="blur(3px)";
+    // Backdrop is pointer-events:none so a bot click during this one-time window
+    // passes through; only the card + OK button below are clickable.
+    bs.pointerEvents="none";
 
     var card = mk("div", back); var cs = card.style;
+    cs.pointerEvents="auto";
     cs.boxSizing="border-box"; cs.maxWidth="440px"; cs.width="86%";
     cs.padding="26px 26px 22px"; cs.borderRadius="16px";
     cs.background="rgba(20,20,23,0.98)"; cs.color="#fff"; cs.textAlign="center";
@@ -160,12 +164,12 @@ window.__sapsPaint = function(payload){
     if(!root || !root.isConnected){
       root = mk("div", document.documentElement); root.id = ID;
       var s = root.style;
-      // Centered both axes. pointerEvents:auto so the visible card is NOT
-      // click-through (the surrounding empty space still passes clicks to the
-      // page, so the automation is only ever blocked if the card sits directly
-      // over its target -- drag the card aside if so).
+      // Centered both axes. pointerEvents:none so the overlay can NEVER
+      // intercept the automation's clicks: the bot clicks by raw CDP screen
+      // coordinates (Input.dispatchMouseEvent) and by Playwright hit-testing,
+      // both of which an opaque clickable card sitting over a target would eat.
       s.position="fixed"; s.top="50%"; s.left="50%"; s.transform="translate(-50%,-50%)";
-      s.zIndex="2147483647"; s.pointerEvents="auto"; s.maxWidth="460px";
+      s.zIndex="2147483647"; s.pointerEvents="none"; s.maxWidth="460px";
       s.boxSizing="border-box"; s.padding="10px 14px"; s.borderRadius="12px";
       s.background="rgba(15,15,17,0.92)"; s.color="#fff";
       s.font="13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
