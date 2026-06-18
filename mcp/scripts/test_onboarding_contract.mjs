@@ -29,9 +29,7 @@ assert.match(panelHtml, /Setup progress/);
 assert.match(guide, /gives the agent a\s+terminal goal/);
 assert.match(guide, /onboarding-progress\.json/);
 assert.match(privacy, /Doctor check IDs and pass\/fail\/expected status/);
-assert.ok(manifest.tools.some((tool) => tool.name === "install_runtime"));
-assert.ok(manifest.tools.some((tool) => tool.name === "install_status"));
-assert.ok(manifest.tools.some((tool) => tool.name === "doctor"));
+assert.ok(manifest.tools.some((tool) => tool.name === "runtime"));
 
 for (const [file, text] of [
   ["setup/SKILL.md", skill],
