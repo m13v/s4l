@@ -345,9 +345,10 @@ function blockedReasonMessage(reason: string): string {
     case "no_search_topics":
       return (
         "This project has no search topics yet, so there was nothing to scan. Topics live in the " +
-        "DB (project_search_topics) and are seeded from your project's `search_topics` during setup. " +
-        "Re-run the `setup` tool for this project with a `search_topics` list (comma-separated keywords/" +
-        "phrases your buyers tweet about); setup seeds them automatically, then run draft_cycle again."
+        "DB (project_search_topics) and are seeded from your project's `search_topics` when you " +
+        "configure it. Re-run the `project_config` tool for this project with a `search_topics` list " +
+        "(comma-separated keywords/phrases your buyers tweet about); it seeds them automatically, then " +
+        "run draft_cycle again."
       );
     case "topics_api_unreachable":
       return (
@@ -634,10 +635,10 @@ async function postApproved(batchId: string, plan: Plan) {
 // This is NOT a tool — the model never auto-calls it. It surfaces in clients
 // that render prompts as slash-commands / starters (e.g. Claude Desktop's "/"
 // menu). When the user picks it, it injects the message below into the chat,
-// which nudges the agent to start the real onboarding via the `setup` tool.
+// which nudges the agent to start the real onboarding via the `project_config` tool.
 // Deliberately a DUMB POINTER: it names no fields and no steps, so it can never
-// drift from REQUIRED_FIELDS / the setup tool's flow. All real logic stays in
-// `setup`; this is just a convenience handle to begin.
+// drift from REQUIRED_FIELDS / the project_config tool's flow. All real logic stays
+// in `project_config`; this is just a convenience handle to begin.
 server.registerPrompt(
   "getting-started",
   {
@@ -694,11 +695,11 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
   "register, vibe) while keeping every product CLAIM factual to the site. Don't invent " +
   "features, metrics, or guarantees the site doesn't state.\n" +
   "5. Save the best conservative factual draft without adding a confirmation round-trip. Call " +
-  "setup with name + the product fields (plus voice/search_topics from the profile scan). If the " +
+  "project_config with name + the product fields (plus voice/search_topics from the profile scan). If the " +
   "site is thin or unreachable, use only supported facts and leave optional detail conservative; " +
   "ask the user only if a required field is genuinely unknowable.";
 
-// ---- setup: per-project config (the "brain": project, website, voice) -----
+// ---- project_config: per-project config (the "brain": project, website, voice) -----
 // Run this FIRST. The action tools refuse until at least one project is ready.
 // You can set up MULTIPLE products and fill each project's fields INCREMENTALLY
 // across several calls — readiness is derived from config.json, never a stored
@@ -863,7 +864,7 @@ tool(
             "once per browser.",
           how_to_proceed:
             "If the user explicitly requested setup or connection, relay the say_to_user line as a brief " +
-            "heads-up and immediately call setup again with action:'connect_x', confirm:true; do not wait " +
+            "heads-up and immediately call project_config again with action:'connect_x', confirm:true; do not wait " +
             "for another yes/no reply. Optionally pass the recommended x_source. If the user only asked " +
             "what connection would do, stop after this preview.",
         });
@@ -904,12 +905,12 @@ tool(
           : undefined,
         onboarding: onboardingSnapshot(),
         next_step: r.connected
-          ? "X is connected. Next, run setup action:'profile_scan' to read this account's bio + recent " +
+          ? "X is connected. Next, run project_config action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
             "before saving. Then run draft_cycle once the project is fully set up."
           : r.state === "needs_login"
             ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
-              "them that single required action, then call setup action:'connect_x', confirm:true again."
+              "them that single required action, then call project_config action:'connect_x', confirm:true again."
             : "X is not connected yet. " + summarizeXAuth(r),
       });
     }
@@ -919,7 +920,7 @@ tool(
     // successful connect_x) to read the user's bio + recent posts + recent
     // replies. Returns the raw corpus plus grounding_instructions; synthesis of
     // voice/icp/topics happens IN THIS CONVERSATION (no nested model), then the
-    // agent confirms with the user and calls setup to persist. Read-only.
+    // agent confirms with the user and calls project_config to persist. Read-only.
     if (args.action === "profile_scan") {
       // Handle is auto-detected from the live logged-in session by the scanner.
       recordOnboardingAttempt("profile_scanned");
@@ -927,7 +928,7 @@ tool(
       if (!scan.ok) {
         const hint =
           scan.state === "browser_not_running" || scan.state === "no_handle"
-            ? " Run setup action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
+            ? " Run project_config action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
             : "";
         blockOnboardingMilestone(
           "profile_scanned",
@@ -1018,14 +1019,14 @@ tool(
           !rtReady
             ? "Runtime is not ready. Call install_runtime, poll install_status to completion, then continue setup automatically."
             : projects.length === 0
-            ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call setup. Ask only if no product can be identified." +
+            ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
                   ? "All configured projects are ready and X is connected. Run draft_cycle now to verify end to end without posting. After it verifies, call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
-                    "x.com session. Detect sources and run setup action:'connect_x', confirm:true; do not ask whether to proceed.")
-              : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call setup again. Ask only if a required field is genuinely unknowable." +
+                    "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
+              : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
                 (x.connected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
       });
     }
