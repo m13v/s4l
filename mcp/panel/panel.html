@@ -48,23 +48,15 @@
         <div class="install-err" id="install-err" hidden></div>
       </section>
 
-      <section class="status" id="status-card" hidden>
-        <div class="card">
-          <div class="k">Projects</div>
-          <div class="v" id="st-proj">&mdash;</div>
-          <div class="sub" id="st-proj-sub"></div>
-        </div>
-      </section>
-
       <section class="actions">
         <button id="btn-setup">Set up</button>
         <button id="btn-draft" class="primary" hidden>Run draft cycle</button>
       </section>
 
-      <section class="live" id="live-card" hidden>
-        <div class="live-head">
-          <span>Live browser</span>
-          <div class="live-head-actions">
+      <section class="section" id="live-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Live browser</span>
+          <div class="section-actions">
             <button id="btn-live" class="ghost">Show browser</button>
             <button id="btn-live-stop" class="ghost" hidden>Hide browser</button>
             <button id="btn-live-front" class="ghost">Bring to front</button>
@@ -74,14 +66,14 @@
         <img id="live-img" class="live-img" hidden alt="Live browser view" />
       </section>
 
-      <section class="stats" id="stats-card" hidden>
+      <section class="section" id="stats-card" hidden>
         <button
-          class="section-toggle"
+          class="section-row section-row-toggle"
           id="stats-toggle"
           type="button"
           aria-expanded="false"
         >
-          <span>Last 7 days stats</span>
+          <span class="section-label">Last 7 days stats</span>
           <span class="chevron" aria-hidden="true"></span>
         </button>
         <div class="stats-grid" id="stats-grid" hidden>
@@ -89,10 +81,10 @@
         </div>
       </section>
 
-      <section class="config" id="config-card" hidden>
-        <div class="config-head">
-          <span>Configuration</span>
-          <div class="config-head-actions">
+      <section class="section" id="config-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Configuration</span>
+          <div class="section-actions">
             <button id="btn-config-load" class="ghost">View agent instructions</button>
             <button id="btn-config-save" class="primary" hidden>Save</button>
             <button id="btn-config-cancel" class="ghost" hidden>Cancel</button>
@@ -112,12 +104,14 @@
         <div class="config-status" id="config-status"></div>
       </section>
 
-      <section class="autopilot-row" id="autopilot-card" hidden>
-        <span class="autopilot-label">Autopilot</span>
-        <label class="toggle" title="Turn hands-free background posting on or off">
-          <input type="checkbox" id="ap-checkbox" disabled />
-          <span class="slider"></span>
-        </label>
+      <section class="section" id="autopilot-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Autopilot</span>
+          <label class="toggle" title="Turn hands-free background posting on or off">
+            <input type="checkbox" id="ap-checkbox" disabled />
+            <span class="slider"></span>
+          </label>
+        </div>
       </section>
 
       <div class="log" id="log"></div>
