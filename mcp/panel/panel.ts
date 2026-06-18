@@ -496,7 +496,9 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
           "and connect my X session, scan my profile, discover and research my product, then infer " +
           "and save a complete project with seeded search topics. Keep going without asking me to " +
           "approve each safe setup step. Ask only if I must interactively sign in or no product " +
-          "can be identified.",
+          "can be identified. Keep every reply to me extremely concise: a few short sentences at " +
+          "most, no step-by-step narration or long status walls. If you must ask me something (e.g. " +
+          "the product URL), make it one short question.",
       }],
     });
     if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
