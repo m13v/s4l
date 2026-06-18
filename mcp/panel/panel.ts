@@ -274,7 +274,6 @@ function render() {
   // runtime is still installing.
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
-  configCard.hidden = !setupComplete;
   autopilotCard.hidden = !setupComplete;
 }
 
