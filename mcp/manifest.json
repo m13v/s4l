@@ -23,8 +23,8 @@
   },
   "tools": [
     {
-      "name": "setup",
-      "description": "Run first and continue end to end: inspect status, connect X, discover and configure the product, seed topics, and proceed to draft-only verification."
+      "name": "project_config",
+      "description": "The one tool to configure, edit, and connect a project's X account. Run first and continue end to end: inspect status, connect X, discover and configure (or later edit) the product, seed topics, and proceed to draft-only verification."
     },
     {
       "name": "install_runtime",
