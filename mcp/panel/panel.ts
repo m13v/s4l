@@ -105,8 +105,6 @@ const onboardingCount = $("onboarding-count");
 const onboardingBarFill = $("onboarding-bar-fill");
 const liveCard = $("live-card");
 const statsCard = $("stats-card");
-const configCard = $("config-card");
-const configDesc = $("config-desc");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
@@ -115,17 +113,11 @@ const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
-const configEditor = $("config-editor") as HTMLTextAreaElement;
-const configStatus = $("config-status");
-const btnConfigLoad = $("btn-config-load") as HTMLButtonElement;
-const btnConfigSave = $("btn-config-save") as HTMLButtonElement;
-const btnConfigCancel = $("btn-config-cancel") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
 let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
-let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
 let setupDetailsOpen = false; // header setup dropdown expanded state
 let statsOpen = false; // "Last 7 days stats" dropdown expanded state
 
@@ -348,7 +340,7 @@ async function refresh() {
     // install_status is cheap and tells us whether the runtime gate is cleared;
     // pull it alongside the usual status so a refresh re-evaluates the gate.
     const [setupStatus, ap, rt] = await Promise.all([
-      call("setup", { status: true }),
+      call("project_config", { status: true }),
       call("autopilot", { action: "status" }),
       call("install_status").catch(() => ({})),
     ]);
@@ -603,60 +595,9 @@ btnInstall.addEventListener("click", async () => {
 });
 
 // ---- config view / edit ---------------------------------------------------
-// Read-only by default; the textarea opens on "View config" and becomes
-// editable. Save round-trips through the `config` tool, which validates JSON and
-// writes a timestamped backup before overwriting config.json.
-function showConfigEditing(on: boolean) {
-  configEditor.hidden = !on;
-  btnConfigSave.hidden = !on;
-  btnConfigCancel.hidden = !on;
-  btnConfigLoad.hidden = on;
-  // The descriptive blurb stays hidden until the config is actually opened.
-  configDesc.hidden = !on;
-}
-
-btnConfigLoad.addEventListener("click", () => busy(btnConfigLoad, "Loading\u2026", async () => {
-  configStatus.textContent = "";
-  try {
-    const r = await call("config", { action: "get" });
-    if (!r.ok) { configStatus.textContent = "Couldn't load config: " + (r.error || "unknown error"); return; }
-    configLoaded = r.content || "";
-    configEditor.value = configLoaded;
-    showConfigEditing(true);
-    configStatus.textContent = `Loaded ${r.bytes ?? configLoaded.length} bytes. Edit and Save, or Cancel.`;
-    // The config card sits near the bottom of a tall panel; in a constrained
-    // host viewport the freshly-opened editor lands below the fold, so the click
-    // looks like a no-op. Pull it into view so the user actually sees it open.
-    try { configEditor.scrollIntoView({ behavior: "smooth", block: "center" }); } catch { /* older host */ }
-  } catch (e: any) {
-    configStatus.textContent = "Couldn't load config: " + (e?.message || e);
-  }
-}));
-
-btnConfigCancel.addEventListener("click", () => {
-  configEditor.value = configLoaded;
-  showConfigEditing(false);
-  configStatus.textContent = "";
-});
-
-btnConfigSave.addEventListener("click", () => busy(btnConfigSave, "Saving\u2026", async () => {
-  const content = configEditor.value;
-  if (content === configLoaded) { configStatus.textContent = "No changes to save."; return; }
-  // Client-side parse first so an obvious typo is caught before the round-trip.
-  try { JSON.parse(content); }
-  catch (e: any) { configStatus.textContent = "Invalid JSON, not saved: " + (e?.message || e); return; }
-  try {
-    const r = await call("config", { action: "save", content });
-    if (!r.ok) { configStatus.textContent = "Save failed: " + (r.error || "unknown error"); return; }
-    configLoaded = content;
-    showConfigEditing(false);
-    configStatus.textContent = `Saved ${r.bytes ?? content.length} bytes. Backup: ${r.backup || "(none)"}`;
-    // Project list / handle may have changed; re-read status.
-    void refresh();
-  } catch (e: any) {
-    configStatus.textContent = "Save failed: " + (e?.message || e);
-  }
-}));
+// Removed: raw config.json view/edit. All project changes now go through the
+// `project_config` tool (validates, merges, re-seeds topics) — there is no
+// raw-overwrite surface in the panel anymore.
 
 // ---- live browser view ----------------------------------------------------
 // Polls the show_browser_to_user tool, which keeps a CDP screencast of the
