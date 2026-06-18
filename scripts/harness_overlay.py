@@ -113,12 +113,15 @@ window.__sapsAnnounce = function(payload){
     bs.alignItems="center"; bs.justifyContent="center";
     bs.background="rgba(0,0,0,0.55)";
     bs.backdropFilter="blur(3px)"; bs.webkitBackdropFilter="blur(3px)";
-    // Backdrop is pointer-events:none so a bot click during this one-time window
-    // passes through; only the card + OK button below are clickable.
+    // The ENTIRE modal (backdrop + card + text) is pointer-events:none so that a
+    // bot click during this one-time window always passes through to the page,
+    // even if the user never clicks OK. The OK button is the ONLY element that
+    // re-enables pointer-events, so it stays clickable while everything else is
+    // transparent to the automation's CDP/hit-test clicks.
     bs.pointerEvents="none";
 
     var card = mk("div", back); var cs = card.style;
-    cs.pointerEvents="auto";
+    cs.pointerEvents="none";
     cs.boxSizing="border-box"; cs.maxWidth="440px"; cs.width="86%";
     cs.padding="26px 26px 22px"; cs.borderRadius="16px";
     cs.background="rgba(20,20,23,0.98)"; cs.color="#fff"; cs.textAlign="center";
@@ -135,6 +138,7 @@ window.__sapsAnnounce = function(payload){
 
     var ok = mk("button", card); ok.textContent="OK";
     var os_ = ok.style;
+    os_.pointerEvents="auto";  // the ONLY clickable thing; rest of modal is click-through
     os_.cursor="pointer"; os_.appearance="none"; os_.webkitAppearance="none";
     os_.border="1px solid rgba(255,255,255,0.18)"; os_.borderRadius="10px";
     os_.padding="9px 30px"; os_.fontSize="14px"; os_.fontWeight="600";
