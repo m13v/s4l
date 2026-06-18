@@ -1859,11 +1859,14 @@ function startLocalPanel(): Promise<string> {
   });
 }
 
-// Open a URL in the user's default browser, cross-platform. Honors
-// SAPS_PANEL_NO_OPEN (set on headless autopilot boxes or in tests) to skip the
-// actual open while still returning the URL to the caller.
+// Open a URL in the user's default browser, cross-platform. Opening is OPT-IN:
+// by default we do NOT pop a browser tab. The dashboard already surfaces in-host
+// (MCP Apps inline) or via the Claude Code side panel / returned loopback URL, so
+// auto-opening the OS browser on every dashboard call is unwanted noise. Set
+// SAPS_PANEL_OPEN_BROWSER=1 to restore the old auto-open behavior. (The URL is
+// always returned to the caller regardless, so nothing is lost when we don't open.)
 async function openInBrowser(url: string): Promise<void> {
-  if (process.env.SAPS_PANEL_NO_OPEN) return;
+  if (!process.env.SAPS_PANEL_OPEN_BROWSER) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
@@ -1914,8 +1917,9 @@ appTool(
       return { content: [], structuredContent: { snapshot: JSON.stringify(snap) } };
     }
     // Host CAN'T render inline (Claude Code / Cowork today): serve the identical
-    // panel.html from a loopback HTTP server and open it in the browser, so the
-    // user still gets the visual surface instead of a wall of text.
+    // panel.html from a loopback HTTP server. We do NOT auto-open a browser tab
+    // (see openInBrowser — opt-in only); the dashboard is shown in the Claude Code
+    // side panel, and the loopback URL is returned for anyone who wants to open it.
     try {
       const url = await startLocalPanel();
       await openInBrowser(url);
@@ -1924,7 +1928,7 @@ appTool(
           type: "text" as const,
           text:
             human +
-            `\n\nThis host can't render the dashboard inline, so I opened it in your browser: ${url}`,
+            `\n\nThis host can't render the dashboard inline. It's available in the side panel; loopback URL: ${url}`,
         }],
         structuredContent: { snapshot: JSON.stringify(snap), fallback_url: url },
       };
@@ -2035,6 +2039,12 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
+  // Eagerly start the loopback panel server so the Claude Code side panel (and any
+  // reverse proxy in front of it) always has a backend to hit, without waiting for
+  // a first `dashboard` call. Best-effort: a bind failure must never block boot.
+  void startLocalPanel()
+    .then((url) => console.error(`[social-autoposter-mcp] panel loopback ready at ${url}`))
+    .catch((e) => console.error("[social-autoposter-mcp] panel loopback start failed:", e?.message || e));
   // Phone home so this .mcpb install is visible in the install-lane digest
   // (parity with the npx launchd heartbeat). Once on startup, then every 15m
   // while the desktop app keeps the server alive. unref() so it never holds the
