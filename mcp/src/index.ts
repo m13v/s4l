@@ -83,7 +83,8 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
 );
 
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
-// install keeps itself current — the interactive `version` tool only helps when
+// install keeps itself current — the interactive `runtime` tool (action:'update')
+// only helps when
 // a human-facing agent session is open, which an autopilot box never has.
 const UPDATER_LABEL = "com.m13v.social-autoposter-update";
 const UPDATER_PLIST = path.join(
@@ -1020,7 +1021,7 @@ tool(
         update_available: ver.update_available,
         update_hint: ver.update_available
           ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
-            `Tell the user and offer to run the \`version\` tool with action:'update' ` +
+            `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
             `(or \`npx social-autoposter@latest update\`).`
           : undefined,
         required_fields: REQUIRED_FIELDS,
@@ -1030,7 +1031,7 @@ tool(
         onboarding: onboardingSnapshot(),
         next_step:
           !rtReady
-            ? "Runtime is not ready. Call install_runtime, poll install_status to completion, then continue setup automatically."
+            ? "Runtime is not ready. Call runtime action:'install', poll runtime action:'status' to completion, then continue setup automatically."
             : projects.length === 0
             ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
