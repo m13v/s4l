@@ -341,7 +341,7 @@ async function refresh() {
     const [setupStatus, ap, rt] = await Promise.all([
       call("project_config", { status: true }),
       call("autopilot", { action: "status" }),
-      call("install_status").catch(() => ({})),
+      call("runtime", { action: "status" }).catch(() => ({})),
     ]);
     applyState({
       ...fromSetupStatus(setupStatus),
@@ -368,7 +368,7 @@ async function pollInstall() {
   btnInstall.textContent = "Installing\u2026";
   try {
     for (;;) {
-      const rt = await call("install_status").catch(() => ({} as any));
+      const rt = await call("runtime", { action: "status" }).catch(() => ({} as any));
       renderInstallProgress(rt.progress ?? null);
       if (rt.onboarding) applyState({ onboarding: rt.onboarding });
       if (rt.runtime_ready) {
@@ -405,7 +405,7 @@ async function pollSetup() {
   const MAX_MS = 20 * 60 * 1000; // safety stop: setup is autonomous, not infinite
   try {
     for (;;) {
-      const rt = await call("install_status").catch(() => ({} as any));
+      const rt = await call("runtime", { action: "status" }).catch(() => ({} as any));
       if (rt.progress) renderInstallProgress(rt.progress);
       const patch: Partial<Snapshot> = {};
       if (typeof rt.runtime_ready === "boolean") patch.runtime_ready = rt.runtime_ready;
@@ -559,7 +559,7 @@ async function runUpdate() {
   if (btn) { btn.disabled = true; btn.textContent = "Updating\u2026"; }
   log("Installing the latest release\u2026 this can take a minute.");
   try {
-    const r = await call("version", { action: "update" });
+    const r = await call("runtime", { action: "update" });
     if (r.ok) {
       log(`Updated to ${r.latest_published || "the latest version"}. ${r.takes_effect || "Restart the client to apply."}`);
       if (btn) btn.textContent = "Update installed \u2014 restart to apply";
@@ -581,7 +581,7 @@ btnInstall.addEventListener("click", async () => {
   btnInstall.textContent = "Starting\u2026";
   log("Installing the runtime \u2014 this is a one-time download (~150MB+).");
   try {
-    const r = await call("install_runtime");
+    const r = await call("runtime", { action: "install" });
     if (r.runtime_ready) { applyState({ runtime_ready: true }); void refresh(); return; }
     renderInstallProgress(r.progress ?? null);
     void pollInstall();
