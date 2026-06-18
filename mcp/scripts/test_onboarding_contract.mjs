@@ -25,7 +25,7 @@ assert.match(server, /runDoctorPhase\("full"\)/);
 assert.match(panel, /Set up social autoposter end to end now/);
 assert.match(panel, /btnSetup\.disabled = false/);
 assert.match(panelHtml, /The Set up button handles this automatically/);
-assert.match(panelHtml, /Setup progress/);
+assert.match(panelHtml, /id="onboarding-details"/);
 assert.match(guide, /gives the agent a\s+terminal goal/);
 assert.match(guide, /onboarding-progress\.json/);
 assert.match(privacy, /Doctor check IDs and pass\/fail\/expected status/);
