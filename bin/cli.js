@@ -367,123 +367,6 @@ function applyAppMakerMcpConfigOverrides() {
 // uv installed and broke Phase 1's Claude scan (the MCP server's `command:
 // /root/.local/bin/uv` resolved to ENOENT, Claude got no tools, returned an
 // empty envelope).
-// AppMaker VM self-bootstrap. Single entry point that the appmaker template
-// startup.sh calls on every fresh sandbox boot. Reads the stable sessionKey
-// from /run/mk0r-session.json (which the appmaker bridge rewrites on every
-// session bind, and which survives E2B sandbox substitution — only the
-// sandboxId changes), then asks the social-autoposter HTTP API which Twitter
-// account this VM is bound to (handle + stored login cookies, keyed by
-// social_accounts.vm_session_key). With that single DB answer it sets up
-// everything: env file (with the DB-sourced handle), profile symlink, MCP
-// config (BH_PORT=9222), uuid-runtime, then restores the Twitter login by
-// re-injecting the stored cookies via CDP.
-//
-// This is the "one proper fix" for sandbox substitution: the VM holds no
-// per-VM state on disk — the DB does, keyed by the stable sessionKey. So
-// any fresh sandbox can rebuild itself by reading /run/mk0r-session.json
-// and calling one route.
-function bootstrapVm() {
-  if (!isAppMakerVm()) {
-    console.error('bootstrap-vm: not an AppMaker VM (no /opt/startup.sh + CDP :9222). Use `init` or `update` on dev boxes.');
-    process.exit(2);
-  }
-  // Persist VM mode so subsequent `update` runs on this sandbox keep the
-  // AppMaker tweaks without re-passing --vm/SA_VM.
-  enableVmMode();
-  console.log('  AppMaker VM bootstrap: resolving identity from DB by sessionKey...');
-
-  let sessionKey;
-  try {
-    const raw = fs.readFileSync('/run/mk0r-session.json', 'utf8');
-    sessionKey = (JSON.parse(raw) || {}).sessionKey;
-  } catch (err) {
-    console.error(`bootstrap-vm: cannot read /run/mk0r-session.json: ${err.message}`);
-    process.exit(3);
-  }
-  if (!sessionKey) {
-    console.error('bootstrap-vm: /run/mk0r-session.json has no sessionKey');
-    process.exit(3);
-  }
-  console.log(`    sessionKey=${sessionKey}`);
-
-  // Get the X-Installation header via identity.py (same Python helper http_api.py
-  // uses, so auth stays single-sourced).
-  const identityPath = path.join(PKG_ROOT, 'scripts', 'identity.py');
-  const headerRes = spawnSync('/usr/bin/python3', [identityPath, 'header'], {
-    encoding: 'utf8',
-  });
-  if (headerRes.status !== 0) {
-    console.error(`bootstrap-vm: identity.py header failed: ${headerRes.stderr || headerRes.error}`);
-    process.exit(4);
-  }
-  const installHeader = (headerRes.stdout || '').trim();
-
-  const base = (process.env.AUTOPOSTER_API_BASE || 'https://s4l.ai').replace(/\/+$/, '');
-  const url = `${base}/api/v1/twitter/vm-session?session_key=${encodeURIComponent(sessionKey)}`;
-  console.log(`    GET ${url}`);
-
-  // Use curl (always present on the appmaker template) so we don't pull in
-  // a Node HTTP dep here.
-  const curl = spawnSync('curl', [
-    '-sS', '--max-time', '15',
-    '-H', `X-Installation: ${installHeader}`,
-    '-H', 'Content-Type: application/json',
-    url,
-  ], { encoding: 'utf8' });
-  if (curl.status !== 0) {
-    console.error(`bootstrap-vm: curl failed: ${curl.stderr || curl.error}`);
-    process.exit(5);
-  }
-  let payload;
-  try {
-    payload = JSON.parse(curl.stdout || '{}');
-  } catch (err) {
-    console.error(`bootstrap-vm: bad JSON from API: ${curl.stdout.slice(0, 300)}`);
-    process.exit(6);
-  }
-  if (!payload.ok || !payload.data) {
-    console.error(`bootstrap-vm: API error: ${JSON.stringify(payload).slice(0, 300)}`);
-    process.exit(7);
-  }
-  const { handle, cookies, vm_project_id } = payload.data;
-  if (!handle) {
-    console.error('bootstrap-vm: API returned no handle. social_accounts.vm_session_key may be unset for this VM.');
-    process.exit(8);
-  }
-  console.log(`    bound to @${handle} (vm_project_id=${vm_project_id || 'none'}, cookies=${(cookies || []).length})`);
-
-  // Write env file with DB-sourced handle (durable across `social-autoposter update`).
-  writeAppMakerEnvFile(handle);
-
-  // Existing setup steps. installBrowserHarness already installs uuid-runtime,
-  // symlinks the profile, and patches the MCP config — call it directly.
-  installBrowserHarness();
-
-  // Install Python deps from requirements.txt. installBrowserHarness only
-  // installs uv + mcp; it does NOT read requirements.txt, so without this the
-  // VM is missing websocket-client (restore_twitter_session.py aborts on
-  // import) plus playwright that the cycle scripts need.
-  installPythonDeps();
-
-  // Restore the Twitter login if we have stored cookies and the Chrome is
-  // up. No-op when Chrome isn't reachable yet (startup ordering); the cycle
-  // preflight will run restore_twitter_session.py on its next tick.
-  if ((cookies || []).length > 0) {
-    const restorePath = path.join(HOME, 'social-autoposter', 'scripts', 'restore_twitter_session.py');
-    if (fs.existsSync(restorePath)) {
-      console.log('    invoking restore_twitter_session.py to re-inject cookies...');
-      // Source the env file so AUTOPOSTER_TWITTER_HANDLE / TWITTER_CDP_URL are set.
-      const r = spawnSync('bash', ['-lc',
-        `source ${HOME}/.social-autoposter-env 2>/dev/null; /usr/bin/python3 ${restorePath} || true`,
-      ], { stdio: 'inherit' });
-      void r;
-    }
-  } else {
-    console.log('    no stored cookies; manual login still required this once.');
-  }
-
-  console.log('  bootstrap-vm: done.');
-}
 
 function installBrowserHarness() {
   const onAppMaker = vmModeEnabled();
@@ -1137,8 +1020,6 @@ if (cmd === 'init') {
   update();
 } else if (cmd === 'doctor') {
   doctor();
-} else if (cmd === 'bootstrap-vm') {
-  bootstrapVm();
 } else if (cmd === 'install-runtime') {
   installRuntime();
 } else if (cmd === 'reset' || cmd === 'uninstall') {
@@ -1171,7 +1052,6 @@ if (cmd === 'init') {
   console.log('  npx social-autoposter init          first-time setup');
   console.log('  npx social-autoposter update        update scripts, preserve config');
   console.log('  npx social-autoposter doctor [--json] [--phase pre_connect|full]');
-  console.log('  npx social-autoposter bootstrap-vm  AppMaker VM self-bootstrap (DB-driven)');
   console.log('  npx social-autoposter install-runtime  provision owned Python + Chromium (panel-free)');
   console.log('  npx social-autoposter export-cookies [dir]  export browser cookies');
   console.log('  npx social-autoposter import-cookies [dir]  import browser cookies');
