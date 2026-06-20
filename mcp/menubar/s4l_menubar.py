@@ -30,6 +30,9 @@ POLL_SECONDS = 5
 
 GLYPH = {"complete": "✓", "in_progress": "…", "blocked": "✗"}
 
+# Menu-bar title spinner shown while a post is in flight.
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 # Prompts the model-driven menu items type into the Claude Desktop composer.
 # SETUP_PROMPT mirrors the in-chat panel's Setup button (panel.ts) verbatim so
 # both entry points kick off the same end-to-end flow.
@@ -92,6 +95,9 @@ class S4LMenuBar(rumps.App):
         self._sig = None  # last rendered state signature; skip rebuild if unchanged
         self._review_active = False  # a review-card sequence is on screen
         self._reviewed_batches = set()  # batch_ids already handled this run
+        self._posting = False  # a post is in flight (drives the title spinner)
+        self._spin_i = 0
+        self._spinner = None  # rumps.Timer animating the title while posting
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -188,8 +194,31 @@ class S4LMenuBar(rumps.App):
         else:
             self._notify("S4L", "Open Claude Desktop to change autopilot.")
 
+    # ---- posting spinner --------------------------------------------------
+    # Runs on the main thread (rumps timer). While a post is in flight it cycles
+    # the title; once the background post clears self._posting it restores the
+    # normal title and stops itself. Cross-thread safe: the worker only flips the
+    # bool, never touches AppKit.
+    def _spin(self, _):
+        if self._posting:
+            self._spin_i = (self._spin_i + 1) % len(SPINNER)
+            self.title = f"S4L posting {SPINNER[self._spin_i]}"
+            return
+        try:
+            if self._spinner is not None:
+                self._spinner.stop()
+        except Exception:
+            pass
+        self._spinner = None
+        self.title = "S4L"
+        self._sig = None  # force the next tick to repaint title + menu
+
     # ---- tick: read state, set title, (re)build menu ----------------------
     def _tick(self, _):
+        # While posting, the spinner owns the UI; don't fight it or start a new
+        # review mid-post.
+        if self._posting:
+            return
         snap = st.snapshot()
         ob = snap.get("onboarding") or st.read_onboarding()
         runtime_ready = bool(snap.get("runtime_ready"))
@@ -288,6 +317,12 @@ class S4LMenuBar(rumps.App):
             return
         self._notify("S4L", f"Posting {len(approved)} draft(s)…")
 
+        # Animate the menu-bar title until the post finishes.
+        self._posting = True
+        self._spin_i = 0
+        self._spinner = rumps.Timer(self._spin, 0.12)
+        self._spinner.start()
+
         def work():
             res = st.post_drafts(batch, post=post_nums, edits=edits)
             if res is None:
@@ -301,6 +336,7 @@ class S4LMenuBar(rumps.App):
                     f"Posted {posted if posted is not None else len(approved)} draft(s).",
                 )
             self._review_active = False
+            self._posting = False  # _spin (main thread) restores the title + stops
 
         threading.Thread(target=work, daemon=True).start()
 
