@@ -38,7 +38,7 @@ from AppKit import (
 _active = None
 
 W = 380
-H = 340
+H = 300
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
 
@@ -111,88 +111,73 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _render(self):
         d = self._drafts[self._idx]
-        total = len(self._drafts)
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 40, W - 2 * M, 18),
-                f"Review draft  {self._idx + 1}/{total}",
-                size=13,
-                bold=True,
-            )
-        )
-        author = d.get("thread_author") or "thread"
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 62, W - 2 * M, 16),
-                f"Replying to {author}:",
-                size=11,
-                muted=True,
-            )
-        )
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 148, W - 2 * M, 82),
-                _truncate(d.get("thread_text")),
-                size=11,
-                muted=True,
-            )
-        )
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 170, W - 2 * M, 16),
-                "Your reply (editable):",
-                size=11,
-                bold=True,
-            )
-        )
-
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(M, 64, W - 2 * M, 96))
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(NS_BEZEL_BORDER)
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * M, 96))
-        tv.setFont_(NSFont.systemFontOfSize_(12))
-        tv.setRichText_(False)
-        tv.setEditable_(True)
-        tv.setString_(d.get("reply_text") or "")
-        scroll.setDocumentView_(tv)
-        content.addSubview_(scroll)
-        self._textview = tv
-
-        if d.get("link_url"):
-            content.addSubview_(
-                _label(
-                    NSMakeRect(M, 44, W - 2 * M, 14),
-                    f"link: {d['link_url']}",
-                    size=10,
-                    muted=True,
-                )
-            )
-
-        approve = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 96, 12, 96, 28))
+        # Buttons at the TOP: Approve (left), Reject (right).
+        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 110, 30))
         approve.setTitle_("Approve")
         approve.setBezelStyle_(NSBezelStyleRounded)
         approve.setTarget_(self)
         approve.setAction_("approve:")
         content.addSubview_(approve)
 
-        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 96 - 8 - 84, 12, 84, 28))
+        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 110, H - 42, 110, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
         reject.setTarget_(self)
         reject.setAction_("reject:")
         content.addSubview_(reject)
 
-        reject_all = NSButton.alloc().initWithFrame_(NSMakeRect(M, 12, 96, 28))
-        reject_all.setTitle_("Reject all")
-        reject_all.setBezelStyle_(NSBezelStyleRounded)
-        reject_all.setTarget_(self)
-        reject_all.setAction_("rejectAll:")
-        content.addSubview_(reject_all)
+        # "Replying to @author:" — bold, black.
+        author = d.get("thread_author") or "thread"
+        content.addSubview_(
+            _label(
+                NSMakeRect(M, H - 70, W - 2 * M, 18),
+                f"Replying to {author}:",
+                size=12,
+                bold=True,
+            )
+        )
+        # Thread text — black.
+        content.addSubview_(
+            _label(
+                NSMakeRect(M, H - 150, W - 2 * M, 74),
+                _truncate(d.get("thread_text")),
+                size=12,
+            )
+        )
+        # Reply heading — black.
+        content.addSubview_(
+            _label(
+                NSMakeRect(M, H - 172, W - 2 * M, 16),
+                "Reply (editable):",
+                size=12,
+                bold=True,
+            )
+        )
+
+        # Editable reply, with the attached link folded in as it'll post (no
+        # separate link field). The trailing link is stripped on send so the
+        # pipeline still mints the tracked /r/<code> short link (no double link).
+        reply = d.get("reply_text") or ""
+        link = d.get("link_url")
+        composed = f"{reply} {link}" if link else reply
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(NS_BEZEL_BORDER)
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * M, 100))
+        tv.setFont_(NSFont.systemFontOfSize_(12))
+        tv.setRichText_(False)
+        tv.setEditable_(True)
+        tv.setString_(composed)
+        scroll.setDocumentView_(tv)
+        content.addSubview_(scroll)
+        self._textview = tv
 
         self._panel.setContentView_(content)
-        self._panel.setTitle_(f"Review drafts  {self._idx + 1}/{total}")
+        self._panel.setTitle_("")
 
     @objc.python_method
     def _current_text(self):
@@ -204,14 +189,23 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _record(self, approved):
         d = self._drafts[self._idx]
-        orig = d.get("reply_text") or ""
-        text = self._current_text() if approved else orig
+        orig = (d.get("reply_text") or "").strip()
+        link = d.get("link_url") or ""
+        if approved:
+            text = self._current_text()
+            # Strip the link we folded into the field so the pipeline mints the
+            # tracked short link itself (avoids a double link / bare URL).
+            if link and text.rstrip().endswith(link):
+                text = text.rstrip()[: -len(link)]
+            body = text.strip()
+        else:
+            body = orig
         self._decisions.append(
             {
                 "n": d["n"],
                 "approved": bool(approved),
-                "text": text,
-                "edited": bool(approved and text.strip() != orig.strip()),
+                "text": body,
+                "edited": bool(approved and body != orig),
             }
         )
 
