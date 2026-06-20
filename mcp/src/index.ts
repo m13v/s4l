@@ -48,7 +48,6 @@ import {
   resolvePython,
   resolveChrome,
   ensureMenubar,
-  stateDir,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
@@ -1868,14 +1867,26 @@ function startLocalPanel(): Promise<string> {
   });
 }
 
-// Publish the loopback URL to a stable file so an out-of-process reader (the
-// Claude Code side-panel reverse proxy) can find the ephemeral port without
-// scraping `lsof`. Best-effort: a write failure never blocks the panel.
+// Publish the loopback URL to stable files so out-of-process readers can find
+// the ephemeral port without scraping `lsof`:
+//   - panel-url            plain text, for the Claude Code side-panel reverse proxy.
+//   - panel-endpoint.json  richer (url + version + pid), for the menu bar app,
+//                          which POSTs /tool/<name> here for live data.
+// Best-effort: a write failure never blocks the panel (readers re-check /health).
 function writePanelUrl(url: string): void {
   try {
     const dir = path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "panel-url"), url, "utf-8");
+    fs.writeFileSync(
+      path.join(dir, "panel-endpoint.json"),
+      JSON.stringify(
+        { url, pid: process.pid, version: VERSION, started_at: new Date().toISOString() },
+        null,
+        2
+      ) + "\n",
+      "utf-8"
+    );
   } catch (e: any) {
     console.error("[social-autoposter-mcp] writePanelUrl failed:", e?.message || e);
   }
