@@ -108,12 +108,6 @@ const MENUBAR_ENTRY = path.join(MENUBAR_DIR, "s4l_menubar.py");
 const MENUBAR_OUT_LOG = path.join(MENUBAR_DIR, "menubar.out.log");
 const MENUBAR_ERR_LOG = path.join(MENUBAR_DIR, "menubar.err.log");
 
-// Absolute path to the state dir, for callers in other modules (index.ts writes
-// panel-endpoint.json here).
-export function stateDir(): string {
-  return STATE_DIR;
-}
-
 // A directory is a usable pipeline clone only if it carries requirements.txt
 // (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
 // empty extension dir or a half-deleted state dir.
