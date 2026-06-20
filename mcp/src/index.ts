@@ -47,6 +47,8 @@ import {
   readRuntime,
   resolvePython,
   resolveChrome,
+  ensureMenubar,
+  stateDir,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
