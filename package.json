@@ -1,6 +1,6 @@
 {
   "name": "social-autoposter",
-  "version": "1.6.69",
+  "version": "1.6.70",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
     "social-autoposter": "bin/cli.js"
@@ -123,6 +123,7 @@
     "mcp-servers/",
     "mcp/dist/",
     "!mcp/dist/pipeline.tgz",
+    "mcp/menubar/",
     "mcp/package.json",
     "mcp/manifest.json",
     "mcp/install.mjs",
