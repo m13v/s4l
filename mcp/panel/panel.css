@@ -133,7 +133,7 @@ button[hidden] { display: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* ---- unified section card ------------------------------------------------- */
-/* Every body section (live browser, stats, configuration, autopilot) is the same
+/* Every body section (live browser, stats) is the same
  * card: a header row with a sentence-case label on the left and its control(s) on
  * the right, plus an optional body that reveals below. Same font, padding, and
  * border everywhere so they line up as one consistent stack. */
@@ -169,29 +169,6 @@ button.section-row-toggle {
 }
 button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
 .section-row-toggle .chevron { color: var(--muted); }
-
-/* Autopilot on/off switch. Grayscale only: track fills to --fg when on, sits at
- * --border when off; the knob is the page background. State carried by position
- * + fill weight, never color. */
-.toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
-.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
-.toggle .slider {
-  position: absolute; inset: 0; cursor: pointer;
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  transition: background 0.15s ease;
-}
-.toggle .slider::before {
-  content: ""; position: absolute;
-  height: 16px; width: 16px; left: 2px; top: 2px;
-  background: var(--bg);
-  border-radius: 50%;
-  transition: transform 0.15s ease;
-}
-.toggle input:checked + .slider { background: var(--fg); border-color: var(--fg); }
-.toggle input:checked + .slider::before { transform: translateX(18px); }
-.toggle input:disabled + .slider { opacity: 0.45; cursor: default; }
 
 /* ---- stats grid (revealed under the stats section row) -------------------- */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
