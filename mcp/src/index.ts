@@ -226,7 +226,8 @@ const server = new McpServer(
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
-      "and `draft_cycle` has verified the pipeline without posting. Do not ask whether to inspect " +
+      "and the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
+      "without posting. Do not ask whether to inspect " +
       "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
       "X, scan the profile, research the product website, save conservative inferred fields, seed " +
       "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
@@ -236,25 +237,28 @@ const server = new McpServer(
       "when no product can be identified from config, context, the X profile, or public research, " +
       "or pause for an unavoidable interactive login or OS prompt. Never post drafts or enable " +
       "autopilot during setup unless the user explicitly requested that. When setup reaches done — " +
-      "runtime ready, a project configured with seeded topics, X connected, and `draft_cycle` " +
-      "verified — call the `dashboard` tool so the user sees the finished setup rendered, then give " +
+      "runtime ready, a project configured with seeded topics, X connected, and the draft path " +
+      "(scan_candidates -> draft -> submit_drafts) verified — call the `dashboard` tool so the user " +
+      "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
-      "milestone), don't wait to be asked: offer to tell the world by running `draft_cycle` to post " +
-      "about it. A feature nobody hears about is wasted distribution. Use judgment, suggest it for " +
+      "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
+      "(`scan_candidates` -> draft the replies -> `submit_drafts`) about it. A feature nobody hears " +
+      "about is wasted distribution. Use judgment, suggest it for " +
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
       "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
       "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `draft_cycle` " +
-      "(scan + review a batch; the user approves / edits / skips every draft in a single form) -> " +
+      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `scan_candidates` " +
+      "(get the top threads to reply to) -> draft the replies yourself -> `submit_drafts` (queue them " +
+      "for review; nothing posts until the user approves) -> `post_drafts` (post the approved ones) -> " +
       "`get_stats` (see performance). Run `project_config` first; the other tools refuse until a " +
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`draft_cycle`, `post_drafts`, `get_stats`), end your turn by " +
+      "(`scan_candidates`, `submit_drafts`, `post_drafts`, `get_stats`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
@@ -357,14 +361,14 @@ function blockedReasonMessage(reason: string): string {
         "couldn't run. (It DID find and rank threads, it just couldn't draft replies.) This " +
         "CLI uses its own login, separate from Claude Desktop. To fix it, open a terminal and run:\n\n" +
         "    claude\n\n" +
-        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run draft_cycle again."
+        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run scan_candidates again."
       );
     case "monthly_limit":
     case "daily_limit":
     case "rate_limit_5h":
       return (
         `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
-        "Wait for the limit to reset, then run draft_cycle again."
+        "Wait for the limit to reset, then run scan_candidates again."
       );
     case "no_search_topics":
       return (
@@ -372,23 +376,23 @@ function blockedReasonMessage(reason: string): string {
         "DB (project_search_topics) and are seeded from your project's `search_topics` when you " +
         "configure it. Re-run the `project_config` tool for this project with a `search_topics` list " +
         "(comma-separated keywords/phrases your buyers tweet about); it seeds them automatically, then " +
-        "run draft_cycle again."
+        "run scan_candidates again."
       );
     case "topics_api_unreachable":
       return (
         "Couldn't reach the search-topics service to load this project's topics, so the cycle stopped " +
-        "before scanning. This is usually a transient backend/network issue. Try draft_cycle again in a " +
+        "before scanning. This is usually a transient backend/network issue. Try scan_candidates again in a " +
         "moment; if it persists, check connectivity to the autoposter backend."
       );
     case "credit_balance":
       return (
         "The drafting step failed because the Anthropic account is out of credits. " +
-        "Add credits, then run draft_cycle again."
+        "Add credits, then run scan_candidates again."
       );
     default:
       return (
         `The drafting step failed (${reason}) and produced no drafts. ` +
-        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run draft_cycle again."
+        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run scan_candidates again."
       );
   }
 }
@@ -1364,15 +1368,15 @@ tool(
   {
     title: "Post chosen drafts",
     description:
-      "Post the drafts the user approved from a draft_cycle batch. Pass the batch_id from " +
-      "draft_cycle and the user's decision by NUMBER (1-based, matching the table): `post` is " +
+      "Post the drafts the user approved from a submit_drafts batch. Pass the batch_id from " +
+      "submit_drafts and the user's decision by NUMBER (1-based, matching the table): `post` is " +
       "the list of draft numbers to post as drafted; `edits` rewrites a draft's text before " +
       "posting it (editing implies posting); `post_all` posts every draft. Only the chosen " +
       "drafts post; anything not listed is left unposted. Call this ONLY after the user has " +
       "told you which drafts they want. After posting, call the `dashboard` tool so the user " +
       "sees the updated state.",
     inputSchema: {
-      batch_id: z.string().describe("The batch_id returned by draft_cycle."),
+      batch_id: z.string().describe("The batch_id returned by submit_drafts."),
       post: z
         .array(z.number().int().positive())
         .optional()
@@ -1388,7 +1392,7 @@ tool(
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
-        `No drafts found for batch ${batch_id}. Run draft_cycle again to produce a fresh batch.`
+        `No drafts found for batch ${batch_id}. Run scan_candidates then submit_drafts again to produce a fresh batch.`
       );
     }
     const candidates = plan.candidates;
@@ -2154,7 +2158,7 @@ appTool(
       "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
       "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (draft_cycle, post_drafts, get_stats) so the user sees the " +
+      "action (scan_candidates, submit_drafts, post_drafts, get_stats) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
