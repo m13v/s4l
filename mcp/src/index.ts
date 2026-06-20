@@ -279,9 +279,30 @@ const baseRegisterTool = server.registerTool.bind(server);
 // same input-schema -> callback-arg inference it had before; the body is `any`
 // and just additionally stashes the callback by name. `appTool` drops the
 // leading `server` arg of registerAppTool (its callback takes no typed args).
+// Tools that take a while: writing activity.json around them makes the menu bar
+// show a spinner + label while they run (either invocation path). draft_cycle is
+// NOT here — it writes finer scanning/drafting phases itself (see produceDrafts).
+const TOOL_ACTIVITY: Record<string, string> = {
+  post_drafts: "posting",
+  get_stats: "loading stats",
+};
+function withActivity(name: string, cb: ToolHandler): ToolHandler {
+  const label = TOOL_ACTIVITY[name];
+  if (!label) return cb;
+  return async (args: any, extra: any) => {
+    writeActivity("working", label);
+    try {
+      return await cb(args, extra);
+    } finally {
+      clearActivity();
+    }
+  };
+}
+
 const tool: typeof server.registerTool = ((name: string, config: any, cb: ToolHandler) => {
-  TOOL_HANDLERS[name] = cb;
-  return (baseRegisterTool as any)(name, config, cb);
+  const h = withActivity(name, cb);
+  TOOL_HANDLERS[name] = h;
+  return (baseRegisterTool as any)(name, config, h);
 }) as any;
 const appTool = ((name: string, config: any, cb: ToolHandler) => {
   // Wrap every tool handler so any thrown error is reported to Sentry. Single
@@ -296,8 +317,9 @@ const appTool = ((name: string, config: any, cb: ToolHandler) => {
       throw e;
     }
   }) as ToolHandler;
-  TOOL_HANDLERS[name] = wrapped;
-  return registerAppTool(server as any, name, config as any, wrapped as any);
+  const h = withActivity(name, wrapped);
+  TOOL_HANDLERS[name] = h;
+  return registerAppTool(server as any, name, config as any, h as any);
 }) as any;
 
 function jsonContent(obj: unknown) {
@@ -1835,6 +1857,30 @@ function sapsStateDir(): string {
     process.env.SAPS_STATE_DIR ||
     path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
   );
+}
+
+// activity.json: a tiny "what's running right now" signal the menu bar reads to
+// show a loading spinner + label (scanning / drafting / posting / …). Written by
+// long-running tools, cleared when they finish. Best-effort; absence == idle.
+function writeActivity(state: string, label: string): void {
+  try {
+    const dir = sapsStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "activity.json"),
+      JSON.stringify({ state, label, since: new Date().toISOString() }) + "\n",
+      "utf-8"
+    );
+  } catch {
+    /* best effort: a status write must never break the work it's narrating */
+  }
+}
+function clearActivity(): void {
+  try {
+    fs.rmSync(path.join(sapsStateDir(), "activity.json"), { force: true });
+  } catch {
+    /* best effort */
+  }
 }
 
 // Signal the menu bar that a fresh draft batch is ready for pop-up review. The
