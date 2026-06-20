@@ -95,9 +95,8 @@ class S4LMenuBar(rumps.App):
         self._sig = None  # last rendered state signature; skip rebuild if unchanged
         self._review_active = False  # a review-card sequence is on screen
         self._reviewed_batches = set()  # batch_ids already handled this run
-        self._posting = False  # a post is in flight (drives the title spinner)
         self._spin_i = 0
-        self._spinner = None  # rumps.Timer animating the title while posting
+        self._spinner = None  # fast rumps.Timer animating the title while busy
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -107,6 +106,11 @@ class S4LMenuBar(rumps.App):
         sys.stderr.flush()
         self._timer = rumps.Timer(self._tick, POLL_SECONDS)
         self._timer.start()
+        # Light 1s poll for server activity (scanning/drafting/posting/…); it
+        # spins up the fast title-spinner on demand. Idle cost is one tiny file
+        # read per second.
+        self._act_poll = rumps.Timer(self._poll_activity, 1.0)
+        self._act_poll.start()
         self._tick(None)
 
     # ---- side effects -----------------------------------------------------
