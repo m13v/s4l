@@ -232,8 +232,9 @@ const server = new McpServer(
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
-      "and the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
-      "without posting. Do not ask whether to inspect " +
+      "the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
+      "without posting, AND the recurring autopilot scheduled task has been created and run once " +
+      "(see SCHEDULE THE AUTOPILOT below). Do not ask whether to inspect " +
       "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
       "X, scan the profile, research the product website, save conservative inferred fields, seed " +
       "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
@@ -241,12 +242,24 @@ const server = new McpServer(
       "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
-      "or pause for an unavoidable interactive login or OS prompt. Never post drafts or enable " +
-      "autopilot during setup unless the user explicitly requested that. When setup reaches done — " +
-      "runtime ready, a project configured with seeded topics, X connected, and the draft path " +
-      "(scan_candidates -> draft -> submit_drafts) verified — call the `dashboard` tool so the user " +
+      "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup, but " +
+      "DO schedule the draft-only autopilot as the final step (it only queues drafts for approval, it " +
+      "never posts on its own). When setup reaches done (" +
+      "runtime ready, a project configured with seeded topics, X connected, the draft path verified, " +
+      "and the autopilot scheduled task created and run once), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
+      "SCHEDULE THE AUTOPILOT (final onboarding step). Once the draft path is verified, start the " +
+      "autopilot by calling the HOST tool `create_scheduled_task` with: taskId " +
+      "'social-autoposter-autopilot'; cronExpression '* * * * *' (continuous, like the pipeline; the " +
+      "host runs one at a time and skips overlapping fires, so cycles run back-to-back); and a " +
+      "self-contained prompt telling the run to call scan_candidates, draft ONE on-brand reply " +
+      "(<=250 chars, same language as the thread, adds real value) for each candidate worth engaging, " +
+      "then call submit_drafts with those drafts, and NOT post (drafts pile up in the menu-bar " +
+      "approval cards for the user to approve). Then run ONE cycle yourself now (scan_candidates -> " +
+      "draft -> submit_drafts) to seed the cards and pre-approve the tools, so unattended fires do not " +
+      "stall on a permission prompt. If the host exposes no create_scheduled_task tool, tell the user " +
+      "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
@@ -1090,7 +1103,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. After it verifies, call the `dashboard` tool so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. Then SCHEDULE THE AUTOPILOT: call create_scheduled_task (taskId 'social-autoposter-autopilot', cron '* * * * *', prompt = scan_candidates -> draft -> submit_drafts, draft-only) and run one cycle now. Then call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1215,8 +1228,9 @@ tool(
         note: (result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
-            `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts to` +
-            `verify without posting. Do not enable autopilot unless explicitly requested.`
+            `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts ` +
+            `to verify without posting, then schedule the draft-only autopilot (create_scheduled_task, cron '* * * * *', ` +
+            `prompt = scan_candidates -> draft -> submit_drafts) and run one cycle now.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
             `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
