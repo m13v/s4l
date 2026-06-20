@@ -623,6 +623,17 @@ async function postApproved(batchId: string, plan: Plan) {
   } catch {
     /* keep raw */
   }
+  // On a successful run, mark the posted candidates in the ORIGINAL plan so the
+  // other review surface (chat vs menu-bar pop-ups) skips them — cross-surface
+  // de-dup. Best-effort; the pipeline's own already-posted check is the backstop.
+  if (res.code === 0) {
+    for (const c of approved) c.posted = true;
+    try {
+      writePlan(batchId, plan);
+    } catch {
+      /* best effort */
+    }
+  }
   return {
     attempted: approved.length,
     exit_code: res.code,
@@ -1259,6 +1270,15 @@ tool(
       outcome: "review_batch",
       draft_count: count,
     });
+    // Fire the menu-bar pop-up review (default). The chat-table review below is
+    // unchanged; both surfaces can approve, de-duped by the plan `posted` flag.
+    writeReviewRequest({
+      batch_id: drafted.batchId,
+      project: proj,
+      count,
+      plan_path: planPath(drafted.batchId),
+      created_at: new Date().toISOString(),
+    });
     const table = renderDraftsTable(plan);
     const message =
       `Drafted ${count} ${count === 1 ? "reply" : "replies"} for "${proj}" ` +
@@ -1371,6 +1391,19 @@ tool(
       if (inRange(n)) approve.add(n);
       else warnings.push(`ignored #${n}: out of range (1-${total})`);
     });
+
+    // Cross-surface de-dup: chat and the menu-bar pop-ups can both approve, so
+    // never re-post a candidate the other surface already posted.
+    const alreadyPosted: number[] = [];
+    for (const n of Array.from(approve)) {
+      if (candidates[n - 1]?.posted === true) {
+        approve.delete(n);
+        alreadyPosted.push(n);
+      }
+    }
+    if (alreadyPosted.length) {
+      warnings.push(`already posted (skipped): ${alreadyPosted.sort((a, b) => a - b).join(", ")}`);
+    }
 
     candidates.forEach((c, i) => (c.approved = approve.has(i + 1)));
     writePlan(batch_id, plan);
@@ -1791,6 +1824,40 @@ function writePanelUrl(url: string): void {
     );
   } catch (e: any) {
     console.error("[social-autoposter-mcp] writePanelUrl failed:", e?.message || e);
+  }
+}
+
+// The owned state dir, honoring SAPS_STATE_DIR (matches menubar/s4l_state.py).
+function sapsStateDir(): string {
+  return (
+    process.env.SAPS_STATE_DIR ||
+    path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
+  );
+}
+
+// Signal the menu bar that a fresh draft batch is ready for pop-up review. The
+// chat-table review path is unchanged and still works; this just ALSO lets the
+// corner cards drive review (both surfaces de-dup via the plan's `posted` flag).
+// The menu bar reads review-request.json, presents the cards, posts via the
+// loopback post_drafts tool, then clears the file. Best-effort: a write failure
+// just means no pop-ups this batch (chat review still works).
+function writeReviewRequest(req: {
+  batch_id: string;
+  project: string;
+  count: number;
+  plan_path: string;
+  created_at: string;
+}): void {
+  try {
+    const dir = sapsStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "review-request.json"),
+      JSON.stringify(req, null, 2) + "\n",
+      "utf-8"
+    );
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] writeReviewRequest failed:", e?.message || e);
   }
 }
 
