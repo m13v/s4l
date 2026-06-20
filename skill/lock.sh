@@ -617,10 +617,9 @@ defer_if_foreign_browser_mcp_active() {
 
 # Explicit early release. Use this when a long-running script only needs the
 # browser for part of its run (e.g. run-twitter-cycle.sh holds the lock for
-# Phase 1 scrape, releases during the 5-min T1 sleep + Phase 2a HTTP poll, then
-# re-acquires before Phase 2b posting). Without this, sibling pipelines waiting
-# on the same profile lock block for the full cycle even when the holder is
-# only sleeping.
+# Phase 1 scrape, releases between Phase 1 and Phase 2b posting, then re-acquires
+# before Phase 2b). Without this, sibling pipelines waiting on the same profile
+# lock block for the full cycle even when the holder is not using the browser.
 release_lock() {
   local name="$1"
   local lock_dir="/tmp/social-autoposter-${name}.lock"
