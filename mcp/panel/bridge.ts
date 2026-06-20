@@ -59,18 +59,17 @@ class HttpBridge implements PanelBridge {
   async connect(): Promise<void> {
     // First paint: in inline mode the host pushes the spawning tool's result via
     // ontoolresult. Over HTTP there is no host push, so we assemble the same
-    // snapshot ourselves from the read-only status tools (project_config/autopilot/
-    // runtime) — the exact set refresh() uses. We deliberately do NOT call
-    // the `dashboard` tool here: in a non-UI host it has a side effect (it opens
-    // the loopback URL in the OS browser), which would pop a window every time this
-    // page loads. These three tools are pure reads, so first paint is side-effect free.
+    // snapshot ourselves from the read-only status tools (project_config/runtime)
+    // — the exact set refresh() uses. We deliberately do NOT call the `dashboard`
+    // tool here: in a non-UI host it has a side effect (it opens the loopback URL
+    // in the OS browser), which would pop a window every time this page loads.
+    // These tools are pure reads, so first paint is side-effect free.
     try {
-      const [setupR, apR, rtR] = await Promise.all([
+      const [setupR, rtR] = await Promise.all([
         this.callServerTool({ name: "project_config", arguments: { status: true } }),
-        this.callServerTool({ name: "autopilot", arguments: { action: "status" } }),
         this.callServerTool({ name: "runtime", arguments: { action: "status" } }),
       ]);
-      const setup = dataOf(setupR), ap = dataOf(apR), rt = dataOf(rtR);
+      const setup = dataOf(setupR), rt = dataOf(rtR);
       const projects = Array.isArray(setup.projects) ? setup.projects : [];
       const snapshot = {
         projects,
@@ -79,8 +78,6 @@ class HttpBridge implements PanelBridge {
         x_connected: !!setup.x_connected,
         x_state: setup.x_state || "",
         x_handle: setup.x_handle ?? null,
-        autopilot_on: !!ap.loaded,
-        auto_update_on: !!ap.auto_update_loaded,
         version: setup.mcp_version || "",
         latest_version: setup.latest_version ?? null,
         update_available: !!setup.update_available,
