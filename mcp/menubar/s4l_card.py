@@ -83,6 +83,7 @@ class _ReviewController(NSObject):
         self._build()
         return self
 
+    @objc.python_method
     def _build(self):
         screen = NSScreen.mainScreen()
         vf = screen.visibleFrame() if screen is not None else NSMakeRect(0, 0, 1440, 900)
@@ -107,6 +108,7 @@ class _ReviewController(NSObject):
         panel.makeKeyAndOrderFront_(None)
         panel.orderFrontRegardless()
 
+    @objc.python_method
     def _render(self):
         d = self._drafts[self._idx]
         total = len(self._drafts)
@@ -192,12 +194,14 @@ class _ReviewController(NSObject):
         self._panel.setContentView_(content)
         self._panel.setTitle_(f"Review drafts  {self._idx + 1}/{total}")
 
+    @objc.python_method
     def _current_text(self):
         try:
             return str(self._textview.string())
         except Exception:
             return self._drafts[self._idx].get("reply_text") or ""
 
+    @objc.python_method
     def _record(self, approved):
         d = self._drafts[self._idx]
         orig = d.get("reply_text") or ""
@@ -211,6 +215,7 @@ class _ReviewController(NSObject):
             }
         )
 
+    @objc.python_method
     def _advance(self):
         self._idx += 1
         if self._idx >= len(self._drafts):
@@ -239,6 +244,7 @@ class _ReviewController(NSObject):
         self._finish()
         return True
 
+    @objc.python_method
     def _finish(self):
         global _active
         try:
