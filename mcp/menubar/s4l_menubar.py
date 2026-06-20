@@ -28,9 +28,59 @@ POLL_SECONDS = 5
 
 GLYPH = {"complete": "✓", "in_progress": "…", "blocked": "✗"}
 
+# Prompts the model-driven menu items type into the Claude Desktop composer.
+# SETUP_PROMPT mirrors the in-chat panel's Setup button (panel.ts) verbatim so
+# both entry points kick off the same end-to-end flow.
+SETUP_PROMPT = (
+    "Set up social autoposter end to end now. Inspect and repair the runtime, "
+    "auto-detect and connect my X session, scan my profile, discover and research "
+    "my product, then infer and save a complete project with seeded search topics. "
+    "Keep going without asking me to approve each safe setup step. Ask only if I "
+    "must interactively sign in or no product can be identified."
+)
+DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
+POST_PROMPT = "Post my approved social-autoposter drafts."
+UPDATE_PROMPT = "Update social-autoposter to the latest version."
+
 
 def _glyph(status):
     return GLYPH.get(status, "·")
+
+
+def _osa_quote(s):
+    """Escape a Python string for an AppleScript double-quoted literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _claude_send_script(prompt):
+    """AppleScript that focuses Claude, pastes `prompt` into the focused composer,
+    and presses Return. Uses the clipboard (saved + restored) rather than slow
+    per-character keystrokes, and waits longer on a cold launch so the window is
+    ready before pasting."""
+    p = _osa_quote(prompt)
+    return "\n".join(
+        [
+            'set prevClip to ""',
+            "try",
+            "    set prevClip to (the clipboard as text)",
+            "end try",
+            f'set the clipboard to "{p}"',
+            'tell application "System Events" to set wasRunning to (exists process "Claude")',
+            'tell application "Claude" to activate',
+            "if wasRunning then",
+            "    delay 0.5",
+            "else",
+            "    delay 2.5",
+            "end if",
+            'tell application "System Events"',
+            '    keystroke "v" using {command down}',
+            "    delay 0.15",
+            "    key code 36",
+            "end tell",
+            "delay 0.3",
+            'if prevClip is not "" then set the clipboard to prevClip',
+        ]
+    )
 
 
 class S4LMenuBar(rumps.App):
