@@ -60,15 +60,13 @@ except ImportError:
         "websocket-client not installed (needed for CDP). pip install websocket-client"
     )
 
-# Optional server-side session-cookie store (best-effort). Lets connect_x persist
-# the validated X cookies so restore_twitter_session.py can auto-re-inject them
-# after any logout. Guarded so a missing dep or offline API never breaks setup.
+# Live-handle resolver (best-effort). Lets connect_x record the real logged-in
+# @handle alongside the locally-mirrored cookies. Guarded so a missing dep never
+# breaks setup.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from http_api import api_post  # noqa: E402
     from twitter_account import resolve_handle  # noqa: E402
 except Exception:
-    api_post = None
     resolve_handle = None
 
 # Local 0600 cookie mirror — the keychain-independent durability layer (Gap B).
