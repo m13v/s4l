@@ -153,6 +153,9 @@ export interface PlanCandidate {
   search_topic?: string;
   language?: string;
   approved?: boolean;
+  // Set true once this candidate has actually been posted, so the two review
+  // surfaces (chat + menu-bar pop-ups) can't post the same draft twice.
+  posted?: boolean;
   [k: string]: unknown;
 }
 
