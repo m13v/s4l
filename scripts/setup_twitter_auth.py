@@ -386,16 +386,13 @@ def _write_handle_to_config(handle: "str | None") -> bool:
 
 def _persist_session() -> None:
     """Persist the validated live X session for auto-restore after ANY logout
-    (hard kill, crash, keychain re-lock wiping Chrome's Cookies DB, or AppMaker
-    VM reseed). One CDP attach feeds two sinks:
+    (hard kill, crash, or a keychain re-lock wiping Chrome's Cookies DB).
 
-      1. LOCAL 0600 mirror (twitter_cookie_mirror) — ALWAYS written. This is the
-         keychain-independent durability layer that fixes Gap B on a persistent
-         machine: restore_twitter_session.py re-injects from it on the next cycle
-         preflight even after Chrome wiped its own encrypted store.
-      2. Server-side session store (POST /api/v1/twitter/session-cookies) —
-         best-effort. Enables VM auto-restore where the profile is reseeded
-         hourly. No-op on a persistent machine with no social_accounts row.
+    Writes the validated x.com/twitter.com cookies to the LOCAL 0600 mirror
+    (twitter_cookie_mirror) — the keychain-independent durability layer that
+    fixes Gap B on a persistent machine: restore_twitter_session.py re-injects
+    from it on the next cycle preflight even after Chrome wiped its own
+    encrypted store.
 
     Non-fatal end-to-end: the local session is already valid; this only enables
     future auto-recovery, so nothing here may abort connect_x."""
@@ -437,7 +434,9 @@ def _persist_session() -> None:
         except Exception:
             handle = None
 
-    # 1. Local mirror — always, keychain-independent.
+    # Local mirror — keychain-independent durability. This is the only cookie
+    # store; the VM-era server store (/api/v1/twitter/session-cookies) was
+    # removed 2026-06-17 when we stopped running AppMaker VMs.
     if twitter_cookie_mirror is not None:
         try:
             n = twitter_cookie_mirror.save_cookies(cookies, handle=handle)
@@ -446,18 +445,6 @@ def _persist_session() -> None:
                   "/ Cookies-DB wipe on relaunch)", file=sys.stderr)
         except Exception as e:
             print(f"setup_twitter_auth: local mirror save skipped ({e})", file=sys.stderr)
-
-    # 2. Server store — best-effort, only when a handle resolves.
-    if api_post is not None and handle:
-        try:
-            api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
-            print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
-                  "(server auto-restore enabled)", file=sys.stderr)
-        # api_post raises SystemExit (BaseException, NOT Exception) on a 4xx/5xx —
-        # e.g. "no social_accounts row" on a persistent machine that never
-        # registered this handle. Best-effort: must never abort connect_x.
-        except (Exception, SystemExit) as e:
-            print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
 
 
 def _show_window_and_open_login() -> bool:
