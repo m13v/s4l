@@ -3,9 +3,9 @@
  *
  * Renders inside the host's sandboxed iframe. It does NOT duplicate any pipeline
  * logic: every button calls one of the server's existing tools (draft_cycle,
- * autopilot, setup, get_stats) through the host via app.callServerTool, and the
- * host pushes results back. First paint comes from the `panel` tool's own
- * structuredContent snapshot; Refresh re-reads via setup(status) + autopilot.
+ * setup, get_stats) through the host via app.callServerTool, and the host pushes
+ * results back. First paint comes from the `panel` tool's own structuredContent
+ * snapshot; Refresh re-reads via setup(status) + runtime(status).
  */
 import {
   applyDocumentTheme,
@@ -58,8 +58,6 @@ interface Snapshot {
   x_connected: boolean;
   x_state: string;
   x_handle?: string | null;
-  autopilot_on: boolean;
-  auto_update_on?: boolean;
   version: string;
   latest_version: string | null;
   update_available: boolean;
@@ -91,8 +89,6 @@ const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
-const apToggle = $("ap-checkbox") as HTMLInputElement;
-const autopilotCard = $("autopilot-card");
 const statsGrid = $("stats-grid");
 const statsToggle = $("stats-toggle") as HTMLButtonElement;
 const logEl = $("log");
@@ -244,10 +240,6 @@ function render() {
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
-  // Autopilot. Rendered as an on/off switch on the bottom row: checked ==
-  // hands-free posting is live.
-  apToggle.checked = !!state.autopilot_on;
-
   // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
   // exists, at least one project is fully configured, and the X session is
   // connected. Until all three hold, the panel is intentionally minimal — just
@@ -263,18 +255,15 @@ function render() {
   btnDraft.hidden = !setupComplete;
   btnSetup.disabled = false;
   btnDraft.disabled = needsRuntime || !hasReady;
-  apToggle.disabled = needsRuntime || !hasReady;
   btnSetup.classList.toggle("primary", !setupComplete);
   btnDraft.classList.toggle("primary", setupComplete);
 
-  // Secondary surfaces (live browser, 7-day stats, config editor, autopilot) are
-  // only meaningful once the product is configured and posting. Hide them until
-  // setup is complete so the pre-setup view stays a minimal "just set up"
-  // interface; the Install card (gated above) is the only thing shown while the
-  // runtime is still installing.
+  // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
+  // product is configured and posting. Hide them until setup is complete so the
+  // pre-setup view stays a minimal "just set up" interface; the Install card
+  // (gated above) is the only thing shown while the runtime is still installing.
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
-  autopilotCard.hidden = !setupComplete;
 }
 
 function applyState(snap: Partial<Snapshot>) {
@@ -338,15 +327,12 @@ async function refresh() {
   try {
     // install_status is cheap and tells us whether the runtime gate is cleared;
     // pull it alongside the usual status so a refresh re-evaluates the gate.
-    const [setupStatus, ap, rt] = await Promise.all([
+    const [setupStatus, rt] = await Promise.all([
       call("project_config", { status: true }),
-      call("autopilot", { action: "status" }),
       call("runtime", { action: "status" }).catch(() => ({})),
     ]);
     applyState({
       ...fromSetupStatus(setupStatus),
-      autopilot_on: !!ap.loaded,
-      auto_update_on: !!ap.auto_update_loaded,
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
       onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
@@ -520,28 +506,6 @@ btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async 
     void loadStats();
   } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
 }));
-
-// The autopilot switch flips state directly. We disable it during the round-trip
-// and revert the checkbox if the tool call fails, so it never shows a state the
-// server didn't confirm.
-apToggle.addEventListener("change", async () => {
-  if (!state) return;
-  const desired = apToggle.checked;
-  const action = desired ? "enable" : "disable";
-  apToggle.disabled = true;
-  log(desired ? "Enabling autopilot\u2026" : "Disabling autopilot\u2026");
-  try {
-    const r = await call("autopilot", { action });
-    const on = action === "enable" ? !!(r.autopilot?.loaded) : !(r.autopilot_unloaded);
-    applyState({ autopilot_on: on });
-    log(`Autopilot ${on ? "enabled" : "disabled"}.`);
-  } catch (e: any) {
-    apToggle.checked = state.autopilot_on; // revert to last confirmed state
-    log("Autopilot toggle failed: " + (e?.message || e));
-  } finally {
-    render(); // re-applies readiness gating to the switch
-  }
-});
 
 // In-header update button. Created fresh by render() whenever an update is
 // available, so the click is delegated off verEl rather than bound to the
