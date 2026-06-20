@@ -82,6 +82,11 @@ const PANEL_URI = "ui://social-autoposter/panel.html";
 // the approved subset and marks them posted (filtered out of the cards thereafter).
 const REVIEW_QUEUE_ID = "review-queue";
 
+// The Desktop scheduled task onboarding creates for the autopilot. Its presence on
+// disk is the single "autopilot is set up" signal the dashboard + menu bar share
+// (the legacy launchd autopilot is retired).
+const AUTOPILOT_TASK_ID = "social-autoposter-autopilot";
+
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
   os.homedir(),
@@ -1563,17 +1568,28 @@ function runtimeSnapshot() {
 // view has data the instant it loads.
 
 // Is either launchd job (cycle / daily updater) currently loaded?
+// "Autopilot" is now the Claude Desktop scheduled task `social-autoposter-autopilot`
+// (created during onboarding via create_scheduled_task), NOT the legacy launchd job.
+// We can't read the host's enabled/paused flag, but the task's presence on disk is the
+// single signal the dashboard AND the menu bar key off of, so they stay aligned.
 async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
+  let autopilot_on = false;
+  try {
+    const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    autopilot_on = fs.existsSync(
+      path.join(cfg, "scheduled-tasks", AUTOPILOT_TASK_ID, "SKILL.md")
+    );
+  } catch {
+    /* leave false */
+  }
+  let auto_update_on = false;
   try {
     const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-    const lines = res.stdout.split("\n");
-    return {
-      autopilot_on: lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL)),
-      auto_update_on: lines.some((l) => l.includes(UPDATER_LABEL)),
-    };
+    auto_update_on = res.stdout.split("\n").some((l) => l.includes(UPDATER_LABEL));
   } catch {
-    return { autopilot_on: false, auto_update_on: false };
+    /* leave false */
   }
+  return { autopilot_on, auto_update_on };
 }
 
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
