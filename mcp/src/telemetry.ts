@@ -15,7 +15,7 @@ import { VERSION } from "./version.js";
 
 // Sentry DSN is a client-side identifier (safe to embed, same posture as Fazm's
 // hardcoded Swift DSN). Overridable via env for dev. Empty -> Sentry disabled.
-const EMBEDDED_DSN = "";
+const EMBEDDED_DSN = "https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640";
 const SENTRY_DSN = process.env.SAPS_SENTRY_DSN || EMBEDDED_DSN;
 
 let sentryReady = false;
