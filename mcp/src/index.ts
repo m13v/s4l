@@ -76,6 +76,12 @@ import http from "node:http";
 const DIST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_URI = "ui://social-autoposter/panel.html";
 
+// Stable id for the accumulating draft review queue. submit_drafts appends each
+// run's drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
+// continuous autopilot instead of each run overwriting the last; post_drafts posts
+// the approved subset and marks them posted (filtered out of the cards thereafter).
+const REVIEW_QUEUE_ID = "review-queue";
+
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
   os.homedir(),
@@ -585,8 +591,11 @@ async function produceDrafts(
 function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
   return candidates
-    .map((c, i) => {
-      const n = i + 1;
+    // Number by FULL-array index (matches post_drafts + the menu bar), then drop
+    // already-posted entries so the cards only show what's still pending.
+    .map((c, i) => ({ c, n: i + 1 }))
+    .filter((e) => e.c.posted !== true)
+    .map(({ c, n }) => {
       const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
       const style = c.engagement_style ?? "?";
       const reply = c.reply_text ?? "(empty)";
