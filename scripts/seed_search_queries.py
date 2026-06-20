@@ -132,6 +132,35 @@ def _fetch_active_queries(project: str) -> list[dict]:
     return out
 
 
+def _load_provided_queries(path: str) -> list[tuple[str, str]]:
+    """Read AGENT-SUPPLIED queries from a JSON file: returns (query, topic) pairs.
+
+    Accepts either {"queries": [...]} or a bare top-level list. Each item may be
+    a string (topic left blank) or an object {"query": ..., "topic": ...}.
+    This is the claude-free seed path: the in-session agent already expanded the
+    topics into queries, so there is nothing to draft."""
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    items = raw.get("queries") if isinstance(raw, dict) else raw
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for it in (items or []):
+        if isinstance(it, str):
+            q, t = it.strip(), ""
+        elif isinstance(it, dict):
+            q, t = (it.get("query") or "").strip(), (it.get("topic") or "").strip()
+        else:
+            continue
+        if not q:
+            continue
+        core = normalize_query(q)
+        if core in seen:
+            continue
+        seen.add(core)
+        out.append((q, t))
+    return out
+
+
 def _find_project(cfg: dict, name: str) -> dict | None:
     for p in cfg.get("projects", []):
         if (p.get("name") or "").strip().lower() == name.strip().lower():
@@ -181,6 +210,12 @@ def main() -> int:
                          "bank as JSON on a sentinel line (===QUERIES_JSON===) so a "
                          "caller (e.g. the MCP setup tool) can hand the queries back "
                          "to the user.")
+    ap.add_argument("--queries-json",
+                    help="Path to a JSON file of AGENT-SUPPLIED queries to seed "
+                         "directly, bypassing the `claude -p` drafting loop entirely. "
+                         "Shape: {\"queries\":[{\"query\":\"...\",\"topic\":\"...\"}]} "
+                         "or a bare list of strings. Use this from the in-session MCP "
+                         "setup path so the seed step never depends on the claude CLI.")
     args = ap.parse_args()
 
     cfg = load_config()
