@@ -103,7 +103,11 @@ def _launchctl_list() -> str:
 
 
 def autopilot_loaded() -> bool:
-    return AUTOPILOT_LABEL in _launchctl_list()
+    # Autopilot is now the Claude Desktop scheduled task, not the legacy launchd job.
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(str(Path.home()), ".claude")
+    return os.path.exists(
+        os.path.join(cfg, "scheduled-tasks", "social-autoposter-autopilot", "SKILL.md")
+    )
 
 
 # ---- loopback panel server (live, when Claude Desktop is running) ----------
@@ -207,35 +211,9 @@ def stats_7d():
     }
 
 
-def set_autopilot(enable: bool) -> bool:
-    """Toggle background posting. Prefer the loopback tool (it creates the plist
-    correctly on first enable); fall back to launchctl against the existing
-    plist when Claude Desktop is closed. Returns False if it couldn't act."""
-    res = loopback_tool("autopilot", {"action": "enable" if enable else "disable"})
-    if res is not None:
-        return True
-    plist = str(
-        Path.home() / "Library" / "LaunchAgents" / (AUTOPILOT_LABEL + ".plist")
-    )
-    uid = os.getuid()
-    try:
-        if enable:
-            if not os.path.exists(plist):
-                return False  # first enable needs the server to write the plist
-            subprocess.run(
-                ["launchctl", "bootstrap", f"gui/{uid}", plist],
-                capture_output=True,
-                timeout=15,
-            )
-        else:
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}/{AUTOPILOT_LABEL}"],
-                capture_output=True,
-                timeout=15,
-            )
-        return True
-    except Exception:
-        return False
+# set_autopilot() (the launchd toggle) was removed: the autopilot is now the Claude
+# Desktop scheduled task `social-autoposter-autopilot`, managed in the Scheduled tab,
+# so the menu bar no longer toggles a launchd job (it mirrors the dashboard instead).
 
 
 def panel_url():
