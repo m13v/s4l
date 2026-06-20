@@ -24,8 +24,10 @@ import {
   readPlan,
   writePlan,
   planPath,
+  scanResultPath,
   type Plan,
   type PlanCandidate,
+  type ScanCandidate,
 } from "./repo.js";
 import {
   applySetup,
@@ -1878,6 +1880,218 @@ async function openInBrowser(url: string): Promise<void> {
     console.error("[social-autoposter-mcp] openInBrowser failed:", e?.message || e);
   }
 }
+
+// ---- Desktop-session autopilot: scan_candidates + submit_drafts ------------
+// These two tools move the cycle's AI step OUT of `claude -p` and into the
+// CALLING agent. Intended use: a Claude Desktop scheduled task (which runs on
+// the user's OWN plan) calls scan_candidates, drafts each on-brand reply
+// ITSELF, then submit_drafts hands the drafts to the SAME review plan the
+// menu-bar approval UI and post_drafts already consume. Nothing posts until the
+// user approves. The legacy launchd + `claude -p` autopilot is untouched and
+// keeps running in parallel; this is an additive, opt-in second path.
+
+interface ScanResult {
+  batchId: string | null;
+  candidates: ScanCandidate[];
+  blocked?: string;
+}
+
+async function runScanCandidates(
+  project?: string,
+  onProgress?: (message: string, step: number) => void
+): Promise<ScanResult> {
+  // SCAN_ONLY=1: run scan -> score -> top-N select, then STOP before drafting.
+  // No DRAFT_ONLY, no `claude -p` drafting. TWITTER_PHASE1_LLM_DRAFT=0 forces the
+  // deterministic query bank so the whole scan is claude-free (the agent does ALL
+  // the AI). Off-screen by default (no BH_WINDOW_* / overlay): a scheduled run has
+  // no human watching the Chrome.
+  const env: NodeJS.ProcessEnv = {
+    SCAN_ONLY: "1",
+    TWITTER_PHASE1_LLM_DRAFT: "0",
+    SAPS_REPO_DIR: repoDir(),
+    PATH: pipelinePath(),
+  };
+  if (project) env.SAPS_FORCE_PROJECT = project;
+  const chrome = resolveChrome();
+  if (chrome) env.BH_CHROME_BIN = chrome;
+  let step = 0;
+  let lastMsg = "";
+  const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
+    env,
+    timeoutMs: 900_000,
+    onLine: (line) => {
+      const t = line.replace(/\s+$/, "");
+      if (t.trim()) console.error(`[scan_candidates] ${t}`);
+      if (!onProgress) return;
+      const msg = cycleProgressMessage(t);
+      if (msg && msg !== lastMsg) {
+        lastMsg = msg;
+        onProgress(msg, ++step);
+      }
+    },
+  });
+  const marker = /SCAN_ONLY_RESULT=(\/\S+\.json)/.exec(res.stdout + "\n" + res.stderr);
+  if (marker && marker[1]) {
+    try {
+      const data = JSON.parse(fs.readFileSync(marker[1], "utf-8"));
+      return {
+        batchId: data.batch_id ?? null,
+        candidates: (data.candidates ?? []) as ScanCandidate[],
+      };
+    } catch (e: any) {
+      return {
+        batchId: null,
+        candidates: [],
+        blocked: `Scan finished but its result file was unreadable: ${e?.message || e}`,
+      };
+    }
+  }
+  // If query-gen (when enabled) hits a real failure, the cycle still emits
+  // DRAFT_ONLY_BLOCKED=<reason>. Surface it rather than "no candidates".
+  const blockedMarker = /DRAFT_ONLY_BLOCKED=([a-z0-9_]+)/.exec(res.stdout + "\n" + res.stderr);
+  if (blockedMarker && blockedMarker[1]) {
+    return { batchId: null, candidates: [], blocked: blockedReasonMessage(blockedMarker[1]) };
+  }
+  return {
+    batchId: null,
+    candidates: [],
+    blocked:
+      `This scan produced no candidates (exit ${res.code}). Usually a cold-start ` +
+      `project with no seeded search topics, or nothing fresh on-theme right now. Tail:\n` +
+      res.stderr.split("\n").slice(-12).join("\n"),
+  };
+}
+
+tool(
+  "scan_candidates",
+  {
+    title: "Scan X for reply candidates (no drafting, no posting)",
+    description:
+      "Step 1 of a hands-free / scheduled autopilot run. Runs the scan+score half of the pipeline " +
+      "and returns the top scored X/Twitter threads worth replying to — WITHOUT drafting or posting, " +
+      "and without spending any `claude -p` budget. You (this session) then draft an on-brand reply " +
+      "for each good candidate YOURSELF and submit them with `submit_drafts`. Each candidate includes " +
+      "its candidate_id (pass it back), the thread text/author, the matched project, and engagement " +
+      "metrics. Optional `project` scopes the scan to one configured project.",
+    inputSchema: { project: z.string().optional() },
+  },
+  async (args: { project?: string }) => {
+    const scan = await runScanCandidates(args?.project);
+    if (!scan.batchId) {
+      return textContent(scan.blocked || "No candidates found.");
+    }
+    return jsonContent({
+      batch_id: scan.batchId,
+      count: scan.candidates.length,
+      candidates: scan.candidates,
+      next_step:
+        `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
+        `judge genuinely worth engaging; skip the rest. Then call submit_drafts with batch_id ` +
+        `"${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). Nothing posts ` +
+        `until the user approves.`,
+    });
+  }
+);
+
+tool(
+  "submit_drafts",
+  {
+    title: "Submit drafted replies for review",
+    description:
+      "Step 2 of a hands-free / scheduled autopilot run. Hand back the replies you drafted for the " +
+      "candidates returned by scan_candidates. Writes them into the SAME review plan the menu-bar " +
+      "approval UI and post_drafts already use — nothing is posted until the user approves. Provide " +
+      "batch_id (from scan_candidates) and a `drafts` array; each entry needs candidate_id and " +
+      "reply_text (engagement_style, language, link_keyword optional).",
+    inputSchema: {
+      batch_id: z.string(),
+      drafts: z
+        .array(
+          z.object({
+            candidate_id: z.union([z.string(), z.number()]),
+            reply_text: z.string(),
+            engagement_style: z.string().optional(),
+            language: z.string().optional(),
+            link_keyword: z.string().optional(),
+          })
+        )
+        .min(1),
+    },
+  },
+  async (args: {
+    batch_id: string;
+    drafts: Array<{
+      candidate_id: string | number;
+      reply_text: string;
+      engagement_style?: string;
+      language?: string;
+      link_keyword?: string;
+    }>;
+  }) => {
+    // Reload the scan candidates for thread metadata (url / author / text /
+    // project / topic). If the scan file is gone (e.g. /tmp cleared), we still
+    // build a plan from the drafts alone; the review cards just lack context.
+    const scanById = new Map<string, ScanCandidate>();
+    try {
+      const raw = JSON.parse(fs.readFileSync(scanResultPath(args.batch_id), "utf-8"));
+      for (const c of (raw.candidates ?? []) as ScanCandidate[]) {
+        scanById.set(String(c.id), c);
+      }
+    } catch {
+      /* scan file missing — proceed with draft-only context */
+    }
+    const candidates: PlanCandidate[] = args.drafts.map((d) => {
+      const sc = scanById.get(String(d.candidate_id));
+      return {
+        candidate_id: d.candidate_id,
+        candidate_url: sc?.tweet_url,
+        thread_author: sc?.author_handle,
+        thread_text: sc?.tweet_text,
+        reply_text: d.reply_text,
+        engagement_style: d.engagement_style,
+        language: d.language,
+        link_keyword: d.link_keyword,
+        search_topic: sc?.search_topic,
+        matched_project: sc?.matched_project,
+      } as PlanCandidate;
+    });
+    const firstSc = scanById.get(String(args.drafts[0].candidate_id));
+    const project =
+      (candidates.map((c) => c.matched_project).find((p): p is string => !!p) ||
+        firstSc?.matched_project ||
+        "default") as string;
+    const plan: Plan = { candidates };
+    writePlan(args.batch_id, plan);
+    // Bake link targets into the plan (sub-second at TWITTER_PAGE_GEN_RATE=0), the
+    // same prep step DRAFT_ONLY does before handing off. Best-effort: posting
+    // falls back to the plain project URL per-candidate if this is skipped.
+    try {
+      await runPython("scripts/twitter_gen_links.py", ["--plan", planPath(args.batch_id)], {
+        timeoutMs: 120_000,
+        env: { TWITTER_PAGE_GEN_RATE: "0", SAPS_REPO_DIR: repoDir(), PATH: pipelinePath() },
+      });
+    } catch {
+      /* best effort — plan still posts with a plain-URL fallback */
+    }
+    const finalPlan = readPlan(args.batch_id) ?? plan;
+    const count = (finalPlan.candidates || []).length;
+    // Surface to the menu-bar review cards (same contract draft_cycle uses).
+    writeReviewRequest({
+      batch_id: args.batch_id,
+      project,
+      count,
+      plan_path: planPath(args.batch_id),
+      created_at: new Date().toISOString(),
+    });
+    return textContent(
+      `${count} draft(s) queued for review (batch ${args.batch_id}). They're now in the menu-bar ` +
+        `approval cards and the table below; nothing posts until approved.\n\n` +
+        renderDraftsTable(finalPlan) +
+        `\n\nTo post the approved ones: the user approves in the menu bar, or call post_drafts with the ` +
+        `numbers to post.`
+    );
+  }
+);
 
 appTool(
   "dashboard",
