@@ -203,9 +203,20 @@ log "Length-control experiment concluded 2026-06-04; winner=control; LENGTH_ARM 
 # spend the sysctl read for the next check.
 source "$REPO_DIR/scripts/preflight.sh"
 SA_PREFLIGHT_SCRIPT="run-twitter-cycle"
-preflight_skip_if_claude_blocked
-preflight_skip_if_jetsam_pressure
-preflight_acquire_slot_or_skip "twitter-cycle" 1
+if [ "${SCAN_ONLY:-0}" = "1" ]; then
+    # SCAN_ONLY (the Desktop-session autopilot's scan step) gets its OWN slot pool
+    # so it is NOT blocked by a live launchd autopilot cycle; the two then serialize
+    # on the twitter-browser lock (acquired in Phase 1) instead of being mutually
+    # exclusive. It also SKIPS the claude-blocked gate: SCAN_ONLY drives no
+    # `claude -p`, so a prior claude cap must not suppress a pure scan.
+    SA_PREFLIGHT_SCRIPT="run-twitter-cycle-scan"
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-scan" 1
+else
+    preflight_skip_if_claude_blocked
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-cycle" 1
+fi
 
 # Source lock helpers (functions only, no lock acquired here). Phase 0 + the
 # project/queries setup below run lock-free against DB and config files;
