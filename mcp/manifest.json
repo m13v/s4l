@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "social-autoposter",
   "display_name": "Social Autoposter",
-  "version": "1.6.74",
+  "version": "1.6.75",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
   "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Choose **Set up social-autoposter** from the prompt menu or type **Set me up on social-autoposter end to end**. The agent installs the owned runtime, connects X, discovers and configures your product, and verifies with a draft-only cycle.",
   "author": {
