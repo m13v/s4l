@@ -2,9 +2,9 @@
 // social-autoposter MCP server (X/Twitter rail).
 //
 // Core tools:
-//   draft_cycle  - scan + draft, return all drafts as a numbered table for the
-//                  user to review in chat (posts nothing).
-//   post_drafts  - post the drafts the user chose by number from a batch.
+//   scan_candidates - scan + score X threads, return the top candidates (no draft, no post).
+//   submit_drafts   - take the replies you drafted and queue them for review (posts nothing).
+//   post_drafts     - post the drafts the user chose by number from a batch.
 //   get_stats    - read-only post + engagement stats.
 //
 // THIN wrapper. The pipeline brain (scan, score, drafting prompts, posting)
@@ -783,7 +783,7 @@ tool(
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
       "whether X is connected. Use config, conversation context, profile_scan, and website research " +
       "before asking for fields. Ask only if no product can be identified or an interactive login is " +
-      "unavoidable. The draft_cycle and get_stats tools refuse to run until a project is " +
+      "unavoidable. The scan_candidates and get_stats tools refuse to run until a project is " +
       "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
@@ -965,7 +965,7 @@ tool(
         next_step: r.connected
           ? "X is connected. Next, run project_config action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
-            "before saving. Then run draft_cycle once the project is fully set up."
+            "before saving. Then run a draft cycle (scan_candidates -> draft -> submit_drafts) once the project is fully set up."
           : r.state === "needs_login"
             ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
               "them that single required action, then call project_config action:'connect_x', confirm:true again."
@@ -1081,7 +1081,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Run draft_cycle now to verify end to end without posting. After it verifies, call the `dashboard` tool so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. After it verifies, call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1132,8 +1132,8 @@ tool(
             topic_count: topicCount,
           });
           seedNote = m
-            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so draft_cycle has a topic universe to work with.`
-            : " Seeded search topics into the DB so draft_cycle has a topic universe to work with.";
+            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so scan_candidates has a topic universe to work with.`
+            : " Seeded search topics into the DB so scan_candidates has a topic universe to work with.";
         } else {
           const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
           blockOnboardingMilestone(
@@ -1142,7 +1142,7 @@ tool(
             tail,
             { exit_code: seed.code }
           );
-          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. draft_cycle will tell you clearly if topics are missing.)`;
+          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. scan_candidates will tell you clearly if topics are missing.)`;
         }
 
         // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
@@ -1206,7 +1206,7 @@ tool(
         note: (result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
-            `action:'connect_x', confirm:true immediately. Once X is connected, run draft_cycle to ` +
+            `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts to` +
             `verify without posting. Do not enable autopilot unless explicitly requested.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
@@ -2131,7 +2131,11 @@ tool(
     }
     const finalPlan = readPlan(args.batch_id) ?? plan;
     const count = (finalPlan.candidates || []).length;
-    // Surface to the menu-bar review cards (same contract draft_cycle uses).
+    // Drafts queued = the pipeline verified end-to-end without posting. This is the
+    // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
+    if (count > 0)
+      completeOnboardingMilestone("draft_verified", { outcome: "review_batch", draft_count: count });
+    // Surface to the menu-bar review cards (same review plan draft_cycle used).
     writeReviewRequest({
       batch_id: args.batch_id,
       project,
