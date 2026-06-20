@@ -191,12 +191,8 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
-    def _toggle_ap(self, sender):
-        desired = not bool(sender.state)
-        if st.set_autopilot(desired):
-            sender.state = 1 if desired else 0
-        else:
-            self._notify("S4L", "Open Claude Desktop to change autopilot.")
+    # _toggle_ap removed: autopilot is the Claude Desktop scheduled task now, managed
+    # in the Scheduled tab. The menu bar mirrors the dashboard (no launchd toggle).
 
     # ---- activity spinner -------------------------------------------------
     # The server writes activity.json while a tool runs (scanning/drafting/
@@ -469,9 +465,6 @@ class S4LMenuBar(rumps.App):
             out.append(self._label("7d stats — open dashboard"))
 
         out.append(rumps.separator)
-        ap = rumps.MenuItem("Autopilot", callback=self._toggle_ap)
-        ap.state = 1 if snap.get("autopilot_on") else 0
-        out.append(ap)
         out.append(
             rumps.MenuItem("Run draft cycle in Claude", callback=self._draft)
         )
