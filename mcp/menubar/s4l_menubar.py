@@ -96,6 +96,49 @@ class S4LMenuBar(rumps.App):
     def _open_claude(self, _=None):
         subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True)
 
+    def _send_to_claude(self, prompt):
+        """Type a prompt into the Claude Desktop composer and submit it via
+        AppleScript GUI scripting. The menu bar can't use the in-iframe
+        sendMessage bridge, so this drives the keyboard instead. On failure
+        (most often Accessibility permission not yet granted) it degrades to
+        just focusing Claude and tells the user what to do."""
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", _claude_send_script(prompt)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception:
+            r = None
+        if r is not None and r.returncode == 0:
+            return True
+        # Failed: bring Claude forward anyway, then explain.
+        self._open_claude()
+        err = (r.stderr or "").lower() if r else ""
+        if "1743" in err or "assistive" in err or "not allowed" in err or "-25211" in err:
+            self._notify(
+                "S4L needs Accessibility",
+                "Enable the S4L menu bar app under System Settings → Privacy & "
+                "Security → Accessibility, then try again.",
+            )
+        else:
+            self._notify("S4L", "Opened Claude — type your request there.")
+        return False
+
+    # Model-driven actions: type the matching prompt into Claude's composer.
+    def _setup(self, _=None):
+        self._send_to_claude(SETUP_PROMPT)
+
+    def _draft(self, _=None):
+        self._send_to_claude(DRAFT_PROMPT)
+
+    def _post(self, _=None):
+        self._send_to_claude(POST_PROMPT)
+
+    def _update(self, _=None):
+        self._send_to_claude(UPDATE_PROMPT)
+
     def _open_dashboard(self, _=None):
         url = st.panel_url()
         if url:
@@ -205,7 +248,7 @@ class S4LMenuBar(rumps.App):
             items.append(
                 rumps.MenuItem(
                     f"Update to v{snap['latest_version']} in Claude",
-                    callback=self._open_claude,
+                    callback=self._update,
                 )
             )
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
@@ -222,7 +265,7 @@ class S4LMenuBar(rumps.App):
     def _state_a(self):
         return [
             self._label("Runtime not installed"),
-            rumps.MenuItem("Set up in Claude", callback=self._open_claude),
+            rumps.MenuItem("Set up in Claude", callback=self._setup),
         ]
 
     # State B — runtime ready, setup running/incomplete (the ramp state).
@@ -262,10 +305,10 @@ class S4LMenuBar(rumps.App):
             out.append(
                 rumps.MenuItem(
                     f"⚠ Needs you: {blocker.get('message', '')}",
-                    callback=self._open_claude,
+                    callback=self._setup,
                 )
             )
-        out.append(rumps.MenuItem("Set up in Claude", callback=self._open_claude))
+        out.append(rumps.MenuItem("Set up in Claude", callback=self._setup))
         return out
 
     # State C — setup complete: the mini dashboard.
@@ -297,10 +340,10 @@ class S4LMenuBar(rumps.App):
         ap.state = 1 if snap.get("autopilot_on") else 0
         out.append(ap)
         out.append(
-            rumps.MenuItem("Run draft cycle in Claude", callback=self._open_claude)
+            rumps.MenuItem("Run draft cycle in Claude", callback=self._draft)
         )
         out.append(
-            rumps.MenuItem("Post approved drafts in Claude", callback=self._open_claude)
+            rumps.MenuItem("Post approved drafts in Claude", callback=self._post)
         )
         return out
 
