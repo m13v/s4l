@@ -314,6 +314,13 @@ def request_accessibility() -> bool:
 # produced), present the cards, then post the approved subset via the loopback
 # post_drafts tool. The chat-table review still works in parallel; both surfaces
 # de-dup on the plan's per-candidate `posted` flag.
+def read_activity():
+    """What the server is doing right now: {state, label} or None when idle.
+    Written by long-running tools (scanning/drafting/posting/…); drives the
+    menu-bar loading spinner."""
+    return read_json("activity.json")
+
+
 def read_review_request():
     return read_json("review-request.json")
 
