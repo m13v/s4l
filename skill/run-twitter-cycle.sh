@@ -12,18 +12,14 @@
 #   - scrape tweets via twitter-harness, enrich via fxtwitter -> T0 snapshot
 #   - store all candidates with batch_id and search_topic
 #
-# Sleep 300s.
+# No ripen wait (variant D won the A/B/C/D test 2026-05-31): the cycle goes
+# straight from discovery to drafting. There is NO 5-min sleep and NO fxtwitter
+# T1 re-poll anywhere in the Twitter pipeline. delta_score stays at its T0
+# value and is no longer a gate. Do not re-introduce a ripen/sleep step here.
 #
-# Phase 2 (t=5m):
-#   - re-fetch the same candidates via fxtwitter -> T1 snapshot + delta_score
-#   - SQL gate: floor lowered to delta_score >= 0 so zero-momentum but on-theme
-#     product-discussion tweets (asking for a tool, venting a pain point) can
-#     compete; ranking still favors growth via hybrid sort
-#   - Hybrid sort: ORDER BY (delta_score + product_intent_boost) where
-#     product_intent_boost is +5 when tweet text matches an intent-signal regex
-#     (wish/need/looking for/recommend/alternative/frustrated/etc); raw growth
-#     remains the dominant signal, but a slow-burn "anyone know a tool for..."
-#     tweet now ranks alongside fast-growing news/drama
+# Phase 2 (immediately after Phase 1):
+#   - sort candidates by virality_score DESC (composite predictor stamped at
+#     discovery by score_twitter_candidates.py); no delta floor, no T1 re-poll
 #   - Claude reads top 25 (raised from 15 so the long tail reaches the model),
 #     drops unsuitable, posts every candidate it judges genuinely on-brand
 #     (no per-cycle post cap, no per-project quota)
@@ -412,7 +408,7 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 #      read from the owner's twitter_batches row:
 #        phase0        ->  5 min  (just the salvage SQL)
 #        phase1        -> 20 min  (Claude scan + scrape)
-#        phase2a       -> 20 min  (5 min sleep + HTTP T1 poll)
+#        phase2a       -> 20 min  (browser-lock handoff window; no ripen wait since 2026-05-31)
 #        phase2b-prep  -> 45 min  (Claude reads threads + drafts; bumped 2026-05-15
 #                                  15 -> 30 after 17:15 cycle was wrongly salvaged
 #                                  while queued behind 17:30's 42-min lock-hold;
@@ -1454,16 +1450,16 @@ if [ "$BATCH_COUNT" = "0" ]; then
     exit 0
 fi
 
-# Stamp phase2a before releasing the lock so the budget covers the entire
-# 5-min wait + HTTP poll window (phase2a budget = 20 min).
+# Stamp phase2a before releasing the lock so the salvage budget covers the
+# browser-lock handoff window (phase2a budget = 20 min).
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2a 2>&1 | tee -a "$LOG_FILE" || true
 
-# Release the twitter-browser lock during the 5-min T1 wait + HTTP-only Phase 2a.
+# Release the twitter-browser lock between Phase 1 scrape and Phase 2b posting.
 # Other pipelines (engage-twitter, dm-outreach-twitter, link-edit-twitter,
 # stats.sh) can run their browser steps in this window instead of waiting for us
 # to finish. We re-acquire just before Phase 2b posts, blocking up to the
 # acquire_lock timeout if another pipeline is mid-run.
-log "Releasing twitter-browser lock for the T1 wait window (5min sleep + HTTP fxtwitter poll)..."
+log "Releasing twitter-browser lock between Phase 1 scrape and Phase 2b posting..."
 release_lock "twitter-browser" 2>>"$LOG_FILE"
 # (2026-06-16) NO `rm -f twitter-browser-lock.json` here. The blind rm was
 # ownership-unaware and ran AFTER release_lock, so under a pipeline handoff it
