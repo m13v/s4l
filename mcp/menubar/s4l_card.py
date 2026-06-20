@@ -177,7 +177,8 @@ class _ReviewController(NSObject):
         self._textview = tv
 
         self._panel.setContentView_(content)
-        self._panel.setTitle_("")
+        # Counter lives in the native title bar, not inside the content.
+        self._panel.setTitle_(f"Review draft {self._idx + 1} of {len(self._drafts)}")
 
     @objc.python_method
     def _current_text(self):
