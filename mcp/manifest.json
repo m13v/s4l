@@ -35,16 +35,12 @@
       "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
     },
     {
-      "name": "autopilot",
-      "description": "Enable or disable background X/Twitter posting (the launchd cycle)."
-    },
-    {
       "name": "get_stats",
       "description": "Read-only post and engagement stats for the X/Twitter rail over the last N days."
     },
     {
       "name": "dashboard",
-      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle autopilot, connect X, and refresh. Also rendered automatically after state-changing actions."
+      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, and refresh. Also rendered automatically after state-changing actions."
     }
   ],
   "keywords": ["twitter", "x", "social", "autoposter", "marketing"],
