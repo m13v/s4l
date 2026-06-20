@@ -87,7 +87,6 @@
     "!scripts/export_kent_handoff.py",
     "!scripts/extract_user_messages_today.py",
     "!scripts/fazm_seo_health.py",
-    "!scripts/fetch_twitter_t1.py",
     "!scripts/fix_mdx_light_mode.py",
     "!scripts/fix_style_lengths_20260601.py",
     "!scripts/fix_svg_paragraph_wrap.py",
