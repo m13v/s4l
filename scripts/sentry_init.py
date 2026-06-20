@@ -15,7 +15,7 @@ import os
 
 # Client-side DSN: safe to embed, same posture as the Node telemetry and Fazm's
 # hardcoded Swift DSN. Overridable via env for dev. Empty -> Sentry disabled.
-_EMBEDDED_DSN = ""
+_EMBEDDED_DSN = "https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640"
 
 _initialized = False
 
