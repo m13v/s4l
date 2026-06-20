@@ -226,12 +226,6 @@ class _ReviewController(NSObject):
         self._record(False)
         self._advance()
 
-    def rejectAll_(self, sender):
-        while self._idx < len(self._drafts):
-            self._record(False)
-            self._idx += 1
-        self._finish()
-
     def windowShouldClose_(self, sender):
         # Closing the window stops review; remaining cards are left undecided
         # (not posted). Finish with whatever was decided so far.
