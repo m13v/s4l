@@ -227,53 +227,84 @@ def main() -> int:
     # canonical name as stored
     project = (project_entry.get("name") or args.project).strip()
 
-    topics = _load_active_topics(project)
-    if not topics:
-        print(f"seed_search_queries: no active topics for {project!r} — seed "
-              f"topics first (scripts/seed_search_topics.py).", file=sys.stderr)
-        return 3
-
     target = max(1, args.target)
 
-    # Idempotency: aim for `target` TOTAL active queries, not `target` NEW per
-    # run. A project that already has >= target active seed queries needs no
-    # drafting — re-running reseed just re-emits the existing bank instead of
-    # ballooning it. Otherwise we only draft the shortfall. (2026-06-04)
-    active_now = len(_fetch_active_queries(project))
-    need = max(0, target - active_now)
-    per_topic = math.ceil(need / len(topics)) if need else 0
-    per_topic = max(MIN_PER_TOPIC, min(MAX_PER_TOPIC, per_topic)) if need else 0
+    # ---- Agent-supplied path (claude-free) ------------------------------
+    # When the caller (the in-session MCP setup tool) hands us queries the agent
+    # already expanded from the topics, we skip the `claude -p` drafting loop
+    # entirely and just dedup + (maybe) supply-test + persist them. This is the
+    # single setup path on machines without the claude CLI. (2026-06-19)
+    if args.queries_json:
+        topics = _load_active_topics(project)  # best-effort, summary only
+        provided = _load_provided_queries(args.queries_json)
+        existing = (load_existing_query_cores(project)
+                    | _load_existing_seed_cores(project))
+        drafted = [(q, t) for q, t in provided
+                   if normalize_query(q) not in existing]
+        active_now = len(_fetch_active_queries(project))
+        print(f"seed_search_queries: project={project!r} mode=agent-supplied "
+              f"provided={len(provided)} new={len(drafted)} "
+              f"active_now={active_now} (no claude)", file=sys.stderr)
+        if not drafted:
+            # Everything provided was already seeded (or nothing usable) —
+            # healthy no-op: re-emit the live bank and succeed.
+            print(
+                f"seed_search_queries: project={project} topics={len(topics)} "
+                f"drafted=0 supply_ran=0 dropped_zero=0 seeded=0 inserted=0 "
+                f"updated=0 failed=0 (agent_supplied_nothing_new)"
+            )
+            if args.emit_json:
+                queries = _fetch_active_queries(project)
+                print("===QUERIES_JSON===")
+                print(json.dumps({"project": project, "count": len(queries),
+                                  "queries": queries}))
+            return 0
+    else:
+        topics = _load_active_topics(project)
+        if not topics:
+            print(f"seed_search_queries: no active topics for {project!r} — seed "
+                  f"topics first (scripts/seed_search_topics.py).", file=sys.stderr)
+            return 3
 
-    # Dedup against (a) every query EVER attempted for this project and (b) seed
-    # queries already persisted. Accumulates as we go so topics don't overlap.
-    avoid_cores = load_existing_query_cores(project) | _load_existing_seed_cores(project)
+        # Idempotency: aim for `target` TOTAL active queries, not `target` NEW per
+        # run. A project that already has >= target active seed queries needs no
+        # drafting — re-running reseed just re-emits the existing bank instead of
+        # ballooning it. Otherwise we only draft the shortfall. (2026-06-04)
+        active_now = len(_fetch_active_queries(project))
+        need = max(0, target - active_now)
+        per_topic = math.ceil(need / len(topics)) if need else 0
+        per_topic = max(MIN_PER_TOPIC, min(MAX_PER_TOPIC, per_topic)) if need else 0
 
-    print(f"seed_search_queries: project={project!r} topics={len(topics)} "
-          f"target={target} active_now={active_now} need={need} "
-          f"per_topic={per_topic} existing_cores={len(avoid_cores)}",
-          file=sys.stderr)
+        # Dedup against (a) every query EVER attempted for this project and (b) seed
+        # queries already persisted. Accumulates as we go so topics don't overlap.
+        avoid_cores = load_existing_query_cores(project) | _load_existing_seed_cores(project)
 
-    # --- Draft queries topic by topic ------------------------------------
-    drafted: list[tuple[str, str]] = []  # (query, topic)
-    for topic in topics:
-        if need <= 0 or len({normalize_query(q) for q, _ in drafted}) >= need:
-            break
-        prompt = build_query_prompt(
-            project_entry, topic, per_topic, avoid_queries=avoid_cores
-        )
-        try:
-            out = call_claude(prompt, timeout_sec=DRAFT_TIMEOUT_SEC)
-        except SystemExit as e:
-            print(f"[seed_search_queries] draft failed for topic {topic!r}: {e}",
-                  file=sys.stderr)
-            continue
-        qs = extract_queries(out, per_topic)
-        new_qs, dupes = dedup_queries(qs, avoid_cores)
-        for q in new_qs:
-            avoid_cores.add(normalize_query(q))
-            drafted.append((q, topic))
-        print(f"  topic={topic!r}: drafted={len(qs)} new={len(new_qs)} "
-              f"dupes={len(dupes)}", file=sys.stderr)
+        print(f"seed_search_queries: project={project!r} topics={len(topics)} "
+              f"target={target} active_now={active_now} need={need} "
+              f"per_topic={per_topic} existing_cores={len(avoid_cores)}",
+              file=sys.stderr)
+
+        # --- Draft queries topic by topic ------------------------------------
+        drafted = []  # (query, topic)
+        for topic in topics:
+            if need <= 0 or len({normalize_query(q) for q, _ in drafted}) >= need:
+                break
+            prompt = build_query_prompt(
+                project_entry, topic, per_topic, avoid_queries=avoid_cores
+            )
+            try:
+                out = call_claude(prompt, timeout_sec=DRAFT_TIMEOUT_SEC)
+            except SystemExit as e:
+                print(f"[seed_search_queries] draft failed for topic {topic!r}: {e}",
+                      file=sys.stderr)
+                continue
+            qs = extract_queries(out, per_topic)
+            new_qs, dupes = dedup_queries(qs, avoid_cores)
+            for q in new_qs:
+                avoid_cores.add(normalize_query(q))
+                drafted.append((q, topic))
+            print(f"  topic={topic!r}: drafted={len(qs)} new={len(new_qs)} "
+                  f"dupes={len(dupes)}", file=sys.stderr)
 
     if not drafted:
         # Two cases: (a) the bank already meets target (need==0) — that's a
