@@ -1,0 +1,243 @@
+"""Data layer for the S4L menu bar app.
+
+Pure stdlib (no third-party deps; rumps lives only in s4l_menubar.py). Two
+sources, in priority order:
+
+  1. The MCP server's loopback panel server, when Claude Desktop is running.
+     panel-endpoint.json (written by the server at boot) records its url; we
+     POST /tool/<name> to replay the exact same tool handlers the in-chat
+     dashboard uses. This gives the full, live snapshot (projects, X handle,
+     stats) with zero logic duplication.
+
+  2. Direct reads of the owned state dir, when Claude Desktop is closed. The
+     onboarding ledger (onboarding-progress.json) and runtime.json are plain
+     files, so setup progress + the current blocker (State B, the whole point
+     of the menu bar during onboarding) are available with nothing running.
+
+Everything is best-effort: any failure degrades to "unknown / open Claude".
+"""
+
+import json
+import os
+import subprocess
+import urllib.request
+from pathlib import Path
+
+# Mirrors shared/onboarding-ledger.cjs MILESTONES (same order).
+MILESTONES = [
+    "environment_checked",
+    "runtime_ready",
+    "x_connected",
+    "profile_scanned",
+    "project_ready",
+    "topics_seeded",
+    "draft_verified",
+]
+
+# Mirrors panel.ts MILESTONE_LABELS.
+MILESTONE_LABELS = {
+    "environment_checked": "Environment checked",
+    "runtime_ready": "Runtime ready",
+    "x_connected": "X connected",
+    "profile_scanned": "Profile scanned",
+    "project_ready": "Project ready",
+    "topics_seeded": "Topics seeded",
+    "draft_verified": "Draft cycle verified",
+}
+
+# Mirrors index.ts TWITTER_AUTOPILOT_LABEL.
+AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle"
+
+
+def state_dir() -> str:
+    return os.environ.get("SAPS_STATE_DIR") or str(
+        Path.home() / ".social-autoposter-mcp"
+    )
+
+
+def read_json(name: str):
+    try:
+        return json.loads((Path(state_dir()) / name).read_text())
+    except Exception:
+        return None
+
+
+# ---- direct file reads (work with Claude Desktop closed) -------------------
+def read_onboarding():
+    """Re-derive onboarding-ledger.cjs publicSnapshot() from the raw ledger."""
+    d = read_json("onboarding-progress.json")
+    if not d or not isinstance(d.get("milestones"), dict):
+        return None
+    ms = d["milestones"]
+    milestones = [{"id": mid, **(ms.get(mid) or {})} for mid in MILESTONES]
+    complete = all(
+        (ms.get(mid) or {}).get("status") == "complete" for mid in MILESTONES
+    )
+    return {
+        "complete": complete,
+        "milestones": milestones,
+        "current_blocker": d.get("current_blocker"),
+    }
+
+
+def runtime_ready() -> bool:
+    rt = read_json("runtime.json")
+    if not rt or not rt.get("ready"):
+        return False
+    py = rt.get("python")
+    return bool(py and os.path.exists(py))
+
+
+def version():
+    ep = read_json("panel-endpoint.json") or {}
+    return ep.get("version")
+
+
+def _launchctl_list() -> str:
+    try:
+        return subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:
+        return ""
+
+
+def autopilot_loaded() -> bool:
+    return AUTOPILOT_LABEL in _launchctl_list()
+
+
+# ---- loopback panel server (live, when Claude Desktop is running) ----------
+def _endpoint_url():
+    ep = read_json("panel-endpoint.json")
+    url = (ep or {}).get("url")
+    if not url:
+        return None
+    try:
+        with urllib.request.urlopen(url + "health", timeout=1.5) as r:
+            if r.status == 200:
+                return url
+    except Exception:
+        return None
+    return None
+
+
+def loopback_reachable() -> bool:
+    return _endpoint_url() is not None
+
+
+def _parse_tool_result(obj):
+    """Normalize an MCP tool result (structuredContent or a JSON text block)."""
+    if isinstance(obj, dict):
+        sc = obj.get("structuredContent")
+        if isinstance(sc, dict):
+            snap = sc.get("snapshot")
+            if isinstance(snap, str):
+                try:
+                    return json.loads(snap)
+                except Exception:
+                    pass
+            return sc
+        content = obj.get("content")
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+                    try:
+                        return json.loads(c["text"])
+                    except Exception:
+                        return {"_raw": c["text"]}
+    return obj
+
+
+def loopback_tool(name: str, args=None, timeout: float = 20.0):
+    url = _endpoint_url()
+    if not url:
+        return None
+    try:
+        data = json.dumps(args or {}).encode()
+        req = urllib.request.Request(
+            url + "tool/" + name,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _parse_tool_result(json.loads(r.read().decode()))
+    except Exception:
+        return None
+
+
+# ---- the snapshot the menu bar renders ------------------------------------
+def snapshot():
+    """Full live snapshot via the loopback dashboard tool, else a file-built
+    fallback covering the essentials (runtime, onboarding, autopilot)."""
+    snap = loopback_tool("dashboard", {})
+    if isinstance(snap, dict) and "projects_total" in snap:
+        snap["_live"] = True
+        return snap
+    ob = read_onboarding()
+    return {
+        "_live": False,
+        "runtime_ready": runtime_ready(),
+        "onboarding": ob,
+        "autopilot_on": autopilot_loaded(),
+        "x_connected": False,  # unknowable offline; State derives from onboarding
+        "x_handle": None,
+        "projects_ready": 0,
+        "projects_total": 0,
+        "version": version(),
+        "update_available": False,
+        "latest_version": None,
+    }
+
+
+def stats_7d():
+    """7-day post stats; loopback only (the DB read needs the owned runtime)."""
+    res = loopback_tool("get_stats", {"days": 7})
+    if not isinstance(res, dict):
+        return None
+    projects = res.get("projects")
+    proj = projects[0] if isinstance(projects, list) and projects else None
+    p = (proj or {}).get("posts")
+    if not p:
+        return None
+    return {
+        "posts": p.get("total", 0),
+        "views": p.get("views_period_total", p.get("views", 0)),
+        "replies": p.get("comments_period_total", p.get("comments", 0)),
+    }
+
+
+def set_autopilot(enable: bool) -> bool:
+    """Toggle background posting. Prefer the loopback tool (it creates the plist
+    correctly on first enable); fall back to launchctl against the existing
+    plist when Claude Desktop is closed. Returns False if it couldn't act."""
+    res = loopback_tool("autopilot", {"action": "enable" if enable else "disable"})
+    if res is not None:
+        return True
+    plist = str(
+        Path.home() / "Library" / "LaunchAgents" / (AUTOPILOT_LABEL + ".plist")
+    )
+    uid = os.getuid()
+    try:
+        if enable:
+            if not os.path.exists(plist):
+                return False  # first enable needs the server to write the plist
+            subprocess.run(
+                ["launchctl", "bootstrap", f"gui/{uid}", plist],
+                capture_output=True,
+                timeout=15,
+            )
+        else:
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{uid}/{AUTOPILOT_LABEL}"],
+                capture_output=True,
+                timeout=15,
+            )
+        return True
+    except Exception:
+        return False
+
+
+def panel_url():
+    """The loopback dashboard url if reachable, else None."""
+    return _endpoint_url()
