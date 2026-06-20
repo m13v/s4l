@@ -767,8 +767,10 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
   "register, vibe) while keeping every product CLAIM factual to the site. Don't invent " +
   "features, metrics, or guarantees the site doesn't state.\n" +
   "5. Save the best conservative factual draft without adding a confirmation round-trip. Call " +
-  "project_config with name + the product fields (plus voice/search_topics from the profile scan). If the " +
-  "site is thin or unreachable, use only supported facts and leave optional detail conservative; " +
+  "project_config with name + the product fields (plus voice/search_topics from the profile scan), AND " +
+  "expand those topics into a `search_queries` array of ~30 concrete X advanced-search strings in the " +
+  "SAME call — YOU are the model, so do the expansion in-session; it seeds directly with no `claude -p`. " +
+  "If the site is thin or unreachable, use only supported facts and leave optional detail conservative; " +
   "ask the user only if a required field is genuinely unknowable.";
 
 // ---- project_config: per-project config (the "brain": project, website, voice) -----
@@ -1186,17 +1188,35 @@ tool(
         // search queries (project_search_queries) so the deterministic Phase 1
         // bank (qualified_query_bank.py) has something to run on day one.
         // Without this, a freshly-configured project's bank is empty and the
-        // cycle falls back to ONE crude topic-as-query. Best-effort: a failure
-        // here never fails setup; the topic-as-query fallback still works, just
-        // narrower. Supply-test is auto (only if the harness is up), so this
-        // stays fast when X isn't connected yet. (2026-06-04)
-        if (seed.code === 0) {
+        // cycle falls back to ONE crude topic-as-query.
+        //
+        // CLAUDE-FREE: the in-session agent (you) expands topics -> queries and
+        // passes them as `search_queries` in THIS call. We seed them directly via
+        // --queries-json, so setup never shells out to `claude -p` (which isn't
+        // installed in the Desktop / .mcpb lane and was the FileNotFoundError
+        // users hit). If the agent didn't supply queries, we skip expansion
+        // entirely — the topic-as-query fallback still runs, just narrower — and
+        // nudge the agent to re-run with search_queries. (2026-06-19)
+        const agentQueries = Array.isArray(args.search_queries)
+          ? (args.search_queries as string[]).map((q) => String(q).trim()).filter(Boolean)
+          : [];
+        if (seed.code === 0 && agentQueries.length) {
           try {
+            const qfile = path.join(
+              os.tmpdir(),
+              `saps-queries-${result.project}-${Date.now()}.json`
+            );
+            fs.writeFileSync(
+              qfile,
+              JSON.stringify({ queries: agentQueries.map((q) => ({ query: q, topic: "" })) })
+            );
             const qseed = await runPython(
               "scripts/seed_search_queries.py",
-              ["--project", result.project, "--supply-test", "auto", "--emit-json"],
+              ["--project", result.project, "--queries-json", qfile,
+                "--supply-test", "auto", "--emit-json"],
               { timeoutMs: 600_000 }
             );
+            try { fs.unlinkSync(qfile); } catch { /* best-effort cleanup */ }
             const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
             const qjson = qseed.stdout.split("===QUERIES_JSON===")[1];
             if (qjson) {
@@ -1208,14 +1228,16 @@ tool(
             }
             if (qseed.code === 0 && qm) {
               const n = searchQueries.length || Number(qm[1]);
-              seedNote += ` Expanded them into ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
+              seedNote += ` Seeded ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
             } else if (qseed.code !== 0) {
               const qtail = (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-              seedNote += ` (Search queries not expanded yet — ${qtail}. The cycle still runs off the seeded topics.)`;
+              seedNote += ` (Search queries not seeded yet — ${qtail}. The cycle still runs off the seeded topics.)`;
             }
           } catch (e) {
-            seedNote += ` (Search-query expansion skipped — ${(e as Error).message}.)`;
+            seedNote += ` (Search-query seeding skipped — ${(e as Error).message}.)`;
           }
+        } else if (seed.code === 0) {
+          seedNote += ` (No search_queries supplied, so the cycle will run off the seeded topics one at a time. To fan out, re-call project_config with a search_queries array of ~30 X search strings you expand from these topics — it seeds them directly, no claude CLI.)`;
         }
       }
       // Surface any advanced (escape-hatch) field edits in the note so the
