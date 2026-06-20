@@ -19,6 +19,7 @@ rather than rumps.notification (which needs a bundle id).
 import json
 import subprocess
 import sys
+import threading
 
 import rumps
 
@@ -89,6 +90,8 @@ class S4LMenuBar(rumps.App):
         super().__init__("S4L", quit_button=None)
         self._last_blocker_code = None
         self._sig = None  # last rendered state signature; skip rebuild if unchanged
+        self._review_active = False  # a review-card sequence is on screen
+        self._reviewed_batches = set()  # batch_ids already handled this run
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -234,6 +237,72 @@ class S4LMenuBar(rumps.App):
         if sig != self._sig:
             self._sig = sig
             self._build_menu(runtime_ready, setup_complete, ob, blocker, snap)
+
+        # Draft-review pop-ups: if a draft cycle left a review request, present the
+        # cards. Independent of the menu rebuild above.
+        self._maybe_start_review()
+
+    # ---- draft review pop-ups ---------------------------------------------
+    def _maybe_start_review(self):
+        if self._review_active:
+            return
+        req = st.read_review_request()
+        if not req:
+            return
+        batch = req.get("batch_id")
+        if not batch or batch in self._reviewed_batches:
+            return
+        plan = st.read_plan(req.get("plan_path") or "")
+        drafts = st.review_drafts(plan)
+        # Nothing left to review (empty, missing plan, or all already posted via
+        # the chat surface) — mark handled and clear the signal.
+        if not drafts:
+            self._reviewed_batches.add(batch)
+            st.clear_review_request()
+            return
+        self._review_active = True
+        self._reviewed_batches.add(batch)
+        try:
+            import s4l_card
+
+            s4l_card.present_review(
+                drafts, lambda decisions: self._on_review_done(batch, decisions)
+            )
+        except Exception as e:
+            # Card UI unavailable — don't strand the batch; chat review still works.
+            self._review_active = False
+            sys.stderr.write(f"[s4l-menubar] review cards failed: {e}\n")
+            sys.stderr.flush()
+
+    def _on_review_done(self, batch, decisions):
+        # Runs on the main thread (from the card controller). Translate decisions
+        # into post_drafts args and post on a background thread so the UI stays
+        # responsive (posting can take minutes).
+        approved = [d for d in decisions if d.get("approved")]
+        post_nums = [d["n"] for d in approved if not d.get("edited")]
+        edits = [{"n": d["n"], "text": d["text"]} for d in approved if d.get("edited")]
+        st.clear_review_request()
+        if not approved:
+            self._review_active = False
+            self._notify("S4L", "No drafts approved — nothing posted.")
+            return
+        self._notify("S4L", f"Posting {len(approved)} draft(s)…")
+
+        def work():
+            res = st.post_drafts(batch, post=post_nums, edits=edits)
+            if res is None:
+                self._notify(
+                    "S4L", "Couldn't post — open Claude Desktop and try the draft again."
+                )
+            else:
+                posted = res.get("posted") if isinstance(res, dict) else None
+                self._notify(
+                    "S4L",
+                    f"Posted {posted if posted is not None else len(approved)} draft(s).",
+                )
+            self._review_active = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _render_title(self, setup_complete, ob, blocker):
         if blocker:
