@@ -1520,6 +1520,57 @@ if [ -z "$CANDIDATES" ]; then
     exit 0
 fi
 
+# --- SCAN_ONLY gate: stop after scoring, emit candidates, skip drafting -------
+# When SCAN_ONLY=1 the cycle runs scan -> score -> top-N select, writes the chosen
+# candidates as JSON, and STOPS before the claude drafting step. The MCP
+# scan_candidates tool reads this so a Claude Desktop scheduled-task session can do
+# the drafting ITSELF (on the user's plan, no `claude -p`) and hand the drafts back
+# via submit_drafts. Candidates stay 'pending' (drafted+posted via submit_drafts ->
+# post_drafts, or salvaged by a later cycle). The browser lock was already released
+# at the Phase 1 handoff, so this exits clean via the EXIT trap. NO current caller
+# sets SCAN_ONLY, so the autopilot/draft_cycle paths are byte-for-byte unchanged.
+if [ "${SCAN_ONLY:-0}" = "1" ]; then
+    SCAN_FILE="/tmp/saps_scan_candidates_${BATCH_ID}.json"
+    # $CANDIDATES is the same pipe-separated top-N the drafting step consumes (cols
+    # documented in twitter_cycle_helper.py:cmd_candidates; tweet_text/draft fields
+    # are pipe+newline sanitized there, so a field split is safe). Batch id + out
+    # path travel via env so the single-quoted python needs no shell interpolation.
+    printf '%s\n' "$CANDIDATES" | SAPS_SCAN_FILE="$SCAN_FILE" SAPS_SCAN_BATCH="$BATCH_ID" python3 -c '
+import json, os, sys
+def _i(x):
+    try:
+        return int(float(x or 0))
+    except Exception:
+        return 0
+def _f(x):
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+out = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line.strip():
+        continue
+    p = line.split("|")
+    if len(p) < 14 or not p[0].isdigit():
+        continue
+    out.append({
+        "id": int(p[0]), "tweet_url": p[1], "author_handle": p[2], "tweet_text": p[3],
+        "virality_score": _f(p[4]), "delta_score": _f(p[5]), "matched_project": p[6],
+        "search_topic": p[7], "likes": _i(p[8]), "retweets": _i(p[9]), "replies": _i(p[10]),
+        "views": _i(p[11]), "author_followers": _i(p[12]), "age_hours": _f(p[13]),
+        "existing_draft": p[14] if len(p) > 14 else "", "existing_draft_style": p[15] if len(p) > 15 else "",
+    })
+json.dump({"batch_id": os.environ["SAPS_SCAN_BATCH"], "candidates": out}, open(os.environ["SAPS_SCAN_FILE"], "w"))
+' 2>/dev/null || printf '{"batch_id": "%s", "candidates": []}' "$BATCH_ID" > "$SCAN_FILE"
+    SCAN_N=$(python3 -c "import json; print(len(json.load(open('$SCAN_FILE')).get('candidates') or []))" 2>/dev/null || echo 0)
+    log "SCAN_ONLY=1: $SCAN_N candidate(s) scored and written to $SCAN_FILE. Stopping before drafting (agent drafts next)."
+    _SA_RUN_SUMMARY_EMITTED=1
+    echo "SCAN_ONLY_RESULT=$SCAN_FILE"
+    exit 0
+fi
+
 CANDIDATE_COUNT=$(printf '%s\n' "$CANDIDATES" | grep -c '^[0-9]')
 log "Top $CANDIDATE_COUNT candidates by virality_score selected for post review."
 
