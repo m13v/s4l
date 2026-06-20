@@ -241,3 +241,68 @@ def set_autopilot(enable: bool) -> bool:
 def panel_url():
     """The loopback dashboard url if reachable, else None."""
     return _endpoint_url()
+
+
+# ---- Accessibility (TCC) permission ---------------------------------------
+# Posting keystrokes via AppleScript needs the Accessibility permission, granted
+# PER responsible-process identity. So this must be called from inside the menu
+# bar process to reflect the menu bar (not some parent). AXIsProcessTrusted() is
+# TCC's own check — the reliable signal, reached via ctypes (no third-party dep).
+def accessibility_trusted() -> bool:
+    try:
+        import ctypes
+        import ctypes.util
+
+        lib = ctypes.util.find_library("ApplicationServices")
+        if not lib:
+            return False
+        ap = ctypes.cdll.LoadLibrary(lib)
+        ap.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(ap.AXIsProcessTrusted())
+    except Exception:
+        return False
+
+
+def request_accessibility() -> bool:
+    """Pop the system Accessibility prompt for THIS process (registers it in the
+    list so the user can toggle it on) and open the Settings pane. Returns the
+    current trust state. Safe to call when already trusted (no prompt shown)."""
+    trusted = False
+    try:
+        import ctypes
+        import ctypes.util
+
+        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        ap = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
+        prompt_key = ctypes.c_void_p.in_dll(ap, "kAXTrustedCheckOptionPrompt")
+        cf_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+        cf.CFDictionaryCreate.restype = ctypes.c_void_p
+        cf.CFDictionaryCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        keys = (ctypes.c_void_p * 1)(prompt_key)
+        vals = (ctypes.c_void_p * 1)(cf_true)
+        d = cf.CFDictionaryCreate(None, keys, vals, 1, None, None)
+        ap.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        ap.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        trusted = bool(ap.AXIsProcessTrustedWithOptions(d))
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            [
+                "open",
+                "x-apple.systempreferences:com.apple.preference.security"
+                "?Privacy_Accessibility",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+    return trusted
