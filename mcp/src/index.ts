@@ -507,6 +507,9 @@ async function produceDrafts(
     `\n===== draft_cycle start ${new Date().toISOString()} ` +
       `project=${project ?? "(default)"} =====\n`
   );
+  // Menu-bar status: scanning first, then drafting once the prep phase begins
+  // (switched in onLine below). Cleared before every return.
+  writeActivity("scanning", "scanning X");
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000, // scan+draft can take several minutes
@@ -522,6 +525,7 @@ async function produceDrafts(
         appendLog(`${t}\n`);
         console.error(`[draft_cycle] ${t}`);
       }
+      if (/Phase 2b-prep/.test(t)) writeActivity("drafting", "drafting replies");
       if (!onProgress) return;
       const msg = cycleProgressMessage(t);
       // Skip consecutive duplicates (a phase can log a couple matching lines).
@@ -538,7 +542,7 @@ async function produceDrafts(
   const marker = /DRAFT_ONLY_PLAN=\/tmp\/twitter_cycle_plan_(.+)\.json/.exec(
     res.stdout + "\n" + res.stderr
   );
-  if (marker && marker[1]) return { batchId: marker[1] };
+  if (marker && marker[1]) { clearActivity(); return { batchId: marker[1] }; }
   // A real prep-step failure (e.g. the background claude CLI isn't logged in)
   // emits DRAFT_ONLY_BLOCKED=<reason>. Surface that instead of silently falling
   // back to a stale/empty batch and mis-reporting "no fresh candidates".
@@ -546,6 +550,7 @@ async function produceDrafts(
     res.stdout + "\n" + res.stderr
   );
   if (blockedMarker && blockedMarker[1]) {
+    clearActivity();
     return { batchId: null, blocked: blockedReasonMessage(blockedMarker[1]) };
   }
   // No `DRAFT_ONLY_PLAN=` marker from THIS run => this run produced no drafts.
@@ -553,6 +558,7 @@ async function produceDrafts(
   // that's a *previous* run's batch, so a 5-second empty cycle would echo an old
   // 7-draft batch and report phantom success. Report 0 drafts honestly, with the
   // pipeline's own reason (e.g. cold-start project with no seeded queries).
+  clearActivity();
   return {
     batchId: null,
     blocked:
