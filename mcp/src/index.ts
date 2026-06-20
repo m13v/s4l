@@ -5,7 +5,6 @@
 //   draft_cycle  - scan + draft, return all drafts as a numbered table for the
 //                  user to review in chat (posts nothing).
 //   post_drafts  - post the drafts the user chose by number from a batch.
-//   autopilot    - one tool, action = enable | disable | status (launchd job).
 //   get_stats    - read-only post + engagement stats.
 //
 // THIN wrapper. The pipeline brain (scan, score, drafting prompts, posting)
@@ -249,12 +248,11 @@ const server = new McpServer(
       "surfaces `update_available` and an `update_hint`.\n\n" +
       "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `draft_cycle` " +
       "(scan + review a batch; the user approves / edits / skips every draft in a single form) -> " +
-      "`autopilot` (enable to also turn on hands-free background posting AND daily auto-updates) -> " +
       "`get_stats` (see performance). Run `project_config` first; the other tools refuse until a " +
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`draft_cycle`, `post_drafts`, `autopilot` enable/disable, `get_stats`), end your turn by " +
+      "(`draft_cycle`, `post_drafts`, `get_stats`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
@@ -1402,112 +1400,16 @@ tool(
   }
 );
 
-// ---- autopilot: one tool, three actions -----------------------------------
-tool(
-  "autopilot",
-  {
-    title: "X autopilot",
-    description:
-      "Control background X/Twitter posting. action=enable loads the launchd job so the " +
-      "cycle fires automatically; action=disable unloads it (manual draft_cycle still works); " +
-      "action=status reports whether it is loaded. After enable/disable, call the `dashboard` " +
-      "tool so the user sees the updated autopilot state.",
-    inputSchema: {
-      action: z.enum(["enable", "disable", "status"]),
-    },
-  },
-  async ({ action }) => {
-    if (action !== "status" && !hasReadyProject()) {
-      return textContent(
-        "No project is fully set up yet, so autopilot has nothing to post. Run the `project_config` tool " +
-          "first. Note: autopilot runs the background cycle across all configured projects; it is " +
-          "not scoped to one project."
-      );
-    }
-    const uid = process.getuid ? process.getuid() : 0;
-    const logDir = path.join(repoDir(), "skill", "logs");
-
-    if (action === "status") {
-      const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-      const lines = res.stdout.split("\n");
-      const loaded = lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
-      const updaterLoaded = lines.some((l) => l.includes(UPDATER_LABEL));
-      return jsonContent({
-        label: TWITTER_AUTOPILOT_LABEL,
-        loaded,
-        auto_update_label: UPDATER_LABEL,
-        auto_update_loaded: updaterLoaded,
-      });
-    }
-
-    if (action === "enable") {
-      // Bring up the on-screen overlay watcher so background autopilot cycles
-      // still paint the harness status/sidebar. Idempotent + detached.
-      await ensureOverlayWatch();
-      // 1) Cycle plist. Write one pointing at the self-update guard ONLY if no
-      //    plist exists yet; never overwrite a hand-tuned/dev plist.
-      const createdCycle = ensurePlist(
-        TWITTER_AUTOPILOT_PLIST,
-        plistXml({
-          label: TWITTER_AUTOPILOT_LABEL,
-          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "run-cycle-update-guard.sh")],
-          intervalSecs: 60,
-          runAtLoad: false,
-          stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
-          stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
-        })
-      );
-      const cycleRes = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
-
-      // 2) Daily self-updater. Keeps a headless install current with no human
-      //    in the loop. RunAtLoad so it also checks shortly after enable.
-      const createdUpdater = ensurePlist(
-        UPDATER_PLIST,
-        plistXml({
-          label: UPDATER_LABEL,
-          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "social-autoposter-update.sh")],
-          intervalSecs: 86_400,
-          runAtLoad: true,
-          stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
-          stderrLog: path.join(logDir, "launchd-self-update-stderr.log"),
-        })
-      );
-      const updaterRes = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-
-      return jsonContent({
-        action: "enable",
-        autopilot: {
-          loaded: cycleRes.code === 0,
-          plist: TWITTER_AUTOPILOT_PLIST,
-          created: createdCycle,
-          error: cycleRes.code === 0 ? null : (cycleRes.stderr || cycleRes.stdout).trim(),
-        },
-        auto_update: {
-          loaded: updaterRes.code === 0,
-          plist: UPDATER_PLIST,
-          created: createdUpdater,
-          note:
-            "Daily updater enabled. It self-updates real npm installs and is a no-op on dev/source " +
-            "checkouts (refuses to clobber a .git working tree).",
-          error: updaterRes.code === 0 ? null : (updaterRes.stderr || updaterRes.stdout).trim(),
-        },
-      });
-    }
-
-    // disable — unload both jobs (leave the plist files in place for re-enable)
-    const cycleOff = await unloadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
-    const updaterOff = await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-    return jsonContent({
-      action: "disable",
-      autopilot_unloaded: cycleOff.code === 0,
-      auto_update_unloaded: updaterOff.code === 0,
-      note:
-        cycleOff.code === 0
-          ? "Autopilot and daily auto-update unloaded. Manual draft_cycle still works."
-          : `Autopilot disable reported exit ${cycleOff.code}: ${(cycleOff.stderr || cycleOff.stdout).trim()}`,
-    });
-  }
-);
+// ---- autopilot: MCP tool removed ------------------------------------------
+// The `autopilot` MCP tool (enable/disable/status) was intentionally removed:
+// hands-free background posting is no longer toggled from the agent/tool surface.
+// The underlying launchd cycle job + plist (com.m13v.social-twitter-cycle) and
+// the daily self-updater are NOT touched here — an already-loaded job keeps
+// running, and the plist files stay on disk. The plist helpers above
+// (ensurePlist / plistXml / loadPlist / unloadPlist) and the constants are kept
+// as the underlying source for that job; the `dashboard` snapshot still reports
+// the job's loaded state via autopilotLoaded(). To enable/disable the job now,
+// use launchctl directly or re-add a tool here.
 
 // ---- get_stats: read-only -------------------------------------------------
 tool(
