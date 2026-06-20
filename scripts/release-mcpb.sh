@@ -75,17 +75,28 @@ fs.writeFileSync(p, JSON.stringify({version:'$VERSION',installedAt:new Date().to
 console.log('  '+fs.readFileSync(p,'utf8').trim());
 "
 
-# ---- 3b. Stamp manifest.json + mcp/package.json version ---------------------
+# ---- 3b. Stamp manifest.json + mcp/package.json + lockfile version ----------
 # Claude Desktop's extension "Details" panel reads version from manifest.json,
 # so it must track the release version too (not the frozen 0.0.1 placeholder).
-say "Stamping mcp/manifest.json + mcp/package.json version -> $VERSION"
+# mcp/package.json and its lockfile are stamped in lockstep so the three stay
+# consistent (npm errors if package.json and package-lock.json disagree).
+say "Stamping mcp/manifest.json + mcp/package.json + mcp/package-lock.json -> $VERSION"
 node -e "
 const fs=require('fs');
+const V='$VERSION';
 for (const p of ['$MCP_DIR/manifest.json','$MCP_DIR/package.json']) {
   const j=JSON.parse(fs.readFileSync(p,'utf8'));
-  j.version='$VERSION';
+  j.version=V;
   fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
   console.log('  '+p.replace('$MCP_DIR/','mcp/')+' -> '+j.version);
+}
+const lp='$MCP_DIR/package-lock.json';
+if (fs.existsSync(lp)) {
+  const l=JSON.parse(fs.readFileSync(lp,'utf8'));
+  l.version=V;
+  if (l.packages && l.packages['']) l.packages[''].version=V;
+  fs.writeFileSync(lp, JSON.stringify(l,null,2)+'\n');
+  console.log('  mcp/package-lock.json -> '+l.version);
 }
 "
 
