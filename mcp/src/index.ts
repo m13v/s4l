@@ -1994,11 +1994,10 @@ tool(
       (candidates.map((c) => c.matched_project).find((p): p is string => !!p) ||
         firstSc?.matched_project ||
         "default") as string;
-    const plan: Plan = { candidates };
-    writePlan(args.batch_id, plan);
-    // Bake link targets into the plan (sub-second at TWITTER_PAGE_GEN_RATE=0), the
-    // same prep step DRAFT_ONLY does before handing off. Best-effort: posting
-    // falls back to the plain project URL per-candidate if this is skipped.
+    // Stage the new drafts under the scan batch id and bake link targets into them
+    // (sub-second at TWITTER_PAGE_GEN_RATE=0). Best-effort: posting falls back to the
+    // plain project URL per-candidate if gen is skipped.
+    writePlan(args.batch_id, { candidates });
     try {
       await runPython("scripts/twitter_gen_links.py", ["--plan", planPath(args.batch_id)], {
         timeoutMs: 120_000,
@@ -2007,26 +2006,47 @@ tool(
     } catch {
       /* best effort — plan still posts with a plain-URL fallback */
     }
-    const finalPlan = readPlan(args.batch_id) ?? plan;
-    const count = (finalPlan.candidates || []).length;
+    const staged = (readPlan(args.batch_id)?.candidates as PlanCandidate[]) ?? candidates;
+
+    // Accumulate into ONE persistent review queue so a continuous autopilot's drafts
+    // PILE UP in the menu-bar cards instead of each run overwriting the last. New
+    // drafts are appended; a thread already in the queue (by URL) is skipped (one
+    // draft per thread). Posted entries are KEPT in place so the 1-based card
+    // numbering stays stable across runs — the menu bar, the chat table, and
+    // post_drafts all index the full array and filter on the `posted` flag.
+    const queue: PlanCandidate[] = [
+      ...((readPlan(REVIEW_QUEUE_ID)?.candidates as PlanCandidate[]) ?? []),
+    ];
+    const seen = new Set(queue.map((c) => c.candidate_url).filter((u): u is string => !!u));
+    let added = 0;
+    for (const nc of staged) {
+      if (nc.candidate_url && seen.has(nc.candidate_url)) continue;
+      queue.push(nc);
+      if (nc.candidate_url) seen.add(nc.candidate_url);
+      added++;
+    }
+    writePlan(REVIEW_QUEUE_ID, { candidates: queue });
+    const pending = queue.filter((c) => c.posted !== true);
+
     // Drafts queued = the pipeline verified end-to-end without posting. This is the
     // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
-    if (count > 0)
-      completeOnboardingMilestone("draft_verified", { outcome: "review_batch", draft_count: count });
-    // Surface to the menu-bar review cards (same review plan draft_cycle used).
+    if (added > 0)
+      completeOnboardingMilestone("draft_verified", { outcome: "review_batch", draft_count: added });
+
+    // Point the menu-bar review cards at the accumulated queue.
     writeReviewRequest({
-      batch_id: args.batch_id,
+      batch_id: REVIEW_QUEUE_ID,
       project,
-      count,
-      plan_path: planPath(args.batch_id),
+      count: pending.length,
+      plan_path: planPath(REVIEW_QUEUE_ID),
       created_at: new Date().toISOString(),
     });
     return textContent(
-      `${count} draft(s) queued for review (batch ${args.batch_id}). They're now in the menu-bar ` +
-        `approval cards and the table below; nothing posts until approved.\n\n` +
-        renderDraftsTable(finalPlan) +
-        `\n\nTo post the approved ones: the user approves in the menu bar, or call post_drafts with the ` +
-        `numbers to post.`
+      `Queued ${added} new draft(s); ${pending.length} now awaiting approval in the menu-bar cards ` +
+        `(review queue "${REVIEW_QUEUE_ID}"). Nothing posts until approved.\n\n` +
+        renderDraftsTable({ candidates: queue }) +
+        `\n\nTo post: the user approves in the menu bar, or call post_drafts with batch_id ` +
+        `"${REVIEW_QUEUE_ID}" and the numbers to post.`
     );
   }
 );
