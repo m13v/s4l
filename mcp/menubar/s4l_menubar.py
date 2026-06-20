@@ -18,6 +18,7 @@ rather than rumps.notification (which needs a bundle id).
 
 import json
 import subprocess
+import sys
 
 import rumps
 
@@ -88,6 +89,13 @@ class S4LMenuBar(rumps.App):
         super().__init__("S4L", quit_button=None)
         self._last_blocker_code = None
         self._sig = None  # last rendered state signature; skip rebuild if unchanged
+        # Reliable self-check of our own Accessibility (TCC) grant — this is the
+        # faithful reading (our launchd process identity, not a parent's). Logged
+        # so menubar.err.log records whether keystroke posting will work.
+        sys.stderr.write(
+            f"[s4l-menubar] accessibility_trusted={st.accessibility_trusted()}\n"
+        )
+        sys.stderr.flush()
         self._timer = rumps.Timer(self._tick, POLL_SECONDS)
         self._timer.start()
         self._tick(None)
@@ -102,6 +110,18 @@ class S4LMenuBar(rumps.App):
         sendMessage bridge, so this drives the keyboard instead. On failure
         (most often Accessibility permission not yet granted) it degrades to
         just focusing Claude and tells the user what to do."""
+        # Reliably know up front whether we can post keystrokes; if not, prompt
+        # for the grant + open Settings instead of a paste that would silently
+        # go nowhere.
+        if not st.accessibility_trusted():
+            st.request_accessibility()
+            self._open_claude()
+            self._notify(
+                "S4L needs Accessibility",
+                "Enable S4L (python) under System Settings → Privacy & Security "
+                "→ Accessibility, then click again.",
+            )
+            return False
         try:
             r = subprocess.run(
                 ["osascript", "-e", _claude_send_script(prompt)],
