@@ -870,6 +870,16 @@ tool(
         .union([z.array(z.string()), z.string()])
         .optional()
         .describe("Topics/keywords to monitor on X (comma-separated or array)"),
+      search_queries: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Cold-start X search-query bank YOU expand from search_topics, in this same call. " +
+            "Fan each topic into a few concrete X advanced-search strings (aim ~30 total, e.g. " +
+            "'mac menu bar app -filter:replies', 'screen recording privacy lang:en') so the cycle " +
+            "fans out instead of running one crude topic-as-query. Seeded directly with NO `claude " +
+            "-p` — you are the model doing the expansion, so setup never needs the claude CLI."
+        ),
       get_started_link: z
         .string()
         .optional()
