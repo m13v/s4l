@@ -2,10 +2,12 @@
 //
 // The "real" version is the top-level `social-autoposter` npm package version
 // (e.g. 1.6.x) — that is what actually bundles this MCP's prebuilt dist/. The
-// MCP's own package.json (0.0.1) and manifest (0.0.1) are decoupled artifacts
-// that nobody bumps, so they are NOT a reliable signal. This module resolves the
-// true version from the most authoritative source available at runtime, and can
-// check npm for a newer published release so we can deliver updates on demand.
+// MCP's own package.json and manifest are stamped to the same version at release
+// time (scripts/release-mcpb.sh step 3b), but historically they were frozen at
+// 0.0.1, so this module still resolves the true version from the most
+// authoritative source available at runtime (and tolerates a stale co-located
+// package.json on an old bundle). It can also check npm for a newer published
+// release so we can deliver updates on demand.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -29,7 +31,8 @@ function readJsonVersion(p: string): string | null {
 //      from the npm package version at every init/update. Authoritative on a
 //      real user install, where the top-level package.json is NOT copied.
 //   2. <repo>/package.json — git checkout / dev machine: the meaningful 1.6.x.
-//   3. mcp/package.json    — co-located last resort (currently 0.0.1).
+//   3. mcp/package.json    — co-located last resort (release-stamped to match,
+//      but may be stale on an older bundle).
 export function resolveVersion(): string {
   return (
     readJsonVersion(path.join(__dirname, "version.json")) ||
