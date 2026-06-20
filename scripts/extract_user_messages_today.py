@@ -1,30 +1,93 @@
 #!/usr/bin/env python3
-"""Extract all user-authored messages sent on today's date across every Claude Code
-session for the social-autoposter workspace.
+"""Extract all user-authored messages sent on a given date across every Claude
+conversation transcript on this machine.
 
-Output: a single Markdown file grouped by session, with timestamps + content.
+Two storage sources are walked (they do NOT overlap on disk):
+
+  1. claude_code — ~/.claude/projects/<encoded-cwd>/*.jsonl
+     Covers the Claude Code CLI (terminal) AND the Claude Code tab in the
+     desktop app; both write here, keyed by the real project cwd. Scoped to the
+     social-autoposter workspace by default (see WORKSPACE_REPOS /
+     INCLUDE_ALL_CLAUDE_CODE_PROJECTS).
+
+  2. cowork — ~/Library/Application Support/Claude/local-agent-mode-sessions/
+              **/.claude/projects/**/*.jsonl
+     Covers Cowork / local-agent-mode. Each Cowork session runs in a sandboxed
+     HOME, so its transcript never lands in ~/.claude/projects. Cowork cannot be
+     scoped by cwd (the cwd is the sandbox, e.g. /sessions/loving-laughing-ride),
+     so ALL Cowork sessions for the date are included.
+
+The plain chat tab in the desktop app stores conversations server-side
+(claude.ai) with only a browser cache locally; there is no local transcript to
+walk, so it is out of scope here.
+
+Output: two Markdown files grouped by session, with timestamps + content.
+
+Usage:
+  python3 extract_user_messages_today.py            # today (UTC)
+  python3 extract_user_messages_today.py 2026-04-21 # a specific UTC date
 """
 from __future__ import annotations
 
 import json
-import os
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-WORKSPACE_PROJECT_DIR = Path(
-    "/Users/matthewdi/.claude/projects/-Users-matthewdi-social-autoposter"
-)
-TODAY_UTC = "2026-04-21"
-OUT_PATH = Path(
-    "/Users/matthewdi/social-autoposter/scripts/claude_user_messages_2026-04-21.md"
-)
-OUT_PATH_TRIMMED = Path(
-    "/Users/matthewdi/social-autoposter/scripts/claude_user_messages_2026-04-21.interactive.md"
+HOME = Path.home()
+
+# --- Source 1: Claude Code (CLI + desktop Code tab) ---------------------------
+CLAUDE_CODE_PROJECTS_ROOT = HOME / ".claude" / "projects"
+# Repos whose Claude Code transcripts we care about. Flip
+# INCLUDE_ALL_CLAUDE_CODE_PROJECTS = True to walk every project instead.
+WORKSPACE_REPOS = [HOME / "social-autoposter"]
+INCLUDE_ALL_CLAUDE_CODE_PROJECTS = False
+
+# --- Source 2: Cowork / local agent mode (desktop app, sandboxed HOMEs) -------
+COWORK_SESSIONS_ROOT = (
+    HOME / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
 )
 
+OUT_DIR = Path(__file__).resolve().parent
 
-def iter_session_files():
-    for p in sorted(WORKSPACE_PROJECT_DIR.glob("*.jsonl")):
+
+def _encode_cwd(path: Path) -> str:
+    """Claude Code encodes a project cwd into its projects/ folder name by
+    replacing every '/' with '-'."""
+    return str(path).replace("/", "-")
+
+
+def resolve_date(argv: list[str]) -> str:
+    if len(argv) > 1 and argv[1].strip():
+        d = argv[1].strip()
+        # validate shape; raises if malformed
+        datetime.strptime(d, "%Y-%m-%d")
+        return d
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def iter_claude_code_session_files():
+    """Yield .jsonl transcripts from the Claude Code projects root."""
+    if not CLAUDE_CODE_PROJECTS_ROOT.is_dir():
+        return
+    if INCLUDE_ALL_CLAUDE_CODE_PROJECTS:
+        for p in sorted(CLAUDE_CODE_PROJECTS_ROOT.glob("*/*.jsonl")):
+            yield p
+        return
+    for repo in WORKSPACE_REPOS:
+        proj_dir = CLAUDE_CODE_PROJECTS_ROOT / _encode_cwd(repo)
+        if proj_dir.is_dir():
+            for p in sorted(proj_dir.glob("*.jsonl")):
+                yield p
+
+
+def iter_cowork_session_files():
+    """Yield .jsonl transcripts from every Cowork sandbox HOME."""
+    if not COWORK_SESSIONS_ROOT.is_dir():
+        return
+    # **/.claude/projects/**/*.jsonl catches every account/workspace/session.
+    for p in sorted(COWORK_SESSIONS_ROOT.glob("**/.claude/projects/**/*.jsonl")):
         yield p
 
 
@@ -51,15 +114,13 @@ def content_to_text(content) -> str | None:
 
 def classify(text: str) -> str:
     """Tag a user-role message by origin:
-    HUMAN       - you typed it in the terminal
+    HUMAN       - you typed it in the terminal / chat composer
     COMMAND     - slash-command invocation (<command-name>...)
     TASK_NOTIF  - background Task tool wake-up (<task-notification>)
     CMD_STDOUT  - output of a ! bang-command echoed back (<local-command-stdout>)
     SCHED_WAKE  - autonomous loop / scheduled wake-up sentinel
     SYS_REMIND  - pure <system-reminder> block injected by the harness
     HOOK        - user-prompt-submit-hook injection
-    CLI_PROMPT  - non-interactive `claude -p "..."` feed (very long, no wrapper tags)
-                  — same authorship as HUMAN (you or a script you own)
     """
     stripped = text.lstrip()
     if stripped.startswith("<task-notification>"):
@@ -74,18 +135,17 @@ def classify(text: str) -> str:
         return "HOOK"
     # A message that is ONLY system-reminder blocks (nothing else) is harness-injected.
     if stripped.startswith("<system-reminder>"):
-        # strip all <system-reminder>...</system-reminder> blocks; if nothing left, it's pure sys
-        import re
         without = re.sub(r"<system-reminder>.*?</system-reminder>", "", stripped, flags=re.DOTALL).strip()
         if not without:
             return "SYS_REMIND"
     return "HUMAN"
 
 
-def extract_from_file(path: Path):
+def extract_from_file(path: Path, source: str, date: str):
     msgs = []
     session_meta = {
         "session_id": path.stem,
+        "source": source,
         "path": str(path),
         "cwd": None,
         "first_ts": None,
@@ -118,7 +178,7 @@ def extract_from_file(path: Path):
                 msg = d.get("message") or {}
                 if msg.get("role") != "user":
                     continue
-                if not ts or not ts.startswith(TODAY_UTC):
+                if not ts or not ts.startswith(date):
                     continue
 
                 text = content_to_text(msg.get("content"))
@@ -144,40 +204,72 @@ def extract_from_file(path: Path):
     return session_meta, msgs
 
 
-def main():
+def collect_sessions(date: str):
+    """Walk both sources, returning a list of (meta, msgs) for sessions that had
+    user activity on `date`, deduped by (source, session_id)."""
+    seen: set[tuple[str, str]] = set()
     sessions = []
-    total_msgs = 0
-    for path in iter_session_files():
-        meta, msgs = extract_from_file(path)
-        if not msgs:
-            continue
-        msgs.sort(key=lambda m: m["timestamp"])
-        sessions.append((meta, msgs))
-        total_msgs += len(msgs)
-
+    sources = (
+        ("claude_code", iter_claude_code_session_files()),
+        ("cowork", iter_cowork_session_files()),
+    )
+    for source, files in sources:
+        for path in files:
+            key = (source, path.stem)
+            if key in seen:
+                continue
+            seen.add(key)
+            meta, msgs = extract_from_file(path, source, date)
+            if not msgs:
+                continue
+            msgs.sort(key=lambda m: m["timestamp"])
+            sessions.append((meta, msgs))
     # sort sessions by earliest message
     sessions.sort(key=lambda s: s[1][0]["timestamp"])
+    return sessions
+
+
+def main():
+    date = resolve_date(sys.argv)
+    out_full = OUT_DIR / f"claude_user_messages_{date}.md"
+    out_trimmed = OUT_DIR / f"claude_user_messages_{date}.interactive.md"
+
+    sessions = collect_sessions(date)
+    total_msgs = sum(len(msgs) for _m, msgs in sessions)
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # tally kinds
+    # tallies
     kind_counts: dict[str, int] = {}
-    for _meta, msgs in sessions:
+    source_counts: dict[str, int] = {}
+    source_session_counts: dict[str, int] = {}
+    for meta, msgs in sessions:
+        source_session_counts[meta["source"]] = source_session_counts.get(meta["source"], 0) + 1
         for m in msgs:
             kind_counts[m["kind"]] = kind_counts.get(m["kind"], 0) + 1
+            source_counts[meta["source"]] = source_counts.get(meta["source"], 0) + 1
+
+    scope = "ALL projects" if INCLUDE_ALL_CLAUDE_CODE_PROJECTS else ", ".join(str(r) for r in WORKSPACE_REPOS)
 
     lines: list[str] = []
-    lines.append(f"# User messages for {TODAY_UTC}")
+    lines.append(f"# User messages for {date}")
     lines.append("")
-    lines.append(f"- Workspace: `/Users/matthewdi/social-autoposter`")
-    lines.append(f"- Sessions with activity today: **{len(sessions)}**")
+    lines.append("Sources walked:")
+    lines.append(f"- `claude_code` — `~/.claude/projects/` (CLI + desktop Code tab), scope: {scope}")
+    lines.append(f"- `cowork` — `~/Library/Application Support/Claude/local-agent-mode-sessions/` (all sessions; not project-scopable)")
+    lines.append("")
+    lines.append(f"- Sessions with activity on date: **{len(sessions)}**"
+                 + (f" ({', '.join(f'{s}={n}' for s, n in sorted(source_session_counts.items()))})" if source_session_counts else ""))
     lines.append(f"- Total user-role messages (excluding tool results): **{total_msgs}**")
+    if source_counts:
+        for s, n in sorted(source_counts.items()):
+            lines.append(f"  - source `{s}`: {n}")
     for k in ("HUMAN", "COMMAND", "TASK_NOTIF", "CMD_STDOUT", "SCHED_WAKE", "SYS_REMIND", "HOOK"):
         if k in kind_counts:
-            lines.append(f"  - `{k}`: {kind_counts[k]}")
+            lines.append(f"  - kind `{k}`: {kind_counts[k]}")
     lines.append(f"- Generated: {generated_at}")
     lines.append("")
-    lines.append("Each section below is one Claude session. Messages are in chronological order.")
+    lines.append("Each section below is one session. Messages are in chronological order.")
     lines.append("Tool-result blocks (role=user but produced by the harness) are excluded.")
     lines.append("")
     lines.append("Message **kind** tags:")
@@ -195,14 +287,14 @@ def main():
     lines.append("")
 
     for idx, (meta, msgs) in enumerate(sessions, 1):
-        lines.append(f"## Session {idx}: `{meta['session_id']}`")
+        lines.append(f"## Session {idx}: `{meta['session_id']}` (source: {meta['source']})")
         lines.append("")
         lines.append(f"- File: `{meta['path']}`")
         if meta.get("cwd"):
             lines.append(f"- cwd: `{meta['cwd']}`")
         lines.append(f"- First entry: `{meta['first_ts']}`")
         lines.append(f"- Last entry: `{meta['last_ts']}`")
-        lines.append(f"- User-role messages today: **{len(msgs)}**")
+        lines.append(f"- User-role messages on date: **{len(msgs)}**")
         kc: dict[str, int] = {}
         for m in msgs:
             kc[m["kind"]] = kc.get(m["kind"], 0) + 1
@@ -223,53 +315,57 @@ def main():
         lines.append("---")
         lines.append("")
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    out_full.parent.mkdir(parents=True, exist_ok=True)
+    out_full.write_text("\n".join(lines), encoding="utf-8")
 
-    print(f"wrote {OUT_PATH}")
-    print(f"sessions: {len(sessions)}")
+    print(f"wrote {out_full}")
+    print(f"sessions: {len(sessions)} ({', '.join(f'{s}={n}' for s, n in sorted(source_session_counts.items())) or 'none'})")
     print(f"user messages: {total_msgs}")
 
     # --- Trimmed output: interactive human messages only ---
-    # Heuristic: a session is "interactive" if it contains >=2 distinct HUMAN promptIds.
-    # Sessions with a single HUMAN promptId are almost always `claude -p` script fires
-    # from skill/run-*.sh. Inside kept sessions we still drop non-HUMAN kinds.
+    # Heuristic: a claude_code session is "interactive" if it has >=2 distinct
+    # HUMAN promptIds. Sessions with a single HUMAN promptId are almost always
+    # `claude -p` script fires from skill/run-*.sh. Cowork sessions carry no
+    # promptId and have no script-fire concept, so they are kept whenever they
+    # contain any HUMAN message. Inside kept sessions we still drop non-HUMAN kinds.
     interactive_sessions = []
     trimmed_total = 0
     for meta, msgs in sessions:
-        human_prompt_ids = {m["promptId"] for m in msgs if m["kind"] == "HUMAN" and m.get("promptId")}
-        if len(human_prompt_ids) < 2:
-            continue
         human_only = [m for m in msgs if m["kind"] == "HUMAN"]
         if not human_only:
             continue
+        if meta["source"] == "claude_code":
+            human_prompt_ids = {m["promptId"] for m in human_only if m.get("promptId")}
+            if len(human_prompt_ids) < 2:
+                continue
+        # cowork: keep as long as there's a HUMAN message
         interactive_sessions.append((meta, human_only))
         trimmed_total += len(human_only)
 
     tl: list[str] = []
-    tl.append(f"# Interactive human messages for {TODAY_UTC}")
+    tl.append(f"# Interactive human messages for {date}")
     tl.append("")
-    tl.append(f"- Workspace: `/Users/matthewdi/social-autoposter`")
-    tl.append(f"- Filter: sessions with ≥2 distinct HUMAN `promptId`s (proxy for interactive)")
+    tl.append(f"- Sources: `claude_code` (scope: {scope}) + `cowork` (all)")
+    tl.append(f"- Filter: claude_code sessions need ≥2 distinct HUMAN `promptId`s (proxy for interactive);")
+    tl.append(f"  cowork sessions are kept whenever they contain any HUMAN message (no script-fires there)")
     tl.append(f"- Kept sessions: **{len(interactive_sessions)}** / {len(sessions)}")
     tl.append(f"- Kept messages: **{trimmed_total}** / {total_msgs}")
     tl.append(f"- Generated: {generated_at}")
     tl.append("")
     tl.append("Note: `claude -p` non-interactive script invocations (skill/run-*.sh) fire a single")
     tl.append("templated prompt per session, so they have exactly one HUMAN promptId and are")
-    tl.append("filtered out here. Any session that kept you in a back-and-forth conversation")
-    tl.append("survived the filter.")
+    tl.append("filtered out here. Any session that kept you in a back-and-forth conversation survived.")
     tl.append("")
     tl.append("---")
     tl.append("")
     for idx, (meta, msgs) in enumerate(interactive_sessions, 1):
-        tl.append(f"## Session {idx}: `{meta['session_id']}`")
+        tl.append(f"## Session {idx}: `{meta['session_id']}` (source: {meta['source']})")
         tl.append("")
         if meta.get("cwd"):
             tl.append(f"- cwd: `{meta['cwd']}`")
         tl.append(f"- First entry: `{meta['first_ts']}`")
         tl.append(f"- Last entry: `{meta['last_ts']}`")
-        tl.append(f"- HUMAN messages today: **{len(msgs)}**")
+        tl.append(f"- HUMAN messages on date: **{len(msgs)}**")
         tl.append("")
         for i, m in enumerate(msgs, 1):
             tl.append(f"### [{i}] {m['timestamp']}")
@@ -281,8 +377,8 @@ def main():
         tl.append("---")
         tl.append("")
 
-    OUT_PATH_TRIMMED.write_text("\n".join(tl), encoding="utf-8")
-    print(f"wrote {OUT_PATH_TRIMMED}")
+    out_trimmed.write_text("\n".join(tl), encoding="utf-8")
+    print(f"wrote {out_trimmed}")
     print(f"interactive sessions: {len(interactive_sessions)}")
     print(f"interactive HUMAN messages: {trimmed_total}")
 

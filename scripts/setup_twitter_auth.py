@@ -60,15 +60,13 @@ except ImportError:
         "websocket-client not installed (needed for CDP). pip install websocket-client"
     )
 
-# Optional server-side session-cookie store (best-effort). Lets connect_x persist
-# the validated X cookies so restore_twitter_session.py can auto-re-inject them
-# after any logout. Guarded so a missing dep or offline API never breaks setup.
+# Live-handle resolver (best-effort). Lets connect_x record the real logged-in
+# @handle alongside the locally-mirrored cookies. Guarded so a missing dep never
+# breaks setup.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from http_api import api_post  # noqa: E402
     from twitter_account import resolve_handle  # noqa: E402
 except Exception:
-    api_post = None
     resolve_handle = None
 
 # Local 0600 cookie mirror — the keychain-independent durability layer (Gap B).
@@ -386,16 +384,13 @@ def _write_handle_to_config(handle: "str | None") -> bool:
 
 def _persist_session() -> None:
     """Persist the validated live X session for auto-restore after ANY logout
-    (hard kill, crash, keychain re-lock wiping Chrome's Cookies DB, or AppMaker
-    VM reseed). One CDP attach feeds two sinks:
+    (hard kill, crash, or a keychain re-lock wiping Chrome's Cookies DB).
 
-      1. LOCAL 0600 mirror (twitter_cookie_mirror) — ALWAYS written. This is the
-         keychain-independent durability layer that fixes Gap B on a persistent
-         machine: restore_twitter_session.py re-injects from it on the next cycle
-         preflight even after Chrome wiped its own encrypted store.
-      2. Server-side session store (POST /api/v1/twitter/session-cookies) —
-         best-effort. Enables VM auto-restore where the profile is reseeded
-         hourly. No-op on a persistent machine with no social_accounts row.
+    Writes the validated x.com/twitter.com cookies to the LOCAL 0600 mirror
+    (twitter_cookie_mirror) — the keychain-independent durability layer that
+    fixes Gap B on a persistent machine: restore_twitter_session.py re-injects
+    from it on the next cycle preflight even after Chrome wiped its own
+    encrypted store.
 
     Non-fatal end-to-end: the local session is already valid; this only enables
     future auto-recovery, so nothing here may abort connect_x."""
@@ -403,8 +398,19 @@ def _persist_session() -> None:
         ws, send = _attach()
     except Exception:
         return
+    # Collect cookies AND resolve the live @handle on the SAME open connection,
+    # THEN close it. Resolving after ws.close() (the previous structure) ran every
+    # _resolve_live_handle CDP call against a dead socket, so it silently returned
+    # None on every connect — which is why config.json + the cookie mirror were
+    # perpetually handle:null. Both reads must happen before the finally closes ws.
+    handle = None
     try:
         cookies = _collect_x_cookies(send)
+        if cookies:
+            # Prefer the LIVE logged-in handle so a fresh install records the real
+            # account instead of the config.json placeholder; persist it so the
+            # cycle's account_resolver (our_account) is correct. Best-effort.
+            handle = _resolve_live_handle(send)
     except Exception:
         cookies = []
     finally:
@@ -415,11 +421,7 @@ def _persist_session() -> None:
     if not cookies:
         return
 
-    # Prefer the LIVE logged-in handle so a fresh install records the real
-    # account instead of the config.json placeholder; persist it so the cycle's
-    # account_resolver (our_account) is correct. Fall back to the configured
-    # handle. All best-effort: never abort connect_x.
-    handle = _resolve_live_handle(send)
+    # Fall back to the configured handle if live resolution came up empty.
     if handle and _write_handle_to_config(handle):
         print(f"setup_twitter_auth: recorded live X handle @{handle} in config.json "
               "(accounts.twitter.handle); attribution + own-reply dedup now scoped "
@@ -430,7 +432,9 @@ def _persist_session() -> None:
         except Exception:
             handle = None
 
-    # 1. Local mirror — always, keychain-independent.
+    # Local mirror — keychain-independent durability. This is the only cookie
+    # store; the VM-era server store (/api/v1/twitter/session-cookies) was
+    # removed 2026-06-17 when we stopped running AppMaker VMs.
     if twitter_cookie_mirror is not None:
         try:
             n = twitter_cookie_mirror.save_cookies(cookies, handle=handle)
@@ -439,18 +443,6 @@ def _persist_session() -> None:
                   "/ Cookies-DB wipe on relaunch)", file=sys.stderr)
         except Exception as e:
             print(f"setup_twitter_auth: local mirror save skipped ({e})", file=sys.stderr)
-
-    # 2. Server store — best-effort, only when a handle resolves.
-    if api_post is not None and handle:
-        try:
-            api_post("/api/v1/twitter/session-cookies", {"handle": handle, "cookies": cookies})
-            print(f"setup_twitter_auth: saved {len(cookies)} session cookies for @{handle} "
-                  "(server auto-restore enabled)", file=sys.stderr)
-        # api_post raises SystemExit (BaseException, NOT Exception) on a 4xx/5xx —
-        # e.g. "no social_accounts row" on a persistent machine that never
-        # registered this handle. Best-effort: must never abort connect_x.
-        except (Exception, SystemExit) as e:
-            print(f"setup_twitter_auth: session-store save skipped ({e})", file=sys.stderr)
 
 
 def _show_window_and_open_login() -> bool:
@@ -654,12 +646,27 @@ def _import_from(source: str) -> dict:
             f"(vendored script missing at {VENDORED_COOKIE_SCRIPT} and "
             f"ai-browser-profile venv not found at {ABP_PYTHON})",
         }
+    # The copier's first step is `security find-generic-password` on the
+    # browser's Safe Storage entry, which can pop a macOS Keychain auth dialog
+    # the user has to click ("Always Allow"). That dialog often opens unfocused
+    # or behind the autoposter's own Chrome window, so a human needs real time
+    # to find and click it. A 60s cap killed it mid-prompt and dumped the user
+    # into the manual-login fallback. Give the dialog room; override with
+    # SAPS_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
+    _raw_to = os.environ.get("SAPS_COOKIE_COPY_TIMEOUT", "600").strip()
+    try:
+        copy_timeout = float(_raw_to) if _raw_to else None
+    except ValueError:
+        copy_timeout = 600.0
+    if copy_timeout is not None and copy_timeout <= 0:
+        copy_timeout = None
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
+            cmd, capture_output=True, text=True, timeout=copy_timeout, cwd=cwd,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"cookie copy from {source} timed out after 60s"}
+        _to_label = f"{copy_timeout:g}s" if copy_timeout is not None else "no limit"
+        return {"ok": False, "error": f"cookie copy from {source} timed out ({_to_label})"}
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
@@ -718,7 +725,15 @@ def _classify_import_error(detail: str | None) -> str:
     # Keychain access issues — most common on headless runs.
     if ("user interaction is not allowed" in d) or ("interaction is not allowed" in d):
         return "keychain_locked"
-    if ("access denied" in d) or ("errsecauth" in d) or ("-25293" in d):
+    # A keychain DENY can surface two different ways depending on which dialog
+    # the user dismissed:
+    #   - ACL "allow access?" prompt, click Deny  -> errSecAuthFailed (-25293)
+    #   - unlock/confirm prompt, click Cancel/Deny -> errSecUserCanceled (-128)
+    # Both mean "the user actively refused", and both have the same fix (re-run
+    # and click Allow), so collapse them into one type.
+    if (("access denied" in d) or ("errsecauth" in d) or ("-25293" in d)
+            or ("user canceled" in d) or ("user cancelled" in d)
+            or ("errsecusercanceled" in d) or ("-128" in d)):
         return "keychain_acl_denied"
     if ("not be found in the keychain" in d) or ("errsecitemnotfound" in d):
         return "keychain_entry_missing"
@@ -853,8 +868,69 @@ def _configured_handle() -> "str | None":
     return "@" + h.lstrip("@")
 
 
+def _mirror_handle() -> "str | None":
+    """The @handle stamped on the keychain-independent cookie mirror by connect_x,
+    or None. This is what lets status surface the real account BEFORE a project
+    (config.json) exists — the mirror is written the moment X is connected,
+    whereas accounts.twitter.handle only exists once setup writes config.json."""
+    if twitter_cookie_mirror is None:
+        return None
+    try:
+        h = (twitter_cookie_mirror.load_meta() or {}).get("handle") or ""
+    except Exception:
+        return None
+    h = str(h).strip()
+    if not h or h.lower() in _HANDLE_PLACEHOLDERS:
+        return None
+    return "@" + h.lstrip("@")
+
+
+def _durable_handle() -> "str | None":
+    """The known @handle from the most durable source available: config.json first
+    (an intentional, user-confirmed value), then the cookie mirror (stamped at
+    connect time, survives a fresh install with no config.json yet)."""
+    return _configured_handle() or _mirror_handle()
+
+
+def _mirror_has_session() -> bool:
+    """True when the durable 0600 mirror holds an x.com auth_token cookie — i.e. a
+    real X session exists ON DISK even if the managed Chrome isn't live right now.
+
+    This is the fix for the dashboard flipping back to "disconnected" the instant
+    the managed Chrome exits after a successful import: the session is durably
+    saved (and the cycle preflight restores it via restore_twitter_session.py), so
+    status must trust the mirror instead of demanding a live browser."""
+    if twitter_cookie_mirror is None:
+        return False
+    try:
+        cks = twitter_cookie_mirror.load_cookies()
+    except Exception:
+        return False
+    return any(
+        isinstance(c, dict)
+        and c.get("name") == "auth_token"
+        and "x.com" in (c.get("domain") or "")
+        for c in (cks or [])
+    )
+
+
 def cmd_status(args) -> dict:
     if not ensure_chrome(launch=False):
+        # The managed Chrome isn't live, but a durable keychain-independent session
+        # may already exist on disk (the mirror connect_x writes). Trust it so a
+        # successful import doesn't read back as "disconnected" once Chrome exits;
+        # the cycle preflight restores this same mirror before it scans.
+        if _mirror_has_session():
+            return {
+                "ok": True,
+                "connected": True,
+                "state": "connected_idle",
+                "handle": _durable_handle(),
+                "note": "X is connected (session saved). The autoposter's browser "
+                "isn't running this moment; the next cycle restores the session "
+                "from the local mirror automatically.",
+                "cdp": CDP,
+            }
         return {
             "ok": True,
             "connected": False,
@@ -870,14 +946,28 @@ def cmd_status(args) -> dict:
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error",
                 "handle": None, "error": str(e), "cdp": CDP}
+    # Live browser says logged out, but a durable mirror session can still exist
+    # (e.g. Chrome relaunched with a keychain-wiped Cookies DB before the preflight
+    # restore ran). Report it as connected_idle rather than a hard logged_out so
+    # the dashboard doesn't churn between connected and disconnected.
+    if not valid and _mirror_has_session():
+        return {
+            "ok": True,
+            "connected": True,
+            "state": "connected_idle",
+            "handle": _durable_handle(),
+            "note": "X is connected (session saved). The live browser is logged out "
+            "right now; the next cycle restores the session from the local mirror.",
+            "cdp": CDP,
+        }
     return {
         "ok": True,
         "connected": valid,
         "state": "connected" if valid else "logged_out",
-        # Only report a handle when a session exists; logged_out -> null (unknown,
-        # not missing). Callers must not treat a logged_out result as a reason to
-        # ask for / overwrite the handle.
-        "handle": _configured_handle() if valid else None,
+        # Surface the durable handle (config.json OR mirror) on a valid session;
+        # logged_out -> null (unknown, not missing). Callers must not treat a
+        # logged_out result as a reason to ask for / overwrite the handle.
+        "handle": _durable_handle() if valid else None,
         "cdp": CDP,
     }
 
@@ -1006,56 +1096,101 @@ def cmd_connect(args) -> dict:
         except Exception:
             pass
 
-    # 4. Could not establish a valid session automatically -> manual login.
-    #    Put a real, focused X login screen in front of the user (the cron
-    #    pipeline may have parked this window off-screen) and tell them to sign
-    #    in by hand, then re-run connect_x. We never ask for their password and
-    #    never hand-decrypt cookies; they log into their own browser themselves.
-    shown = _show_window_and_open_login()
-
-    # Own the wait: block here until the user finishes the manual login (or the
-    # bounded window elapses) instead of returning `needs_login` instantly and
-    # letting the caller re-check faster than a human can type a password + 2FA.
-    # That race is what made setup misreport the handle as "missing." If the
-    # cookie appears, fall through to the same connected/persist/handle path the
-    # auto-import success branch uses.
-    login_wait = getattr(args, "login_wait", 90.0)
-    if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
-        try:
-            if _is_session_valid():
-                _persist_session()
-                flush_ok, flush_detail = _force_cookie_flush()
-                return {
-                    "ok": True,
-                    "connected": True,
-                    "state": "connected",
-                    "source": "manual_login",
-                    "attempts": attempts,
-                    "flushed_to_disk": flush_ok,
-                    "flush_detail": flush_detail,
-                    "note": "You logged in manually; the autoposter detected the live X "
-                            "session and saved it to its own profile.",
-                    "cdp": CDP,
-                }
-        except Exception:
-            pass
-
-    note = (
-        "A Chrome window for the autoposter is open at the X login page"
-        + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
-        + " and you are NOT logged in yet. Log in there yourself — username, password, "
-        "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
-        "to confirm and I'll re-check (run connect_x again). The session is saved to the "
-        "autoposter's own profile, so this is a one-time step. "
-        "(Auto-import tried: " + ", ".join(sources) + ".)"
-    )
-    # If every attempt classified to the same root cause, surface it so the
-    # caller doesn't keep telling the user "log in manually" when really the
-    # keychain is locked / no source profile exists / CDP isn't reachable.
+    # 4. Could not establish a valid session automatically.
+    #    Roll up the import failure cause FIRST, because whether we shove a Chrome
+    #    login window in front of the user depends on it. We open a focused X login
+    #    screen ONLY when either:
+    #      (a) the user actually DENIED/Cancelled the keychain prompt — auto-import
+    #          genuinely can't proceed, so manual login is the real fallback; or
+    #      (b) the caller explicitly asked for it (--manual-login).
+    #    For every other failure (no X session in the source browser, locked
+    #    keychain, CDP error, unknown) we do NOT pop an unexpected browser window;
+    #    we return needs_login and let the user opt into manual login.
     distinct_error_types = {a.get("error_type") for a in attempts if a.get("error_type")}
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
+    manual_login = bool(getattr(args, "manual_login", False))
+    open_login = manual_login or rolled_up_error_type == "keychain_acl_denied"
+
+    shown = False
+    if open_login:
+        # Put a real, focused X login screen in front of the user (the cron
+        # pipeline may have parked this window off-screen) and tell them to sign
+        # in by hand, then re-run connect_x. We never ask for their password and
+        # never hand-decrypt cookies; they log into their own browser themselves.
+        shown = _show_window_and_open_login()
+
+        # Own the wait: block here until the user finishes the manual login (or the
+        # bounded window elapses) instead of returning `needs_login` instantly and
+        # letting the caller re-check faster than a human can type a password + 2FA.
+        # That race is what made setup misreport the handle as "missing." If the
+        # cookie appears, fall through to the same connected/persist/handle path the
+        # auto-import success branch uses.
+        login_wait = getattr(args, "login_wait", 90.0)
+        if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
+            try:
+                if _is_session_valid():
+                    _persist_session()
+                    flush_ok, flush_detail = _force_cookie_flush()
+                    return {
+                        "ok": True,
+                        "connected": True,
+                        "state": "connected",
+                        "source": "manual_login",
+                        "attempts": attempts,
+                        "flushed_to_disk": flush_ok,
+                        "flush_detail": flush_detail,
+                        "note": "You logged in manually; the autoposter detected the live X "
+                                "session and saved it to its own profile.",
+                        "cdp": CDP,
+                    }
+            except Exception:
+                pass
+
+    # Build the needs_login note from the rolled-up cause + whether a window opened.
+    extra = {}
+    if rolled_up_error_type == "keychain_acl_denied":
+        # The user clicked Deny/Cancel on the keychain prompt. Auto-import would
+        # have worked; they just refused keychain access. Tell them the real fix
+        # (re-run and click Allow), and since we DID open a login window for this
+        # case, point at it as the keychain-free fallback.
+        note = (
+            "It looks like you clicked Deny (or Cancel) on the macOS Keychain prompt. "
+            "To import your X session automatically, the autoposter needs to read Chrome's "
+            "\"Safe Storage\" key from your Keychain. Re-run connect_x and click Allow (or "
+            "Always Allow) on that prompt and the import will finish on its own. "
+            "If you'd rather not grant keychain access, there's already a Chrome window open "
+            "at the X login page"
+            + ("" if shown else " (look for a 'Google Chrome' window)")
+            + " — just log in there by hand and ask me to re-check. "
+            "(Auto-import tried: " + ", ".join(sources) + ".)"
+        )
+        extra["remediation"] = "rerun_connect_x_and_click_allow"
+    elif open_login:
+        # Explicit --manual-login: a window is open and we waited; they just
+        # haven't finished signing in yet.
+        note = (
+            "A Chrome window for the autoposter is open at the X login page"
+            + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
+            + " and you are NOT logged in yet. Log in there yourself — username, password, "
+            "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
+            "to confirm and I'll re-check (run connect_x again). The session is saved to the "
+            "autoposter's own profile, so this is a one-time step. "
+            "(Auto-import tried: " + ", ".join(sources) + ".)"
+        )
+    else:
+        # Auto-import failed for a non-deny reason and the user did NOT ask for
+        # manual login. Do NOT pop a browser window. Explain what happened and
+        # offer manual login as an explicit opt-in.
+        note = (
+            "Couldn't import an X session automatically (auto-import tried: "
+            + ", ".join(sources) + "). This usually means you're not logged into X in "
+            "your everyday browser, so there was no session to copy. I did NOT open a "
+            "login window. If you want to sign in by hand, ask me to connect X with "
+            "manual login and I'll open a focused X login page for you to use."
+        )
+        extra["manual_login_hint"] = "rerun_connect_x_with_manual_login"
     return {
         "ok": True,
         "connected": False,
@@ -1070,6 +1205,7 @@ def cmd_connect(args) -> dict:
         "note": note,
         "profile_dir": str(PROFILE_DIR),
         "cdp": CDP,
+        **extra,
     }
 
 
@@ -1088,6 +1224,12 @@ def main() -> int:
                         "(one keychain prompt for the right browser).")
     c.add_argument("--no-launch", action="store_true",
                    help="Do not launch Chrome if it's down (probe only).")
+    c.add_argument("--manual-login", action="store_true",
+                   help="Explicitly opt into manual login: open a focused X login "
+                        "window and wait for the user to sign in by hand. Without this, "
+                        "the login window only opens when the user DENIED the keychain "
+                        "prompt; every other auto-import failure returns needs_login "
+                        "without popping an unexpected browser window.")
     c.add_argument("--login-wait", type=float, default=90.0,
                    help="Seconds to wait for a MANUAL login to complete before "
                         "returning needs_login (default 90; 0 disables the wait). "

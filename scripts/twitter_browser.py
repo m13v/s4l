@@ -252,50 +252,181 @@ def _is_holder_alive(holder: str) -> bool:
         return True  # err on the side of NOT stealing
 
 
-def _acquire_browser_lock():
-    """Check if another session holds the Twitter browser lock, then acquire it.
+def _is_python_holder_alive(holder: str) -> bool:
+    """Liveness probe for a `python:PID` lock holder.
 
-    Claude Code does not export session_id to subprocesses, so we can't directly
-    match our parent session. Lock holders today are python:PID (from this
-    script's concurrent invocations); UUID-style holders are a legacy artifact
-    of the retired PreToolUse hook (twitter-agent-lock.sh). If a UUID lock is
-    still in flight, inherit it instead of failing; only python:PID holders
-    represent a real conflict.
+    Holders written today are `python:<pid>` (see _LOCK_SESSION_ID). Before this
+    check existed (defect a, 2026-06-16), a holder whose process died WITHOUT
+    running its atexit _release_browser_lock (SIGKILL, OOM, watchdog SIGTERM,
+    hard hang) left the lockfile behind, and _acquire_browser_lock had no way to
+    tell it was dead -- so every peer waited the full LOCK_WAIT_MAX and gave up,
+    and the lock only cleared after LOCK_EXPIRY (300s). os.kill(pid, 0) sends no
+    signal; it just probes existence. Returns True (treat as held, do NOT steal)
+    for anything we cannot prove dead, so the worst case degrades to the old
+    LOCK_EXPIRY failsafe rather than stealing a live peer's lock.
+    """
+    if not holder.startswith("python:"):
+        return True  # not a python holder; this probe makes no claim
+    try:
+        pid = int(holder.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return True  # unparseable holder -> don't steal on this basis
+    try:
+        os.kill(pid, 0)
+        return True            # process exists -> alive
+    except ProcessLookupError:
+        return False           # no such process -> dead, reclaimable
+    except PermissionError:
+        return True            # exists but another owner -> alive
+    except OSError:
+        return True            # ambiguous -> err toward NOT stealing
+
+
+def _try_take_lock() -> bool:
+    """Atomically claim LOCK_FILE for this process. Returns True iff we created
+    it. O_CREAT|O_EXCL makes "is it free? then take it" a single syscall, so two
+    cold-start acquirers can't both win the way the old os.path.exists +
+    open(w) check-then-act allowed (defect c, 2026-06-16). A False return means a
+    peer beat us to it; the caller re-loops and re-evaluates the holder.
+    """
+    try:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    try:
+        os.write(fd, json.dumps(
+            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}
+        ).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+def _acquire_browser_lock():
+    """Acquire the Twitter browser session mutex (~/.claude/twitter-browser-lock.json).
+
+    This file-mutex is the UNIVERSAL serializer for every twitter_browser.py
+    browser op (all of them route through get_browser_and_page below). The shell
+    FIFO lock in skill/lock.sh only serializes the pipelines that bother to take
+    it; this one catches everything, including cross-pipeline handoff races and
+    MCP-driven posts.
+
+    Holders today are python:PID. UUID-style holders are a legacy artifact of the
+    retired PreToolUse hook (twitter-agent-lock.sh); a live UUID holder is a
+    parent Claude session still in flight, so we INHERIT rather than fight it.
+
+    Reclaim priority (a holder we can PROVE is dead is taken immediately, so a
+    crashed peer can never starve the fleet for LOCK_WAIT_MAX/LOCK_EXPIRY):
+      1. holder == us            -> re-entrant; we already hold it.
+      2. UUID holder, pid gone   -> stale legacy lock, reclaim.
+      3. python:PID, pid gone    -> dead peer (defect a fix), reclaim.
+      4. age >= LOCK_EXPIRY      -> failsafe for holders we cannot probe.
+      5. live UUID holder        -> inherit (parent session).
+      6. live python:PID holder  -> real peer; wait, then give up after
+                                    LOCK_WAIT_MAX with a structured error.
+
+    Acquisition itself is atomic (_try_take_lock / O_EXCL), so the moment we
+    decide the lock is free, no concurrent acquirer can also claim it.
+
+    NOTE for future maintainers: do NOT "simplify" this by having the shell
+    pipelines `rm -f` the lockfile around release_lock. That blind rm deleted
+    LIVE peers' locks (defect b) and was removed 2026-06-16. Dead holders are
+    reclaimed here instead. See docs/twitter_browser_lock.md.
     """
     global _LOCK_SESSION_ID, _LOCK_INHERITED
     deadline = time.time() + LOCK_WAIT_MAX
+    # Guarantee the lock dir exists so _try_take_lock's O_EXCL create can't fail
+    # for a missing-parent reason (which would otherwise spin the no-file path).
+    try:
+        os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    except OSError:
+        pass
     while True:
-        if os.path.exists(LOCK_FILE):
+        if not os.path.exists(LOCK_FILE):
+            if _try_take_lock():
+                break
+            # Lost the create race to a peer (or a persistent create failure).
+            # Bound by `deadline` so this path can never spin forever.
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "success": False,
+                    "error": f"Twitter browser lock contended on create; waited {LOCK_WAIT_MAX}s, giving up."
+                }))
+                sys.exit(1)
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+        try:
+            with open(LOCK_FILE) as f:
+                lock = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Corrupt / half-written / vanished between exists() and open().
+            # Try to claim atomically; if a peer holds a valid lock our O_EXCL
+            # create fails and we re-loop. Bounded by `deadline` so a persistently
+            # unreadable lockfile gives up instead of hanging the pipeline.
+            if _try_take_lock():
+                break
+            if time.time() >= deadline:
+                print(json.dumps({
+                    "success": False,
+                    "error": f"Twitter browser lock unreadable; waited {LOCK_WAIT_MAX}s, giving up."
+                }))
+                sys.exit(1)
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+        age = time.time() - lock.get("timestamp", 0)
+        holder = lock.get("session_id", "")
+
+        # 1. Re-entrant: the lock is already ours (same process, or a stale lock
+        # left by a previous process whose PID we have since reused). Refresh the
+        # timestamp so a peer's LOCK_EXPIRY failsafe can't reclaim it under us.
+        if holder == _LOCK_SESSION_ID and not _LOCK_INHERITED:
+            _refresh_browser_lock()
+            break
+
+        # 2-4. Reclaim a holder we can prove is dead/expired. Remove-then-take so
+        # the O_EXCL claim wins; if a peer reclaims at the same instant exactly
+        # one of us creates the file and the other re-loops (never both).
+        reclaim_reason = ""
+        if _UUID_RE.match(holder or "") and not _is_holder_alive(holder):
+            reclaim_reason = "dead_uuid"
+        elif holder.startswith("python:") and not _is_python_holder_alive(holder):
+            reclaim_reason = "dead_python"
+        elif age >= LOCK_EXPIRY:
+            reclaim_reason = "expired"
+        if reclaim_reason:
             try:
-                with open(LOCK_FILE) as f:
-                    lock = json.load(f)
-                age = time.time() - lock.get("timestamp", 0)
-                holder = lock.get("session_id", "")
-                # pgrep alive-check is authoritative: a Claude UUID holder
-                # whose process is gone leaves a stale lockfile (the unlock
-                # hook only refreshes timestamp, not deletes). Same fix as
-                # linkedin_browser.py — see 2026-05-01 14:33 incident.
-                if _UUID_RE.match(holder or "") and not _is_holder_alive(holder):
-                    break  # stale, take it
-                if age >= LOCK_EXPIRY:
-                    break
-                if _UUID_RE.match(holder or ""):
-                    _LOCK_SESSION_ID = holder
-                    _LOCK_INHERITED = True
-                    break
-                if time.time() >= deadline:
-                    print(json.dumps({
-                        "success": False,
-                        "error": f"Twitter browser locked by session {holder} ({int(age)}s); waited {LOCK_WAIT_MAX}s, giving up."
-                    }))
-                    sys.exit(1)
-                time.sleep(LOCK_POLL_INTERVAL)
-                continue
-            except (json.JSONDecodeError, OSError):
+                os.remove(LOCK_FILE)
+            except OSError:
                 pass
-        break
-    with open(LOCK_FILE, "w") as f:
-        json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
+            if _try_take_lock():
+                # Verifiable signal that defect-a starvation was prevented.
+                print(f"[browser_lock] reclaimed holder={holder or '<none>'} "
+                      f"reason={reclaim_reason} age={int(age)}s -> pid={os.getpid()}",
+                      file=sys.stderr)
+                break
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
+
+        # 5. Live UUID holder = parent Claude session still in flight -> inherit.
+        if _UUID_RE.match(holder or ""):
+            _LOCK_SESSION_ID = holder
+            _LOCK_INHERITED = True
+            break
+
+        # 6. Live python:PID peer. Wait, then give up. Reaching the deadline now
+        # means the holder is a genuinely LIVE peer (dead ones were reclaimed
+        # above), i.e. real contention -- NOT the defect-a starvation. The
+        # "locked by session" substring is preserved for downstream parsers.
+        if time.time() >= deadline:
+            print(json.dumps({
+                "success": False,
+                "error": f"Twitter browser locked by session {holder} ({int(age)}s, peer alive); waited {LOCK_WAIT_MAX}s, giving up."
+            }))
+            sys.exit(1)
+        time.sleep(LOCK_POLL_INTERVAL)
+        continue
 
 
 def _refresh_browser_lock():

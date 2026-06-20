@@ -15,8 +15,11 @@ import { runPython } from "./repo.js";
 export interface XAuthResult {
   ok: boolean;
   connected: boolean;
-  // browser_not_running | logged_out | connected | imported | needs_login |
-  // browser_launch_failed | error
+  // browser_not_running | logged_out | connected | connected_idle | imported |
+  // needs_login | browser_launch_failed | error
+  // connected_idle = a durable session exists on disk (the keychain-independent
+  // cookie mirror) but the managed Chrome isn't live this moment; the cycle
+  // preflight restores it. Treated as connected (x_connected true) by the panel.
   state: string;
   // The logged-in @handle when a valid session exists; null = unknown (logged
   // out / browser down), NEVER "missing". setup_twitter_auth.py owns this.
@@ -54,12 +57,20 @@ export async function xStatus(): Promise<XAuthResult> {
 // Ensure the browser is up, validate, and import cookies from the user's
 // everyday browser if needed. `source` optional (e.g. "arc:Default"); default
 // auto-detects chrome/arc/brave/edge.
-export async function xConnect(source?: string): Promise<XAuthResult> {
+export async function xConnect(source?: string, manualLogin?: boolean): Promise<XAuthResult> {
   const args = ["connect"];
   if (source) args.push("--source", source);
+  // Only pop a Chrome login window when the user explicitly asked to sign in by
+  // hand. Without this, auto-import failures (no X session in the browser, etc.)
+  // return needs_login WITHOUT shoving an unexpected browser window in front of
+  // the user; the login window still opens on its own if they DENIED keychain.
+  if (manualLogin) args.push("--manual-login");
   const res = await runPython("scripts/setup_twitter_auth.py", args, {
-    // import opens a real Chrome and may navigate to x.com/home a couple times
-    timeoutMs: 180_000,
+    // import opens a real Chrome and may pop a macOS Keychain auth dialog the
+    // user has to find + click ("Always Allow"). Keep this above the Python
+    // cookie-copy timeout (SAPS_COOKIE_COPY_TIMEOUT, default 600s) so the
+    // wrapper never kills the dialog before the human can.
+    timeoutMs: 660_000,
   });
   return parse(res.stdout, res.stderr, res.code);
 }
@@ -156,6 +167,12 @@ export function summarizeXAuth(r: XAuthResult): string {
   switch (r.state) {
     case "connected":
       return "X is connected (the autoposter browser has a valid x.com session).";
+    case "connected_idle":
+      return (
+        "X is connected (your session is saved). The autoposter's browser isn't " +
+        "running this moment; the next cycle restores it from the local mirror " +
+        "automatically — no action needed."
+      );
     case "imported":
       return `X connected — imported your session from ${r.source ?? "your browser"}.`;
     case "logged_out":

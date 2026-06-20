@@ -59,12 +59,29 @@ echo "[0] stop running processes"
 if [ "$DRY" -eq 0 ]; then
   pkill -f 'social-autoposter-mcp' 2>/dev/null || true
   pkill -f 'browser-harness'       2>/dev/null || true
+  pkill -f 's4l_menubar.py'        2>/dev/null || true
   # packaged Chromium launched from the owned playwright / harness profiles
   pkill -f '\.claude/browser-profiles/browser-harness' 2>/dev/null || true
   sleep 1
 else
-  echo "  (would pkill: social-autoposter-mcp, browser-harness, packaged Chrome)"
+  echo "  (would pkill: social-autoposter-mcp, browser-harness, menu bar app, packaged Chrome)"
 fi
+echo
+
+# ---- 0b. menu bar LaunchAgent ---------------------------------------------
+# The menu bar app runs as a KeepAlive LaunchAgent; its plist lives outside the
+# state dir, so unload + remove it explicitly (its python files under the state
+# dir are removed in [1]). KEEP MENUBAR_LABEL in sync with src/runtime.ts.
+echo "[0b] menu bar LaunchAgent"
+MENUBAR_LABEL="com.m13v.social-autoposter.menubar"
+MENUBAR_PLIST="$HOME_DIR/Library/LaunchAgents/$MENUBAR_LABEL.plist"
+if [ "$DRY" -eq 0 ]; then
+  launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" 2>/dev/null \
+    || launchctl unload "$MENUBAR_PLIST" 2>/dev/null || true
+else
+  echo "  (would bootout $MENUBAR_LABEL)"
+fi
+rm_path "$MENUBAR_PLIST" "menubar-plist"
 echo
 
 # ---- 1. MCP state dir (owned python + venv + materialized repo) ------------

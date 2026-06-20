@@ -155,4 +155,10 @@ scripts/tmp_li_scan/
 scripts/_browser_use_test/
 scripts/*storage_state*.json
 scripts/scratch_*.py
+scripts/tmp_*.py
 scripts/db_direct.py
+*.mcpb
+*.bak
+*.dump
+*_backup_*.json
+scripts/neon-retirement-backup/

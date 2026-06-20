@@ -12,18 +12,14 @@
 #   - scrape tweets via twitter-harness, enrich via fxtwitter -> T0 snapshot
 #   - store all candidates with batch_id and search_topic
 #
-# Sleep 300s.
+# No ripen wait (variant D won the A/B/C/D test 2026-05-31): the cycle goes
+# straight from discovery to drafting. There is NO 5-min sleep and NO fxtwitter
+# T1 re-poll anywhere in the Twitter pipeline. delta_score stays at its T0
+# value and is no longer a gate. Do not re-introduce a ripen/sleep step here.
 #
-# Phase 2 (t=5m):
-#   - re-fetch the same candidates via fxtwitter -> T1 snapshot + delta_score
-#   - SQL gate: floor lowered to delta_score >= 0 so zero-momentum but on-theme
-#     product-discussion tweets (asking for a tool, venting a pain point) can
-#     compete; ranking still favors growth via hybrid sort
-#   - Hybrid sort: ORDER BY (delta_score + product_intent_boost) where
-#     product_intent_boost is +5 when tweet text matches an intent-signal regex
-#     (wish/need/looking for/recommend/alternative/frustrated/etc); raw growth
-#     remains the dominant signal, but a slow-burn "anyone know a tool for..."
-#     tweet now ranks alongside fast-growing news/drama
+# Phase 2 (immediately after Phase 1):
+#   - sort candidates by virality_score DESC (composite predictor stamped at
+#     discovery by score_twitter_candidates.py); no delta floor, no T1 re-poll
 #   - Claude reads top 25 (raised from 15 so the long tail reaches the model),
 #     drops unsuitable, posts every candidate it judges genuinely on-brand
 #     (no per-cycle post cap, no per-project quota)
@@ -45,7 +41,13 @@ set -uo pipefail
 # if the kernel/account caps below this.
 ulimit -n 4096 2>/dev/null || true
 
-REPO_DIR="$HOME/social-autoposter"
+# Honor SAPS_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
+# install that materializes the repo under ~/.social-autoposter-mcp/repo/package
+# resolves correctly. Falls back to the legacy ~/social-autoposter path for
+# npm/git installs and direct invocations. Cascades to every $REPO_DIR/... ref
+# below (sourced libs + child scripts inherit it), so this one line fixes the
+# whole cycle's repo resolution on a bare .mcpb install.
+REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
@@ -97,7 +99,17 @@ TW_ENGINE_PREFIX=""
 # because the salvage loop kept re-carrying stale low-virality junk. A 2h
 # ceiling drops that carry runway so aged-out junk expires instead of riding
 # ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
-FRESHNESS_HOURS=2
+#
+# 2026-06-17 (per user request): DRAFT mode (DRAFT_ONLY=1, the MCP draft_cycle
+# tool) widens both freshness knobs to 24h so human review surfaces more (and
+# older) candidates. Autopilot is untouched: it keeps the experiment-concluded
+# 2h expire ceiling + 1h discovery window (variant D). The branch is on
+# DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    FRESHNESS_HOURS=24
+else
+    FRESHNESS_HOURS=2
+fi
 
 # ----------------------------------------------------------------------------
 # EXPERIMENT CONCLUDED 2026-05-31: variant D won the ripen+freshness A/B/C/D
@@ -114,7 +126,15 @@ FRESHNESS_HOURS=2
 # other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
-FRESHNESS_HOURS_DISCOVER=1
+# DRAFT mode widens discovery to 24h (the twitter-search-since-rewrite.py hook
+# clamps the override to a 1-24h range, so 24 is the accepted max); autopilot
+# keeps the winning D setting of 1h. See the DRAFT_ONLY branch on
+# FRESHNESS_HOURS above (2026-06-17, per user request).
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    FRESHNESS_HOURS_DISCOVER=24
+else
+    FRESHNESS_HOURS_DISCOVER=1
+fi
 # Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
 # drives the expire-stale gate from the same knob (was hardcoded 18h there).
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
@@ -179,9 +199,20 @@ log "Length-control experiment concluded 2026-06-04; winner=control; LENGTH_ARM 
 # spend the sysctl read for the next check.
 source "$REPO_DIR/scripts/preflight.sh"
 SA_PREFLIGHT_SCRIPT="run-twitter-cycle"
-preflight_skip_if_claude_blocked
-preflight_skip_if_jetsam_pressure
-preflight_acquire_slot_or_skip "twitter-cycle" 1
+if [ "${SCAN_ONLY:-0}" = "1" ]; then
+    # SCAN_ONLY (the Desktop-session autopilot's scan step) gets its OWN slot pool
+    # so it is NOT blocked by a live launchd autopilot cycle; the two then serialize
+    # on the twitter-browser lock (acquired in Phase 1) instead of being mutually
+    # exclusive. It also SKIPS the claude-blocked gate: SCAN_ONLY drives no
+    # `claude -p`, so a prior claude cap must not suppress a pure scan.
+    SA_PREFLIGHT_SCRIPT="run-twitter-cycle-scan"
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-scan" 1
+else
+    preflight_skip_if_claude_blocked
+    preflight_skip_if_jetsam_pressure
+    preflight_acquire_slot_or_skip "twitter-cycle" 1
+fi
 
 # Source lock helpers (functions only, no lock acquired here). Phase 0 + the
 # project/queries setup below run lock-free against DB and config files;
@@ -377,7 +408,7 @@ python3 "$REPO_DIR/scripts/twitter_batch_phase.py" start "$BATCH_ID" --phase pha
 #      read from the owner's twitter_batches row:
 #        phase0        ->  5 min  (just the salvage SQL)
 #        phase1        -> 20 min  (Claude scan + scrape)
-#        phase2a       -> 20 min  (5 min sleep + HTTP T1 poll)
+#        phase2a       -> 20 min  (browser-lock handoff window; no ripen wait since 2026-05-31)
 #        phase2b-prep  -> 45 min  (Claude reads threads + drafts; bumped 2026-05-15
 #                                  15 -> 30 after 17:15 cycle was wrongly salvaged
 #                                  while queued behind 17:30's 42-min lock-hold;
@@ -1419,21 +1450,23 @@ if [ "$BATCH_COUNT" = "0" ]; then
     exit 0
 fi
 
-# Stamp phase2a before releasing the lock so the budget covers the entire
-# 5-min wait + HTTP poll window (phase2a budget = 20 min).
+# Stamp phase2a before releasing the lock so the salvage budget covers the
+# browser-lock handoff window (phase2a budget = 20 min).
 python3 "$REPO_DIR/scripts/twitter_batch_phase.py" advance "$BATCH_ID" --phase phase2a 2>&1 | tee -a "$LOG_FILE" || true
 
-# Release the twitter-browser lock during the 5-min T1 wait + HTTP-only Phase 2a.
+# Release the twitter-browser lock between Phase 1 scrape and Phase 2b posting.
 # Other pipelines (engage-twitter, dm-outreach-twitter, link-edit-twitter,
 # stats.sh) can run their browser steps in this window instead of waiting for us
 # to finish. We re-acquire just before Phase 2b posts, blocking up to the
 # acquire_lock timeout if another pipeline is mid-run.
-log "Releasing twitter-browser lock for the T1 wait window (5min sleep + HTTP fxtwitter poll)..."
+log "Releasing twitter-browser lock between Phase 1 scrape and Phase 2b posting..."
 release_lock "twitter-browser" 2>>"$LOG_FILE"
-# Defense-in-depth: clear the twitter_browser.py process lockfile so the next
-# cycle's writer never sees a stale entry from us. run_claude.sh's exit trap
-# already does this; explicit repeat covers SIGKILL of the wrapper.
-rm -f "$HOME/.claude/twitter-browser-lock.json"
+# (2026-06-16) NO `rm -f twitter-browser-lock.json` here. The blind rm was
+# ownership-unaware and ran AFTER release_lock, so under a pipeline handoff it
+# deleted a LIVE peer's session mutex (defect b) -> two browser ops on one X
+# tab. Dead python:PID holders are now reclaimed by _acquire_browser_lock in
+# scripts/twitter_browser.py (os.kill liveness), so the workaround is obsolete
+# AND unsafe. Do NOT re-add it. See docs/twitter_browser_lock.md.
 
 # --- No ripen wait (winning variant D) --------------------------------------
 # The 20-min ripen sleep + fetch_twitter_t1 re-measurement was removed when
@@ -1491,6 +1524,57 @@ if [ -z "$CANDIDATES" ]; then
         --tweets-pulled "${TWEETS_PULLED:-0}" --candidates "${BATCH_COUNT:-0}" \
         --cost "$_COST" --elapsed $(( $(date +%s) - RUN_START ))
     _SA_RUN_SUMMARY_EMITTED=1
+    exit 0
+fi
+
+# --- SCAN_ONLY gate: stop after scoring, emit candidates, skip drafting -------
+# When SCAN_ONLY=1 the cycle runs scan -> score -> top-N select, writes the chosen
+# candidates as JSON, and STOPS before the claude drafting step. The MCP
+# scan_candidates tool reads this so a Claude Desktop scheduled-task session can do
+# the drafting ITSELF (on the user's plan, no `claude -p`) and hand the drafts back
+# via submit_drafts. Candidates stay 'pending' (drafted+posted via submit_drafts ->
+# post_drafts, or salvaged by a later cycle). The browser lock was already released
+# at the Phase 1 handoff, so this exits clean via the EXIT trap. NO current caller
+# sets SCAN_ONLY, so the autopilot/draft_cycle paths are byte-for-byte unchanged.
+if [ "${SCAN_ONLY:-0}" = "1" ]; then
+    SCAN_FILE="/tmp/saps_scan_candidates_${BATCH_ID}.json"
+    # $CANDIDATES is the same pipe-separated top-N the drafting step consumes (cols
+    # documented in twitter_cycle_helper.py:cmd_candidates; tweet_text/draft fields
+    # are pipe+newline sanitized there, so a field split is safe). Batch id + out
+    # path travel via env so the single-quoted python needs no shell interpolation.
+    printf '%s\n' "$CANDIDATES" | SAPS_SCAN_FILE="$SCAN_FILE" SAPS_SCAN_BATCH="$BATCH_ID" python3 -c '
+import json, os, sys
+def _i(x):
+    try:
+        return int(float(x or 0))
+    except Exception:
+        return 0
+def _f(x):
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+out = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line.strip():
+        continue
+    p = line.split("|")
+    if len(p) < 14 or not p[0].isdigit():
+        continue
+    out.append({
+        "id": int(p[0]), "tweet_url": p[1], "author_handle": p[2], "tweet_text": p[3],
+        "virality_score": _f(p[4]), "delta_score": _f(p[5]), "matched_project": p[6],
+        "search_topic": p[7], "likes": _i(p[8]), "retweets": _i(p[9]), "replies": _i(p[10]),
+        "views": _i(p[11]), "author_followers": _i(p[12]), "age_hours": _f(p[13]),
+        "existing_draft": p[14] if len(p) > 14 else "", "existing_draft_style": p[15] if len(p) > 15 else "",
+    })
+json.dump({"batch_id": os.environ["SAPS_SCAN_BATCH"], "candidates": out}, open(os.environ["SAPS_SCAN_FILE"], "w"))
+' 2>/dev/null || printf '{"batch_id": "%s", "candidates": []}' "$BATCH_ID" > "$SCAN_FILE"
+    SCAN_N=$(python3 -c "import json; print(len(json.load(open('$SCAN_FILE')).get('candidates') or []))" 2>/dev/null || echo 0)
+    log "SCAN_ONLY=1: $SCAN_N candidate(s) scored and written to $SCAN_FILE. Stopping before drafting (agent drafts next)."
+    _SA_RUN_SUMMARY_EMITTED=1
+    echo "SCAN_ONLY_RESULT=$SCAN_FILE"
     exit 0
 fi
 
@@ -1889,8 +1973,8 @@ esac
 if [ "${PLAN_COUNT:-0}" = "0" ] || ! $GEN_IS_NOOP; then
     log "Releasing twitter-browser lock (gen step is lock-free)..."
     release_lock "twitter-browser" 2>>"$LOG_FILE"
-    # Defense-in-depth: clear the twitter_browser.py process lockfile; see Phase 1 note.
-    rm -f "$HOME/.claude/twitter-browser-lock.json"
+    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
+    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
 else
     log "Keeping twitter-browser lock through Phase 2b-gen (TWITTER_PAGE_GEN_RATE=$GEN_RATE_RAW, gen is a no-op; skipping release/re-acquire dance)"
 fi
@@ -1952,7 +2036,8 @@ fi
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
     # Not posting, so the browser lock isn't needed; release it if still held.
     release_lock "twitter-browser" 2>>"$LOG_FILE" || true
-    rm -f "$HOME/.claude/twitter-browser-lock.json"
+    # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
+    # in twitter_browser.py now. Do NOT re-add. See Phase 1 note + docs/twitter_browser_lock.md.
     log "DRAFT_ONLY=1: $PLAN_COUNT draft(s) ready for review at $PLAN_FILE. Stopping before post."
     # Emit a clean posted=0 run row and suppress the EXIT-trap summary oneshot, so
     # a draft-only run is NOT mis-synthesized as a phase2b_silent failure (the

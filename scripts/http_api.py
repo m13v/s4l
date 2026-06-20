@@ -24,6 +24,16 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Best-effort Sentry init (no-op if sentry-sdk missing or DSN unset). http_api
+# is the central HTTP-lane client (~100 pipeline scripts import it), so this one
+# hook gives the whole Python pipeline error capture. Mirrors mcp/src/telemetry.ts.
+try:
+    import sentry_init as _sentry_init
+
+    _sentry_init.init()
+except Exception:
+    pass
+
 
 def _build_ssl_context() -> ssl.SSLContext:
     """Pin a known-good trust store, immune to a bad inherited SSL_CERT_FILE.

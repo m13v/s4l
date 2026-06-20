@@ -1,4 +1,4 @@
-/* Social Autoposter control panel.
+/* Social Autoposter (S4L) control panel.
  * Black / white / grayscale only (matches the dashboard palette rule). The host
  * (Claude, etc.) injects its own CSS variables via applyHostStyleVariables; we
  * reference them with safe grayscale fallbacks so it looks native in any host. */
@@ -44,18 +44,20 @@ html, body {
 .wrap {
   max-width: 640px;
   margin: 0 auto;
-  padding: 16px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
+/* ---- header --------------------------------------------------------------- */
 .head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
+.head-left { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
 .title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
 .ver { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 /* The update indicator is an actionable button (black CTA), not just a label. */
@@ -69,36 +71,54 @@ html, body {
   border: 1px solid var(--btn-bg);
 }
 
-.status {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-.card {
-  background: var(--card);
+/* Inline setup summary in the header: a compact "Setup N/7 ▾" dropdown that
+ * expands the milestone details below. The count is hidden once complete, so a
+ * finished setup reads as a quiet "Setup ▾" the user can still open on demand. */
+.setup-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  min-height: 64px;
+  border-radius: 8px;
 }
-.card .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.card .v { font-size: 18px; font-weight: 650; margin-top: 2px; }
-.card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.setup-summary[hidden] { display: none; }
+.setup-summary.complete { color: var(--fg); }
+.setup-summary-label { font-weight: 600; }
+.setup-summary-count { color: var(--muted); }
+.setup-summary-count[hidden] { display: none; }
+.setup-summary.blocked .setup-summary-count { color: var(--fg); font-weight: 600; }
 
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+/* Grayscale expand/collapse caret (a UI affordance, not decoration). Points down
+ * when collapsed, flips up when its control carries the .expanded class. */
+.chevron {
+  width: 0;
+  height: 0;
+  flex: none;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 0.15s ease;
 }
+.expanded .chevron { transform: rotate(180deg); }
+
+/* ---- buttons (one size + style everywhere) -------------------------------- */
 button {
   appearance: none;
   border: 1px solid var(--btn-border);
   background: var(--card);
   color: var(--fg);
   border-radius: 8px;
-  padding: 8px 14px;
+  padding: 7px 12px;
   font-size: 13px;
   font-weight: 550;
+  line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
   transition: opacity 0.12s ease;
 }
@@ -110,36 +130,100 @@ button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: 
 button.ghost { background: var(--bg); }
 button[hidden] { display: none; }
 
-/* Autopilot on/off switch. Grayscale only: track fills to --fg when on, sits at
- * --border when off; the knob is the page background. State carried by position
- * + fill weight, never color. */
-.toggle { position: relative; display: inline-block; width: 40px; height: 22px; margin-top: 4px; }
-.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
-.toggle .slider {
-  position: absolute; inset: 0; cursor: pointer;
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  transition: background 0.15s ease;
-}
-.toggle .slider::before {
-  content: ""; position: absolute;
-  height: 16px; width: 16px; left: 2px; top: 2px;
-  background: var(--bg);
-  border-radius: 50%;
-  transition: transform 0.15s ease;
-}
-.toggle input:checked + .slider { background: var(--fg); border-color: var(--fg); }
-.toggle input:checked + .slider::before { transform: translateX(18px); }
-.toggle input:disabled + .slider { opacity: 0.45; cursor: default; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-/* First-run runtime installer. Grayscale only; status is shown via glyphs +
- * weight, never color. */
+/* ---- unified section card ------------------------------------------------- */
+/* Every body section (live browser, stats) is the same
+ * card: a header row with a sentence-case label on the left and its control(s) on
+ * the right, plus an optional body that reveals below. Same font, padding, and
+ * border everywhere so they line up as one consistent stack. */
+.section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.section[hidden] { display: none; }
+.section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+.section-label { font-size: 13px; font-weight: 600; color: var(--fg); }
+.section-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+/* A whole row that is itself the expand control (stats). Strip the button chrome
+ * so it reads as a plain row, not a nested button. */
+button.section-row-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+}
+button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
+.section-row-toggle .chevron { color: var(--muted); }
+
+/* ---- stats grid (revealed under the stats section row) -------------------- */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
+.stats-grid[hidden] { display: none; }
+.stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.stat .n { font-size: 17px; font-weight: 650; }
+.stat .l { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+/* ---- configuration body --------------------------------------------------- */
+.config-desc { font-size: 12px; color: var(--muted); }
+.config-desc[hidden] { display: none; }
+.config-editor {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+.config-editor[hidden] { display: none; }
+.config-status { font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+
+/* ---- live browser body ---------------------------------------------------- */
+.live-status { font-size: 11px; color: var(--muted); min-height: 14px; }
+.live-img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #000;
+}
+/* `display:block` above would otherwise defeat the HTML `hidden` attribute,
+   leaving an empty <img> that renders a broken-image icon when there's no
+   frame. This higher-specificity rule keeps `hidden` working: no frame, no box. */
+.live-img[hidden] { display: none; }
+
+/* ---- first-run runtime installer ------------------------------------------ */
 .install {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 14px 16px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -147,6 +231,12 @@ button[hidden] { display: none; }
 .install[hidden] { display: none; }
 .install-head { font-size: 14px; font-weight: 650; }
 .install-desc { font-size: 12px; color: var(--muted); }
+.install-actions { display: flex; gap: 8px; }
+.install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
+.install-err[hidden] { display: none; }
+
+/* Shared step list (runtime installer + onboarding milestones). Status carried by
+ * glyph + weight, never color. */
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .steps li {
   display: flex;
@@ -164,58 +254,57 @@ button[hidden] { display: none; }
 }
 .steps li.running { color: var(--fg); }
 .steps li.done { color: var(--fg); }
+.steps li.complete { color: var(--fg); }
+.steps li.in_progress { color: var(--fg); }
 .steps li.pending { opacity: 0.55; }
 .steps li.error { color: var(--fg); font-weight: 600; }
+.steps li.blocked { color: var(--fg); font-weight: 600; }
 .steps li .detail { font-size: 11px; color: var(--muted); }
-.install-actions { display: flex; gap: 8px; }
-.install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
-.install-err[hidden] { display: none; }
 
-.stats { display: flex; flex-direction: column; gap: 8px; }
-.stats-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
-.stat {
+/* ---- onboarding details (revealed from the header setup dropdown) --------- */
+.onboarding-details {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-.stat .n { font-size: 17px; font-weight: 650; }
-.stat .l { font-size: 11px; color: var(--muted); margin-top: 1px; }
-
-/* Config viewer / editor. Grayscale, monospace JSON in a resizable textarea. */
-.config { display: flex; flex-direction: column; gap: 8px; }
-.config-head {
+  border-radius: 10px;
+  padding: 12px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
+  flex-direction: column;
+  gap: 10px;
 }
-.config-head-actions { display: flex; gap: 6px; }
-.config-head-actions button { padding: 5px 10px; font-size: 12px; }
-.config-desc { font-size: 12px; color: var(--muted); }
-.config-editor {
-  width: 100%;
-  min-height: 280px;
-  resize: vertical;
-  background: var(--card);
+.onboarding-details[hidden] { display: none; }
+/* Thin grayscale progress bar: the track is the border tone, the fill is --fg. */
+.onboarding-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.onboarding-bar > span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--fg);
+  border-radius: inherit;
+  transition: width 0.35s ease;
+}
+.onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.onboarding-blocker {
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
-  line-height: 1.45;
-  tab-size: 2;
-  white-space: pre;
-  overflow: auto;
+  font-weight: 600;
+  white-space: pre-wrap;
 }
-.config-editor[hidden] { display: none; }
-.config-status { font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+.onboarding-blocker[hidden] { display: none; }
+
+@media (max-width: 520px) {
+  .onboarding-steps { grid-template-columns: 1fr; }
+}
 
 .log {
   font-size: 12px;
@@ -224,37 +313,3 @@ button[hidden] { display: none; }
   white-space: pre-wrap;
 }
 .muted { color: var(--muted); }
-
-/* Live browser view: a CDP screencast of the managed Chrome, polled by the
-   panel and painted into an <img>. Grayscale chrome only — the frame itself
-   carries the color. */
-.live {
-  margin-top: 14px;
-  padding: 12px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.live-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-.live-head-actions { display: flex; gap: 6px; }
-.live-status { font-size: 11px; color: var(--muted); margin-top: 6px; min-height: 14px; }
-.live-img {
-  display: block;
-  width: 100%;
-  margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #000;
-}
-/* `display:block` above would otherwise defeat the HTML `hidden` attribute,
-   leaving an empty <img> that renders a broken-image icon when there's no
-   frame. This higher-specificity rule keeps `hidden` working: no frame, no box. */
-.live-img[hidden] { display: none; }

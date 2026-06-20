@@ -3,9 +3,9 @@
  *
  * Renders inside the host's sandboxed iframe. It does NOT duplicate any pipeline
  * logic: every button calls one of the server's existing tools (draft_cycle,
- * autopilot, setup, get_stats) through the host via app.callServerTool, and the
- * host pushes results back. First paint comes from the `panel` tool's own
- * structuredContent snapshot; Refresh re-reads via setup(status) + autopilot.
+ * setup, get_stats) through the host via app.callServerTool, and the host pushes
+ * results back. First paint comes from the `panel` tool's own structuredContent
+ * snapshot; Refresh re-reads via setup(status) + runtime(status).
  */
 import {
   applyDocumentTheme,
@@ -27,6 +27,30 @@ interface InstallProgress {
   error?: string;
   steps: ProgressStep[];
 }
+type MilestoneStatus = "pending" | "in_progress" | "complete" | "blocked";
+interface OnboardingMilestone {
+  id: string;
+  status: MilestoneStatus;
+  attempts: number;
+  completed_at?: string;
+  last_error?: string;
+}
+interface OnboardingSnapshot {
+  complete: boolean;
+  milestones: OnboardingMilestone[];
+  current_blocker?: {
+    milestone: string;
+    code: string;
+    message: string;
+    at: string;
+    attempt: number;
+  } | null;
+  doctor?: {
+    phase: string;
+    ok: boolean;
+    summary: { pass: number; fail: number; expected: number; total: number };
+  } | null;
+}
 interface Snapshot {
   projects: ProjStatus[];
   projects_ready: number;
@@ -34,13 +58,12 @@ interface Snapshot {
   x_connected: boolean;
   x_state: string;
   x_handle?: string | null;
-  autopilot_on: boolean;
-  auto_update_on?: boolean;
   version: string;
   latest_version: string | null;
   update_available: boolean;
   runtime_ready: boolean;
   runtime_provisioning?: boolean;
+  onboarding?: OnboardingSnapshot;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -64,15 +87,20 @@ function parseResult(result: CallToolResult): any {
 // ---- DOM ------------------------------------------------------------------
 const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
-const stProj = $("st-proj"), stProjSub = $("st-proj-sub");
-const stX = $("st-x"), stXSub = $("st-x-sub");
-const stApSub = $("st-ap-sub");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
-const apToggle = $("ap-checkbox") as HTMLInputElement;
 const statsGrid = $("stats-grid");
+const statsToggle = $("stats-toggle") as HTMLButtonElement;
 const logEl = $("log");
 const installCard = $("install-card");
+const setupSummary = $("setup-summary") as HTMLButtonElement;
+const onboardingDetails = $("onboarding-details");
+const onboardingSteps = $("onboarding-steps");
+const onboardingBlocker = $("onboarding-blocker");
+const onboardingCount = $("onboarding-count");
+const onboardingBarFill = $("onboarding-bar-fill");
+const liveCard = $("live-card");
+const statsCard = $("stats-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
@@ -81,16 +109,13 @@ const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
-const configEditor = $("config-editor") as HTMLTextAreaElement;
-const configStatus = $("config-status");
-const btnConfigLoad = $("btn-config-load") as HTMLButtonElement;
-const btnConfigSave = $("btn-config-save") as HTMLButtonElement;
-const btnConfigCancel = $("btn-config-cancel") as HTMLButtonElement;
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
+let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
-let configLoaded = ""; // last-loaded raw config, for dirty-check + cancel
+let setupDetailsOpen = false; // header setup dropdown expanded state
+let statsOpen = false; // "Last 7 days stats" dropdown expanded state
 
 function log(msg: string) { logEl.textContent = msg; }
 
@@ -120,8 +145,88 @@ function renderInstallProgress(p: InstallProgress | null) {
   else installErr.hidden = true;
 }
 
+const MILESTONE_LABELS: Record<string, string> = {
+  environment_checked: "Environment checked",
+  runtime_ready: "Runtime ready",
+  x_connected: "X connected",
+  profile_scanned: "Profile scanned",
+  project_ready: "Project ready",
+  topics_seeded: "Topics seeded",
+  draft_verified: "Draft cycle verified",
+};
+
+function milestoneGlyph(status: MilestoneStatus): string {
+  switch (status) {
+    case "complete": return "\u2713";
+    case "in_progress": return "\u2026";
+    case "blocked": return "\u00d7";
+    default: return "\u00b7";
+  }
+}
+
+// Reflect the setupDetailsOpen flag onto the dropdown button + details panel.
+function applySetupDetails() {
+  onboardingDetails.hidden = !setupDetailsOpen;
+  setupSummary.setAttribute("aria-expanded", String(setupDetailsOpen));
+  setupSummary.classList.toggle("expanded", setupDetailsOpen);
+}
+
+function renderOnboarding(progress?: OnboardingSnapshot) {
+  if (!progress || !Array.isArray(progress.milestones)) {
+    setupSummary.hidden = true;
+    onboardingDetails.hidden = true;
+    return;
+  }
+  // The header always carries the setup dropdown once a ledger exists, so the
+  // milestone details stay reachable even after setup completes.
+  setupSummary.hidden = false;
+
+  const total = progress.milestones.length;
+  const completed = progress.milestones.filter((m) => m.status === "complete").length;
+  const blocked = !!progress.current_blocker && !progress.complete;
+  setupSummary.classList.toggle("complete", progress.complete);
+  setupSummary.classList.toggle("blocked", blocked);
+
+  // The "N/total" counter is shown only while setup is incomplete; once complete
+  // it collapses to a bare "Setup ▾" dropdown (progress no longer surfaced inline).
+  onboardingCount.hidden = progress.complete;
+  onboardingCount.textContent = blocked
+    ? `${completed}/${total} · needs you`
+    : setupPolling
+      ? `${completed}/${total} · setting up…`
+      : `${completed}/${total}`;
+  onboardingBarFill.style.width =
+    total > 0 ? `${Math.round((completed / total) * 100)}%` : "0%";
+
+  onboardingSteps.innerHTML = progress.milestones
+    .map((milestone) => {
+      const label = MILESTONE_LABELS[milestone.id] || milestone.id;
+      const attempts = milestone.attempts > 1
+        ? ` <span class="detail">${milestone.attempts} attempts</span>`
+        : "";
+      return (
+        `<li class="${milestone.status}">` +
+        `<span class="glyph">${milestoneGlyph(milestone.status)}</span>` +
+        `<span>${label}${attempts}</span></li>`
+      );
+    })
+    .join("");
+  if (progress.current_blocker) {
+    onboardingBlocker.textContent =
+      `Current blocker: ${progress.current_blocker.message}`;
+    onboardingBlocker.hidden = false;
+    // A blocker needs the user — force the details open so it isn't buried in a
+    // collapsed dropdown.
+    setupDetailsOpen = true;
+  } else {
+    onboardingBlocker.hidden = true;
+  }
+  applySetupDetails();
+}
+
 function render() {
   if (!state) return;
+  renderOnboarding(state.onboarding);
   // Version + update button. When an update is available the badge is an actual
   // button that installs the latest release (delegated click on verEl, since the
   // button is recreated on every render).
@@ -129,50 +234,36 @@ function render() {
     ? `v${state.version} \u00b7 <button id="btn-update" class="update-btn">Update to ${state.latest_version}</button>`
     : `v${state.version}`;
 
-  // Runtime install gate: until the owned Python/Chromium runtime exists, the
-  // Install card is the primary (and only enabled) surface. Everything else is
-  // disabled because no pipeline tool can run without the interpreter.
+  // Show runtime status until the owned Python/Chromium runtime exists. The
+  // end-to-end Set up action remains enabled: the agent owns installation too.
+  // The direct install button is only a manual repair/fallback surface.
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
-  // Projects.
-  stProj.textContent = `${state.projects_ready}/${state.projects_total}`;
-  stProjSub.textContent = state.projects_total === 0
-    ? "none configured"
-    : state.projects.map((p) => p.name + (p.ready ? "" : " (incomplete)")).join(", ");
-
-  // X / Twitter. When connected, prefer showing the resolved @handle (the
-  // account we post as); fall back to the raw state string. A null handle while
-  // connected just means it wasn't resolved this read — never "missing".
-  stX.textContent = state.x_connected ? "Connected" : "Not connected";
-  const handle = state.x_handle
-    ? (state.x_handle.startsWith("@") ? state.x_handle : "@" + state.x_handle)
-    : "";
-  stXSub.textContent = state.x_connected
-    ? (handle || state.x_state || "")
-    : (state.x_state || "");
-
-  // Autopilot. Rendered as an on/off switch in the status card rather than a
-  // button — checked == hands-free posting is live.
-  apToggle.checked = !!state.autopilot_on;
-  stApSub.textContent = state.autopilot_on
-    ? (state.auto_update_on ? "on \u00b7 auto-update on" : "on")
-    : "off";
-
-  // Gate actions on readiness. Nothing below works without the runtime, so when
-  // it's missing every action is disabled and the Install card carries the only
-  // live button.
+  // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
+  // exists, at least one project is fully configured, and the X session is
+  // connected. Until all three hold, the panel is intentionally minimal — just
+  // the Set up button (or the Install card while the runtime is missing) — and
+  // Run draft cycle is hidden. Once complete, Set up disappears and Run draft
+  // cycle is the single primary action.
   const hasReady = state.projects_ready > 0;
-  btnSetup.disabled = needsRuntime;
+  const setupComplete = !needsRuntime && hasReady && state.x_connected;
+
+  // Two mutually exclusive primary actions: Set up before completion, Run draft
+  // cycle after. Never both at once.
+  btnSetup.hidden = setupComplete;
+  btnDraft.hidden = !setupComplete;
+  btnSetup.disabled = false;
   btnDraft.disabled = needsRuntime || !hasReady;
-  apToggle.disabled = needsRuntime || !hasReady;
-  // When nothing is configured yet, Set up is the obvious next action, so
-  // promote it to the primary (filled) style and demote draft (which is
-  // disabled anyway). Once a project is ready, draft regains the emphasis. While
-  // the runtime is missing, neither gets emphasis — the Install button does.
-  const needsSetup = !hasReady;
-  btnSetup.classList.toggle("primary", !needsRuntime && needsSetup);
-  btnDraft.classList.toggle("primary", !needsRuntime && !needsSetup);
+  btnSetup.classList.toggle("primary", !setupComplete);
+  btnDraft.classList.toggle("primary", setupComplete);
+
+  // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
+  // product is configured and posting. Hide them until setup is complete so the
+  // pre-setup view stays a minimal "just set up" interface; the Install card
+  // (gated above) is the only thing shown while the runtime is still installing.
+  liveCard.hidden = !setupComplete;
+  statsCard.hidden = !setupComplete;
 }
 
 function applyState(snap: Partial<Snapshot>) {
@@ -193,6 +284,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
+    onboarding: o.onboarding,
   };
 }
 
@@ -235,16 +327,14 @@ async function refresh() {
   try {
     // install_status is cheap and tells us whether the runtime gate is cleared;
     // pull it alongside the usual status so a refresh re-evaluates the gate.
-    const [setupStatus, ap, rt] = await Promise.all([
-      call("setup", { status: true }),
-      call("autopilot", { action: "status" }),
-      call("install_status").catch(() => ({})),
+    const [setupStatus, rt] = await Promise.all([
+      call("project_config", { status: true }),
+      call("runtime", { action: "status" }).catch(() => ({})),
     ]);
     applyState({
       ...fromSetupStatus(setupStatus),
-      autopilot_on: !!ap.loaded,
-      auto_update_on: !!ap.auto_update_loaded,
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
+      onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
     log("");
@@ -264,8 +354,9 @@ async function pollInstall() {
   btnInstall.textContent = "Installing\u2026";
   try {
     for (;;) {
-      const rt = await call("install_status").catch(() => ({} as any));
+      const rt = await call("runtime", { action: "status" }).catch(() => ({} as any));
       renderInstallProgress(rt.progress ?? null);
+      if (rt.onboarding) applyState({ onboarding: rt.onboarding });
       if (rt.runtime_ready) {
         applyState({ runtime_ready: true });
         log("Runtime installed; you're ready to set up.");
@@ -283,6 +374,42 @@ async function pollInstall() {
     }
   } finally {
     installPolling = false;
+  }
+}
+
+// Follow the autonomous setup the agent runs in the chat. The onboarding ledger
+// advances as the agent completes each milestone (connect X, scan profile, save
+// project, seed topics, draft-verify), so we poll the cheap install_status —
+// which carries both the runtime install progress and the onboarding snapshot —
+// and repaint the Setup progress card live until every milestone is done. This
+// is pollInstall's twin, extended past runtime_ready to the end of setup.
+async function pollSetup() {
+  if (setupPolling) return;
+  setupPolling = true;
+  render(); // flip the header to "setting up…" immediately
+  const startedAt = Date.now();
+  const MAX_MS = 20 * 60 * 1000; // safety stop: setup is autonomous, not infinite
+  try {
+    for (;;) {
+      const rt = await call("runtime", { action: "status" }).catch(() => ({} as any));
+      if (rt.progress) renderInstallProgress(rt.progress);
+      const patch: Partial<Snapshot> = {};
+      if (typeof rt.runtime_ready === "boolean") patch.runtime_ready = rt.runtime_ready;
+      if (rt.onboarding) patch.onboarding = rt.onboarding;
+      if (Object.keys(patch).length) applyState(patch);
+      if ((rt.onboarding as OnboardingSnapshot | undefined)?.complete) {
+        // Final full read flips the gating (Set up -> Run draft cycle), reveals
+        // the status/stats cards, and loads 7-day stats.
+        await refresh();
+        log("Setup complete.");
+        break;
+      }
+      if (Date.now() - startedAt > MAX_MS) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } finally {
+    setupPolling = false;
+    render(); // drop the "setting up…" hint
   }
 }
 
@@ -317,10 +444,11 @@ function busy(btn: HTMLButtonElement, label: string, fn: () => Promise<void>) {
 
 // ---- button handlers ------------------------------------------------------
 // Setup is the one action that genuinely needs the model in the loop (it reads
-// setup/SKILL.md and drives the browser-login wizard). Unlike the other buttons
+// setup/SKILL.md and drives autonomous discovery plus any unavoidable login).
+// Unlike the other buttons
 // (which call server tools directly via callServerTool, no model involved), this
 // injects a real user turn into the host conversation via sendMessage, so Claude
-// takes a turn and runs the wizard right there in the chat.
+// takes a turn and runs the end-to-end setup flow right there in the chat.
 btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async () => {
   log("Asking Claude to run setup\u2026");
   try {
@@ -329,50 +457,55 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       content: [{
         type: "text",
         text:
-          "Run the social autoposter setup wizard: configure my project " +
-          "(website, what I do, who to target, brand voice) and connect my X/Twitter account. " +
-          "Walk me through it step by step.",
+          "Set up social autoposter end to end now. Inspect and repair the runtime, auto-detect " +
+          "and connect my X session, scan my profile, discover and research my product, then infer " +
+          "and save a complete project with seeded search topics. Keep going without asking me to " +
+          "approve each safe setup step. Ask only if I must interactively sign in or no product " +
+          "can be identified. Keep every reply to me extremely concise: a few short sentences at " +
+          "most, no step-by-step narration or long status walls. If you must ask me something (e.g. " +
+          "the product URL), make it one short question.",
       }],
     });
     if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
-    else log("Setup started in the chat \u2014 follow the prompts there, then hit Refresh.");
+    else {
+      log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
+      // Follow the agent's progress live and repaint the Setup progress card as
+      // each milestone lands, instead of waiting for a manual Refresh.
+      void pollSetup();
+    }
   } catch (e: any) {
     log("Couldn\u2019t start setup: " + (e?.message || e));
   }
 }));
+
+// ---- collapsible sections -------------------------------------------------
+// The header setup dropdown and the "Last 7 days stats" header are the only two
+// expand/collapse controls. Both just flip a local boolean and re-apply it; the
+// setup details panel also auto-opens on a blocker (handled in renderOnboarding).
+setupSummary.addEventListener("click", () => {
+  setupDetailsOpen = !setupDetailsOpen;
+  applySetupDetails();
+});
+
+statsToggle.addEventListener("click", () => {
+  statsOpen = !statsOpen;
+  statsGrid.hidden = !statsOpen;
+  statsToggle.setAttribute("aria-expanded", String(statsOpen));
+  statsToggle.classList.toggle("expanded", statsOpen);
+});
 
 btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
   log("Drafting\u2026 the draft list appears in the chat for review.");
   try {
     const r = await call("draft_cycle");
     const n = r.drafted ?? 0;
+    if (r.onboarding) applyState({ onboarding: r.onboarding });
     if (n) log(`Drafted ${n} \u2014 review them in the chat and choose which to post.`);
     else log("No drafts produced.");
+    void refresh();
     void loadStats();
   } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
 }));
-
-// The autopilot switch flips state directly. We disable it during the round-trip
-// and revert the checkbox if the tool call fails, so it never shows a state the
-// server didn't confirm.
-apToggle.addEventListener("change", async () => {
-  if (!state) return;
-  const desired = apToggle.checked;
-  const action = desired ? "enable" : "disable";
-  apToggle.disabled = true;
-  log(desired ? "Enabling autopilot\u2026" : "Disabling autopilot\u2026");
-  try {
-    const r = await call("autopilot", { action });
-    const on = action === "enable" ? !!(r.autopilot?.loaded) : !(r.autopilot_unloaded);
-    applyState({ autopilot_on: on });
-    log(`Autopilot ${on ? "enabled" : "disabled"}.`);
-  } catch (e: any) {
-    apToggle.checked = state.autopilot_on; // revert to last confirmed state
-    log("Autopilot toggle failed: " + (e?.message || e));
-  } finally {
-    render(); // re-applies readiness gating to the switch
-  }
-});
 
 // In-header update button. Created fresh by render() whenever an update is
 // available, so the click is delegated off verEl rather than bound to the
@@ -390,7 +523,7 @@ async function runUpdate() {
   if (btn) { btn.disabled = true; btn.textContent = "Updating\u2026"; }
   log("Installing the latest release\u2026 this can take a minute.");
   try {
-    const r = await call("version", { action: "update" });
+    const r = await call("runtime", { action: "update" });
     if (r.ok) {
       log(`Updated to ${r.latest_published || "the latest version"}. ${r.takes_effect || "Restart the client to apply."}`);
       if (btn) btn.textContent = "Update installed \u2014 restart to apply";
@@ -412,7 +545,7 @@ btnInstall.addEventListener("click", async () => {
   btnInstall.textContent = "Starting\u2026";
   log("Installing the runtime \u2014 this is a one-time download (~150MB+).");
   try {
-    const r = await call("install_runtime");
+    const r = await call("runtime", { action: "install" });
     if (r.runtime_ready) { applyState({ runtime_ready: true }); void refresh(); return; }
     renderInstallProgress(r.progress ?? null);
     void pollInstall();
@@ -425,58 +558,9 @@ btnInstall.addEventListener("click", async () => {
 });
 
 // ---- config view / edit ---------------------------------------------------
-// Read-only by default; the textarea opens on "View config" and becomes
-// editable. Save round-trips through the `config` tool, which validates JSON and
-// writes a timestamped backup before overwriting config.json.
-function showConfigEditing(on: boolean) {
-  configEditor.hidden = !on;
-  btnConfigSave.hidden = !on;
-  btnConfigCancel.hidden = !on;
-  btnConfigLoad.hidden = on;
-}
-
-btnConfigLoad.addEventListener("click", () => busy(btnConfigLoad, "Loading\u2026", async () => {
-  configStatus.textContent = "";
-  try {
-    const r = await call("config", { action: "get" });
-    if (!r.ok) { configStatus.textContent = "Couldn't load config: " + (r.error || "unknown error"); return; }
-    configLoaded = r.content || "";
-    configEditor.value = configLoaded;
-    showConfigEditing(true);
-    configStatus.textContent = `Loaded ${r.bytes ?? configLoaded.length} bytes. Edit and Save, or Cancel.`;
-    // The config card sits near the bottom of a tall panel; in a constrained
-    // host viewport the freshly-opened editor lands below the fold, so the click
-    // looks like a no-op. Pull it into view so the user actually sees it open.
-    try { configEditor.scrollIntoView({ behavior: "smooth", block: "center" }); } catch { /* older host */ }
-  } catch (e: any) {
-    configStatus.textContent = "Couldn't load config: " + (e?.message || e);
-  }
-}));
-
-btnConfigCancel.addEventListener("click", () => {
-  configEditor.value = configLoaded;
-  showConfigEditing(false);
-  configStatus.textContent = "";
-});
-
-btnConfigSave.addEventListener("click", () => busy(btnConfigSave, "Saving\u2026", async () => {
-  const content = configEditor.value;
-  if (content === configLoaded) { configStatus.textContent = "No changes to save."; return; }
-  // Client-side parse first so an obvious typo is caught before the round-trip.
-  try { JSON.parse(content); }
-  catch (e: any) { configStatus.textContent = "Invalid JSON, not saved: " + (e?.message || e); return; }
-  try {
-    const r = await call("config", { action: "save", content });
-    if (!r.ok) { configStatus.textContent = "Save failed: " + (r.error || "unknown error"); return; }
-    configLoaded = content;
-    showConfigEditing(false);
-    configStatus.textContent = `Saved ${r.bytes ?? content.length} bytes. Backup: ${r.backup || "(none)"}`;
-    // Project list / handle may have changed; re-read status.
-    void refresh();
-  } catch (e: any) {
-    configStatus.textContent = "Save failed: " + (e?.message || e);
-  }
-}));
+// Removed: raw config.json view/edit. All project changes now go through the
+// `project_config` tool (validates, merges, re-seeds topics) — there is no
+// raw-overwrite surface in the panel anymore.
 
 // ---- live browser view ----------------------------------------------------
 // Polls the show_browser_to_user tool, which keeps a CDP screencast of the

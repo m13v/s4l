@@ -3,58 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Social Autoposter</title>
+    <title>S4L</title>
   </head>
   <body>
     <div class="wrap">
       <header class="head">
-        <div class="title">Social Autoposter</div>
-        <div class="ver" id="ver"></div>
+        <div class="head-left">
+          <span class="title">S4L</span>
+          <span class="ver" id="ver"></span>
+        </div>
+        <!-- Inline setup summary + expand dropdown. The counter shows only while
+             setup is incomplete; once complete this collapses to just a "Setup"
+             dropdown so the milestone details stay inspectable on demand. -->
+        <button
+          class="setup-summary"
+          id="setup-summary"
+          type="button"
+          hidden
+          aria-expanded="false"
+        >
+          <span class="setup-summary-label">Setup</span>
+          <span class="setup-summary-count" id="onboarding-count"></span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
       </header>
 
+      <section class="onboarding-details" id="onboarding-details" hidden>
+        <div class="onboarding-bar"><span id="onboarding-bar-fill"></span></div>
+        <ul class="steps onboarding-steps" id="onboarding-steps"></ul>
+        <div class="onboarding-blocker" id="onboarding-blocker" hidden></div>
+      </section>
+
       <section class="install" id="install-card" hidden>
-        <div class="install-head">Finish setup</div>
+        <div class="install-head">Runtime not installed yet</div>
         <div class="install-desc" id="install-desc">
-          One-time install of the private Python runtime and Chromium browser the
-          autoposter needs. Nothing is added to your system Python.
+          The Set up button handles this automatically. Use the runtime-only
+          button below only if you want to install or repair it separately.
+          Nothing is added to your system Python.
         </div>
         <ul class="steps" id="install-steps"></ul>
         <div class="install-actions">
-          <button id="btn-install" class="primary">Install runtime</button>
+          <button id="btn-install">Install runtime only</button>
         </div>
         <div class="install-err" id="install-err" hidden></div>
       </section>
 
-      <section class="status">
-        <div class="card">
-          <div class="k">Projects</div>
-          <div class="v" id="st-proj">&mdash;</div>
-          <div class="sub" id="st-proj-sub"></div>
-        </div>
-        <div class="card">
-          <div class="k">X / Twitter</div>
-          <div class="v" id="st-x">&mdash;</div>
-          <div class="sub" id="st-x-sub"></div>
-        </div>
-        <div class="card">
-          <div class="k">Autopilot</div>
-          <label class="toggle" title="Turn hands-free background posting on or off">
-            <input type="checkbox" id="ap-checkbox" disabled />
-            <span class="slider"></span>
-          </label>
-          <div class="sub" id="st-ap-sub"></div>
-        </div>
-      </section>
-
       <section class="actions">
         <button id="btn-setup">Set up</button>
-        <button id="btn-draft" class="primary">Run draft cycle</button>
+        <button id="btn-draft" class="primary" hidden>Run draft cycle</button>
       </section>
 
-      <section class="live" id="live-card">
-        <div class="live-head">
-          <span>Live browser</span>
-          <div class="live-head-actions">
+      <section class="section" id="live-card" hidden>
+        <div class="section-row">
+          <span class="section-label">Live browser</span>
+          <div class="section-actions">
             <button id="btn-live" class="ghost">Show browser</button>
             <button id="btn-live-stop" class="ghost" hidden>Hide browser</button>
             <button id="btn-live-front" class="ghost">Bring to front</button>
@@ -64,38 +66,24 @@
         <img id="live-img" class="live-img" hidden alt="Live browser view" />
       </section>
 
-      <section class="stats">
-        <div class="stats-head">Last 7 days</div>
-        <div class="stats-grid" id="stats-grid">
+      <section class="section" id="stats-card" hidden>
+        <button
+          class="section-row section-row-toggle"
+          id="stats-toggle"
+          type="button"
+          aria-expanded="false"
+        >
+          <span class="section-label">Last 7 days stats</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
+        <div class="stats-grid" id="stats-grid" hidden>
           <div class="muted">&mdash;</div>
         </div>
       </section>
 
-      <section class="config" id="config-card">
-        <div class="config-head">
-          <span>Configuration</span>
-          <div class="config-head-actions">
-            <button id="btn-config-load" class="ghost">View config</button>
-            <button id="btn-config-save" class="primary" hidden>Save</button>
-            <button id="btn-config-cancel" class="ghost" hidden>Cancel</button>
-          </div>
-        </div>
-        <div class="config-desc" id="config-desc">
-          The full config.json: every project, account handle, topics, and
-          exclusions. Editing saves a timestamped backup before overwriting.
-        </div>
-        <textarea
-          id="config-editor"
-          class="config-editor"
-          spellcheck="false"
-          autocomplete="off"
-          hidden
-        ></textarea>
-        <div class="config-status" id="config-status"></div>
-      </section>
-
       <div class="log" id="log"></div>
     </div>
+
     <script type="module" src="./panel.ts"></script>
   </body>
 </html>

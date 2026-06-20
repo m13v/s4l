@@ -1,6 +1,6 @@
 {
   "name": "social-autoposter",
-  "version": "1.6.64",
+  "version": "1.6.74",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
     "social-autoposter": "bin/cli.js"
@@ -9,7 +9,7 @@
     "start": "node bin/server.js",
     "dev": "node --watch bin/server.js",
     "release:mcpb": "bash scripts/release-mcpb.sh",
-    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js && node test/tweetclaw-candidates.test.js"
+    "test": "node test/platform.test.js && node test/launchd-golden.test.js && node test/systemd-golden.test.js && node test/tweetclaw-candidates.test.js && node mcp/scripts/test_onboarding_contract.mjs && node mcp/scripts/test_onboarding_ledger.mjs"
   },
   "files": [
     "bin/",
@@ -87,7 +87,6 @@
     "!scripts/export_kent_handoff.py",
     "!scripts/extract_user_messages_today.py",
     "!scripts/fazm_seo_health.py",
-    "!scripts/fetch_twitter_t1.py",
     "!scripts/fix_mdx_light_mode.py",
     "!scripts/fix_style_lengths_20260601.py",
     "!scripts/fix_svg_paragraph_wrap.py",
@@ -123,6 +122,7 @@
     "mcp-servers/",
     "mcp/dist/",
     "!mcp/dist/pipeline.tgz",
+    "mcp/menubar/",
     "mcp/package.json",
     "mcp/manifest.json",
     "mcp/install.mjs",

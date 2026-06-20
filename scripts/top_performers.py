@@ -19,7 +19,6 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import db as dbmod
 
 MIN_CONTENT_LEN = 30  # skip posts with empty/placeholder content
 
@@ -193,7 +192,7 @@ def annotate_failure(row):
 _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = None
 
 
-def _load_active_campaign_suffixes(conn=None):
+def _load_active_campaign_suffixes():
     """Best-effort: return a list of currently-active campaign suffix literals.
 
     Cached per-process. Used to strip the suffix from `our_content` before
@@ -201,44 +200,26 @@ def _load_active_campaign_suffixes(conn=None):
     echo the suffix in its drafts (which then double-fires with the
     tool-layer injection, observed 2026-05-18 on Reddit IDs 70412 + 70413).
     On any failure returns []: missing strip is preferable to crashing
-    the report pipeline.
-
-    Dual-path: when `conn` is given (legacy direct-DB path) reads directly;
-    otherwise routes through the HTTP API (/api/v1/campaigns) like the
-    rest of the codebase. main() typically calls with conn=None.
+    the report pipeline. Routes through the HTTP API (/api/v1/campaigns).
     """
     global _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
     if _ACTIVE_CAMPAIGN_SUFFIXES_CACHE is not None:
         return _ACTIVE_CAMPAIGN_SUFFIXES_CACHE
     suffixes = []
-    if conn is not None:
-        try:
-            rows = conn.execute(
-                "SELECT suffix FROM campaigns "
-                "WHERE status = 'active' AND suffix IS NOT NULL AND TRIM(suffix) != ''"
-            ).fetchall()
-            for r in rows:
-                s = (r[0] or "").strip()
-                if s and s not in suffixes:
-                    suffixes.append(s)
-        except Exception as e:
-            print(f"[top_performers] _load_active_campaign_suffixes (db) failed: {e}",
-                  file=sys.stderr)
-    else:
-        try:
-            from http_api import api_get
-            resp = api_get(
-                "/api/v1/campaigns",
-                query={"status": "active", "has_suffix": "true", "limit": 500},
-            )
-            rows = ((resp or {}).get("data") or {}).get("campaigns") or []
-            for r in rows:
-                s = (r.get("suffix") or "").strip()
-                if s and s not in suffixes:
-                    suffixes.append(s)
-        except Exception as e:
-            print(f"[top_performers] _load_active_campaign_suffixes (api) failed: {e}",
-                  file=sys.stderr)
+    try:
+        from http_api import api_get
+        resp = api_get(
+            "/api/v1/campaigns",
+            query={"status": "active", "has_suffix": "true", "limit": 500},
+        )
+        rows = ((resp or {}).get("data") or {}).get("campaigns") or []
+        for r in rows:
+            s = (r.get("suffix") or "").strip()
+            if s and s not in suffixes:
+                suffixes.append(s)
+    except Exception as e:
+        print(f"[top_performers] _load_active_campaign_suffixes (api) failed: {e}",
+              file=sys.stderr)
     _ACTIVE_CAMPAIGN_SUFFIXES_CACHE = suffixes
     return suffixes
 
@@ -260,287 +241,6 @@ def _strip_active_campaign_suffixes(text, suffixes):
                 cleaned = cleaned[: -len(sfx)].rstrip()
                 changed = True
     return cleaned
-
-
-def get_style_performance(conn, platform=None):
-    """Avg upvotes AND avg comments per engagement_style for the given platform.
-
-    Comments are reported alongside upvotes so Claude can see which styles
-    drive discussion (the strongest imitation signal), not just which accumulate
-    passive upvotes.
-    """
-    where_clauses = [
-        "status = 'active'",
-        "engagement_style IS NOT NULL",
-        "our_content IS NOT NULL",
-        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
-        "upvotes IS NOT NULL",
-    ]
-    _r = _recency_clause()
-    if _r:
-        where_clauses.append(_r)
-    params = []
-    if platform:
-        where_clauses.append("platform = %s")
-        params.append(platform)
-    where = " AND ".join(where_clauses)
-    # Style averages now include avg_clicks too; clicks are the ground-truth
-    # behavioral signal and styles that drive zero clicks (no matter how
-    # many comments) should be visible as suspect.
-    cur = conn.execute(
-        f"{POSTS_WITH_CLICKS_CTE}"
-        f"SELECT engagement_style, COUNT(*) as cnt, "
-        f"AVG({UPVOTES_NET_SQL})::numeric(10,2) as avg_up, "
-        f"AVG(COALESCE(comments_count,0))::numeric(10,2) as avg_cm, "
-        f"AVG(COALESCE(clicks,0))::numeric(10,2) as avg_clicks, "
-        f"MAX({UPVOTES_NET_SQL}) as max_up, "
-        f"MAX(comments_count) as max_cm, "
-        f"MAX(clicks) as max_clicks "
-        f"FROM posts_w_clicks WHERE {where} "
-        f"GROUP BY engagement_style "
-        f"ORDER BY avg_clicks DESC, avg_cm DESC, avg_up DESC",
-        params,
-    )
-    return cur.fetchall()
-
-
-def get_project_platform_summary(conn, project=None, platform=None):
-    """Post count and avg upvotes per project per platform.
-
-    When project/platform are given, show:
-    - The filtered project across all platforms (for cross-platform context)
-    - The filtered platform across all projects (for competitive context)
-    """
-    where_clauses = [
-        "status = 'active'",
-        "platform NOT IN ('github_issues','hackernews','dev','youtube','github')",
-        "our_content IS NOT NULL",
-        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
-    ]
-    _r = _recency_clause()
-    if _r:
-        where_clauses.append(_r)
-
-    if project and platform:
-        # Show this project on all platforms + this platform for all projects
-        filter_sql = f"(COALESCE(project_name, '(no project)') = %s OR platform = %s)"
-        params = [project, platform]
-    elif project:
-        filter_sql = "COALESCE(project_name, '(no project)') = %s"
-        params = [project]
-    elif platform:
-        filter_sql = "platform = %s"
-        params = [platform]
-    else:
-        filter_sql = None
-        params = []
-
-    if filter_sql:
-        where_clauses.append(filter_sql)
-
-    where = " AND ".join(where_clauses)
-    cur = conn.execute(
-        f"{POSTS_WITH_CLICKS_CTE}"
-        f"SELECT COALESCE(project_name, '(no project)') as proj, platform, "
-        f"COUNT(*) as cnt, "
-        f"AVG({UPVOTES_NET_SQL})::numeric(10,1) as avg_up, "
-        f"AVG(COALESCE(comments_count,0))::numeric(10,1) as avg_cm, "
-        f"AVG(COALESCE(clicks,0))::numeric(10,2) as avg_clicks, "
-        f"MAX({UPVOTES_NET_SQL}) as max_up, "
-        f"MAX(comments_count) as max_cm, "
-        f"MAX(clicks) as max_clicks, "
-        f"SUM(COALESCE(clicks,0)) as total_clicks "
-        f"FROM posts_w_clicks WHERE {where} "
-        f"GROUP BY project_name, platform "
-        f"ORDER BY proj, avg_clicks DESC, avg_cm DESC, avg_up DESC",
-        params
-    )
-    return cur.fetchall()
-
-
-def get_top_posts(conn, project=None, platform=None, limit=15, min_score=None):
-    """Top performing posts with full factual details.
-
-    Ranks by composite SCORE_SQL (comments*3 + upvotes, Reddit -1) so that
-    discussion-driving posts surface even with modest upvote counts. Threshold
-    is per-platform (see PLATFORM_MIN_SCORE) since reactions/likes/upvotes have
-    different scales. If project is given and has no posts meeting the
-    threshold, returns None so the caller can fall back to general posts.
-    """
-    if min_score is None:
-        min_score = min_score_for(platform)
-    where_clauses = [
-        "status = 'active'",
-        "upvotes IS NOT NULL",
-        f"{SCORE_SQL} >= {min_score}",
-        "our_content IS NOT NULL",
-        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
-        "platform NOT IN ('github_issues')",
-    ]
-    _r = _recency_clause()
-    if _r:
-        where_clauses.append(_r)
-    params = []
-    if project:
-        where_clauses.append("project_name = %s")
-        params.append(project)
-    if platform:
-        where_clauses.append("platform = %s")
-        params.append(platform)
-
-    where = " AND ".join(where_clauses)
-    # Fetch extra rows so we can filter out anti-pattern examples.
-    # Tiebreaker uses UPVOTES_NET_SQL so two posts with identical scores on
-    # Reddit/Moltbook order by net upvotes (not net + self-upvote noise) —
-    # matches every other display in this script and on the dashboard.
-    #
-    # Column 11 (`clicks`) is the new bot-filtered click count, surfaced so
-    # callers (and format_post below) can show "[X clicks]" alongside
-    # upvotes/comments. Order tiebreaker also threads clicks DESC so two
-    # posts with the same composite score sort the higher-click one first.
-    fetch_limit = limit * 3
-    cur = conn.execute(
-        f"{POSTS_WITH_CLICKS_CTE}"
-        f"SELECT id, platform, upvotes, comments_count, views, "
-        f"our_content, thread_title, thread_content, "
-        f"project_name, posted_at::date, our_account, clicks "
-        f"FROM posts_w_clicks WHERE {where} "
-        f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
-        f"         {UPVOTES_NET_SQL} DESC LIMIT %s",
-        params + [fetch_limit]
-    )
-    rows = cur.fetchall()
-    # Click-aware anti-pattern filter (2026-05-12 fix).
-    #
-    # The old rule was: drop any post whose content contains a product
-    # name OR a URL. That made sense pre-2026-05-07 when we ranked by
-    # comments/upvotes — links suppressed organic reach and the model
-    # would learn to drop them. After the click signal came online, the
-    # rule started filtering OUT our highest-converting examples:
-    # Mediar's best post drove 40 clicks but contained a URL (it had to,
-    # to be clickable), and the filter removed it from the few-shot
-    # context, leaving Claude staring at "(no Mediar posts meeting
-    # threshold)" while 40 clicks of proof sat one filter away.
-    #
-    # New rule:
-    #   - Product-name mentions (PRODUCT_NAMES): still filter unconditionally.
-    #     We don't want Claude learning to namedrop the project.
-    #   - URLs / www. references: filter ONLY if the post has zero clicks.
-    #     A URL-bearing post that drove real human clicks IS the gold
-    #     example by definition.
-    clean = []
-    for r in rows:
-        content = r[5] or ""
-        clicks = r[11] if len(r) > 11 and r[11] is not None else 0
-        lower = content.lower()
-        # Product-name gate: hard filter regardless of clicks.
-        if any(name in lower for name in PRODUCT_NAMES):
-            continue
-        # URL gate: only filter when there's no click evidence.
-        has_url = ("http://" in lower or "https://" in lower or "www." in lower)
-        if has_url and clicks == 0:
-            continue
-        clean.append(r)
-    return clean[:limit]
-
-
-def get_top_post_per_style(conn, platform=None):
-    """Top posts per engagement_style, so the prompt can show a concrete
-    real-world exemplar next to each style the model might pick.
-
-    Returns a flat list of rows with the standard 12-column post shape PLUS
-    a 13th column (engagement_style). Up to 3 rows per style are returned
-    (ranked by SCORE_SQL) so the caller can run the same anti-pattern filter
-    (_apply_top_filter) and still land a clean exemplar if the #1 post is a
-    product-name / zero-click-URL post. The caller keeps only the best
-    surviving row per style.
-
-    No min_score gate here on purpose: even a style whose best post is weak
-    is informative — the per-style header stats make the weakness visible,
-    and a weak "best" tells the model the style has not landed yet.
-    """
-    where_clauses = [
-        "status = 'active'",
-        "engagement_style IS NOT NULL",
-        "upvotes IS NOT NULL",
-        "our_content IS NOT NULL",
-        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
-        "platform NOT IN ('github_issues')",
-    ]
-    _r = _recency_clause()
-    if _r:
-        where_clauses.append(_r)
-    params = []
-    if platform:
-        where_clauses.append("platform = %s")
-        params.append(platform)
-    where = " AND ".join(where_clauses)
-    cur = conn.execute(
-        f"{POSTS_WITH_CLICKS_CTE}"
-        f", ranked AS ("
-        f"  SELECT id, platform, upvotes, comments_count, views, "
-        f"         our_content, thread_title, thread_content, "
-        f"         project_name, posted_at::date AS posted_at_date, "
-        f"         our_account, clicks, engagement_style, "
-        f"         ROW_NUMBER() OVER ("
-        f"           PARTITION BY engagement_style "
-        f"           ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
-        f"                    {UPVOTES_NET_SQL} DESC"
-        f"         ) AS rn "
-        f"    FROM posts_w_clicks WHERE {where}"
-        f") "
-        f"SELECT id, platform, upvotes, comments_count, views, "
-        f"       our_content, thread_title, thread_content, "
-        f"       project_name, posted_at_date, our_account, clicks, engagement_style "
-        f"FROM ranked WHERE rn <= 3 "
-        f"ORDER BY engagement_style, rn",
-        params,
-    )
-    return cur.fetchall()
-
-
-def get_bottom_posts(conn, project=None, platform=None, limit=10):
-    """Worst performing posts (zero-engagement by composite score).
-
-    Uses SCORE_SQL = 0 as the failure gate instead of `upvotes < 1`. This
-    correctly catches Reddit posts sitting at upvotes=1 with no comments
-    (which the old filter missed because the OP self-upvote clears `< 1`),
-    and still captures zero-engagement posts across all platforms.
-    """
-    where_clauses = [
-        "status = 'active'",
-        "upvotes IS NOT NULL",
-        f"{SCORE_SQL} = 0",
-        "our_content IS NOT NULL",
-        f"LENGTH(our_content) >= {MIN_CONTENT_LEN}",
-        "platform NOT IN ('github_issues')",
-    ]
-    _r = _recency_clause()
-    if _r:
-        where_clauses.append(_r)
-    params = []
-    if project:
-        where_clauses.append("project_name = %s")
-        params.append(project)
-    if platform:
-        where_clauses.append("platform = %s")
-        params.append(platform)
-
-    where = " AND ".join(where_clauses)
-    # SCORE_SQL=0 already means zero clicks AND zero comments AND zero
-    # upvotes_net, so bottom posts are still "all three dead" — the click
-    # term doesn't change which rows qualify, just makes the failure mode
-    # visible in the display.
-    cur = conn.execute(
-        f"{POSTS_WITH_CLICKS_CTE}"
-        f"SELECT id, platform, upvotes, comments_count, views, "
-        f"our_content, thread_title, thread_content, "
-        f"project_name, posted_at::date, our_account, clicks "
-        f"FROM posts_w_clicks WHERE {where} "
-        f"ORDER BY posted_at DESC LIMIT %s",
-        params + [limit]
-    )
-    return cur.fetchall()
 
 
 def format_post(row, include_thread_content=True, suffix_strip_list=None):
@@ -824,60 +524,6 @@ def _fetch_report_via_api(*, platform, project, top, bottom):
             fallback_filtered, top_by_group, top_by_style)
 
 
-def _fetch_report_via_db(*, platform, project, top, bottom):
-    conn = dbmod.get_conn()
-    try:
-        summary = get_project_platform_summary(conn, project=project, platform=platform)
-        style_perf = get_style_performance(conn, platform=platform)
-        top_posts = get_top_posts(conn, project=project, platform=platform, limit=top)
-        bottom_posts = get_bottom_posts(conn, project=project, platform=platform, limit=bottom)
-        top_by_style = get_top_post_per_style(conn, platform=platform)
-        fallback_top = None
-        if project and not top_posts:
-            fallback_top = get_top_posts(conn, project=None, platform=platform, limit=top)
-        top_by_group = None
-        if not project:
-            top_by_group = {}
-            min_score = min_score_for(platform)
-            platform_filter = "AND platform = %s" if platform else ""
-            platform_params = [platform] if platform else []
-            _r = _recency_clause()
-            recency_filter = f"AND {_r} " if _r else ""
-            cur = conn.execute(
-                f"{POSTS_WITH_CLICKS_CTE}"
-                f"SELECT DISTINCT COALESCE(project_name, '(no project)') FROM posts_w_clicks "
-                f"WHERE status = 'active' AND platform NOT IN ('github_issues') "
-                f"AND our_content IS NOT NULL AND LENGTH(our_content) >= %s "
-                f"AND upvotes IS NOT NULL AND {SCORE_SQL} >= %s "
-                f"{platform_filter} {recency_filter}"
-                f"ORDER BY 1",
-                [MIN_CONTENT_LEN, min_score] + platform_params,
-            )
-            projects = [row[0] for row in cur.fetchall()]
-            for proj in projects:
-                proj_filter = proj if proj != "(no project)" else None
-                where_extra = "AND project_name = %s" if proj_filter else "AND project_name IS NULL"
-                params = ([proj_filter] if proj_filter else []) + platform_params
-                cur = conn.execute(
-                    f"{POSTS_WITH_CLICKS_CTE}"
-                    f"SELECT id, platform, upvotes, comments_count, views, "
-                    f"our_content, thread_title, thread_content, "
-                    f"project_name, posted_at::date, our_account, clicks "
-                    f"FROM posts_w_clicks WHERE status = 'active' AND {SCORE_SQL} >= {min_score} "
-                    f"AND our_content IS NOT NULL AND LENGTH(our_content) >= {MIN_CONTENT_LEN} "
-                    f"AND platform NOT IN ('github_issues') "
-                    f"{where_extra} {platform_filter} {recency_filter}"
-                    f"ORDER BY {SCORE_SQL} DESC, COALESCE(clicks,0) DESC, "
-                    f"         {UPVOTES_NET_SQL} DESC LIMIT 5",
-                    params,
-                )
-                top_by_group[proj] = cur.fetchall()
-        return (summary, style_perf, top_posts, bottom_posts,
-                fallback_top, top_by_group, top_by_style)
-    finally:
-        conn.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Generate top performers feedback report")
     parser.add_argument("--platform", default=None, help="Filter to specific platform")
@@ -897,12 +543,8 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     args = parser.parse_args()
 
-    if os.environ.get("SOCIAL_AUTOPOSTER_LEGACY_NEON") == "1":
-        fetch = _fetch_report_via_db
-    else:
-        fetch = _fetch_report_via_api
     (summary, style_perf, top, bottom, fallback_top,
-     top_by_group, top_by_style) = fetch(
+     top_by_group, top_by_style) = _fetch_report_via_api(
         platform=args.platform, project=args.project, top=args.top, bottom=args.bottom,
     )
 

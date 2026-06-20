@@ -9,8 +9,8 @@ an empty schema. The cycle preflight calls this to heal that automatically:
   1. Attach to the harness Chrome (TWITTER_CDP_URL, default 127.0.0.1:9555 —
      the Mac harness port; AppMaker VMs override it to :9222 via the env file).
   2. Navigate to x.com/home; if it redirects to /login, the session is gone.
-  3. Load cookies, mirror-first: the local 0600 mirror written on every connect
-     (keychain-independent), then the server store for machines with a handle.
+  3. Load cookies from the local 0600 mirror written on every connect
+     (keychain-independent).
   4. Inject them via CDP Network.setCookies and reload.
   5. Verify we land on /home (logged in).
 
@@ -29,11 +29,10 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from http_api import api_get  # noqa: E402
-from twitter_account import resolve_handle  # noqa: E402
 
-# Local 0600 cookie mirror — the keychain-independent restore source for
-# persistent machines (Gap B). Tried before the server store. Stdlib-only;
+# Local 0600 cookie mirror — the keychain-independent restore source (Gap B).
+# It is the ONLY cookie source; the VM-era server store
+# (/api/v1/twitter/session-cookies) was removed 2026-06-17. Stdlib-only;
 # guarded so a path quirk never breaks the cycle preflight.
 try:
     import twitter_cookie_mirror  # noqa: E402
@@ -125,10 +124,10 @@ def _inject(send, cookies) -> int:
 
 
 def _stored_cookies():
-    """Return (cookies, source). Tries the LOCAL mirror first — it's the only
-    durable source on a persistent machine, where the server store is skipped
-    for lack of a social_accounts row — then falls back to the server store
-    (the durable source on hourly-reseeded AppMaker VMs)."""
+    """Return (cookies, source) from the LOCAL 0600 mirror, or ([], None).
+
+    The mirror is the only cookie source; the VM-era server store
+    (/api/v1/twitter/session-cookies) was removed 2026-06-17."""
     if twitter_cookie_mirror is not None:
         try:
             mirrored = twitter_cookie_mirror.load_cookies()
@@ -136,20 +135,6 @@ def _stored_cookies():
             mirrored = []
         if mirrored:
             return mirrored, f"local mirror ({twitter_cookie_mirror.MIRROR_PATH.name})"
-
-    handle = None
-    try:
-        handle = resolve_handle()
-    except Exception:
-        handle = None
-    if handle:
-        try:
-            resp = api_get("/api/v1/twitter/session-cookies", query={"handle": handle})
-            cookies = ((resp or {}).get("data") or {}).get("cookies") or []
-            if cookies:
-                return cookies, f"server store (@{handle})"
-        except Exception as e:
-            print(f"restore_twitter_session: server store fetch failed ({e})", file=sys.stderr)
     return [], None
 
 
@@ -167,8 +152,8 @@ def main():
 
         cookies, source = _stored_cookies()
         if not cookies:
-            print("restore_twitter_session: no stored cookies (local mirror empty + no "
-                  "server store); manual connect_x required", file=sys.stderr)
+            print("restore_twitter_session: no stored cookies (local mirror empty); "
+                  "manual connect_x required", file=sys.stderr)
             return 1
 
         print(f"restore_twitter_session: logged out, restoring from {source}...")

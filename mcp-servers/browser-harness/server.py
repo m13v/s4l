@@ -60,8 +60,49 @@ LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.chrom
 MCP_LOG_FILE = Path.home() / ".claude" / "browser-profiles" / f"{PROFILE_NAME}.mcp.log"
 
 
+def _playwright_chromium_bins() -> list[str]:
+    """Chromium binaries the runtime's `playwright install chromium` step drops
+    into the shared ms-playwright cache, newest revision first.
+
+    A .mcpb user with no system Chrome (e.g. only Arc installed) still gets a
+    working browser here because the runtime download lands in this cache. The
+    rev number (chromium-1208/1217/1223/...) changes per Playwright pin, and the
+    bundle is named "Google Chrome for Testing" on recent revs / "Chromium" on
+    older ones, so we glob rather than hardcode. macOS uses chrome-mac[-arm64];
+    Linux uses chrome-linux.
+    """
+    cache = Path.home() / "Library" / "Caches" / "ms-playwright"  # macOS
+    linux_cache = Path.home() / ".cache" / "ms-playwright"  # Linux
+    patterns = [
+        # macOS, newer revs (arm64 + x64): "Google Chrome for Testing"
+        "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        # macOS, older revs: "Chromium"
+        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
+        # Linux
+        "chromium-*/chrome-linux/chrome",
+    ]
+    found: list[str] = []
+    for root in (cache, linux_cache):
+        if not root.exists():
+            continue
+        for pat in patterns:
+            for hit in root.glob(pat):
+                if hit.exists():
+                    found.append(str(hit))
+
+    def _rev(p: str) -> int:
+        # Sort by the chromium-<rev> number so the newest install wins.
+        for part in Path(p).parts:
+            if part.startswith("chromium-") and part[len("chromium-"):].isdigit():
+                return int(part[len("chromium-"):])
+        return 0
+
+    return sorted(set(found), key=_rev, reverse=True)
+
+
 def _detect_chrome_bin() -> str:
-    """Find the Chrome binary on disk. Env override wins."""
+    """Find the Chrome binary on disk. Env override wins. Returns "" if nothing
+    real is found (callers can then trigger an install fallback)."""
     env = os.environ.get("BH_CHROME_BIN")
     if env and Path(env).exists():
         return env
@@ -81,14 +122,56 @@ def _detect_chrome_bin() -> str:
         if Path(p).exists():
             return p
 
+    # The runtime's own bundled Chromium (ms-playwright cache). This is what
+    # makes setup work on a machine with no system Chrome installed.
+    for p in _playwright_chromium_bins():
+        return p
+
     # Fall back to PATH lookup.
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         found = shutil.which(name)
         if found:
             return found
 
-    # Last-resort default (matches the pre-2026-05-20 hardcoded value).
-    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    return ""
+
+
+def _chrome_exists(p: str) -> bool:
+    return bool(p) and (Path(p).exists() or shutil.which(p) is not None)
+
+
+def _venv_python() -> str | None:
+    """The runtime venv interpreter (has playwright). Mirrors runtime.ts:
+    <SAPS_STATE_DIR|~/.social-autoposter-mcp>/runtime/.venv/bin/python3."""
+    state_dir = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
+    if sys.platform == "win32":
+        cand = state_dir / "runtime" / ".venv" / "Scripts" / "python.exe"
+    else:
+        cand = state_dir / "runtime" / ".venv" / "bin" / "python3"
+    return str(cand) if cand.exists() else None
+
+
+def _install_chromium() -> dict:
+    """Last-ditch fallback when no Chromium is found anywhere: run
+    `playwright install chromium` so a fresh machine self-heals instead of
+    dead-ending at no_chrome_binary. Uses the runtime venv if present, otherwise
+    the interpreter running this server. The download lands in the shared
+    ms-playwright cache that _detect_chrome_bin() globs."""
+    py = _venv_python() or sys.executable
+    _log(f"no chromium found; attempting `playwright install chromium` via {py}")
+    try:
+        r = subprocess.run(
+            [py, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=int(os.environ.get("BH_CHROME_INSTALL_TIMEOUT_SEC", "600")),
+        )
+    except Exception as e:  # noqa: BLE001
+        _log(f"chromium install failed to launch: {e}")
+        return {"ok": False, "python": py, "error": str(e)}
+    ok = r.returncode == 0
+    _log(f"chromium install exit={r.returncode}")
+    return {"ok": ok, "python": py, "exit": r.returncode, "out": (r.stdout + r.stderr)[-600:]}
 
 
 def _detect_browser_harness_bin() -> str:
@@ -277,15 +360,25 @@ def _launch_url() -> str:
 
 def ensure_chrome() -> dict:
     """Make sure our managed Chrome is running on PORT. Idempotent."""
+    global CHROME_BIN
     if _cdp_alive():
         return {"status": "already_running", "pid": _read_pid(), "cdp": CDP_URL}
 
-    if not Path(CHROME_BIN).exists() and not shutil.which(CHROME_BIN):
-        return {
-            "status": "no_chrome_binary",
-            "looked_for": CHROME_BIN,
-            "hint": "Set BH_CHROME_BIN to your Chrome/Chromium path, or install google-chrome / chromium.",
-        }
+    if not _chrome_exists(CHROME_BIN):
+        # Re-detect (the runtime may have finished its chromium download since
+        # this server booted), then auto-install as a last resort so a fresh
+        # machine self-heals instead of dead-ending here.
+        CHROME_BIN = _detect_chrome_bin()
+        if not _chrome_exists(CHROME_BIN):
+            install = _install_chromium()
+            CHROME_BIN = _detect_chrome_bin()
+            if not _chrome_exists(CHROME_BIN):
+                return {
+                    "status": "no_chrome_binary",
+                    "looked_for": CHROME_BIN or "(none found)",
+                    "install_attempt": install,
+                    "hint": "Auto-install of chromium failed. Set BH_CHROME_BIN to a Chrome/Chromium path, or run `playwright install chromium`.",
+                }
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)

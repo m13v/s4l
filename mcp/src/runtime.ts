@@ -27,6 +27,42 @@ import { fileURLToPath } from "node:url";
 // Pin the standalone CPython series the venv is built from. Bump deliberately.
 const PYTHON_VERSION = "3.12";
 
+// The CDP scan engine the twitter cycle shells out to (~/.local/bin/browser-harness).
+// The npm front door (bin/cli.js) clones + `uv tool install -e` this; a bare
+// .mcpb install never did, so draft_cycle's scan found no engine and produced
+// zero drafts. KEEP BROWSER_HARNESS_PIN IN SYNC WITH bin/cli.js (pinned so
+// upstream drift can't reach users untested).
+const BROWSER_HARNESS_PIN = "6d20866664ea3d9691b27bbf64f42ae097437dc3";
+const BROWSER_HARNESS_REPO = "https://github.com/browser-use/browser-harness";
+const HARNESS_DIR = path.join(os.homedir(), "Developer", "browser-harness");
+const HARNESS_BIN = path.join(os.homedir(), ".local", "bin", "browser-harness");
+
+// The harness drives a REAL Google Chrome over CDP (see twitter-backend.sh
+// _resolve_chrome_bin). Nothing installs Chrome, the runtime only ever
+// downloaded Playwright's Chromium (which the cycle does NOT use), so a .mcpb
+// install on a Chrome-less Mac green-lit every step and then died mid-cycle with
+// "no Chrome/Chromium binary found." These are the paths twitter-backend.sh
+// probes (plus ~/Applications, the no-sudo fallback target we install into).
+const GOOGLE_CHROME_DMG =
+  "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg";
+const CHROME_CANDIDATES = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  path.join(
+    os.homedir(),
+    "Applications",
+    "Google Chrome.app",
+    "Contents",
+    "MacOS",
+    "Google Chrome"
+  ),
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/snap/bin/chromium",
+];
+
 // dist/runtime.js -> repo root is two levels up (mcp/dist -> mcp -> repo root).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +89,24 @@ const REPO_MATERIALIZE_DIR = path.join(STATE_DIR, "repo");
 const MATERIALIZED_REPO = path.join(REPO_MATERIALIZE_DIR, "package");
 // dist/runtime.js sits beside the embedded tarball produced at build time.
 const EMBEDDED_TARBALL = path.join(__dirname, "pipeline.tgz");
+
+// ---- menu bar app (macOS status-bar mini-dashboard) ------------------------
+// Provisioned as install Step 8 and re-ensured at server boot. The rumps app
+// runs from the owned venv as a KeepAlive LaunchAgent, pointed at a STABLE copy
+// under the state dir (NOT the extension dir, which is replaced on every
+// update). KEEP MENUBAR_LABEL in sync with menubar/s4l_state.py and
+// scripts/reset-test-machine.sh.
+export const MENUBAR_LABEL = "com.m13v.social-autoposter.menubar";
+export const MENUBAR_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${MENUBAR_LABEL}.plist`
+);
+const MENUBAR_DIR = path.join(STATE_DIR, "menubar");
+const MENUBAR_ENTRY = path.join(MENUBAR_DIR, "s4l_menubar.py");
+const MENUBAR_OUT_LOG = path.join(MENUBAR_DIR, "menubar.out.log");
+const MENUBAR_ERR_LOG = path.join(MENUBAR_DIR, "menubar.err.log");
 
 // A directory is a usable pipeline clone only if it carries requirements.txt
 // (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
@@ -92,6 +146,12 @@ export interface RuntimeInfo {
   // double-click it's the repo we materialize from the embedded tarball under
   // the state dir. Persisted so resolveRepoDir() finds it on later boots.
   repo_dir?: string;
+  // Absolute path to the Google Chrome (or Chromium) binary the harness drives
+  // over CDP. Detected if already installed, else installed by provision() on
+  // macOS. Persisted so the server can export it as BH_CHROME_BIN for the cycle
+  // (the cycle's own _resolve_chrome_bin doesn't scan ~/Applications, our
+  // no-sudo fallback target). Absent on a host where Chrome resolves via PATH.
+  chrome?: string;
   ready: boolean;
   provisioned_at: string;
 }
@@ -120,6 +180,9 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
   { id: "venv", label: "Create owned virtual environment" },
   { id: "deps", label: "Install pipeline dependencies" },
   { id: "chromium", label: "Download Chromium browser (~150MB)" },
+  { id: "harness", label: "Install browser-harness (CDP scan engine)" },
+  { id: "chrome", label: "Install Google Chrome (browser the scanner drives)" },
+  { id: "menubar", label: "Install menu bar app" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -155,6 +218,40 @@ export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
   return process.env.SAPS_PYTHON || "python3";
+}
+
+// First Chrome/Chromium binary that exists AND is executable, from the same
+// paths twitter-backend.sh probes (plus ~/Applications). Returns null when none
+// is on disk (the cycle's own PATH-based resolver may still find one).
+function detectChromeBin(): string | null {
+  const cands = [process.env.BH_CHROME_BIN, ...CHROME_CANDIDATES];
+  for (const c of cands) {
+    if (!c) continue;
+    try {
+      fs.accessSync(c, fs.constants.X_OK);
+      return c;
+    } catch {
+      /* not present / not executable; try next */
+    }
+  }
+  return null;
+}
+
+// Resolve the Chrome binary the cycle should drive: the provisioned path from
+// runtime.json first (catches our ~/Applications fallback install, which the
+// shell's _resolve_chrome_bin doesn't scan), then live detection, then the env
+// override. null means "let the shell resolve it from PATH."
+export function resolveChrome(): string | null {
+  const rt = readRuntime();
+  if (rt && rt.chrome) {
+    try {
+      fs.accessSync(rt.chrome, fs.constants.X_OK);
+      return rt.chrome;
+    } catch {
+      /* recorded path went away; fall through to live detection */
+    }
+  }
+  return detectChromeBin() || process.env.BH_CHROME_BIN || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +411,25 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       return fail(`unpacking pipeline source failed (exit ${r.code}). ${r.out.slice(-400)}`);
     }
     resolvedRepo = MATERIALIZED_REPO;
+    // Compatibility symlink: the pipeline scripts (run-twitter-cycle.sh and ~40
+    // siblings) hardcode $HOME/social-autoposter for REPO_DIR. A bare .mcpb
+    // materializes the repo under the state dir, so those paths don't resolve.
+    // Plant ~/social-autoposter -> materialized repo so every hardcoded
+    // reference resolves at once. Only when the path is entirely free: never
+    // clobber a real npm/git clone or any pre-existing entry (lstat catches
+    // dirs, files, and dangling symlinks; existsSync would miss a dangling one).
+    try {
+      const compat = path.join(os.homedir(), "social-autoposter");
+      let occupied = true;
+      try {
+        fs.lstatSync(compat);
+      } catch {
+        occupied = false;
+      }
+      if (!occupied) fs.symlinkSync(MATERIALIZED_REPO, compat);
+    } catch {
+      /* best effort; SAPS_REPO_DIR + the run-*.sh fallback also resolve the repo */
+    }
     setStep("repo", "done", `unpacked to ${resolvedRepo}`);
   }
 
@@ -387,12 +503,132 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   }
   setStep("chromium", "done");
 
+  // --- Step 6: browser-harness CLI -----------------------------------------
+  // The twitter cycle (run-twitter-cycle.sh) drives Chrome over CDP by shelling
+  // out to ~/.local/bin/browser-harness. The npm installer (bin/cli.js) clones
+  // browser-use/browser-harness and `uv tool install -e`s it; a bare .mcpb
+  // install never provisioned it, so the scan engine was missing and every
+  // draft_cycle returned "no candidates". This brings .mcpb to parity with npm.
+  setStep("harness", "running");
+  {
+    // Clone if absent (mkdir parent first), else reuse the checkout.
+    if (!fs.existsSync(HARNESS_DIR)) {
+      fs.mkdirSync(path.dirname(HARNESS_DIR), { recursive: true });
+      const clone = await sh(
+        "git",
+        ["clone", "--depth", "1", BROWSER_HARNESS_REPO, HARNESS_DIR],
+        { timeoutMs: 180000 }
+      );
+      if (clone.code !== 0) {
+        return fail(`browser-harness clone failed (exit ${clone.code}). ${clone.out.slice(-400)}`);
+      }
+    }
+    // Pin to the known-good commit (fetch the exact SHA, hard-reset). Best
+    // effort: a transient fetch failure falls back to the existing checkout.
+    await sh("git", ["-C", HARNESS_DIR, "fetch", "--depth", "1", "origin", BROWSER_HARNESS_PIN], {
+      timeoutMs: 120000,
+    });
+    await sh("git", ["-C", HARNESS_DIR, "reset", "--hard", "FETCH_HEAD"], { timeoutMs: 60000 });
+    // Install the CLI via uv tool (lands at ~/.local/bin/browser-harness).
+    // --force so a refreshed source / changed entry point is reinstalled.
+    const inst = await sh(uv, ["tool", "install", "--force", "-e", HARNESS_DIR], {
+      env: uvEnv,
+      timeoutMs: 300000,
+    });
+    if (inst.code !== 0 || !fs.existsSync(HARNESS_BIN)) {
+      return fail(
+        `browser-harness CLI install failed (exit ${inst.code}); ${HARNESS_BIN} missing. ` +
+          `${inst.out.slice(-400)}`
+      );
+    }
+    // Drop the harness daemon's cached code so the next run loads fresh (best effort).
+    await sh(HARNESS_BIN, ["--reload"], { timeoutMs: 30000 });
+  }
+  setStep("harness", "done", HARNESS_BIN);
+
+  // --- Step 7: Google Chrome (the browser the harness drives over CDP) ------
+  // The harness scans/scrapes X by steering a REAL Chrome over CDP. The runtime
+  // never installed one (Step 5's Playwright Chromium is a different binary the
+  // cycle doesn't use), so a Chrome-less Mac passed every step then died with
+  // "no Chrome/Chromium binary found." Detect an existing Chrome first; if none,
+  // install on macOS via the official DMG using plain `cp` (no sudo, no GUI
+  // prompt): try /Applications (group-writable for admins), else ~/Applications
+  // (always user-writable). The resolved path is recorded for BH_CHROME_BIN.
+  setStep("chrome", "running");
+  let chromeBin = detectChromeBin();
+  if (chromeBin) {
+    setStep("chrome", "done", `found: ${chromeBin}`);
+  } else if (process.platform === "darwin") {
+    // One self-contained script: download DMG, mount, copy to the first
+    // writable Applications dir, unmount, clean up. Echoes INSTALLED:<path> on
+    // success so we record the exact binary (handles the /Applications vs
+    // ~/Applications branch without re-detecting spaces-in-path quirks).
+    const script = [
+      "set -e",
+      'DMG="$(mktemp -t saps-gchrome).dmg"',
+      'MNT="$(mktemp -d -t saps-gchrome-mnt)"',
+      'cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; rm -f "$DMG"; rmdir "$MNT" 2>/dev/null || true; }',
+      "trap cleanup EXIT",
+      `curl -fsSL -o "$DMG" "${GOOGLE_CHROME_DMG}"`,
+      'hdiutil attach "$DMG" -nobrowse -quiet -mountpoint "$MNT"',
+      'if cp -R "$MNT/Google Chrome.app" /Applications/ 2>/dev/null; then',
+      '  echo "INSTALLED:/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+      "else",
+      '  mkdir -p "$HOME/Applications"',
+      '  cp -R "$MNT/Google Chrome.app" "$HOME/Applications/"',
+      '  echo "INSTALLED:$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+      "fi",
+    ].join("\n");
+    const r = await bash(script, 300000);
+    const m = r.out.match(/INSTALLED:(.+)/);
+    const installed = m ? m[1].trim() : "";
+    if (r.code === 0 && installed) {
+      try {
+        fs.accessSync(installed, fs.constants.X_OK);
+        chromeBin = installed;
+      } catch {
+        /* copied but not executable? fall through to re-detect */
+      }
+    }
+    if (!chromeBin) chromeBin = detectChromeBin();
+    if (chromeBin) {
+      setStep("chrome", "done", `installed: ${chromeBin}`);
+    } else {
+      return fail(
+        `Google Chrome install failed (exit ${r.code}). The scanner drives ` +
+          `Chrome over CDP and none was found. Install Google Chrome from ` +
+          `https://www.google.com/chrome/ and re-run setup. ${r.out.slice(-300)}`
+      );
+    }
+  } else {
+    // Non-macOS (managed Linux VMs): we don't auto-install. The cycle's own
+    // PATH-based _resolve_chrome_bin may still find one at run time, so this is
+    // a soft note, not a hard fail.
+    setStep(
+      "chrome",
+      "done",
+      "no Chrome found; on non-macOS the host must provide google-chrome/chromium on PATH"
+    );
+  }
+
+  // --- Step 8: menu bar app (macOS status-bar mini-dashboard) --------------
+  // Non-fatal: a menu bar failure must never block a usable runtime, so on any
+  // problem we mark the step errored and still persist runtime.json below.
+  setStep("menubar", "running");
+  if (process.platform === "darwin") {
+    const mb = await installMenubar(uv, uvEnv, VENV_PYTHON);
+    setStep("menubar", mb.ok ? "done" : "error", mb.detail);
+  } else {
+    setStep("menubar", "done", "skipped (macOS only)");
+  }
+
   // --- Persist the result ---------------------------------------------------
   const info: RuntimeInfo = {
     python: VENV_PYTHON,
     uv,
     python_version: PYTHON_VERSION,
     repo_dir: resolvedRepo,
+    chrome: chromeBin || undefined,
     ready: true,
     provisioned_at: new Date().toISOString(),
   };
@@ -404,4 +640,164 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   progress.ok = true;
   writeProgress(progress);
   return progress;
+}
+
+// ---------------------------------------------------------------------------
+// Menu bar app provisioning.
+//
+// installMenubar copies the rumps app to a stable state-dir location, installs
+// rumps into the owned venv, and (re)loads a KeepAlive LaunchAgent. ensureMenubar
+// is the cheap, idempotent boot-time path: a no-op when it's already installed
+// and loaded, so existing installs pick up the menu bar on the next Claude
+// restart without re-running the whole provision.
+// ---------------------------------------------------------------------------
+
+// The bundled menu bar source: <ext>/menubar in a packed .mcpb (dist/runtime.js
+// -> ../menubar), the same path for a tsc dev build (mcp/dist -> mcp/menubar),
+// and the repo clone for an npm install.
+function menubarSourceDir(): string | null {
+  const candidates = [
+    path.join(__dirname, "..", "menubar"),
+    path.join(resolveRepoDir(), "mcp", "menubar"),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(path.join(c, "s4l_menubar.py"))) return c;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+// KeepAlive { SuccessfulExit: false } so a clean Quit (exit 0) stays quit until
+// next login (RunAtLoad), while a crash relaunches. No StartInterval — this is a
+// long-running agent, not a cron job.
+function menubarPlistXml(python: string): string {
+  const menubarPath = [
+    path.dirname(python),
+    path.join(os.homedir(), ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].join(":");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>Label</key>
+\t<string>${MENUBAR_LABEL}</string>
+\t<key>ProgramArguments</key>
+\t<array>
+\t\t<string>${python}</string>
+\t\t<string>${MENUBAR_ENTRY}</string>
+\t</array>
+\t<key>RunAtLoad</key>
+\t<true/>
+\t<key>KeepAlive</key>
+\t<dict>
+\t\t<key>SuccessfulExit</key>
+\t\t<false/>
+\t</dict>
+\t<key>ProcessType</key>
+\t<string>Interactive</string>
+\t<key>StandardOutPath</key>
+\t<string>${MENUBAR_OUT_LOG}</string>
+\t<key>StandardErrorPath</key>
+\t<string>${MENUBAR_ERR_LOG}</string>
+\t<key>EnvironmentVariables</key>
+\t<dict>
+\t\t<key>PATH</key>
+\t\t<string>${menubarPath}</string>
+\t\t<key>HOME</key>
+\t\t<string>${os.homedir()}</string>
+\t\t<key>SAPS_STATE_DIR</key>
+\t\t<string>${STATE_DIR}</string>
+\t\t<key>SAPS_PYTHON</key>
+\t\t<string>${python}</string>
+\t\t<key>SAPS_REPO_DIR</key>
+\t\t<string>${resolveRepoDir()}</string>
+\t</dict>
+</dict>
+</plist>
+`;
+}
+
+async function menubarLoaded(): Promise<boolean> {
+  const r = await sh("launchctl", ["list"], { timeoutMs: 10_000 });
+  return r.out.includes(MENUBAR_LABEL);
+}
+
+export async function installMenubar(
+  uv: string,
+  uvEnv: NodeJS.ProcessEnv,
+  python: string
+): Promise<{ ok: boolean; detail: string }> {
+  if (process.platform !== "darwin") return { ok: true, detail: "skipped (macOS only)" };
+  const src = menubarSourceDir();
+  if (!src) return { ok: false, detail: "menu bar source not found in bundle" };
+
+  // 1. Copy the python to a stable location that survives extension updates.
+  try {
+    fs.mkdirSync(MENUBAR_DIR, { recursive: true });
+    for (const f of fs.readdirSync(src)) {
+      if (f.endsWith(".py")) {
+        fs.copyFileSync(path.join(src, f), path.join(MENUBAR_DIR, f));
+      }
+    }
+  } catch (e: any) {
+    return { ok: false, detail: `copy failed: ${e?.message || e}` };
+  }
+  if (!fs.existsSync(MENUBAR_ENTRY)) return { ok: false, detail: "entry not copied" };
+
+  // 2. Install rumps into the owned venv (pulls pyobjc-framework-Cocoa).
+  const r = await sh(uv, ["pip", "install", "--python", python, "rumps"], {
+    env: uvEnv,
+    timeoutMs: 300_000,
+  });
+  if (r.code !== 0) {
+    return { ok: false, detail: `rumps install failed (exit ${r.code}). ${r.out.slice(-300)}` };
+  }
+
+  // 3. Write + (re)load the LaunchAgent (bootout any prior instance first).
+  try {
+    fs.mkdirSync(path.dirname(MENUBAR_PLIST), { recursive: true });
+    fs.writeFileSync(MENUBAR_PLIST, menubarPlistXml(python), "utf-8");
+  } catch (e: any) {
+    return { ok: false, detail: `plist write failed: ${e?.message || e}` };
+  }
+  const uid = process.getuid ? process.getuid() : 0;
+  await sh("launchctl", ["bootout", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+  let lr = await sh("launchctl", ["bootstrap", `gui/${uid}`, MENUBAR_PLIST], {
+    timeoutMs: 15_000,
+  });
+  if (lr.code !== 0) {
+    lr = await sh("launchctl", ["load", MENUBAR_PLIST], { timeoutMs: 15_000 });
+  }
+  return { ok: true, detail: MENUBAR_ENTRY };
+}
+
+export async function ensureMenubar(): Promise<{
+  ok: boolean;
+  detail: string;
+  skipped?: boolean;
+}> {
+  if (process.platform !== "darwin") return { ok: true, skipped: true, detail: "non-macOS" };
+  if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
+  if (
+    fs.existsSync(MENUBAR_ENTRY) &&
+    fs.existsSync(MENUBAR_PLIST) &&
+    (await menubarLoaded())
+  ) {
+    return { ok: true, skipped: true, detail: "already installed" };
+  }
+  const uv = findUv();
+  if (!uv) return { ok: false, detail: "uv not found" };
+  const uvEnv: NodeJS.ProcessEnv = {
+    UV_PYTHON_INSTALL_DIR: path.join(RUNTIME_DIR, "python"),
+  };
+  return installMenubar(uv, uvEnv, resolvePython());
 }

@@ -59,6 +59,13 @@ export interface ProjectInput {
   search_topics?: string[] | string;
   get_started_link?: string;
   content_guardrails?: string;
+  // Escape hatch for ANY other project field the modeled props above don't
+  // cover (e.g. weight, platform, booking_link, qualification, subreddit_bans,
+  // short_links_host/short_links_live, content_angle, messaging, landing_pages,
+  // posthog, voice_relationship). Each key is shallow-merged onto the project,
+  // replacing that key's whole value. A value of null DELETES the key. Lets the
+  // single project_config tool edit any field without a raw whole-file overwrite.
+  fields?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,15 +166,46 @@ function userFields(input: Partial<ProjectInput>): Record<string, unknown> {
   return fields;
 }
 
+// Apply the generic `fields` escape hatch onto a project object IN PLACE.
+// Shallow per-key: each key replaces that key's whole value; a value of null
+// (or undefined) DELETES the key. Returns the list of keys touched so callers
+// can report exactly what changed. `name` is protected — it's the match key and
+// renaming via this path would orphan the entry, so it's ignored here.
+export function applyExtraFields(
+  target: Record<string, unknown>,
+  fields: Record<string, unknown> | undefined
+): { set: string[]; removed: string[] } {
+  const set: string[] = [];
+  const removed: string[] = [];
+  if (!fields || typeof fields !== "object") return { set, removed };
+  for (const [k, v] of Object.entries(fields)) {
+    if (k === "name") continue; // never rename through the escape hatch
+    if (v === null || v === undefined) {
+      if (k in target) {
+        delete target[k];
+        removed.push(k);
+      }
+      continue;
+    }
+    target[k] = v;
+    set.push(k);
+  }
+  return { set, removed };
+}
+
 // A brand-new project entry: user fields plus the defaults a fresh X-rail
 // project needs. Applied ONLY on create, never on update.
 export function buildProjectEntry(input: ProjectInput): Record<string, unknown> {
-  return {
+  const entry: Record<string, unknown> = {
     weight: 10,
     platform: "twitter",
     voice_relationship: "first_party",
     ...userFields(input),
   };
+  // Generic fields can override the defaults above (e.g. platform/weight) and
+  // set any advanced field at creation time too.
+  applyExtraFields(entry, input.fields);
+  return entry;
 }
 
 // Upsert the project into config.json projects[] (match by name), incrementally
@@ -179,17 +217,31 @@ export function applySetup(input: ProjectInput): {
   created: boolean;
   ready: boolean;
   missing_required: string[];
+  fields_set: string[];
+  fields_removed: string[];
 } {
   const cfg = readConfig();
   cfg.projects = cfg.projects || [];
   const idx = cfg.projects.findIndex((p) => p.name === input.name);
   let created: boolean;
+  let fields_set: string[] = [];
+  let fields_removed: string[] = [];
   if (idx >= 0) {
-    // Update: merge ONLY supplied fields; keep every other existing field.
-    cfg.projects[idx] = { ...cfg.projects[idx], ...userFields(input) };
+    // Update: merge ONLY supplied modeled fields; keep every other existing
+    // field. Then apply the generic `fields` escape hatch (set/delete any key).
+    const merged = { ...cfg.projects[idx], ...userFields(input) };
+    const r = applyExtraFields(merged, input.fields);
+    fields_set = r.set;
+    fields_removed = r.removed;
+    cfg.projects[idx] = merged;
     created = false;
   } else {
-    cfg.projects.push(buildProjectEntry(input));
+    const entry = buildProjectEntry(input);
+    // Report which advanced keys the create call set via the escape hatch.
+    fields_set = Object.keys(input.fields ?? {}).filter(
+      (k) => k !== "name" && (input.fields as Record<string, unknown>)[k] != null
+    );
+    cfg.projects.push(entry);
     created = true;
   }
   const cfgPath = configPath();
@@ -202,7 +254,14 @@ export function applySetup(input: ProjectInput): {
 
   recordManagedProject(input.name);
   const missing = missingForProject(input.name) ?? [];
-  return { project: input.name, created, ready: missing.length === 0, missing_required: missing };
+  return {
+    project: input.name,
+    created,
+    ready: missing.length === 0,
+    missing_required: missing,
+    fields_set,
+    fields_removed,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,9 +322,9 @@ export interface Resolved {
 }
 
 const SETUP_REQUIRED_MESSAGE =
-  "No project is set up yet. Run the `setup` tool first: collect from the user their website " +
+  "No project is set up yet. Run the `project_config` tool first: collect from the user their website " +
   "URL, what the product does (description), who to target (icp), and brand voice/tone, then " +
-  "call setup with a short name plus those fields. You can set up multiple products; each is " +
+  "call project_config with a short name plus those fields. You can set up multiple products; each is " +
   "configured independently and you fill the fields incrementally.";
 
 export function resolveProject(requested?: string): Resolved {
@@ -275,7 +334,7 @@ export function resolveProject(requested?: string): Resolved {
       return {
         ok: false,
         message:
-          `Project '${requested}' isn't set up yet. Run setup with name='${requested}' plus its ` +
+          `Project '${requested}' isn't set up yet. Run project_config with name='${requested}' plus its ` +
           `website, description, icp, and voice.`,
       };
     }
@@ -284,7 +343,7 @@ export function resolveProject(requested?: string): Resolved {
         ok: false,
         message:
           `Project '${requested}' still needs: ${st.missing_required.join(", ")}. Ask the user ` +
-          `for those and call setup again with name='${requested}'.`,
+          `for those and call project_config again with name='${requested}'.`,
       };
     }
     return { ok: true, project: requested };

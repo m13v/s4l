@@ -203,9 +203,47 @@ def main():
     persisted = 0
     with_media = 0
     reposts = 0
+    access_checked = 0
+    access_not_visible = 0
+    access_check_limit = int(os.environ.get("SAPS_TWITTER_EMPTY_MEDIA_ACCESS_CHECKS", "3"))
+    access_wait_ms = int(os.environ.get("SAPS_TWITTER_EMPTY_MEDIA_ACCESS_WAIT_MS", "4000"))
+    empty_capture_unreliable = None
     for cid, url in pairs:
         rec = by_url.get(url) or {}
         media = rec.get("media", [])
+        access = None
+        if not media:
+            # Empty media is only meaningful when the tweet itself rendered.
+            # If x.com served an empty app shell / block / protected page, do
+            # NOT persist [] because [] means "captured successfully, no media";
+            # leaving NULL lets a later cycle retry instead of poisoning the row.
+            if empty_capture_unreliable:
+                access = empty_capture_unreliable
+            elif access_checked < access_check_limit:
+                try:
+                    from twitter_access_check import diagnose_tweet_access
+                    access = diagnose_tweet_access(
+                        url, wait_ms=access_wait_ms, include_public=False,
+                    )
+                    access_checked += 1
+                except Exception as e:
+                    access = {"status": "access_check_failed", "reason": str(e)}
+                    access_checked += 1
+            else:
+                access = {"status": "unchecked", "reason": "empty_media_access_check_cap"}
+            status = access.get("status")
+            if status not in ("visible", "visible_no_anchor", "unchecked"):
+                access_not_visible += 1
+                if status in ("app_not_hydrated", "app_error", "logged_out", "access_check_failed", "unknown"):
+                    empty_capture_unreliable = access
+                print(
+                    f"[capture_thread_media] cid={cid} url={url} "
+                    f"access_status={status} reason={access.get('reason')} "
+                    "leaving thread_media NULL",
+                    file=sys.stderr,
+                )
+                captured.append((cid, media, {"is_repost": False, "reposted_by": ""}))
+                continue
         fresh = rec.get("repost", {"is_repost": False, "reposted_by": ""})
         # Authoritative repost flag comes from discovery (stored). Fresh permalink
         # detection is a rare bonus; prefer stored, fall back to fresh.
@@ -240,6 +278,8 @@ def main():
         "persisted": persisted,
         "with_media": with_media,
         "reposts": reposts,
+        "access_checked": access_checked,
+        "access_not_visible": access_not_visible,
         "urls_visited": (batch or {}).get("urls_visited", 0),
     }), file=sys.stderr)
 

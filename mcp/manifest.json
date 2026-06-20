@@ -1,10 +1,10 @@
 {
   "dxt_version": "0.1",
   "name": "social-autoposter",
-  "display_name": "Social Autoposter (X / Twitter)",
-  "version": "0.0.1",
+  "display_name": "Social Autoposter",
+  "version": "1.6.74",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the social-autoposter pipeline.",
-  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Start a new session and type **run social autoposter dashboard now** to set up the local runtime.",
+  "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Fully quit and restart Claude (quit and reopen, not just close the window).\n2. Choose **Set up social-autoposter** from the prompt menu or type **Set me up on social-autoposter end to end**. The agent installs the owned runtime, connects X, discovers and configures your product, and verifies with a draft-only cycle.",
   "author": {
     "name": "m13v",
     "email": "i@m13v.com",
@@ -15,7 +15,9 @@
     "entry_point": "dist/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/dist/index.js"],
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
       "env": {
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       }
@@ -23,16 +25,16 @@
   },
   "tools": [
     {
-      "name": "setup",
-      "description": "Run first. Configures the single project this install posts for: website, description, target audience, brand voice."
+      "name": "project_config",
+      "description": "The one tool to configure, edit, and connect a project's X account. Run first and continue end to end: inspect status, connect X, discover and configure (or later edit) the product, seed topics, and proceed to draft-only verification."
+    },
+    {
+      "name": "runtime",
+      "description": "The one plumbing tool for the local runtime lifecycle, action-based: status (is the owned Python/Chromium runtime installed, plus mid-install progress), install (provision/repair it, safe and idempotent), version + update (report and install new releases), and doctor + doctor_status (structured environment diagnostics, pre-connect during onboarding and full after X is connected)."
     },
     {
       "name": "draft_cycle",
       "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
-    },
-    {
-      "name": "autopilot",
-      "description": "Enable or disable background X/Twitter posting (the launchd cycle)."
     },
     {
       "name": "get_stats",
@@ -40,10 +42,16 @@
     },
     {
       "name": "dashboard",
-      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle autopilot, connect X, and refresh. Also rendered automatically after state-changing actions."
+      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, and refresh. Also rendered automatically after state-changing actions."
     }
   ],
-  "keywords": ["twitter", "x", "social", "autoposter", "marketing"],
+  "keywords": [
+    "twitter",
+    "x",
+    "social",
+    "autoposter",
+    "marketing"
+  ],
   "license": "UNLICENSED",
   "repository": {
     "type": "git",

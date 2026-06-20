@@ -19,3 +19,7 @@ node_modules/**/*.map
 node_modules/**/test/
 node_modules/**/tests/
 node_modules/**/.github/
+# Python bytecode cache (e.g. from running menubar/*.py locally); the owned venv
+# recompiles against its own interpreter at runtime, so never ship these.
+__pycache__/
+*.pyc

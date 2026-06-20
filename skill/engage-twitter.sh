@@ -118,7 +118,8 @@ except Exception:
         log "Releasing twitter + twitter-browser locks so other pipelines (dm-outreach-twitter, dm-replies-twitter) can run."
         release_lock "twitter" 2>>"$LOG_FILE" || true
         release_lock "twitter-browser" 2>>"$LOG_FILE" || true
-        rm -f "$HOME/.claude/twitter-browser-lock.json" 2>/dev/null || true
+        # (2026-06-16) session-lock rm removed (defect b); dead holders self-reclaim
+        # in twitter_browser.py now. Do NOT re-add. See docs/twitter_browser_lock.md.
         RUN_ELAPSED=$(( $(date +%s) - RUN_START ))
         log "=== Twitter Engagement Run done (no real work): elapsed=${RUN_ELAPSED}s ==="
         python3 "$REPO_DIR/scripts/log_run.py" --script "engage_twitter" --posted 0 --skipped 0 --failed 0 --cost 0 --elapsed "$RUN_ELAPSED" 2>/dev/null || true

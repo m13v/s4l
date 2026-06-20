@@ -75,6 +75,31 @@ fs.writeFileSync(p, JSON.stringify({version:'$VERSION',installedAt:new Date().to
 console.log('  '+fs.readFileSync(p,'utf8').trim());
 "
 
+# ---- 3b. Stamp manifest.json + mcp/package.json + lockfile version ----------
+# Claude Desktop's extension "Details" panel reads version from manifest.json,
+# so it must track the release version too (not the frozen 0.0.1 placeholder).
+# mcp/package.json and its lockfile are stamped in lockstep so the three stay
+# consistent (npm errors if package.json and package-lock.json disagree).
+say "Stamping mcp/manifest.json + mcp/package.json + mcp/package-lock.json -> $VERSION"
+node -e "
+const fs=require('fs');
+const V='$VERSION';
+for (const p of ['$MCP_DIR/manifest.json','$MCP_DIR/package.json']) {
+  const j=JSON.parse(fs.readFileSync(p,'utf8'));
+  j.version=V;
+  fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+  console.log('  '+p.replace('$MCP_DIR/','mcp/')+' -> '+j.version);
+}
+const lp='$MCP_DIR/package-lock.json';
+if (fs.existsSync(lp)) {
+  const l=JSON.parse(fs.readFileSync(lp,'utf8'));
+  l.version=V;
+  if (l.packages && l.packages['']) l.packages[''].version=V;
+  fs.writeFileSync(lp, JSON.stringify(l,null,2)+'\n');
+  console.log('  mcp/package-lock.json -> '+l.version);
+}
+"
+
 # ---- 4. Pack the .mcpb ------------------------------------------------------
 say "Packing $BUNDLE"
 rm -f "$BUNDLE"
@@ -98,6 +123,10 @@ echo "  embedded pipeline.tgz: ok"
 BUNDLE_VER=$(unzip -p "$BUNDLE" dist/version.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
 [[ "$BUNDLE_VER" == "$VERSION" ]] || die "bundle version.json=$BUNDLE_VER != $VERSION"
 echo "  version.json: $BUNDLE_VER ok"
+
+MANIFEST_VER=$(unzip -p "$BUNDLE" manifest.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
+[[ "$MANIFEST_VER" == "$VERSION" ]] || die "bundle manifest.json=$MANIFEST_VER != $VERSION (Desktop Details panel would show the wrong version)"
+echo "  manifest.json: $MANIFEST_VER ok"
 
 for f in "dist/index.js" "dist/runtime.js" "manifest.json"; do
   # grep -c reads all input (no SIGPIPE); anchor on the time column + 3-space

@@ -76,7 +76,7 @@ LOG_DIR = Path(os.environ.get("SAPS_LOG_DIR", str(Path.home() / "social-autopost
 # How stale a cycle log can be (seconds) before we treat the harness as idle.
 IDLE_AFTER_SEC = int(os.environ.get("SAPS_OVERLAY_IDLE_SEC", "240"))
 
-TITLE = "Social Autoposter"
+TITLE = "S4L"
 REASSURE = (
     "Working in the background. You can keep using other apps and leave this "
     "window behind \u2014 just don\u2019t close it."
@@ -90,6 +90,68 @@ REASSURE = (
 # (CSP-safe; no <style> tag, no innerHTML-with-style-attrs). pointer-events is
 # none so the overlay can never intercept the automation's own clicks.
 _BODY = r"""
+window.__sapsAnnounce = function(payload){
+  // One-time, dismissible-forever launch notice. The reassurance disclaimer
+  // lives HERE (a big centered modal with an OK button) instead of eating space
+  // in the always-on status overlay. Once OK is clicked we stamp localStorage so
+  // it never shows again. Best-effort + CSP-safe (createElement/style/textContent
+  // + addEventListener only); never throws into the page.
+  try {
+    var KEY = "__saps_announce_v1";
+    var dismissed = false;
+    try { dismissed = window.localStorage.getItem(KEY) === "1"; } catch(e) {}
+    if(window.__sapsAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
+    if(dismissed) return;
+    if(document.getElementById("__saps_announce")) return;
+
+    function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
+
+    var back = mk("div", document.documentElement); back.id = "__saps_announce";
+    var bs = back.style;
+    bs.position="fixed"; bs.top="0"; bs.left="0"; bs.width="100vw"; bs.height="100vh";
+    bs.zIndex="2147483647"; bs.display="flex";
+    bs.alignItems="center"; bs.justifyContent="center";
+    bs.background="rgba(0,0,0,0.55)";
+    bs.backdropFilter="blur(3px)"; bs.webkitBackdropFilter="blur(3px)";
+    // The ENTIRE modal (backdrop + card + text) is pointer-events:none so that a
+    // bot click during this one-time window always passes through to the page,
+    // even if the user never clicks OK. The OK button is the ONLY element that
+    // re-enables pointer-events, so it stays clickable while everything else is
+    // transparent to the automation's CDP/hit-test clicks.
+    bs.pointerEvents="none";
+
+    var card = mk("div", back); var cs = card.style;
+    cs.pointerEvents="none";
+    cs.boxSizing="border-box"; cs.maxWidth="440px"; cs.width="86%";
+    cs.padding="26px 26px 22px"; cs.borderRadius="16px";
+    cs.background="rgba(20,20,23,0.98)"; cs.color="#fff"; cs.textAlign="center";
+    cs.font="14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+    cs.boxShadow="0 12px 48px rgba(0,0,0,0.55)"; cs.border="1px solid rgba(255,255,255,0.14)";
+
+    var ttl = mk("div", card); ttl.textContent = (payload && payload.title) || "S4L is running";
+    ttl.style.fontSize="19px"; ttl.style.fontWeight="700"; ttl.style.letterSpacing="0.3px";
+    ttl.style.marginBottom="10px";
+
+    var body = mk("div", card);
+    body.textContent = (payload && payload.reassure) || "";
+    body.style.opacity="0.82"; body.style.fontSize="14px"; body.style.marginBottom="22px";
+
+    var ok = mk("button", card); ok.textContent="OK";
+    var os_ = ok.style;
+    os_.pointerEvents="auto";  // the ONLY clickable thing; rest of modal is click-through
+    os_.cursor="pointer"; os_.appearance="none"; os_.webkitAppearance="none";
+    os_.border="1px solid rgba(255,255,255,0.18)"; os_.borderRadius="10px";
+    os_.padding="9px 30px"; os_.fontSize="14px"; os_.fontWeight="600";
+    os_.background="#fff"; os_.color="#111"; os_.font="inherit";
+    os_.fontWeight="600"; os_.minWidth="120px";
+    ok.addEventListener("click", function(){
+      try { window.localStorage.setItem(KEY, "1"); } catch(e) {}
+      window.__sapsAnnounceDismissed = true;  // session fallback if storage is blocked
+      if(back && back.remove) back.remove();
+    });
+  } catch(e) { /* announcement is best-effort, never throw into the page */ }
+};
+
 window.__sapsPaint = function(payload){
   try {
     var ID = "__saps_overlay";
@@ -97,13 +159,20 @@ window.__sapsPaint = function(payload){
     st.title = payload.title; st.reassure = payload.reassure;
     st.status = payload.status; st.ts = payload.ts || Date.now();
 
+    // Surface the one-time launch notice (carries the reassurance disclaimer).
+    try { window.__sapsAnnounce({title: st.title + " is running", reassure: st.reassure}); } catch(e){}
+
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
     var root = document.getElementById(ID);
     if(!root || !root.isConnected){
       root = mk("div", document.documentElement); root.id = ID;
       var s = root.style;
-      s.position="fixed"; s.top="12px"; s.left="50%"; s.transform="translateX(-50%)";
+      // Centered both axes. pointerEvents:none so the overlay can NEVER
+      // intercept the automation's clicks: the bot clicks by raw CDP screen
+      // coordinates (Input.dispatchMouseEvent) and by Playwright hit-testing,
+      // both of which an opaque clickable card sitting over a target would eat.
+      s.position="fixed"; s.top="50%"; s.left="50%"; s.transform="translate(-50%,-50%)";
       s.zIndex="2147483647"; s.pointerEvents="none"; s.maxWidth="460px";
       s.boxSizing="border-box"; s.padding="10px 14px"; s.borderRadius="12px";
       s.background="rgba(15,15,17,0.92)"; s.color="#fff";
@@ -112,6 +181,7 @@ window.__sapsPaint = function(payload){
       s.backdropFilter="blur(6px)"; s.webkitBackdropFilter="blur(6px)";
 
       var head = mk("div", root); head.style.display="flex"; head.style.alignItems="center"; head.style.gap="8px";
+      head.style.cursor="move"; head.style.userSelect="none"; head.style.webkitUserSelect="none";
       var dot = mk("span", head); st._dot = dot;
       dot.style.width="9px"; dot.style.height="9px"; dot.style.borderRadius="50%";
       dot.style.background="#fff"; dot.style.flex="0 0 auto"; dot.style.opacity="1";
@@ -121,12 +191,33 @@ window.__sapsPaint = function(payload){
       ago.style.marginLeft="auto"; ago.style.opacity="0.55"; ago.style.fontSize="11px";
       ago.style.fontVariantNumeric="tabular-nums";
 
-      var re = mk("div", root); st._reassure = re;
-      re.style.marginTop="5px"; re.style.opacity="0.72"; re.style.fontSize="12px";
-
       var stat = mk("div", root); st._status = stat;
       stat.style.marginTop="6px"; stat.style.fontWeight="500";
       stat.style.whiteSpace="nowrap"; stat.style.overflow="hidden"; stat.style.textOverflow="ellipsis";
+
+      // --- drag-to-move (grab the header) ---------------------------------
+      (function(){
+        var drag = null; // {dx, dy}
+        head.addEventListener("mousedown", function(ev){
+          try {
+            var r = root.getBoundingClientRect();
+            drag = {dx: ev.clientX - r.left, dy: ev.clientY - r.top};
+            root.style.transform = "none";
+            root.style.left = r.left + "px";
+            root.style.top = r.top + "px";
+            ev.preventDefault();
+          } catch(e) { drag = null; }
+        });
+        document.addEventListener("mousemove", function(ev){
+          if(!drag) return;
+          var x = ev.clientX - drag.dx, y = ev.clientY - drag.dy;
+          var maxX = Math.max(0, window.innerWidth - root.offsetWidth);
+          var maxY = Math.max(0, window.innerHeight - root.offsetHeight);
+          root.style.left = Math.min(Math.max(0, x), maxX) + "px";
+          root.style.top = Math.min(Math.max(0, y), maxY) + "px";
+        });
+        document.addEventListener("mouseup", function(){ drag = null; });
+      })();
 
       if(st._iv) clearInterval(st._iv);
       st._iv = setInterval(function(){
@@ -140,7 +231,6 @@ window.__sapsPaint = function(payload){
       }, 250);
     }
     st._title.textContent = st.title;
-    st._reassure.textContent = st.reassure;
     st._status.textContent = st.status;
   } catch(e) { /* overlay is best-effort, never throw into the page */ }
 };
@@ -153,6 +243,7 @@ PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__sapsPaint(payload); } 
 # Removes the overlay from a page.
 CLEAR_EXPR = (
     "() => { var e=document.getElementById('__saps_overlay'); if(e&&e.remove)e.remove(); "
+    "var a=document.getElementById('__saps_announce'); if(a&&a.remove)a.remove(); "
     "var s=window.__sapsOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
 )
 

@@ -367,6 +367,12 @@ def fetch_json(url, headers=None, user_agent="social-autoposter/1.0"):
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 404:
+            # NOTE: never throw away the body on the status code that carries
+            # the payload. fxtwitter returns its meaningful tombstone object
+            # WITH a 404; reading e.read() here is what lets the tombstone
+            # guard distinguish "alive but guest-blind" from a real deletion.
+            # Verified live 2026-06-05: a full stats-twitter run logged 2
+            # TOMBSTONE skips, 0 false DELETED.
             body = None
             try:
                 body = json.loads(e.read())

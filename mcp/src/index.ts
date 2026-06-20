@@ -2,10 +2,9 @@
 // social-autoposter MCP server (X/Twitter rail).
 //
 // Core tools:
-//   draft_cycle  - scan + draft, return all drafts as a numbered table for the
-//                  user to review in chat (posts nothing).
-//   post_drafts  - post the drafts the user chose by number from a batch.
-//   autopilot    - one tool, action = enable | disable | status (launchd job).
+//   scan_candidates - scan + score X threads, return the top candidates (no draft, no post).
+//   submit_drafts   - take the replies you drafted and queue them for review (posts nothing).
+//   post_drafts     - post the drafts the user chose by number from a batch.
 //   get_stats    - read-only post + engagement stats.
 //
 // THIN wrapper. The pipeline brain (scan, score, drafting prompts, posting)
@@ -25,8 +24,10 @@ import {
   readPlan,
   writePlan,
   planPath,
+  scanResultPath,
   type Plan,
   type PlanCandidate,
+  type ScanCandidate,
 } from "./repo.js";
 import {
   applySetup,
@@ -46,8 +47,21 @@ import {
   runtimeReady,
   readRuntime,
   resolvePython,
+  resolveChrome,
+  ensureMenubar,
 } from "./runtime.js";
+import {
+  blockOnboardingMilestone,
+  completeOnboardingMilestone,
+  ensureDoctorPhase,
+  onboardingLedger,
+  onboardingSnapshot,
+  recordOnboardingAttempt,
+  runDoctorPhase,
+  type DoctorPhase,
+} from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
+import { initSentry, sendHeartbeat, captureError, flushSentry } from "./telemetry.js";
 import {
   registerAppTool,
   registerAppResource,
@@ -62,6 +76,17 @@ import http from "node:http";
 const DIST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_URI = "ui://social-autoposter/panel.html";
 
+// Stable id for the accumulating draft review queue. submit_drafts appends each
+// run's drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
+// continuous autopilot instead of each run overwriting the last; post_drafts posts
+// the approved subset and marks them posted (filtered out of the cards thereafter).
+const REVIEW_QUEUE_ID = "review-queue";
+
+// The Desktop scheduled task onboarding creates for the autopilot. Its presence on
+// disk is the single "autopilot is set up" signal the dashboard + menu bar share
+// (the legacy launchd autopilot is retired).
+const AUTOPILOT_TASK_ID = "social-autoposter-autopilot";
+
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
   os.homedir(),
@@ -71,7 +96,8 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
 );
 
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
-// install keeps itself current — the interactive `version` tool only helps when
+// install keeps itself current — the interactive `runtime` tool (action:'update')
+// only helps when
 // a human-facing agent session is open, which an autopilot box never has.
 const UPDATER_LABEL = "com.m13v.social-autoposter-update";
 const UPDATER_PLIST = path.join(
@@ -93,6 +119,30 @@ const LAUNCHD_PATH = [
   "/sbin",
 ].join(":");
 
+// Bin dirs the pipeline must resolve FIRST: the owned uv venv (so the scripts'
+// bare `python3` hits the provisioned interpreter with pipeline deps, not the
+// user's system python) and ~/.local/bin (so `browser-harness`, the CDP scan
+// engine, resolves). resolvePython() is dynamic, so this re-derives per call.
+function ownedBinDirs(): string[] {
+  const dirs: string[] = [];
+  const py = resolvePython();
+  if (path.isAbsolute(py)) dirs.push(path.dirname(py));
+  dirs.push(path.join(os.homedir(), ".local", "bin"));
+  return dirs;
+}
+
+// PATH for an interactively-spawned pipeline run (draft_cycle): owned bins
+// first, then whatever PATH the MCP server inherited.
+function pipelinePath(): string {
+  return [...ownedBinDirs(), process.env.PATH || LAUNCHD_PATH].join(":");
+}
+
+// PATH baked into launchd plists (autopilot/cron): owned bins first, then the
+// sane launchd default (launchd starts with a bare PATH).
+function launchdPath(): string {
+  return [...ownedBinDirs(), LAUNCHD_PATH].join(":");
+}
+
 function plistXml(opts: {
   label: string;
   programArgs: string[];
@@ -102,6 +152,14 @@ function plistXml(opts: {
   stderrLog: string;
 }): string {
   const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
+  // Background (cron/autopilot) runs get the same Chrome the interactive cycle
+  // uses, so a no-sudo ~/Applications install (which the shell's own resolver
+  // doesn't scan) is still found off-screen. Omitted when Chrome resolves via
+  // PATH, so the shell's _resolve_chrome_bin stays the fallback.
+  const chrome = resolveChrome();
+  const chromeEnv = chrome
+    ? `\n\t\t<key>BH_CHROME_BIN</key>\n\t\t<string>${chrome}</string>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -121,13 +179,13 @@ ${args}
 \t<key>EnvironmentVariables</key>
 \t<dict>
 \t\t<key>PATH</key>
-\t\t<string>${LAUNCHD_PATH}</string>
+\t\t<string>${launchdPath()}</string>
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
 \t\t<key>SAPS_REPO_DIR</key>
 \t\t<string>${repoDir()}</string>
 \t\t<key>SAPS_PYTHON</key>
-\t\t<string>${resolvePython()}</string>
+\t\t<string>${resolvePython()}</string>${chromeEnv}
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<${opts.runAtLoad ? "true" : "false"}/>
@@ -176,21 +234,55 @@ const server = new McpServer(
     instructions:
       "social-autoposter drafts, reviews, and posts X/Twitter replies for the user's product, and " +
       "can run them hands-free on autopilot.\n\n" +
+      "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
+      "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
+      "project is fully configured with seeded search topics, X is connected with its real handle, " +
+      "the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
+      "without posting, AND the recurring autopilot scheduled task has been created and run once " +
+      "(see SCHEDULE THE AUTOPILOT below). Do not ask whether to inspect " +
+      "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
+      "X, scan the profile, research the product website, save conservative inferred fields, seed " +
+      "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
+      "explicit setup request authorizes the owned runtime install and importing ONLY x.com/" +
+      "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
+      "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
+      "when no product can be identified from config, context, the X profile, or public research, " +
+      "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup, but " +
+      "DO schedule the draft-only autopilot as the final step (it only queues drafts for approval, it " +
+      "never posts on its own). When setup reaches done (" +
+      "runtime ready, a project configured with seeded topics, X connected, the draft path verified, " +
+      "and the autopilot scheduled task created and run once), call the `dashboard` tool so the user " +
+      "sees the finished setup rendered, then give " +
+      "the completion summary.\n\n" +
+      "SCHEDULE THE AUTOPILOT (final onboarding step). Once the draft path is verified, start the " +
+      "autopilot by calling the HOST tool `create_scheduled_task` with: taskId " +
+      "'social-autoposter-autopilot'; cronExpression '* * * * *' (continuous, like the pipeline; the " +
+      "host runs one at a time and skips overlapping fires, so cycles run back-to-back); and a " +
+      "self-contained prompt telling the run to call scan_candidates, draft ONE on-brand reply " +
+      "(<=250 chars, same language as the thread, adds real value) for each candidate worth engaging, " +
+      "then call submit_drafts with those drafts, and NOT post (drafts pile up in the menu-bar " +
+      "approval cards for the user to approve). Then run ONE cycle yourself now (scan_candidates -> " +
+      "draft -> submit_drafts) to seed the cards and pre-approve the tools, so unattended fires do not " +
+      "stall on a permission prompt. If the host exposes no create_scheduled_task tool, tell the user " +
+      "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
-      "milestone), don't wait to be asked: offer to tell the world by running `draft_cycle` to post " +
-      "about it. A feature nobody hears about is wasted distribution. Use judgment, suggest it for " +
+      "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
+      "(`scan_candidates` -> draft the replies -> `submit_drafts`) about it. A feature nobody hears " +
+      "about is wasted distribution. Use judgment, suggest it for " +
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
-      "release, call the `version` tool (action:'status'). If `update_available` is true, tell the " +
-      "user and offer to run `version` with action:'update'. The `setup` tool's status also surfaces " +
-      "`update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `setup` (configure the project once) -> `draft_cycle` (scan + review a batch; the " +
-      "user approves / edits / skips every draft in a single form) -> `autopilot` (enable to also turn " +
-      "on hands-free background posting AND daily auto-updates) -> `get_stats` (see performance). Run " +
-      "`setup` first; the other tools refuse until a project is fully configured.\n\n" +
+      "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
+      "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
+      "surfaces `update_available` and an `update_hint`.\n\n" +
+      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `scan_candidates` " +
+      "(get the top threads to reply to) -> draft the replies yourself -> `submit_drafts` (queue them " +
+      "for review; nothing posts until the user approves) -> `post_drafts` (post the approved ones) -> " +
+      "`get_stats` (see performance). Run `project_config` first; the other tools refuse until a " +
+      "project is fully configured. To change anything about a project later, call `project_config` " +
+      "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`draft_cycle`, `post_drafts`, `autopilot` enable/disable, `get_stats`), end your turn by " +
+      "(`scan_candidates`, `submit_drafts`, `post_drafts`, `get_stats`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
@@ -215,13 +307,47 @@ const baseRegisterTool = server.registerTool.bind(server);
 // same input-schema -> callback-arg inference it had before; the body is `any`
 // and just additionally stashes the callback by name. `appTool` drops the
 // leading `server` arg of registerAppTool (its callback takes no typed args).
+// Tools that take a while: writing activity.json around them makes the menu bar
+// show a spinner + label while they run (either invocation path). draft_cycle is
+// NOT here — it writes finer scanning/drafting phases itself (see produceDrafts).
+const TOOL_ACTIVITY: Record<string, string> = {
+  post_drafts: "posting",
+  get_stats: "loading stats",
+};
+function withActivity(name: string, cb: ToolHandler): ToolHandler {
+  const label = TOOL_ACTIVITY[name];
+  if (!label) return cb;
+  return async (args: any, extra: any) => {
+    writeActivity("working", label);
+    try {
+      return await cb(args, extra);
+    } finally {
+      clearActivity();
+    }
+  };
+}
+
 const tool: typeof server.registerTool = ((name: string, config: any, cb: ToolHandler) => {
-  TOOL_HANDLERS[name] = cb;
-  return (baseRegisterTool as any)(name, config, cb);
+  const h = withActivity(name, cb);
+  TOOL_HANDLERS[name] = h;
+  return (baseRegisterTool as any)(name, config, h);
 }) as any;
 const appTool = ((name: string, config: any, cb: ToolHandler) => {
-  TOOL_HANDLERS[name] = cb;
-  return registerAppTool(server as any, name, config as any, cb as any);
+  // Wrap every tool handler so any thrown error is reported to Sentry. Single
+  // chokepoint for both the MCP SDK path and the local HTTP-panel path (both
+  // dispatch through TOOL_HANDLERS / registerAppTool). Re-throws so the caller
+  // still formats the error response exactly as before.
+  const wrapped = (async (args: any, extra: any) => {
+    try {
+      return await cb(args, extra);
+    } catch (e) {
+      captureError(e, { tool: name });
+      throw e;
+    }
+  }) as ToolHandler;
+  const h = withActivity(name, wrapped);
+  TOOL_HANDLERS[name] = h;
+  return registerAppTool(server as any, name, config as any, h as any);
 }) as any;
 
 function jsonContent(obj: unknown) {
@@ -259,37 +385,38 @@ function blockedReasonMessage(reason: string): string {
         "couldn't run. (It DID find and rank threads, it just couldn't draft replies.) This " +
         "CLI uses its own login, separate from Claude Desktop. To fix it, open a terminal and run:\n\n" +
         "    claude\n\n" +
-        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run draft_cycle again."
+        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run scan_candidates again."
       );
     case "monthly_limit":
     case "daily_limit":
     case "rate_limit_5h":
       return (
         `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
-        "Wait for the limit to reset, then run draft_cycle again."
+        "Wait for the limit to reset, then run scan_candidates again."
       );
     case "no_search_topics":
       return (
         "This project has no search topics yet, so there was nothing to scan. Topics live in the " +
-        "DB (project_search_topics) and are seeded from your project's `search_topics` during setup. " +
-        "Re-run the `setup` tool for this project with a `search_topics` list (comma-separated keywords/" +
-        "phrases your buyers tweet about); setup seeds them automatically, then run draft_cycle again."
+        "DB (project_search_topics) and are seeded from your project's `search_topics` when you " +
+        "configure it. Re-run the `project_config` tool for this project with a `search_topics` list " +
+        "(comma-separated keywords/phrases your buyers tweet about); it seeds them automatically, then " +
+        "run scan_candidates again."
       );
     case "topics_api_unreachable":
       return (
         "Couldn't reach the search-topics service to load this project's topics, so the cycle stopped " +
-        "before scanning. This is usually a transient backend/network issue. Try draft_cycle again in a " +
+        "before scanning. This is usually a transient backend/network issue. Try scan_candidates again in a " +
         "moment; if it persists, check connectivity to the autoposter backend."
       );
     case "credit_balance":
       return (
         "The drafting step failed because the Anthropic account is out of credits. " +
-        "Add credits, then run draft_cycle again."
+        "Add credits, then run scan_candidates again."
       );
     default:
       return (
         `The drafting step failed (${reason}) and produced no drafts. ` +
-        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run draft_cycle again."
+        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run scan_candidates again."
       );
   }
 }
@@ -358,6 +485,12 @@ async function produceDrafts(
   const env: NodeJS.ProcessEnv = {
     DRAFT_ONLY: "1",
     TWITTER_PAGE_GEN_RATE: "0",
+    // Point the cycle at the resolved repo (a bare .mcpb materializes it under
+    // the state dir, NOT ~/social-autoposter); run-twitter-cycle.sh honors
+    // SAPS_REPO_DIR for its REPO_DIR. And put the owned runtime + ~/.local/bin
+    // first on PATH so the script's bare `python3` and `browser-harness` resolve.
+    SAPS_REPO_DIR: repoDir(),
+    PATH: pipelinePath(),
     // Interactive draft_cycle: launch the harness Chrome ON-SCREEN so the user
     // can watch the scan/scrape happen live. Cron/autopilot do NOT set these, so
     // background runs keep the off-screen default in twitter-backend.sh and don't
@@ -367,6 +500,13 @@ async function produceDrafts(
     BH_WINDOW_SIZE: "1280,900",
   };
   if (project) env.SAPS_FORCE_PROJECT = project;
+  // Point the harness at the Chrome the runtime detected/installed. The cycle's
+  // own _resolve_chrome_bin doesn't scan ~/Applications (our no-sudo fallback
+  // install target), so without this a non-admin .mcpb install would have Chrome
+  // on disk yet still report "no Chrome/Chromium binary found." Only set when
+  // resolved; otherwise let the shell resolve Chrome from its own probe list.
+  const chrome = resolveChrome();
+  if (chrome) env.BH_CHROME_BIN = chrome;
   // Bring the on-screen overlay up alongside the live harness window so the user
   // watching the scan/scrape sees status + queued drafts. Idempotent + detached.
   await ensureOverlayWatch();
@@ -395,6 +535,9 @@ async function produceDrafts(
     `\n===== draft_cycle start ${new Date().toISOString()} ` +
       `project=${project ?? "(default)"} =====\n`
   );
+  // Menu-bar status: scanning first, then drafting once the prep phase begins
+  // (switched in onLine below). Cleared before every return.
+  writeActivity("scanning", "scanning X");
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000, // scan+draft can take several minutes
@@ -410,6 +553,7 @@ async function produceDrafts(
         appendLog(`${t}\n`);
         console.error(`[draft_cycle] ${t}`);
       }
+      if (/Phase 2b-prep/.test(t)) writeActivity("drafting", "drafting replies");
       if (!onProgress) return;
       const msg = cycleProgressMessage(t);
       // Skip consecutive duplicates (a phase can log a couple matching lines).
@@ -426,7 +570,7 @@ async function produceDrafts(
   const marker = /DRAFT_ONLY_PLAN=\/tmp\/twitter_cycle_plan_(.+)\.json/.exec(
     res.stdout + "\n" + res.stderr
   );
-  if (marker && marker[1]) return { batchId: marker[1] };
+  if (marker && marker[1]) { clearActivity(); return { batchId: marker[1] }; }
   // A real prep-step failure (e.g. the background claude CLI isn't logged in)
   // emits DRAFT_ONLY_BLOCKED=<reason>. Surface that instead of silently falling
   // back to a stale/empty batch and mis-reporting "no fresh candidates".
@@ -434,6 +578,7 @@ async function produceDrafts(
     res.stdout + "\n" + res.stderr
   );
   if (blockedMarker && blockedMarker[1]) {
+    clearActivity();
     return { batchId: null, blocked: blockedReasonMessage(blockedMarker[1]) };
   }
   // No `DRAFT_ONLY_PLAN=` marker from THIS run => this run produced no drafts.
@@ -441,6 +586,7 @@ async function produceDrafts(
   // that's a *previous* run's batch, so a 5-second empty cycle would echo an old
   // 7-draft batch and report phantom success. Report 0 drafts honestly, with the
   // pipeline's own reason (e.g. cold-start project with no seeded queries).
+  clearActivity();
   return {
     batchId: null,
     blocked:
@@ -463,8 +609,11 @@ async function produceDrafts(
 function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
   return candidates
-    .map((c, i) => {
-      const n = i + 1;
+    // Number by FULL-array index (matches post_drafts + the menu bar), then drop
+    // already-posted entries so the cards only show what's still pending.
+    .map((c, i) => ({ c, n: i + 1 }))
+    .filter((e) => e.c.posted !== true)
+    .map(({ c, n }) => {
       const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
       const style = c.engagement_style ?? "?";
       const reply = c.reply_text ?? "(empty)";
@@ -535,6 +684,17 @@ async function postApproved(batchId: string, plan: Plan) {
   } catch {
     /* keep raw */
   }
+  // On a successful run, mark the posted candidates in the ORIGINAL plan so the
+  // other review surface (chat vs menu-bar pop-ups) skips them — cross-surface
+  // de-dup. Best-effort; the pipeline's own already-posted check is the backstop.
+  if (res.code === 0) {
+    for (const c of approved) c.posted = true;
+    try {
+      writePlan(batchId, plan);
+    } catch {
+      /* best effort */
+    }
+  }
   return {
     attempted: approved.length,
     exit_code: res.code,
@@ -547,10 +707,10 @@ async function postApproved(batchId: string, plan: Plan) {
 // This is NOT a tool — the model never auto-calls it. It surfaces in clients
 // that render prompts as slash-commands / starters (e.g. Claude Desktop's "/"
 // menu). When the user picks it, it injects the message below into the chat,
-// which nudges the agent to start the real onboarding via the `setup` tool.
+// which nudges the agent to start the real onboarding via the `project_config` tool.
 // Deliberately a DUMB POINTER: it names no fields and no steps, so it can never
-// drift from REQUIRED_FIELDS / the setup tool's flow. All real logic stays in
-// `setup`; this is just a convenience handle to begin.
+// drift from REQUIRED_FIELDS / the project_config tool's flow. All real logic stays
+// in `project_config`; this is just a convenience handle to begin.
 server.registerPrompt(
   "getting-started",
   {
@@ -566,10 +726,17 @@ server.registerPrompt(
         content: {
           type: "text" as const,
           text:
-            "I just installed social-autoposter and want to get set up. Call the `setup` tool " +
-            "(status mode) to see what's still needed, then walk me through it conversationally — " +
-            "ask me about my product and connect my X/Twitter account, one thing at a time. " +
-            "Don't dump a form at me, and explain the X connection before doing it.",
+            "Set up social-autoposter end to end now. Treat this as a terminal goal: inspect status, " +
+            "install or repair the owned runtime, auto-detect and connect my X session, scan my " +
+            "profile, discover and research the product I most clearly represent, infer and save a " +
+            "conservative complete project with search topics, seed them, and run a draft-only " +
+            "verification. Keep going without asking me to approve each safe setup step. A brief " +
+            "heads-up before macOS keychain prompts is enough; proceed immediately. Ask only if an " +
+            "interactive login is unavoidable or no product can be identified from config, context, " +
+            "my X profile, or public research. Do not post or enable autopilot unless I explicitly ask. " +
+            "Keep every reply to me extremely concise: a few short sentences at most, no step-by-step " +
+            "narration or long status walls. If you must ask me something (e.g. the product URL), make " +
+            "it one short question.",
         },
       },
     ],
@@ -583,7 +750,9 @@ server.registerPrompt(
 // site itself, written in the user's voice captured by the profile scan.
 const WEBSITE_RESEARCH_INSTRUCTIONS =
   "PRODUCT RESEARCH (do this before saving the product fields):\n" +
-  "1. Ask the user for the URL of the product/website they want to market on X.\n" +
+  "1. Discover the product URL from existing config, the conversation, the connected X profile " +
+  "(bio, links, and recent posts), or public research. Use the clearest supported product without " +
+  "asking. Ask one blocking question only if no defensible product can be identified.\n" +
   "2. Visit it with your OWN browser/fetch tools (no scraper is provided) and read " +
   "AT LEAST 5 pages if the site has them — follow the internal nav/footer links. " +
   "Prioritize: homepage, pricing, features/product, about, docs or changelog or blog, " +
@@ -597,37 +766,52 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
   "4. WRITE these fields in the USER'S voice from the profile scan (their phrasing, " +
   "register, vibe) while keeping every product CLAIM factual to the site. Don't invent " +
   "features, metrics, or guarantees the site doesn't state.\n" +
-  "5. Show the user your draft of the product fields for confirmation, then call setup " +
-  "with name + the product fields (plus the voice/search_topics from the profile scan) " +
-  "to save. If the site is thin or unreachable, tell the user and ask them to fill the " +
-  "gaps rather than guessing.";
+  "5. Save the best conservative factual draft without adding a confirmation round-trip. Call " +
+  "project_config with name + the product fields (plus voice/search_topics from the profile scan). If the " +
+  "site is thin or unreachable, use only supported facts and leave optional detail conservative; " +
+  "ask the user only if a required field is genuinely unknowable.";
 
-// ---- setup: per-project config (the "brain": project, website, voice) -----
+// ---- project_config: per-project config (the "brain": project, website, voice) -----
 // Run this FIRST. The action tools refuse until at least one project is ready.
 // You can set up MULTIPLE products and fill each project's fields INCREMENTALLY
 // across several calls — readiness is derived from config.json, never a stored
 // flag. Call with status:true (or just no name) to list every project this
 // install manages and what each still needs.
 tool(
-  "setup",
+  "project_config",
   {
-    title: "Set up a project",
+    title: "Configure or edit a project",
     description:
-      "Run this FIRST, before any drafting or autopilot. Two jobs:\n" +
-      "1) Configure a project this install posts for: its website, what it does (description), who " +
-      "to target (icp), and brand voice. To fill the PRODUCT fields, get the product URL and visit " +
-      "it with your own browser/fetch tools — read 5+ pages (home, pricing, features, about, docs/" +
-      "blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE products " +
-      "(call once per product, identified by name); fill a project's fields INCREMENTALLY across " +
-      "several calls — pass whatever you have, it merges and tells you what's still missing.\n" +
+      "The ONE tool for a project's whole lifecycle: create it, EDIT it later, and connect its X " +
+      "account. There is no separate raw-config editor — every project change goes through here so " +
+      "it validates, merges, and re-seeds the search-topic universe the cycle reads. To CHANGE an " +
+      "existing project (its website, voice, icp, differentiator, search_topics, guardrails, CTA " +
+      "link), call this with that project's `name` and ONLY the fields you want to change; it merges " +
+      "onto what's already saved and never clobbers untouched fields. Run it FIRST before any " +
+      "drafting or autopilot. A user's request to set up social-autoposter is a request to finish " +
+      "the workflow end to end, not to interview them step by step: resume from current status, " +
+      "infer discoverable fields, and keep taking safe actions until runtime, project, X connection, " +
+      "topic seeding, and draft-only verification are complete.\n" +
+      "Two jobs:\n" +
+      "1) Configure (or edit) a project this install posts for: its website, what it does " +
+      "(description), who to target (icp), and brand voice. To fill the PRODUCT fields, discover the " +
+      "product URL from config, conversation context, the connected X profile, or public research, " +
+      "then visit it with your own browser/fetch tools — read 5+ pages (home, pricing, features, " +
+      "about, docs/blog, FAQ) to learn it deeply, rather than guessing from the name. Set up MULTIPLE " +
+      "products (call once per product, identified by name); fill or edit a project's fields " +
+      "INCREMENTALLY across several calls — pass whatever you have, it merges and tells you what's " +
+      "still missing.\n" +
       "2) Connect X/Twitter (action:'connect_x'): the autoposter posts through its OWN managed Chrome, " +
       "which needs your logged-in x.com session. This imports x.com/twitter.com cookies from your " +
       "everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into that browser — nothing else is " +
-      "touched. ALWAYS explain what will happen and get the user's OK first: call with action:'connect_x' " +
-      "(no confirm) to get the explanation, relay it, then call again with action:'connect_x', confirm:true.\n" +
+      "touched. An explicit setup/connect request is authorization: briefly warn that macOS Safe " +
+      "Storage prompts may appear, then call action:'connect_x', confirm:true immediately. Use " +
+      "action:'detect_x_sources' first and choose its recommendation instead of asking the user.\n" +
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
-      "whether X is connected. Ask the user conversationally; don't dump a form. The draft_cycle, " +
-      "autopilot, and get_stats tools refuse to run until a project is fully set up.",
+      "whether X is connected. Use config, conversation context, profile_scan, and website research " +
+      "before asking for fields. Ask only if no product can be identified or an interactive login is " +
+      "unavoidable. The scan_candidates and get_stats tools refuse to run until a project is " +
+      "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
       action: z
@@ -635,25 +819,37 @@ tool(
         .optional()
         .describe(
           "connect_x = import/validate your X session in the autoposter's managed browser. " +
-            "Without confirm:true it only EXPLAINS what it will do (so you can tell the user first). " +
+            "With an explicit setup/connect request, warn about possible keychain prompts and call " +
+            "with confirm:true without waiting for another yes/no reply. Without confirm:true it " +
+            "only previews the operation for users who asked to inspect it rather than run it. " +
             "detect_x_sources = list the browsers/profiles the X session can be imported from " +
             "(read-only, no keychain prompt) so the user can pick the right one; returns " +
             "{sources:[{spec,label,x_session}], recommended}. " +
             "profile_scan = AFTER connect_x, read the connected account's bio + recent posts + recent " +
             "replies to build a 'grounding truth' corpus. Use it to draft voice/icp/search_topics in " +
-            "the USER'S OWN register (their phrases, vibe, profession), then confirm with the user " +
-            "before calling setup to save. Returns {profile, posts, comments, grounding_instructions}."
+            "the USER'S OWN register (their phrases, vibe, profession), then save a conservative best " +
+            "draft without requiring a confirmation round-trip. Returns {profile, posts, comments, " +
+            "grounding_instructions}."
         ),
       confirm: z
         .boolean()
         .optional()
-        .describe("Set true with action:'connect_x' to actually run the import after the user has agreed."),
+        .describe("Set true to run the import. An explicit setup/connect request counts as authorization."),
       x_source: z
         .string()
         .optional()
         .describe(
           "Optional browser profile to import the X session from, e.g. 'arc:Default', 'chrome:Profile 1'. " +
             "Default: auto-detect chrome/arc/brave/edge."
+        ),
+      x_manual_login: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true ONLY when the user explicitly wants to sign into X by hand. It opens a focused " +
+            "X login window and waits for them to log in. By default (false), connect_x does NOT pop a " +
+            "browser window on an auto-import miss; it returns needs_login and you offer manual login as " +
+            "an opt-in. The login window still opens automatically if the user DENIED the keychain prompt."
         ),
       name: z
         .string()
@@ -682,6 +878,19 @@ tool(
         .string()
         .optional()
         .describe("Anything the posts must avoid saying / claiming"),
+      fields: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe(
+          "Escape hatch to edit ANY other project field the named props above don't cover — e.g. " +
+            "weight, platform, voice_relationship, booking_link, qualification, subreddit_bans, " +
+            "short_links_host, short_links_live, content_angle, messaging, landing_pages, posthog. " +
+            "Pass {name:'<project>', fields:{<key>:<value>, ...}}; each key SHALLOW-merges onto the " +
+            "project, REPLACING that key's whole value (read the current value via status:true first if " +
+            "you only want to tweak part of a nested object, then pass the full new value). A value of " +
+            "null DELETES the key. 'name' is ignored here (can't rename through this path). This is how " +
+            "you edit advanced config without any raw whole-file overwrite."
+        ),
     },
   },
   async (args) => {
@@ -701,8 +910,9 @@ tool(
     }
 
     // ---- Connect X/Twitter: import the user's session into our browser ----
-    // Explain-then-confirm: the first call (no confirm) describes exactly what
-    // will happen so the agent can get the user's OK; confirm:true runs it.
+    // Preview-or-run: a call without confirm describes the operation. During an
+    // explicit end-to-end setup request the agent gives a short keychain heads-up
+    // and calls confirm:true immediately; no extra yes/no round-trip is needed.
     if (args.action === "connect_x") {
       if (args.confirm !== true) {
         // Cheap probe so the explanation reflects current state (no Chrome launch).
@@ -726,12 +936,43 @@ tool(
             "cookies from your everyday browser (Chrome/Arc/Brave/Edge, auto-detected) into it, and " +
             "(3) verify you're logged in. No other site's cookies are read, and your passwords are never " +
             "seen. If it can't import a valid session, a Chrome window will open for you to sign in once.",
+          keychain_prompt:
+            "Reading the saved session requires macOS to unlock the browser's encrypted cookie store, so " +
+            "one or more keychain prompts will appear (\u201c... wants to use your confidential information " +
+            "stored in '... Safe Storage' in your keychain\u201d). This is expected. The user enters their Mac " +
+            "login password and clicks Allow (or Always Allow to avoid repeats). If they use more than one " +
+            "browser, the prompt can appear a few times, once per browser.",
+          say_to_user:
+            "Heads up: your Mac will pop up a keychain prompt asking to use your browser's Safe Storage. " +
+            "That's just us reading your saved X login, nothing else. Type your Mac login password and click " +
+            "Allow (or Always Allow). If you use more than one browser you may see it a couple of times, " +
+            "once per browser.",
           how_to_proceed:
-            "Tell the user the above in your own words and ask if that's OK. If yes, call setup again with " +
-            "action:'connect_x', confirm:true (optionally x_source:'arc:Default' etc. if they use a non-Chrome browser).",
+            "If the user explicitly requested setup or connection, relay the say_to_user line as a brief " +
+            "heads-up and immediately call project_config again with action:'connect_x', confirm:true; do not wait " +
+            "for another yes/no reply. Optionally pass the recommended x_source. If the user only asked " +
+            "what connection would do, stop after this preview.",
         });
       }
-      const r = await xConnect(args.x_source);
+      recordOnboardingAttempt("x_connected", {
+        state: args.x_source ? "source_selected" : "auto_detect",
+      });
+      const r = await xConnect(args.x_source, args.x_manual_login);
+      let doctorReport = null;
+      if (r.connected) {
+        completeOnboardingMilestone("x_connected", { state: r.state });
+        // The pre-connect Doctor intentionally treats missing X/cookie artifacts
+        // as expected. Once connect_x succeeds, run the full phase immediately
+        // to verify persistence, CDP, and the durable cookie mirror.
+        doctorReport = await runDoctorPhase("full");
+      } else {
+        blockOnboardingMilestone(
+          "x_connected",
+          `x_${r.state || "not_connected"}`,
+          r.error || r.note || summarizeXAuth(r),
+          { state: r.state || "not_connected" }
+        );
+      }
       return jsonContent({
         action: "connect_x",
         connected: r.connected,
@@ -740,13 +981,21 @@ tool(
         summary: summarizeXAuth(r),
         note: r.note,
         attempts: r.attempts,
+        doctor: doctorReport
+          ? {
+              phase: doctorReport.phase,
+              ok: doctorReport.ok,
+              summary: doctorReport.summary,
+            }
+          : undefined,
+        onboarding: onboardingSnapshot(),
         next_step: r.connected
-          ? "X is connected. Next, run setup action:'profile_scan' to read this account's bio + recent " +
+          ? "X is connected. Next, run project_config action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
-            "before saving. Then run draft_cycle once the project is fully set up."
+            "before saving. Then run a draft cycle (scan_candidates -> draft -> submit_drafts) once the project is fully set up."
           : r.state === "needs_login"
-            ? "Ask the user to sign in to x.com in the Chrome window that just opened, then call setup " +
-              "action:'connect_x', confirm:true again to confirm."
+            ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
+              "them that single required action, then call project_config action:'connect_x', confirm:true again."
             : "X is not connected yet. " + summarizeXAuth(r),
       });
     }
@@ -756,22 +1005,33 @@ tool(
     // successful connect_x) to read the user's bio + recent posts + recent
     // replies. Returns the raw corpus plus grounding_instructions; synthesis of
     // voice/icp/topics happens IN THIS CONVERSATION (no nested model), then the
-    // agent confirms with the user and calls setup to persist. Read-only.
+    // agent confirms with the user and calls project_config to persist. Read-only.
     if (args.action === "profile_scan") {
       // Handle is auto-detected from the live logged-in session by the scanner.
+      recordOnboardingAttempt("profile_scanned");
       const scan = await xScanProfile();
       if (!scan.ok) {
         const hint =
           scan.state === "browser_not_running" || scan.state === "no_handle"
-            ? " Run setup action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
+            ? " Run project_config action:'connect_x' (confirm:true) first so the account is connected, then retry profile_scan."
             : "";
+        blockOnboardingMilestone(
+          "profile_scanned",
+          `profile_${scan.state || "failed"}`,
+          scan.error || "profile scan failed",
+          { state: scan.state || "failed" }
+        );
         return jsonContent({
           action: "profile_scan",
           ok: false,
           state: scan.state,
           error: (scan.error || "profile scan failed") + hint,
+          onboarding: onboardingSnapshot(),
         });
       }
+      completeOnboardingMilestone("profile_scanned", {
+        state: scan.state,
+      });
       return jsonContent({
         action: "profile_scan",
         ok: true,
@@ -782,28 +1042,48 @@ tool(
         comments: scan.comments,
         grounding_instructions: scan.grounding_instructions,
         website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
+        onboarding: onboardingSnapshot(),
         next_step:
           "TWO steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
           "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
           "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
-          "SECOND (product, from their website): then follow website_research_instructions — ask " +
-          "the user for the product URL and read 5+ of its pages to fill description, " +
+          "SECOND (product, from their website): then follow website_research_instructions — discover " +
+          "the product URL from config, context, profile links/posts, or public research and read 5+ " +
+          "of its pages to fill description, " +
           "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
-          "just captured. Show the user your combined read ('here's the voice/topics from your " +
-          "profile and what I learned from your site — accurate?'), then call setup with the " +
-          "confirmed fields to save.",
+          "just captured. Save the best conservative supported fields without a confirmation " +
+          "round-trip. Ask only if no product can be identified or a required field is unknowable.",
       });
     }
 
     // Status / discovery mode: no project name supplied, or explicitly asked.
     if (args.status === true || !args.name) {
       const projects = listManagedProjectStatus();
-      const x = await xStatus();
+      const rtReady = runtimeReady();
+      // On a bare .mcpb install the runtime step also materializes the pipeline
+      // source that xStatus shells into. Status must still work before that first
+      // install, otherwise the agent cannot discover that installation is the
+      // next milestone. Avoid probing Python until the owned runtime is ready.
+      const x = rtReady
+        ? await xStatus().catch(() => ({ connected: false, state: "status_unavailable" }) as any)
+        : ({ connected: false, state: "runtime_not_ready" } as any);
+      await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
       const ver = await versionStatus();
+      const configured = projects.some((p) => p.ready);
+      if (rtReady) completeOnboardingMilestone("runtime_ready");
+      if (x.connected) {
+        completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
+      }
+      if (configured) {
+        completeOnboardingMilestone("project_ready", {
+          missing_count: 0,
+        });
+      }
       return jsonContent({
-        configured: projects.some((p) => p.ready),
+        configured,
         projects,
+        runtime_ready: rtReady,
         x_connected: x.connected,
         x_state: x.state,
         x_handle: x.handle ?? null,
@@ -812,33 +1092,47 @@ tool(
         update_available: ver.update_available,
         update_hint: ver.update_available
           ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
-            `Tell the user and offer to run the \`version\` tool with action:'update' ` +
+            `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
             `(or \`npx social-autoposter@latest update\`).`
           : undefined,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: configPath(),
+        ready_for_verification: rtReady && configured && x.connected,
+        onboarding: onboardingSnapshot(),
         next_step:
-          projects.length === 0
-            ? "No projects yet. Ask the user about a product (website, what it does, who to target, " +
-              "brand voice), then call setup with a short name plus those fields. Repeat per product." +
-              (x.connected ? "" : " X is not connected yet either — also run setup action:'connect_x'.")
+          !rtReady
+            ? "Runtime is not ready. Call runtime action:'install', poll runtime action:'status' to completion, then continue setup automatically."
+            : projects.length === 0
+            ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
+              (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Call setup again with a new name " +
-                    "to add another product, or run draft_cycle to post."
+                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. Then SCHEDULE THE AUTOPILOT: call create_scheduled_task (taskId 'social-autoposter-autopilot', cron '* * * * *', prompt = scan_candidates -> draft -> submit_drafts, draft-only) and run one cycle now. Then call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
-                    "x.com session. Run setup action:'connect_x' to import it from the user's browser.")
-              : "Some projects are missing required fields (see each project's missing_required). Ask the " +
-                "user for those and call setup again with that project's name plus the missing fields." +
-                (x.connected ? "" : " X is also not connected yet (run setup action:'connect_x')."),
+                    "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
+              : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
+                (x.connected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
       });
     }
 
     // Apply mode (incremental): merge whatever fields were supplied onto the
     // named project, then report whether it's now ready or still missing fields.
     try {
+      recordOnboardingAttempt("project_ready", {
+        missing_count: 0,
+      });
       const result = applySetup(args as ProjectInput);
+      if (result.ready) {
+        completeOnboardingMilestone("project_ready", { missing_count: 0 });
+      } else {
+        blockOnboardingMilestone(
+          "project_ready",
+          "missing_required_fields",
+          `Project '${result.project}' still needs: ${result.missing_required.join(", ")}`,
+          { missing_count: result.missing_required.length }
+        );
+      }
       // Seed this project's search_topics into the DB universe the cycle reads
       // (project_search_topics). Without this a freshly-configured project has
       // topics in config.json but ZERO rows in the DB, so draft_cycle's topic
@@ -847,8 +1141,11 @@ tool(
       // the user if topics are missing. Only runs once the project is ready
       // (i.e. it actually has search_topics to seed). (2026-06-02)
       let seedNote = "";
+      let topicsSeeded = false;
+      let topicCount = 0;
       let searchQueries: Array<{ query: string; topic: string }> = [];
       if (result.ready) {
+        recordOnboardingAttempt("topics_seeded");
         const seed = await runPython(
           "scripts/seed_search_topics.py",
           ["--project", result.project],
@@ -856,12 +1153,23 @@ tool(
         );
         if (seed.code === 0) {
           const m = /planned=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(seed.stdout);
+          topicCount = m ? Number(m[1]) : 0;
+          topicsSeeded = true;
+          completeOnboardingMilestone("topics_seeded", {
+            topic_count: topicCount,
+          });
           seedNote = m
-            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so draft_cycle has a topic universe to work with.`
-            : " Seeded search topics into the DB so draft_cycle has a topic universe to work with.";
+            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so scan_candidates has a topic universe to work with.`
+            : " Seeded search topics into the DB so scan_candidates has a topic universe to work with.";
         } else {
           const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. draft_cycle will tell you clearly if topics are missing.)`;
+          blockOnboardingMilestone(
+            "topics_seeded",
+            "topic_seed_failed",
+            tail,
+            { exit_code: seed.code }
+          );
+          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. scan_candidates will tell you clearly if topics are missing.)`;
         }
 
         // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
@@ -900,21 +1208,38 @@ tool(
           }
         }
       }
+      // Surface any advanced (escape-hatch) field edits in the note so the
+      // agent can confirm exactly what changed to the user.
+      let advancedNote = "";
+      if (result.fields_set.length || result.fields_removed.length) {
+        const parts: string[] = [];
+        if (result.fields_set.length) parts.push(`set ${result.fields_set.join(", ")}`);
+        if (result.fields_removed.length) parts.push(`removed ${result.fields_removed.join(", ")}`);
+        advancedNote = ` Advanced fields updated: ${parts.join("; ")}.`;
+      }
       return jsonContent({
         ok: true,
         project: result.project,
         action: result.created ? "created" : "updated",
         ready: result.ready,
         missing_required: result.missing_required,
-        topics_seeded: result.ready,
+        topics_seeded: topicsSeeded,
+        topic_count: topicCount,
         search_queries: searchQueries,
+        fields_set: result.fields_set,
+        fields_removed: result.fields_removed,
         config_path: configPath(),
-        note: result.ready
-          ? `Project '${result.project}' is fully set up.${seedNote} Next: connect X so the autoposter can post — ` +
-            `call setup with action:'connect_x' (it explains itself, then run again with confirm:true). ` +
-            `Once X is connected you can run draft_cycle, autopilot, and get_stats.`
+        onboarding: onboardingSnapshot(),
+        note: (result.ready
+          ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
+            `detect sources, warn about keychain prompts, and call project_config with ` +
+            `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts ` +
+            `to verify without posting, then schedule the draft-only autopilot (create_scheduled_task, cron '* * * * *', ` +
+            `prompt = scan_candidates -> draft -> submit_drafts) and run one cycle now.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
-            `Ask the user for those and call setup again with name='${result.project}' and the missing fields.`,
+            `First derive those fields from existing context, profile_scan, and website research, then ` +
+            `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
+          advancedNote,
       });
     } catch (e) {
       return textContent(`Setup failed: ${(e as Error).message}`);
@@ -922,118 +1247,14 @@ tool(
   }
 );
 
-// ---- draft_cycle: scan + draft, then hand the batch to the user for review.
-// Posting is a SEPARATE step (post_drafts) so the user picks by number in chat.
-// This host doesn't support elicitation, so there is no in-tool form: the model
-// relays the table and asks which to post / edit, then calls post_drafts.
-tool(
-  "draft_cycle",
-  {
-    title: "Draft an X reply cycle",
-    description:
-      "Scan X and draft replies on this machine, then return ALL drafts as a numbered table " +
-      "for review. This tool POSTS NOTHING. Show the table to the user and ask which numbers " +
-      "to post and which to rewrite, then call `post_drafts` with their decision and the " +
-      "returned batch_id. The table MUST show, per draft: the thread being replied to " +
-      "(thread_text), the draft reply, and the link target (link_url) when present; never " +
-      "drop those columns. Flow: discover -> draft -> review in chat -> post_drafts. " +
-      "After returning the table, call the `dashboard` tool so the user sees the updated state.",
-    inputSchema: {
-      project: z
-        .string()
-        .optional()
-        .describe("Which configured project to draft for. Optional when only one project is set up; required when several are."),
-    },
-  },
-  async ({ project }, extra) => {
-    const r = resolveProject(project);
-    if (!r.ok) return textContent(r.message!);
-    const proj = r.project!;
-
-    // Live progress so the chat doesn't sit on a frozen spinner for minutes.
-    // Two channels, both best-effort (a sink failure must never fail the cycle):
-    //   1. notifications/message — a log line; the host records it (and some
-    //      clients show it in a log view). Works with no client opt-in.
-    //   2. notifications/progress — drives the status text under the running
-    //      tool. Only valid when the client supplied a progressToken on the
-    //      request, so it's guarded on that.
-    const progressToken = extra?._meta?.progressToken;
-    const sendProgress = async (message: string, step: number) => {
-      try {
-        await extra.sendNotification({
-          method: "notifications/message",
-          params: { level: "info", logger: "draft_cycle", data: message },
-        });
-      } catch {
-        /* ignore */
-      }
-      if (progressToken !== undefined) {
-        try {
-          await extra.sendNotification({
-            method: "notifications/progress",
-            params: { progressToken, progress: step, message },
-          });
-        } catch {
-          /* ignore */
-        }
-      }
-    };
-
-    const drafted = await produceDrafts(proj, (message, step) => {
-      void sendProgress(message, step);
-    });
-    if (drafted.blocked || !drafted.batchId) {
-      return textContent(drafted.blocked ?? "No drafts produced.");
-    }
-    const plan = readPlan(drafted.batchId);
-    if (!plan || !(plan.candidates && plan.candidates.length)) {
-      return textContent(`No drafts in batch ${drafted.batchId}.`);
-    }
-    const count = plan.candidates.length;
-    const table = renderDraftsTable(plan);
-    const message =
-      `Drafted ${count} ${count === 1 ? "reply" : "replies"} for "${proj}" ` +
-      `(batch ${drafted.batchId}). NOTHING has been posted yet.\n\n` +
-      `${table}\n\n` +
-      `Show this list to the user and ask which to post and which to edit. When you render ` +
-      `the table, ALWAYS include, for every draft: the thread it replies to (in reply to / ` +
-      `thread_text), the draft text, and the link target (link_url) if present. Do NOT drop ` +
-      `the thread or link columns. Note the literal short link is appended at post time and ` +
-      `an A/B gate may omit it, so present link_url as the target, not a guaranteed final URL. ` +
-      `They can reply however is natural, e.g. "post 1, 3 and 5", "edit 2: <new wording>", ` +
-      `"post all", or "skip all". Editing a draft also posts it. Then call the post_drafts ` +
-      `tool with batch_id "${drafted.batchId}" and their decision (post: [numbers], ` +
-      `edits: [{n, text}], or post_all: true). Do not post anything the user didn't ask for.`;
-    return {
-      content: [{ type: "text" as const, text: message }],
-      structuredContent: {
-        batch_id: drafted.batchId,
-        drafted: count,
-        status: "awaiting_decision",
-        // Include the actual draft text here, not just a count. Some hosts
-        // (e.g. Claude Desktop) surface ONLY structuredContent to the model and
-        // drop the human-readable `content` table — which left the agent saying
-        // "drafted: 2" with no way to show the drafts. Carrying the drafts in
-        // structuredContent makes them available regardless of host behavior.
-        drafts: (plan.candidates || []).map((c: PlanCandidate, i: number) => ({
-          n: i + 1,
-          author: c.thread_author,
-          tweet_url: c.candidate_url,
-          // The original tweet being replied to — reviewer context. Hosts that
-          // surface ONLY structuredContent (Claude Desktop, Fazm Code tab) need
-          // this here or the relayed table loses the thread it's responding to.
-          thread_text: c.thread_text,
-          reply_text: c.reply_text,
-          // Target link only. The literal /r/<code> short link is minted at post
-          // time and an A/B gate may omit it; do not pre-mint here.
-          link_url: c.link_url,
-          style: c.engagement_style,
-          language: c.language,
-        })),
-      },
-    };
-  }
-);
+// ---- draft_cycle: DEPRECATED 2026-06-20 (registration removed) -------------
+// Replaced by the scan_candidates -> (agent drafts) -> submit_drafts flow, so the
+// AI drafting now runs in the calling session (on the user's plan) instead of a
+// spawned `claude -p`. post_drafts (below) still posts the approved subset, and
+// submit_drafts completes the onboarding "draft_verified" milestone that this
+// tool used to. The underlying pipeline (run-twitter-cycle.sh) and the
+// produceDrafts() helper are kept as the source those tools reuse; only the
+// draft_cycle tool registration was removed here.
 
 // ---- post_drafts: post the user's chosen drafts from a batch ---------------
 // Second half of the manual loop. The user reviewed the table from draft_cycle
@@ -1044,15 +1265,15 @@ tool(
   {
     title: "Post chosen drafts",
     description:
-      "Post the drafts the user approved from a draft_cycle batch. Pass the batch_id from " +
-      "draft_cycle and the user's decision by NUMBER (1-based, matching the table): `post` is " +
+      "Post the drafts the user approved from a submit_drafts batch. Pass the batch_id from " +
+      "submit_drafts and the user's decision by NUMBER (1-based, matching the table): `post` is " +
       "the list of draft numbers to post as drafted; `edits` rewrites a draft's text before " +
       "posting it (editing implies posting); `post_all` posts every draft. Only the chosen " +
       "drafts post; anything not listed is left unposted. Call this ONLY after the user has " +
       "told you which drafts they want. After posting, call the `dashboard` tool so the user " +
       "sees the updated state.",
     inputSchema: {
-      batch_id: z.string().describe("The batch_id returned by draft_cycle."),
+      batch_id: z.string().describe("The batch_id returned by submit_drafts."),
       post: z
         .array(z.number().int().positive())
         .optional()
@@ -1068,7 +1289,7 @@ tool(
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
-        `No drafts found for batch ${batch_id}. Run draft_cycle again to produce a fresh batch.`
+        `No drafts found for batch ${batch_id}. Run scan_candidates then submit_drafts again to produce a fresh batch.`
       );
     }
     const candidates = plan.candidates;
@@ -1102,6 +1323,19 @@ tool(
       else warnings.push(`ignored #${n}: out of range (1-${total})`);
     });
 
+    // Cross-surface de-dup: chat and the menu-bar pop-ups can both approve, so
+    // never re-post a candidate the other surface already posted.
+    const alreadyPosted: number[] = [];
+    for (const n of Array.from(approve)) {
+      if (candidates[n - 1]?.posted === true) {
+        approve.delete(n);
+        alreadyPosted.push(n);
+      }
+    }
+    if (alreadyPosted.length) {
+      warnings.push(`already posted (skipped): ${alreadyPosted.sort((a, b) => a - b).join(", ")}`);
+    }
+
     candidates.forEach((c, i) => (c.approved = approve.has(i + 1)));
     writePlan(batch_id, plan);
 
@@ -1130,112 +1364,16 @@ tool(
   }
 );
 
-// ---- autopilot: one tool, three actions -----------------------------------
-tool(
-  "autopilot",
-  {
-    title: "X autopilot",
-    description:
-      "Control background X/Twitter posting. action=enable loads the launchd job so the " +
-      "cycle fires automatically; action=disable unloads it (manual draft_cycle still works); " +
-      "action=status reports whether it is loaded. After enable/disable, call the `dashboard` " +
-      "tool so the user sees the updated autopilot state.",
-    inputSchema: {
-      action: z.enum(["enable", "disable", "status"]),
-    },
-  },
-  async ({ action }) => {
-    if (action !== "status" && !hasReadyProject()) {
-      return textContent(
-        "No project is fully set up yet, so autopilot has nothing to post. Run the `setup` tool " +
-          "first. Note: autopilot runs the background cycle across all configured projects; it is " +
-          "not scoped to one project."
-      );
-    }
-    const uid = process.getuid ? process.getuid() : 0;
-    const logDir = path.join(repoDir(), "skill", "logs");
-
-    if (action === "status") {
-      const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-      const lines = res.stdout.split("\n");
-      const loaded = lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL));
-      const updaterLoaded = lines.some((l) => l.includes(UPDATER_LABEL));
-      return jsonContent({
-        label: TWITTER_AUTOPILOT_LABEL,
-        loaded,
-        auto_update_label: UPDATER_LABEL,
-        auto_update_loaded: updaterLoaded,
-      });
-    }
-
-    if (action === "enable") {
-      // Bring up the on-screen overlay watcher so background autopilot cycles
-      // still paint the harness status/sidebar. Idempotent + detached.
-      await ensureOverlayWatch();
-      // 1) Cycle plist. Write one pointing at the self-update guard ONLY if no
-      //    plist exists yet; never overwrite a hand-tuned/dev plist.
-      const createdCycle = ensurePlist(
-        TWITTER_AUTOPILOT_PLIST,
-        plistXml({
-          label: TWITTER_AUTOPILOT_LABEL,
-          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "run-cycle-update-guard.sh")],
-          intervalSecs: 60,
-          runAtLoad: false,
-          stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
-          stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
-        })
-      );
-      const cycleRes = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
-
-      // 2) Daily self-updater. Keeps a headless install current with no human
-      //    in the loop. RunAtLoad so it also checks shortly after enable.
-      const createdUpdater = ensurePlist(
-        UPDATER_PLIST,
-        plistXml({
-          label: UPDATER_LABEL,
-          programArgs: ["/bin/bash", path.join(repoDir(), "skill", "social-autoposter-update.sh")],
-          intervalSecs: 86_400,
-          runAtLoad: true,
-          stdoutLog: path.join(logDir, "launchd-self-update-stdout.log"),
-          stderrLog: path.join(logDir, "launchd-self-update-stderr.log"),
-        })
-      );
-      const updaterRes = await loadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-
-      return jsonContent({
-        action: "enable",
-        autopilot: {
-          loaded: cycleRes.code === 0,
-          plist: TWITTER_AUTOPILOT_PLIST,
-          created: createdCycle,
-          error: cycleRes.code === 0 ? null : (cycleRes.stderr || cycleRes.stdout).trim(),
-        },
-        auto_update: {
-          loaded: updaterRes.code === 0,
-          plist: UPDATER_PLIST,
-          created: createdUpdater,
-          note:
-            "Daily updater enabled. It self-updates real npm installs and is a no-op on dev/source " +
-            "checkouts (refuses to clobber a .git working tree).",
-          error: updaterRes.code === 0 ? null : (updaterRes.stderr || updaterRes.stdout).trim(),
-        },
-      });
-    }
-
-    // disable — unload both jobs (leave the plist files in place for re-enable)
-    const cycleOff = await unloadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
-    const updaterOff = await unloadPlist(UPDATER_LABEL, UPDATER_PLIST, uid);
-    return jsonContent({
-      action: "disable",
-      autopilot_unloaded: cycleOff.code === 0,
-      auto_update_unloaded: updaterOff.code === 0,
-      note:
-        cycleOff.code === 0
-          ? "Autopilot and daily auto-update unloaded. Manual draft_cycle still works."
-          : `Autopilot disable reported exit ${cycleOff.code}: ${(cycleOff.stderr || cycleOff.stdout).trim()}`,
-    });
-  }
-);
+// ---- autopilot: MCP tool removed ------------------------------------------
+// The `autopilot` MCP tool (enable/disable/status) was intentionally removed:
+// hands-free background posting is no longer toggled from the agent/tool surface.
+// The underlying launchd cycle job + plist (com.m13v.social-twitter-cycle) and
+// the daily self-updater are NOT touched here — an already-loaded job keeps
+// running, and the plist files stay on disk. The plist helpers above
+// (ensurePlist / plistXml / loadPlist / unloadPlist) and the constants are kept
+// as the underlying source for that job; the `dashboard` snapshot still reports
+// the job's loaded state via autopilotLoaded(). To enable/disable the job now,
+// use launchctl directly or re-add a tool here.
 
 // ---- get_stats: read-only -------------------------------------------------
 tool(
@@ -1273,33 +1411,97 @@ tool(
 );
 
 // ---- version: report installed version + deliver updates on demand ---------
+// ---- runtime: install + version/update + diagnostics ----------------------
+// ONE plumbing tool for the whole local-runtime lifecycle, action-based like
+// project_config and autopilot. The pipeline runs Python locally; rather than
+// depend on the user's system Python (the #1 source of install failures), the
+// first run provisions a fully OWNED uv runtime: standalone CPython + owned venv
+// + deps + Chromium. It also reports/installs new releases and runs the Doctor.
+// Plain (non-UI) so EVERY host can drive it — the panel's Install card and
+// Update button are just skins that call action:'install' then poll
+// action:'status'. See runtime.ts for the provisioning + progress contract.
+//
+// Actions:
+//   status (default) — is the owned runtime installed? + in-progress step detail
+//   install          — start provisioning in the background; poll status to follow
+//   version          — installed vs latest published, whether an update is available
+//   update           — pull + install the latest release (npx social-autoposter@latest update)
+//   doctor           — run structured environment diagnostics (phase: pre_connect|full)
+//   doctor_status    — last persisted Doctor result without re-running checks
 tool(
-  "version",
+  "runtime",
   {
-    title: "Version & updates",
+    title: "Runtime: install, update & diagnostics",
     description:
-      "Report the installed social-autoposter version and check npm for a newer release. " +
-      "action:'status' (default) shows installed vs latest published and whether an update is " +
-      "available. action:'update' pulls and installs the latest release (runs " +
-      "`npx social-autoposter@latest update`); the new MCP code takes effect after the client " +
-      "reconnects / restarts (this running process keeps the old code until then). Use this when " +
-      "the user asks what version they're on, or to push the latest update to their machine.",
+      "The ONE plumbing tool for the autoposter's local runtime lifecycle. action:'status' (default) " +
+      "reports whether the self-contained Python/Chromium runtime is installed and, mid-install, the " +
+      "per-step progress (uv, Python, venv, dependencies, Chromium) — poll it after action:'install'. " +
+      "action:'install' provisions that runtime (a private Python via uv, NOT your system Python, plus " +
+      "deps and Chromium); it runs in the background and returns immediately, is safe to call " +
+      "repeatedly, and is a no-op once installed. action:'version' shows installed vs latest published " +
+      "and whether an update is available; action:'update' pulls and installs the latest release (runs " +
+      "`npx social-autoposter@latest update`, taking effect after the client reconnects/restarts). " +
+      "action:'doctor' runs structured environment diagnostics (phase:'pre_connect' is safe at " +
+      "onboarding start and treats the missing X session/cookies as expected; phase:'full' verifies the " +
+      "completed environment after X is connected); action:'doctor_status' returns the last persisted " +
+      "Doctor result without re-running. Use this the first time the user sets up, when another tool " +
+      "reports the runtime isn't ready, when the user asks what version they're on or to update, or to " +
+      "diagnose a broken environment.",
     inputSchema: {
-      action: z.enum(["status", "update"]).optional(),
+      action: z
+        .enum(["status", "install", "version", "update", "doctor", "doctor_status"])
+        .optional(),
+      phase: z
+        .enum(["pre_connect", "full"])
+        .optional()
+        .describe("Only for action:'doctor' — which diagnostic phase to run (default pre_connect)."),
     },
   },
-  async ({ action }) => {
+  async ({ action, phase }: { action?: "status" | "install" | "version" | "update" | "doctor" | "doctor_status"; phase?: DoctorPhase }) => {
+    // ---- install: start provisioning the owned runtime --------------------
+    if (action === "install") {
+      if (runtimeReady()) {
+        completeOnboardingMilestone("runtime_ready");
+        return jsonContent({ already_installed: true, ...runtimeSnapshot() });
+      }
+      recordOnboardingAttempt("runtime_ready");
+      const progress = startProvisioning();
+      return jsonContent({
+        started: true,
+        runtime_ready: false,
+        note: "Runtime install started. Poll runtime action:'status' every ~1.5s for progress.",
+        progress,
+      });
+    }
+
+    // ---- version: installed vs latest published ---------------------------
+    if (action === "version") {
+      const v = await versionStatus();
+      return jsonContent({
+        installed: v.installed,
+        latest_published: v.latest,
+        update_available: v.update_available,
+        update_command: "npx social-autoposter@latest update",
+        note:
+          v.latest == null
+            ? "Could not reach npm to check for a newer version (offline or registry error)."
+            : v.update_available
+              ? `A newer version (${v.latest}) is available. Run this tool with action:'update' ` +
+                "to install it, or run `npx social-autoposter@latest update` in a terminal."
+              : "You are on the latest published version.",
+      });
+    }
+
+    // ---- update: pull + install the latest release ------------------------
     if (action === "update") {
-      // Pull + install the latest published release. This overwrites mcp/dist/
-      // (including this running file — safe; the loaded process keeps old code)
-      // and re-runs install.mjs to re-register the client config. npx is run
-      // non-interactively so it can't stall on a confirm prompt.
+      // Overwrites mcp/dist/ (including this running file — safe; the loaded
+      // process keeps old code) and re-runs install.mjs to re-register the
+      // client config. npx is non-interactive so it can't stall on a confirm.
       const before = VERSION;
       const res = await run("npx", ["-y", "social-autoposter@latest", "update"], {
         timeoutMs: 600_000,
       });
-      // Bust the latest-version cache so the post-update number is fresh.
-      const latest = await latestPublishedVersion();
+      const latest = await latestPublishedVersion(); // bust the cache
       return jsonContent({
         action: "update",
         ran: "npx social-autoposter@latest update",
@@ -1313,30 +1515,37 @@ tool(
         output_tail: (res.stdout + "\n" + res.stderr).trim().split("\n").slice(-20).join("\n"),
       });
     }
-    const v = await versionStatus();
-    return jsonContent({
-      installed: v.installed,
-      latest_published: v.latest,
-      update_available: v.update_available,
-      update_command: "npx social-autoposter@latest update",
-      note:
-        v.latest == null
-          ? "Could not reach npm to check for a newer version (offline or registry error)."
-          : v.update_available
-            ? `A newer version (${v.latest}) is available. Run this tool with action:'update' ` +
-              "to install it, or run `npx social-autoposter@latest update` in a terminal."
-            : "You are on the latest published version.",
-    });
+
+    // ---- doctor: run structured diagnostics -------------------------------
+    if (action === "doctor") {
+      const selected = phase || "pre_connect";
+      const report = await runDoctorPhase(selected);
+      return jsonContent({ doctor: report, onboarding: onboardingSnapshot() });
+    }
+
+    // ---- doctor_status: last persisted Doctor result ----------------------
+    if (action === "doctor_status") {
+      return jsonContent({
+        doctor: onboardingLedger()?.doctor?.latest ?? null,
+        onboarding: onboardingSnapshot(),
+      });
+    }
+
+    // ---- status (default): runtime install snapshot -----------------------
+    const snapshot = runtimeSnapshot();
+    if (snapshot.runtime_ready) {
+      completeOnboardingMilestone("runtime_ready");
+    } else if (snapshot.progress?.done && !snapshot.progress.ok) {
+      blockOnboardingMilestone(
+        "runtime_ready",
+        "runtime_install_failed",
+        snapshot.progress.error || "Runtime installation failed",
+        { outcome: "failed" }
+      );
+    }
+    return jsonContent({ ...snapshot, onboarding: onboardingSnapshot() });
   }
 );
-
-// ---- runtime installer ----------------------------------------------------
-// The pipeline runs Python locally. Rather than depend on the user's system
-// Python (the #1 source of install failures), the first run provisions a fully
-// OWNED uv runtime: standalone CPython + owned venv + deps + Chromium. These two
-// tools drive it. They are plain (non-UI) tools so EVERY host can install — the
-// panel's Install card is just a skin that calls install_runtime then polls
-// install_status. See runtime.ts for the provisioning + progress contract.
 
 function runtimeSnapshot() {
   const rt = readRuntime();
@@ -1347,131 +1556,40 @@ function runtimeSnapshot() {
     python: rt?.python ?? null,
     python_version: rt?.python_version ?? null,
     progress: progress ?? null,
+    onboarding: onboardingSnapshot(),
   };
 }
-
-tool(
-  "install_runtime",
-  {
-    title: "Install the Python runtime",
-    description:
-      "One-time setup that provisions the self-contained runtime the autoposter needs: a private " +
-      "Python (via uv, not your system Python), its dependencies, and the Chromium browser. Runs in " +
-      "the background and returns immediately; poll `install_status` for progress. Safe to call " +
-      "repeatedly; it resumes/repairs and is a no-op once everything is installed. Use this the " +
-      "first time the user sets up, or if other tools report the runtime isn't ready.",
-    inputSchema: {},
-  },
-  async () => {
-    if (runtimeReady()) {
-      return jsonContent({ already_installed: true, ...runtimeSnapshot() });
-    }
-    const progress = startProvisioning();
-    return jsonContent({
-      started: true,
-      runtime_ready: false,
-      note: "Runtime install started. Poll install_status every ~1.5s for progress.",
-      progress,
-    });
-  }
-);
-
-tool(
-  "install_status",
-  {
-    title: "Runtime install status",
-    description:
-      "Report whether the self-contained Python/Chromium runtime is installed and, if an install is " +
-      "in progress, the per-step progress (uv, Python, venv, dependencies, Chromium). Poll this after " +
-      "install_runtime to follow the install to completion.",
-    inputSchema: {},
-  },
-  async () => jsonContent(runtimeSnapshot())
-);
-
-// ---- config: read / edit the raw config.json ------------------------------
-// The panel renders the full config and lets the user edit it. Writing is
-// guarded: the new content must parse as JSON, and we always drop a timestamped
-// backup next to config.json before overwriting, so a bad paste is recoverable.
-tool(
-  "config",
-  {
-    title: "View or edit config.json",
-    description:
-      "Read or update the autoposter's config.json (the source of truth for every project, the X/" +
-      "Reddit/LinkedIn account handles, topics, and exclusions). action:'get' (default) returns the " +
-      "full raw JSON; action:'save' validates the supplied `content` as JSON, writes a timestamped " +
-      "backup, then overwrites config.json. Use when the user asks to see, edit, or fix their config.",
-    inputSchema: {
-      action: z.enum(["get", "save"]).optional(),
-      content: z.string().optional(),
-    },
-  },
-  async (args: { action?: "get" | "save"; content?: string }) => {
-    const action = args.action || "get";
-    const cfgPath = configPath();
-    if (action === "get") {
-      try {
-        const content = fs.readFileSync(cfgPath, "utf-8");
-        return jsonContent({ ok: true, path: cfgPath, bytes: content.length, content });
-      } catch (e: any) {
-        return jsonContent({ ok: false, path: cfgPath, error: String(e?.message || e) });
-      }
-    }
-    // save
-    const content = args.content;
-    if (typeof content !== "string" || content.trim() === "") {
-      return jsonContent({ ok: false, error: "Nothing to save: `content` was empty." });
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch (e: any) {
-      // Don't write a config that won't parse — every pipeline reads this file.
-      return jsonContent({ ok: false, error: "Invalid JSON, not saved: " + String(e?.message || e) });
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return jsonContent({ ok: false, error: "Top level of config.json must be a JSON object." });
-    }
-    try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backup = `${cfgPath}.bak-panel-${stamp}`;
-      try {
-        fs.copyFileSync(cfgPath, backup);
-      } catch {
-        /* first-write / missing original is non-fatal */
-      }
-      // Re-serialize the parsed object so what lands on disk is canonical,
-      // 2-space-indented JSON with a trailing newline (matches the Python
-      // writers), regardless of how the user formatted their paste.
-      const out = JSON.stringify(parsed, null, 2) + "\n";
-      fs.writeFileSync(cfgPath, out, "utf-8");
-      return jsonContent({ ok: true, path: cfgPath, bytes: out.length, backup });
-    } catch (e: any) {
-      return jsonContent({ ok: false, error: "Write failed: " + String(e?.message || e) });
-    }
-  }
-);
 
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
-// the tools above (draft_cycle / autopilot / setup / get_stats) through the host
+// the tools above (draft_cycle / project_config / get_stats) through the host
 // and re-reads status. The tool itself returns the first-paint snapshot so the
 // view has data the instant it loads.
 
 // Is either launchd job (cycle / daily updater) currently loaded?
+// "Autopilot" is now the Claude Desktop scheduled task `social-autoposter-autopilot`
+// (created during onboarding via create_scheduled_task), NOT the legacy launchd job.
+// We can't read the host's enabled/paused flag, but the task's presence on disk is the
+// single signal the dashboard AND the menu bar key off of, so they stay aligned.
 async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
+  let autopilot_on = false;
+  try {
+    const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    autopilot_on = fs.existsSync(
+      path.join(cfg, "scheduled-tasks", AUTOPILOT_TASK_ID, "SKILL.md")
+    );
+  } catch {
+    /* leave false */
+  }
+  let auto_update_on = false;
   try {
     const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
-    const lines = res.stdout.split("\n");
-    return {
-      autopilot_on: lines.some((l) => l.includes(TWITTER_AUTOPILOT_LABEL)),
-      auto_update_on: lines.some((l) => l.includes(UPDATER_LABEL)),
-    };
+    auto_update_on = res.stdout.split("\n").some((l) => l.includes(UPDATER_LABEL));
   } catch {
-    return { autopilot_on: false, auto_update_on: false };
+    /* leave false */
   }
+  return { autopilot_on, auto_update_on };
 }
 
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
@@ -1483,11 +1601,22 @@ async function buildSnapshot() {
     ready: p.ready,
     missing_required: p.missing_required,
   }));
+  const rtReady = runtimeReady();
   const [x, ap, ver] = await Promise.all([
-    xStatus().catch(() => ({ connected: false, state: "" }) as any),
+    rtReady
+      ? xStatus().catch(() => ({ connected: false, state: "" }) as any)
+      : Promise.resolve({ connected: false, state: "runtime_not_ready" } as any),
     autopilotLoaded(),
     versionStatus().catch(() => ({ installed: VERSION, latest: null, update_available: false }) as any),
   ]);
+  await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
+  if (rtReady) completeOnboardingMilestone("runtime_ready");
+  if (x.connected) {
+    completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
+  }
+  if (projects.some((project) => project.ready)) {
+    completeOnboardingMilestone("project_ready", { missing_count: 0 });
+  }
   return {
     projects,
     projects_total: projects.length,
@@ -1502,8 +1631,9 @@ async function buildSnapshot() {
     update_available: !!ver.update_available,
     // Runtime install gate: the panel shows the Install card (and disables the
     // action buttons) until the owned Python/Chromium runtime is provisioned.
-    runtime_ready: runtimeReady(),
+    runtime_ready: rtReady,
     runtime_provisioning: isProvisioning(),
+    onboarding: onboardingSnapshot(),
   };
 }
 
@@ -1601,20 +1731,110 @@ function startLocalPanel(): Promise<string> {
       }
     });
     srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
+    // Optional fixed port (SAPS_PANEL_PORT) for deterministic addressing; default
+    // is an OS-assigned ephemeral port.
+    const wantPort = Number(process.env.SAPS_PANEL_PORT) || 0;
+    srv.listen(wantPort, "127.0.0.1", () => {
       const addr = srv.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       localPanel = { url: `http://127.0.0.1:${port}/`, server: srv };
+      writePanelUrl(localPanel.url);
       resolve(localPanel.url);
     });
   });
 }
 
-// Open a URL in the user's default browser, cross-platform. Honors
-// SAPS_PANEL_NO_OPEN (set on headless autopilot boxes or in tests) to skip the
-// actual open while still returning the URL to the caller.
+// Publish the loopback URL to stable files so out-of-process readers can find
+// the ephemeral port without scraping `lsof`:
+//   - panel-url            plain text, for the Claude Code side-panel reverse proxy.
+//   - panel-endpoint.json  richer (url + version + pid), for the menu bar app,
+//                          which POSTs /tool/<name> here for live data.
+// Best-effort: a write failure never blocks the panel (readers re-check /health).
+function writePanelUrl(url: string): void {
+  try {
+    const dir = path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "panel-url"), url, "utf-8");
+    fs.writeFileSync(
+      path.join(dir, "panel-endpoint.json"),
+      JSON.stringify(
+        { url, pid: process.pid, version: VERSION, started_at: new Date().toISOString() },
+        null,
+        2
+      ) + "\n",
+      "utf-8"
+    );
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] writePanelUrl failed:", e?.message || e);
+  }
+}
+
+// The owned state dir, honoring SAPS_STATE_DIR (matches menubar/s4l_state.py).
+function sapsStateDir(): string {
+  return (
+    process.env.SAPS_STATE_DIR ||
+    path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
+  );
+}
+
+// activity.json: a tiny "what's running right now" signal the menu bar reads to
+// show a loading spinner + label (scanning / drafting / posting / …). Written by
+// long-running tools, cleared when they finish. Best-effort; absence == idle.
+function writeActivity(state: string, label: string): void {
+  try {
+    const dir = sapsStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "activity.json"),
+      JSON.stringify({ state, label, since: new Date().toISOString() }) + "\n",
+      "utf-8"
+    );
+  } catch {
+    /* best effort: a status write must never break the work it's narrating */
+  }
+}
+function clearActivity(): void {
+  try {
+    fs.rmSync(path.join(sapsStateDir(), "activity.json"), { force: true });
+  } catch {
+    /* best effort */
+  }
+}
+
+// Signal the menu bar that a fresh draft batch is ready for pop-up review. The
+// chat-table review path is unchanged and still works; this just ALSO lets the
+// corner cards drive review (both surfaces de-dup via the plan's `posted` flag).
+// The menu bar reads review-request.json, presents the cards, posts via the
+// loopback post_drafts tool, then clears the file. Best-effort: a write failure
+// just means no pop-ups this batch (chat review still works).
+function writeReviewRequest(req: {
+  batch_id: string;
+  project: string;
+  count: number;
+  plan_path: string;
+  created_at: string;
+}): void {
+  try {
+    const dir = sapsStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "review-request.json"),
+      JSON.stringify(req, null, 2) + "\n",
+      "utf-8"
+    );
+  } catch (e: any) {
+    console.error("[social-autoposter-mcp] writeReviewRequest failed:", e?.message || e);
+  }
+}
+
+// Open a URL in the user's default browser, cross-platform. Opening is OPT-IN:
+// by default we do NOT pop a browser tab. The dashboard already surfaces in-host
+// (MCP Apps inline) or via the Claude Code side panel / returned loopback URL, so
+// auto-opening the OS browser on every dashboard call is unwanted noise. Set
+// SAPS_PANEL_OPEN_BROWSER=1 to restore the old auto-open behavior. (The URL is
+// always returned to the caller regardless, so nothing is lost when we don't open.)
 async function openInBrowser(url: string): Promise<void> {
-  if (process.env.SAPS_PANEL_NO_OPEN) return;
+  if (!process.env.SAPS_PANEL_OPEN_BROWSER) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
@@ -1625,16 +1845,252 @@ async function openInBrowser(url: string): Promise<void> {
   }
 }
 
+// ---- Desktop-session autopilot: scan_candidates + submit_drafts ------------
+// These two tools move the cycle's AI step OUT of `claude -p` and into the
+// CALLING agent. Intended use: a Claude Desktop scheduled task (which runs on
+// the user's OWN plan) calls scan_candidates, drafts each on-brand reply
+// ITSELF, then submit_drafts hands the drafts to the SAME review plan the
+// menu-bar approval UI and post_drafts already consume. Nothing posts until the
+// user approves. The legacy launchd + `claude -p` autopilot is untouched and
+// keeps running in parallel; this is an additive, opt-in second path.
+
+interface ScanResult {
+  batchId: string | null;
+  candidates: ScanCandidate[];
+  blocked?: string;
+}
+
+async function runScanCandidates(
+  project?: string,
+  onProgress?: (message: string, step: number) => void
+): Promise<ScanResult> {
+  // SCAN_ONLY=1: run scan -> score -> top-N select, then STOP before drafting.
+  // No DRAFT_ONLY, no `claude -p` drafting. TWITTER_PHASE1_LLM_DRAFT=0 forces the
+  // deterministic query bank so the whole scan is claude-free (the agent does ALL
+  // the AI). Off-screen by default (no BH_WINDOW_* / overlay): a scheduled run has
+  // no human watching the Chrome.
+  const env: NodeJS.ProcessEnv = {
+    SCAN_ONLY: "1",
+    TWITTER_PHASE1_LLM_DRAFT: "0",
+    SAPS_REPO_DIR: repoDir(),
+    PATH: pipelinePath(),
+  };
+  if (project) env.SAPS_FORCE_PROJECT = project;
+  const chrome = resolveChrome();
+  if (chrome) env.BH_CHROME_BIN = chrome;
+  let step = 0;
+  let lastMsg = "";
+  const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
+    env,
+    timeoutMs: 900_000,
+    onLine: (line) => {
+      const t = line.replace(/\s+$/, "");
+      if (t.trim()) console.error(`[scan_candidates] ${t}`);
+      if (!onProgress) return;
+      const msg = cycleProgressMessage(t);
+      if (msg && msg !== lastMsg) {
+        lastMsg = msg;
+        onProgress(msg, ++step);
+      }
+    },
+  });
+  const marker = /SCAN_ONLY_RESULT=(\/\S+\.json)/.exec(res.stdout + "\n" + res.stderr);
+  if (marker && marker[1]) {
+    try {
+      const data = JSON.parse(fs.readFileSync(marker[1], "utf-8"));
+      return {
+        batchId: data.batch_id ?? null,
+        candidates: (data.candidates ?? []) as ScanCandidate[],
+      };
+    } catch (e: any) {
+      return {
+        batchId: null,
+        candidates: [],
+        blocked: `Scan finished but its result file was unreadable: ${e?.message || e}`,
+      };
+    }
+  }
+  // If query-gen (when enabled) hits a real failure, the cycle still emits
+  // DRAFT_ONLY_BLOCKED=<reason>. Surface it rather than "no candidates".
+  const blockedMarker = /DRAFT_ONLY_BLOCKED=([a-z0-9_]+)/.exec(res.stdout + "\n" + res.stderr);
+  if (blockedMarker && blockedMarker[1]) {
+    return { batchId: null, candidates: [], blocked: blockedReasonMessage(blockedMarker[1]) };
+  }
+  return {
+    batchId: null,
+    candidates: [],
+    blocked:
+      `This scan produced no candidates (exit ${res.code}). Usually a cold-start ` +
+      `project with no seeded search topics, or nothing fresh on-theme right now. Tail:\n` +
+      res.stderr.split("\n").slice(-12).join("\n"),
+  };
+}
+
+tool(
+  "scan_candidates",
+  {
+    title: "Scan X for reply candidates (no drafting, no posting)",
+    description:
+      "Step 1 of a hands-free / scheduled autopilot run. Runs the scan+score half of the pipeline " +
+      "and returns the top scored X/Twitter threads worth replying to — WITHOUT drafting or posting, " +
+      "and without spending any `claude -p` budget. You (this session) then draft an on-brand reply " +
+      "for each good candidate YOURSELF and submit them with `submit_drafts`. Each candidate includes " +
+      "its candidate_id (pass it back), the thread text/author, the matched project, and engagement " +
+      "metrics. Optional `project` scopes the scan to one configured project.",
+    inputSchema: { project: z.string().optional() },
+  },
+  async (args: { project?: string }) => {
+    const scan = await runScanCandidates(args?.project);
+    if (!scan.batchId) {
+      return textContent(scan.blocked || "No candidates found.");
+    }
+    return jsonContent({
+      batch_id: scan.batchId,
+      count: scan.candidates.length,
+      candidates: scan.candidates,
+      next_step:
+        `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
+        `judge genuinely worth engaging; skip the rest. Then call submit_drafts with batch_id ` +
+        `"${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). Nothing posts ` +
+        `until the user approves.`,
+    });
+  }
+);
+
+tool(
+  "submit_drafts",
+  {
+    title: "Submit drafted replies for review",
+    description:
+      "Step 2 of a hands-free / scheduled autopilot run. Hand back the replies you drafted for the " +
+      "candidates returned by scan_candidates. Writes them into the SAME review plan the menu-bar " +
+      "approval UI and post_drafts already use — nothing is posted until the user approves. Provide " +
+      "batch_id (from scan_candidates) and a `drafts` array; each entry needs candidate_id and " +
+      "reply_text (engagement_style, language, link_keyword optional).",
+    inputSchema: {
+      batch_id: z.string(),
+      drafts: z
+        .array(
+          z.object({
+            candidate_id: z.union([z.string(), z.number()]),
+            reply_text: z.string(),
+            engagement_style: z.string().optional(),
+            language: z.string().optional(),
+            link_keyword: z.string().optional(),
+          })
+        )
+        .min(1),
+    },
+  },
+  async (args: {
+    batch_id: string;
+    drafts: Array<{
+      candidate_id: string | number;
+      reply_text: string;
+      engagement_style?: string;
+      language?: string;
+      link_keyword?: string;
+    }>;
+  }) => {
+    // Reload the scan candidates for thread metadata (url / author / text /
+    // project / topic). If the scan file is gone (e.g. /tmp cleared), we still
+    // build a plan from the drafts alone; the review cards just lack context.
+    const scanById = new Map<string, ScanCandidate>();
+    try {
+      const raw = JSON.parse(fs.readFileSync(scanResultPath(args.batch_id), "utf-8"));
+      for (const c of (raw.candidates ?? []) as ScanCandidate[]) {
+        scanById.set(String(c.id), c);
+      }
+    } catch {
+      /* scan file missing — proceed with draft-only context */
+    }
+    const candidates: PlanCandidate[] = args.drafts.map((d) => {
+      const sc = scanById.get(String(d.candidate_id));
+      return {
+        candidate_id: d.candidate_id,
+        candidate_url: sc?.tweet_url,
+        thread_author: sc?.author_handle,
+        thread_text: sc?.tweet_text,
+        reply_text: d.reply_text,
+        engagement_style: d.engagement_style,
+        language: d.language,
+        link_keyword: d.link_keyword,
+        search_topic: sc?.search_topic,
+        matched_project: sc?.matched_project,
+      } as PlanCandidate;
+    });
+    const firstSc = scanById.get(String(args.drafts[0].candidate_id));
+    const project =
+      (candidates.map((c) => c.matched_project).find((p): p is string => !!p) ||
+        firstSc?.matched_project ||
+        "default") as string;
+    // Stage the new drafts under the scan batch id and bake link targets into them
+    // (sub-second at TWITTER_PAGE_GEN_RATE=0). Best-effort: posting falls back to the
+    // plain project URL per-candidate if gen is skipped.
+    writePlan(args.batch_id, { candidates });
+    try {
+      await runPython("scripts/twitter_gen_links.py", ["--plan", planPath(args.batch_id)], {
+        timeoutMs: 120_000,
+        env: { TWITTER_PAGE_GEN_RATE: "0", SAPS_REPO_DIR: repoDir(), PATH: pipelinePath() },
+      });
+    } catch {
+      /* best effort — plan still posts with a plain-URL fallback */
+    }
+    const staged = (readPlan(args.batch_id)?.candidates as PlanCandidate[]) ?? candidates;
+
+    // Accumulate into ONE persistent review queue so a continuous autopilot's drafts
+    // PILE UP in the menu-bar cards instead of each run overwriting the last. New
+    // drafts are appended; a thread already in the queue (by URL) is skipped (one
+    // draft per thread). Posted entries are KEPT in place so the 1-based card
+    // numbering stays stable across runs — the menu bar, the chat table, and
+    // post_drafts all index the full array and filter on the `posted` flag.
+    const queue: PlanCandidate[] = [
+      ...((readPlan(REVIEW_QUEUE_ID)?.candidates as PlanCandidate[]) ?? []),
+    ];
+    const seen = new Set(queue.map((c) => c.candidate_url).filter((u): u is string => !!u));
+    let added = 0;
+    for (const nc of staged) {
+      if (nc.candidate_url && seen.has(nc.candidate_url)) continue;
+      queue.push(nc);
+      if (nc.candidate_url) seen.add(nc.candidate_url);
+      added++;
+    }
+    writePlan(REVIEW_QUEUE_ID, { candidates: queue });
+    const pending = queue.filter((c) => c.posted !== true);
+
+    // Drafts queued = the pipeline verified end-to-end without posting. This is the
+    // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
+    if (added > 0)
+      completeOnboardingMilestone("draft_verified", { outcome: "review_batch", draft_count: added });
+
+    // Point the menu-bar review cards at the accumulated queue.
+    writeReviewRequest({
+      batch_id: REVIEW_QUEUE_ID,
+      project,
+      count: pending.length,
+      plan_path: planPath(REVIEW_QUEUE_ID),
+      created_at: new Date().toISOString(),
+    });
+    return textContent(
+      `Queued ${added} new draft(s); ${pending.length} now awaiting approval in the menu-bar cards ` +
+        `(review queue "${REVIEW_QUEUE_ID}"). Nothing posts until approved.\n\n` +
+        renderDraftsTable({ candidates: queue }) +
+        `\n\nTo post: the user approves in the menu bar, or call post_drafts with batch_id ` +
+        `"${REVIEW_QUEUE_ID}" and the numbers to post.`
+    );
+  }
+);
+
 appTool(
   "dashboard",
   {
     title: "Social Autoposter dashboard",
     description:
       "Render the Social Autoposter dashboard in chat: a visual surface showing project setup, X " +
-      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle " +
-      "autopilot, connect X, and refresh. Use when the user asks to see the dashboard, panel, " +
+      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
+      "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (draft_cycle, post_drafts, autopilot enable/disable, get_stats) so the user sees the " +
+      "action (scan_candidates, submit_drafts, post_drafts, get_stats) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
@@ -1665,8 +2121,9 @@ appTool(
       return { content: [], structuredContent: { snapshot: JSON.stringify(snap) } };
     }
     // Host CAN'T render inline (Claude Code / Cowork today): serve the identical
-    // panel.html from a loopback HTTP server and open it in the browser, so the
-    // user still gets the visual surface instead of a wall of text.
+    // panel.html from a loopback HTTP server. We do NOT auto-open a browser tab
+    // (see openInBrowser — opt-in only); the dashboard is shown in the Claude Code
+    // side panel, and the loopback URL is returned for anyone who wants to open it.
     try {
       const url = await startLocalPanel();
       await openInBrowser(url);
@@ -1675,7 +2132,7 @@ appTool(
           type: "text" as const,
           text:
             human +
-            `\n\nThis host can't render the dashboard inline, so I opened it in your browser: ${url}`,
+            `\n\nThis host can't render the dashboard inline. It's available in the side panel; loopback URL: ${url}`,
         }],
         structuredContent: { snapshot: JSON.stringify(snap), fallback_url: url },
       };
@@ -1782,12 +2239,38 @@ registerAppResource(
 );
 
 async function main() {
+  initSentry();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
+  // Eagerly start the loopback panel server so the Claude Code side panel (and any
+  // reverse proxy in front of it) always has a backend to hit, without waiting for
+  // a first `dashboard` call. Best-effort: a bind failure must never block boot.
+  void startLocalPanel()
+    .then((url) => console.error(`[social-autoposter-mcp] panel loopback ready at ${url}`))
+    .catch((e) => console.error("[social-autoposter-mcp] panel loopback start failed:", e?.message || e));
+  // Ensure the macOS menu bar mini-dashboard is installed + running. Idempotent
+  // and cheap when already present, so existing installs pick it up on the next
+  // Claude restart without re-provisioning. Best-effort: never blocks boot.
+  void ensureMenubar()
+    .then((r) =>
+      console.error(
+        `[social-autoposter-mcp] menubar: ${r.skipped ? "skip" : r.ok ? "ok" : "fail"} (${r.detail})`
+      )
+    )
+    .catch((e) => console.error("[social-autoposter-mcp] menubar ensure failed:", e?.message || e));
+  // Phone home so this .mcpb install is visible in the install-lane digest
+  // (parity with the npx launchd heartbeat). Once on startup, then every 15m
+  // while the desktop app keeps the server alive. unref() so it never holds the
+  // process open past a normal exit.
+  void sendHeartbeat("startup");
+  const hb = setInterval(() => void sendHeartbeat("interval"), 15 * 60_000);
+  hb.unref();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("[social-autoposter-mcp] fatal:", err);
+  captureError(err, { component: "main" });
+  await flushSentry();
   process.exit(1);
 });
