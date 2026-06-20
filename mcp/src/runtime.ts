@@ -90,6 +90,30 @@ const MATERIALIZED_REPO = path.join(REPO_MATERIALIZE_DIR, "package");
 // dist/runtime.js sits beside the embedded tarball produced at build time.
 const EMBEDDED_TARBALL = path.join(__dirname, "pipeline.tgz");
 
+// ---- menu bar app (macOS status-bar mini-dashboard) ------------------------
+// Provisioned as install Step 8 and re-ensured at server boot. The rumps app
+// runs from the owned venv as a KeepAlive LaunchAgent, pointed at a STABLE copy
+// under the state dir (NOT the extension dir, which is replaced on every
+// update). KEEP MENUBAR_LABEL in sync with menubar/s4l_state.py and
+// scripts/reset-test-machine.sh.
+export const MENUBAR_LABEL = "com.m13v.social-autoposter.menubar";
+export const MENUBAR_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${MENUBAR_LABEL}.plist`
+);
+const MENUBAR_DIR = path.join(STATE_DIR, "menubar");
+const MENUBAR_ENTRY = path.join(MENUBAR_DIR, "s4l_menubar.py");
+const MENUBAR_OUT_LOG = path.join(MENUBAR_DIR, "menubar.out.log");
+const MENUBAR_ERR_LOG = path.join(MENUBAR_DIR, "menubar.err.log");
+
+// Absolute path to the state dir, for callers in other modules (index.ts writes
+// panel-endpoint.json here).
+export function stateDir(): string {
+  return STATE_DIR;
+}
+
 // A directory is a usable pipeline clone only if it carries requirements.txt
 // (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
 // empty extension dir or a half-deleted state dir.
@@ -164,6 +188,7 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
   { id: "chromium", label: "Download Chromium browser (~150MB)" },
   { id: "harness", label: "Install browser-harness (CDP scan engine)" },
   { id: "chrome", label: "Install Google Chrome (browser the scanner drives)" },
+  { id: "menubar", label: "Install menu bar app" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -592,6 +617,17 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     );
   }
 
+  // --- Step 8: menu bar app (macOS status-bar mini-dashboard) --------------
+  // Non-fatal: a menu bar failure must never block a usable runtime, so on any
+  // problem we mark the step errored and still persist runtime.json below.
+  setStep("menubar", "running");
+  if (process.platform === "darwin") {
+    const mb = await installMenubar(uv, uvEnv, VENV_PYTHON);
+    setStep("menubar", mb.ok ? "done" : "error", mb.detail);
+  } else {
+    setStep("menubar", "done", "skipped (macOS only)");
+  }
+
   // --- Persist the result ---------------------------------------------------
   const info: RuntimeInfo = {
     python: VENV_PYTHON,
@@ -610,4 +646,164 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   progress.ok = true;
   writeProgress(progress);
   return progress;
+}
+
+// ---------------------------------------------------------------------------
+// Menu bar app provisioning.
+//
+// installMenubar copies the rumps app to a stable state-dir location, installs
+// rumps into the owned venv, and (re)loads a KeepAlive LaunchAgent. ensureMenubar
+// is the cheap, idempotent boot-time path: a no-op when it's already installed
+// and loaded, so existing installs pick up the menu bar on the next Claude
+// restart without re-running the whole provision.
+// ---------------------------------------------------------------------------
+
+// The bundled menu bar source: <ext>/menubar in a packed .mcpb (dist/runtime.js
+// -> ../menubar), the same path for a tsc dev build (mcp/dist -> mcp/menubar),
+// and the repo clone for an npm install.
+function menubarSourceDir(): string | null {
+  const candidates = [
+    path.join(__dirname, "..", "menubar"),
+    path.join(resolveRepoDir(), "mcp", "menubar"),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(path.join(c, "s4l_menubar.py"))) return c;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+// KeepAlive { SuccessfulExit: false } so a clean Quit (exit 0) stays quit until
+// next login (RunAtLoad), while a crash relaunches. No StartInterval — this is a
+// long-running agent, not a cron job.
+function menubarPlistXml(python: string): string {
+  const menubarPath = [
+    path.dirname(python),
+    path.join(os.homedir(), ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].join(":");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>Label</key>
+\t<string>${MENUBAR_LABEL}</string>
+\t<key>ProgramArguments</key>
+\t<array>
+\t\t<string>${python}</string>
+\t\t<string>${MENUBAR_ENTRY}</string>
+\t</array>
+\t<key>RunAtLoad</key>
+\t<true/>
+\t<key>KeepAlive</key>
+\t<dict>
+\t\t<key>SuccessfulExit</key>
+\t\t<false/>
+\t</dict>
+\t<key>ProcessType</key>
+\t<string>Interactive</string>
+\t<key>StandardOutPath</key>
+\t<string>${MENUBAR_OUT_LOG}</string>
+\t<key>StandardErrorPath</key>
+\t<string>${MENUBAR_ERR_LOG}</string>
+\t<key>EnvironmentVariables</key>
+\t<dict>
+\t\t<key>PATH</key>
+\t\t<string>${menubarPath}</string>
+\t\t<key>HOME</key>
+\t\t<string>${os.homedir()}</string>
+\t\t<key>SAPS_STATE_DIR</key>
+\t\t<string>${STATE_DIR}</string>
+\t\t<key>SAPS_PYTHON</key>
+\t\t<string>${python}</string>
+\t\t<key>SAPS_REPO_DIR</key>
+\t\t<string>${resolveRepoDir()}</string>
+\t</dict>
+</dict>
+</plist>
+`;
+}
+
+async function menubarLoaded(): Promise<boolean> {
+  const r = await sh("launchctl", ["list"], { timeoutMs: 10_000 });
+  return r.out.includes(MENUBAR_LABEL);
+}
+
+export async function installMenubar(
+  uv: string,
+  uvEnv: NodeJS.ProcessEnv,
+  python: string
+): Promise<{ ok: boolean; detail: string }> {
+  if (process.platform !== "darwin") return { ok: true, detail: "skipped (macOS only)" };
+  const src = menubarSourceDir();
+  if (!src) return { ok: false, detail: "menu bar source not found in bundle" };
+
+  // 1. Copy the python to a stable location that survives extension updates.
+  try {
+    fs.mkdirSync(MENUBAR_DIR, { recursive: true });
+    for (const f of fs.readdirSync(src)) {
+      if (f.endsWith(".py")) {
+        fs.copyFileSync(path.join(src, f), path.join(MENUBAR_DIR, f));
+      }
+    }
+  } catch (e: any) {
+    return { ok: false, detail: `copy failed: ${e?.message || e}` };
+  }
+  if (!fs.existsSync(MENUBAR_ENTRY)) return { ok: false, detail: "entry not copied" };
+
+  // 2. Install rumps into the owned venv (pulls pyobjc-framework-Cocoa).
+  const r = await sh(uv, ["pip", "install", "--python", python, "rumps"], {
+    env: uvEnv,
+    timeoutMs: 300_000,
+  });
+  if (r.code !== 0) {
+    return { ok: false, detail: `rumps install failed (exit ${r.code}). ${r.out.slice(-300)}` };
+  }
+
+  // 3. Write + (re)load the LaunchAgent (bootout any prior instance first).
+  try {
+    fs.mkdirSync(path.dirname(MENUBAR_PLIST), { recursive: true });
+    fs.writeFileSync(MENUBAR_PLIST, menubarPlistXml(python), "utf-8");
+  } catch (e: any) {
+    return { ok: false, detail: `plist write failed: ${e?.message || e}` };
+  }
+  const uid = process.getuid ? process.getuid() : 0;
+  await sh("launchctl", ["bootout", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+  let lr = await sh("launchctl", ["bootstrap", `gui/${uid}`, MENUBAR_PLIST], {
+    timeoutMs: 15_000,
+  });
+  if (lr.code !== 0) {
+    lr = await sh("launchctl", ["load", MENUBAR_PLIST], { timeoutMs: 15_000 });
+  }
+  return { ok: true, detail: MENUBAR_ENTRY };
+}
+
+export async function ensureMenubar(): Promise<{
+  ok: boolean;
+  detail: string;
+  skipped?: boolean;
+}> {
+  if (process.platform !== "darwin") return { ok: true, skipped: true, detail: "non-macOS" };
+  if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
+  if (
+    fs.existsSync(MENUBAR_ENTRY) &&
+    fs.existsSync(MENUBAR_PLIST) &&
+    (await menubarLoaded())
+  ) {
+    return { ok: true, skipped: true, detail: "already installed" };
+  }
+  const uv = findUv();
+  if (!uv) return { ok: false, detail: "uv not found" };
+  const uvEnv: NodeJS.ProcessEnv = {
+    UV_PYTHON_INSTALL_DIR: path.join(RUNTIME_DIR, "python"),
+  };
+  return installMenubar(uv, uvEnv, resolvePython());
 }
