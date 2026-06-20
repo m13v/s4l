@@ -306,3 +306,58 @@ def request_accessibility() -> bool:
     except Exception:
         pass
     return trusted
+
+
+# ---- draft review (pop-up cards) ------------------------------------------
+# draft_cycle writes review-request.json when a fresh batch is ready; we read
+# the linked plan file (the /tmp/twitter_cycle_plan_<batch>.json the pipeline
+# produced), present the cards, then post the approved subset via the loopback
+# post_drafts tool. The chat-table review still works in parallel; both surfaces
+# de-dup on the plan's per-candidate `posted` flag.
+def read_review_request():
+    return read_json("review-request.json")
+
+
+def clear_review_request():
+    try:
+        p = Path(state_dir()) / "review-request.json"
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def read_plan(plan_path):
+    try:
+        return json.loads(Path(plan_path).read_text())
+    except Exception:
+        return None
+
+
+def review_drafts(plan):
+    """Flatten a plan into the card model: only candidates not already posted."""
+    out = []
+    for i, c in enumerate(((plan or {}).get("candidates") or [])):
+        if c.get("posted") is True:
+            continue
+        out.append(
+            {
+                "n": i + 1,  # 1-based, matches post_drafts numbering
+                "thread_author": c.get("thread_author"),
+                "thread_text": c.get("thread_text"),
+                "reply_text": c.get("reply_text") or "",
+                "link_url": c.get("link_url"),
+            }
+        )
+    return out
+
+
+def post_drafts(batch_id, post=None, edits=None, timeout=900):
+    """Post approved drafts via the loopback tool. `post` = 1-based numbers to
+    post as-is; `edits` = [{n, text}] to rewrite then post. Returns the parsed
+    result, or None if the loopback is unreachable (Claude Desktop closed)."""
+    return loopback_tool(
+        "post_drafts",
+        {"batch_id": batch_id, "post": post or [], "edits": edits or []},
+        timeout=timeout,
+    )
