@@ -738,7 +738,7 @@ tool(
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
       "whether X is connected. Use config, conversation context, profile_scan, and website research " +
       "before asking for fields. Ask only if no product can be identified or an interactive login is " +
-      "unavoidable. The draft_cycle, autopilot, and get_stats tools refuse to run until a project is " +
+      "unavoidable. The draft_cycle and get_stats tools refuse to run until a project is " +
       "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
@@ -1599,7 +1599,7 @@ function runtimeSnapshot() {
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
-// the tools above (draft_cycle / autopilot / project_config / get_stats) through the host
+// the tools above (draft_cycle / project_config / get_stats) through the host
 // and re-reads status. The tool itself returns the first-paint snapshot so the
 // view has data the instant it loads.
 
@@ -1818,10 +1818,10 @@ appTool(
     title: "Social Autoposter dashboard",
     description:
       "Render the Social Autoposter dashboard in chat: a visual surface showing project setup, X " +
-      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, toggle " +
-      "autopilot, connect X, and refresh. Use when the user asks to see the dashboard, panel, " +
+      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
+      "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (draft_cycle, post_drafts, autopilot enable/disable, get_stats) so the user sees the " +
+      "action (draft_cycle, post_drafts, get_stats) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
