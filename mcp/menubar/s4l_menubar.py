@@ -198,15 +198,24 @@ class S4LMenuBar(rumps.App):
         else:
             self._notify("S4L", "Open Claude Desktop to change autopilot.")
 
-    # ---- posting spinner --------------------------------------------------
-    # Runs on the main thread (rumps timer). While a post is in flight it cycles
-    # the title; once the background post clears self._posting it restores the
-    # normal title and stops itself. Cross-thread safe: the worker only flips the
-    # bool, never touches AppKit.
+    # ---- activity spinner -------------------------------------------------
+    # The server writes activity.json while a tool runs (scanning/drafting/
+    # posting/…). _poll_activity (1s) starts the fast spinner; _spin (0.12s)
+    # animates the title with the label and stops itself when activity clears.
+    # Both run on the main thread (rumps timers).
+    def _poll_activity(self, _):
+        act = st.read_activity()
+        if act and act.get("label") and self._spinner is None:
+            self._spin_i = 0
+            self._spinner = rumps.Timer(self._spin, 0.12)
+            self._spinner.start()
+
     def _spin(self, _):
-        if self._posting:
+        act = st.read_activity()
+        label = act.get("label") if act else None
+        if label:
             self._spin_i = (self._spin_i + 1) % len(SPINNER)
-            self.title = f"S4L posting {SPINNER[self._spin_i]}"
+            self.title = f"S4L {label} {SPINNER[self._spin_i]}"
             return
         try:
             if self._spinner is not None:
@@ -219,9 +228,9 @@ class S4LMenuBar(rumps.App):
 
     # ---- tick: read state, set title, (re)build menu ----------------------
     def _tick(self, _):
-        # While posting, the spinner owns the UI; don't fight it or start a new
-        # review mid-post.
-        if self._posting:
+        # While a tool is running, the spinner owns the title/menu; don't fight it
+        # or start a review mid-run.
+        if self._spinner is not None:
             return
         snap = st.snapshot()
         ob = snap.get("onboarding") or st.read_onboarding()
@@ -321,12 +330,8 @@ class S4LMenuBar(rumps.App):
             return
         self._notify("S4L", f"Posting {len(approved)} draft(s)…")
 
-        # Animate the menu-bar title until the post finishes.
-        self._posting = True
-        self._spin_i = 0
-        self._spinner = rumps.Timer(self._spin, 0.12)
-        self._spinner.start()
-
+        # The server's post_drafts writes "posting" activity, so the activity
+        # spinner shows automatically while this runs — no local spinner needed.
         def work():
             res = st.post_drafts(batch, post=post_nums, edits=edits)
             if res is None:
@@ -340,7 +345,6 @@ class S4LMenuBar(rumps.App):
                     f"Posted {posted if posted is not None else len(approved)} draft(s).",
                 )
             self._review_active = False
-            self._posting = False  # _spin (main thread) restores the title + stops
 
         threading.Thread(target=work, daemon=True).start()
 
