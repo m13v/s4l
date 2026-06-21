@@ -1,5 +1,5 @@
 /**
- * Social Autoposter control panel (MCP Apps UI).
+ * S4L control panel (MCP Apps UI).
  *
  * Renders inside the host's sandboxed iframe. It does NOT duplicate any pipeline
  * logic: every button calls one of the server's existing tools (draft_cycle,
@@ -457,7 +457,7 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       content: [{
         type: "text",
         text:
-          "Set up social autoposter end to end now. Inspect and repair the runtime, auto-detect " +
+          "Set up S4L end to end now. Inspect and repair the runtime, auto-detect " +
           "and connect my X session, scan my profile, discover and research my product, then infer " +
           "and save a complete project with seeded search topics. Keep going without asking me to " +
           "approve each safe setup step. Ask only if I must interactively sign in or no product " +
@@ -466,7 +466,7 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
           "the product URL), make it one short question.",
       }],
     });
-    if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up social autoposter\u201d in the chat instead.");
+    if ((res as any)?.isError) log("The host rejected the setup request \u2014 type \u201cset up S4L\u201d in the chat instead.");
     else {
       log("Setup is running in the chat. It will only stop for an unavoidable login or missing product.");
       // Follow the agent's progress live and repaint the Setup progress card as
