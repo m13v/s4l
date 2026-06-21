@@ -125,5 +125,5 @@ export function createBridge(): PanelBridge {
   const mode = (globalThis as any).__SAPS_BRIDGE__;
   if (mode === "http") return new HttpBridge();
   // Inline MCP Apps host: the real App satisfies PanelBridge structurally.
-  return new App({ name: "Social Autoposter Panel", version: "1.0.0" }) as unknown as PanelBridge;
+  return new App({ name: "S4L Panel", version: "1.0.0" }) as unknown as PanelBridge;
 }
