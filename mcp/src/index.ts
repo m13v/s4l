@@ -258,10 +258,12 @@ const server = new McpServer(
       "autopilot by calling the HOST tool `create_scheduled_task` with: taskId " +
       "'social-autoposter-autopilot'; cronExpression '* * * * *' (continuous, like the pipeline; the " +
       "host runs one at a time and skips overlapping fires, so cycles run back-to-back); and a " +
-      "self-contained prompt telling the run to call scan_candidates, draft ONE on-brand reply " +
-      "(<=250 chars, same language as the thread, adds real value) for each candidate worth engaging, " +
-      "then call submit_drafts with those drafts, and NOT post (drafts pile up in the menu-bar " +
-      "approval cards for the user to approve). Then run ONE cycle yourself now (scan_candidates -> " +
+      "self-contained prompt telling the run to call scan_candidates (which long-polls — if it " +
+      "returns a `Scan in progress` status, call scan_candidates again with the same args and keep " +
+      "re-calling until it returns candidates; never sleep or use background waits between calls), " +
+      "draft ONE on-brand reply (<=250 chars, same language as the thread, adds real value) for each " +
+      "candidate worth engaging, then call submit_drafts with those drafts, and NOT post (drafts pile " +
+      "up in the menu-bar approval cards for the user to approve). Then run ONE cycle yourself now (scan_candidates -> " +
       "draft -> submit_drafts) to seed the cards and pre-approve the tools, so unattended fires do not " +
       "stall on a permission prompt. If the host exposes no create_scheduled_task tool, tell the user " +
       "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
@@ -1958,6 +1960,104 @@ async function runScanCandidates(
   };
 }
 
+// ---- Long-poll job registry for scan_candidates ----------------------------
+// runScanCandidates drives run-twitter-cycle.sh (SCAN_ONLY), which runs a real
+// browser for 1-3 minutes — longer than the MCP client's ~60s request timeout.
+// Awaiting the whole scan in one tool call therefore ALWAYS tripped the client
+// timeout (-32001 Request timed out), and the agent's retry started a SECOND
+// run-twitter-cycle.sh that collided with the pipeline's max=1 single-flight lock
+// (too_many_inflight) and came back as a false "no candidates". Instead we run
+// ONE scan as a shared background job and LONG-POLL it: each scan_candidates call
+// waits up to SCAN_POLL_WAIT_MS (kept under the client timeout) for the in-flight
+// job to finish, then returns either the candidates or a "scan in progress"
+// status. The agent simply re-calls scan_candidates until it returns — no client
+// timeouts, no second scan racing the lock, and no sleeping/background waits.
+interface ScanJob {
+  project?: string;
+  startedAt: number;
+  done: boolean;
+  promise: Promise<ScanResult>;
+  result?: ScanResult;
+}
+
+// At most one scan runs at a time (mirrors the pipeline's own max=1 lock). Kept
+// across calls so a later poll attaches to the SAME running scan instead of
+// starting a new one.
+let currentScanJob: ScanJob | null = null;
+
+// Per-call long-poll window. Must stay under the ~60s MCP client request timeout
+// so every scan_candidates call returns a real response before the client gives
+// up. Override with SAPS_SCAN_POLL_WAIT_MS for non-standard clients.
+const SCAN_POLL_WAIT_MS = Number(process.env.SAPS_SCAN_POLL_WAIT_MS) || 45_000;
+
+// Resolve to {done:true,value} the moment `p` settles, or {done:false} after
+// `ms` — whichever is first. The job promise keeps running either way, so a
+// later poll re-attaches to it.
+function waitUpTo<T>(
+  p: Promise<T>,
+  ms: number
+): Promise<{ done: true; value: T } | { done: false }> {
+  return Promise.race([
+    p.then((value) => ({ done: true as const, value })),
+    new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), ms)),
+  ]);
+}
+
+function startScanJob(project?: string): ScanJob {
+  const job: ScanJob = {
+    project,
+    startedAt: Date.now(),
+    done: false,
+    promise: undefined as unknown as Promise<ScanResult>,
+  };
+  job.promise = runScanCandidates(project)
+    .then((r) => {
+      job.result = r;
+      job.done = true;
+      return r;
+    })
+    .catch((e: any) => {
+      const r: ScanResult = {
+        batchId: null,
+        candidates: [],
+        blocked:
+          `The scan crashed before producing a result: ${String(e?.message || e)}. ` +
+          `Call scan_candidates again to retry.`,
+      };
+      job.result = r;
+      job.done = true;
+      return r;
+    });
+  return job;
+}
+
+function formatScanResult(scan: ScanResult) {
+  if (!scan.batchId) {
+    return textContent(scan.blocked || "No candidates found.");
+  }
+  return jsonContent({
+    batch_id: scan.batchId,
+    count: scan.candidates.length,
+    candidates: scan.candidates,
+    next_step:
+      `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
+      `judge genuinely worth engaging; skip the rest. Then call submit_drafts with batch_id ` +
+      `"${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). Nothing posts ` +
+      `until the user approves.`,
+  });
+}
+
+function scanInProgress(job: ScanJob) {
+  const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+  return textContent(
+    `Scan in progress (${elapsed}s elapsed). The X scan drives a real browser and usually takes ` +
+      `1-3 minutes. Call scan_candidates again RIGHT NOW to keep waiting — each call long-polls up ` +
+      `to ~${Math.round(SCAN_POLL_WAIT_MS / 1000)}s and returns the candidates the moment the scan ` +
+      `finishes. Do NOT sleep, run a background command, or do other work to bridge the gap; just ` +
+      `re-call scan_candidates until it returns candidates or reports no candidates.`
+  );
+}
+
 tool(
   "scan_candidates",
   {
@@ -1968,24 +2068,34 @@ tool(
       "and without spending any `claude -p` budget. You (this session) then draft an on-brand reply " +
       "for each good candidate YOURSELF and submit them with `submit_drafts`. Each candidate includes " +
       "its candidate_id (pass it back), the thread text/author, the matched project, and engagement " +
-      "metrics. Optional `project` scopes the scan to one configured project.",
+      "metrics. Optional `project` scopes the scan to one configured project. The scan drives a real " +
+      "browser and can take 1-3 minutes: this call long-polls and may return a `Scan in progress` " +
+      "status instead of candidates — if so, just call scan_candidates again (same args) and keep " +
+      "re-calling until it returns candidates. Never sleep or use a background wait to bridge the gap.",
     inputSchema: { project: z.string().optional() },
   },
   async (args: { project?: string }) => {
-    const scan = await runScanCandidates(args?.project);
-    if (!scan.batchId) {
-      return textContent(scan.blocked || "No candidates found.");
+    // Long-poll the single in-flight scan job (see the ScanJob registry above).
+    // A finished-but-unconsumed job: hand back its result and clear the slot so a
+    // later call starts a fresh scan.
+    if (currentScanJob?.done) {
+      const finished = currentScanJob;
+      currentScanJob = null;
+      return formatScanResult(finished.result!);
     }
-    return jsonContent({
-      batch_id: scan.batchId,
-      count: scan.candidates.length,
-      candidates: scan.candidates,
-      next_step:
-        `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
-        `judge genuinely worth engaging; skip the rest. Then call submit_drafts with batch_id ` +
-        `"${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). Nothing posts ` +
-        `until the user approves.`,
-    });
+    // Nothing running -> start one scan (single-flight: never spawn a second
+    // run-twitter-cycle.sh that would just hit the pipeline's too_many_inflight).
+    if (!currentScanJob) {
+      currentScanJob = startScanJob(args?.project);
+    }
+    // Wait for the in-flight scan, but no longer than the client timeout allows.
+    const waited = await waitUpTo(currentScanJob.promise, SCAN_POLL_WAIT_MS);
+    if (waited.done) {
+      currentScanJob = null;
+      return formatScanResult(waited.value);
+    }
+    // Still scanning — tell the agent to simply call scan_candidates again.
+    return scanInProgress(currentScanJob);
   }
 );
 
