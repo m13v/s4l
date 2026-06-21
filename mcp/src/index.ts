@@ -714,7 +714,7 @@ async function postApproved(batchId: string, plan: Plan) {
 server.registerPrompt(
   "getting-started",
   {
-    title: "Set up social-autoposter",
+    title: "Set up S4L",
     description:
       "Start here. Walks you through configuring a product and connecting your X/Twitter " +
       "account so the autoposter can draft and post for you.",
@@ -2116,9 +2116,9 @@ tool(
 appTool(
   "dashboard",
   {
-    title: "Social Autoposter dashboard",
+    title: "S4L dashboard",
     description:
-      "Render the Social Autoposter dashboard in chat: a visual surface showing project setup, X " +
+      "Render the S4L dashboard in chat: a visual surface showing project setup, X " +
       "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
       "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
@@ -2134,7 +2134,7 @@ appTool(
   async () => {
     const snap = await buildSnapshot();
     const human =
-      `Social Autoposter v${snap.version}` +
+      `S4L v${snap.version}` +
       (snap.update_available && snap.latest_version ? ` (update to ${snap.latest_version})` : "") +
       ` — projects ${snap.projects_ready}/${snap.projects_total} ready, ` +
       `X ${snap.x_connected ? "connected" : "not connected"}, ` +
@@ -2256,7 +2256,7 @@ tool(
 
 registerAppResource(
   server,
-  "Social Autoposter panel",
+  "S4L panel",
   PANEL_URI,
   { mimeType: RESOURCE_MIME_TYPE },
   async () => ({
