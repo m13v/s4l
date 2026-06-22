@@ -1,0 +1,62 @@
+/* S4L "add your product" widget.
+ * Reuses the dashboard palette tokens (panel.css :root) — black/white/grayscale
+ * only, with the host's injected CSS variables and grayscale fallbacks. No
+ * chromatic color: hierarchy comes from weight, size, and spacing. */
+
+.pl-wrap {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 18px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pl-head { display: flex; flex-direction: column; gap: 4px; }
+.pl-title { margin: 0; font-size: 17px; font-weight: 650; }
+.pl-sub { margin: 0; font-size: 13px; color: var(--muted); }
+.pl-muted { color: var(--muted); font-weight: 400; }
+
+.pl-form { display: flex; flex-direction: column; gap: 8px; }
+.pl-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.pl-namewrap { display: flex; flex-direction: column; gap: 8px; margin-top: 2px; }
+
+.pl-input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 11px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+.pl-input::placeholder { color: var(--muted); }
+.pl-input:focus { border-color: var(--fg); box-shadow: 0 0 0 2px var(--card) inset; }
+
+.pl-btn {
+  font: inherit;
+  font-weight: 560;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--btn-border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  margin-top: 4px;
+}
+.pl-btn:hover { background: var(--card); }
+.pl-btn.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
+.pl-btn.primary:hover { opacity: 0.9; }
+.pl-btn[disabled] { opacity: 0.5; cursor: default; }
+
+.pl-status {
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.pl-log { font-size: 12px; color: var(--muted); min-height: 1em; white-space: pre-wrap; }
