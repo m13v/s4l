@@ -47,7 +47,6 @@ SETUP_PROMPT = (
     "must interactively sign in or no product can be identified."
 )
 DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
-POST_PROMPT = "Post my approved social-autoposter drafts."
 UPDATE_PROMPT = "Update social-autoposter to the latest version."
 
 
@@ -183,9 +182,6 @@ class S4LMenuBar(rumps.App):
     def _draft(self, _=None):
         self._send_to_claude(DRAFT_PROMPT)
 
-    def _post(self, _=None):
-        self._send_to_claude(POST_PROMPT)
-
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
 
@@ -319,8 +315,13 @@ class S4LMenuBar(rumps.App):
         act = st.read_activity()
         label = act.get("label") if act else None
         if label:
-            self._spin_i = (self._spin_i + 1) % len(SPINNER)
-            self.title = f"S4L {label} {SPINNER[self._spin_i]}"
+            # A "✓" label (e.g. "posted 3/10 ✓") is a momentary confirmation, not
+            # ongoing work — show it without the spinner glyph so it reads as done.
+            if "✓" in label:
+                self.title = f"S4L {label}"
+            else:
+                self._spin_i = (self._spin_i + 1) % len(SPINNER)
+                self.title = f"S4L {label} {SPINNER[self._spin_i]}"
             return
         try:
             if self._spinner is not None:
@@ -589,9 +590,10 @@ class S4LMenuBar(rumps.App):
         out.append(
             rumps.MenuItem("Run draft cycle in Claude", callback=self._draft)
         )
-        out.append(
-            rumps.MenuItem("Post approved drafts in Claude", callback=self._post)
-        )
+        # No "Post approved drafts" item: approving a review card already posts
+        # directly + programmatically (_on_review_done -> st.post_drafts -> the
+        # CDP poster). A menu button that types a prompt into the chat to do the
+        # same thing was a redundant detour through the model, so it's gone.
         return out
 
 
