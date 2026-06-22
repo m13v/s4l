@@ -1942,6 +1942,13 @@ async function runScanCandidates(
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000,
+    onSpawn: (c) => {
+      // Track the PLUGIN's own scan process so an approved post can abort exactly
+      // this scan (posting preempts scanning). This is the plugin pipeline only —
+      // the plist autopilot's scan is a separate launchd process the MCP server
+      // never spawns and has no handle to, so it can never be touched here.
+      scanChild = c;
+    },
     onLine: (line) => {
       const t = line.replace(/\s+$/, "");
       if (t.trim()) console.error(`[scan_candidates] ${t}`);
@@ -1953,6 +1960,7 @@ async function runScanCandidates(
       }
     },
   });
+  scanChild = null; // scan finished on its own; nothing to preempt.
   const marker = /SCAN_ONLY_RESULT=(\/\S+\.json)/.exec(res.stdout + "\n" + res.stderr);
   if (marker && marker[1]) {
     try {
@@ -2024,6 +2032,40 @@ interface ScanJob {
 // across calls so a later poll attaches to the SAME running scan instead of
 // starting a new one.
 let currentScanJob: ScanJob | null = null;
+
+// The PLUGIN's currently-spawned scan subprocess (captured via run()'s onSpawn),
+// so an approved post can abort exactly this scan and take the browser
+// immediately. Only ever references a scan the MCP server itself launched — never
+// the plist autopilot's launchd scan.
+let scanChild: ChildProcess | null = null;
+
+// Posting takes priority over scanning (plugin pipeline only). When the user
+// approves a post, abort any in-flight plugin scan so the browser frees up at
+// once: killing the scan's bash leaves a dead lock-holder pid that the poster's
+// twitter_browser.py steals via its liveness check, so the post acquires the
+// browser without the 45s lock wait. The aborted scan just re-runs next cron
+// tick. Best-effort; never throws. Does NOT touch the plist autopilot (separate
+// process, no handle here) or any locked pipeline script.
+function preemptScanForPost(): void {
+  try {
+    if (scanChild && scanChild.pid && scanChild.exitCode === null) {
+      console.error(
+        `[post] preempting in-flight plugin scan (pid ${scanChild.pid}) so the approved post takes the browser`
+      );
+      try {
+        scanChild.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+  // Drop the long-poll job so a queued poller stops waiting on the aborted scan;
+  // the next scan_candidates call starts fresh.
+  currentScanJob = null;
+  scanChild = null;
+}
 
 // Per-call long-poll window. Must stay under the ~60s MCP client request timeout
 // so every scan_candidates call returns a real response before the client gives
