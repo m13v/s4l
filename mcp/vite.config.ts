@@ -1,11 +1,16 @@
 import { defineConfig } from "vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-// Bundles each panel/*.html entry + its TS/CSS into ONE self-contained file in
-// dist/ that the MCP server reads and serves as a `ui://` resource:
-//   panel/panel.html        -> dist/panel.html        (dashboard)
-//   panel/product-link.html -> dist/product-link.html ("add your product" widget)
+// vite-plugin-singlefile forces output.inlineDynamicImports, which supports only
+// ONE input per build — so each widget is built in its own vite invocation,
+// selected by SAPS_PANEL_ENTRY (see package.json build:panel). Each entry becomes
+// a single self-contained file in dist/ that the MCP server serves as a `ui://`
+// resource:
+//   SAPS_PANEL_ENTRY=panel        -> dist/panel.html        (dashboard, default)
+//   SAPS_PANEL_ENTRY=product-link -> dist/product-link.html ("add your product")
 // emptyOutDir is false so this never wipes the tsc-built server JS in dist/.
+const ENTRY = process.env.SAPS_PANEL_ENTRY || "panel";
+
 export default defineConfig({
   root: "panel",
   plugins: [viteSingleFile()],
@@ -13,10 +18,7 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: false,
     rollupOptions: {
-      input: {
-        panel: "panel/panel.html",
-        "product-link": "panel/product-link.html",
-      },
+      input: `panel/${ENTRY}.html`,
     },
   },
 });
