@@ -8840,7 +8840,7 @@ const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>S4L</title>
+<title>Social Autoposter</title>
 <script>
   // Apply persisted theme before first paint to avoid FOUC.
   (function() {
@@ -9847,7 +9847,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <div class="header">
-  <h1>S4L</h1>
+  <h1>Social Autoposter</h1>
   <div style="display:flex;align-items:center;gap:12px;">
     <button class="theme-toggle" id="global-refresh-btn" onclick="refreshAllData()" title="Refresh all data" aria-label="Refresh all data">
       <span id="global-refresh-icon" style="font-size:14px;line-height:1;">↻</span>
@@ -20876,7 +20876,7 @@ function tryListen(port, maxAttempts = 10) {
   const host = auth.CLIENT_MODE ? '0.0.0.0' : '127.0.0.1';
   server.listen(port, host, () => {
     const actualPort = server.address().port;
-    console.log(`S4L dashboard running at http://${host}:${actualPort}`);
+    console.log(`Social Autoposter dashboard running at http://${host}:${actualPort}`);
     if (!auth.CLIENT_MODE) {
       const { platform } = os;
       const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
