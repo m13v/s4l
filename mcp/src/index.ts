@@ -12,6 +12,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ChildProcess } from "node:child_process";
 import { z } from "zod";
 import { screencast, bringBrowserToFront } from "./screencast.js";
 import os from "node:os";
@@ -652,6 +653,10 @@ function renderDraftsTable(plan: Plan): string {
 async function postApproved(batchId: string, plan: Plan) {
   const approved = (plan.candidates || []).filter((c: PlanCandidate) => c.approved === true);
   if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
+  // Posting is a priority over scanning: abort any in-flight plugin scan so the
+  // approved post takes the browser immediately instead of waiting on the lock.
+  // Plugin pipeline only — never affects the plist autopilot.
+  preemptScanForPost();
   const approvedBatch = `${batchId}_approved`;
   writePlan(approvedBatch, { ...plan, candidates: approved });
   // SAPS_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
