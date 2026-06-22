@@ -1641,6 +1641,102 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
   return { autopilot_on, auto_update_on };
 }
 
+// ---- Autopilot prompt: keep the scheduled task's SKILL.md current ------------
+// The scheduled task's prompt (SKILL.md) is owned by the host and does NOT update
+// when the plugin updates. So a behavior change (the no-improvise / voice-inline /
+// stop-cleanly rules) would never reach an already-scheduled task. We close that
+// gap by REWRITING the task's SKILL.md on server boot when its embedded prompt
+// version is older than what this build ships. The host reads the file fresh on
+// each run, so the next fire picks up the new prompt — no host tool, no user
+// action. Bump AUTOPILOT_PROMPT_VERSION whenever the prompt below changes.
+const AUTOPILOT_PROMPT_VERSION = 1;
+const AUTOPILOT_PROMPT_MARKER = "saps_autopilot_prompt_version";
+
+function autopilotSkillPath(): string {
+  const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  return path.join(cfg, "scheduled-tasks", AUTOPILOT_TASK_ID, "SKILL.md");
+}
+
+// The canonical draft-only autopilot prompt: uses ONLY scan_candidates +
+// submit_drafts, drafts from the INLINE project_voices, improvises nothing, and
+// stops cleanly if its tools aren't available.
+function autopilotSkillMd(project: string): string {
+  const body = [
+    `You are running the Social Autoposter draft-only autopilot for the project "${project}". ` +
+      `Run ONE cycle, then stop. DRAFT-ONLY: you must NEVER post to X/Twitter — you only queue ` +
+      `drafts for the user's approval. Use ONLY two tools — scan_candidates and submit_drafts — ` +
+      `and IMPROVISE NOTHING ELSE.`,
+    ``,
+    `Steps:`,
+    `1. Call scan_candidates with project "${project}". It long-polls: if it returns a "Scan in ` +
+      `progress" status, call scan_candidates again (same args) and keep re-calling until it ` +
+      `returns candidates. Never sleep or use background waits. If it returns no candidates, stop ` +
+      `cleanly — nothing to do this cycle.`,
+    `2. The result includes a project_voices field — the brand voice + guardrails for each ` +
+      `candidate's project. Draft from project_voices[<matched_project>] (voice, description, ` +
+      `differentiator, content_guardrails). NEVER read config files, call project_config, or run ` +
+      `Bash/Read to find the voice — everything you need is already in the scan result.`,
+    `3. For each candidate you judge genuinely worth engaging, write ONE on-brand reply (<=250 ` +
+      `chars, match the thread's language, genuinely helpful — not spammy, no hard selling). Skip ` +
+      `the rest.`,
+    `4. Call submit_drafts with the batch_id from scan_candidates and a drafts array of ` +
+      `{candidate_id, reply_text}. This queues them for the menu-bar approval UI. Do NOT call ` +
+      `post_drafts — posting is the user's decision.`,
+    ``,
+    `HARD GUARD: if scan_candidates is NOT available (ToolSearch returns no matching tool — can ` +
+      `happen when a run spawns before the extension's MCP server has reconnected), STOP immediately ` +
+      `and report "S4L tools unavailable, skipping this cycle." Do NOT search the connector registry, ` +
+      `do NOT call list_connectors, do NOT improvise any other tool.`,
+  ].join("\n");
+  return (
+    `---\n` +
+    `name: ${AUTOPILOT_TASK_ID}\n` +
+    `description: Social Autoposter draft-only autopilot for project ${project} — scans X, drafts ` +
+    `on-brand replies (voice inline), queues them for approval. Never posts.\n` +
+    `---\n\n` +
+    body +
+    `\n\n<!-- ${AUTOPILOT_PROMPT_MARKER}: ${AUTOPILOT_PROMPT_VERSION} -->\n`
+  );
+}
+
+// Read the project name back from an existing autopilot SKILL.md so a rewrite
+// keeps the same project. Null if it can't be determined (then leave it alone).
+function detectAutopilotProject(skillMd: string): string | null {
+  const m1 = /project[s]?\s+"([^"]+)"/i.exec(skillMd);
+  if (m1) return m1[1];
+  const m2 = /for project\s+([A-Za-z0-9_-]+)/i.exec(skillMd);
+  if (m2) return m2[1];
+  return null;
+}
+
+// Refresh the scheduled task's SKILL.md when this build ships a newer prompt than
+// what's on disk. Best-effort, synchronous, never throws. Only touches an EXISTING
+// task (onboarding creates the first one), only when stale, and only when the
+// project reads back, so we never write a wrong/blank project.
+function ensureAutopilotPromptCurrent(): void {
+  try {
+    const skillPath = autopilotSkillPath();
+    if (!fs.existsSync(skillPath)) return; // no scheduled task yet
+    const cur = fs.readFileSync(skillPath, "utf-8");
+    const m = new RegExp(`${AUTOPILOT_PROMPT_MARKER}:\\s*(\\d+)`).exec(cur);
+    const curVer = m ? parseInt(m[1], 10) : 0;
+    if (curVer >= AUTOPILOT_PROMPT_VERSION) return; // already current
+    const project = detectAutopilotProject(cur);
+    if (!project) {
+      console.error(
+        `[autopilot] prompt is stale (v${curVer}) but project unreadable from SKILL.md; leaving it`
+      );
+      return;
+    }
+    fs.writeFileSync(skillPath, autopilotSkillMd(project), "utf-8");
+    console.error(
+      `[autopilot] refreshed scheduled-task prompt -> v${AUTOPILOT_PROMPT_VERSION} (was v${curVer}), project=${project}`
+    );
+  } catch (e: any) {
+    console.error(`[autopilot] ensureAutopilotPromptCurrent error: ${e?.message || e}`);
+  }
+}
+
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
@@ -2619,6 +2715,11 @@ async function main() {
   // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
   // the version first materialized at install). Synchronous + best-effort.
   ensurePipelineCurrent();
+  // Same problem for the scheduled task's prompt: the host owns its SKILL.md and
+  // a plugin update never touches it. Rewrite it on boot when this build ships a
+  // newer prompt version, so behavior changes (no-improvise / voice-inline /
+  // stop-cleanly) reach an already-scheduled task on its next fire. Best-effort.
+  ensureAutopilotPromptCurrent();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
