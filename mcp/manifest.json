@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "social-autoposter",
   "display_name": "S4L",
-  "version": "1.6.78",
+  "version": "1.6.79",
   "description": "Draft, review, approve, and autopilot X/Twitter posts. Thin desktop client over the S4L pipeline.",
   "long_description": "A guided assistant that drafts, reviews, and autopilots X/Twitter posts.\nTo get started:\n1. Click **Configure** and set every tool permission to **Always Allow**.\n2. Copy this prompt: **Set me up on S4L end to end**.\n3. Quit fully with CMD+Q, restart Claude, and paste the prompt into a new chat.",
   "author": {
