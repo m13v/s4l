@@ -1935,6 +1935,10 @@ async function runScanCandidates(
   if (chrome) env.BH_CHROME_BIN = chrome;
   let step = 0;
   let lastMsg = "";
+  // Specific phase label for the menu bar for the whole multi-minute scan, so the
+  // long-poll doesn't leave it on a generic "working" (or flicker to idle between
+  // re-calls). Cleared by the handler when the scan resolves.
+  writeActivity("scanning", project ? `scanning X for ${project}` : "scanning X");
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000,
