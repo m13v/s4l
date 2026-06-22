@@ -45,6 +45,7 @@ import random
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -845,6 +846,39 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     return ("posted", "")
 
 
+def _saps_state_dir() -> str:
+    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".social-autoposter-mcp")
+
+
+def _write_activity(label: str) -> None:
+    """Best-effort live status for the S4L menu bar, which polls
+    <state_dir>/activity.json. Mirrors the Node server's writeActivity shape so
+    the menu-bar spinner renders our per-post progress ("posting 3/10", then
+    "posted 3/10 ✓"). Purely cosmetic: a failure here never affects posting."""
+    try:
+        sd = _saps_state_dir()
+        os.makedirs(sd, exist_ok=True)
+        payload = {"state": "working", "label": label,
+                   "since": datetime.now(timezone.utc).isoformat()}
+        with open(os.path.join(sd, "activity.json"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def _clear_activity() -> None:
+    """Remove our status so neither an early exit nor the cron path (which does
+    NOT go through the MCP runTool's clear) leaves a stale 'posting/posted' stuck
+    in the menu bar. Double-clearing with runTool is harmless."""
+    try:
+        p = os.path.join(_saps_state_dir(), "activity.json")
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True,
@@ -924,26 +958,37 @@ def main() -> int:
                   f"approved in plan (pass --post-unapproved to override)", flush=True)
         candidates = _kept
 
-    for c in candidates:
-        try:
-            outcome, reason = post_one(c, picker_assignment=picker_assignment)
-        except Exception as e:
-            print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
-                  flush=True)
-            outcome, reason = ("failed", "exception")
-            cid = c.get("candidate_id")
-            if isinstance(cid, int):
-                update_candidate(cid, "skipped", "exception")
-        if outcome == "posted":
-            posted += 1
-        elif outcome == "skipped":
-            skipped += 1
-            if reason:
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-        else:
-            failed += 1
-            if reason:
-                fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+    _total = len(candidates)
+    try:
+        for _idx, c in enumerate(candidates, start=1):
+            # Live per-post status for the S4L menu bar: "posting 3/10" while this
+            # one is in flight, then "posted 3/10 ✓" once it lands. Cosmetic only.
+            _write_activity(f"posting {_idx}/{_total}")
+            try:
+                outcome, reason = post_one(c, picker_assignment=picker_assignment)
+            except Exception as e:
+                print(f"[post] candidate {c.get('candidate_id')} crashed: {e}",
+                      flush=True)
+                outcome, reason = ("failed", "exception")
+                cid = c.get("candidate_id")
+                if isinstance(cid, int):
+                    update_candidate(cid, "skipped", "exception")
+            if outcome == "posted":
+                posted += 1
+                # Flash the confirmation with a short dwell so the menu bar shows
+                # it before the next iteration's "posting" overwrites the label.
+                _write_activity(f"posted {_idx}/{_total} ✓")
+                time.sleep(0.6)
+            elif outcome == "skipped":
+                skipped += 1
+                if reason:
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            else:
+                failed += 1
+                if reason:
+                    fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+    finally:
+        _clear_activity()
 
     summary = {
         "posted": posted,
