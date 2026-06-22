@@ -75,6 +75,7 @@ import http from "node:http";
 // (vite-plugin-singlefile) into dist/panel.html alongside this compiled file.
 const DIST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_URI = "ui://social-autoposter/panel.html";
+const PRODUCT_LINK_URI = "ui://social-autoposter/product-link.html";
 
 // Stable id for the accumulating draft review queue. submit_drafts appends each
 // run's drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
@@ -1694,11 +1695,14 @@ let localPanel: { url: string; server: http.Server } | null = null;
 // Read the built panel.html and flip it into HTTP-bridge mode by injecting a
 // flag the front-end reads at boot. Same bytes as the inline ui:// resource,
 // minus the postMessage host (there's none over loopback).
-function panelHtmlForHttp(): string {
-  const html = fs.readFileSync(path.join(DIST_DIR, "panel.html"), "utf-8");
+function widgetHtmlForHttp(file: string): string {
+  const html = fs.readFileSync(path.join(DIST_DIR, file), "utf-8");
   const inject = `<script>window.__SAPS_BRIDGE__=${JSON.stringify("http")};</script>`;
   if (html.includes("</head>")) return html.replace("</head>", inject + "</head>");
   return inject + html;
+}
+function panelHtmlForHttp(): string {
+  return widgetHtmlForHttp("panel.html");
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -1725,6 +1729,14 @@ function startLocalPanel(): Promise<string> {
         ) {
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(panelHtmlForHttp());
+          return;
+        }
+        if (
+          req.method === "GET" &&
+          (url.pathname === "/product-link" || url.pathname === "/product-link.html")
+        ) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(widgetHtmlForHttp("product-link.html"));
           return;
         }
         if (req.method === "GET" && url.pathname === "/health") {
