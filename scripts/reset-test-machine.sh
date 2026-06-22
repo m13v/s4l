@@ -4,6 +4,7 @@
 # For TEST MACHINES. Removes everything an install scatters so you can re-run a
 # clean first-install and reproduce new-user bugs:
 #   - MCP state dir (owned uv-python venv + materialized repo + runtime.json + setup-state)
+#   - the Claude Desktop .mcpb extension (install dir + per-extension settings + installations registry entry)
 #   - the global npm library
 #   - the MCP registration (claude mcp + Claude Desktop config)
 #   - packaged Chrome profiles + imported cookies (browser-harness / reddit / linkedin)
@@ -87,6 +88,51 @@ echo
 # ---- 1. MCP state dir (owned python + venv + materialized repo) ------------
 echo "[1] MCP state dir (uv-owned python, venv, materialized repo, runtime.json, setup-state)"
 rm_path "$HOME_DIR/.social-autoposter-mcp" "state"
+echo
+
+# ---- 1b. Claude Desktop .mcpb extension -----------------------------------
+# A .mcpb (Desktop) install scatters THREE artifacts under ~/Library/Application
+# Support/Claude/, NONE of which live in the state dir removed in [1]: the
+# unpacked extension, its per-extension settings, and an entry in the
+# installations registry. Remove all three so a reinstall is genuinely first-run.
+# Scoped to social-autoposter only — other extensions (lede, s4l-plugin) are left
+# untouched.
+echo "[1b] Claude Desktop .mcpb extension (install dir + settings + registry)"
+EXT_ID="local.mcpb.m13v.social-autoposter"
+CLAUDE_SUPPORT="$HOME_DIR/Library/Application Support/Claude"
+INSTALL_REG="$CLAUDE_SUPPORT/extensions-installations.json"
+# The registry edit only sticks if Claude Desktop is NOT running (it rewrites
+# these files on quit). Warn rather than force-quit — the script may be invoked
+# from inside a live Claude session and killing the app would take it down.
+if pgrep -x "Claude" >/dev/null 2>&1; then
+  echo "  WARN    Claude Desktop is running — quit it (Cmd+Q) so the registry edit"
+  echo "          isn't rewritten on exit, then re-run this step if needed."
+fi
+rm_path "$CLAUDE_SUPPORT/Claude Extensions/$EXT_ID"            "ext-install"
+rm_path "$CLAUDE_SUPPORT/Claude Extensions Settings/$EXT_ID.json" "ext-settings"
+# Surgically drop only OUR entry from the installations registry (keep others).
+if [ -f "$INSTALL_REG" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get('extensions',{}) else 1)" "$INSTALL_REG" "$EXT_ID" 2>/dev/null; then
+      echo "  edit    remove [$EXT_ID] from $INSTALL_REG"
+      if [ "$DRY" -eq 0 ]; then
+        cp "$INSTALL_REG" "$INSTALL_REG.bak" 2>/dev/null || true
+        python3 - "$INSTALL_REG" "$EXT_ID" <<'PY'
+import json, sys
+p, eid = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d.get("extensions", {}).pop(eid, None)
+json.dump(d, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+      fi
+    else
+      echo "  (registry has no $EXT_ID entry)"
+    fi
+  else
+    echo "  NOTE    python3 not on PATH — remove the \"$EXT_ID\" entry from $INSTALL_REG by hand"
+  fi
+fi
 echo
 
 # ---- 2. global npm library -------------------------------------------------
