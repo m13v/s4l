@@ -870,7 +870,12 @@ export async function ensureMenubar(): Promise<{
     fs.existsSync(MENUBAR_PLIST) &&
     (await menubarLoaded())
   ) {
-    return { ok: true, skipped: true, detail: "already installed" };
+    // Installed — but refresh the stable copy if the bundled menu bar is newer.
+    // An .mcpb update ships new menu bar code, yet the running menu bar runs from
+    // this stable copy (so it survives extension replacement); without this it
+    // would stay the version it first installed at. Cheap: content-compare, and
+    // a kickstart only when something actually changed.
+    return await refreshMenubarIfStale();
   }
   const uv = findUv();
   if (!uv) return { ok: false, detail: "uv not found" };
@@ -878,4 +883,33 @@ export async function ensureMenubar(): Promise<{
     UV_PYTHON_INSTALL_DIR: path.join(RUNTIME_DIR, "python"),
   };
   return installMenubar(uv, uvEnv, resolvePython());
+}
+
+// Re-copy the bundled menu bar python into the stable dir when it differs from
+// what's installed, and kickstart the launchd job so the running menu bar picks
+// up the new code. Content-compare keeps this a no-op on an unchanged boot, so
+// it's cheap to call on every ensureMenubar(). This is what makes menu bar
+// changes (e.g. the "Please update now" button) actually ship on an .mcpb update.
+async function refreshMenubarIfStale(): Promise<{ ok: boolean; detail: string; skipped?: boolean }> {
+  const src = menubarSourceDir();
+  if (!src) return { ok: true, skipped: true, detail: "no bundle source to refresh from" };
+  let changed = false;
+  try {
+    for (const f of fs.readdirSync(src)) {
+      if (!f.endsWith(".py")) continue;
+      const s = fs.readFileSync(path.join(src, f));
+      const dPath = path.join(MENUBAR_DIR, f);
+      const d = fs.existsSync(dPath) ? fs.readFileSync(dPath) : Buffer.alloc(0);
+      if (!s.equals(d)) {
+        fs.writeFileSync(dPath, s);
+        changed = true;
+      }
+    }
+  } catch (e: any) {
+    return { ok: true, skipped: true, detail: `menu bar refresh check failed: ${e?.message || e}` };
+  }
+  if (!changed) return { ok: true, skipped: true, detail: "menu bar already current" };
+  const uid = process.getuid ? process.getuid() : 0;
+  await sh("launchctl", ["kickstart", "-k", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+  return { ok: true, detail: "menu bar refreshed + restarted to bundled version" };
 }
