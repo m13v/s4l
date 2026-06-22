@@ -18,7 +18,7 @@
 // Progress is written to install-progress.json as a JSON object the panel polls
 // via the `install_status` tool (host-agnostic; survives the iframe sandbox).
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -154,6 +154,11 @@ export interface RuntimeInfo {
   chrome?: string;
   ready: boolean;
   provisioned_at: string;
+  // The .mcpb version whose pipeline.tgz was last materialized into repo_dir.
+  // Lets ensurePipelineCurrent() detect a plugin update that refreshed dist/
+  // (this server) but left the materialized pipeline stale, and re-extract just
+  // the pipeline so server/pipeline fixes actually take effect on update.
+  pipeline_version?: string;
 }
 
 export type StepStatus = "pending" | "running" | "done" | "error";
@@ -194,6 +199,74 @@ export function readRuntime(): RuntimeInfo | null {
     return JSON.parse(fs.readFileSync(RUNTIME_JSON, "utf-8")) as RuntimeInfo;
   } catch {
     return null;
+  }
+}
+
+// The .mcpb version this running server was built from. The release script
+// stamps dist/version.json next to this compiled module. Returns null for a dev
+// build with no stamp (in which case we leave the working tree untouched).
+const VERSION_JSON = path.join(__dirname, "version.json");
+function bundledVersion(): string | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(VERSION_JSON, "utf-8"));
+    return typeof v?.version === "string" ? v.version : null;
+  } catch {
+    return null;
+  }
+}
+
+// Re-materialize the pipeline source when a plugin UPDATE shipped a newer
+// pipeline.tgz than what's on disk. The .mcpb update refreshes dist/ (this
+// server) but does NOT re-extract the embedded tarball, so without this the box
+// keeps running the pipeline it first materialized and server/pipeline fixes
+// silently never take effect on update. Cheap: a version compare, and a tar only
+// when stale.
+//
+// Unlike provision()'s Step 0, this does NOT wipe the repo first — it extracts
+// OVER it, so the project's config.json and the logs/ dir (neither of which is in
+// the tarball) survive. Best-effort and synchronous: meant to run at server
+// startup BEFORE any tool shells out to the pipeline; never throws.
+export function ensurePipelineCurrent(): void {
+  try {
+    // A real clone (npm/git install) is the user's working tree — never touch it.
+    if (looksLikeRepo(process.env.SAPS_REPO_DIR)) return;
+    // Nothing materialized yet, or no tarball to extract from: provision() owns
+    // the first materialize; this only refreshes an existing one.
+    if (!looksLikeRepo(MATERIALIZED_REPO)) return;
+    if (!fs.existsSync(EMBEDDED_TARBALL)) return;
+
+    const bundled = bundledVersion();
+    if (!bundled) return; // dev build, no stamp — leave the materialized repo alone.
+    const rt = readRuntime();
+    if (rt?.pipeline_version === bundled) return; // already current.
+
+    // Stale (or never recorded): extract the new pipeline OVER the materialized
+    // repo. No rmSync, so config.json + logs are preserved.
+    fs.mkdirSync(REPO_MATERIALIZE_DIR, { recursive: true });
+    const r = spawnSync("tar", ["xzf", EMBEDDED_TARBALL, "-C", REPO_MATERIALIZE_DIR], {
+      timeout: 120000,
+    });
+    if (r.status !== 0 || !looksLikeRepo(MATERIALIZED_REPO)) {
+      console.error(
+        `[runtime] pipeline re-materialize failed (exit ${r.status}); keeping existing pipeline`
+      );
+      return;
+    }
+    // Record the new version so we don't re-extract on every boot.
+    const next = rt ?? readRuntime();
+    if (next) {
+      next.pipeline_version = bundled;
+      try {
+        fs.writeFileSync(RUNTIME_JSON, JSON.stringify(next, null, 2) + "\n", "utf-8");
+      } catch {
+        /* best effort — worst case we re-extract next boot */
+      }
+    }
+    console.error(
+      `[runtime] re-materialized pipeline -> ${bundled} (was ${rt?.pipeline_version ?? "unrecorded"})`
+    );
+  } catch (e: any) {
+    console.error(`[runtime] ensurePipelineCurrent error: ${e?.message || e}`);
   }
 }
 
@@ -631,6 +704,11 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     chrome: chromeBin || undefined,
     ready: true,
     provisioned_at: new Date().toISOString(),
+    // Stamp the just-materialized pipeline version so ensurePipelineCurrent()
+    // can detect a later update without re-extracting on every boot. Only
+    // meaningful for the materialized (.mcpb) repo, not a SAPS_REPO_DIR clone.
+    pipeline_version:
+      resolvedRepo === MATERIALIZED_REPO ? bundledVersion() ?? undefined : undefined,
   };
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(RUNTIME_JSON, JSON.stringify(info, null, 2) + "\n", "utf-8");
