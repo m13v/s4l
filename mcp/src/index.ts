@@ -2132,19 +2132,62 @@ function startScanJob(project?: string): ScanJob {
   return job;
 }
 
+// Read the on-brand drafting guidance for the given projects from config.json so
+// scan_candidates can hand it to the agent INLINE. Without this the autopilot run
+// has to read the config itself (project_config returns status, not the voice
+// fields) — and a headless run improvises Bash/Read for that, hitting an
+// un-approved tool and hanging. Returning the voice here removes the need to read
+// any file. Best-effort: a missing/unreadable config yields {} and the agent
+// drafts from thread context, same as before.
+function readProjectVoices(projectNames: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const want = new Set(projectNames.filter(Boolean));
+  if (!want.size) return out;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(repoDir(), "config.json"), "utf-8"));
+    const projects: any[] = Array.isArray(cfg?.projects) ? cfg.projects : [];
+    for (const p of projects) {
+      if (!p?.name || !want.has(p.name)) continue;
+      // Only the fields needed to draft on-brand — keep it lean.
+      out[p.name] = {
+        voice: p.voice,
+        voice_relationship: p.voice_relationship,
+        description: p.description,
+        differentiator: p.differentiator,
+        content_guardrails: p.content_guardrails,
+        website: p.website,
+        get_started_link: p.get_started_link,
+      };
+    }
+  } catch {
+    /* best effort — no inline voice, agent falls back to thread context */
+  }
+  return out;
+}
+
 function formatScanResult(scan: ScanResult) {
   if (!scan.batchId) {
     return textContent(scan.blocked || "No candidates found.");
   }
+  // The brand voice for every project in this batch, INLINE, so the agent never
+  // has to read a config file (that improvisation is what hangs headless runs).
+  const projects = Array.from(
+    new Set(scan.candidates.map((c) => c.matched_project).filter(Boolean) as string[])
+  );
+  const project_voices = readProjectVoices(projects);
   return jsonContent({
     batch_id: scan.batchId,
     count: scan.candidates.length,
     candidates: scan.candidates,
+    project_voices,
     next_step:
       `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
-      `judge genuinely worth engaging; skip the rest. Then call submit_drafts with batch_id ` +
-      `"${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). Nothing posts ` +
-      `until the user approves.`,
+      `judge genuinely worth engaging; skip the rest. The brand voice + guardrails for each ` +
+      `candidate's project are in project_voices[<matched_project>] (voice, description, ` +
+      `differentiator, content_guardrails) — draft from THAT. Do NOT read config files or call any ` +
+      `other tool to find the voice; everything you need is in this result. Then call submit_drafts ` +
+      `with batch_id "${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). ` +
+      `Nothing posts until the user approves.`,
   });
 }
 
