@@ -239,6 +239,7 @@ export function ensurePipelineCurrent(): void {
     if (!bundled) return; // dev build, no stamp — leave the materialized repo alone.
     const rt = readRuntime();
     if (rt?.pipeline_version === bundled) return; // already current.
+    const prevVer = rt?.pipeline_version ?? "unrecorded"; // capture before we mutate rt below.
 
     // Stale (or never recorded): extract the new pipeline OVER the materialized
     // repo. No rmSync, so config.json + logs are preserved.
@@ -262,9 +263,7 @@ export function ensurePipelineCurrent(): void {
         /* best effort — worst case we re-extract next boot */
       }
     }
-    console.error(
-      `[runtime] re-materialized pipeline -> ${bundled} (was ${rt?.pipeline_version ?? "unrecorded"})`
-    );
+    console.error(`[runtime] re-materialized pipeline -> ${bundled} (was ${prevVer})`);
   } catch (e: any) {
     console.error(`[runtime] ensurePipelineCurrent error: ${e?.message || e}`);
   }
