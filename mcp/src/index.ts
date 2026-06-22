@@ -225,7 +225,7 @@ async function unloadPlist(label: string, plistPath: string, uid: number) {
 // instead of a frozen literal.
 const server = new McpServer(
   {
-    name: "social-autoposter",
+    name: "S4L",
     version: VERSION,
   },
   {
@@ -1892,6 +1892,10 @@ interface ScanResult {
   batchId: string | null;
   candidates: ScanCandidate[];
   blocked?: string;
+  // True when the scan couldn't run because ANOTHER scan holds the pipeline's
+  // max=1 slot (e.g. the legacy claude -p autopilot). Contention, not an empty
+  // result — the caller should retry rather than conclude "no candidates".
+  busy?: boolean;
 }
 
 async function runScanCandidates(
@@ -1950,6 +1954,21 @@ async function runScanCandidates(
   if (blockedMarker && blockedMarker[1]) {
     return { batchId: null, candidates: [], blocked: blockedReasonMessage(blockedMarker[1]) };
   }
+  // The pipeline's single-flight guard prints too_many_inflight and exits 0 when
+  // ANOTHER scan already holds the twitter-cycle slot (commonly the legacy
+  // claude -p autopilot, which we deliberately keep running). That is CONTENTION,
+  // not an empty batch — flag it so the caller retries instead of concluding
+  // "no candidates" (a clean empty scan returns a batch_id with count:0).
+  if (/too_many_inflight/.test(res.stdout + res.stderr)) {
+    return {
+      batchId: null,
+      candidates: [],
+      busy: true,
+      blocked:
+        "Another scan already holds the pipeline slot (likely the legacy autopilot). Contention, " +
+        "not an empty result — retry scan_candidates shortly.",
+    };
+  }
   return {
     batchId: null,
     candidates: [],
@@ -1989,6 +2008,20 @@ let currentScanJob: ScanJob | null = null;
 // so every scan_candidates call returns a real response before the client gives
 // up. Override with SAPS_SCAN_POLL_WAIT_MS for non-standard clients.
 const SCAN_POLL_WAIT_MS = Number(process.env.SAPS_SCAN_POLL_WAIT_MS) || 45_000;
+
+// After a contention hit (too_many_inflight), wait this long before launching a
+// fresh scan, so polls don't hammer the pipeline with back-to-back no-op scans
+// while the other holder finishes. Polls during the cooldown just report "busy".
+const SCAN_BUSY_COOLDOWN_MS = Number(process.env.SAPS_SCAN_BUSY_COOLDOWN_MS) || 20_000;
+let scanBusyUntil = 0;
+
+function scanBusy() {
+  return textContent(
+    "Another scan is already running on this machine (likely the legacy autopilot holding the " +
+      "twitter-cycle slot). This is CONTENTION, not an empty result. Call scan_candidates again in " +
+      "~20s to retry — do NOT conclude there are no candidates, and do NOT sleep; just re-call."
+  );
+}
 
 // Resolve to {done:true,value} the moment `p` settles, or {done:false} after
 // `ms` — whichever is first. The job promise keeps running either way, so a
@@ -2081,7 +2114,16 @@ tool(
     if (currentScanJob?.done) {
       const finished = currentScanJob;
       currentScanJob = null;
+      if (finished.result?.busy) {
+        scanBusyUntil = Date.now() + SCAN_BUSY_COOLDOWN_MS;
+        return scanBusy();
+      }
       return formatScanResult(finished.result!);
+    }
+    // Contention cooldown: another scan holds the slot — report busy without
+    // launching yet another no-op scan against the locked pipeline.
+    if (!currentScanJob && Date.now() < scanBusyUntil) {
+      return scanBusy();
     }
     // Nothing running -> start one scan (single-flight: never spawn a second
     // run-twitter-cycle.sh that would just hit the pipeline's too_many_inflight).
@@ -2092,6 +2134,10 @@ tool(
     const waited = await waitUpTo(currentScanJob.promise, SCAN_POLL_WAIT_MS);
     if (waited.done) {
       currentScanJob = null;
+      if (waited.value.busy) {
+        scanBusyUntil = Date.now() + SCAN_BUSY_COOLDOWN_MS;
+        return scanBusy();
+      }
       return formatScanResult(waited.value);
     }
     // Still scanning — tell the agent to simply call scan_candidates again.
