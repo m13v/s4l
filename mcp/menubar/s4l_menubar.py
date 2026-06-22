@@ -17,9 +17,12 @@ rather than rumps.notification (which needs a bundle id).
 """
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 
 import rumps
 
@@ -111,6 +114,14 @@ class S4LMenuBar(rumps.App):
         # read per second.
         self._act_poll = rumps.Timer(self._poll_activity, 1.0)
         self._act_poll.start()
+        # Self-check for a newer published .mcpb, independent of the MCP server's
+        # npm check (which has been flaky). Slow timer + cache; drives the title
+        # indicator + the "Please update now" menu item.
+        self._update_available = False
+        self._latest_version = None
+        self._upd_timer = rumps.Timer(self._check_update, 1800)  # every 30 min
+        self._upd_timer.start()
+        self._check_update(None)
         self._tick(None)
 
     # ---- side effects -----------------------------------------------------
@@ -171,6 +182,98 @@ class S4LMenuBar(rumps.App):
 
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
+
+    # ---- .mcpb self-update (menu-bar driven) ------------------------------
+    EXT_DIR = os.path.expanduser(
+        "~/Library/Application Support/Claude/Claude Extensions/"
+        "local.mcpb.m13v.social-autoposter"
+    )
+    MCPB_URL = (
+        "https://github.com/m13v/social-autoposter/releases/latest/download/"
+        "social-autoposter.mcpb"
+    )
+    RELEASE_API = (
+        "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
+    )
+
+    @staticmethod
+    def _vtuple(v):
+        try:
+            return tuple(int(x) for x in str(v).split("."))
+        except Exception:
+            return (0,)
+
+    def _check_update(self, _=None):
+        """Is a newer .mcpb published than what's installed? Compare the GitHub
+        latest release tag to the installed extension manifest. Offline / API
+        errors leave the cached value untouched (never flips to 'no update' on a
+        transient failure). A change forces a title + menu repaint."""
+        installed = None
+        try:
+            with open(os.path.join(self.EXT_DIR, "manifest.json")) as f:
+                installed = (json.load(f) or {}).get("version")
+        except Exception:
+            return  # not a .mcpb install (or no manifest) -> nothing to offer
+        try:
+            r = subprocess.run(
+                ["curl", "-fsSL", "-m", "15", self.RELEASE_API],
+                capture_output=True, text=True, timeout=20,
+            )
+            if r.returncode != 0:
+                return
+            latest = ((json.loads(r.stdout) or {}).get("tag_name") or "").lstrip("v")
+        except Exception:
+            return
+        if not latest:
+            return
+        available = bool(installed) and self._vtuple(latest) > self._vtuple(installed)
+        if available != self._update_available or latest != self._latest_version:
+            self._update_available = available
+            self._latest_version = latest
+            self._sig = None  # repaint on next tick
+
+    def _do_mcpb_update(self, _=None):
+        """User clicked 'Please update now'. Pull the latest .mcpb, unpack it over
+        the Desktop extension dir in place, and restart Claude so the new server
+        loads. The menu bar is a launchd process (not a Claude child), so the
+        restart is clean. Heavy work runs on a background thread."""
+        self._notify("S4L", "Updating… Claude will restart in a moment.")
+        threading.Thread(target=self._mcpb_update_work, daemon=True).start()
+
+    def _mcpb_update_work(self):
+        tmpd = tempfile.mkdtemp(prefix="s4l-update-")
+        mcpb = os.path.join(tmpd, "social-autoposter.mcpb")
+        try:
+            r = subprocess.run(["curl", "-fLs", "-m", "300", self.MCPB_URL, "-o", mcpb],
+                               capture_output=True, timeout=320)
+            if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
+                self._notify("S4L update failed", "Couldn't download the update — check your connection.")
+                return
+            r = subprocess.run(["unzip", "-oq", mcpb, "-d", self.EXT_DIR],
+                               capture_output=True, timeout=180)
+            if r.returncode != 0:
+                self._notify("S4L update failed", "Couldn't unpack the update.")
+                return
+            # Restart Claude so the refreshed server loads (we're decoupled from it).
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           capture_output=True, timeout=20)
+            time.sleep(4)
+            subprocess.run(["killall", "Claude"], capture_output=True)      # if quit was blocked
+            time.sleep(2)
+            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
+            time.sleep(1)
+            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._update_available = False
+            self._sig = None
+            self._notify("S4L updated", "Claude restarted on the latest version.")
+        except Exception as e:
+            self._notify("S4L update failed", str(e)[:140])
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(tmpd, ignore_errors=True)
+            except Exception:
+                pass
 
     def _open_dashboard(self, _=None):
         url = st.panel_url()
@@ -350,6 +453,8 @@ class S4LMenuBar(rumps.App):
         elif not setup_complete and ob and not ob.get("complete"):
             done = sum(1 for m in ob["milestones"] if m.get("status") == "complete")
             self.title = f"S4L {done}/{len(ob['milestones'])}"
+        elif self._update_available:
+            self.title = "S4L ⬆"  # update available — open the menu to update
         else:
             self.title = "S4L"
 
@@ -373,12 +478,11 @@ class S4LMenuBar(rumps.App):
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
-        if snap.get("update_available") and snap.get("latest_version"):
+        if self._update_available and self._latest_version:
+            items.append(rumps.separator)
+            items.append(self._label(f"⬆ Update available · v{self._latest_version}"))
             items.append(
-                rumps.MenuItem(
-                    f"Update to v{snap['latest_version']} in Claude",
-                    callback=self._update,
-                )
+                rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
             )
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
