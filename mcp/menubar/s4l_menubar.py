@@ -97,7 +97,13 @@ class S4LMenuBar(rumps.App):
         self._last_blocker_code = None
         self._sig = None  # last rendered state signature; skip rebuild if unchanged
         self._review_active = False  # a review-card sequence is on screen
-        self._reviewed_batches = set()  # batch_ids already handled this run
+        # Signature of the pending drafts last presented. We de-dup on the CONTENT
+        # of the pending set, NOT on the batch_id: the server intentionally reuses
+        # a constant batch_id ("review-queue") so a continuous autopilot's drafts
+        # accumulate into one queue. Keying de-dup on that constant suppressed every
+        # later batch for the life of this process (only a restart cleared it),
+        # which is exactly the "drafts queued but no cards" bug.
+        self._last_review_sig = None
         self._spin_i = 0
         self._spinner = None  # fast rumps.Timer animating the title while busy
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
@@ -391,24 +397,35 @@ class S4LMenuBar(rumps.App):
         if not req:
             return
         batch = req.get("batch_id")
-        if not batch or batch in self._reviewed_batches:
+        if not batch:
             return
         plan = st.read_plan(req.get("plan_path") or "")
         drafts = st.review_drafts(plan)
         # Nothing left to review (empty, missing plan, or all already posted via
-        # the chat surface) — mark handled and clear the signal.
+        # the chat surface) — clear the signal and reset the signature so a future
+        # batch is presented fresh.
         if not drafts:
-            self._reviewed_batches.add(batch)
+            self._last_review_sig = None
             st.clear_review_request()
             return
+        # De-dup on the CONTENT of the pending set (each draft's plan index + reply
+        # text), not the constant batch_id. This means: re-present whenever NEW
+        # drafts arrive (the signature changes), but don't re-pop the identical
+        # cards we already showed for this same pending set. No restart is ever
+        # needed for new pending drafts to surface.
+        sig = tuple((d.get("n"), d.get("reply_text") or "") for d in drafts)
+        if sig == self._last_review_sig:
+            return
         self._review_active = True
-        self._reviewed_batches.add(batch)
         try:
             import s4l_card
 
             s4l_card.present_review(
                 drafts, lambda decisions: self._on_review_done(batch, decisions)
             )
+            # Record as shown only AFTER the cards are actually up, so a transient
+            # card-UI failure never permanently suppresses this pending set.
+            self._last_review_sig = sig
         except Exception as e:
             # Card UI unavailable — don't strand the batch; chat review still works.
             self._review_active = False
