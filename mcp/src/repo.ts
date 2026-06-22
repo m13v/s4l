@@ -2,7 +2,7 @@
 // This MCP is a THIN client: it shells out to the existing pipeline scripts in
 // the social-autoposter repo and never reimplements pipeline logic.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -58,6 +58,10 @@ export function run(
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
     onLine?: (line: string, stream: "stdout" | "stderr") => void;
+    // Hands the spawned child to the caller so a long-running job (e.g. a scan)
+    // can be aborted out-of-band — used to preempt an in-flight scan when the
+    // user approves a post (posting takes the browser immediately).
+    onSpawn?: (child: ChildProcess) => void;
   } = {}
 ): Promise<RunResult> {
   return new Promise((resolve) => {
@@ -65,6 +69,11 @@ export function run(
       cwd: opts.cwd || repoDir(),
       env: { ...process.env, ...(opts.env || {}) },
     });
+    try {
+      opts.onSpawn?.(child);
+    } catch {
+      /* a spawn observer must never break the run */
+    }
     let stdout = "";
     let stderr = "";
     // Per-stream partial-line buffers so onLine fires on whole lines only,
