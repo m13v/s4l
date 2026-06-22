@@ -2344,6 +2344,58 @@ appTool(
   }
 );
 
+// ---- add your product: focused single-field onboarding widget --------------
+// A standalone ui:// widget (separate from the dashboard panel) that captures
+// the user's product URL. The widget itself reads project status and either
+// writes the website via project_config (callServerTool) or, on a cold start,
+// hands the URL to the model via sendMessage. Same inline/loopback duality as
+// `dashboard`.
+appTool(
+  "connect_product",
+  {
+    title: "Add your product",
+    description:
+      "Render the 'add your product' widget in chat: a single-field form where the user pastes " +
+      "their product's website. Use at the START of onboarding when you need the product URL, " +
+      "instead of asking for it in plain prose. If a project already needs a website the widget " +
+      "saves it directly; on a cold start it kicks off end-to-end setup. Hosts without UI support " +
+      "get a loopback URL.",
+    inputSchema: {},
+    outputSchema: { snapshot: z.string(), fallback_url: z.string().optional() },
+    _meta: { ui: { resourceUri: PRODUCT_LINK_URI } },
+  },
+  async () => {
+    const snap = await buildSnapshot();
+    // Inline-capable host: paint the resource named by _meta.ui.resourceUri.
+    // Emit no text content so the chat shows only the widget (see `dashboard`).
+    if (hostRendersAppUi()) {
+      return { content: [], structuredContent: { snapshot: JSON.stringify(snap) } };
+    }
+    // No inline UI: serve the identical product-link.html from the loopback
+    // server at /product-link and return its URL.
+    try {
+      const base = await startLocalPanel();
+      const url = base.replace(/\/$/, "") + "/product-link";
+      await openInBrowser(url);
+      return {
+        content: [{
+          type: "text" as const,
+          text:
+            "Add your product: paste your product's website to begin setup.\n\n" +
+            `This host can't render the widget inline. Loopback URL: ${url}`,
+        }],
+        structuredContent: { snapshot: JSON.stringify(snap), fallback_url: url },
+      };
+    } catch (e: any) {
+      console.error("[social-autoposter-mcp] product-link fallback failed:", e?.message || e);
+      return {
+        content: [{ type: "text" as const, text: "Paste your product's website in the chat to begin setup." }],
+        structuredContent: { snapshot: JSON.stringify(snap) },
+      };
+    }
+  }
+);
+
 // ---- show browser to user: live CDP screencast ----------------------------
 // Streams a live view of the autoposter's managed Chrome into the panel. Frames
 // travel back through the normal tool-result channel as a data: URL (which the
@@ -2433,6 +2485,22 @@ registerAppResource(
         uri: PANEL_URI,
         mimeType: RESOURCE_MIME_TYPE,
         text: fs.readFileSync(path.join(DIST_DIR, "panel.html"), "utf-8"),
+      },
+    ],
+  })
+);
+
+registerAppResource(
+  server,
+  "S4L product link",
+  PRODUCT_LINK_URI,
+  { mimeType: RESOURCE_MIME_TYPE },
+  async () => ({
+    contents: [
+      {
+        uri: PRODUCT_LINK_URI,
+        mimeType: RESOURCE_MIME_TYPE,
+        text: fs.readFileSync(path.join(DIST_DIR, "product-link.html"), "utf-8"),
       },
     ],
   })
