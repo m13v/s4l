@@ -19,21 +19,29 @@
 
 .pl-form { display: flex; flex-direction: column; gap: 8px; }
 .pl-label { font-size: 12px; font-weight: 600; color: var(--muted); }
-.pl-namewrap { display: flex; flex-direction: column; gap: 8px; margin-top: 2px; }
 
 .pl-input {
   width: 100%;
   font: inherit;
   font-size: 14px;
-  padding: 9px 11px;
+  padding: 11px 12px;
   color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  /* Faint fill + a frame derived from the text color (not the host's --border,
+     which can be near-invisible) so the field clearly reads as an input on ANY
+     host theme. Grayscale only: --fg is the theme's text color, never a hue. */
+  background: color-mix(in oklab, var(--fg) 5%, var(--bg));
+  border: 1.5px solid color-mix(in oklab, var(--fg) 34%, transparent);
+  border-radius: 9px;
   outline: none;
+  transition: border-color .12s, box-shadow .12s, background .12s;
 }
 .pl-input::placeholder { color: var(--muted); }
-.pl-input:focus { border-color: var(--fg); box-shadow: 0 0 0 2px var(--card) inset; }
+.pl-input:hover { border-color: color-mix(in oklab, var(--fg) 50%, transparent); }
+.pl-input:focus {
+  border-color: var(--fg);
+  background: var(--bg);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--fg) 14%, transparent);
+}
 
 .pl-btn {
   font: inherit;
