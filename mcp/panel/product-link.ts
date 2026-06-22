@@ -48,8 +48,6 @@ function parseResult(result: CallToolResult): any {
 const $ = (id: string) => document.getElementById(id)!;
 const form = $("pl-form") as HTMLFormElement;
 const urlInput = $("pl-url") as HTMLInputElement;
-const nameInput = $("pl-name") as HTMLInputElement;
-const nameWrap = $("pl-namewrap");
 const submitBtn = $("pl-submit") as HTMLButtonElement;
 const subEl = $("pl-sub");
 const statusEl = $("pl-status");
@@ -100,12 +98,10 @@ function render(data: any) {
   if (coldStart || !target) {
     subEl.textContent =
       "Paste the link to your product to begin setup. S4L reads it to learn what to post about.";
-    nameWrap.hidden = false;
     submitBtn.textContent = "Start setup";
   } else {
     subEl.textContent =
       `Set the product website for “${target.name}”. S4L re-reads it to keep posts on-message.`;
-    nameWrap.hidden = true;
     submitBtn.textContent = target.ready ? "Update website" : "Save website";
   }
 }
@@ -127,16 +123,14 @@ async function refresh() {
 async function startSetup(url: string) {
   busy(true, "Starting…");
   try {
-    const name = nameInput.value.trim();
     const res = await app.sendMessage({
       role: "user",
       content: [{
         type: "text",
         text:
-          `Set up social-autoposter for my product at ${url}` +
-          (name ? ` (call the project “${name}”)` : "") +
-          ". Research the site, infer a complete project, connect my X session, seed search " +
-          "topics, and continue setup end to end. Keep replies to me very concise.",
+          `Set up social-autoposter for my product at ${url}. Research the site, infer a complete ` +
+          "project (derive a short slug from the site), connect my X session, seed search topics, " +
+          "and continue setup end to end. Keep replies to me very concise.",
       }],
     } as any);
     if ((res as any)?.isError) {
