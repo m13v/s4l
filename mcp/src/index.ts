@@ -49,6 +49,7 @@ import {
   resolvePython,
   resolveChrome,
   ensureMenubar,
+  ensurePipelineCurrent,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
@@ -2508,6 +2509,11 @@ registerAppResource(
 
 async function main() {
   initSentry();
+  // A plugin UPDATE refreshes this server (dist/) but not the materialized
+  // pipeline. Re-extract the bundled pipeline.tgz when it's newer than what's on
+  // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
+  // the version first materialized at install). Synchronous + best-effort.
+  ensurePipelineCurrent();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
