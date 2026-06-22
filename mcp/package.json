@@ -9,11 +9,11 @@
     "social-autoposter-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "vite build && tsc",
-    "build:panel": "vite build",
+    "build": "npm run build:panel && tsc",
+    "build:panel": "vite build && SAPS_PANEL_ENTRY=product-link vite build",
     "build:server": "tsc",
     "bundle:pipeline": "node bundle-pipeline.mjs",
-    "build:bundle": "vite build && tsc && node bundle-pipeline.mjs",
+    "build:bundle": "npm run build:panel && tsc && node bundle-pipeline.mjs",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "install-clients": "node install.mjs",
