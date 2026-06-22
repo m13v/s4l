@@ -263,11 +263,15 @@ const server = new McpServer(
       "self-contained prompt telling the run to call scan_candidates (which long-polls — if it " +
       "returns a `Scan in progress` status, call scan_candidates again with the same args and keep " +
       "re-calling until it returns candidates; never sleep or use background waits between calls), " +
+      "then (if it needs the project's brand voice to draft on-brand) call project_config to read it, " +
       "draft ONE on-brand reply (<=250 chars, same language as the thread, adds real value) for each " +
       "candidate worth engaging, then call submit_drafts with those drafts, and NOT post (drafts pile " +
-      "up in the menu-bar approval cards for the user to approve). Then run ONE cycle yourself now (scan_candidates -> " +
-      "draft -> submit_drafts) to seed the cards and pre-approve the tools, so unattended fires do not " +
-      "stall on a permission prompt. If the host exposes no create_scheduled_task tool, tell the user " +
+      "up in the menu-bar approval cards for the user to approve). The prompt MUST name EVERY tool the " +
+      "run can use (scan_candidates, project_config, submit_drafts) so none is a surprise mid-run. " +
+      "Then run ONE FULL cycle yourself now that exercises ALL of them " +
+      "(scan_candidates -> project_config -> draft -> submit_drafts) to seed the cards AND pre-approve " +
+      "every tool, so unattended fires never stall waiting on a per-tool permission prompt. If the host " +
+      "exposes no create_scheduled_task tool, tell the user " +
       "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
