@@ -45,6 +45,7 @@ import random
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
@@ -792,6 +793,9 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
                             matched_project=project, search_topic=search_topic)
     print(f"[post] candidate {cid} posted as {reply_url} (post_id={post_id})",
           flush=True)
+    # Stash the live URL on the candidate so main() can include it in the durable
+    # post-results audit log (so the menu bar/dashboard can surface "posted N + links").
+    c["our_url"] = reply_url
 
     # Persist the human-top-replies snapshot via the s4l.ai routes. We POST
     # even when top_replies is empty so posts.top_replies_captured_at is
@@ -948,6 +952,26 @@ def main() -> int:
         "failure_reasons": ",".join(f"{k}:{v}" for k, v in fail_reasons.items()),
         "skip_reasons":    ",".join(f"{k}:{v}" for k, v in skip_reasons.items()),
     }
+    # Persist a durable audit line so "did it post, and how many — and where?" is
+    # answerable after the fact. The shell harvests the json on stdout, but when
+    # the menu bar launches this directly it captures-then-discards stdout, leaving
+    # no record of what posted. Append a timestamped JSONL row (with the live URLs)
+    # the menu bar / dashboard can read. Best-effort: never affects the post outcome.
+    try:
+        posted_urls = [c.get("our_url") for c in candidates if c.get("our_url")]
+        audit = dict(summary)
+        audit["plan"] = plan_path.name
+        audit["at"] = datetime.now(timezone.utc).isoformat()
+        audit["urls"] = posted_urls
+        audit_path = os.path.join(REPO_DIR, "skill", "logs", "post-results.jsonl")
+        os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit) + "\n")
+        print(f"[post] result: posted={posted} skipped={skipped} failed={failed}"
+              f"{' urls=' + ','.join(posted_urls) if posted_urls else ''} "
+              f"(audit: {audit_path})", flush=True)
+    except Exception as e:
+        print(f"[post] audit-log write failed (non-fatal): {e}", flush=True)
     # The shell harvests this as the last json line in our stdout.
     print(json.dumps(summary), flush=True)
     return 0
