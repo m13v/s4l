@@ -261,17 +261,21 @@ const server = new McpServer(
       "autopilot by calling the HOST tool `create_scheduled_task` with: taskId " +
       "'social-autoposter-autopilot'; cronExpression '* * * * *' (continuous, like the pipeline; the " +
       "host runs one at a time and skips overlapping fires, so cycles run back-to-back); and a " +
-      "self-contained prompt telling the run to call scan_candidates (which long-polls — if it " +
-      "returns a `Scan in progress` status, call scan_candidates again with the same args and keep " +
-      "re-calling until it returns candidates; never sleep or use background waits between calls), " +
-      "then (if it needs the project's brand voice to draft on-brand) call project_config to read it, " +
-      "draft ONE on-brand reply (<=250 chars, same language as the thread, adds real value) for each " +
-      "candidate worth engaging, then call submit_drafts with those drafts, and NOT post (drafts pile " +
-      "up in the menu-bar approval cards for the user to approve). The prompt MUST name EVERY tool the " +
-      "run can use (scan_candidates, project_config, submit_drafts) so none is a surprise mid-run. " +
-      "Then run ONE FULL cycle yourself now that exercises ALL of them " +
-      "(scan_candidates -> project_config -> draft -> submit_drafts) to seed the cards AND pre-approve " +
-      "every tool, so unattended fires never stall waiting on a per-tool permission prompt. If the host " +
+      "self-contained prompt telling the run to use ONLY two tools — scan_candidates and submit_drafts " +
+      "— and to IMPROVISE NOTHING ELSE. Specifically the prompt must say: (1) call scan_candidates " +
+      "(which long-polls — if it returns a `Scan in progress` status, call scan_candidates again with " +
+      "the same args and keep re-calling until it returns candidates; never sleep or use background " +
+      "waits between calls); (2) the brand voice + guardrails come back INLINE in the result's " +
+      "`project_voices[<matched_project>]` field — draft from THAT and NEVER read config files, call " +
+      "project_config, or run Bash/Read to find the voice; (3) draft ONE on-brand reply (<=250 chars, " +
+      "same language as the thread, adds real value) for each candidate worth engaging; (4) call " +
+      "submit_drafts with those drafts, and do NOT post (drafts pile up in the menu-bar approval cards). " +
+      "Add a HARD GUARD: if scan_candidates is NOT available (ToolSearch returns no matching tool — can " +
+      "happen when a run spawns before the extension's MCP server reconnects), STOP immediately and " +
+      "report 'S4L tools unavailable, skipping this cycle' — do NOT search the connector registry, do " +
+      "NOT call list_connectors, do NOT improvise any other tool. Then run ONE cycle yourself now " +
+      "(scan_candidates -> draft -> submit_drafts) to seed the cards AND pre-approve those two tools, " +
+      "so unattended fires never stall waiting on a per-tool permission prompt. If the host " +
       "exposes no create_scheduled_task tool, tell the user " +
       "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
@@ -2212,7 +2216,10 @@ tool(
       "and without spending any `claude -p` budget. You (this session) then draft an on-brand reply " +
       "for each good candidate YOURSELF and submit them with `submit_drafts`. Each candidate includes " +
       "its candidate_id (pass it back), the thread text/author, the matched project, and engagement " +
-      "metrics. Optional `project` scopes the scan to one configured project. The scan drives a real " +
+      "metrics. The result ALSO includes `project_voices` — the brand voice + guardrails for each " +
+      "project in the batch — so you draft on-brand WITHOUT reading config files or calling other " +
+      "tools (do not improvise a config read). Optional `project` scopes the scan to one configured " +
+      "project. The scan drives a real " +
       "browser and can take 1-3 minutes: this call long-polls and may return a `Scan in progress` " +
       "status instead of candidates — if so, just call scan_candidates again (same args) and keep " +
       "re-calling until it returns candidates. Never sleep or use a background wait to bridge the gap.",
