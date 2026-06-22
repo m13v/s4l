@@ -347,7 +347,13 @@ def main():
     # non-zero so audit and stats rows don't trip a false positive.
     _real_work = (args.checked or args.scanned or args.replies_refreshed
                   or args.changed or args.updated or args.views_refreshed)
-    if args.posted == 0 and args.failed > 0 and not _real_work:
+    # SCAN_ONLY runs (the Desktop-session autopilot's scan step) never post by
+    # design — an empty scan is "nothing fresh on-theme right now", not a silent
+    # failure. run-twitter-cycle.sh exports SCAN_ONLY=1 and log_run.py inherits
+    # it, so suppress the alarm for that path. The legacy full-cycle / plist
+    # autopilot runs WITHOUT SCAN_ONLY, so its behavior is byte-for-byte unchanged.
+    _scan_only = os.environ.get("SCAN_ONLY") == "1"
+    if args.posted == 0 and args.failed > 0 and not _real_work and not _scan_only:
         warning = f"WARNING: {args.script} posted=0 failed={args.failed} -- possible silent failure"
         with open(LOG_PATH, "a") as f:
             f.write(f"{timestamp} | {warning}\n")
