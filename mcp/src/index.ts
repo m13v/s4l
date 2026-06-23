@@ -781,6 +781,12 @@ async function postApproved(batchId: string, plan: Plan) {
         "or set accounts.twitter.handle in config.json.",
     };
   }
+  // Mark posting active so scan_candidates DEFERS launching any scan for the
+  // duration of this batch (+ grace). This is the source-level mutual exclusion
+  // that actually fixes the hijack: the autopilot never launches a scan to race
+  // the post for the browser. Reset is guaranteed by scheduleShellLockRelease()
+  // in the finally below, so an early/failed post can't wedge scanning.
+  postingActive = true;
   // Posting is a priority over scanning: abort any in-flight plugin scan so the
   // approved post takes the browser immediately instead of waiting on the lock.
   // Plugin pipeline only — never affects the plist autopilot.
@@ -835,12 +841,12 @@ async function postApproved(batchId: string, plan: Plan) {
         }
       );
     } finally {
-      // Don't free the lock immediately — hold it through a grace window so the
-      // NEXT approved card (a separate post_drafts call) reuses the same continuous
-      // hold, and a parked scan can't slip into the gap between cards. The timer
-      // releases it once posting truly stops (mirrors the plist holding the lock
-      // through the whole posting phase, then releasing at the end).
-      if (heldShellLock) scheduleShellLockRelease();
+      // Always schedule the grace release (even if the lock acquire failed): the
+      // timer both frees the lock AND clears postingActive, so scanning resumes
+      // SHELL_LOCK_GRACE_MS after the last card. Holding through the grace lets the
+      // NEXT approved card reuse one continuous hold (mirrors the plist holding the
+      // lock through the whole posting phase, then releasing at the end).
+      scheduleShellLockRelease();
     }
   })();
   // Persist the poster's own stdout/stderr to a dated log. Without this the post
@@ -2599,6 +2605,15 @@ function sigkillAllScans(): void {
 // hold EXPANDS as more cards get approved and there is never a gap between cards.
 const SHELL_LOCK_GRACE_MS = Number(process.env.SAPS_POST_LOCK_GRACE_MS) || 60_000;
 let shellLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+// True from the start of a post batch until SHELL_LOCK_GRACE_MS after the last
+// card. scan_candidates checks this and DEFERS launching a scan while it's set —
+// the real fix: posting and scanning are mutually exclusive at the SOURCE (both
+// are children of THIS one MCP), so we never even launch a scan that would race
+// the post for the browser lock. Having the post fight scans for the lock (the
+// prior approach) lost the race because the autopilot relaunches scans faster
+// than the post can hold the dir. Reset is guaranteed by the grace timer below,
+// so it can never wedge scanning permanently.
+let postingActive = false;
 function cancelScheduledShellLockRelease(): void {
   if (shellLockReleaseTimer) {
     clearTimeout(shellLockReleaseTimer);
@@ -2609,6 +2624,7 @@ function scheduleShellLockRelease(): void {
   cancelScheduledShellLockRelease();
   shellLockReleaseTimer = setTimeout(() => {
     shellLockReleaseTimer = null;
+    postingActive = false; // posting drained -> the autopilot may scan again
     releaseShellBrowserLock();
   }, SHELL_LOCK_GRACE_MS);
 }
@@ -2737,6 +2753,17 @@ function scanBusy() {
     "Another scan is already running on this machine (likely the legacy autopilot holding the " +
       "twitter-cycle slot). This is CONTENTION, not an empty result. Call scan_candidates again in " +
       "~20s to retry — do NOT conclude there are no candidates, and do NOT sleep; just re-call."
+  );
+}
+
+// A post batch is in progress: scanning is deferred so posting has exclusive use
+// of the one shared browser (mutual exclusion at the source). Not an error.
+function scanDeferredForPost() {
+  return textContent(
+    "A post is in progress on this machine, so scanning is deferred — only one task drives X at a " +
+      "time and posting has priority. This is EXPECTED, not an error or an empty result. Call " +
+      "scan_candidates again shortly; it runs as soon as the current post batch finishes. Do NOT " +
+      "sleep or conclude there are no candidates; just re-call."
   );
 }
 
