@@ -447,6 +447,15 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     progress.ok = false;
     progress.error = msg;
     writeProgress(progress);
+    // Every fatal install-step failure (repo unpack, uv, python, venv, deps,
+    // chromium, harness, chrome) was previously only written to the local
+    // install-progress.json, invisible to us. Report it so a failed runtime
+    // install becomes a real Sentry event, tagged with the step that failed.
+    const failedStep = progress.steps.find((s) => s.status === "running");
+    captureError(new Error(msg), {
+      component: "install",
+      ...(failedStep ? { step: failedStep.id } : {}),
+    });
     return progress;
   };
 
