@@ -661,6 +661,10 @@ async function postApproved(batchId: string, plan: Plan) {
   // approved post takes the browser immediately instead of waiting on the lock.
   // Plugin pipeline only — never affects the plist autopilot.
   preemptScanForPost();
+  // Hold the /tmp shell browser lock (the one the scanner respects) for the WHOLE
+  // batch so the every-minute autopilot scan queues behind the post instead of
+  // seizing Chrome mid-batch — the root cause of approved batches landing 0/N.
+  const heldShellLock = await acquireShellBrowserLock();
   const approvedBatch = `${batchId}_approved`;
   writePlan(approvedBatch, { ...plan, candidates: approved });
   // SAPS_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
@@ -668,32 +672,55 @@ async function postApproved(batchId: string, plan: Plan) {
   // twitter_browser.py's reply handler reads this env (inherited through
   // twitter_post_plan.py's subprocess). The cron pipeline doesn't set it, so the
   // A/B disclosure experiment keeps running on autopilot/cron and on Reddit.
-  const res = await runPython(
-    "scripts/twitter_post_plan.py",
-    ["--plan", planPath(approvedBatch)],
-    {
-      timeoutMs: 900_000,
-      env: {
-        SAPS_SKIP_CAMPAIGN_SUFFIX: "1",
-        // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
-        // runs TWITTER_TAIL_LINK_RATE=0.9 (from .env) so ~10% of autopilot posts
-        // ship link-less as an experiment arm. But when the user hand-reviews a
-        // draft, sees the link target in the table, and approves it, dropping the
-        // link is surprising and unwanted. Force 1.0 here so every approved draft
-        // carries its link. This wins over .env / process.env because run() spreads
-        // opts.env AFTER process.env, and twitter_post_plan.py never load_dotenv's
-        // with override, so nothing clobbers it. Cron is untouched (it never goes
-        // through this MCP path), so the 0.9 experiment keeps running there.
-        TWITTER_TAIL_LINK_RATE: "1.0",
-        // The poster attaches to the twitter-harness Chrome over CDP. The cron
-        // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
-        // must set it explicitly or twitter_browser.py fails with "No twitter-
-        // harness Chrome reachable". Honor an inherited value (AppMaker / VM
-        // BYO-Chrome), else default to the local harness on port 9555.
-        TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
-      },
+  const res = await (async () => {
+    try {
+      return await runPython(
+        "scripts/twitter_post_plan.py",
+        ["--plan", planPath(approvedBatch)],
+        {
+          timeoutMs: 900_000,
+          env: {
+            SAPS_SKIP_CAMPAIGN_SUFFIX: "1",
+            // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
+            // runs TWITTER_TAIL_LINK_RATE=0.9 (from .env) so ~10% of autopilot posts
+            // ship link-less as an experiment arm. But when the user hand-reviews a
+            // draft, sees the link target in the table, and approves it, dropping the
+            // link is surprising and unwanted. Force 1.0 here so every approved draft
+            // carries its link. This wins over .env / process.env because run() spreads
+            // opts.env AFTER process.env, and twitter_post_plan.py never load_dotenv's
+            // with override, so nothing clobbers it. Cron is untouched (it never goes
+            // through this MCP path), so the 0.9 experiment keeps running there.
+            TWITTER_TAIL_LINK_RATE: "1.0",
+            // The poster attaches to the twitter-harness Chrome over CDP. The cron
+            // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
+            // must set it explicitly or twitter_browser.py fails with "No twitter-
+            // harness Chrome reachable". Honor an inherited value (AppMaker / VM
+            // BYO-Chrome), else default to the local harness on port 9555.
+            TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
+          },
+        }
+      );
+    } finally {
+      // Always free the lock so a queued scan can proceed, even on throw/timeout.
+      if (heldShellLock) releaseShellBrowserLock();
     }
-  );
+  })();
+  // Persist the poster's own stdout/stderr to a dated log. Without this the post
+  // run was invisible: twitter_post_plan.py's output streamed to this MCP
+  // instance's stderr and was never tee'd anywhere on disk, so a 0/N batch left
+  // no on-box trace to debug. Best-effort; never breaks posting.
+  try {
+    const postLogDir = path.join(repoDir(), "skill", "logs");
+    fs.mkdirSync(postLogDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.writeFileSync(
+      path.join(postLogDir, `post-${stamp}.log`),
+      `# post_drafts batch=${batchId} approved=${approved.length} exit=${res.code} ` +
+        `shell_lock=${heldShellLock}\n\n=== stdout ===\n${res.stdout}\n\n=== stderr ===\n${res.stderr}\n`
+    );
+  } catch {
+    /* best effort */
+  }
   let summary: unknown = res.stdout.trim();
   try {
     const lines = res.stdout.trim().split("\n");
