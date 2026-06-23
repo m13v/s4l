@@ -299,6 +299,36 @@ def read_activity():
     return read_json("activity.json")
 
 
+def write_activity(state: str, label: str):
+    """Best-effort local activity update. The MCP server normally owns this file,
+    but the menu-bar posting queue knows the whole approved-card burst while the
+    server only sees one post_drafts call at a time."""
+    try:
+        p = Path(state_dir()) / "activity.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    "state": state,
+                    "label": label,
+                    "since": time_iso(),
+                }
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+
+
+def time_iso():
+    try:
+        import datetime
+
+        return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
 def read_review_request():
     return read_json("review-request.json")
 
@@ -320,10 +350,10 @@ def read_plan(plan_path):
 
 
 def review_drafts(plan):
-    """Flatten a plan into the card model: only candidates not already posted."""
+    """Flatten a plan into the card model: only unfinished candidates."""
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
-        if c.get("posted") is True:
+        if c.get("posted") is True or c.get("terminal") is True:
             continue
         out.append(
             {
@@ -334,15 +364,17 @@ def review_drafts(plan):
                 "link_url": c.get("link_url"),
             }
         )
+    # The review queue is append-only, so the highest stable index is newest and
+    # most likely to still be live on X.
+    out.sort(key=lambda d: d["n"], reverse=True)
     return out
 
 
-def post_drafts(batch_id, post=None, edits=None, timeout=900):
+def post_drafts(batch_id, post=None, edits=None, timeout=900, activity_label=None):
     """Post approved drafts via the loopback tool. `post` = 1-based numbers to
     post as-is; `edits` = [{n, text}] to rewrite then post. Returns the parsed
     result, or None if the loopback is unreachable (Claude Desktop closed)."""
-    return loopback_tool(
-        "post_drafts",
-        {"batch_id": batch_id, "post": post or [], "edits": edits or []},
-        timeout=timeout,
-    )
+    args = {"batch_id": batch_id, "post": post or [], "edits": edits or []}
+    if activity_label:
+        args["__saps_activity_label"] = activity_label
+    return loopback_tool("post_drafts", args, timeout=timeout)
