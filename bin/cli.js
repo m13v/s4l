@@ -591,10 +591,9 @@ function generatePlists() {
       stderrLog: `${DEST}/skill/logs/launchd-self-update-stderr.log`,
     },
     {
-      // On-screen overlay watcher supervisor. The overlay (harness status banner;
-      // the interactive draft sidebar is OFF by default as of 2026-06-23, opt back
-      // in with SAPS_SIDEBAR=1) only renders WHILE harness_overlay.py watch runs.
-      // The supervisor is idempotent (pgrep guard), so a 60s StartInterval
+      // On-screen overlay watcher supervisor. The overlay (harness status banner)
+      // only renders WHILE harness_overlay.py watch runs. The supervisor is
+      // idempotent (pgrep guard), so a 60s StartInterval
       // is a no-op while the watcher is up and re-spawns it within a minute if it
       // ever dies. RunAtLoad starts it right after install. This is what makes the
       // overlay appear on headless / remote installs (Lane A); the MCP covers the
