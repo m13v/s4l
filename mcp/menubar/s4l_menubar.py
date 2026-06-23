@@ -164,6 +164,8 @@ class S4LMenuBar(rumps.App):
         self._review_lock = threading.Lock()
         self._panel_open = False
         self._posts_outstanding = 0
+        self._posting_batch_total = 0
+        self._posting_batch_done = 0
         self._spin_i = 0
         self._spinner = None  # fast rumps.Timer animating the title while busy
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
@@ -465,6 +467,32 @@ class S4LMenuBar(rumps.App):
             self._maybe_start_review()
 
     # ---- draft review pop-ups ---------------------------------------------
+    def _posting_activity_label_locked(self):
+        """Progress for the current menu-bar approval burst.
+
+        The server receives one post_drafts call per approved card, so its native
+        view is always 1/1. The menu bar owns the burst queue and can show the
+        useful progress: current approved post / total approved so far.
+        """
+        if self._posts_outstanding <= 0:
+            return None
+        total = max(
+            self._posting_batch_total,
+            self._posting_batch_done + self._posts_outstanding,
+        )
+        current = min(total, self._posting_batch_done + 1)
+        return f"posting {current}/{total}"
+
+    def _write_posting_activity_locked(self):
+        label = self._posting_activity_label_locked()
+        if label:
+            st.write_activity("posting", label)
+        return label
+
+    def _reset_posting_progress_locked(self):
+        self._posting_batch_total = 0
+        self._posting_batch_done = 0
+
     def _maybe_start_review(self):
         if self._review_active:
             return
@@ -491,8 +519,10 @@ class S4LMenuBar(rumps.App):
         sig = tuple((d.get("n"), d.get("reply_text") or "") for d in drafts)
         if sig == self._last_review_sig:
             return
-        self._review_active = True
-        self._panel_open = True
+        with self._review_lock:
+            self._reset_posting_progress_locked()
+            self._review_active = True
+            self._panel_open = True
         try:
             import s4l_card
 
@@ -521,7 +551,9 @@ class S4LMenuBar(rumps.App):
             return
         with self._review_lock:
             self._posts_outstanding += 1
+            self._posting_batch_total += 1
             self._review_active = True
+            self._write_posting_activity_locked()
         self._post_q.put((batch, decision))
         self._ensure_post_worker()
 
@@ -534,6 +566,7 @@ class S4LMenuBar(rumps.App):
             self._panel_open = False
             if self._posts_outstanding <= 0:
                 self._review_active = False
+                self._reset_posting_progress_locked()
         st.clear_review_request()
         if not any(d.get("approved") for d in decisions):
             self._notify("S4L", "No drafts approved — nothing posted.")
@@ -548,19 +581,24 @@ class S4LMenuBar(rumps.App):
 
     def _post_worker_loop(self):
         # Serialized poster: one approved card at a time so two posts never drive
-        # the shared harness Chrome simultaneously. The server's post_drafts writes
-        # "posting" activity, so the menu-bar spinner shows automatically.
+        # the shared harness Chrome simultaneously. The menu bar passes a burst
+        # progress label into post_drafts, so the spinner shows e.g. "posting 17/95"
+        # even though each server call is still one approved draft.
         while True:
             batch, decision = self._post_q.get()  # blocks until a card is approved
             n = decision.get("n")
             try:
                 self._notify("S4L", f"Posting draft {n}…")
+                with self._review_lock:
+                    activity_label = self._posting_activity_label_locked()
                 if decision.get("edited"):
                     res = st.post_drafts(
-                        batch, edits=[{"n": n, "text": decision.get("text") or ""}]
+                        batch,
+                        edits=[{"n": n, "text": decision.get("text") or ""}],
+                        activity_label=activity_label,
                     )
                 else:
-                    res = st.post_drafts(batch, post=[n])
+                    res = st.post_drafts(batch, post=[n], activity_label=activity_label)
                 if res is None:
                     self._notify(
                         "S4L", "Couldn't post — open Claude Desktop and try the draft again."
@@ -577,9 +615,13 @@ class S4LMenuBar(rumps.App):
                 _capture(e, phase="post_card")
             finally:
                 with self._review_lock:
+                    self._posting_batch_done += 1
                     self._posts_outstanding -= 1
-                    if self._posts_outstanding <= 0 and not self._panel_open:
+                    if self._posts_outstanding > 0:
+                        self._write_posting_activity_locked()
+                    elif not self._panel_open:
                         self._review_active = False
+                        self._reset_posting_progress_locked()
                 self._post_q.task_done()
 
     def _render_title(self, setup_complete, ob, blocker):
