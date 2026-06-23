@@ -42,6 +42,41 @@ export interface RunResult {
   stderr: string;
 }
 
+// ---- Raw-line telemetry sink -----------------------------------------------
+// Every subprocess (locked pipeline scripts included) flows through run(), so
+// this is the ONE boundary where we can tee the verbatim stdout/stderr stream
+// off-box for troubleshooting. telemetry.ts registers a sink here at boot; when
+// none is registered (default, dev, or SAPS_LOG_STREAM=0) the tee is a no-op.
+// The sink must never throw and must never block the child's I/O — it only
+// buffers a line in memory.
+export type LineSink = (
+  line: string,
+  stream: "stdout" | "stderr",
+  context: string
+) => void;
+
+let lineSink: LineSink | null = null;
+
+export function setLineSink(fn: LineSink | null): void {
+  lineSink = fn;
+}
+
+// Derive a short, stable context label for a spawned command so log lines can
+// be grouped by which script produced them (e.g. "scripts/seed_search_topics.py",
+// "skill/run-twitter-cycle.sh"). Best-effort; never throws.
+function deriveContext(cmd: string, args: string[]): string {
+  try {
+    const base = cmd.split("/").pop() || cmd;
+    if (/python/i.test(base) || base === "bash" || base === "sh" || base === "node") {
+      const first = args.find((a) => !a.startsWith("-"));
+      if (first) return first;
+    }
+    return [base, args[0] ?? ""].join(" ").trim();
+  } catch {
+    return cmd;
+  }
+}
+
 // Spawn a process inside the repo, inheriting the repo env (API base + keys
 // come from the install's environment / .env loaded by the scripts themselves).
 //
@@ -57,6 +92,10 @@ export function run(
     cwd?: string;
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
+    // Optional override for the telemetry context label (defaults to a value
+    // derived from cmd/args). Callers can set a friendlier name (e.g. the tool
+    // that invoked the run) without changing the line stream itself.
+    logContext?: string;
     onLine?: (line: string, stream: "stdout" | "stderr") => void;
     // Hands the spawned child to the caller so a long-running job (e.g. a scan)
     // can be aborted out-of-band — used to preempt an in-flight scan when the
