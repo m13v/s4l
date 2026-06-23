@@ -217,7 +217,15 @@ export function run(
 export function runPython(
   scriptRelPath: string,
   args: string[],
-  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}
+  opts: {
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    // Pass-throughs to run(): onLine lets callers stream a python script's output
+    // live (e.g. the poster, so handled failures surface in main.log + telemetry
+    // instead of staying buffered); onSpawn hands back the child for preemption.
+    onLine?: (line: string, stream: "stdout" | "stderr") => void;
+    onSpawn?: (child: ChildProcess) => void;
+  } = {}
 ): Promise<RunResult> {
   return run(resolvePython(), [scriptRelPath, ...args], opts);
 }
