@@ -54,7 +54,9 @@ def fetch(days):
     days = int(days)
     q = f"""
     WITH win AS (
-      SELECT *, COALESCE(hardware_uuid, 'nohw:' || install_id::text) AS machine_key
+      SELECT *,
+             COALESCE(NULLIF(git_email, ''), NULLIF(hardware_uuid, ''),
+                      'anon:' || install_id::text) AS entity_key
       FROM installations
       WHERE last_seen_at > now() - interval '{days} days'
     ),
@@ -65,18 +67,19 @@ def fetch(days):
       GROUP BY install_id
     )
     SELECT
-      w.machine_key,
+      w.entity_key,
       count(DISTINCT w.install_id)                                            AS installs,
+      count(DISTINCT w.hardware_uuid)                                         AS machines,
       array_remove(array_agg(DISTINCT NULLIF(w.git_email, '')), NULL)         AS emails,
       array_remove(array_agg(DISTINCT w.hostname), NULL)                      AS hostnames,
       max(w.os_version)                                                       AS os,
       array_remove(array_agg(DISTINCT
-        w.last_country || '/' || COALESCE(w.last_city, '?')), NULL)           AS locations,
+        w.last_country || '/' || COALESCE(w.last_city, '-')), NULL)           AS locations,
       max(w.last_seen_at)                                                     AS last_seen,
       COALESCE(sum(p.n), 0)                                                   AS posts
     FROM win w
     LEFT JOIN posted p ON p.install_id = w.install_id
-    GROUP BY w.machine_key
+    GROUP BY w.entity_key
     ORDER BY last_seen DESC;
     """
     conn = get_conn()
@@ -93,7 +96,7 @@ def person(row):
         return row["emails"][0]
     if row["hostnames"]:
         return row["hostnames"][0]
-    return row["machine_key"][:12]
+    return row["entity_key"][:12]
 
 
 def loc(row):
@@ -118,7 +121,7 @@ def main():
 
     if args.json:
         out = [{
-            "person": person(r), "machine": r["machine_key"][:12], "installs": r["installs"],
+            "person": person(r), "machines": r["machines"], "installs": r["installs"],
             "hostnames": r["hostnames"], "emails": r["emails"], "os": r["os"],
             "location": loc(r), "posts": int(r["posts"]),
             "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
