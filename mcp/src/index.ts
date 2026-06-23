@@ -63,7 +63,7 @@ import {
   type DoctorPhase,
 } from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
-import { initSentry, sendHeartbeat, captureError, flushSentry } from "./telemetry.js";
+import { initSentry, sendHeartbeat, captureError, flushSentry, startLogStreaming, flushLogs } from "./telemetry.js";
 import {
   registerAppTool,
   registerAppResource,
@@ -770,6 +770,7 @@ async function postApproved(batchId: string, plan: Plan) {
     );
     void flushSentry(2000);
   }
+  void flushLogs();
   return {
     attempted: approved.length,
     posted: realPosted,
@@ -3001,6 +3002,11 @@ registerAppResource(
 
 async function main() {
   initSentry();
+  // Tee the verbatim stdout/stderr of every pipeline subprocess to the s4l
+  // Cloud Run relay (-> Cloud Logging) so we can troubleshoot/rescue any user
+  // scenario (silent stalls, partial onboarding) without asking them to ship a
+  // log file. Best-effort; disabled with SAPS_LOG_STREAM=0.
+  startLogStreaming();
   // A plugin UPDATE refreshes this server (dist/) but not the materialized
   // pipeline. Re-extract the bundled pipeline.tgz when it's newer than what's on
   // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
@@ -3058,6 +3064,7 @@ async function main() {
 main().catch(async (err) => {
   console.error("[social-autoposter-mcp] fatal:", err);
   captureError(err, { component: "main" });
+  await flushLogs();
   await flushSentry();
   process.exit(1);
 });
