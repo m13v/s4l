@@ -4564,6 +4564,83 @@ async function handleApi(req, res) {
     });
   }
 
+  // PUBLIC: onboarding milestone relay. The .mcpb client's onboarding ledger
+  // (onboarding.ts) batches redacted milestone events here (attempt/completed/
+  // blocked/doctor per step: runtime_ready, x_connected, topics_seeded,
+  // draft_verified, ...). Like /logs, this handler ONLY console.log()s each
+  // event as structured JSON so Cloud Run ships it to Cloud Logging — filter
+  // jsonPayload.logType="onboarding-milestone" and jsonPayload.install_id in
+  // Log Explorer to see exactly where an install got stuck (the Karol case).
+  // Replaces the dead Vercel route that INSERTed into installation_onboarding_
+  // events (a table that was never created). No database. Above the Firebase gate.
+  if (p === '/api/v1/installations/onboarding-events' && req.method === 'POST') {
+    return readBody(req).then(async body => {
+      const rawHeader = (req.headers['x-installation'] || '').trim();
+      let installId = null;
+      if (rawHeader) {
+        try {
+          const decoded = Buffer.from(rawHeader, 'base64').toString('utf8');
+          const payload = JSON.parse(decoded);
+          const id = String(payload && payload.install_id || '').trim();
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            installId = id;
+          }
+        } catch { /* malformed header -> installId stays null */ }
+      }
+      if (!installId) return json(res, { error: 'x_installation_required' }, 401);
+
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch (e) { return json(res, { error: 'invalid_json' }, 400); }
+
+      const events = payload && payload.events;
+      if (!Array.isArray(events) || events.length === 0 || events.length > 50) {
+        return json(res, { error: 'events must be an array of 1-50 items' }, 400);
+      }
+
+      const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+      let accepted = 0;
+      for (const ev of events) {
+        if (!ev || typeof ev !== 'object' || Array.isArray(ev)) continue;
+        const milestone = str(ev.milestone, 80);
+        if (!milestone) continue; // a milestone is the minimum useful event
+        const type = str(ev.type, 40);
+        const status = str(ev.status, 40);
+        // blocked milestones are the signal we care about most -> surface as
+        // WARNING so Error Reporting / severity filters catch stuck installs.
+        const severity = (type === 'blocked' || status === 'blocked') ? 'WARNING' : 'INFO';
+        const ts = (typeof ev.occurred_at === 'string' && Number.isFinite(Date.parse(ev.occurred_at)))
+          ? new Date(ev.occurred_at).toISOString()
+          : new Date().toISOString();
+        // metadata is already redacted client-side to a bounded vocabulary; pass
+        // it through as-is (cap the serialized size as a backstop).
+        let metadata = (ev.metadata && typeof ev.metadata === 'object' && !Array.isArray(ev.metadata))
+          ? ev.metadata : undefined;
+        try { if (metadata && JSON.stringify(metadata).length > 4096) metadata = { truncated: true }; }
+        catch { metadata = undefined; }
+        console.log(JSON.stringify({
+          severity,
+          message: `onboarding ${milestone} ${type || ''}${status ? ' ' + status : ''}`.trim(),
+          logType: 'onboarding-milestone',
+          install_id: installId,
+          milestone,
+          type,
+          status,
+          code: str(ev.code, 80),
+          attempt: Number.isFinite(ev.attempt) ? ev.attempt : undefined,
+          metadata,
+          client_ts: ts,
+          'logging.googleapis.com/labels': { install_id: installId, log_type: 'onboarding-milestone', milestone },
+        }));
+        accepted += 1;
+      }
+      return json(res, { accepted });
+    }).catch(e => {
+      console.error('[installations/onboarding-events] handler error:', e.message);
+      return json(res, { error: e.message }, 400);
+    });
+  }
+
   // Auth: no-op when CLIENT_MODE is unset (local operator use).
   // When CLIENT_MODE=1, require a Firebase Bearer token and enforce admin/project claims.
   const av = await auth.verifyAuth(req, p);
