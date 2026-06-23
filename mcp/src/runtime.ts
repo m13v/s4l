@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { captureError } from "./telemetry.js";
 
 // Pin the standalone CPython series the venv is built from. Bump deliberately.
 const PYTHON_VERSION = "3.12";
@@ -690,6 +691,15 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   if (process.platform === "darwin") {
     const mb = await installMenubar(uv, uvEnv, VENV_PYTHON);
     setStep("menubar", mb.ok ? "done" : "error", mb.detail);
+    // Non-fatal step, so the only prior signal of a menu bar install failure was
+    // a local install-progress.json entry (invisible to us). Report it so "menu
+    // bar didn't start" becomes a real Sentry event with the failing detail.
+    if (!mb.ok) {
+      captureError(new Error(`menubar install failed: ${mb.detail}`), {
+        component: "menubar",
+        phase: "install",
+      });
+    }
   } else {
     setStep("menubar", "done", "skipped (macOS only)");
   }
