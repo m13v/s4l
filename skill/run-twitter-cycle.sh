@@ -2070,7 +2070,7 @@ log "twitter-browser lock held (pid=$$) Phase 2b-post"
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
-POST_OUTPUT=$(python3 "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
+POST_OUTPUT=$("${SAPS_PYTHON:-python3}" "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
 echo "$POST_OUTPUT" >> "$LOG_FILE"
 
 # The post helper prints a JSON summary on its last stdout line.
