@@ -423,6 +423,7 @@ def _acquire_browser_lock():
             continue
         age = time.time() - lock.get("timestamp", 0)
         holder = lock.get("session_id", "")
+        holder_role = lock.get("role", "scan")  # legacy locks (no role) = preemptable
 
         # 1. Re-entrant: the lock is already ours (same process, or a stale lock
         # left by a previous process whose PID we have since reused). Refresh the
@@ -460,6 +461,43 @@ def _acquire_browser_lock():
             _LOCK_SESSION_ID = holder
             _LOCK_INHERITED = True
             break
+
+        # 5b. POSTING PRIORITY (cross-process). A LIVE python:PID peer running a
+        # lower-priority op (role != "post": the scan/draft cycle, whether the
+        # plugin's own, a separate autopilot agent's, or the launchd cron's) must
+        # YIELD to an approved post. Preempt it by signal and reclaim, so the post
+        # takes the browser at once instead of waiting LOCK_WAIT_MAX and giving up
+        # while the scan holds it. The aborted scan just re-runs next cron tick;
+        # posting is the scarce, user-initiated action. Only a poster
+        # (LOCK_ROLE == "post") ever preempts, and only a non-post holder -- two
+        # posters fall through to the normal peer-wait below so neither kills the
+        # other. UUID holders are handled above (we inherit, never kill those).
+        if (
+            LOCK_ROLE == "post"
+            and holder.startswith("python:")
+            and holder_role != "post"
+            and _is_python_holder_alive(holder)
+        ):
+            try:
+                victim_pid = int(holder.split(":", 1)[1])
+            except (ValueError, IndexError):
+                victim_pid = 0
+            if victim_pid and _preempt_holder(victim_pid):
+                try:
+                    os.remove(LOCK_FILE)
+                except OSError:
+                    pass
+                if _try_take_lock():
+                    print(
+                        f"[browser_lock] post preempted holder={holder} "
+                        f"role={holder_role} age={int(age)}s -> pid={os.getpid()}",
+                        file=sys.stderr,
+                    )
+                    break
+            # Preempt didn't land (couldn't kill, or a peer reclaimed first) ->
+            # re-loop and re-evaluate rather than busy-spin.
+            time.sleep(LOCK_POLL_INTERVAL)
+            continue
 
         # 6. Live python:PID peer. Wait, then give up. Reaching the deadline now
         # means the holder is a genuinely LIVE peer (dead ones were reclaimed
