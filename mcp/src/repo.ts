@@ -134,6 +134,27 @@ export function run(
       }
       return buf;
     };
+    // Parallel whole-line splitter that tees to the telemetry sink (if any),
+    // kept separate from the onLine pump so neither path can affect the other.
+    const logCtx = opts.logContext || deriveContext(cmd, args);
+    let sinkOutBuf = "";
+    let sinkErrBuf = "";
+    const sinkPump = (chunk: string, which: "stdout" | "stderr", buf: string): string => {
+      const sink = lineSink;
+      if (!sink) return buf;
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        try {
+          sink(line, which, logCtx);
+        } catch {
+          /* the telemetry sink must never break the wrapped command */
+        }
+      }
+      return buf;
+    };
     let timer: NodeJS.Timeout | undefined;
     if (opts.timeoutMs) {
       timer = setTimeout(() => {
@@ -144,11 +165,13 @@ export function run(
       const s = d.toString();
       stdout += s;
       outBuf = pump(s, "stdout", outBuf);
+      sinkOutBuf = sinkPump(s, "stdout", sinkOutBuf);
     });
     child.stderr.on("data", (d) => {
       const s = d.toString();
       stderr += s;
       errBuf = pump(s, "stderr", errBuf);
+      sinkErrBuf = sinkPump(s, "stderr", sinkErrBuf);
     });
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
@@ -163,6 +186,21 @@ export function run(
         if (errBuf)
           try {
             opts.onLine(errBuf, "stderr");
+          } catch {
+            /* ignore */
+          }
+      }
+      const sink = lineSink;
+      if (sink) {
+        if (sinkOutBuf)
+          try {
+            sink(sinkOutBuf, "stdout", logCtx);
+          } catch {
+            /* ignore */
+          }
+        if (sinkErrBuf)
+          try {
+            sink(sinkErrBuf, "stderr", logCtx);
           } catch {
             /* ignore */
           }
