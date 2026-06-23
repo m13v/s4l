@@ -1,10 +1,12 @@
 """Corner pop-up review cards for draft approval (AppKit / pyobjc).
 
-`present_review(drafts, on_complete)` shows one small floating panel per draft in
-the top-right corner: thread context, an EDITABLE reply field, a counter, and
-Reject / Approve (+ Reject all). Advancing through every card calls on_complete
-with the decisions. The whole AppKit surface is isolated behind that one
-function so the menu bar wiring doesn't depend on the windowing details.
+`present_review(drafts, on_decision, on_complete)` shows one small floating panel
+per draft in the top-right corner: thread context, an EDITABLE reply field, a
+counter, and Reject / Approve. `on_decision` fires the INSTANT each card is
+approved/rejected (so an approved draft can post right away), and `on_complete`
+fires once the last card is decided or the window is closed. The whole AppKit
+surface is isolated behind that one function so the menu bar wiring doesn't
+depend on the windowing details.
 
 Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool}
 
@@ -70,11 +72,12 @@ def _label(frame, text, *, size=12, bold=False, muted=False):
 
 
 class _ReviewController(NSObject):
-    def initWithDrafts_onComplete_(self, drafts, on_complete):
+    def initWithDrafts_onDecision_onComplete_(self, drafts, on_decision, on_complete):
         self = objc.super(_ReviewController, self).init()
         if self is None:
             return None
         self._drafts = list(drafts)
+        self._on_decision = on_decision
         self._on_complete = on_complete
         self._idx = 0
         self._decisions = []
@@ -218,13 +221,29 @@ class _ReviewController(NSObject):
         else:
             self._render()
 
+    @objc.python_method
+    def _fire_decision(self):
+        # Fire the per-card callback the instant a decision is made, so an
+        # approved draft starts posting immediately instead of waiting for the
+        # whole batch to be reviewed. A throwing callback must never break the
+        # card flow (or the panel would wedge on the current card).
+        cb = self._on_decision
+        if cb is None or not self._decisions:
+            return
+        try:
+            cb(dict(self._decisions[-1]))
+        except Exception:
+            pass
+
     # ObjC selectors (trailing underscore -> "approve:" etc.)
     def approve_(self, sender):
         self._record(True)
+        self._fire_decision()
         self._advance()
 
     def reject_(self, sender):
         self._record(False)
+        self._fire_decision()
         self._advance()
 
     def windowShouldClose_(self, sender):
@@ -252,12 +271,17 @@ class _ReviewController(NSObject):
         _active = None
 
 
-def present_review(drafts, on_complete):
+def present_review(drafts, on_decision=None, on_complete=None):
     """Show the review cards (main thread only). drafts: list of
-    {n, thread_author, thread_text, reply_text, link_url}. on_complete(decisions)
-    fires on the main thread when the user finishes or closes the window."""
+    {n, thread_author, thread_text, reply_text, link_url}.
+    on_decision(decision) fires the instant each card is approved/rejected (so an
+    approved draft posts right away); on_complete(decisions) fires when the user
+    finishes the last card or closes the window. Both run on the main thread."""
     global _active
     if not drafts:
-        on_complete([])
+        if on_complete is not None:
+            on_complete([])
         return
-    _active = _ReviewController.alloc().initWithDrafts_onComplete_(drafts, on_complete)
+    _active = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_(
+        drafts, on_decision, on_complete
+    )
