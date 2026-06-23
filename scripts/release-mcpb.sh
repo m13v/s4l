@@ -29,13 +29,23 @@ GH_REPO="m13v/social-autoposter"
 SIZE_CAP_MB=180
 
 TAG_OVERRIDE=""
+VERSION_OVERRIDE=""
 DO_RELEASE=1
+DO_NPM=1
+DO_BUMP=1
+BUMP_LEVEL="patch"
 DRAFT_FLAG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tag) TAG_OVERRIDE="$2"; shift 2 ;;
     --tag=*) TAG_OVERRIDE="${1#*=}"; shift ;;
+    --version) VERSION_OVERRIDE="$2"; shift 2 ;;
+    --version=*) VERSION_OVERRIDE="${1#*=}"; shift ;;
+    --bump) BUMP_LEVEL="$2"; shift 2 ;;
+    --bump=*) BUMP_LEVEL="${1#*=}"; shift ;;
+    --no-bump) DO_BUMP=0; shift ;;
+    --no-npm) DO_NPM=0; shift ;;
     --no-release) DO_RELEASE=0; shift ;;
     --draft) DRAFT_FLAG="--draft"; shift ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
@@ -43,24 +53,58 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$BUMP_LEVEL" in
+  patch|minor|major) ;;
+  *) echo "invalid --bump level: $BUMP_LEVEL (want patch|minor|major)" >&2; exit 2 ;;
+esac
+
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v node >/dev/null || die "node not found on PATH"
 command -v mcpb >/dev/null || die "mcpb CLI not found (npm i -g @anthropic-ai/mcpb)"
 
-# ---- 1. Resolve version -----------------------------------------------------
+# ---- 1. Resolve + WRITE version into the repo-root package.json -------------
+# The repo-root package.json is the SINGLE source of truth: `npm pack` reads it
+# to build the embedded pipeline.tgz, so the bundle shell and the bundled
+# pipeline cannot diverge as long as we bump it BEFORE building (step 2). This
+# closes the 1.6.84-class bug where the shell said X but pipeline.tgz carried
+# the prior version because only the satellites were stamped.
 PKG_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
-if [[ -n "$TAG_OVERRIDE" ]]; then
-  TAG="$TAG_OVERRIDE"
-  VERSION="${TAG#v}"
+if [[ -n "$VERSION_OVERRIDE" ]]; then
+  VERSION="${VERSION_OVERRIDE#v}"
+elif [[ -n "$TAG_OVERRIDE" ]]; then
+  VERSION="${TAG_OVERRIDE#v}"
+elif [[ "$DO_BUMP" == "1" ]]; then
+  # Compute the next version without writing a git tag; we own the write below.
+  VERSION="$(node -e "
+    let [a,b,c]='$PKG_VERSION'.split('.').map(Number);
+    const lvl='$BUMP_LEVEL';
+    if(lvl==='major'){a++;b=0;c=0;} else if(lvl==='minor'){b++;c=0;} else {c++;}
+    console.log(a+'.'+b+'.'+c);
+  ")"
 else
   VERSION="$PKG_VERSION"
-  TAG="v$VERSION"
 fi
-say "Releasing social-autoposter .mcpb $TAG (package.json=$PKG_VERSION)"
+TAG="v$VERSION"
+
+# Write the resolved version into the repo-root package.json + lockfile so the
+# pipeline tarball, npm publish, and all satellites share one number.
 if [[ "$VERSION" != "$PKG_VERSION" ]]; then
-  echo "  note: tag version ($VERSION) differs from package.json ($PKG_VERSION)"
+  say "Bumping repo-root package.json $PKG_VERSION -> $VERSION"
+  node -e "
+    const fs=require('fs');
+    for (const p of ['$REPO_ROOT/package.json','$REPO_ROOT/package-lock.json']) {
+      if (!fs.existsSync(p)) continue;
+      const j=JSON.parse(fs.readFileSync(p,'utf8'));
+      j.version='$VERSION';
+      if (j.packages && j.packages['']) j.packages[''].version='$VERSION';
+      fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+      console.log('  '+p.replace('$REPO_ROOT/','')+' -> '+j.version);
+    }
+  "
+else
+  say "Releasing $TAG (repo-root package.json already $VERSION)"
 fi
 
 # ---- 2. Build the bundle ----------------------------------------------------
@@ -127,6 +171,14 @@ echo "  version.json: $BUNDLE_VER ok"
 MANIFEST_VER=$(unzip -p "$BUNDLE" manifest.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
 [[ "$MANIFEST_VER" == "$VERSION" ]] || die "bundle manifest.json=$MANIFEST_VER != $VERSION (Desktop Details panel would show the wrong version)"
 echo "  manifest.json: $MANIFEST_VER ok"
+
+# THE guard that was missing when 1.6.84 shipped a 1.6.83 pipeline: assert the
+# version INSIDE the embedded pipeline.tgz matches the bundle. ensurePipelineCurrent()
+# on the box trusts version.json to decide whether to re-extract; if the tarball's
+# own package.json lags, the box materializes stale Python and never knows.
+PIPELINE_VER=$(unzip -p "$BUNDLE" dist/pipeline.tgz 2>/dev/null | tar -xzO package/package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
+[[ "$PIPELINE_VER" == "$VERSION" ]] || die "embedded pipeline.tgz version=$PIPELINE_VER != $VERSION (box would materialize a STALE pipeline; bump repo-root package.json BEFORE build)"
+echo "  pipeline.tgz internal version: $PIPELINE_VER ok"
 
 for f in "dist/index.js" "dist/runtime.js" "manifest.json"; do
   # grep -c reads all input (no SIGPIPE); anchor on the time column + 3-space
