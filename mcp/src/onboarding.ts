@@ -256,8 +256,13 @@ export function flushOnboardingEvents(): Promise<{
         error: "installation identity unavailable",
       };
     }
+    // Onboarding milestones go to the CLOUD RUN host (AUTOPOSTER_LOG_BASE,
+    // default app.s4l.ai), the same GCP-logging lane as the raw log stream: the
+    // relay console.log()s each event so Cloud Run's runtime ships it to Cloud
+    // Logging. NOT the Vercel host (AUTOPOSTER_API_BASE / s4l.ai) the heartbeat
+    // still uses — these events are not a DB row anymore.
     const base = (
-      process.env.AUTOPOSTER_API_BASE || "https://s4l.ai"
+      process.env.AUTOPOSTER_LOG_BASE || "https://app.s4l.ai"
     ).replace(/\/+$/, "");
     let sent = 0;
     // Re-read after every batch. This catches milestone events appended while a
