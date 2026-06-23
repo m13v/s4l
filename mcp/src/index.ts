@@ -1692,7 +1692,7 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // version is older than what this build ships. The host reads the file fresh on
 // each run, so the next fire picks up the new prompt — no host tool, no user
 // action. Bump AUTOPILOT_PROMPT_VERSION whenever the prompt below changes.
-const AUTOPILOT_PROMPT_VERSION = 1;
+const AUTOPILOT_PROMPT_VERSION = 2;
 const AUTOPILOT_PROMPT_MARKER = "saps_autopilot_prompt_version";
 
 function autopilotSkillPath(): string {
@@ -1708,7 +1708,11 @@ function autopilotSkillMd(project: string): string {
     `You are running the Social Autoposter draft-only autopilot for the project "${project}". ` +
       `Run ONE cycle, then stop. DRAFT-ONLY: you must NEVER post to X/Twitter — you only queue ` +
       `drafts for the user's approval. Use ONLY two tools — scan_candidates and submit_drafts — ` +
-      `and IMPROVISE NOTHING ELSE.`,
+      `and IMPROVISE NOTHING ELSE. Specifically: NEVER run Bash, Read, Write, Edit, python, or any ` +
+      `shell/file tool, for ANY reason — not to debug, inspect a tool result, verify an outcome, or ` +
+      `investigate something surprising. This run is unattended: any tool that is not pre-approved ` +
+      `STALLS the whole pipeline waiting on a human who is not there, so reaching for one is never ` +
+      `worth it. If something looks off, report it in one line and stop.`,
     ``,
     `Steps:`,
     `1. Call scan_candidates with project "${project}". It long-polls: if it returns a "Scan in ` +
@@ -1725,6 +1729,12 @@ function autopilotSkillMd(project: string): string {
     `4. Call submit_drafts with the batch_id from scan_candidates and a drafts array of ` +
       `{candidate_id, reply_text}. This queues them for the menu-bar approval UI. Do NOT call ` +
       `post_drafts — posting is the user's decision.`,
+    `5. You are now DONE: report in ONE short line how many drafts you queued, then stop. ` +
+      `"Queued 0 new draft(s)" is a NORMAL, expected result — it means the threads were already ` +
+      `queued in an earlier cycle (dedup), NOT a failure. Treat ANY count, including zero, as ` +
+      `success. NEVER re-read, parse, or inspect the submit_drafts result; NEVER open files under ` +
+      `tool-results/ or anywhere else; NEVER run Bash/Read/python to confirm what happened. A ` +
+      `zero or surprising count is not a reason to investigate — just report it and stop.`,
     ``,
     `HARD GUARD: if scan_candidates is NOT available (ToolSearch returns no matching tool — can ` +
       `happen when a run spawns before the extension's MCP server has reconnected), STOP immediately ` +
