@@ -946,7 +946,17 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                         page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
                     except Exception:
                         pass
-                page.wait_for_timeout(15000 if nav_attempt == 1 else 8000)
+                # Was a blind 15s/8s settle here -> pure dead latency. SPA
+                # readiness is ALREADY gated actively below by
+                # wait_for_selector("main") (up to 20s) and
+                # _wait_for_reply_textbox (polls every 500ms up to 45s); both
+                # return the instant the composer mounts, so the blind sleep
+                # only delayed the start of that polling. Keep a short floor so
+                # the initial JS kicks off (and the deleted-tweet text check
+                # below has content to read), then let the active gates do the
+                # real waiting. Cuts ~12s off every happy-path reply.
+                # (optimized 2026-06-22: 15000/8000 -> 2500)
+                page.wait_for_timeout(2500)
 
                 # `wait_until="load"` fires before Twitter's SPA mounts the
                 # <main> app shell, so "loaded" != "rendered". Explicitly gate
@@ -1021,7 +1031,12 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             except Exception:
                 page.keyboard.press("Meta+Enter")
 
-            page.wait_for_timeout(4000)
+            # Post-submit settle: lets the CDP network response (which carries
+            # the new tweet id -> reply_url, captured below) and the success
+            # interstitial arrive. Trimmed from 4000ms 2026-06-22; the DOM-diff
+            # fallback (3x2s, below) still covers a slow CDP response, so the
+            # reply_url is not lost if 2000ms is short on a given run.
+            page.wait_for_timeout(2000)
 
             # Verify: check if the reply box is empty (cleared after posting)
             try:
