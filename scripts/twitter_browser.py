@@ -33,6 +33,7 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -42,6 +43,18 @@ LOCK_FILE = os.path.expanduser("~/.claude/twitter-browser-lock.json")
 LOCK_EXPIRY = 300  # process-level mutex TTL; refreshed during long ops
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
+PREEMPT_KILL_WAIT = 5  # secs to wait for a preempted scan holder to die before SIGKILL
+
+# Lock role priority. A "post" holder is user-initiated (an approved reply) and
+# outranks any "scan" holder (the scan/draft cycle, autopilot or plugin). When a
+# poster finds a LIVE lower-priority holder it PREEMPTS it (SIGTERM + reclaim)
+# instead of waiting LOCK_WAIT_MAX and giving up. This is what makes "posting
+# takes priority over scanning" hold CROSS-PROCESS: the old in-process
+# preemptScanForPost only killed the plugin's own scan, never a scan spawned by a
+# separate autopilot agent / launchd cron, so an approved post kept losing the
+# 45s race to a live scan that held the browser. Default "scan" so any unmarked
+# browser op is preemptable; only the poster path sets SAPS_LOCK_ROLE=post.
+LOCK_ROLE = (os.environ.get("SAPS_LOCK_ROLE") or "scan").strip() or "scan"
 VIEWPORT = {"width": 911, "height": 1016}
 
 # Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
@@ -298,11 +311,43 @@ def _try_take_lock() -> bool:
         return False
     try:
         os.write(fd, json.dumps(
-            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}
+            {"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time()), "role": LOCK_ROLE}
         ).encode())
     finally:
         os.close(fd)
     return True
+
+
+def _preempt_holder(pid: int) -> bool:
+    """Preempt a live lock holder we outrank (a poster taking the browser from a
+    scan). SIGTERM it, wait PREEMPT_KILL_WAIT for it to die so its pid frees the
+    lock, then escalate to SIGKILL once. Returns True once the holder is gone
+    (or was already gone). Best-effort; never raises. The caller then removes the
+    stale lockfile and claims it via O_EXCL.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True            # already gone
+    except OSError:
+        return False           # not ours to signal / ambiguous -> don't claim
+    deadline = time.time() + PREEMPT_KILL_WAIT
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True        # ProcessLookupError or perm change -> dead enough
+        time.sleep(0.2)
+    # Still alive after the SIGTERM grace window -> escalate once.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    return False
 
 
 def _acquire_browser_lock():
@@ -434,7 +479,7 @@ def _refresh_browser_lock():
     """Refresh the lock timestamp to prevent expiry during long operations."""
     try:
         with open(LOCK_FILE, "w") as f:
-            json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time())}, f)
+            json.dump({"session_id": _LOCK_SESSION_ID, "timestamp": int(time.time()), "role": LOCK_ROLE}, f)
     except OSError:
         pass
 
