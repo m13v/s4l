@@ -88,7 +88,7 @@ def _emit_run_summary_oneshot():
     try:
         subprocess.run(
             [
-                "python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
+                PYTHON, os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_run.py"),
                 "--script", "post_github",
                 "--posted", str(_RUN_STATE["posted"]),
                 "--skipped", str(_RUN_STATE["skipped"]),
@@ -143,6 +143,16 @@ SKILL_FILE = os.path.join(REPO_DIR, "SKILL.md")
 GITHUB_TOOLS = os.path.join(SCRIPTS, "github_tools.py")
 RUN_CLAUDE = os.path.join(SCRIPTS, "run_claude.sh")
 
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps that live only in
+# the owned uv runtime — the same fresh-box failure class that broke the Twitter
+# poster (Karol, 2026-06-22). The GitHub rail posts via the REST API (no browser,
+# so no Playwright dep), but its util/DB children still need the owned venv, so
+# pin the interpreter here too. Honor SAPS_PYTHON (set by the launchd plist),
+# else sys.executable; never the literal PYTHON.
+PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
+os.environ["SAPS_PYTHON"] = PYTHON
+
 # Momentum tunables. Edit here, not at call sites.
 DELTA_THRESHOLD = 1.0
 HIGH_DELTA_BUMP = 3
@@ -178,7 +188,7 @@ def load_config():
 def get_top_performers(project_name, platform="github"):
     try:
         result = subprocess.run(
-            ["python3", os.path.join(SCRIPTS, "top_performers.py"),
+            [PYTHON, os.path.join(SCRIPTS, "top_performers.py"),
              "--platform", platform, "--project", project_name],
             capture_output=True, text=True, timeout=15,
         )
@@ -194,7 +204,7 @@ def get_top_search_topics(project_name, platform="github", limit=8, window_days=
     Empty string if no data yet. Mirrors post_reddit.get_top_search_topics."""
     try:
         result = subprocess.run(
-            ["python3", os.path.join(SCRIPTS, "top_search_topics.py"),
+            [PYTHON, os.path.join(SCRIPTS, "top_search_topics.py"),
              "--project", project_name, "--platform", platform,
              "--window-days", str(window_days), "--limit", str(limit)],
             capture_output=True, text=True, timeout=15,
@@ -287,7 +297,7 @@ def build_content_angle(project, config):
 def gh_search(query, limit=SEARCH_PER_TOPIC):
     try:
         out = subprocess.check_output(
-            ["python3", GITHUB_TOOLS, "search", query, "--limit", str(limit)],
+            [PYTHON, GITHUB_TOOLS, "search", query, "--limit", str(limit)],
             text=True, timeout=45,
         )
         items = json.loads(out)
@@ -727,7 +737,7 @@ def log_post(thread_url, our_url, text, project_name, thread_author, thread_titl
     curated landing-page hits from generic homepage links.
     """
     try:
-        cmd = ["python3", GITHUB_TOOLS, "log-post",
+        cmd = [PYTHON, GITHUB_TOOLS, "log-post",
                thread_url, our_url or "", text, project_name,
                thread_author or "unknown", thread_title or "",
                "--account", github_username]
@@ -1018,7 +1028,7 @@ def main():
         log(f"Claude FAILED: {output[:300]}")
         _RUN_STATE["failed"] = 1
         subprocess.run([
-            "python3", os.path.join(SCRIPTS, "log_run.py"),
+            PYTHON, os.path.join(SCRIPTS, "log_run.py"),
             "--script", "post_github",
             "--posted", "0", "--skipped", "0", "--failed", "1",
             "--cost", f"{usage['cost_usd']:.4f}",
@@ -1286,7 +1296,7 @@ def main():
     _RUN_STATE["skipped"] = len(skipped)
     _RUN_STATE["cost"] = usage["cost_usd"]
     subprocess.run([
-        "python3", os.path.join(SCRIPTS, "log_run.py"),
+        PYTHON, os.path.join(SCRIPTS, "log_run.py"),
         "--script", "post_github",
         "--posted", str(posted),
         "--skipped", str(len(skipped)),
