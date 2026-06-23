@@ -8,6 +8,7 @@ instance built via object.__new__ (bypassing rumps.App.__init__). Verifies:
   3. plain approvals -> post=[n]; edited approvals -> edits=[{n,text}]
   4. rejected cards never post
   5. _posts_outstanding / _review_active settle to idle once drained
+  6. activity progress reflects the approved burst total, not each 1-item call
 """
 import os
 import queue
@@ -41,13 +42,21 @@ overlap_detected = []
 inflight = {"n": 0}
 inflight_lock = threading.Lock()
 calls = []
+activity_events = []
 
-def fake_post_drafts(batch_id, post=None, edits=None, timeout=900):
+def fake_post_drafts(batch_id, post=None, edits=None, timeout=900, activity_label=None):
     with inflight_lock:
         inflight["n"] += 1
         if inflight["n"] > 1:
             overlap_detected.append(True)
-    calls.append({"batch": batch_id, "post": post or [], "edits": edits or []})
+    calls.append(
+        {
+            "batch": batch_id,
+            "post": post or [],
+            "edits": edits or [],
+            "activity_label": activity_label,
+        }
+    )
     time.sleep(0.15)  # simulate a slow post so overlaps would be caught
     with inflight_lock:
         inflight["n"] -= 1
@@ -57,6 +66,7 @@ def fake_post_drafts(batch_id, post=None, edits=None, timeout=900):
 
 st = types.ModuleType("s4l_state")
 st.post_drafts = fake_post_drafts
+st.write_activity = lambda state, label: activity_events.append((state, label))
 st.accessibility_trusted = lambda: True
 st.clear_review_request = lambda: None
 sys.modules["s4l_state"] = st
@@ -70,6 +80,8 @@ app._post_worker = None
 app._review_lock = threading.Lock()
 app._panel_open = True
 app._posts_outstanding = 0
+app._posting_batch_total = 0
+app._posting_batch_done = 0
 app._review_active = False
 app._notify = lambda title, msg: None  # silence Notification Center
 
@@ -106,6 +118,13 @@ posted_ns = [(c["post"], c["edits"]) for c in calls]
 expected = [([1], []), ([], [{"n": 2, "text": "edited two"}]), ([4], [])]
 if posted_ns != expected:
     fail.append(f"wrong calls/order: got {posted_ns}\n  expected {expected}")
+labels = [c["activity_label"] for c in calls if c.get("activity_label")]
+if not any(label == "posting 2/3" for label in labels):
+    fail.append(f"second post did not carry burst progress 2/3: labels={labels}")
+if not any(label == "posting 3/3" for label in labels):
+    fail.append(f"third post did not carry burst progress 3/3: labels={labels}")
+if not any(event == ("posting", "posting 1/3") for event in activity_events):
+    fail.append(f"activity never expanded first post to 1/3: events={activity_events}")
 if any(c["post"] == [3] or any(e.get("n") == 3 for e in c["edits"]) for c in calls):
     fail.append("rejected card #3 was posted")
 with app._review_lock:
