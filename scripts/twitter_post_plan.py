@@ -970,6 +970,32 @@ def main() -> int:
                   f"approved in plan (pass --post-unapproved to override)", flush=True)
         candidates = _kept
 
+    # Hard preflight: the reply path (twitter_browser.py) imports Playwright,
+    # the only such importer in the pipeline. If the resolved interpreter can't
+    # import it, EVERY post dies with no_reply_json because the owned runtime is
+    # missing or half-provisioned (Karol, 2026-06-22). Fail LOUD here with a
+    # distinct signal instead of attempting posts that silently no-op. Gated on
+    # there being real work, so a no-op / all-skipped plan still exits clean.
+    if candidates:
+        _chk = subprocess.run(
+            [PYTHON, "-c", "import playwright"],
+            capture_output=True, text=True,
+        )
+        if _chk.returncode != 0:
+            print(f"[post] FATAL runtime_incomplete: interpreter {PYTHON!r} cannot "
+                  f"import playwright — the owned Python runtime is missing or "
+                  f"unprovisioned. Run the `runtime` install (action:'install') "
+                  f"before posting. stderr: {(_chk.stderr or '').strip()[:300]}",
+                  file=sys.stderr, flush=True)
+            print(json.dumps({
+                "posted": 0,
+                "skipped": 0,
+                "failed": len(candidates),
+                "failure_reasons": "runtime_incomplete",
+                "skip_reasons": "",
+            }), flush=True)
+            return 3
+
     _total = len(candidates)
     try:
         for _idx, c in enumerate(candidates, start=1):
