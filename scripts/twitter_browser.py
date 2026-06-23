@@ -41,6 +41,17 @@ import time
 
 LOCK_FILE = os.path.expanduser("~/.claude/twitter-browser-lock.json")
 LOCK_EXPIRY = 300  # process-level mutex TTL; refreshed during long ops
+# Posting-specific silence ceiling, DECOUPLED from the fleet-wide LOCK_EXPIRY.
+# A role:"post" holder (an approved batch, or a single reply) is reclaimed by a
+# peer once its lock has gone unrefreshed this long; a role:"scan" holder keeps
+# the 300s LOCK_EXPIRY untouched. Posting refreshes the lock at every candidate
+# boundary (twitter_post_plan holds it across the whole batch), so a healthy
+# poster never goes silent this long -- only a genuinely hung poster (e.g.
+# link_tail's `claude -p` wedged) trips it. Kept as its own knob so tuning the
+# scan TTL never moves the poster's hang ceiling and vice-versa. Must exceed the
+# worst-case single candidate step (one reply + the link_tail AI call), and stay
+# well under any value that would let a hung poster block the browser for long.
+POST_LOCK_EXPIRY = 180  # seconds; applies ONLY to a role:"post" holder
 LOCK_WAIT_MAX = 45  # seconds to wait for lock to free before giving up
 LOCK_POLL_INTERVAL = 2
 PREEMPT_KILL_WAIT = 5  # secs to wait for a preempted scan holder to die before SIGKILL
@@ -432,6 +443,29 @@ def _acquire_browser_lock():
             _refresh_browser_lock()
             break
 
+        # 1b. Batch-owner inherit (posting). The poster (twitter_post_plan.py)
+        # acquires this lock ONCE and holds it across the WHOLE approved batch,
+        # exporting its own session id as SAPS_LOCK_OWNER for the child
+        # twitter_browser.py reply subprocesses it spawns. Each child INHERITS the
+        # parent's hold instead of contending for it -- two role:"post" peers would
+        # otherwise both fall to the case-6 peer-wait and give up after
+        # LOCK_WAIT_MAX, breaking the post. The child refreshes the timestamp
+        # (proof of progress at this candidate boundary, so the POST_LOCK_EXPIRY
+        # failsafe only ever fires on a real hang) and, being _LOCK_INHERITED,
+        # leaves the lock in place for the PARENT to release at batch end. A DEAD
+        # owner is never inherited: the alive-probe fails here and we fall through
+        # to the dead_python reclaim below, so a crashed batch can't wedge the
+        # browser. This is what closes the inter-candidate gap (the link_tail
+        # claude -p call, ~5-20s) the every-60s autopilot scan used to slip into.
+        _batch_owner = os.environ.get("SAPS_LOCK_OWNER") or ""
+        if holder and holder == _batch_owner and _is_python_holder_alive(holder):
+            _LOCK_SESSION_ID = holder
+            _LOCK_INHERITED = True
+            _refresh_browser_lock()
+            print(f"[browser_lock] inherited batch owner={holder} "
+                  f"role={holder_role} -> pid={os.getpid()}", file=sys.stderr)
+            break
+
         # 2-4. Reclaim a holder we can prove is dead/expired. Remove-then-take so
         # the O_EXCL claim wins; if a peer reclaims at the same instant exactly
         # one of us creates the file and the other re-loops (never both).
@@ -440,7 +474,10 @@ def _acquire_browser_lock():
             reclaim_reason = "dead_uuid"
         elif holder.startswith("python:") and not _is_python_holder_alive(holder):
             reclaim_reason = "dead_python"
-        elif age >= LOCK_EXPIRY:
+        elif age >= (POST_LOCK_EXPIRY if holder_role == "post" else LOCK_EXPIRY):
+            # Role-aware failsafe: a hung poster self-clears on the posting-only
+            # POST_LOCK_EXPIRY, a scan on the fleet-wide LOCK_EXPIRY. Scan
+            # behaviour is unchanged; only the post ceiling is decoupled.
             reclaim_reason = "expired"
         if reclaim_reason:
             try:
