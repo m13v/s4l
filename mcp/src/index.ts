@@ -743,6 +743,7 @@ async function postApproved(batchId: string, plan: Plan) {
     );
     void flushSentry(2000);
   }
+  void flushLogs();
   return {
     attempted: approved.length,
     posted: realPosted,
