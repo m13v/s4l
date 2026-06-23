@@ -65,3 +65,40 @@ def _tag_install(sentry_sdk) -> None:
             sentry_sdk.set_tag("hostname", str(host))
     except Exception:
         pass
+
+
+def capture_exception(err, tags=None) -> None:
+    """Explicitly report an exception to Sentry with optional tags. Safe to call
+    even if init() was never run or sentry-sdk is missing (silent no-op). Use for
+    swallowed/handled errors that would otherwise never reach Sentry (the global
+    excepthook only catches UNHANDLED ones)."""
+    if not _initialized:
+        return
+    try:
+        import sentry_sdk
+    except Exception:
+        return
+    try:
+        if tags:
+            with sentry_sdk.push_scope() as scope:
+                for k, v in tags.items():
+                    scope.set_tag(str(k), str(v))
+                sentry_sdk.capture_exception(err)
+        else:
+            sentry_sdk.capture_exception(err)
+    except Exception:
+        return
+
+
+def flush(timeout: float = 2.0) -> None:
+    """Block until queued events are sent (best-effort). Call before a short-lived
+    or about-to-crash process exits so a just-captured event isn't dropped on
+    teardown."""
+    if not _initialized:
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.flush(timeout)
+    except Exception:
+        return
