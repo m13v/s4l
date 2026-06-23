@@ -701,10 +701,21 @@ async function postApproved(batchId: string, plan: Plan) {
   } catch {
     /* keep raw */
   }
-  // On a successful run, mark the posted candidates in the ORIGINAL plan so the
-  // other review surface (chat vs menu-bar pop-ups) skips them — cross-surface
-  // de-dup. Best-effort; the pipeline's own already-posted check is the backstop.
-  if (res.code === 0) {
+  // Real posted count from the pipeline summary — NOT the approved count. A run
+  // can exit 0 yet post nothing (every reply hit reply_box_not_found, etc.), so
+  // trusting approved.length here reported phantom successes ("posted: 1" when 0
+  // landed). Fall back to approved.length only when the summary is unparseable
+  // AND the process exited clean.
+  const summObj = (summary && typeof summary === "object") ? (summary as Record<string, unknown>) : null;
+  const realPosted: number =
+    summObj && typeof summObj.posted === "number"
+      ? (summObj.posted as number)
+      : res.code === 0 && !summObj
+        ? approved.length
+        : 0;
+  // Mark only candidates that ACTUALLY posted (cross-surface de-dup). When the
+  // summary is missing but the run exited clean, fall back to marking all.
+  if (realPosted > 0 || (res.code === 0 && !summObj)) {
     for (const c of approved) c.posted = true;
     try {
       writePlan(batchId, plan);
@@ -712,8 +723,29 @@ async function postApproved(batchId: string, plan: Plan) {
       /* best effort */
     }
   }
+  // Post failures are HANDLED in the pipeline (it returns a count, never throws),
+  // so they never reach Sentry on their own. Capture an explicit event whenever
+  // the run exited non-zero OR fewer drafts posted than were approved. This is
+  // the only telemetry channel that reaches a customer .mcpb install (their cycle
+  // log lives on their machine). install_id/hostname are auto-tagged.
+  if (res.code !== 0 || realPosted < approved.length) {
+    captureError(
+      new Error(`post_drafts: ${realPosted}/${approved.length} posted (exit=${res.code})`),
+      {
+        component: "post",
+        exit_code: String(res.code),
+        attempted: String(approved.length),
+        posted: String(realPosted),
+        failure_reasons: String((summObj?.failure_reasons as string) || ""),
+        skip_reasons: String((summObj?.skip_reasons as string) || ""),
+        stderr_tail: res.stderr.split("\n").slice(-5).join(" | ").slice(0, 500),
+      }
+    );
+    void flushSentry(2000);
+  }
   return {
     attempted: approved.length,
+    posted: realPosted,
     exit_code: res.code,
     summary,
     stderr_tail: res.stderr.split("\n").slice(-8).join("\n"),
@@ -1401,11 +1433,22 @@ tool(
     }
 
     const result = await postApproved(batch_id, plan);
+    // Report the REAL posted count from the pipeline, not the approved count.
+    // A run can approve N yet land 0 (browser/session failure); reporting
+    // approve.size here told the agent "posted: N" on a total failure.
+    const actuallyPosted = typeof result.posted === "number" ? result.posted : approve.size;
+    if (actuallyPosted < approve.size) {
+      warnings.push(
+        `only ${actuallyPosted}/${approve.size} actually posted (exit=${result.exit_code}); ` +
+          `see result.summary / result.stderr_tail for the reason`
+      );
+    }
     return jsonContent({
       batch_id,
       drafted: total,
-      posted: approve.size,
-      skipped: total - approve.size,
+      posted: actuallyPosted,
+      approved: approve.size,
+      skipped: total - actuallyPosted,
       edited: editedCount,
       result,
       warnings,
