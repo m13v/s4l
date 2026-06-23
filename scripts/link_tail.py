@@ -42,6 +42,8 @@ Exit codes:
     2 — argparse / IO failure before we could write any JSON
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -55,6 +57,62 @@ from pathlib import Path
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
+
+# --- X/Twitter length budget -------------------------------------------------
+# X charges a FLAT 23 characters for any http/https URL (t.co wrapping),
+# regardless of the link's real length. So the budget is fixed: text + 23 <= 280
+# => at most 257 characters of text before the link. We only enforce this for
+# twitter; reddit/linkedin have far larger ceilings and need no tail trim.
+TWEET_LIMIT = 280
+URL_WEIGHT = 23
+TWITTER_TEXT_BUDGET = TWEET_LIMIT - URL_WEIGHT  # 257 chars for everything but the URL
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def x_weighted_len(text: str) -> int:
+    """Character count the way X computes it: every URL counts as 23."""
+    if not text:
+        return 0
+    return len(_URL_RE.sub("x" * URL_WEIGHT, text))
+
+
+def _trim_to_chars(s: str, max_chars: int) -> str:
+    """Trim `s` to at most `max_chars`, backing off to a word boundary so we
+    never chop mid-word, then stripping trailing punctuation/space."""
+    s = s.strip()
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    cut = s[:max_chars].rstrip()
+    sp = cut.rfind(" ")
+    # only back off to the word boundary when it doesn't gut more than half
+    if sp > max_chars * 0.5:
+        cut = cut[:sp]
+    return cut.rstrip(" ,;:-")
+
+
+def enforce_budget(text: str, link_url: str,
+                   limit: int = TWEET_LIMIT) -> tuple[str, bool]:
+    """Guarantee x_weighted_len(text) <= limit by trimming the BODY, never the
+    link. The link is the most important part of the reply and always stays at
+    the end. Returns (text, was_trimmed)."""
+    if x_weighted_len(text) <= limit:
+        return text, False
+    if link_url and link_url in text:
+        head, _, tail = text.rpartition(link_url)
+        head = head.rstrip()
+        tail = tail.strip()  # normally empty; the URL ends the reply
+        # Budget left for the body after reserving the URL (23) + a joining
+        # space + any (rare) trailing chars after the URL.
+        max_head = limit - URL_WEIGHT - 1 - len(tail)
+        trimmed_head = _trim_to_chars(head, max_head)
+        joined = (trimmed_head + " " + link_url).strip()
+        if tail:
+            joined = (joined + " " + tail).strip()
+        return joined, True
+    # No link present (shouldn't happen on the twitter path): hard word-trim.
+    return _trim_to_chars(text, limit), True
 
 
 def resolve_voice_relationship(project: str) -> str:
@@ -151,6 +209,26 @@ def build_prompt(*, reply_text: str, link_url: str, thread_text: str,
             f"  - \"we ship the same recall-on-revisit pattern in {project}, scores against a 4-axis rubric, {link_url}\""
         )
 
+    # X-specific hard length budget. Pass the agent the current body length AND
+    # the budget so it self-fits by compressing the body, keeping the link at
+    # the end. Other platforms (reddit/linkedin) have far larger ceilings, so we
+    # add no tight cap there.
+    length_rule = ""
+    if platform == "twitter":
+        body_len = len(reply_text or "")
+        length_rule = (
+            f"HARD LENGTH LIMIT (X counts EVERY link as exactly 23 characters, "
+            f"no matter how long it looks):\n"
+            f"- The entire final reply must be \u2264 {TWEET_LIMIT} characters with "
+            f"the URL counted as {URL_WEIGHT}. That means everything EXCEPT the "
+            f"URL must total \u2264 {TWITTER_TEXT_BUDGET} characters.\n"
+            f"- The drafted body is currently {body_len} characters. If body + "
+            f"bridge would exceed {TWITTER_TEXT_BUDGET} chars of text, COMPRESS "
+            f"the body to make room: tighten wording, drop the weakest clause, "
+            f"but keep the single strongest claim and keep the URL at the very "
+            f"end. Never drop or move the link.\n"
+        )
+
     return f"""You are writing the FINAL bridge sentence that folds a product link into a social media reply we already drafted. This is a one-shot task. Output ONLY the bridge sentence (no preamble, no explanation, no quotes).
 
 PLATFORM: {platform}
@@ -158,6 +236,8 @@ PROJECT: {project}
 LANDING PAGE URL: {link_url}
 
 {voice_rule}
+
+{length_rule}
 
 ORIGINAL THREAD WE ARE REPLYING TO:
 {thread_text}
@@ -289,7 +369,8 @@ THIRD_PARTY_VOICE_VIOLATIONS = (
 
 
 def passes_quality_gate(final_text: str, link_url: str,
-                        voice_relationship: str = "first_party"
+                        voice_relationship: str = "first_party",
+                        limit: int | None = None
                         ) -> tuple[bool, str]:
     """Return (passes, reason_if_not).
 
@@ -327,6 +408,12 @@ def passes_quality_gate(final_text: str, link_url: str,
     # Length sanity: model returning a 5-word stub is a fail.
     if len(final_text.split()) < 8:
         return (False, "too_short")
+    # Upper-length backstop (twitter): X-weighted length must fit the cap. The
+    # caller trims the body to fit BEFORE the gate, so this should only trip on
+    # a degenerate trim; on trip we fall back to the (also budget-enforced)
+    # mechanical concat.
+    if limit is not None and x_weighted_len(final_text) > limit:
+        return (False, f"too_long:{x_weighted_len(final_text)}>{limit}")
     return (True, "")
 
 
@@ -375,6 +462,8 @@ def main() -> int:
         return 0
 
     voice_relationship = args.voice_relationship or resolve_voice_relationship(args.project)
+    # Length cap is X-specific; reddit/linkedin pass None (no tail trim).
+    limit = TWEET_LIMIT if args.platform == "twitter" else None
     prompt = build_prompt(
         reply_text=reply_text, link_url=link_url,
         thread_text=(args.thread_text or "").strip()[:2000],
@@ -388,12 +477,16 @@ def main() -> int:
     elapsed = round(time.time() - started, 2)
 
     if not ok:
+        fb_text, fb_trim = enforce_budget(
+            mechanical_fallback(reply_text, link_url), link_url,
+            limit if limit is not None else TWEET_LIMIT * 100)
         out = {
             "ok": True,
-            "text": mechanical_fallback(reply_text, link_url),
+            "text": fb_text,
             "tail": link_url,
             "model_call_ok": False,
             "fallback_used": True,
+            "budget_trimmed": fb_trim,
             "error": err or "model_call_failed",
             "elapsed_sec": elapsed,
         }
@@ -401,15 +494,26 @@ def main() -> int:
         return 0
 
     cleaned = clean_output(raw)
+    # Trim the body to fit BEFORE the gate so a good model bridge is preserved
+    # (we trim the body, never the link) instead of being thrown away for being
+    # a few chars over. No-op on non-twitter (limit is None).
+    budget_trimmed = False
+    if limit is not None:
+        cleaned, budget_trimmed = enforce_budget(cleaned, link_url, limit)
     passes, reason = passes_quality_gate(cleaned, link_url,
-                                         voice_relationship=voice_relationship)
+                                         voice_relationship=voice_relationship,
+                                         limit=limit)
     if not passes:
+        fb_text, fb_trim = enforce_budget(
+            mechanical_fallback(reply_text, link_url), link_url,
+            limit if limit is not None else TWEET_LIMIT * 100)
         out = {
             "ok": True,
-            "text": mechanical_fallback(reply_text, link_url),
+            "text": fb_text,
             "tail": link_url,
             "model_call_ok": True,
             "fallback_used": True,
+            "budget_trimmed": fb_trim,
             "error": f"quality_gate_failed:{reason}",
             "raw_model_output": raw[:500],
             "elapsed_sec": elapsed,
@@ -436,6 +540,7 @@ def main() -> int:
         "tail": tail,
         "model_call_ok": True,
         "fallback_used": False,
+        "budget_trimmed": budget_trimmed,
         "elapsed_sec": elapsed,
     }
     print(json.dumps(out), flush=True)
