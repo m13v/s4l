@@ -4492,6 +4492,78 @@ async function handleApi(req, res) {
     });
   }
 
+  // PUBLIC: raw client log relay. The open-source .mcpb client tees the verbatim
+  // stdout/stderr of every pipeline subprocess here (telemetry.ts batcher). This
+  // handler does ONE thing: console.log() each line as structured JSON so Cloud
+  // Run's runtime ships it to Cloud Logging automatically. No database, no
+  // service-account key on the client — the relay is the only thing authed to
+  // GCP, implicitly via its Cloud Run runtime identity. Query/filter by
+  // jsonPayload.install_id in Log Explorer; Error Reporting + Log Analytics
+  // (BigQuery SQL) work over it for free.
+  //
+  // Auth is the same X-Installation lane as the Vercel /api/v1/installations/*
+  // routes: base64-encoded JSON carrying an install_id UUID (no signature). We
+  // parse it only to tag the line; a malformed/absent header is rejected rather
+  // than logged anonymously. Must live ABOVE the Firebase auth gate.
+  if (p === '/api/v1/installations/logs' && req.method === 'POST') {
+    return readBody(req).then(async body => {
+      // Parse the X-Installation header (base64 JSON -> { install_id, ... }).
+      const rawHeader = (req.headers['x-installation'] || '').trim();
+      let installId = null;
+      if (rawHeader) {
+        try {
+          const decoded = Buffer.from(rawHeader, 'base64').toString('utf8');
+          const payload = JSON.parse(decoded);
+          const id = String(payload && payload.install_id || '').trim();
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            installId = id;
+          }
+        } catch { /* malformed header -> installId stays null */ }
+      }
+      if (!installId) return json(res, { error: 'x_installation_required' }, 401);
+
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch (e) { return json(res, { error: 'invalid_json' }, 400); }
+
+      const rawLines = payload && payload.lines;
+      if (!Array.isArray(rawLines) || rawLines.length === 0 || rawLines.length > 200) {
+        return json(res, { error: 'lines must be an array of 1-200 items' }, 400);
+      }
+
+      const STREAMS = new Set(['stdout', 'stderr']);
+      let accepted = 0;
+      for (const item of rawLines) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        if (typeof item.line !== 'string') continue;
+        const stream = STREAMS.has(item.stream) ? item.stream : 'stdout';
+        const ctx = (typeof item.context === 'string' ? item.context : '').slice(0, 200);
+        const ts = (typeof item.ts === 'string' && Number.isFinite(Date.parse(item.ts)))
+          ? new Date(item.ts).toISOString()
+          : new Date().toISOString();
+        const line = item.line.slice(0, 8192);
+        // Cloud Run parses JSON on stdout into Cloud Logging structured fields.
+        // `severity`/`message` are special-cased by the agent; install_id is a
+        // label so Log Explorer can filter on it directly.
+        console.log(JSON.stringify({
+          severity: stream === 'stderr' ? 'WARNING' : 'INFO',
+          message: line,
+          logType: 'client-pipeline',
+          install_id: installId,
+          context: ctx || undefined,
+          stream,
+          client_ts: ts,
+          'logging.googleapis.com/labels': { install_id: installId, log_type: 'client-pipeline' },
+        }));
+        accepted += 1;
+      }
+      return json(res, { accepted });
+    }).catch(e => {
+      console.error('[installations/logs] handler error:', e.message);
+      return json(res, { error: e.message }, 400);
+    });
+  }
+
   // Auth: no-op when CLIENT_MODE is unset (local operator use).
   // When CLIENT_MODE=1, require a Firebase Bearer token and enforce admin/project claims.
   const av = await auth.verifyAuth(req, p);
