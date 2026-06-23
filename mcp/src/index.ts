@@ -623,9 +623,13 @@ function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
   return candidates
     // Number by FULL-array index (matches post_drafts + the menu bar), then drop
-    // already-posted entries so the cards only show what's still pending.
+    // already-finished entries so the cards only show what's still pending.
     .map((c, i) => ({ c, n: i + 1 }))
-    .filter((e) => e.c.posted !== true)
+    .filter((e) => e.c.posted !== true && e.c.terminal !== true)
+    // The queue is append-only; newest drafts have the highest stable index.
+    // Show those first so review starts with likely-live tweets instead of stale
+    // low-number drafts that have been sitting around for hours.
+    .sort((a, b) => b.n - a.n)
     .map(({ c, n }) => {
       const author = c.thread_author ? `@${c.thread_author}` : "(unknown thread)";
       const style = c.engagement_style ?? "?";
@@ -652,6 +656,64 @@ function renderDraftsTable(plan: Plan): string {
       );
     })
     .join("\n\n");
+}
+
+interface PostCandidateResult {
+  candidate_id: string;
+  outcome: "posted" | "skipped" | "failed";
+  reason?: string;
+  our_url?: string;
+}
+
+function parsePostCandidateResults(stdout: string): PostCandidateResult[] {
+  const byId = new Map<string, PostCandidateResult>();
+  const upsert = (
+    candidateId: string,
+    outcome: PostCandidateResult["outcome"],
+    reason?: string,
+    ourUrl?: string
+  ) => {
+    const prev = byId.get(candidateId);
+    // A landed post wins over any earlier noisy line for the same candidate.
+    if (prev?.outcome === "posted" && outcome !== "posted") return;
+    byId.set(candidateId, {
+      candidate_id: candidateId,
+      outcome,
+      ...(reason ? { reason } : {}),
+      ...(ourUrl ? { our_url: ourUrl } : {}),
+    });
+  };
+
+  for (const line of stdout.split("\n")) {
+    let m = /\[post\] candidate (\d+) posted as (\S+) \(post_id=/.exec(line);
+    if (m) {
+      upsert(m[1], "posted", undefined, m[2]);
+      continue;
+    }
+    m = /\[post\] candidate (\d+): pre-post dedup hit\b/.exec(line);
+    if (m) {
+      upsert(m[1], "skipped", "duplicate_thread_pre_post");
+      continue;
+    }
+    m = /\[post\] candidate (\d+) reply failed: ([A-Za-z0-9_:-]+)/.exec(line);
+    if (m) {
+      upsert(m[1], "skipped", m[2]);
+      continue;
+    }
+    m = /\[post\] candidate (\d+) reply succeeded but reply_url invalid:/.exec(line);
+    if (m) {
+      upsert(m[1], "skipped", "no_reply_url_captured");
+      continue;
+    }
+    m = /\[post\] candidate (\d+): empty reply_text; skipping/.exec(line);
+    if (m) {
+      upsert(m[1], "skipped", "empty_reply_text");
+      continue;
+    }
+    m = /\[post\] candidate (\d+) crashed:/.exec(line);
+    if (m) upsert(m[1], "failed", "exception");
+  }
+  return [...byId.values()];
 }
 
 // Resolve the configured posting handle the SAME way account_resolver.py does:
@@ -764,8 +826,12 @@ async function postApproved(batchId: string, plan: Plan) {
         }
       );
     } finally {
-      // Always free the lock so a queued scan can proceed, even on throw/timeout.
-      if (heldShellLock) releaseShellBrowserLock();
+      // Don't free the lock immediately — hold it through a grace window so the
+      // NEXT approved card (a separate post_drafts call) reuses the same continuous
+      // hold, and a parked scan can't slip into the gap between cards. The timer
+      // releases it once posting truly stops (mirrors the plist holding the lock
+      // through the whole posting phase, then releasing at the end).
+      if (heldShellLock) scheduleShellLockRelease();
     }
   })();
   // Persist the poster's own stdout/stderr to a dated log. Without this the post
@@ -803,10 +869,52 @@ async function postApproved(batchId: string, plan: Plan) {
       : res.code === 0 && !summObj
         ? approved.length
         : 0;
-  // Mark only candidates that ACTUALLY posted (cross-surface de-dup). When the
-  // summary is missing but the run exited clean, fall back to marking all.
-  if (realPosted > 0 || (res.code === 0 && !summObj)) {
+  // Mark candidates according to the poster's per-candidate outcome. This keeps
+  // the review queue honest: posted drafts disappear as posted, terminal skips
+  // (dedup, deleted tweet, no captured URL) disappear without being counted as
+  // posted, and multi-approval batches no longer smear one posted count across
+  // every approved draft.
+  const resultRowsFromSummary = Array.isArray(summObj?.candidate_results)
+    ? (summObj?.candidate_results as Array<Record<string, unknown>>)
+    : [];
+  const resultRows: PostCandidateResult[] = resultRowsFromSummary.length
+    ? resultRowsFromSummary
+        .map((r) => ({
+          candidate_id: String(r.candidate_id ?? ""),
+          outcome: String(r.outcome || "") as PostCandidateResult["outcome"],
+          reason: typeof r.reason === "string" ? r.reason : undefined,
+          our_url: typeof r.our_url === "string" ? r.our_url : undefined,
+        }))
+        .filter((r) => r.candidate_id && ["posted", "skipped", "failed"].includes(r.outcome))
+    : parsePostCandidateResults(res.stdout);
+  const approvedById = new Map<string, PlanCandidate>();
+  approved.forEach((c) => {
+    if (c.candidate_id !== undefined && c.candidate_id !== null)
+      approvedById.set(String(c.candidate_id), c);
+  });
+  let touchedPlan = false;
+  if (resultRows.length) {
+    resultRows.forEach((r, idx) => {
+      const c = approvedById.get(r.candidate_id) || approved[idx];
+      if (!c) return;
+      if (r.outcome === "posted") {
+        c.posted = true;
+        c.terminal = false;
+        if (r.our_url) c.our_url = r.our_url;
+        touchedPlan = true;
+      } else if (r.outcome === "skipped" || r.outcome === "failed") {
+        c.terminal = true;
+        c.terminal_reason = r.reason || r.outcome;
+        touchedPlan = true;
+      }
+    });
+  } else if (realPosted > 0 || (res.code === 0 && !summObj)) {
+    // Legacy fallback for older poster output without parseable per-candidate
+    // lines. Mark only when we have no finer-grained signal.
     for (const c of approved) c.posted = true;
+    touchedPlan = true;
+  }
+  if (touchedPlan) {
     try {
       writePlan(batchId, plan);
     } catch {
@@ -2253,6 +2361,11 @@ async function runScanCandidates(
   // long-poll doesn't leave it on a generic "working" (or flicker to idle between
   // re-calls). Cleared by the handler when the scan resolves.
   writeActivity("scanning", project ? `scanning X for ${project}` : "scanning X");
+  // Single-flight: kill any pre-existing run-twitter-cycle.sh (zombies that
+  // survived a prior preempt, or stale waiters parked behind a post) before
+  // launching, so only ONE scan ever exists. The plist gets this from
+  // run-twitter-cycle-singleton.sh; the MCP's direct launch must enforce it here.
+  sigkillAllScans();
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
     env,
     timeoutMs: 900_000,
