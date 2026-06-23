@@ -36,6 +36,16 @@ CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 REPLY_DB = os.path.join(REPO_DIR, "scripts", "reply_db.py")
 SKILL_FILE = os.path.join(REPO_DIR, "SKILL.md")
 
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps that live only in
+# the owned uv runtime — the same fresh-box failure class that broke the Twitter
+# poster (Karol, 2026-06-22). The GitHub rail posts via the REST API (no browser,
+# so no Playwright dep), but its util/DB children still need the owned venv, so
+# pin the interpreter here too. Honor SAPS_PYTHON (set by the launchd plist),
+# else sys.executable; never the literal PYTHON.
+PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
+os.environ["SAPS_PYTHON"] = PYTHON
+
 # Cap the thread JSON we pass to Claude. Long issues with 100+ comments would
 # otherwise blow the prompt budget. 12k chars is ~3k tokens, enough for most
 # threads while leaving headroom for the rules and output.
@@ -444,7 +454,7 @@ def main():
 
         # Exclusion: author
         if (reply["their_author"] or "").lower() in excluded_authors:
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "excluded_author"])
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "excluded_author"])
             print(f"[engage_github] #{reply['id']} skipped (excluded_author: {reply['their_author']})")
             skipped += 1
             processed += 1
@@ -453,7 +463,7 @@ def main():
         # Parse owner/repo/number from thread_url
         owner, repo, number = parse_issue_url(reply["thread_url"] or "")
         if not owner:
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "bad_thread_url"])
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "bad_thread_url"])
             print(f"[engage_github] #{reply['id']} skipped (bad_thread_url: {reply['thread_url']})")
             skipped += 1
             processed += 1
@@ -462,7 +472,7 @@ def main():
         # Exclusion: repo
         repo_key = f"{owner}/{repo}".lower()
         if repo_key in excluded_repos or owner.lower() in excluded_repos:
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "excluded_repo"])
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "excluded_repo"])
             print(f"[engage_github] #{reply['id']} skipped (excluded_repo: {repo_key})")
             skipped += 1
             processed += 1
@@ -472,7 +482,7 @@ def main():
         print(f"[engage_github] Fetching thread for {owner}/{repo}#{number}")
         thread = fetch_thread(owner, repo, number)
         if "_error" in thread:
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]),
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]),
                             f"fetch_error: {thread['_error']}"])
             print(f"[engage_github] #{reply['id']} skipped (fetch_error: {thread['_error'][:100]})")
             skipped += 1
@@ -499,7 +509,7 @@ def main():
         ok, output, usage = run_claude(prompt, timeout=args.per_reply_timeout, session_id=session_id)
         reply_elapsed = time.time() - reply_start
         session_ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+        log_args = [PYTHON, os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
              "--session-id", session_id, "--script", "engage_github",
              "--started-at", session_started_at, "--ended-at", session_ended_at]
         orch_cost = usage.get("cost_usd")
@@ -514,7 +524,7 @@ def main():
             failed += 1
             consecutive_failures += 1
             # Mark as skipped so the loop advances to the next pending reply
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "claude_error"],
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "claude_error"],
                            capture_output=True)
             print(f"[engage_github] #{reply['id']} CLAUDE FAILED ({reply_elapsed:.0f}s): {output[:200]}")
         else:
@@ -540,7 +550,7 @@ def main():
                     classification = parts[2].strip() if len(parts) > 2 and parts[2].strip() in ("bot", "engagement_loop") else "bot"
                     if handle:
                         bl_cmd = [
-                            "python3", REPLY_DB, "blocklist", "add",
+                            PYTHON, REPLY_DB, "blocklist", "add",
                             "github_issues", handle,
                             "--reason", f"engage_llm judgment: {reason}",
                             "--classification", classification,
@@ -552,7 +562,7 @@ def main():
                             print(f"[engage_github] blocklist add github_issues/{handle} cls={classification}")
                         else:
                             print(f"[engage_github] blocklist add FAILED for {handle}: {bl_res.stderr[:200]}")
-                subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), reason])
+                subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), reason])
                 skipped += 1
                 print(f"[engage_github] #{reply['id']} SKIPPED: {reason} ({reply_elapsed:.0f}s) "
                       f"[${usage['cost_usd']:.4f}]")
@@ -560,14 +570,14 @@ def main():
                 reply_text = (decision.get("text") or "").strip()
                 project = decision.get("project")
                 if not reply_text:
-                    subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "empty_reply_text"])
+                    subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "empty_reply_text"])
                     failed += 1
                     print(f"[engage_github] #{reply['id']} empty reply text, marked skipped")
                 else:
-                    subprocess.run(["python3", REPLY_DB, "processing", str(reply["id"])])
+                    subprocess.run([PYTHON, REPLY_DB, "processing", str(reply["id"])])
                     ok_post, url_or_err = post_comment(owner, repo, number, reply_text)
                     if ok_post:
-                        cmd_args = ["python3", REPLY_DB, "replied", str(reply["id"]), reply_text]
+                        cmd_args = [PYTHON, REPLY_DB, "replied", str(reply["id"]), reply_text]
                         if url_or_err:
                             cmd_args.append(url_or_err)
                         style = decision.get("engagement_style", "")
@@ -578,14 +588,14 @@ def main():
                         subprocess.run(cmd_args)
                         if project:
                             subprocess.run(
-                                ["python3", REPLY_DB, "set_project", str(reply["id"]), project],
+                                [PYTHON, REPLY_DB, "set_project", str(reply["id"]), project],
                                 capture_output=True,
                             )
                         succeeded += 1
                         print(f"[engage_github] #{reply['id']} POSTED ({reply_elapsed:.0f}s) "
                               f"[${usage['cost_usd']:.4f}] -> {url_or_err or '(no url)'}")
                     else:
-                        subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]),
+                        subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]),
                                         f"post_error: {url_or_err}"])
                         failed += 1
                         print(f"[engage_github] #{reply['id']} POST FAILED: {url_or_err}")
@@ -623,7 +633,7 @@ def main():
         f" elapsed={int(total_elapsed)}"
     )
 
-    subprocess.run(["python3", REPLY_DB, "status"])
+    subprocess.run([PYTHON, REPLY_DB, "status"])
 
 
 if __name__ == "__main__":
