@@ -12,7 +12,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { z } from "zod";
 import { screencast, bringBrowserToFront } from "./screencast.js";
 import os from "node:os";
@@ -2262,13 +2262,156 @@ let currentScanJob: ScanJob | null = null;
 // the plist autopilot's launchd scan.
 let scanChild: ChildProcess | null = null;
 
-// Posting takes priority over scanning (plugin pipeline only). When the user
-// approves a post, abort any in-flight plugin scan so the browser frees up at
-// once: killing the scan's bash leaves a dead lock-holder pid that the poster's
-// twitter_browser.py steals via its liveness check, so the post acquires the
-// browser without the 45s lock wait. The aborted scan just re-runs next cron
-// tick. Best-effort; never throws. Does NOT touch the plist autopilot (separate
-// process, no handle here) or any locked pipeline script.
+// ---- Cross-process browser-lock bridge (the REAL posting-priority fix) ------
+// The SCANNER (run-twitter-cycle.sh) serializes browser access on a mkdir-based
+// DIRECTORY lock at /tmp/social-autoposter-twitter-browser.lock (skill/lock.sh).
+// The POSTER (twitter_post_plan.py / twitter_browser.py) serializes on a totally
+// SEPARATE json file lock (~/.claude/twitter-browser-lock.json) with role:"post"
+// preemption. The two locks never reference each other, so a post launched from
+// THIS MCP (or a sibling MCP instance — every autopilot agent session spawns its
+// own) never actually excluded a live scan: both held "their" lock and drove the
+// one shared harness Chrome at once, so an approved batch landed 0/N while a scan
+// churned 118 queries for ~10min (proven live on the remote box 2026-06-23:
+// /tmp lock pid=scanner AND json lock python:poster role=post, simultaneously).
+//
+// preemptScanForPost's old body only killed scanChild — a process-LOCAL handle to
+// a scan THIS instance launched. The scan that actually holds the browser is
+// almost always a SIBLING instance's, which we have no ChildProcess for. So we
+// bridge to the lock the scanner truly respects: read its /tmp pid file, and if a
+// live run-twitter-cycle.sh holds it, signal it cross-process. Then the post
+// HOLDS that same /tmp lock for the whole batch so the every-minute autopilot
+// scan queues behind us (its acquire_lock waits on our live pid) instead of
+// seizing Chrome mid-post. skill/lock.sh's ownership guard + kill-0 liveness +
+// 3h stale-reclaim recover the dir if we ever leak it. Never touches a locked
+// pipeline script or the python json lock.
+const TW_BROWSER_LOCK_DIR = "/tmp/social-autoposter-twitter-browser.lock";
+
+function shellLockHolderPid(): number | null {
+  try {
+    const pid = parseInt(
+      fs.readFileSync(path.join(TW_BROWSER_LOCK_DIR, "pid"), "utf-8").trim(),
+      10
+    );
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null; // no dir / no pid file == lock is free
+  }
+}
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+// True ONLY when pid is a run-twitter-cycle.sh scan — the one holder a post is
+// allowed to preempt. Never preempt another poster or an unknown holder.
+function pidIsScan(pid: number): boolean {
+  try {
+    const cmd = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: 4000,
+    });
+    return /run-twitter-cycle\.sh/.test(cmd);
+  } catch {
+    return false;
+  }
+}
+function rmShellLockDir(): void {
+  try {
+    fs.rmSync(TW_BROWSER_LOCK_DIR, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+}
+const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// SIGTERM a live scan holding the shell browser lock so the post takes the
+// browser at once. Best-effort; only ever targets a run-twitter-cycle.sh.
+function preemptScanHoldingBrowser(): void {
+  try {
+    const pid = shellLockHolderPid();
+    if (pid && pidAlive(pid) && pidIsScan(pid)) {
+      console.error(
+        `[post] preempting cross-process scan holding the twitter-browser lock (pid ${pid})`
+      );
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
+// Take the shell browser lock for the batch. Preempts a scan holder; never
+// steals from a live non-scan holder (a peer poster) — there it returns false
+// and posting proceeds unguarded (no worse than before). Best-effort.
+async function acquireShellBrowserLock(): Promise<boolean> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      fs.mkdirSync(TW_BROWSER_LOCK_DIR); // atomic mutex — only one winner
+      try {
+        fs.writeFileSync(path.join(TW_BROWSER_LOCK_DIR, "pid"), String(process.pid));
+      } catch {
+        /* best effort */
+      }
+      try {
+        fs.writeFileSync(
+          path.join(TW_BROWSER_LOCK_DIR, "expires_at"),
+          String(Math.floor(Date.now() / 1000) + 1800)
+        );
+      } catch {
+        /* best effort */
+      }
+      console.error(
+        `[post] holding twitter-browser shell lock pid=${process.pid} — scans queue behind the post`
+      );
+      return true;
+    } catch {
+      // Dir exists. Reclaim if the holder is dead; preempt if it's a scan;
+      // otherwise (a live peer poster) leave it and post unguarded.
+      const pid = shellLockHolderPid();
+      if (!pid || !pidAlive(pid)) {
+        rmShellLockDir();
+      } else if (pidIsScan(pid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          /* already gone */
+        }
+        await sleepMs(400);
+        rmShellLockDir();
+      } else {
+        return false; // a real peer holds it — don't steal; proceed
+      }
+      await sleepMs(250);
+    }
+  }
+  return false;
+}
+
+// Release only if it's still OURS (mirror skill/lock.sh's ownership guard) so we
+// never wipe a scan that legitimately re-acquired after the batch finished.
+function releaseShellBrowserLock(): void {
+  try {
+    if (shellLockHolderPid() === process.pid) {
+      rmShellLockDir();
+      console.error(`[post] released twitter-browser shell lock pid=${process.pid}`);
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
+// Posting takes priority over scanning. When the user approves a post, abort any
+// in-flight scan so the browser frees up at once. Two layers: (1) kill scanChild
+// if THIS instance launched the scan, and (2) cross-process — kill whoever holds
+// the /tmp shell lock if it's a scan (covers sibling MCP instances we have no
+// handle to). Best-effort; never throws; never touches a locked pipeline script.
 function preemptScanForPost(): void {
   try {
     if (scanChild && scanChild.pid && scanChild.exitCode === null) {
@@ -2288,6 +2431,9 @@ function preemptScanForPost(): void {
   // the next scan_candidates call starts fresh.
   currentScanJob = null;
   scanChild = null;
+  // Cross-process: the scan that actually holds the shared Chrome is usually a
+  // sibling MCP instance's, not ours. Kill it via the lock it truly respects.
+  preemptScanHoldingBrowser();
 }
 
 // Per-call long-poll window. Must stay under the ~60s MCP client request timeout
