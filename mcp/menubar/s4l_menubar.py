@@ -173,7 +173,7 @@ class S4LMenuBar(rumps.App):
         # indicator + the "Please update now" menu item.
         self._update_available = False
         self._latest_version = None
-        self._upd_timer = rumps.Timer(self._check_update, 1800)  # every 30 min
+        self._upd_timer = rumps.Timer(self._check_update, 60)  # every 1 min
         self._upd_timer.start()
         self._check_update(None)
         self._tick(None)
