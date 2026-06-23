@@ -3,9 +3,7 @@
 #
 # WHAT: keeps exactly ONE `harness_overlay.py watch` process alive. That watcher
 # injects the status overlay into the twitter-harness Chrome window so a human
-# watching the harness sees what the pipeline is doing. (The interactive "Drafts
-# to post" sidebar is OFF by default as of 2026-06-23; opt back in with
-# SAPS_SIDEBAR=1.)
+# watching the harness sees what the pipeline is doing.
 #
 # WHY a supervisor: the overlay only renders WHILE the watch process runs. It was
 # previously a manual, local-only process, so it never appeared on headless /
