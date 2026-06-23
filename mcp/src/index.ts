@@ -462,9 +462,8 @@ function cycleProgressMessage(line: string): string | null {
 }
 
 // Start the twitter-harness on-screen overlay watcher if it isn't already up.
-// The overlay (status banner; the interactive draft sidebar is OFF by default as
-// of 2026-06-23, opt back in with SAPS_SIDEBAR=1) only renders WHILE
-// `harness_overlay.py watch` runs. The supervisor script is idempotent (pgrep
+// The overlay (status banner) only renders WHILE `harness_overlay.py watch`
+// runs. The supervisor script is idempotent (pgrep
 // guard), so calling this on every draft_cycle / autopilot-enable / show-browser
 // is safe: it spawns at most one detached watcher and is a fast no-op otherwise.
 //
@@ -2763,7 +2762,7 @@ tool(
       return jsonContent({ ok: true, brought_to_front: true, port: res.port });
     }
     // If the user is about to watch the live browser, make sure the on-screen
-    // overlay watcher is up too so the harness window carries status + drafts.
+    // overlay watcher is up too so the harness window carries its status banner.
     if (action === "start") await ensureOverlayWatch();
     const ensured = await screencast.ensure(typeof args?.port === "number" ? args.port : undefined);
     if (!ensured.ok) {
