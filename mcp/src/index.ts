@@ -327,10 +327,19 @@ const TOOL_ACTIVITY: Record<string, string> = {
   post_drafts: "posting",
   get_stats: "loading stats",
 };
+function toolActivityLabel(name: string, args: any): string | null {
+  const fallback = TOOL_ACTIVITY[name];
+  if (!fallback) return null;
+  const override =
+    typeof args?.__saps_activity_label === "string"
+      ? args.__saps_activity_label.replace(/\s+/g, " ").trim().slice(0, 80)
+      : "";
+  return override || fallback;
+}
 function withActivity(name: string, cb: ToolHandler): ToolHandler {
-  const label = TOOL_ACTIVITY[name];
-  if (!label) return cb;
+  if (!TOOL_ACTIVITY[name]) return cb;
   return async (args: any, extra: any) => {
+    const label = toolActivityLabel(name, args) || TOOL_ACTIVITY[name];
     writeActivity("working", label);
     try {
       return await cb(args, extra);
@@ -2985,7 +2994,7 @@ tool(
     // drafts are appended; a thread already in the queue (by URL) is skipped (one
     // draft per thread). Posted entries are KEPT in place so the 1-based card
     // numbering stays stable across runs — the menu bar, the chat table, and
-    // post_drafts all index the full array and filter on the `posted` flag.
+    // post_drafts all index the full array and filter finished rows.
     const queue: PlanCandidate[] = [
       ...((readPlan(REVIEW_QUEUE_ID)?.candidates as PlanCandidate[]) ?? []),
     ];
@@ -2998,7 +3007,7 @@ tool(
       added++;
     }
     writePlan(REVIEW_QUEUE_ID, { candidates: queue });
-    const pending = queue.filter((c) => c.posted !== true);
+    const pending = queue.filter((c) => c.posted !== true && c.terminal !== true);
 
     // Drafts queued = the pipeline verified end-to-end without posting. This is the
     // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
