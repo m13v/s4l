@@ -104,7 +104,8 @@ def loc(row):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Active social-autoposter users, deduped to machines.")
+    ap = argparse.ArgumentParser(
+        description="Active social-autoposter users, deduped per person (email, else machine).")
     ap.add_argument("--days", type=int, default=7, help="lookback window in days (default 7)")
     ap.add_argument("--all", action="store_true", help="include our own infra (i@m13v / mk0r)")
     ap.add_argument("--json", action="store_true", help="emit JSON")
