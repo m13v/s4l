@@ -1,21 +1,35 @@
 #!/usr/bin/env bash
-# One-command release pipeline for the social-autoposter .mcpb (Story B double-click install).
+# THE single release flow for social-autoposter. One command does EVERYTHING and
+# keeps the npm path (Story A) and the .mcpb double-click path (Story B) on one
+# version, because both derive from one bumped repo-root package.json.
 #
 # What it does, end to end:
-#   1. Resolve the release version from the repo-root package.json (or --tag override).
-#   2. Build the MCP bundle: vite (panel) + tsc (server) + bundle-pipeline (embeds npm tarball).
-#   3. Stamp mcp/dist/version.json so the bundle self-reports the right version.
+#   1. Bump the repo-root package.json (the SINGLE source of truth) and lockfile.
+#      Default: patch bump. --bump minor|major, or pin with --version / --tag,
+#      or --no-bump to re-release the current version as-is.
+#   2. Build the MCP bundle: vite (panel) + tsc (server) + bundle-pipeline. The
+#      embedded pipeline.tgz is `npm pack` of the (now-bumped) repo, so the shell
+#      and the bundled Python pipeline CANNOT diverge.
+#   3. Stamp dist/version.json + manifest.json + mcp/package.json(+lock) to match.
 #   4. Pack mcp/ into mcp/social-autoposter.mcpb via the mcpb CLI.
-#   5. Verify the bundle (size cap, embedded pipeline.tgz, stamped version, install tools).
-#   6. Create (or update) the GitHub release vX.Y.Z and upload the .mcpb as an asset.
+#   5. Verify: size cap, embedded pipeline.tgz present, version.json + manifest +
+#      the pipeline.tgz's OWN internal version all == VERSION (the guard that was
+#      missing when 1.6.84 shipped a 1.6.83 pipeline), install tools present.
+#   6. npm publish social-autoposter@VERSION (idempotent; skipped if already live).
+#   7. Create/update GitHub release vX.Y.Z and upload the .mcpb (--clobber).
 #
-# Re-running for the same version is idempotent: the asset is re-uploaded with --clobber.
+# Boxes self-update from the GitHub release: the menu-bar updater polls
+# releases/latest, pulls the new .mcpb, and on next server boot
+# ensurePipelineCurrent() re-extracts pipeline.tgz. No manual box step needed.
 #
 # Usage:
-#   bash scripts/release-mcpb.sh              # version from package.json
-#   bash scripts/release-mcpb.sh --tag v1.6.56
-#   bash scripts/release-mcpb.sh --no-release # build + pack + verify only, skip GitHub
-#   bash scripts/release-mcpb.sh --draft      # create the GitHub release as a draft
+#   bash scripts/release-mcpb.sh                 # patch bump, npm + .mcpb + GitHub
+#   bash scripts/release-mcpb.sh --bump minor
+#   bash scripts/release-mcpb.sh --version 1.7.0 # pin an exact version
+#   bash scripts/release-mcpb.sh --no-bump       # re-release current package.json version
+#   bash scripts/release-mcpb.sh --no-npm        # skip npm publish (only .mcpb + GitHub)
+#   bash scripts/release-mcpb.sh --no-release    # build + pack + verify only (no npm, no GitHub)
+#   bash scripts/release-mcpb.sh --draft         # GitHub release as a draft
 
 set -euo pipefail
 
@@ -48,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     --no-npm) DO_NPM=0; shift ;;
     --no-release) DO_RELEASE=0; shift ;;
     --draft) DRAFT_FLAG="--draft"; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -193,7 +207,30 @@ if [[ "$DO_RELEASE" == "0" ]]; then
   exit 0
 fi
 
-# ---- 6. GitHub release ------------------------------------------------------
+# ---- 6. npm publish (Story A: `npx social-autoposter@<v> init`) -------------
+# Same VERSION as the bundle, from the SAME bumped repo-root package.json, so the
+# npm install path and the .mcpb path can never disagree. Idempotent: a version
+# already on the registry is skipped, not failed.
+if [[ "$DO_NPM" == "1" ]]; then
+  command -v npm >/dev/null || die "npm not found on PATH"
+  NPM_HTTP=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/social-autoposter/$VERSION" || echo "000")
+  if [[ "$NPM_HTTP" == "200" ]]; then
+    say "npm: social-autoposter@$VERSION already published — skipping"
+  else
+    say "Publishing social-autoposter@$VERSION to npm"
+    ( cd "$REPO_ROOT" && npm publish ) || die "npm publish failed"
+    # Confirm it actually landed (granular-token whoami lies; a version fetch doesn't).
+    for _ in 1 2 3 4 5; do
+      sleep 2
+      [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/social-autoposter/$VERSION")" == "200" ]] && break
+    done
+    echo "  npm: social-autoposter@$VERSION live"
+  fi
+else
+  say "npm publish skipped (--no-npm)"
+fi
+
+# ---- 7. GitHub release ------------------------------------------------------
 command -v gh >/dev/null || die "gh CLI not found"
 gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
 
