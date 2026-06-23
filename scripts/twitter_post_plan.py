@@ -55,6 +55,18 @@ LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
 CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 
+# Interpreter every child subprocess (twitter_browser.py reply, log_post.py,
+# campaign_bump.py, link_tail.py) must run under. The reply path is the only
+# Playwright importer in the pipeline, so a bare "python3" here silently
+# resolved to the user's system python (no Playwright) and every post died
+# with no_reply_json (Karol, 2026-06-22). Honor the authoritative pin the rest
+# of the runtime uses — SAPS_PYTHON (set by the launchd plist) — then fall back
+# to sys.executable (the interpreter THIS process already runs under, which the
+# MCP's runPython resolves to the owned uv runtime). Never the literal
+# "python3": that re-rolls the PATH dice. Re-exported so grandchildren inherit.
+PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
+os.environ["SAPS_PYTHON"] = PYTHON
+
 # DATABASE_URL was previously used to issue ad-hoc `psql -c "..."` calls for
 # the pre-post dedup probe and the candidate status updates. As of the
 # 2026-05-18 routes migration both lanes go through the s4l.ai HTTP API
@@ -527,7 +539,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     link_tail_outcome = "skipped_no_link"
     if _add_tail_link:
         rc, out, err = run_subprocess(
-            ["python3", LINK_TAIL,
+            [PYTHON, LINK_TAIL,
              "--reply-text", reply_text,
              "--link-url", link_url,
              "--thread-text", thread_text or "",
@@ -591,7 +603,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
 
     print(f"[post] candidate {cid} -> posting (link={link_url!r})", flush=True)
     rc, out, err = run_subprocess(
-        ["python3", TWITTER_BROWSER, "reply", candidate_url, full_text],
+        [PYTHON, TWITTER_BROWSER, "reply", candidate_url, full_text],
         timeout_sec=600,
     )
     if err:
@@ -668,7 +680,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     from twitter_account import resolve_handle as _resolve_twitter_handle
 
     log_args = [
-        "python3", LOG_POST,
+        PYTHON, LOG_POST,
         "--platform", "twitter",
         "--thread-url", candidate_url,
         "--our-url", reply_url,
@@ -766,7 +778,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # Campaign attribution.
     for ccid in applied_campaigns:
         rc, out, err = run_subprocess(
-            ["python3", CAMPAIGN_BUMP, "--table", "posts",
+            [PYTHON, CAMPAIGN_BUMP, "--table", "posts",
              "--id", str(post_id), "--campaign-id", str(ccid)],
             timeout_sec=30,
         )
@@ -778,7 +790,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # Mark link_edited_at: link is embedded in primary reply, no self-reply
     # will follow. Prevents link-edit-twitter sweep from re-attempting.
     rc, out, err = run_subprocess(
-        ["python3", LOG_POST,
+        [PYTHON, LOG_POST,
          "--mark-self-reply",
          "--post-id", str(post_id),
          "--self-reply-url", reply_url,
