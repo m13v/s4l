@@ -433,4 +433,21 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        _rc = main()
+    except BrokenPipeError:
+        # The MCP setup hook (our parent) closes stdout once it has read the
+        # sentinel ===QUERIES_JSON=== block; the trailing summary prints then hit
+        # a dead pipe and raise BrokenPipeError. All persistence already happened
+        # earlier in main(), so this is BENIGN. Previously it propagated as an
+        # uncaught exception and Sentry logged it as a "seeding failed" event
+        # (Karol, 2026-06-22) — a false positive that buried the real signal.
+        # Redirect stdout to devnull so interpreter shutdown doesn't re-raise on
+        # the final flush, then exit clean.
+        try:
+            _devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull, sys.stdout.fileno())
+        except Exception:
+            pass
+        _rc = 0
+    raise SystemExit(_rc)
