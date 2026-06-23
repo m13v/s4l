@@ -376,13 +376,17 @@ class S4LMenuBar(rumps.App):
         act = st.read_activity()
         label = act.get("label") if act else None
         if label:
+            # The update arrow must stay visible even while a tool runs, so the
+            # "update available" signal is never masked by activity. _tick skips the
+            # title repaint while the spinner owns it, so the arrow is injected here.
+            head = "S4L ⬆" if self._update_available else "S4L"
             # A "✓" label (e.g. "posted 3/10 ✓") is a momentary confirmation, not
             # ongoing work — show it without the spinner glyph so it reads as done.
             if "✓" in label:
-                self.title = f"S4L {label}"
+                self.title = f"{head} {label}"
             else:
                 self._spin_i = (self._spin_i + 1) % len(SPINNER)
-                self.title = f"S4L {label} {SPINNER[self._spin_i]}"
+                self.title = f"{head} {label} {SPINNER[self._spin_i]}"
             return
         try:
             if self._spinner is not None:
@@ -395,10 +399,12 @@ class S4LMenuBar(rumps.App):
 
     # ---- tick: read state, set title, (re)build menu ----------------------
     def _tick(self, _):
-        # While a tool is running, the spinner owns the title/menu; don't fight it
-        # or start a review mid-run.
-        if self._spinner is not None:
-            return
+        # The activity spinner owns the TITLE while a tool runs (we don't fight it at
+        # 0.12s), but the menu + update indicator must still refresh mid-run —
+        # otherwise the "Please update now" item never appears on a box that's always
+        # busy (continuous autopilot). So we no longer bail out wholesale when busy;
+        # we only skip the title repaint and the review pop-up.
+        busy = self._spinner is not None
         snap = st.snapshot()
         ob = snap.get("onboarding") or st.read_onboarding()
         runtime_ready = bool(snap.get("runtime_ready"))
@@ -414,7 +420,9 @@ class S4LMenuBar(rumps.App):
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
 
-        self._render_title(setup_complete, ob, blocker)
+        # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
+        if not busy:
+            self._render_title(setup_complete, ob, blocker)
 
         # Blocker notification only on transition into a new blocker.
         if blocker and blocker_code != self._last_blocker_code:
@@ -431,6 +439,8 @@ class S4LMenuBar(rumps.App):
             if ob
             else 0
         )
+        # _update_available / _latest_version are in the signature so a freshly
+        # detected update rebuilds the menu (adding "Please update now") even mid-run.
         sig = (
             runtime_ready,
             setup_complete,
@@ -439,6 +449,8 @@ class S4LMenuBar(rumps.App):
             bool(snap.get("autopilot_on")),
             snap.get("version"),
             snap.get("update_available"),
+            self._update_available,
+            self._latest_version,
             snap.get("x_handle"),
             snap.get("projects_ready"),
             snap.get("projects_total"),
@@ -448,8 +460,9 @@ class S4LMenuBar(rumps.App):
             self._build_menu(runtime_ready, setup_complete, ob, blocker, snap)
 
         # Draft-review pop-ups: if a draft cycle left a review request, present the
-        # cards. Independent of the menu rebuild above.
-        self._maybe_start_review()
+        # cards. Don't start a review mid-run (the spinner means a tool is active).
+        if not busy:
+            self._maybe_start_review()
 
     # ---- draft review pop-ups ---------------------------------------------
     def _maybe_start_review(self):
