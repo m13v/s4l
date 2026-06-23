@@ -18,6 +18,7 @@ rather than rumps.notification (which needs a bundle id).
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -152,6 +153,17 @@ class S4LMenuBar(rumps.App):
         # later batch for the life of this process (only a restart cleared it),
         # which is exactly the "drafts queued but no cards" bug.
         self._last_review_sig = None
+        # Per-card posting. Each approved card posts the INSTANT it's approved,
+        # serialized through one persistent worker so two posts never drive the
+        # shared harness Chrome at once (the poster lock fails a concurrent peer
+        # after 45s rather than queuing it, which would land the 2nd card 0/N).
+        # `_review_active` stays true while the panel is open OR posts are still
+        # draining, so a half-posted set is never re-presented as fresh cards.
+        self._post_q = queue.Queue()
+        self._post_worker = None
+        self._review_lock = threading.Lock()
+        self._panel_open = False
+        self._posts_outstanding = 0
         self._spin_i = 0
         self._spinner = None  # fast rumps.Timer animating the title while busy
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
@@ -467,11 +479,14 @@ class S4LMenuBar(rumps.App):
         if sig == self._last_review_sig:
             return
         self._review_active = True
+        self._panel_open = True
         try:
             import s4l_card
 
             s4l_card.present_review(
-                drafts, lambda decisions: self._on_review_done(batch, decisions)
+                drafts,
+                on_decision=lambda d: self._on_card_decision(batch, d),
+                on_complete=lambda decisions: self._on_review_closed(batch, decisions),
             )
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
@@ -479,41 +494,80 @@ class S4LMenuBar(rumps.App):
         except Exception as e:
             # Card UI unavailable — don't strand the batch; chat review still works.
             self._review_active = False
+            self._panel_open = False
             sys.stderr.write(f"[s4l-menubar] review cards failed: {e}\n")
             sys.stderr.flush()
             _capture(e, phase="review_cards")
 
-    def _on_review_done(self, batch, decisions):
-        # Runs on the main thread (from the card controller). Translate decisions
-        # into post_drafts args and post on a background thread so the UI stays
-        # responsive (posting can take minutes).
-        approved = [d for d in decisions if d.get("approved")]
-        post_nums = [d["n"] for d in approved if not d.get("edited")]
-        edits = [{"n": d["n"], "text": d["text"]} for d in approved if d.get("edited")]
-        st.clear_review_request()
-        if not approved:
-            self._review_active = False
-            self._notify("S4L", "No drafts approved — nothing posted.")
+    def _on_card_decision(self, batch, decision):
+        # Runs on the main thread the INSTANT a card is approved/rejected. An
+        # approved card is enqueued for immediate posting; a rejected card does
+        # nothing. We never post inline here — posting can take minutes and would
+        # freeze the card UI while the user reviews the rest of the stack.
+        if not decision.get("approved"):
             return
-        self._notify("S4L", f"Posting {len(approved)} draft(s)…")
+        with self._review_lock:
+            self._posts_outstanding += 1
+            self._review_active = True
+        self._post_q.put((batch, decision))
+        self._ensure_post_worker()
 
-        # The server's post_drafts writes "posting" activity, so the activity
-        # spinner shows automatically while this runs — no local spinner needed.
-        def work():
-            res = st.post_drafts(batch, post=post_nums, edits=edits)
-            if res is None:
-                self._notify(
-                    "S4L", "Couldn't post — open Claude Desktop and try the draft again."
-                )
-            else:
-                posted = res.get("posted") if isinstance(res, dict) else None
-                self._notify(
-                    "S4L",
-                    f"Posted {posted if posted is not None else len(approved)} draft(s).",
-                )
-            self._review_active = False
+    def _on_review_closed(self, batch, decisions):
+        # Fires when the card sequence ends (last card decided or window closed).
+        # The panel is gone, but approved cards may still be draining — keep the
+        # review "active" until the queue empties so the not-yet-posted remainder
+        # isn't re-presented as a fresh batch.
+        with self._review_lock:
+            self._panel_open = False
+            if self._posts_outstanding <= 0:
+                self._review_active = False
+        st.clear_review_request()
+        if not any(d.get("approved") for d in decisions):
+            self._notify("S4L", "No drafts approved — nothing posted.")
 
-        threading.Thread(target=work, daemon=True).start()
+    def _ensure_post_worker(self):
+        # One persistent daemon worker drains the approved-card queue. It never
+        # exits (avoids an enqueue-vs-exit race) — an idle parked thread is cheap.
+        if self._post_worker is not None and self._post_worker.is_alive():
+            return
+        self._post_worker = threading.Thread(target=self._post_worker_loop, daemon=True)
+        self._post_worker.start()
+
+    def _post_worker_loop(self):
+        # Serialized poster: one approved card at a time so two posts never drive
+        # the shared harness Chrome simultaneously. The server's post_drafts writes
+        # "posting" activity, so the menu-bar spinner shows automatically.
+        while True:
+            batch, decision = self._post_q.get()  # blocks until a card is approved
+            n = decision.get("n")
+            try:
+                self._notify("S4L", f"Posting draft {n}…")
+                if decision.get("edited"):
+                    res = st.post_drafts(
+                        batch, edits=[{"n": n, "text": decision.get("text") or ""}]
+                    )
+                else:
+                    res = st.post_drafts(batch, post=[n])
+                if res is None:
+                    self._notify(
+                        "S4L", "Couldn't post — open Claude Desktop and try the draft again."
+                    )
+                else:
+                    posted = res.get("posted") if isinstance(res, dict) else None
+                    if posted == 0:
+                        self._notify("S4L", f"Draft {n} didn't post — see the dashboard for why.")
+                    else:
+                        self._notify("S4L", f"Posted draft {n}.")
+            except Exception as e:
+                sys.stderr.write(f"[s4l-menubar] post draft {n} failed: {e}\n")
+                sys.stderr.flush()
+                _capture(e, phase="post_card")
+            finally:
+                with self._review_lock:
+                    self._posts_outstanding -= 1
+                    if self._posts_outstanding <= 0 and not self._panel_open:
+                        self._review_active = False
+                self._post_q.task_done()
 
     def _render_title(self, setup_complete, ob, blocker):
         if blocker:
@@ -641,9 +695,10 @@ class S4LMenuBar(rumps.App):
             rumps.MenuItem("Run draft cycle in Claude", callback=self._draft)
         )
         # No "Post approved drafts" item: approving a review card already posts
-        # directly + programmatically (_on_review_done -> st.post_drafts -> the
-        # CDP poster). A menu button that types a prompt into the chat to do the
-        # same thing was a redundant detour through the model, so it's gone.
+        # that card directly + programmatically (_on_card_decision -> queue ->
+        # _post_worker_loop -> st.post_drafts -> the CDP poster). A menu button
+        # that types a prompt into the chat to do the same thing was a redundant
+        # detour through the model, so it's gone.
         return out
 
 
