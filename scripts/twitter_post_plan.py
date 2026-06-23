@@ -97,6 +97,18 @@ try:
 except Exception:
     validate_or_register = None  # type: ignore[assignment]
 
+# Reasons that signal an OPERATIONAL post failure (browser/session/API broke),
+# as opposed to a content-judgment skip ("off-topic ..."). Some of these are
+# bucketed as `skipped` in the run summary (e.g. reply_box_not_found) so they do
+# not pollute the dashboard "failed" pill, but for remote observability they ARE
+# the signal that a user "approved but couldn't post" — so we capture them to
+# Sentry regardless of which summary bucket they land in.
+MACHINE_FAIL_REASONS = {
+    "no_reply_json", "reply_failed", "timeout", "unknown", "exception",
+    "log_post_no_id", "reply_box_not_found", "rate_limited", "tweet_not_found",
+    "no_reply_url_captured", "empty_reply_text", "session_invalid",
+}
+
 REPLY_URL_RE = re.compile(r"^https?://(?:x\.com|twitter\.com)/[^/]+/status/\d+")
 TOP_LEVEL_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
 
@@ -1035,6 +1047,37 @@ def main() -> int:
         "failure_reasons": ",".join(f"{k}:{v}" for k, v in fail_reasons.items()),
         "skip_reasons":    ",".join(f"{k}:{v}" for k, v in skip_reasons.items()),
     }
+    # Remote observability: a handled post failure returns a reason instead of
+    # raising, so the global Sentry excepthook never sees it. On customer .mcpb
+    # installs the cycle log lives only on their machine, so an explicit capture
+    # here is the ONLY channel that surfaces "approved but didn't post" to us.
+    # Fires only on operational/machine reasons (content-judgment skips like
+    # "off-topic ..." are excluded), so it never alerts on a healthy dedup cycle.
+    try:
+        machine = dict(fail_reasons)
+        for _k, _v in skip_reasons.items():
+            if _k in MACHINE_FAIL_REASONS:
+                machine[_k] = machine.get(_k, 0) + _v
+        if machine:
+            import sentry_init
+            _top = max(machine, key=machine.get)
+            sentry_init.capture_message(
+                "twitter post pipeline issues: "
+                f"posted={posted} failed={failed} attempted={len(candidates)} "
+                f"reasons={','.join(f'{k}:{v}' for k, v in machine.items())}",
+                level=("error" if (failed > 0 or posted == 0) else "warning"),
+                tags={
+                    "component": "twitter_post",
+                    "posted": str(posted),
+                    "failed": str(failed),
+                    "attempted": str(len(candidates)),
+                    "top_reason": _top,
+                },
+            )
+            sentry_init.flush(2.0)
+    except Exception:
+        pass
+
     # Persist a durable audit line so "did it post, and how many — and where?" is
     # answerable after the fact. The shell harvests the json on stdout, but when
     # the menu bar launches this directly it captures-then-discards stdout, leaving
