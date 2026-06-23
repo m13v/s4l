@@ -90,6 +90,30 @@ def capture_exception(err, tags=None) -> None:
         return
 
 
+def capture_message(message, level="error", tags=None) -> None:
+    """Report a handled, non-exception condition to Sentry (e.g. a post that
+    failed gracefully and returned a reason instead of raising). The global
+    excepthook only catches UNHANDLED exceptions, so operational failures that
+    are caught + reported as a result count would otherwise never reach Sentry.
+    Safe to call even if init() never ran or sentry-sdk is missing (no-op)."""
+    if not _initialized:
+        return
+    try:
+        import sentry_sdk
+    except Exception:
+        return
+    try:
+        if tags:
+            with sentry_sdk.push_scope() as scope:
+                for k, v in tags.items():
+                    scope.set_tag(str(k), str(v))
+                sentry_sdk.capture_message(str(message), level=level)
+        else:
+            sentry_sdk.capture_message(str(message), level=level)
+    except Exception:
+        return
+
+
 def flush(timeout: float = 2.0) -> None:
     """Block until queued events are sent (best-effort). Call before a short-lived
     or about-to-crash process exits so a just-captured event isn't dropped on
