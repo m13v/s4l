@@ -33,6 +33,17 @@ CAMPAIGN_BUMP = os.path.join(REPO_DIR, "scripts", "campaign_bump.py")
 REDDIT_MCP_CONFIG = os.path.expanduser("~/.claude/browser-agent-configs/reddit-agent-mcp.json")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps (Playwright and
+# friends) that live only in the owned uv runtime — so on a fresh box every
+# reddit_browser.py reply died (the same class as the Karol/Twitter bug,
+# 2026-06-22). Honor the authoritative SAPS_PYTHON pin (set by the launchd
+# plist), else sys.executable (the owned interpreter the MCP launches us under).
+# Never the literal PYTHON: that re-rolls the PATH dice. Re-exported so
+# grandchildren inherit it.
+PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
+os.environ["SAPS_PYTHON"] = PYTHON
+
 from engagement_styles import (
     REPLY_STYLES as VALID_STYLES,
     get_styles_prompt,
@@ -65,7 +76,7 @@ def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
     """
     try:
         r = subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "acquire",
+            [PYTHON, REDDIT_BROWSER_LOCK, "acquire",
              "--timeout", str(timeout), "--ttl", str(ttl)],
             capture_output=True, text=True, timeout=timeout + 30,
         )
@@ -84,7 +95,7 @@ def _release_browser_lease() -> None:
     """Release the reddit-browser lease. Idempotent (NOT_HELD is fine)."""
     try:
         subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "release"],
+            [PYTHON, REDDIT_BROWSER_LOCK, "release"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -162,7 +173,7 @@ def bump_campaigns(table, row_id, campaign_ids):
     for cid in campaign_ids:
         try:
             subprocess.run(
-                ["python3", CAMPAIGN_BUMP,
+                [PYTHON, CAMPAIGN_BUMP,
                  "--table", table, "--id", str(row_id), "--campaign-id", str(cid)],
                 capture_output=True, text=True, timeout=15,
             )
@@ -649,11 +660,28 @@ def main():
     config = load_config()
     excluded_authors = config.get("exclusions", {}).get("authors", [])
 
+    # Hard preflight: the reddit rail posts replies via reddit_browser.py, the
+    # only Playwright importer here (Moltbook uses its own poster). If the
+    # resolved interpreter can't import Playwright the owned runtime is missing
+    # or half-provisioned and every reply would die with CDP_ERROR. Fail LOUD
+    # with a distinct signal instead. Moltbook is exempt (no browser path).
+    if args.platform == "reddit":
+        _chk = subprocess.run(
+            [PYTHON, "-c", "import playwright"],
+            capture_output=True, text=True,
+        )
+        if _chk.returncode != 0:
+            print(f"[engage_reddit] FATAL runtime_incomplete: interpreter {PYTHON!r} "
+                  f"cannot import playwright — the owned Python runtime is missing or "
+                  f"unprovisioned. Run the `runtime` install (action:'install') before "
+                  f"engaging. stderr: {(_chk.stderr or '').strip()[:300]}", file=sys.stderr)
+            sys.exit(3)
+
     reset_stuck_processing(args.platform)
 
     try:
         top_report = subprocess.check_output(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_performers.py"), "--platform", args.platform],
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_performers.py"), "--platform", args.platform],
             text=True, stderr=subprocess.DEVNULL, timeout=30,
         )
     except Exception:
@@ -690,7 +718,7 @@ def main():
 
         # Check exclusion before spawning Claude
         if reply["their_author"].lower() in {a.lower() for a in excluded_authors}:
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), "excluded_author"])
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), "excluded_author"])
             print(f"[engage_reddit] #{reply['id']} skipped (excluded_author: {reply['their_author']})")
             skipped += 1
             skip_reasons["excluded_author"] += 1
@@ -711,7 +739,7 @@ def main():
                 f":interest={same_post_disengage['interest_level']}"
                 f":status={same_post_disengage['conversation_status']}"
             )
-            subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), reason])
+            subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), reason])
             print(f"[engage_reddit] #{reply['id']} skipped ({reason})")
             skipped += 1
             skip_reasons["cross_pipeline_disengage"] += 1
@@ -775,7 +803,7 @@ def main():
                 # reset_stuck_processing's 2h cap brings it back to pending.
                 try:
                     subprocess.run(
-                        ["python3", REPLY_DB, "processing", str(reply["id"])],
+                        [PYTHON, REPLY_DB, "processing", str(reply["id"])],
                         capture_output=True, timeout=10,
                     )
                 except Exception:
@@ -796,7 +824,7 @@ def main():
         ok, output, usage = run_claude(prompt, timeout=args.per_reply_timeout, session_id=session_id)
         reply_elapsed = time.time() - reply_start
         session_ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+        log_args = [PYTHON, os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
              "--session-id", session_id, "--script", "engage_reddit",
              "--started-at", session_started_at, "--ended-at", session_ended_at]
         orch_cost = usage.get("cost_usd")
@@ -853,7 +881,7 @@ def main():
             reason_key = "timeout" if output == "TIMEOUT" else "claude_failed"
             skip_reasons[reason_key] += 1
             try:
-                subprocess.run(["python3", REPLY_DB, "processing", str(reply["id"])],
+                subprocess.run([PYTHON, REPLY_DB, "processing", str(reply["id"])],
                                capture_output=True, timeout=10)
             except Exception:
                 pass
@@ -877,14 +905,14 @@ def main():
                 # Same loop-prevention as the not-ok branch: mark processing
                 # so the next iteration moves to a different pending row.
                 try:
-                    subprocess.run(["python3", REPLY_DB, "processing", str(reply["id"])],
+                    subprocess.run([PYTHON, REPLY_DB, "processing", str(reply["id"])],
                                    capture_output=True, timeout=10)
                 except Exception:
                     pass
                 print(f"[engage_reddit] #{reply['id']} BAD OUTPUT ({reply_elapsed:.0f}s): {output[:200]}")
             elif decision.get("action") == "skip":
                 reason = decision.get("reason", "unknown")
-                subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), reason])
+                subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), reason])
                 skipped += 1
                 skip_reasons[f"llm:{reason[:48]}"] += 1
                 print(f"[engage_reddit] #{reply['id']} skipped: {reason} ({reply_elapsed:.0f}s) "
@@ -924,7 +952,7 @@ def main():
                     # entire run on any non-zero exit so the row stays untouched and
                     # no platform side-effect occurs.
                     proc_result = subprocess.run(
-                        ["python3", REPLY_DB, "processing", str(reply["id"])],
+                        [PYTHON, REPLY_DB, "processing", str(reply["id"])],
                         capture_output=True,
                     )
                     if proc_result.returncode != 0:
@@ -1012,7 +1040,7 @@ def main():
                             for attempt in range(3):
                                 try:
                                     out = subprocess.check_output(
-                                        ["python3", os.path.join(REPO_DIR, "scripts", "moltbook_post.py"),
+                                        [PYTHON, os.path.join(REPO_DIR, "scripts", "moltbook_post.py"),
                                          "comment",
                                          "--post-id", post_uuid,
                                          "--parent-id", parent_id,
@@ -1034,7 +1062,7 @@ def main():
                         for attempt in range(3):
                             try:
                                 cdp_out = subprocess.check_output(
-                                    ["python3", os.path.join(REPO_DIR, "scripts", "reddit_browser.py"),
+                                    [PYTHON, os.path.join(REPO_DIR, "scripts", "reddit_browser.py"),
                                      "reply", reply["their_comment_url"], reply_text],
                                     text=True, timeout=120, stderr=subprocess.DEVNULL,
                                 )
@@ -1051,7 +1079,7 @@ def main():
                         if post_result.get("already_replied"):
                             existing = post_result.get("existing_text", "")
                             existing_url = post_result.get("existing_url", "")
-                            cmd_args = ["python3", REPLY_DB, "replied", str(reply["id"]), existing]
+                            cmd_args = [PYTHON, REPLY_DB, "replied", str(reply["id"]), existing]
                             if existing_url:
                                 cmd_args.append(existing_url)
                             patch_replied_with_retry(cmd_args, reply["id"])
@@ -1070,7 +1098,7 @@ def main():
                         # 'processing' (which 2h reset_stuck_processing would flip
                         # back to 'pending' and cause a duplicate post).
                         reply_url = post_result.get("url", "")
-                        cmd_args = ["python3", REPLY_DB, "replied", str(reply["id"]), reply_text, reply_url]
+                        cmd_args = [PYTHON, REPLY_DB, "replied", str(reply["id"]), reply_text, reply_url]
                         if engagement_style:
                             cmd_args.append(engagement_style)
                         patch_replied_with_retry(cmd_args, reply["id"])
@@ -1097,7 +1125,7 @@ def main():
                         if reply["platform"] == "reddit":
                             try:
                                 subprocess.run(
-                                    ["python3",
+                                    [PYTHON,
                                      os.path.join(REPO_DIR, "scripts", "dm_conversation.py"),
                                      "ensure-dm",
                                      "--platform", "reddit",
@@ -1114,7 +1142,7 @@ def main():
                         # mutations.
                         if project:
                             subprocess.run(
-                                ["python3", REPLY_DB, "set_project",
+                                [PYTHON, REPLY_DB, "set_project",
                                  str(reply["id"]), project],
                                 capture_output=True,
                             )
@@ -1123,7 +1151,7 @@ def main():
                               f"[${usage['cost_usd']:.4f}]")
                     else:
                         err = post_result.get("error", "unknown") if post_result else "no_response"
-                        subprocess.run(["python3", REPLY_DB, "skipped", str(reply["id"]), f"CDP_ERROR: {err}"])
+                        subprocess.run([PYTHON, REPLY_DB, "skipped", str(reply["id"]), f"CDP_ERROR: {err}"])
                         skip_reasons[f"cdp_error:{(err or 'unknown')[:32]}"] += 1
                         failed += 1
                         print(f"[engage_reddit] #{reply['id']} CDP FAILED: {err} ({reply_elapsed:.0f}s)")
@@ -1200,7 +1228,7 @@ def main():
 
     # Print final status (per-platform counts) via reply_db.py status helper,
     # which now reads /api/v1/replies/counts under the hood.
-    subprocess.run(["python3", REPLY_DB, "status", args.platform])
+    subprocess.run([PYTHON, REPLY_DB, "status", args.platform])
 
 
 if __name__ == "__main__":
