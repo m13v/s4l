@@ -46,21 +46,22 @@ VIEWPORT = {"width": 911, "height": 1016}
 
 # Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
 # var (set by per-account launchd/systemd units) or config.json
-# accounts.twitter.handle. The "m13v_" fallback keeps the Mac default working
-# when neither source is set, but on the VMs the env var MUST be set so the
-# DOM scrape + CDP URL build target the right profile.
-_DEFAULT_HANDLE = "m13v_"
-
+# accounts.twitter.handle. Returns None when neither source is set.
+#
+# There is intentionally NO hardcoded fallback handle. The old "m13v_"
+# default meant any install with an unset handle silently posted under the
+# repo owner's identity: it stamped posts.our_account = m13v_ and built reply
+# permalinks as x.com/m13v_/status/<id> for tweets that actually belonged to a
+# different account, corrupting attribution in the shared DB. Callers that
+# build a URL or post under this identity MUST treat None as "account not
+# configured" and refuse, rather than impersonate someone.
 def our_handle():
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import account_resolver
-        h = account_resolver.resolve("twitter")
-        if h:
-            return h
+        return account_resolver.resolve("twitter")
     except Exception:
-        pass
-    return _DEFAULT_HANDLE
+        return None
 
 # DM encryption passcode from .env
 DM_PASSCODE = os.environ.get("TWITTER_DM_PASSCODE", "")
@@ -820,6 +821,18 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
     """
     print(f"[twitter_browser] reply_to_tweet called: {tweet_url}", file=sys.stderr)
 
+    # Identity gate: refuse to post when no account is configured. Without a
+    # resolved handle we cannot attribute the post or build a correct reply
+    # permalink, and the old behaviour silently impersonated the repo owner
+    # (handle "m13v_"). Fail fast and loud so the misconfiguration surfaces
+    # instead of polluting the shared DB under someone else's identity.
+    _handle = our_handle()
+    if not _handle:
+        print("[twitter_browser] no twitter account configured "
+              "(set AUTOPOSTER_TWITTER_HANDLE or accounts.twitter.handle in "
+              "config.json); refusing to post.", file=sys.stderr)
+        return {"ok": False, "error": "no_account_configured"}
+
     applied_campaigns = []
     if apply_campaigns:
         for cid, suffix, sample_rate in _load_active_twitter_campaigns():
@@ -1065,7 +1078,7 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
 
             # Method 1: CDP network interception (most reliable)
             if _created_tweet_ids:
-                reply_url = f"https://x.com/{our_handle()}/status/{_created_tweet_ids[-1]}"
+                reply_url = f"https://x.com/{_handle}/status/{_created_tweet_ids[-1]}"
                 print(f"[reply_url] captured via CDP+response-listener: {reply_url}", file=sys.stderr)
 
             # Method 2: DOM diff (check if new reply links appeared)
