@@ -250,6 +250,12 @@ export interface PlanCandidate {
   // Set true once this candidate has actually been posted, so the two review
   // surfaces (chat + menu-bar pop-ups) can't post the same draft twice.
   posted?: boolean;
+  // Set once the poster reached a terminal non-post outcome (dedup, deleted
+  // tweet, no reply URL captured, etc.). Kept separate from posted so reporting
+  // can stay honest while review cards stop re-offering dead drafts.
+  terminal?: boolean;
+  terminal_reason?: string;
+  our_url?: string;
   [k: string]: unknown;
 }
 
