@@ -252,148 +252,6 @@ CLEAR_EXPR = (
 )
 
 
-# --- the interactive draft sidebar ------------------------------------------
-# A left-edge panel that lists the drafts waiting to post. Unlike the status
-# overlay (which is pointer-events:none and purely cosmetic), the sidebar is
-# INTERACTIVE: pointer-events:auto, buttons the user can click. Because a button
-# runs in the page's JS world and cannot call Python/CDP directly, the click
-# bridge is a poll: a click stashes {id, ts} on window.__sapsClick, and the
-# Python watch loop reads + clears it each tick, then drives the preview
-# (navigate to the tweet + type the draft into the reply box, NEVER submit).
-#
-# Same CSP discipline as the status overlay: createElement + element.style.<prop>
-# + textContent only, click handlers via addEventListener (NOT inline attrs / no
-# innerHTML). The two elements are kept deliberately separate so the sidebar's
-# pointer-events:auto can never bleed into the cosmetic status overlay and start
-# intercepting the automation's own clicks.
-_SIDEBAR_BODY = r"""
-window.__sapsPaintSidebar = function(payload){
-  try {
-    var ID = "__saps_sidebar";
-    var drafts = (payload && payload.drafts) || [];
-    var note = (payload && payload.note) || "";
-    function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
-
-    var root = document.getElementById(ID);
-    var rebuilt = false;
-    if(!root || !root.isConnected){
-      root = mk("div", document.documentElement); root.id = ID;
-      var s = root.style;
-      s.position="fixed"; s.top="0"; s.right="0"; s.height="100vh"; s.width="264px";
-      s.zIndex="2147483646"; s.pointerEvents="auto"; s.boxSizing="border-box";
-      s.padding="14px 12px"; s.overflowY="auto";
-      s.background="rgba(15,15,17,0.96)"; s.color="#fff";
-      s.font="13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
-      s.borderLeft="1px solid rgba(255,255,255,0.12)";
-      s.boxShadow="-2px 0 18px rgba(0,0,0,0.40)";
-      s.backdropFilter="blur(6px)"; s.webkitBackdropFilter="blur(6px)";
-      rebuilt = true;
-    }
-    var st = window.__sapsSidebarState || (window.__sapsSidebarState = {});
-    var sig = drafts.map(function(d){return d.id;}).join(",");
-    if(rebuilt || st.sig !== sig){
-      st.sig = sig;
-      while(root.firstChild) root.removeChild(root.firstChild);
-
-      var head = mk("div", root);
-      head.style.display="flex"; head.style.alignItems="center"; head.style.gap="8px";
-      var ttl = mk("span", head); ttl.textContent="Drafts to post";
-      ttl.style.fontWeight="600";
-      var cnt = mk("span", head); cnt.textContent=String(drafts.length);
-      cnt.style.marginLeft="auto"; cnt.style.opacity="0.55"; cnt.style.fontSize="11px";
-      cnt.style.fontVariantNumeric="tabular-nums";
-
-      var sub = mk("div", root);
-      sub.textContent="Click one to load it into the reply box. It won\u2019t post.";
-      sub.style.opacity="0.6"; sub.style.fontSize="11px"; sub.style.margin="3px 0 10px";
-
-      var noteEl = mk("div", root); st._note = noteEl; noteEl.id="__saps_sb_note";
-      noteEl.style.minHeight="14px"; noteEl.style.fontSize="11px";
-      noteEl.style.opacity="0.85"; noteEl.style.marginBottom="10px";
-      noteEl.textContent = note;
-
-      if(!drafts.length){
-        var empty = mk("div", root);
-        empty.textContent="No drafts waiting. Run a draft cycle.";
-        empty.style.opacity="0.5"; empty.style.fontSize="12px";
-      }
-      drafts.forEach(function(d){
-        var b = mk("div", root); var bs = b.style;
-        bs.cursor="pointer"; bs.padding="9px 10px"; bs.marginBottom="8px";
-        bs.borderRadius="10px"; bs.border="1px solid rgba(255,255,255,0.10)";
-        bs.background=(window.__sapsSelectedId==d.id)?"rgba(255,255,255,0.16)":"rgba(255,255,255,0.06)";
-        b.setAttribute("data-saps-id", String(d.id));
-
-        var meta = mk("div", b);
-        meta.style.display="flex"; meta.style.gap="6px"; meta.style.alignItems="center";
-        meta.style.marginBottom="4px";
-        if(d.project){
-          var proj = mk("span", meta); proj.textContent=d.project;
-          proj.style.fontSize="10px"; proj.style.fontWeight="600";
-          proj.style.padding="1px 6px"; proj.style.borderRadius="6px";
-          proj.style.background="rgba(255,255,255,0.14)";
-        }
-        if(d.handle){
-          var who = mk("span", meta); who.textContent="@"+d.handle;
-          who.style.fontSize="11px"; who.style.opacity="0.6";
-          who.style.overflow="hidden"; who.style.textOverflow="ellipsis"; who.style.whiteSpace="nowrap";
-        }
-        var txt = mk("div", b);
-        txt.textContent = d.draft_text || "(no draft text)";
-        txt.style.fontSize="12px"; txt.style.lineHeight="1.35";
-        txt.style.display="-webkit-box"; txt.style.webkitLineClamp="3";
-        txt.style.webkitBoxOrient="vertical"; txt.style.overflow="hidden";
-
-        b.addEventListener("mouseenter", function(){ bs.background="rgba(255,255,255,0.12)"; });
-        b.addEventListener("mouseleave", function(){
-          bs.background=(window.__sapsSelectedId==d.id)?"rgba(255,255,255,0.16)":"rgba(255,255,255,0.06)";
-        });
-        b.addEventListener("click", function(){
-          window.__sapsClick = {id: d.id, ts: Date.now()};
-          window.__sapsSelectedId = d.id;
-          var all = root.querySelectorAll("[data-saps-id]");
-          for(var i=0;i<all.length;i++){ all[i].style.background="rgba(255,255,255,0.06)"; }
-          bs.background="rgba(255,255,255,0.16)";
-          if(st._note) st._note.textContent="Loading draft into the reply box\u2026";
-        });
-      });
-    }
-    if(st._note && typeof note === "string" && note.length) st._note.textContent = note;
-  } catch(e) { /* sidebar is best-effort, never throw into the page */ }
-};
-"""
-
-SIDEBAR_PAINT_EXPR = "(payload) => { " + _SIDEBAR_BODY + " try { window.__sapsPaintSidebar(payload); } catch(e){} }"
-
-# Update ONLY the note line without rebuilding the button list (cheap, called on
-# preview start / success / error).
-SB_NOTE_EXPR = (
-    "(note) => { try { var e=document.getElementById('__saps_sb_note'); "
-    "if(e) e.textContent=note; } catch(e){} }"
-)
-
-# Read-and-clear the pending click set by a sidebar button.
-READ_CLICK_EXPR = "() => { var c = window.__sapsClick || null; window.__sapsClick = null; return c; }"
-
-CLEAR_SB_EXPR = "() => { var e=document.getElementById('__saps_sidebar'); if(e&&e.remove)e.remove(); }"
-
-# Reply composer selectors (mirrors twitter_browser._wait_for_reply_textbox).
-_REPLY_SELECTORS = (
-    '[data-testid="tweetTextarea_0"]',
-    '[role="textbox"][aria-label="Post text"]',
-    '[role="textbox"][aria-label="Tweet your reply"]',
-    '[role="textbox"][aria-label="Post your reply"]',
-)
-
-# Whether the interactive "Drafts to post" sidebar renders at all. Default OFF:
-# the sidebar was removed from the harness Chrome on 2026-06-23 at the user's
-# request. Set SAPS_SIDEBAR=1 to opt back in. The cosmetic status overlay is a
-# separate element and is unaffected by this flag.
-SIDEBAR_ENABLED = os.environ.get("SAPS_SIDEBAR", "0").strip() != "0"
-# How often (seconds) to re-fetch the drafts list from the API.
-SIDEBAR_REFRESH_SEC = int(os.environ.get("SAPS_SIDEBAR_REFRESH_SEC", "12"))
-
-
 def _build_init_script(title: str, reassure: str, status: str) -> str:
     """add_init_script body: define the painter on every new document and seed
     it with the latest known text so a mid-cycle navigation paints instantly."""
@@ -469,148 +327,6 @@ class Harness:
             except Exception:
                 pass
         return n
-
-    # --- interactive sidebar -------------------------------------------------
-
-    def register_sidebar_init(self, drafts: list) -> None:
-        """Rebuild the sidebar on every new document so it survives navigation."""
-        seed = json.dumps({"drafts": drafts, "note": ""})
-        script = _SIDEBAR_BODY + ("try { window.__sapsPaintSidebar(" + seed + "); } catch(e){}")
-        for ctx in self._browser.contexts:
-            try:
-                ctx.add_init_script(script)
-            except Exception:
-                pass
-
-    def paint_sidebar(self, drafts: list, note: str = "") -> int:
-        n = 0
-        payload = {"drafts": drafts, "note": note}
-        for p in self._pages():
-            try:
-                p.evaluate(SIDEBAR_PAINT_EXPR, payload)
-                n += 1
-            except Exception:
-                pass
-        return n
-
-    def set_sidebar_note(self, note: str) -> None:
-        for p in self._pages():
-            try:
-                p.evaluate(SB_NOTE_EXPR, note)
-            except Exception:
-                pass
-
-    def read_click(self):
-        """Return (click_dict, page) for the first pending sidebar click, else (None, None)."""
-        for p in self._pages():
-            try:
-                c = p.evaluate(READ_CLICK_EXPR)
-                if c:
-                    return c, p
-            except Exception:
-                pass
-        return None, None
-
-    def clear_sidebar(self) -> int:
-        n = 0
-        for p in self._pages():
-            try:
-                p.evaluate(CLEAR_SB_EXPR)
-                n += 1
-            except Exception:
-                pass
-        return n
-
-    def _wait_reply_box(self, page, total_ms: int = 30000):
-        import time as _t
-        deadline = _t.monotonic() + total_ms / 1000.0
-        while _t.monotonic() < deadline:
-            for sel in _REPLY_SELECTORS:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0 and loc.is_visible():
-                        return loc
-                except Exception:
-                    pass
-            page.wait_for_timeout(500)
-        return None
-
-    def preview_draft(self, page, tweet_url: str, text: str) -> dict:
-        """Navigate to the tweet and TYPE the draft into the reply box.
-
-        Deliberately stops before submitting: there is no click on the Reply /
-        tweetButtonInline button anywhere in this method. It mirrors the
-        navigate+locate+type prefix of twitter_browser.reply_to_tweet, minus the
-        post step, so the user sees exactly how the reply would look without it
-        going live.
-        """
-        try:
-            try:
-                page.goto(tweet_url, wait_until="load", timeout=60000)
-            except Exception:
-                try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
-                except Exception:
-                    pass
-            page.wait_for_timeout(2500)
-            try:
-                page.wait_for_selector("main", state="attached", timeout=20000)
-            except Exception:
-                pass
-            box = self._wait_reply_box(page, 30000)
-            if not box:
-                return {"ok": False, "error": "reply_box_not_found"}
-            box.click()
-            page.wait_for_timeout(400)
-            # Clear anything already in the composer so a re-preview is clean.
-            try:
-                page.keyboard.press("Meta+A")
-                page.keyboard.press("Delete")
-            except Exception:
-                pass
-            page.keyboard.type(text, delay=8)
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-
-# --- drafts data source -----------------------------------------------------
-
-def _fetch_drafts(limit: int = 40) -> list:
-    """Fetch the drafts waiting to post (status='drafted') via the s4l.ai API.
-
-    Returns a compact list the sidebar can render. Best-effort: any failure
-    (API down, no identity, SSL hiccup) returns [] so the watch loop never
-    crashes the pipeline over a missing sidebar list.
-    """
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from http_api import api_get
-        resp = api_get(
-            "/api/v1/twitter-candidates",
-            query={"status": "drafted", "limit": str(limit)},
-        )
-    except BaseException:
-        # api_get raises SystemExit (a BaseException, NOT Exception) on terminal
-        # HTTP failure; a transient 500 must yield [] for this tick, never kill
-        # the watch loop. Catch BaseException so the sidebar degrades gracefully.
-        return []
-    rows = (resp.get("data") or {}).get("candidates") if isinstance(resp, dict) else None
-    rows = rows or (resp.get("candidates") if isinstance(resp, dict) else None) or []
-    drafts = []
-    for r in rows:
-        text = (r.get("draft_reply_text") or "").strip()
-        url = r.get("tweet_url") or ""
-        if not text or not url:
-            continue
-        drafts.append({
-            "id": r.get("id"),
-            "project": r.get("matched_project") or "",
-            "handle": r.get("author_handle") or "",
-            "tweet_url": url,
-            "draft_text": text,
-        })
-    return drafts
 
 
 # --- cycle-log -> friendly status -------------------------------------------
@@ -739,20 +455,12 @@ def cmd_watch(interval: float = 2.0) -> int:
     poster's concurrent CDP session) and only reconnects when the harness Chrome
     comes/goes. Never raises into the pipeline."""
     print(f"watching {LOG_DIR}/twitter-cycle-*.log -> overlay on {CDP_URL} (Ctrl-C to stop)")
-    if SIDEBAR_ENABLED:
-        print(f"interactive drafts sidebar ON (refresh every {SIDEBAR_REFRESH_SEC}s; SAPS_SIDEBAR=0 to disable)")
-    else:
-        print("interactive drafts sidebar OFF (default; set SAPS_SIDEBAR=1 to opt back in)")
     # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
     # cleared on the way out instead of lingering until the next navigation.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     last_status = None
     h: Harness | None = None
     registered = False
-    drafts: list = []
-    drafts_by_id: dict = {}
-    last_sb_fetch = 0.0
-    last_sb_sig = None
     try:
         while True:
             # Never let status computation (log globbing/stat, all racing against
@@ -768,54 +476,12 @@ def cmd_watch(interval: float = 2.0) -> int:
                 if not registered:
                     # Re-register init on each (re)connect so fresh tabs inherit it.
                     h.register_init(TITLE, REASSURE, status)
-                    if SIDEBAR_ENABLED:
-                        h.register_sidebar_init(drafts)
                     registered = True
                 # Repaint every tick even when text is unchanged: the timestamp
                 # reset keeps the heartbeat fresh so the dot never looks dead.
                 if h.paint(TITLE, REASSURE, status) == 0:
                     # No live page (all tabs closed/navigating) -> drop & retry.
                     raise RuntimeError("no live page")
-
-                if SIDEBAR_ENABLED:
-                    now = time.time()
-                    if now - last_sb_fetch >= SIDEBAR_REFRESH_SEC:
-                        drafts = _fetch_drafts()
-                        drafts_by_id = {str(d["id"]): d for d in drafts}
-                        last_sb_fetch = now
-                        sig = ",".join(str(d["id"]) for d in drafts)
-                        if sig != last_sb_sig:
-                            # List changed -> re-register init (fresh tabs) + repaint.
-                            h.register_sidebar_init(drafts)
-                            last_sb_sig = sig
-                    h.paint_sidebar(drafts)
-
-                    # Click bridge: a sidebar button stashed {id, ts} -> drive preview.
-                    click, click_page = h.read_click()
-                    if click and click_page is not None:
-                        did = str(click.get("id"))
-                        d = drafts_by_id.get(did)
-                        if d is None:
-                            h.set_sidebar_note("That draft is no longer in the list.")
-                        elif "posting" in status.lower():
-                            # Collision guard: a posting step is driving the same
-                            # Chrome right now. Refuse so we don't fight it.
-                            h.set_sidebar_note("Busy posting right now \u2014 try again in a moment.")
-                        else:
-                            short = (d["draft_text"][:40] + "\u2026") if len(d["draft_text"]) > 40 else d["draft_text"]
-                            h.set_sidebar_note("Opening tweet + typing draft\u2026")
-                            print(f"[{time.strftime('%H:%M:%S')}] preview draft id={did} -> {d['tweet_url']}")
-                            res = h.preview_draft(click_page, d["tweet_url"], d["draft_text"])
-                            if res.get("ok"):
-                                h.set_sidebar_note(f"\u2713 Loaded into reply box (not posted): \u201c{short}\u201d")
-                            else:
-                                h.set_sidebar_note(f"Couldn\u2019t load draft: {res.get('error')}")
-                else:
-                    # Sidebar disabled: proactively remove any panel a prior
-                    # (sidebar-enabled) watcher generation or a stale
-                    # add_init_script may still be painting, so it disappears
-                    # within a tick instead of lingering until Chrome restarts.
-                    h.clear_sidebar()
             except Exception:
                 # Harness down or transient CDP hiccup; tear down and retry next tick.
                 if h is not None:
@@ -838,10 +504,6 @@ def cmd_watch(interval: float = 2.0) -> int:
             except Exception:
                 pass
             try:
-                h.clear_sidebar()
-            except Exception:
-                pass
-            try:
                 h.__exit__(None, None, None)
             except Exception:
                 pass
@@ -850,17 +512,6 @@ def cmd_watch(interval: float = 2.0) -> int:
                 cmd_clear()
             except Exception:
                 pass
-    return 0
-
-
-def cmd_drafts() -> int:
-    """Print the drafts the sidebar would show (debug helper, no browser needed)."""
-    drafts = _fetch_drafts()
-    print(f"{len(drafts)} draft(s) waiting:")
-    for d in drafts:
-        short = (d["draft_text"][:70] + "\u2026") if len(d["draft_text"]) > 70 else d["draft_text"]
-        print(f"  [{d['id']}] {d['project']} @{d['handle']}: {short}")
-        print(f"        {d['tweet_url']}")
     return 0
 
 
@@ -881,8 +532,6 @@ def main(argv: list[str]) -> int:
     if cmd == "watch":
         iv = float(argv[1]) if len(argv) > 1 else 2.0
         return cmd_watch(iv)
-    if cmd == "drafts":
-        return cmd_drafts()
     print(f"unknown command: {cmd}", file=sys.stderr)
     print(__doc__)
     return 2
