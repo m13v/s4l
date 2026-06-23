@@ -385,8 +385,11 @@ _REPLY_SELECTORS = (
     '[role="textbox"][aria-label="Post your reply"]',
 )
 
-# Whether the sidebar is enabled at all (set SAPS_SIDEBAR=0 to disable).
-SIDEBAR_ENABLED = os.environ.get("SAPS_SIDEBAR", "1").strip() != "0"
+# Whether the interactive "Drafts to post" sidebar renders at all. Default OFF:
+# the sidebar was removed from the harness Chrome on 2026-06-23 at the user's
+# request. Set SAPS_SIDEBAR=1 to opt back in. The cosmetic status overlay is a
+# separate element and is unaffected by this flag.
+SIDEBAR_ENABLED = os.environ.get("SAPS_SIDEBAR", "0").strip() != "0"
 # How often (seconds) to re-fetch the drafts list from the API.
 SIDEBAR_REFRESH_SEC = int(os.environ.get("SAPS_SIDEBAR_REFRESH_SEC", "12"))
 
@@ -738,6 +741,8 @@ def cmd_watch(interval: float = 2.0) -> int:
     print(f"watching {LOG_DIR}/twitter-cycle-*.log -> overlay on {CDP_URL} (Ctrl-C to stop)")
     if SIDEBAR_ENABLED:
         print(f"interactive drafts sidebar ON (refresh every {SIDEBAR_REFRESH_SEC}s; SAPS_SIDEBAR=0 to disable)")
+    else:
+        print("interactive drafts sidebar OFF (default; set SAPS_SIDEBAR=1 to opt back in)")
     # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
     # cleared on the way out instead of lingering until the next navigation.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
@@ -805,6 +810,12 @@ def cmd_watch(interval: float = 2.0) -> int:
                                 h.set_sidebar_note(f"\u2713 Loaded into reply box (not posted): \u201c{short}\u201d")
                             else:
                                 h.set_sidebar_note(f"Couldn\u2019t load draft: {res.get('error')}")
+                else:
+                    # Sidebar disabled: proactively remove any panel a prior
+                    # (sidebar-enabled) watcher generation or a stale
+                    # add_init_script may still be painting, so it disappears
+                    # within a tick instead of lingering until Chrome restarts.
+                    h.clear_sidebar()
             except Exception:
                 # Harness down or transient CDP hiccup; tear down and retry next tick.
                 if h is not None:
