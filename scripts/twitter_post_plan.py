@@ -49,6 +49,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# This pipeline ONLY posts (never scans), so mark every twitter_browser.py reply
+# subprocess it spawns as the high-priority "post" lock role. run_subprocess
+# inherits this process env, so the child twitter_browser.py reads SAPS_LOCK_ROLE
+# at import and will PREEMPT a live scan holding the browser lock instead of
+# losing the 45s wait. Covers BOTH the MCP approve path and the cron post path,
+# since both shell out to this script. Set before any child is spawned.
+os.environ["SAPS_LOCK_ROLE"] = "post"
+
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
 LOG_POST = os.path.join(REPO_DIR, "scripts", "log_post.py")
