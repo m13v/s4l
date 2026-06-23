@@ -35,13 +35,18 @@ from db import load_env, get_conn  # noqa: E402
 
 # Our own installs, hidden by default so the roster is real external users.
 INTERNAL_EMAILS = {"i@m13v.com", "agent@mk0r.com", "matt@mediar.ai"}
-INTERNAL_HOSTNAME_SUBSTR = ("e2b.local",)  # ephemeral mk0r E2B sandboxes
+INTERNAL_HOSTNAME_SUBSTR = ("e2b.local", "71522")  # mk0r E2B sandboxes; MacStadium QA box
+# MacStadium remote QA box (hostname "71522", no git_email). It actively runs the
+# pipeline and posts, so without this it masquerades as our only posting customer.
+INTERNAL_HARDWARE_UUIDS = {"07CB793D-6E32-5EF8-82E2-7CDEABD47FBC"}
 
 
-def is_internal(emails, hostnames):
+def is_internal(emails, hostnames, hardware_uuids):
     if any((e or "").lower() in INTERNAL_EMAILS for e in emails):
         return True
     if any(sub in (h or "") for h in hostnames for sub in INTERNAL_HOSTNAME_SUBSTR):
+        return True
+    if any((u or "") in INTERNAL_HARDWARE_UUIDS for u in hardware_uuids):
         return True
     return False
 
@@ -70,6 +75,7 @@ def fetch(days):
       w.entity_key,
       count(DISTINCT w.install_id)                                            AS installs,
       count(DISTINCT w.hardware_uuid)                                         AS machines,
+      array_remove(array_agg(DISTINCT w.hardware_uuid), NULL)                 AS hardware_uuids,
       array_remove(array_agg(DISTINCT NULLIF(w.git_email, '')), NULL)         AS emails,
       array_remove(array_agg(DISTINCT w.hostname), NULL)                      AS hostnames,
       max(w.os_version)                                                       AS os,
@@ -114,7 +120,7 @@ def main():
     load_env()
     rows = fetch(args.days)
     for r in rows:
-        r["internal"] = is_internal(r["emails"], r["hostnames"])
+        r["internal"] = is_internal(r["emails"], r["hostnames"], r["hardware_uuids"])
 
     external = [r for r in rows if not r["internal"]]
     internal = [r for r in rows if r["internal"]]
