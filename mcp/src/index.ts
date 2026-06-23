@@ -2418,68 +2418,144 @@ function rmShellLockDir(): void {
 }
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// SIGTERM a live scan holding the shell browser lock so the post takes the
-// browser at once. Best-effort; only ever targets a run-twitter-cycle.sh.
+// SIGKILL a scan's WHOLE process tree (the bash + its browser-harness/tee
+// children). run-twitter-cycle.sh traps SIGTERM/INT/HUP (skill/lock.sh installs
+// `trap _sa_release_locks ... TERM`), so a SIGTERM runs the cleanup handler and
+// the script KEEPS GOING — the scan never dies, still drives Chrome, and the next
+// autopilot tick stacks another on top (the zombie pileup that stale-reclaimed the
+// lock mid-post). SIGKILL can't be trapped. Kill children first so the harness CDP
+// driver lets go of Chrome immediately.
+function sigkillScanTree(pid: number): void {
+  try {
+    const out = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf-8", timeout: 4000 });
+    for (const cstr of out.split(/\s+/)) {
+      const c = parseInt(cstr, 10);
+      if (Number.isFinite(c) && c > 0) {
+        try {
+          process.kill(c, "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+    }
+  } catch {
+    /* no children / pgrep unavailable */
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    /* gone */
+  }
+}
+
+// Single-flight: SIGKILL every run-twitter-cycle.sh on the box before launching a
+// fresh scan, so a zombie that survived a prior SIGTERM (or a stale waiter parked
+// behind a post) can never accumulate. Mirrors the plist's run-twitter-cycle-
+// singleton.sh "one cycle at a time" guarantee, which the MCP's direct launch
+// bypassed. Best-effort; never throws.
+function sigkillAllScans(): void {
+  try {
+    const out = execFileSync("pgrep", ["-f", "skill/run-twitter-cycle.sh"], {
+      encoding: "utf-8",
+      timeout: 4000,
+    });
+    for (const pstr of out.split(/\s+/)) {
+      const p = parseInt(pstr, 10);
+      if (Number.isFinite(p) && p > 0) sigkillScanTree(p);
+    }
+  } catch {
+    /* none running */
+  }
+}
+
+// ---- Lock grace-hold: hold the /tmp lock CONTINUOUSLY across per-card posts ----
+// The plist pipeline acquires the browser lock ONCE and holds it through the whole
+// posting phase. The MCP posts per approved card (separate post_drafts calls), and
+// the old code acquired+released the lock PER CARD — leaving a release window
+// BETWEEN every card that a parked scan stale-reclaimed (the hijack). Instead we
+// keep the lock and only release it after SHELL_LOCK_GRACE_MS of no posting, so the
+// hold EXPANDS as more cards get approved and there is never a gap between cards.
+const SHELL_LOCK_GRACE_MS = Number(process.env.SAPS_POST_LOCK_GRACE_MS) || 60_000;
+let shellLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelScheduledShellLockRelease(): void {
+  if (shellLockReleaseTimer) {
+    clearTimeout(shellLockReleaseTimer);
+    shellLockReleaseTimer = null;
+  }
+}
+function scheduleShellLockRelease(): void {
+  cancelScheduledShellLockRelease();
+  shellLockReleaseTimer = setTimeout(() => {
+    shellLockReleaseTimer = null;
+    releaseShellBrowserLock();
+  }, SHELL_LOCK_GRACE_MS);
+}
+
+// SIGKILL a live scan holding the shell browser lock so the post takes the browser
+// at once. Best-effort; only ever targets a run-twitter-cycle.sh.
 function preemptScanHoldingBrowser(): void {
   try {
     const pid = shellLockHolderPid();
     if (pid && pidAlive(pid) && pidIsScan(pid)) {
       console.error(
-        `[post] preempting cross-process scan holding the twitter-browser lock (pid ${pid})`
+        `[post] preempting cross-process scan holding the twitter-browser lock (pid ${pid}) — SIGKILL tree`
       );
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        /* already gone */
-      }
+      sigkillScanTree(pid);
     }
   } catch {
     /* best effort */
   }
 }
 
-// Take the shell browser lock for the batch. Preempts a scan holder; never
-// steals from a live non-scan holder (a peer poster) — there it returns false
-// and posting proceeds unguarded (no worse than before). Best-effort.
+// Take (or extend) the shell browser lock for the batch. Preempts a scan holder
+// with SIGKILL; never steals from a live non-scan holder (a peer poster) — there
+// it returns false and posting proceeds unguarded (no worse than before).
 async function acquireShellBrowserLock(): Promise<boolean> {
+  // A new post cancels any pending grace-release and EXTENDS the existing hold.
+  cancelScheduledShellLockRelease();
+  // Already ours? Refresh the pid + expiry and keep holding — this is the "expand
+  // the lock as more cards get approved" path: consecutive per-card posts reuse
+  // ONE continuous hold instead of churning the lock, which is what left a window
+  // a parked scan stale-reclaimed between cards.
+  if (shellLockHolderPid() === process.pid) {
+    try {
+      fs.writeFileSync(path.join(TW_BROWSER_LOCK_DIR, "pid"), String(process.pid));
+      fs.writeFileSync(
+        path.join(TW_BROWSER_LOCK_DIR, "expires_at"),
+        String(Math.floor(Date.now() / 1000) + 1800)
+      );
+    } catch {
+      /* best effort */
+    }
+    return true;
+  }
   for (let attempt = 0; attempt < 8; attempt++) {
     try {
       fs.mkdirSync(TW_BROWSER_LOCK_DIR); // atomic mutex — only one winner
-      try {
-        fs.writeFileSync(path.join(TW_BROWSER_LOCK_DIR, "pid"), String(process.pid));
-      } catch {
-        /* best effort */
-      }
-      try {
-        fs.writeFileSync(
-          path.join(TW_BROWSER_LOCK_DIR, "expires_at"),
-          String(Math.floor(Date.now() / 1000) + 1800)
-        );
-      } catch {
-        /* best effort */
-      }
+      // Write the pid IMMEDIATELY (sync) so the dir is never observably pid-less.
+      fs.writeFileSync(path.join(TW_BROWSER_LOCK_DIR, "pid"), String(process.pid));
+      fs.writeFileSync(
+        path.join(TW_BROWSER_LOCK_DIR, "expires_at"),
+        String(Math.floor(Date.now() / 1000) + 1800)
+      );
       console.error(
         `[post] holding twitter-browser shell lock pid=${process.pid} — scans queue behind the post`
       );
       return true;
     } catch {
-      // Dir exists. Reclaim if the holder is dead; preempt if it's a scan;
+      // Dir exists. Reclaim if the holder is dead; SIGKILL-preempt if it's a scan;
       // otherwise (a live peer poster) leave it and post unguarded.
       const pid = shellLockHolderPid();
       if (!pid || !pidAlive(pid)) {
         rmShellLockDir();
       } else if (pidIsScan(pid)) {
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch {
-          /* already gone */
-        }
-        await sleepMs(400);
+        sigkillScanTree(pid); // SIGKILL — scans trap SIGTERM and survive it
+        await sleepMs(300);
         rmShellLockDir();
       } else {
         return false; // a real peer holds it — don't steal; proceed
       }
-      await sleepMs(250);
+      await sleepMs(200);
     }
   }
   return false;
@@ -2507,13 +2583,9 @@ function preemptScanForPost(): void {
   try {
     if (scanChild && scanChild.pid && scanChild.exitCode === null) {
       console.error(
-        `[post] preempting in-flight plugin scan (pid ${scanChild.pid}) so the approved post takes the browser`
+        `[post] preempting in-flight plugin scan (pid ${scanChild.pid}) so the approved post takes the browser — SIGKILL tree`
       );
-      try {
-        scanChild.kill("SIGTERM");
-      } catch {
-        /* already gone */
-      }
+      sigkillScanTree(scanChild.pid); // SIGKILL — scan bash traps SIGTERM
     }
   } catch {
     /* best effort */
