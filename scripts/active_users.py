@@ -49,16 +49,19 @@ def is_internal(emails, hostnames):
 def fetch(days):
     # One row per MACHINE (hardware_uuid; fall back to a per-install key when the
     # client never reported a hardware_uuid so those installs aren't all merged).
-    q = """
+    # `days` is an argparse int (injection-safe), inlined because the wrapper's
+    # SQL translation mangles %s placeholders.
+    days = int(days)
+    q = f"""
     WITH win AS (
       SELECT *, COALESCE(hardware_uuid, 'nohw:' || install_id::text) AS machine_key
       FROM installations
-      WHERE last_seen_at > now() - (%s || ' days')::interval
+      WHERE last_seen_at > now() - interval '{days} days'
     ),
     posted AS (
       SELECT install_id, count(*) AS n
       FROM posts
-      WHERE posted_at > now() - (%s || ' days')::interval AND install_id IS NOT NULL
+      WHERE posted_at > now() - interval '{days} days' AND install_id IS NOT NULL
       GROUP BY install_id
     )
     SELECT
@@ -78,7 +81,7 @@ def fetch(days):
     """
     conn = get_conn()
     try:
-        cur = conn.execute(q, (str(days), str(days)))
+        cur = conn.execute(q)
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
