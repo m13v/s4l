@@ -1209,6 +1209,37 @@ def cmd_connect(args) -> dict:
     }
 
 
+def cmd_resolve_handle(args) -> dict:
+    """Read the live logged-in @handle from the managed Chrome and persist it to
+    config.json accounts.twitter.handle.
+
+    The MCP post preflight calls this to self-heal a missing handle — the onboarding
+    gap where connect_x's best-effort live-DOM read silently no-op'd, leaving the
+    install logged in but with accounts:null, so twitter_browser.py refused EVERY
+    reply with no_account_configured. Reading the handle from the SAME session the
+    poster posts through is ground truth, not a guess, so it's safe where a hardcoded
+    fallback would not be. Best-effort: returns state=browser_not_running / no_handle
+    on failure and never raises."""
+    try:
+        ws, send = _attach()
+    except Exception as e:
+        return {"ok": False, "state": "browser_not_running", "error": str(e)}
+    handle = None
+    try:
+        handle = _resolve_live_handle(send)
+    except Exception:
+        handle = None
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    if not handle:
+        return {"ok": False, "state": "no_handle"}
+    persisted = _write_handle_to_config(handle)
+    return {"ok": True, "state": "resolved", "handle": handle, "persisted": persisted}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Twitter/X session bootstrap for MCP setup.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1216,6 +1247,10 @@ def main() -> int:
     sub.add_parser("detect-sources",
                    help="List browsers/profiles to import the X session from "
                         "(JSON, for the panel dropdown). No keychain prompt.")
+    sub.add_parser("resolve-handle",
+                   help="Read the live logged-in @handle from the managed Chrome and "
+                        "persist it to config.json accounts.twitter.handle. Idempotent "
+                        "self-heal for the post preflight; never overwrites a real handle.")
     c = sub.add_parser("connect", help="Ensure browser + import/validate the X session.")
     c.add_argument("--source", default=None,
                    help="Browser profile to import from (e.g. chrome:Default, arc:Default), "
@@ -1244,6 +1279,8 @@ def main() -> int:
         out = {"ok": False, "state": "error", "error": _WEBSOCKET_IMPORT_ERROR}
     elif args.cmd == "status":
         out = cmd_status(args)
+    elif args.cmd == "resolve-handle":
+        out = cmd_resolve_handle(args)
     else:
         out = cmd_connect(args)
     print(json.dumps(out, indent=2))
