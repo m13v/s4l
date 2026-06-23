@@ -1017,11 +1017,58 @@ def main() -> int:
             return 3
 
     _total = len(candidates)
+
+    # ---- Batch-level browser-lock hold (cross-process posting priority) --------
+    # Hold the Twitter browser lock for the WHOLE approved batch instead of
+    # re-acquiring it per candidate. Per-candidate acquisition freed the lock in
+    # the gap between replies (dominated by link_tail's `claude -p` call, ~5-20s),
+    # and the autopilot scan fires every 60s, so a scan kept slipping into that gap
+    # and seizing the browser mid-batch -- the exact "posting gets cut off" symptom
+    # on the remote box. Acquiring ONCE here PREEMPTS any live scan (role:"post"
+    # priority) and, by exporting our session id as SAPS_LOCK_OWNER, makes every
+    # child twitter_browser.py reply INHERIT this hold rather than contend for it,
+    # closing the gap. The hold is bounded by the posting-specific POST_LOCK_EXPIRY
+    # failsafe in twitter_browser (a hung poster self-clears in <=180s; a crashed
+    # one frees instantly via dead-pid reclaim), so it can never wedge the browser
+    # indefinitely. Best-effort: if the import or acquire fails we simply fall back
+    # to the legacy per-candidate acquisition (children still preempt scans one by
+    # one), so posting degrades gracefully and is never blocked by this addition.
+    _tb = None
+    _batch_lock_held = False
+    if candidates:
+        try:
+            import twitter_browser as _tb  # SAPS_LOCK_ROLE=post already set above
+            _tb._acquire_browser_lock()    # preempts a live scan; sys.exit(1) if contended
+            os.environ["SAPS_LOCK_OWNER"] = _tb._LOCK_SESSION_ID
+            _batch_lock_held = True
+            print(f"[post] batch lock held by {_tb._LOCK_SESSION_ID} (role=post); "
+                  f"{_total} candidate(s) inherit it", flush=True)
+        except SystemExit:
+            # _acquire_browser_lock exits when a LIVE non-preemptable peer (another
+            # poster) holds the lock past LOCK_WAIT_MAX. Don't abort the whole run:
+            # drop to per-candidate acquisition (each child still preempts scans).
+            print("[post] batch lock contended; per-candidate acquisition in effect",
+                  flush=True)
+        except Exception as _e:
+            print(f"[post] batch lock setup skipped ({_e}); per-candidate "
+                  "acquisition in effect", flush=True)
+
     try:
         for _idx, c in enumerate(candidates, start=1):
             # Live per-post status for the S4L menu bar: "posting 3/10" while this
             # one is in flight, then "posted 3/10 ✓" once it lands. Cosmetic only.
             _write_activity(f"posting {_idx}/{_total}")
+            # Re-stamp the batch hold at each candidate boundary so the
+            # POST_LOCK_EXPIRY failsafe measures silence from the LAST real
+            # progress, not from batch start. Insurance on top of the child's own
+            # inherit-refresh: keeps the hold fresh even across a candidate that
+            # skips before ever spawning a reply subprocess (empty_reply_text,
+            # pre-post dedup). Cheap; never raises.
+            if _batch_lock_held and _tb is not None:
+                try:
+                    _tb._refresh_browser_lock()
+                except Exception:
+                    pass
             try:
                 outcome, reason = post_one(c, picker_assignment=picker_assignment)
             except Exception as e:
@@ -1047,6 +1094,17 @@ def main() -> int:
                     fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
     finally:
         _clear_activity()
+        # Release the batch hold so the next scan/post can take the browser
+        # immediately (don't make peers wait out POST_LOCK_EXPIRY). _tb's atexit
+        # is a backstop if we somehow skip this; clearing SAPS_LOCK_OWNER stops a
+        # late child from re-inheriting a lock we just dropped.
+        if _batch_lock_held and _tb is not None:
+            try:
+                _tb._release_browser_lock()
+            except Exception:
+                pass
+            os.environ.pop("SAPS_LOCK_OWNER", None)
+            print("[post] batch lock released", flush=True)
 
     summary = {
         "posted": posted,
