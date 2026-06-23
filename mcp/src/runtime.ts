@@ -582,6 +582,21 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     if (r.code !== 0) {
       return fail(`playwright install chromium failed (exit ${r.code}). ${r.out.slice(-400)}`);
     }
+    // Smoke-test the EXACT gate the pipeline's post path runs at use time
+    // (twitter_post_plan.py preflight): the owned interpreter must import
+    // playwright. The reply step is the only Playwright importer, so a deps
+    // sync that left it unimportable was invisible until the first real post
+    // died with no_reply_json in production (Karol, 2026-06-22). Fail the
+    // install LOUDLY here instead.
+    const smoke = await sh(VENV_PYTHON, ["-c", "import playwright"], {
+      timeoutMs: 60000,
+    });
+    if (smoke.code !== 0) {
+      return fail(
+        `runtime smoke test failed: ${VENV_PYTHON} cannot import playwright ` +
+          `(exit ${smoke.code}). ${smoke.out.slice(-400)}`
+      );
+    }
   }
   setStep("chromium", "done");
 
