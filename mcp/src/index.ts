@@ -2898,6 +2898,13 @@ tool(
     inputSchema: { project: z.string().optional() },
   },
   async (args: { project?: string }) => {
+    // MUTUAL EXCLUSION (the real hijack fix): while a post batch is in progress
+    // (or its grace-hold is active), DEFER scanning entirely rather than launching
+    // a scan that races the post for the one shared browser. Both the scan and the
+    // post are children of THIS MCP, so this in-process gate is exact — the
+    // autopilot never even starts a scan to interrupt a post. Posting always wins;
+    // the autopilot just re-calls and runs once the batch drains.
+    if (postingActive) return scanDeferredForPost();
     // Long-poll the single in-flight scan job (see the ScanJob registry above).
     // A finished-but-unconsumed job: hand back its result and clear the slot so a
     // later call starts a fresh scan.
