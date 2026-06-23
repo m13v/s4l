@@ -122,30 +122,40 @@ def parse_urn_ids(*sources):
 
 VALID_PLATFORMS = ("reddit", "twitter", "linkedin", "github_issues", "moltbook")
 
-DEFAULT_ACCOUNTS = {
-    "reddit": "Deep_Ad1959",
-    "linkedin": "Matthew Diakonov",
-    "github_issues": "m13v",
-    "moltbook": "matthew-autoposter",
+# Maps log_post's platform strings to account_resolver's platform keys.
+# (log_post uses "github_issues"; account_resolver uses "github".)
+_RESOLVER_PLATFORM = {
+    "twitter": "twitter",
+    "reddit": "reddit",
+    "linkedin": "linkedin",
+    "github_issues": "github",
+    "moltbook": "moltbook",
 }
 
 
 def _resolve_default_account(platform: str) -> str:
-    """Return the canonical account handle for `platform` on this machine.
+    """Return the configured account handle for `platform` on this machine.
 
-    Twitter is multi-machine-aware: each machine declares its own handle via
-    `AUTOPOSTER_TWITTER_HANDLE` env or `accounts.twitter.handle` in
-    config.json, and `twitter_account.resolve_handle()` returns the
-    normalized form (no `@` prefix). Other platforms keep their static
-    defaults until each gets the same multi-machine treatment.
+    Resolved ONLY from env (`AUTOPOSTER_<PLATFORM>_*`) or config.json
+    (`accounts.<platform>.*`) via account_resolver. There are NO hardcoded
+    handle fallbacks: a misconfigured install must never silently post under
+    another person's identity. The old per-platform defaults
+    (m13v_/Deep_Ad1959/Matthew Diakonov/m13v/matthew-autoposter) did exactly
+    that, stamping every unconfigured install's rows with the repo owner's
+    handle and polluting the shared DB across accounts.
 
-    Returns empty string when nothing is configured; the caller's
+    Returns "" when nothing is configured; the caller's
     `args.account or _resolve_default_account(...)` chain still lets an
-    explicit `--account` flag win.
+    explicit `--account` flag win, and an empty value surfaces the misconfig
+    instead of impersonating someone.
     """
-    if platform == "twitter":
-        return resolve_twitter_handle() or ""
-    return DEFAULT_ACCOUNTS.get(platform, "")
+    try:
+        import account_resolver
+        return account_resolver.resolve(
+            _RESOLVER_PLATFORM.get(platform, platform)
+        ) or ""
+    except Exception:
+        return ""
 
 
 def coerce_engagement_style(args):
