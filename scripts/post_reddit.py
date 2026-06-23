@@ -36,6 +36,17 @@ CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
 REDDIT_BROWSER = os.path.join(REPO_DIR, "scripts", "reddit_browser.py")
 REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py")
 REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
+
+# Interpreter every child subprocess must run under. A bare PYTHON resolved
+# to the user's system python, which lacks the pipeline deps (Playwright and
+# friends) that live only in the owned uv runtime — so on a fresh box every
+# reddit_browser.py reply died (the same class as the Karol/Twitter bug,
+# 2026-06-22). Honor the authoritative SAPS_PYTHON pin (set by the launchd
+# plist), else sys.executable (the owned interpreter the MCP launches us under).
+# Never the literal PYTHON: that re-rolls the PATH dice. Re-exported so
+# grandchildren inherit it.
+PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
+os.environ["SAPS_PYTHON"] = PYTHON
 RATELIMIT_FILE = "/tmp/reddit_ratelimit.json"
 PREFLIGHT_WAIT_BUDGET_SECONDS = 180
 
@@ -619,7 +630,7 @@ def load_config():
 
 def pick_project(platform="reddit", exclude=None):
     try:
-        cmd = ["python3", os.path.join(REPO_DIR, "scripts", "pick_project.py"),
+        cmd = [PYTHON, os.path.join(REPO_DIR, "scripts", "pick_project.py"),
                "--platform", platform, "--json"]
         if exclude:
             cmd.extend(["--exclude", ",".join(exclude)])
@@ -641,7 +652,7 @@ def get_top_performers(project_name, platform="reddit", style=None):
     callers that have not flipped to the picker yet).
     """
     try:
-        cmd = ["python3", os.path.join(REPO_DIR, "scripts", "top_performers.py"),
+        cmd = [PYTHON, os.path.join(REPO_DIR, "scripts", "top_performers.py"),
                "--platform", platform, "--project", project_name]
         if style:
             cmd.extend(["--style", style])
@@ -660,7 +671,7 @@ def get_top_search_topics(project_name, platform="reddit", limit=8, window_days=
     project on this platform, or '' if no data yet. See top_search_topics.py."""
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_search_topics.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_search_topics.py"),
              "--project", project_name, "--platform", platform,
              "--window-days", str(window_days), "--limit", str(limit)],
             capture_output=True, text=True, timeout=15,
@@ -684,7 +695,7 @@ def get_omitted_reddit_topics(project_name, limit=10, window_hours=168, min_omit
     """
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_omitted_reddit_topics.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_omitted_reddit_topics.py"),
              "--project", project_name,
              "--window-hours", str(window_hours),
              "--limit", str(limit),
@@ -709,7 +720,7 @@ def get_dud_reddit_queries(project_name, limit=15, window_hours=168):
     """
     try:
         result = subprocess.run(
-            ["python3", os.path.join(REPO_DIR, "scripts", "top_dud_reddit_queries.py"),
+            [PYTHON, os.path.join(REPO_DIR, "scripts", "top_dud_reddit_queries.py"),
              "--project", project_name,
              "--window-hours", str(window_hours),
              "--limit", str(limit)],
@@ -1451,7 +1462,7 @@ def run_claude(prompt, timeout=600):
         text_output = "\n".join(all_text_parts) if all_text_parts else "".join(collected)
         stderr_out = proc.stderr.read() if proc.stderr else ""
         try:
-            log_args = ["python3", os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
+            log_args = [PYTHON, os.path.join(REPO_DIR, "scripts", "log_claude_session.py"),
                  "--session-id", session_id, "--script", "post_reddit"]
             orch_cost = usage.get("cost_usd")
             if isinstance(orch_cost, (int, float)) and orch_cost > 0:
@@ -1487,7 +1498,7 @@ def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
     """
     try:
         r = subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "acquire",
+            [PYTHON, REDDIT_BROWSER_LOCK, "acquire",
              "--timeout", str(timeout), "--ttl", str(ttl)],
             capture_output=True, text=True, timeout=timeout + 30,
         )
@@ -1512,7 +1523,7 @@ def _release_browser_lease() -> None:
     """
     try:
         subprocess.run(
-            ["python3", REDDIT_BROWSER_LOCK, "release"],
+            [PYTHON, REDDIT_BROWSER_LOCK, "release"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -1529,7 +1540,7 @@ def post_via_cdp(thread_url, reply_to_url, text):
     for attempt in range(MAX_ATTEMPTS):
         try:
             target = reply_to_url or thread_url
-            cmd = ["python3", REDDIT_BROWSER, "reply" if reply_to_url else "post-comment", target, text]
+            cmd = [PYTHON, REDDIT_BROWSER, "reply" if reply_to_url else "post-comment", target, text]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             cdp_out = proc.stdout.strip()
             if not cdp_out:
@@ -1585,7 +1596,7 @@ def log_post(thread_url, permalink, text, project_name, thread_author, thread_ti
     (if any) Claude baked into the reply text.
     """
     try:
-        cmd = ["python3", REDDIT_TOOLS, "log-post",
+        cmd = [PYTHON, REDDIT_TOOLS, "log-post",
              thread_url, permalink or "", text, project_name,
              thread_author, thread_title,
              "--account", reddit_username]
@@ -1616,7 +1627,7 @@ def bump_campaigns(table, row_id, campaign_ids):
     for cid in campaign_ids:
         try:
             subprocess.run(
-                ["python3", bump,
+                [PYTHON, bump,
                  "--table", table, "--id", str(row_id), "--campaign-id", str(cid)],
                 capture_output=True, text=True, timeout=15,
             )
@@ -2623,6 +2634,22 @@ def main():
             sys.exit(2)
         with open(args.in_path) as f:
             plan = json.load(f)
+        # Hard preflight: _post_iteration shells to reddit_browser.py, the only
+        # Playwright importer on this rail. If the resolved interpreter can't
+        # import it the owned runtime is missing/half-provisioned and every post
+        # would die with CDP_ERROR. Fail LOUD with a distinct signal instead.
+        # Gated on real decisions so an empty plan still exits clean.
+        if plan.get("decisions"):
+            _chk = subprocess.run(
+                [PYTHON, "-c", "import playwright"],
+                capture_output=True, text=True,
+            )
+            if _chk.returncode != 0:
+                print(f"[post_reddit] FATAL runtime_incomplete: interpreter {PYTHON!r} "
+                      f"cannot import playwright — the owned Python runtime is missing or "
+                      f"unprovisioned. Run the `runtime` install (action:'install') before "
+                      f"posting. stderr: {(_chk.stderr or '').strip()[:300]}", file=sys.stderr)
+                sys.exit(3)
         try:
             posted, failed = _post_iteration(plan, reddit_username)
             print(f"[post_reddit] phase=post project={plan.get('project_name')} posted={posted} failed={failed}")
