@@ -9864,7 +9864,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <div class="tabs">
-  <div class="tab sa-local-only" data-tab="status">Master Inbox</div>
+  <div class="tab sa-local-only" data-tab="status">Status</div>
   <div class="tab active" data-tab="stats">Stats</div>
   <div class="tab" data-tab="trends">Trends</div>
   <div class="tab" data-tab="activity">Activity</div>
