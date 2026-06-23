@@ -173,7 +173,11 @@ window.__sapsPaint = function(payload){
       // coordinates (Input.dispatchMouseEvent) and by Playwright hit-testing,
       // both of which an opaque clickable card sitting over a target would eat.
       s.position="fixed"; s.top="50%"; s.left="50%"; s.transform="translate(-50%,-50%)";
-      s.zIndex="2147483647"; s.pointerEvents="none"; s.maxWidth="460px";
+      // Sit one below the announce modal (2147483647) so the one-time "S4L is
+      // running" notice + its OK button always stack ON TOP of this always-on
+      // status box. They're both screen-centered, so equal z-index would let
+      // whichever was appended last (this overlay) cover the OK button.
+      s.zIndex="2147483646"; s.pointerEvents="none"; s.maxWidth="460px";
       s.boxSizing="border-box"; s.padding="10px 14px"; s.borderRadius="12px";
       s.background="rgba(15,15,17,0.92)"; s.color="#fff";
       s.font="13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
