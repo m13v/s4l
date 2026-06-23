@@ -2733,12 +2733,24 @@ async function main() {
   // and cheap when already present, so existing installs pick it up on the next
   // Claude restart without re-provisioning. Best-effort: never blocks boot.
   void ensureMenubar()
-    .then((r) =>
+    .then((r) => {
       console.error(
         `[social-autoposter-mcp] menubar: ${r.skipped ? "skip" : r.ok ? "ok" : "fail"} (${r.detail})`
-      )
-    )
-    .catch((e) => console.error("[social-autoposter-mcp] menubar ensure failed:", e?.message || e));
+      );
+      // A non-skipped failure here is the boot-time "menu bar didn't come up"
+      // path (e.g. uv missing, rumps reinstall failed on an existing install).
+      // Report it; a skip (non-macOS / runtime not ready) is expected, not an error.
+      if (!r.ok && !r.skipped) {
+        captureError(new Error(`menubar ensure failed: ${r.detail}`), {
+          component: "menubar",
+          phase: "ensure",
+        });
+      }
+    })
+    .catch((e) => {
+      console.error("[social-autoposter-mcp] menubar ensure failed:", e?.message || e);
+      captureError(e, { component: "menubar", phase: "ensure" });
+    });
   // Phone home so this .mcpb install is visible in the install-lane digest
   // (parity with the npx launchd heartbeat). Once on startup, then every 15m
   // while the desktop app keeps the server alive. unref() so it never holds the
