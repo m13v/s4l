@@ -24,9 +24,58 @@ import tempfile
 import threading
 import time
 
-import rumps
+# --- Sentry bootstrap --------------------------------------------------------
+# The menu bar runs as a standalone KeepAlive LaunchAgent off the owned venv,
+# a separate process from the MCP server, so it was a Sentry blind spot: a crash
+# (most often rumps missing/broken in the venv -> "menu bar didn't start") only
+# ever landed in the local menubar.err.log. Wire it in BEFORE importing rumps so
+# even an import-time failure of the menu bar's heaviest dependency is reported.
+# sentry_init lives in the pipeline's scripts/ dir (SAPS_REPO_DIR is exported by
+# the launchd plist) and sentry-sdk is in the owned venv (requirements.txt). All
+# best-effort: a missing repo path or SDK degrades to a silent no-op.
+_sentry = None
+try:
+    _repo = os.environ.get("SAPS_REPO_DIR")
+    if _repo:
+        _scripts = os.path.join(_repo, "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+    import sentry_init as _sentry  # noqa: E402
 
-import s4l_state as st
+    _sentry.init()
+except Exception:
+    _sentry = None
+
+
+def _capture(err, **tags):
+    """Report a handled menu-bar error to Sentry (component=menubar) without ever
+    raising into the caller. No-op if the Sentry bootstrap above failed."""
+    try:
+        if _sentry is not None:
+            tags.setdefault("component", "menubar")
+            _sentry.capture_exception(err, tags=tags)
+    except Exception:
+        pass
+
+
+def _flush():
+    try:
+        if _sentry is not None:
+            _sentry.flush()
+    except Exception:
+        pass
+
+
+try:
+    import rumps  # noqa: E402
+except Exception as _import_err:
+    # rumps missing/broken in the owned venv is THE "menu bar didn't start" case.
+    # Report it explicitly, flush, then re-raise so launchd records the crash too.
+    _capture(_import_err, phase="import_rumps")
+    _flush()
+    raise
+
+import s4l_state as st  # noqa: E402
 
 CLAUDE_APP = "Claude"
 POLL_SECONDS = 5
@@ -432,6 +481,7 @@ class S4LMenuBar(rumps.App):
             self._review_active = False
             sys.stderr.write(f"[s4l-menubar] review cards failed: {e}\n")
             sys.stderr.flush()
+            _capture(e, phase="review_cards")
 
     def _on_review_done(self, batch, decisions):
         # Runs on the main thread (from the card controller). Translate decisions
@@ -598,4 +648,11 @@ class S4LMenuBar(rumps.App):
 
 
 if __name__ == "__main__":
-    S4LMenuBar().run()
+    try:
+        S4LMenuBar().run()
+    except Exception as _run_err:
+        # The run loop dying is the other "menu bar didn't start / vanished" case.
+        # Report + flush before the KeepAlive relaunch so it isn't lost on teardown.
+        _capture(_run_err, phase="run")
+        _flush()
+        raise
