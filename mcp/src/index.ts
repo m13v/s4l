@@ -52,6 +52,7 @@ import {
   resolveChrome,
   ensureMenubar,
   ensurePipelineCurrent,
+  ensureRuntimeProvisioned,
 } from "./runtime.js";
 import {
   blockOnboardingMilestone,
@@ -3372,6 +3373,18 @@ async function main() {
   // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
   // the version first materialized at install). Synchronous + best-effort.
   ensurePipelineCurrent();
+  // Deterministically finish what setup started: if a prior provision was kicked
+  // off (install-progress.json exists) but the owned runtime isn't ready — a step
+  // failed, or Claude/the host died mid-install — resume it on boot instead of
+  // waiting for the agent to re-call `runtime action:'install'`. Idempotent: it
+  // re-checks done steps and re-attempts only the missing ones. Fresh installs
+  // that never started setup are left untouched (no surprise downloads). The
+  // background provision() updates install-progress.json as it goes.
+  if (ensureRuntimeProvisioned()) {
+    console.error(
+      "[social-autoposter-mcp] runtime not ready with a prior install on disk; auto-resuming provisioning"
+    );
+  }
   // Same problem for the scheduled task's prompt: the host owns its SKILL.md and
   // a plugin update never touches it. Rewrite it on boot when this build ships a
   // newer prompt version, so behavior changes (no-improvise / voice-inline /
