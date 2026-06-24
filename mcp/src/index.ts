@@ -308,10 +308,11 @@ const server = new McpServer(
       "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
       "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `scan_candidates` " +
-      "(get the top threads to reply to) -> draft the replies yourself -> `submit_drafts` (queue them " +
-      "for review; nothing posts until the user approves) -> `post_drafts` (post the approved ones) -> " +
-      "`get_stats` (see performance). Run `project_config` first; the other tools refuse until a " +
+      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `queue_setup` + " +
+      "`create_scheduled_task` (set up the draft autopilot once) -> `run_draft_cycle` (the real pipeline " +
+      "scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
+      "user approves in the menu bar -> `post_drafts` (post the approved ones) -> `get_stats` (see " +
+      "performance). Run `project_config` first; the other tools refuse until a " +
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
@@ -1305,7 +1306,7 @@ tool(
         next_step: r.connected
           ? "X is connected. Next, run project_config action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
-            "before saving. Then run a draft cycle (scan_candidates -> draft -> submit_drafts) once the project is fully set up."
+            "before saving. Then set up the autopilot (queue_setup + create_scheduled_task) and run a real cycle (run_draft_cycle) once the project is fully set up."
           : r.state === "needs_login"
             ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
               "them that single required action, then call project_config action:'connect_x', confirm:true again."
@@ -1421,7 +1422,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. Then SCHEDULE THE AUTOPILOT: call the queue_setup tool and create each returned task with create_scheduled_task (prompt verbatim); do NOT create the deprecated 'social-autoposter-autopilot' task. Then call the `dashboard` tool so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) call run_draft_cycle to fire one real cycle; (3) poll the `dashboard` tool for ~3 min until the pending-draft count rises — that card came through the real pipeline. Do NOT use scan_candidates/submit_drafts to draft, do NOT create the deprecated 'social-autoposter-autopilot' task, do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
