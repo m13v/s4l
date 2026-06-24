@@ -304,35 +304,3 @@ export function latestBatchId(): string | null {
     .sort((a, b) => b.mtime - a.mtime);
   return matches.length ? matches[0].batchId : null;
 }
-
-// ---- Scan/draft split helpers (Desktop-session autopilot) ------------------
-// scan_candidates runs the pipeline in SCAN_ONLY mode (scan -> score -> select)
-// and the cycle writes the chosen candidates as JSON to scanResultPath(batchId).
-// A Claude Desktop scheduled-task session reads them, drafts replies ITSELF (on
-// the user's plan — no `claude -p`), then hands them back via submit_drafts,
-// which writes the SAME plan file draft_cycle / post_drafts / the menu bar use.
-
-export interface ScanCandidate {
-  id: number;
-  tweet_url: string;
-  author_handle: string;
-  tweet_text: string;
-  virality_score: number;
-  delta_score: number;
-  matched_project: string;
-  search_topic: string;
-  likes: number;
-  retweets: number;
-  replies: number;
-  views: number;
-  author_followers: number;
-  age_hours: number;
-  existing_draft?: string;
-  existing_draft_style?: string;
-}
-
-// Hardcoded under TMP_DIR to mirror the cycle script's SCAN_ONLY writer (same
-// coupling planPath has: run-twitter-cycle.sh writes the file to /tmp directly).
-export function scanResultPath(batchId: string): string {
-  return path.join(TMP_DIR, `saps_scan_candidates_${batchId}.json`);
-}

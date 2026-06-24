@@ -2,8 +2,9 @@
 // social-autoposter MCP server (X/Twitter rail).
 //
 // Core tools:
-//   scan_candidates - scan + score X threads, return the top candidates (no draft, no post).
-//   submit_drafts   - take the replies you drafted and queue them for review (posts nothing).
+//   run_draft_cycle - fire ONE real pipeline cycle (scan -> draft via the queue + worker
+//                     task), merging the resulting drafts into the menu-bar approval cards
+//                     (posts nothing).
 //   post_drafts     - post the drafts the user chose by number from a batch.
 //   get_stats    - read-only post + engagement stats.
 //
@@ -12,7 +13,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { execFileSync, type ChildProcess } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { screencast, bringBrowserToFront } from "./screencast.js";
 import os from "node:os";
@@ -25,10 +26,8 @@ import {
   readPlan,
   writePlan,
   planPath,
-  scanResultPath,
   type Plan,
   type PlanCandidate,
-  type ScanCandidate,
 } from "./repo.js";
 import {
   applySetup,
@@ -81,16 +80,11 @@ const DIST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_URI = "ui://social-autoposter/panel.html";
 const PRODUCT_LINK_URI = "ui://social-autoposter/product-link.html";
 
-// Stable id for the accumulating draft review queue. submit_drafts appends each
-// run's drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
+// Stable id for the accumulating draft review queue. Each draft cycle appends its
+// drafts here (dedup by tweet URL) so the menu-bar cards PILE UP across a
 // continuous autopilot instead of each run overwriting the last; post_drafts posts
 // the approved subset and marks them posted (filtered out of the cards thereafter).
 const REVIEW_QUEUE_ID = "review-queue";
-
-// The Desktop scheduled task onboarding creates for the autopilot. Its presence on
-// disk is the single "autopilot is set up" signal the dashboard + menu bar share
-// (the legacy launchd autopilot is retired).
-const AUTOPILOT_TASK_ID = "social-autoposter-autopilot";
 
 // ---- Queue-backed drafting (2026-06-23) -----------------------------------
 // Customer .mcpb boxes have no `claude` CLI, so the deterministic pipeline can't
@@ -100,8 +94,8 @@ const AUTOPILOT_TASK_ID = "social-autoposter-autopilot";
 // and blocks. Two Claude Desktop scheduled tasks — one per job type — drain that
 // queue, run the pipeline's own prompt as a Claude turn, and write the result
 // back, unblocking the cycle. This reuses the entire pipeline (styles, voice,
-// top-performers, em-dash rules) instead of the old scan_candidates host-draft
-// reimplementation. See scripts/claude_job.py + run_claude.sh's provider seam.
+// top-performers, em-dash rules). See scripts/claude_job.py + run_claude.sh's
+// provider seam.
 const PHASE1_TASK_ID = "saps-phase1-query"; // drains "twitter-query" jobs
 const PHASE2B_TASK_ID = "saps-phase2b-draft"; // drains "twitter-prep" jobs
 
@@ -301,8 +295,8 @@ const server = new McpServer(
       "SCHEDULE + VERIFY THE AUTOPILOT (final onboarding step). There is ONE drafting pipeline: a launchd " +
       "job this server installs runs the real cycle in draft-only mode, its Phase-2b Claude turn is " +
       "serviced by a scheduled task that drains a local job queue, and the result is merged into the " +
-      "menu-bar approval cards. There is NO scan_candidates/submit_drafts host-draft path anymore — do " +
-      "NOT use those to draft or to verify. Steps, in order: " +
+      "menu-bar approval cards. Drafting is the queue + worker path; `run_draft_cycle` is how you " +
+      "fire a real cycle on demand. Steps, in order: " +
       "(1) call `queue_setup` — it pre-writes the worker task prompts and returns two task specs " +
       "(saps-phase1-query, saps-phase2b-draft); " +
       "(2) for EACH spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
@@ -331,7 +325,7 @@ const server = new McpServer(
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`scan_candidates`, `submit_drafts`, `post_drafts`, `get_stats`), end your turn by " +
+      "(`run_draft_cycle`, `post_drafts`, `get_stats`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
@@ -443,14 +437,14 @@ function blockedReasonMessage(reason: string): string {
         "couldn't run. (It DID find and rank threads, it just couldn't draft replies.) This " +
         "CLI uses its own login, separate from Claude Desktop. To fix it, open a terminal and run:\n\n" +
         "    claude\n\n" +
-        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run scan_candidates again."
+        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run `run_draft_cycle` again."
       );
     case "monthly_limit":
     case "daily_limit":
     case "rate_limit_5h":
       return (
         `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
-        "Wait for the limit to reset, then run scan_candidates again."
+        "Wait for the limit to reset, then run `run_draft_cycle` again."
       );
     case "no_search_topics":
       return (
@@ -458,23 +452,23 @@ function blockedReasonMessage(reason: string): string {
         "DB (project_search_topics) and are seeded from your project's `search_topics` when you " +
         "configure it. Re-run the `project_config` tool for this project with a `search_topics` list " +
         "(comma-separated keywords/phrases your buyers tweet about); it seeds them automatically, then " +
-        "run scan_candidates again."
+        "run `run_draft_cycle` again."
       );
     case "topics_api_unreachable":
       return (
         "Couldn't reach the search-topics service to load this project's topics, so the cycle stopped " +
-        "before scanning. This is usually a transient backend/network issue. Try scan_candidates again in a " +
+        "before scanning. This is usually a transient backend/network issue. Try `run_draft_cycle` again in a " +
         "moment; if it persists, check connectivity to the autoposter backend."
       );
     case "credit_balance":
       return (
         "The drafting step failed because the Anthropic account is out of credits. " +
-        "Add credits, then run scan_candidates again."
+        "Add credits, then run `run_draft_cycle` again."
       );
     default:
       return (
         `The drafting step failed (${reason}) and produced no drafts. ` +
-        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run scan_candidates again."
+        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run `run_draft_cycle` again."
       );
   }
 }
@@ -848,16 +842,15 @@ async function postApproved(batchId: string, plan: Plan) {
         "or set accounts.twitter.handle in config.json.",
     };
   }
-  // Mark posting active so scan_candidates DEFERS launching any scan for the
+  // Mark posting active so the draft-cycle scan DEFERS launching any scan for the
   // duration of this batch (+ grace). This is the source-level mutual exclusion
   // that actually fixes the hijack: the autopilot never launches a scan to race
   // the post for the browser. Reset is guaranteed by scheduleShellLockRelease()
   // in the finally below, so an early/failed post can't wedge scanning.
   postingActive = true;
   startPostingFlagHeartbeat(); // cross-instance: a sibling MCP's scan defers too
-  // Posting is a priority over scanning: abort any in-flight plugin scan so the
+  // Posting is a priority over scanning: abort any in-flight pipeline scan so the
   // approved post takes the browser immediately instead of waiting on the lock.
-  // Plugin pipeline only — never affects the plist autopilot.
   preemptScanForPost();
   // Hold the /tmp shell browser lock (the one the scanner respects) for the WHOLE
   // batch so the every-minute autopilot scan queues behind the post instead of
@@ -920,7 +913,7 @@ async function postApproved(batchId: string, plan: Plan) {
             // BYO-Chrome), else default to the local harness on port 9555.
             TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
           },
-          // Stream the poster's output live (like scan_candidates does) so HANDLED
+          // Stream the poster's output live so HANDLED
           // failures — e.g. every reply refused with no_account_configured, which
           // returns a reason instead of throwing — surface in main.log + telemetry
           // in real time. Without this the poster's stdout was buffered in-process
@@ -1167,7 +1160,7 @@ tool(
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
       "whether X is connected. Use config, conversation context, profile_scan, and website research " +
       "before asking for fields. Ask only if no product can be identified or an interactive login is " +
-      "unavoidable. The scan_candidates and get_stats tools refuse to run until a project is " +
+      "unavoidable. The run_draft_cycle and get_stats tools refuse to run until a project is " +
       "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
@@ -1475,7 +1468,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) call run_draft_cycle to fire one real cycle; (3) poll the `dashboard` tool for ~3 min until the pending-draft count rises — that card came through the real pipeline. Do NOT use scan_candidates/submit_drafts to draft, do NOT create the deprecated 'social-autoposter-autopilot' task, do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) call run_draft_cycle to fire one real cycle; (3) poll the `dashboard` tool for ~3 min until the pending-draft count rises — that card came through the real pipeline. Do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1526,8 +1519,8 @@ tool(
             topic_count: topicCount,
           });
           seedNote = m
-            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so scan_candidates has a topic universe to work with.`
-            : " Seeded search topics into the DB so scan_candidates has a topic universe to work with.";
+            ? ` Seeded ${m[1]} search topic(s) into the DB (new: ${m[2]}, updated: ${m[3]}), so the draft cycle has a topic universe to work with.`
+            : " Seeded search topics into the DB so the draft cycle has a topic universe to work with.";
         } else {
           const tail = (seed.stderr || seed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
           blockOnboardingMilestone(
@@ -1536,7 +1529,7 @@ tool(
             tail,
             { exit_code: seed.code }
           );
-          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. scan_candidates will tell you clearly if topics are missing.)`;
+          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. run_draft_cycle will tell you clearly if topics are missing.)`;
         }
 
         // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
@@ -1634,33 +1627,24 @@ tool(
   }
 );
 
-// ---- draft_cycle: DEPRECATED 2026-06-20 (registration removed) -------------
-// Replaced by the scan_candidates -> (agent drafts) -> submit_drafts flow, so the
-// AI drafting now runs in the calling session (on the user's plan) instead of a
-// spawned `claude -p`. post_drafts (below) still posts the approved subset, and
-// submit_drafts completes the onboarding "draft_verified" milestone that this
-// tool used to. The underlying pipeline (run-twitter-cycle.sh) and the
-// produceDrafts() helper are kept as the source those tools reuse; only the
-// draft_cycle tool registration was removed here.
-
 // ---- post_drafts: post the user's chosen drafts from a batch ---------------
-// Second half of the manual loop. The user reviewed the table from draft_cycle
-// and said which numbers to post / edit; this posts exactly those. Editing a
-// draft implies posting it. Indices are 1-based, matching the table.
+// Second half of the manual loop. The user reviewed the menu-bar cards a draft
+// cycle produced and said which numbers to post / edit; this posts exactly those.
+// Editing a draft implies posting it. Indices are 1-based, matching the table.
 tool(
   "post_drafts",
   {
     title: "Post chosen drafts",
     description:
-      "Post the drafts the user approved from a submit_drafts batch. Pass the batch_id from " +
-      "submit_drafts and the user's decision by NUMBER (1-based, matching the table): `post` is " +
+      "Post the drafts the user approved from a draft cycle. Pass the batch_id from the " +
+      "approval cards and the user's decision by NUMBER (1-based, matching the table): `post` is " +
       "the list of draft numbers to post as drafted; `edits` rewrites a draft's text before " +
       "posting it (editing implies posting); `post_all` posts every draft. Only the chosen " +
       "drafts post; anything not listed is left unposted. Call this ONLY after the user has " +
       "told you which drafts they want. After posting, call the `dashboard` tool so the user " +
       "sees the updated state.",
     inputSchema: {
-      batch_id: z.string().describe("The batch_id returned by submit_drafts."),
+      batch_id: z.string().describe("The batch_id of the draft batch (from the approval cards)."),
       post: z
         .array(z.number().int().positive())
         .optional()
@@ -1683,7 +1667,7 @@ tool(
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
-        `No drafts found for batch ${batch_id}. Run scan_candidates then submit_drafts again to produce a fresh batch.`
+        `No drafts found for batch ${batch_id}. Run a draft cycle (run_draft_cycle) again to produce a fresh batch.`
       );
     }
     const candidates = plan.candidates;
@@ -2064,7 +2048,7 @@ tool(
 // the 5-min timer). The cycle drafts via the queue + worker task and the wrapper
 // merges the result into the review-queue cards. Use this for onboarding
 // verification ("does the real pipeline produce a card?") and any on-demand
-// "draft now" — NOT scan_candidates/submit_drafts, which are gone.
+// "draft now". This is the single draft path.
 tool(
   "run_draft_cycle",
   {
@@ -2110,21 +2094,23 @@ tool(
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
-// the tools above (draft_cycle / project_config / get_stats) through the host
+// the tools above (run_draft_cycle / project_config / get_stats) through the host
 // and re-reads status. The tool itself returns the first-paint snapshot so the
 // view has data the instant it loads.
 
 // Is either launchd job (cycle / daily updater) currently loaded?
-// "Autopilot" is now the Claude Desktop scheduled task `social-autoposter-autopilot`
-// (created during onboarding via create_scheduled_task), NOT the legacy launchd job.
-// We can't read the host's enabled/paused flag, but the task's presence on disk is the
+// "Autopilot" is now the pair of Claude Desktop queue-worker scheduled tasks
+// (saps-phase1-query + saps-phase2b-draft, created during onboarding via
+// create_scheduled_task) that drain the draft queue, NOT the legacy launchd job.
+// We can't read the host's enabled/paused flag, but the tasks' presence on disk is the
 // single signal the dashboard AND the menu bar key off of, so they stay aligned.
 async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
   let autopilot_on = false;
   try {
-    const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-    autopilot_on = fs.existsSync(
-      path.join(cfg, "scheduled-tasks", AUTOPILOT_TASK_ID, "SKILL.md")
+    // Autopilot is "on" once BOTH queue-worker tasks that service the draft
+    // pipeline's queued `claude -p` calls have their SKILL.md on disk.
+    autopilot_on = QUEUE_WORKERS.every((spec) =>
+      fs.existsSync(scheduledTaskSkillPath(spec.taskId))
     );
   } catch {
     /* leave false */
@@ -2139,182 +2125,11 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
   return { autopilot_on, auto_update_on };
 }
 
-// ---- Autopilot prompt: keep the scheduled task's SKILL.md current ------------
-// The scheduled task's prompt (SKILL.md) is owned by the host and does NOT update
-// when the plugin updates. So a behavior change (the no-improvise / voice-inline /
-// stop-cleanly rules) would never reach an already-scheduled task. We close that
-// gap by REWRITING the task's SKILL.md on server boot when its embedded prompt
-// version is older than what this build ships. The host reads the file fresh on
-// each run, so the next fire picks up the new prompt — no host tool, no user
-// action. Bump AUTOPILOT_PROMPT_VERSION whenever the prompt below changes.
-const AUTOPILOT_PROMPT_VERSION = 2;
-const AUTOPILOT_PROMPT_MARKER = "saps_autopilot_prompt_version";
-
-function autopilotSkillPath(): string {
-  const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-  return path.join(cfg, "scheduled-tasks", AUTOPILOT_TASK_ID, "SKILL.md");
-}
-
-// The canonical draft-only autopilot prompt: uses ONLY scan_candidates +
-// submit_drafts, drafts from the INLINE project_voices, improvises nothing, and
-// stops cleanly if its tools aren't available.
-function autopilotSkillMd(project: string): string {
-  const body = [
-    `You are running the Social Autoposter draft-only autopilot for the project "${project}". ` +
-      `Run ONE cycle, then stop. DRAFT-ONLY: you must NEVER post to X/Twitter — you only queue ` +
-      `drafts for the user's approval. Use ONLY two tools — scan_candidates and submit_drafts — ` +
-      `and IMPROVISE NOTHING ELSE. Specifically: NEVER run Bash, Read, Write, Edit, python, or any ` +
-      `shell/file tool, for ANY reason — not to debug, inspect a tool result, verify an outcome, or ` +
-      `investigate something surprising. This run is unattended: any tool that is not pre-approved ` +
-      `STALLS the whole pipeline waiting on a human who is not there, so reaching for one is never ` +
-      `worth it. If something looks off, report it in one line and stop.`,
-    ``,
-    `Steps:`,
-    `1. Call scan_candidates with project "${project}". It long-polls: if it returns a "Scan in ` +
-      `progress" status, call scan_candidates again (same args) and keep re-calling until it ` +
-      `returns candidates. Never sleep or use background waits. If it returns no candidates, stop ` +
-      `cleanly — nothing to do this cycle.`,
-    `2. The result includes a project_voices field — the brand voice + guardrails for each ` +
-      `candidate's project. Draft from project_voices[<matched_project>] (voice, description, ` +
-      `differentiator, content_guardrails). NEVER read config files, call project_config, or run ` +
-      `Bash/Read to find the voice — everything you need is already in the scan result.`,
-    `3. For each candidate you judge genuinely worth engaging, write ONE on-brand reply (<=250 ` +
-      `chars, match the thread's language, genuinely helpful — not spammy, no hard selling). Skip ` +
-      `the rest.`,
-    `4. Call submit_drafts with the batch_id from scan_candidates and a drafts array of ` +
-      `{candidate_id, reply_text}. This queues them for the menu-bar approval UI. Do NOT call ` +
-      `post_drafts — posting is the user's decision.`,
-    `5. You are now DONE: report in ONE short line how many drafts you queued, then stop. ` +
-      `"Queued 0 new draft(s)" is a NORMAL, expected result — it means the threads were already ` +
-      `queued in an earlier cycle (dedup), NOT a failure. Treat ANY count, including zero, as ` +
-      `success. NEVER re-read, parse, or inspect the submit_drafts result; NEVER open files under ` +
-      `tool-results/ or anywhere else; NEVER run Bash/Read/python to confirm what happened. A ` +
-      `zero or surprising count is not a reason to investigate — just report it and stop.`,
-    ``,
-    `HARD GUARD: if scan_candidates is NOT available (ToolSearch returns no matching tool — can ` +
-      `happen when a run spawns before the extension's MCP server has reconnected), STOP immediately ` +
-      `and report "S4L tools unavailable, skipping this cycle." Do NOT search the connector registry, ` +
-      `do NOT call list_connectors, do NOT improvise any other tool.`,
-  ].join("\n");
-  return (
-    `---\n` +
-    `name: ${AUTOPILOT_TASK_ID}\n` +
-    `description: Social Autoposter draft-only autopilot for project ${project} — scans X, drafts ` +
-    `on-brand replies (voice inline), queues them for approval. Never posts.\n` +
-    `---\n\n` +
-    body +
-    `\n\n<!-- ${AUTOPILOT_PROMPT_MARKER}: ${AUTOPILOT_PROMPT_VERSION} -->\n`
-  );
-}
-
-// Read the project name back from an existing autopilot SKILL.md so a rewrite
-// keeps the same project. Null if it can't be determined (then leave it alone).
-function detectAutopilotProject(skillMd: string): string | null {
-  const m1 = /project[s]?\s+"([^"]+)"/i.exec(skillMd);
-  if (m1) return m1[1];
-  const m2 = /for project\s+([A-Za-z0-9_-]+)/i.exec(skillMd);
-  if (m2) return m2[1];
-  return null;
-}
-
-// Refresh the scheduled task's SKILL.md when this build ships a newer prompt than
-// what's on disk. Best-effort, synchronous, never throws. Only touches an EXISTING
-// task (onboarding creates the first one), only when stale, and only when the
-// project reads back, so we never write a wrong/blank project.
-function ensureAutopilotPromptCurrent(): void {
-  try {
-    const skillPath = autopilotSkillPath();
-    if (!fs.existsSync(skillPath)) return; // no scheduled task yet
-    const cur = fs.readFileSync(skillPath, "utf-8");
-    const m = new RegExp(`${AUTOPILOT_PROMPT_MARKER}:\\s*(\\d+)`).exec(cur);
-    const curVer = m ? parseInt(m[1], 10) : 0;
-    if (curVer >= AUTOPILOT_PROMPT_VERSION) return; // already current
-    const project = detectAutopilotProject(cur);
-    if (!project) {
-      console.error(
-        `[autopilot] prompt is stale (v${curVer}) but project unreadable from SKILL.md; leaving it`
-      );
-      return;
-    }
-    fs.writeFileSync(skillPath, autopilotSkillMd(project), "utf-8");
-    console.error(
-      `[autopilot] refreshed scheduled-task prompt -> v${AUTOPILOT_PROMPT_VERSION} (was v${curVer}), project=${project}`
-    );
-  } catch (e: any) {
-    console.error(`[autopilot] ensureAutopilotPromptCurrent error: ${e?.message || e}`);
-  }
-}
-
-// ---- Pre-approve the autopilot's own tools in ~/.claude/settings.json --------
-// A Desktop scheduled task created via create_scheduled_task defaults to "Ask"
-// permission mode, and per the Desktop docs an un-pre-approved tool STALLS the
-// run until a human approves it. Allow rules from ~/.claude/settings.json DO
-// apply to scheduled-task sessions, so we ship pre-approval for THIS server's
-// tools (the only ones the autopilot is allowed to use) into that file on boot.
-// This makes the legitimate scan -> submit path never stall, independent of
-// whether anyone clicked "Always allow" during onboarding. ALLOW-only by design:
-// it pre-approves our tools; it does NOT (and on this lane cannot) restrict any
-// others — that is the prompt's job. Merge-in-place: read, add only missing
-// entries, write back; never overwrite a user's settings on a parse error.
-//
-// The tool id is mcp__<server>__<tool>. A .mcpb install registers this server
-// under the manifest name ("social-autoposter"); we also list the protocol name
-// ("S4L") so pre-approval matches however the host loaded it. Extra entries that
-// don't match the live namespace are harmless no-ops.
-const AUTOPILOT_ALLOWED_TOOLS = [
-  "mcp__social-autoposter__scan_candidates",
-  "mcp__social-autoposter__submit_drafts",
-  "mcp__S4L__scan_candidates",
-  "mcp__S4L__submit_drafts",
-];
-
-function ensureAutopilotToolsAllowed(): void {
-  try {
-    // Only touch settings.json for installs that actually have the autopilot
-    // scheduled — mirrors the prompt-refresh gate, so we never edit a user's
-    // global settings on a machine that doesn't use the scheduled task.
-    if (!fs.existsSync(autopilotSkillPath())) return;
-    const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-    const settingsPath = path.join(cfg, "settings.json");
-    let settings: any = {};
-    if (fs.existsSync(settingsPath)) {
-      try {
-        settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) || {};
-      } catch (e: any) {
-        // Malformed user settings: do NOT clobber — log and bail.
-        console.error(
-          `[autopilot] settings.json unparseable; skipping tool pre-approval: ${e?.message || e}`
-        );
-        return;
-      }
-    }
-    if (typeof settings !== "object" || Array.isArray(settings)) return;
-    const perms = (settings.permissions ??= {});
-    if (typeof perms !== "object" || Array.isArray(perms)) return;
-    const allow: string[] = Array.isArray(perms.allow) ? perms.allow : (perms.allow = []);
-    let added = 0;
-    for (const t of AUTOPILOT_ALLOWED_TOOLS) {
-      if (!allow.includes(t)) {
-        allow.push(t);
-        added++;
-      }
-    }
-    if (added === 0) return;
-    fs.mkdirSync(cfg, { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-    console.error(
-      `[autopilot] pre-approved ${added} autopilot tool(s) in ${settingsPath} (allow-only)`
-    );
-  } catch (e: any) {
-    console.error(`[autopilot] ensureAutopilotToolsAllowed error: ${e?.message || e}`);
-  }
-}
-
 // ===========================================================================
 // Queue-worker scheduled tasks + launchd kicker (2026-06-23)
 //
-// Replaces the scan_candidates -> host-draft -> submit_drafts autopilot. The
-// REAL pipeline runs in DRAFT_ONLY mode under launchd; its `claude -p` calls go
+// The single drafting path. The REAL pipeline runs in DRAFT_ONLY mode under
+// launchd; its `claude -p` calls go
 // through scripts/claude_job.py's file queue (run_claude.sh provider seam); two
 // scheduled tasks drain that queue. Each task is single-purpose (one job type),
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
@@ -2406,7 +2221,7 @@ function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: st
 }
 
 // Refresh each worker task's SKILL.md when this build ships a newer prompt than
-// what's on disk. Mirrors ensureAutopilotPromptCurrent: best-effort, only touches
+// what's on disk. Best-effort, only touches
 // an EXISTING task (onboarding creates them), only when stale. Also rewrites when
 // the baked-in paths (python/repo) would have changed, since a stale absolute
 // path would break the Bash commands; we detect that by always rewriting on a
@@ -2842,7 +2657,7 @@ function sapsStateDir(): string {
 // of the in-process `postingActive` flag. The autopilot scan and the post
 // sometimes run in the SAME MCP (the in-process flag covers that) and sometimes
 // in TWO SEPARATE MCP instances (different agent sessions each spawn their own).
-// A file every instance's scan_candidates reads makes the mutual exclusion hold
+// A file every instance's draft-cycle scan reads makes the mutual exclusion hold
 // regardless of which topology Claude Desktop happens to use. Heartbeat'd with a
 // short TTL so a crashed poster's flag self-clears and never wedges scanning.
 const POSTING_FLAG_TTL_MS = 45_000;
@@ -2884,7 +2699,7 @@ function stopPostingFlagHeartbeat(): void {
   }
 }
 // True when ANY MCP instance has a FRESH posting flag on disk. Absent or expired
-// == not posting. This is what makes a sibling instance's scan_candidates defer.
+// == not posting. This is what makes a sibling instance's draft-cycle scan defer.
 function isPostingFlagFresh(): boolean {
   try {
     const j = JSON.parse(fs.readFileSync(postingFlagPath(), "utf-8"));
@@ -2962,154 +2777,6 @@ async function openInBrowser(url: string): Promise<void> {
   }
 }
 
-// ---- Desktop-session autopilot: scan_candidates + submit_drafts ------------
-// These two tools move the cycle's AI step OUT of `claude -p` and into the
-// CALLING agent. Intended use: a Claude Desktop scheduled task (which runs on
-// the user's OWN plan) calls scan_candidates, drafts each on-brand reply
-// ITSELF, then submit_drafts hands the drafts to the SAME review plan the
-// menu-bar approval UI and post_drafts already consume. Nothing posts until the
-// user approves. The legacy launchd + `claude -p` autopilot is untouched and
-// keeps running in parallel; this is an additive, opt-in second path.
-
-interface ScanResult {
-  batchId: string | null;
-  candidates: ScanCandidate[];
-  blocked?: string;
-  // True when the scan couldn't run because ANOTHER scan holds the pipeline's
-  // max=1 slot (e.g. the legacy claude -p autopilot). Contention, not an empty
-  // result — the caller should retry rather than conclude "no candidates".
-  busy?: boolean;
-}
-
-async function runScanCandidates(
-  project?: string,
-  onProgress?: (message: string, step: number) => void
-): Promise<ScanResult> {
-  // SCAN_ONLY=1: run scan -> score -> top-N select, then STOP before drafting.
-  // No DRAFT_ONLY, no `claude -p` drafting. TWITTER_PHASE1_LLM_DRAFT=0 forces the
-  // deterministic query bank so the whole scan is claude-free (the agent does ALL
-  // the AI). Off-screen by default (no BH_WINDOW_* / overlay): a scheduled run has
-  // no human watching the Chrome.
-  const env: NodeJS.ProcessEnv = {
-    SCAN_ONLY: "1",
-    TWITTER_PHASE1_LLM_DRAFT: "0",
-    SAPS_REPO_DIR: repoDir(),
-    PATH: pipelinePath(),
-  };
-  if (project) env.SAPS_FORCE_PROJECT = project;
-  const chrome = resolveChrome();
-  if (chrome) env.BH_CHROME_BIN = chrome;
-  let step = 0;
-  let lastMsg = "";
-  // Specific phase label for the menu bar for the whole multi-minute scan, so the
-  // long-poll doesn't leave it on a generic "working" (or flicker to idle between
-  // re-calls). Cleared by the handler when the scan resolves.
-  writeActivity("scanning", project ? `scanning X for ${project}` : "scanning X");
-  // Single-flight: kill any pre-existing run-twitter-cycle.sh (zombies that
-  // survived a prior preempt, or stale waiters parked behind a post) before
-  // launching, so only ONE scan ever exists. The plist gets this from
-  // run-twitter-cycle-singleton.sh; the MCP's direct launch must enforce it here.
-  sigkillAllScans();
-  const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
-    env,
-    timeoutMs: 900_000,
-    onSpawn: (c) => {
-      // Track the PLUGIN's own scan process so an approved post can abort exactly
-      // this scan (posting preempts scanning). This is the plugin pipeline only —
-      // the plist autopilot's scan is a separate launchd process the MCP server
-      // never spawns and has no handle to, so it can never be touched here.
-      scanChild = c;
-    },
-    onLine: (line) => {
-      const t = line.replace(/\s+$/, "");
-      if (t.trim()) console.error(`[scan_candidates] ${t}`);
-      if (!onProgress) return;
-      const msg = cycleProgressMessage(t);
-      if (msg && msg !== lastMsg) {
-        lastMsg = msg;
-        onProgress(msg, ++step);
-      }
-    },
-  });
-  scanChild = null; // scan finished on its own; nothing to preempt.
-  const marker = /SCAN_ONLY_RESULT=(\/\S+\.json)/.exec(res.stdout + "\n" + res.stderr);
-  if (marker && marker[1]) {
-    try {
-      const data = JSON.parse(fs.readFileSync(marker[1], "utf-8"));
-      return {
-        batchId: data.batch_id ?? null,
-        candidates: (data.candidates ?? []) as ScanCandidate[],
-      };
-    } catch (e: any) {
-      return {
-        batchId: null,
-        candidates: [],
-        blocked: `Scan finished but its result file was unreadable: ${e?.message || e}`,
-      };
-    }
-  }
-  // If query-gen (when enabled) hits a real failure, the cycle still emits
-  // DRAFT_ONLY_BLOCKED=<reason>. Surface it rather than "no candidates".
-  const blockedMarker = /DRAFT_ONLY_BLOCKED=([a-z0-9_]+)/.exec(res.stdout + "\n" + res.stderr);
-  if (blockedMarker && blockedMarker[1]) {
-    return { batchId: null, candidates: [], blocked: blockedReasonMessage(blockedMarker[1]) };
-  }
-  // The pipeline's single-flight guard prints too_many_inflight and exits 0 when
-  // ANOTHER scan already holds the twitter-cycle slot (commonly the legacy
-  // claude -p autopilot, which we deliberately keep running). That is CONTENTION,
-  // not an empty batch — flag it so the caller retries instead of concluding
-  // "no candidates" (a clean empty scan returns a batch_id with count:0).
-  if (/too_many_inflight/.test(res.stdout + res.stderr)) {
-    return {
-      batchId: null,
-      candidates: [],
-      busy: true,
-      blocked:
-        "Another scan already holds the pipeline slot (likely the legacy autopilot). Contention, " +
-        "not an empty result — retry scan_candidates shortly.",
-    };
-  }
-  return {
-    batchId: null,
-    candidates: [],
-    blocked:
-      `This scan produced no candidates (exit ${res.code}). Usually a cold-start ` +
-      `project with no seeded search topics, or nothing fresh on-theme right now. Tail:\n` +
-      res.stderr.split("\n").slice(-12).join("\n"),
-  };
-}
-
-// ---- Long-poll job registry for scan_candidates ----------------------------
-// runScanCandidates drives run-twitter-cycle.sh (SCAN_ONLY), which runs a real
-// browser for 1-3 minutes — longer than the MCP client's ~60s request timeout.
-// Awaiting the whole scan in one tool call therefore ALWAYS tripped the client
-// timeout (-32001 Request timed out), and the agent's retry started a SECOND
-// run-twitter-cycle.sh that collided with the pipeline's max=1 single-flight lock
-// (too_many_inflight) and came back as a false "no candidates". Instead we run
-// ONE scan as a shared background job and LONG-POLL it: each scan_candidates call
-// waits up to SCAN_POLL_WAIT_MS (kept under the client timeout) for the in-flight
-// job to finish, then returns either the candidates or a "scan in progress"
-// status. The agent simply re-calls scan_candidates until it returns — no client
-// timeouts, no second scan racing the lock, and no sleeping/background waits.
-interface ScanJob {
-  project?: string;
-  startedAt: number;
-  done: boolean;
-  promise: Promise<ScanResult>;
-  result?: ScanResult;
-}
-
-// At most one scan runs at a time (mirrors the pipeline's own max=1 lock). Kept
-// across calls so a later poll attaches to the SAME running scan instead of
-// starting a new one.
-let currentScanJob: ScanJob | null = null;
-
-// The PLUGIN's currently-spawned scan subprocess (captured via run()'s onSpawn),
-// so an approved post can abort exactly this scan and take the browser
-// immediately. Only ever references a scan the MCP server itself launched — never
-// the plist autopilot's launchd scan.
-let scanChild: ChildProcess | null = null;
-
 // ---- Cross-process browser-lock bridge (the REAL posting-priority fix) ------
 // The SCANNER (run-twitter-cycle.sh) serializes browser access on a mkdir-based
 // DIRECTORY lock at /tmp/social-autoposter-twitter-browser.lock (skill/lock.sh).
@@ -3122,10 +2789,10 @@ let scanChild: ChildProcess | null = null;
 // churned 118 queries for ~10min (proven live on the remote box 2026-06-23:
 // /tmp lock pid=scanner AND json lock python:poster role=post, simultaneously).
 //
-// preemptScanForPost's old body only killed scanChild — a process-LOCAL handle to
-// a scan THIS instance launched. The scan that actually holds the browser is
-// almost always a SIBLING instance's, which we have no ChildProcess for. So we
-// bridge to the lock the scanner truly respects: read its /tmp pid file, and if a
+// The scan that actually holds the browser is a run-twitter-cycle.sh process —
+// usually a SIBLING (the every-minute launchd cycle), which we have no
+// ChildProcess for. So we bridge to the lock the scanner truly respects: read
+// its /tmp pid file, and if a
 // live run-twitter-cycle.sh holds it, signal it cross-process. Then the post
 // HOLDS that same /tmp lock for the whole batch so the every-minute autopilot
 // scan queues behind us (its acquire_lock waits on our live pid) instead of
@@ -3235,7 +2902,7 @@ function sigkillAllScans(): void {
 const SHELL_LOCK_GRACE_MS = Number(process.env.SAPS_POST_LOCK_GRACE_MS) || 60_000;
 let shellLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 // True from the start of a post batch until SHELL_LOCK_GRACE_MS after the last
-// card. scan_candidates checks this and DEFERS launching a scan while it's set —
+// card. The draft-cycle scan checks this and DEFERS launching a scan while it's set —
 // the real fix: posting and scanning are mutually exclusive at the SOURCE (both
 // are children of THIS one MCP), so we never even launch a scan that would race
 // the post for the browser lock. Having the post fight scans for the lock (the
@@ -3343,363 +3010,13 @@ function releaseShellBrowserLock(): void {
 }
 
 // Posting takes priority over scanning. When the user approves a post, abort any
-// in-flight scan so the browser frees up at once. Two layers: (1) kill scanChild
-// if THIS instance launched the scan, and (2) cross-process — kill whoever holds
-// the /tmp shell lock if it's a scan (covers sibling MCP instances we have no
-// handle to). Best-effort; never throws; never touches a locked pipeline script.
+// in-flight scan so the browser frees up at once. The scan that actually holds the
+// shared Chrome is a live run-twitter-cycle.sh (the every-minute launchd cycle);
+// kill it cross-process via the /tmp shell lock it truly respects. Best-effort;
+// never throws; never touches a locked pipeline script.
 function preemptScanForPost(): void {
-  try {
-    if (scanChild && scanChild.pid && scanChild.exitCode === null) {
-      console.error(
-        `[post] preempting in-flight plugin scan (pid ${scanChild.pid}) so the approved post takes the browser — SIGKILL tree`
-      );
-      sigkillScanTree(scanChild.pid); // SIGKILL — scan bash traps SIGTERM
-    }
-  } catch {
-    /* best effort */
-  }
-  // Drop the long-poll job so a queued poller stops waiting on the aborted scan;
-  // the next scan_candidates call starts fresh.
-  currentScanJob = null;
-  scanChild = null;
-  // Cross-process: the scan that actually holds the shared Chrome is usually a
-  // sibling MCP instance's, not ours. Kill it via the lock it truly respects.
   preemptScanHoldingBrowser();
 }
-
-// Per-call long-poll window. Must stay under the ~60s MCP client request timeout
-// so every scan_candidates call returns a real response before the client gives
-// up. Override with SAPS_SCAN_POLL_WAIT_MS for non-standard clients.
-const SCAN_POLL_WAIT_MS = Number(process.env.SAPS_SCAN_POLL_WAIT_MS) || 45_000;
-
-// After a contention hit (too_many_inflight), wait this long before launching a
-// fresh scan, so polls don't hammer the pipeline with back-to-back no-op scans
-// while the other holder finishes. Polls during the cooldown just report "busy".
-const SCAN_BUSY_COOLDOWN_MS = Number(process.env.SAPS_SCAN_BUSY_COOLDOWN_MS) || 20_000;
-let scanBusyUntil = 0;
-
-function scanBusy() {
-  return textContent(
-    "Another scan is already running on this machine (likely the legacy autopilot holding the " +
-      "twitter-cycle slot). This is CONTENTION, not an empty result. Call scan_candidates again in " +
-      "~20s to retry — do NOT conclude there are no candidates, and do NOT sleep; just re-call."
-  );
-}
-
-// A post batch is in progress: scanning is deferred so posting has exclusive use
-// of the one shared browser (mutual exclusion at the source). Not an error.
-function scanDeferredForPost() {
-  return textContent(
-    "A post is in progress on this machine, so scanning is deferred — only one task drives X at a " +
-      "time and posting has priority. This is EXPECTED, not an error or an empty result. Call " +
-      "scan_candidates again shortly; it runs as soon as the current post batch finishes. Do NOT " +
-      "sleep or conclude there are no candidates; just re-call."
-  );
-}
-
-// Resolve to {done:true,value} the moment `p` settles, or {done:false} after
-// `ms` — whichever is first. The job promise keeps running either way, so a
-// later poll re-attaches to it.
-function waitUpTo<T>(
-  p: Promise<T>,
-  ms: number
-): Promise<{ done: true; value: T } | { done: false }> {
-  return Promise.race([
-    p.then((value) => ({ done: true as const, value })),
-    new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), ms)),
-  ]);
-}
-
-function startScanJob(project?: string): ScanJob {
-  const job: ScanJob = {
-    project,
-    startedAt: Date.now(),
-    done: false,
-    promise: undefined as unknown as Promise<ScanResult>,
-  };
-  job.promise = runScanCandidates(project)
-    .then((r) => {
-      job.result = r;
-      job.done = true;
-      return r;
-    })
-    .catch((e: any) => {
-      const r: ScanResult = {
-        batchId: null,
-        candidates: [],
-        blocked:
-          `The scan crashed before producing a result: ${String(e?.message || e)}. ` +
-          `Call scan_candidates again to retry.`,
-      };
-      job.result = r;
-      job.done = true;
-      return r;
-    });
-  return job;
-}
-
-// Read the on-brand drafting guidance for the given projects from config.json so
-// scan_candidates can hand it to the agent INLINE. Without this the autopilot run
-// has to read the config itself (project_config returns status, not the voice
-// fields) — and a headless run improvises Bash/Read for that, hitting an
-// un-approved tool and hanging. Returning the voice here removes the need to read
-// any file. Best-effort: a missing/unreadable config yields {} and the agent
-// drafts from thread context, same as before.
-function readProjectVoices(projectNames: string[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  const want = new Set(projectNames.filter(Boolean));
-  if (!want.size) return out;
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(repoDir(), "config.json"), "utf-8"));
-    const projects: any[] = Array.isArray(cfg?.projects) ? cfg.projects : [];
-    for (const p of projects) {
-      if (!p?.name || !want.has(p.name)) continue;
-      // Only the fields needed to draft on-brand — keep it lean.
-      out[p.name] = {
-        voice: p.voice,
-        voice_relationship: p.voice_relationship,
-        description: p.description,
-        differentiator: p.differentiator,
-        content_guardrails: p.content_guardrails,
-        website: p.website,
-        get_started_link: p.get_started_link,
-      };
-    }
-  } catch {
-    /* best effort — no inline voice, agent falls back to thread context */
-  }
-  return out;
-}
-
-function formatScanResult(scan: ScanResult) {
-  if (!scan.batchId) {
-    return textContent(scan.blocked || "No candidates found.");
-  }
-  // The brand voice for every project in this batch, INLINE, so the agent never
-  // has to read a config file (that improvisation is what hangs headless runs).
-  const projects = Array.from(
-    new Set(scan.candidates.map((c) => c.matched_project).filter(Boolean) as string[])
-  );
-  const project_voices = readProjectVoices(projects);
-  return jsonContent({
-    batch_id: scan.batchId,
-    count: scan.candidates.length,
-    candidates: scan.candidates,
-    project_voices,
-    next_step:
-      `Draft an on-brand reply (<=250 chars, match the thread's language) for each candidate you ` +
-      `judge genuinely worth engaging; skip the rest. The brand voice + guardrails for each ` +
-      `candidate's project are in project_voices[<matched_project>] (voice, description, ` +
-      `differentiator, content_guardrails) — draft from THAT. Do NOT read config files or call any ` +
-      `other tool to find the voice; everything you need is in this result. Then call submit_drafts ` +
-      `with batch_id "${scan.batchId}" and one entry per drafted reply ({candidate_id, reply_text}). ` +
-      `Nothing posts until the user approves.`,
-  });
-}
-
-function scanInProgress(job: ScanJob) {
-  const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-  return textContent(
-    `Scan in progress (${elapsed}s elapsed). The X scan drives a real browser and usually takes ` +
-      `1-3 minutes. Call scan_candidates again RIGHT NOW to keep waiting — each call long-polls up ` +
-      `to ~${Math.round(SCAN_POLL_WAIT_MS / 1000)}s and returns the candidates the moment the scan ` +
-      `finishes. Do NOT sleep, run a background command, or do other work to bridge the gap; just ` +
-      `re-call scan_candidates until it returns candidates or reports no candidates.`
-  );
-}
-
-tool(
-  "scan_candidates",
-  {
-    title: "Scan X for reply candidates (no drafting, no posting)",
-    description:
-      "Step 1 of a hands-free / scheduled autopilot run. Runs the scan+score half of the pipeline " +
-      "and returns the top scored X/Twitter threads worth replying to — WITHOUT drafting or posting, " +
-      "and without spending any `claude -p` budget. You (this session) then draft an on-brand reply " +
-      "for each good candidate YOURSELF and submit them with `submit_drafts`. Each candidate includes " +
-      "its candidate_id (pass it back), the thread text/author, the matched project, and engagement " +
-      "metrics. The result ALSO includes `project_voices` — the brand voice + guardrails for each " +
-      "project in the batch — so you draft on-brand WITHOUT reading config files or calling other " +
-      "tools (do not improvise a config read). Optional `project` scopes the scan to one configured " +
-      "project. The scan drives a real " +
-      "browser and can take 1-3 minutes: this call long-polls and may return a `Scan in progress` " +
-      "status instead of candidates — if so, just call scan_candidates again (same args) and keep " +
-      "re-calling until it returns candidates. Never sleep or use a background wait to bridge the gap.",
-    inputSchema: { project: z.string().optional() },
-  },
-  async (args: { project?: string }) => {
-    // MUTUAL EXCLUSION (the real hijack fix): while a post batch is in progress
-    // (or its grace-hold is active), DEFER scanning entirely rather than launching
-    // a scan that races the post for the one shared browser. Both the scan and the
-    // post are children of THIS MCP, so this in-process gate is exact — the
-    // autopilot never even starts a scan to interrupt a post. Posting always wins;
-    // the autopilot just re-calls and runs once the batch drains.
-    if (postingActive || isPostingFlagFresh()) return scanDeferredForPost();
-    // Long-poll the single in-flight scan job (see the ScanJob registry above).
-    // A finished-but-unconsumed job: hand back its result and clear the slot so a
-    // later call starts a fresh scan.
-    if (currentScanJob?.done) {
-      const finished = currentScanJob;
-      currentScanJob = null;
-      if (finished.result?.busy) {
-        scanBusyUntil = Date.now() + SCAN_BUSY_COOLDOWN_MS;
-        return scanBusy();
-      }
-      return formatScanResult(finished.result!);
-    }
-    // Contention cooldown: another scan holds the slot — report busy without
-    // launching yet another no-op scan against the locked pipeline.
-    if (!currentScanJob && Date.now() < scanBusyUntil) {
-      return scanBusy();
-    }
-    // Nothing running -> start one scan (single-flight: never spawn a second
-    // run-twitter-cycle.sh that would just hit the pipeline's too_many_inflight).
-    if (!currentScanJob) {
-      currentScanJob = startScanJob(args?.project);
-    }
-    // Wait for the in-flight scan, but no longer than the client timeout allows.
-    const waited = await waitUpTo(currentScanJob.promise, SCAN_POLL_WAIT_MS);
-    if (waited.done) {
-      currentScanJob = null;
-      if (waited.value.busy) {
-        scanBusyUntil = Date.now() + SCAN_BUSY_COOLDOWN_MS;
-        return scanBusy();
-      }
-      return formatScanResult(waited.value);
-    }
-    // Still scanning — tell the agent to simply call scan_candidates again.
-    return scanInProgress(currentScanJob);
-  }
-);
-
-tool(
-  "submit_drafts",
-  {
-    title: "Submit drafted replies for review",
-    description:
-      "Step 2 of a hands-free / scheduled autopilot run. Hand back the replies you drafted for the " +
-      "candidates returned by scan_candidates. Writes them into the SAME review plan the menu-bar " +
-      "approval UI and post_drafts already use — nothing is posted until the user approves. Provide " +
-      "batch_id (from scan_candidates) and a `drafts` array; each entry needs candidate_id and " +
-      "reply_text (engagement_style, language, link_keyword optional).",
-    inputSchema: {
-      batch_id: z.string(),
-      drafts: z
-        .array(
-          z.object({
-            candidate_id: z.union([z.string(), z.number()]),
-            reply_text: z.string(),
-            engagement_style: z.string().optional(),
-            language: z.string().optional(),
-            link_keyword: z.string().optional(),
-          })
-        )
-        .min(1),
-    },
-  },
-  async (args: {
-    batch_id: string;
-    drafts: Array<{
-      candidate_id: string | number;
-      reply_text: string;
-      engagement_style?: string;
-      language?: string;
-      link_keyword?: string;
-    }>;
-  }) => {
-    // Reload the scan candidates for thread metadata (url / author / text /
-    // project / topic). If the scan file is gone (e.g. /tmp cleared), we still
-    // build a plan from the drafts alone; the review cards just lack context.
-    const scanById = new Map<string, ScanCandidate>();
-    try {
-      const raw = JSON.parse(fs.readFileSync(scanResultPath(args.batch_id), "utf-8"));
-      for (const c of (raw.candidates ?? []) as ScanCandidate[]) {
-        scanById.set(String(c.id), c);
-      }
-    } catch {
-      /* scan file missing — proceed with draft-only context */
-    }
-    const candidates: PlanCandidate[] = args.drafts.map((d) => {
-      const sc = scanById.get(String(d.candidate_id));
-      return {
-        candidate_id: d.candidate_id,
-        candidate_url: sc?.tweet_url,
-        thread_author: sc?.author_handle,
-        thread_text: sc?.tweet_text,
-        reply_text: d.reply_text,
-        engagement_style: d.engagement_style,
-        language: d.language,
-        link_keyword: d.link_keyword,
-        search_topic: sc?.search_topic,
-        matched_project: sc?.matched_project,
-      } as PlanCandidate;
-    });
-    const firstSc = scanById.get(String(args.drafts[0].candidate_id));
-    const project =
-      (candidates.map((c) => c.matched_project).find((p): p is string => !!p) ||
-        firstSc?.matched_project ||
-        "default") as string;
-    // Stage the new drafts under the scan batch id and bake link targets into them
-    // (sub-second at TWITTER_PAGE_GEN_RATE=0). Best-effort: posting falls back to the
-    // plain project URL per-candidate if gen is skipped.
-    writePlan(args.batch_id, { candidates });
-    try {
-      await runPython("scripts/twitter_gen_links.py", ["--plan", planPath(args.batch_id)], {
-        timeoutMs: 120_000,
-        env: { TWITTER_PAGE_GEN_RATE: "0", SAPS_REPO_DIR: repoDir(), PATH: pipelinePath() },
-      });
-    } catch {
-      /* best effort — plan still posts with a plain-URL fallback */
-    }
-    const staged = (readPlan(args.batch_id)?.candidates as PlanCandidate[]) ?? candidates;
-
-    // Accumulate into ONE persistent review queue so a continuous autopilot's drafts
-    // PILE UP in the menu-bar cards instead of each run overwriting the last. New
-    // drafts are appended; a thread already in the queue (by URL) is skipped (one
-    // draft per thread). Posted entries are KEPT in place so the 1-based card
-    // numbering stays stable across runs — the menu bar, the chat table, and
-    // post_drafts all index the full array and filter finished rows.
-    const queue: PlanCandidate[] = [
-      ...((readPlan(REVIEW_QUEUE_ID)?.candidates as PlanCandidate[]) ?? []),
-    ];
-    const seen = new Set(queue.map((c) => c.candidate_url).filter((u): u is string => !!u));
-    let added = 0;
-    for (const nc of staged) {
-      if (nc.candidate_url && seen.has(nc.candidate_url)) continue;
-      queue.push(nc);
-      if (nc.candidate_url) seen.add(nc.candidate_url);
-      added++;
-    }
-    writePlan(REVIEW_QUEUE_ID, { candidates: queue });
-    // Pending = NOT YET DECIDED. A card that's posted, terminal (rejected/dead), OR
-    // already approved is a settled decision and must never be re-presented for
-    // review — approved ones just proceed to post (see drainApprovedBacklog).
-    const pending = queue.filter(
-      (c) => c.posted !== true && c.terminal !== true && c.approved !== true
-    );
-
-    // Drafts queued = the pipeline verified end-to-end without posting. This is the
-    // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
-    if (added > 0)
-      completeOnboardingMilestone("draft_verified", { outcome: "review_batch", draft_count: added });
-
-    // Point the menu-bar review cards at the accumulated queue.
-    writeReviewRequest({
-      batch_id: REVIEW_QUEUE_ID,
-      project,
-      count: pending.length,
-      plan_path: planPath(REVIEW_QUEUE_ID),
-      created_at: new Date().toISOString(),
-    });
-    return textContent(
-      `Queued ${added} new draft(s); ${pending.length} now awaiting approval in the menu-bar cards ` +
-        `(review queue "${REVIEW_QUEUE_ID}"). Nothing posts until approved.\n\n` +
-        renderDraftsTable({ candidates: queue }) +
-        `\n\nTo post: the user approves in the menu bar, or call post_drafts with batch_id ` +
-        `"${REVIEW_QUEUE_ID}" and the numbers to post.`
-    );
-  }
-);
 
 appTool(
   "dashboard",
@@ -3710,7 +3027,7 @@ appTool(
       "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
       "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (scan_candidates, submit_drafts, post_drafts, get_stats) so the user sees the " +
+      "action (run_draft_cycle, post_drafts, get_stats) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
@@ -3972,15 +3289,6 @@ async function main() {
       "[social-autoposter-mcp] owned runtime not ready; provisioning on boot"
     );
   }
-  // Same problem for the scheduled task's prompt: the host owns its SKILL.md and
-  // a plugin update never touches it. Rewrite it on boot when this build ships a
-  // newer prompt version, so behavior changes (no-improvise / voice-inline /
-  // stop-cleanly) reach an already-scheduled task on its next fire. Best-effort.
-  ensureAutopilotPromptCurrent();
-  // Pre-approve THIS server's tools in ~/.claude/settings.json so the unattended
-  // scan -> submit path never stalls on an "Ask mode" permission prompt (see the
-  // helper's note). Best-effort, allow-only, gated on the task existing.
-  ensureAutopilotToolsAllowed();
   // Queue-backed drafting (2026-06-23): keep the two worker-task prompts current,
   // pre-approve their tools EAGERLY (before onboarding even creates the tasks, so
   // the first unattended fire can't stall), and (re)install the launchd kicker
