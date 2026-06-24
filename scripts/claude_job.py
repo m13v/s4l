@@ -208,7 +208,7 @@ def cmd_provider(ns) -> int:
     trailing_prompt, schema_path = _parse_claude_args(ns.claude_args)
     prompt = stdin_text if stdin_text.strip() else (trailing_prompt or "")
     if not prompt.strip():
-        print("[claude_job] empty prompt; nothing to enqueue", file=sys.stderr)
+        _plog("empty prompt; nothing to enqueue")
         return 1
 
     schema_text = None
@@ -236,11 +236,7 @@ def cmd_provider(ns) -> int:
     pending_path = os.path.join(pending_dir(qtype), fname)
     running_path = os.path.join(running_dir(), fname)
     _atomic_write(pending_path, job)
-    print(
-        f"[claude_job] enqueued {qtype} job {job_id}; waiting for a scheduled "
-        f"task to process it (timeout {ns.timeout}s)",
-        file=sys.stderr,
-    )
+    _plog(f"enqueued {qtype} job {job_id}; waiting for a scheduled task (timeout {ns.timeout}s)")
 
     res_path = os.path.join(result_dir(), f"{job_id}.json")
     deadline = created + ns.timeout
@@ -254,11 +250,7 @@ def cmd_provider(ns) -> int:
                 continue
             os.remove(res_path)
             if res.get("status") == "error":
-                print(
-                    f"[claude_job] job {job_id} returned error: "
-                    f"{res.get('error', 'unknown')}",
-                    file=sys.stderr,
-                )
+                _plog(f"job {job_id} returned error: {res.get('error', 'unknown')}")
                 return 1
             obj = res.get("result")
             # Emit a claude `--output-format json` shaped envelope so the
@@ -283,11 +275,7 @@ def cmd_provider(ns) -> int:
             os.remove(p)
         except OSError:
             pass
-    print(
-        f"[claude_job] timed out after {ns.timeout}s waiting for job {job_id} "
-        f"({qtype}); removed the job. Is the {qtype} scheduled task running?",
-        file=sys.stderr,
-    )
+    _plog(f"timed out after {ns.timeout}s waiting for job {job_id} ({qtype}); removed the job")
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
 
 
