@@ -1791,54 +1791,18 @@ export CLAUDE_SESSION_ID
 # second schema layer.
 PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"candidate_url":{"type":"string"},"thread_author":{"type":"string"},"thread_text":{"type":"string"},"matched_project":{"type":"string"},"reply_text":{"type":"string"},"engagement_style":{"type":"string"},"new_style":{"type":["object","null"],"properties":{"description":{"type":"string"},"example":{"type":"string"},"why_existing_didnt_fit":{"type":"string"},"note":{"type":"string"},"target_chars":{"type":"integer"}}},"language":{"type":"string"},"has_landing_pages":{"type":"boolean"},"link_keyword":{"type":"string"},"link_slug":{"type":"string"},"search_topic":{"type":"string"}},"required":["candidate_id","candidate_url","matched_project","reply_text","engagement_style","language","has_landing_pages","search_topic"]}},"rejected":{"type":"array","items":{"type":"object","properties":{"candidate_id":{"type":"integer"},"reason":{"type":"string"},"proposed_excludes":{"type":"array","items":{"type":"string"}}},"required":["candidate_id","reason"]}}},"required":["candidates","rejected"]}'
 
-PREP_PREFIX="$TW_ENGINE_PREFIX"
-PREP_CONTEXT_READ_LINES="Read $SKILL_FILE for content rules and voice context.
-Read $REPO_DIR/config.json for project metadata."
-PREP_FIRST_JOB_LINE="1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY)."
-PREP_WORKFLOW_READ_STEP="1. Navigate to CANDIDATE_URL using the navigate tool from the BROWSER BACKEND block above (READ-ONLY).
-2. Read the thread to understand context."
-PREP_STYLE_CONTEXT="## FEEDBACK FROM PAST PERFORMANCE:
-$TOP_REPORT
-
-$STYLES_BLOCK"
-PREP_BROWSER_CRITICAL="- Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step."
-
-# Customer .mcpb installs route this Claude turn through a Desktop scheduled
-# task. That worker already receives a sidecar prompt file and is best at a
-# bounded text->JSON job; the legacy browser-preface + full performance corpus
-# can exceed the task's useful context and make it stall before result submit.
-# Keep CLI-backed installs unchanged, but feed queue-backed installs a compact,
-# self-contained drafting prompt based on the already-scraped candidate text.
-if [ "${SAPS_CLAUDE_PROVIDER:-}" = "queue" ]; then
-    PREP_PREFIX=""
-    PREP_CONTEXT_READ_LINES="Do NOT read external context files. The project metadata, voice rules, candidates, assigned style, and output contract are embedded below."
-    PREP_FIRST_JOB_LINE="1. Use the PRE-SCORED CANDIDATES block below. Do NOT navigate to X and do NOT use browser tools in queue mode."
-    PREP_WORKFLOW_READ_STEP="1. Use each candidate's Text, URL, Author, metrics, Search query, Project match, existing draft, and author-history lines from the PRE-SCORED CANDIDATES block.
-2. Do NOT navigate to X or call browser tools in queue mode; Phase 1 already scraped and scored the source tweets."
-    QUEUE_TOP_REPORT=$(printf '%s\n' "$TOP_REPORT" | sed -n '1,80p')
-    QUEUE_STYLES_BLOCK=$(printf '%s\n' "$STYLES_BLOCK" | sed -n '1,220p')
-    PREP_STYLE_CONTEXT="## COMPACT STYLE CONTEXT (queue mode)
-Assigned style mode: $PICKED_MODE
-Assigned style: ${PICKED_STYLE:-(invent)}
-
-$QUEUE_STYLES_BLOCK
-
-## RECENT PERFORMANCE EXAMPLES (truncated)
-$QUEUE_TOP_REPORT"
-    PREP_BROWSER_CRITICAL="- Queue mode: do NOT call browser tools. Draft only from the candidate text and embedded project/style context."
-fi
-
-PREP_PROMPT="${PREP_PREFIX}You are the Social Autoposter prep step.
+PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
-  $PREP_FIRST_JOB_LINE
+  1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY).
   2. Draft a reply for each.
   3. Persist each fresh draft via log_draft.py.
   4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
 
 You will NOT post anything. You will NOT generate landing pages. You will NOT call log_post.py. The shell handles all of that AFTER your session ends, with the browser lock released for the long landing-page build.
 
-$PREP_CONTEXT_READ_LINES
+Read $SKILL_FILE for content rules and voice context.
+Read $REPO_DIR/config.json for project metadata.
 
 ## PRE-SCORED CANDIDATES (sorted by Virality DESC, highest first)
 Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
@@ -1849,13 +1813,17 @@ $MEDIA_BLOCK
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
 All project configs: $ALL_PROJECTS_JSON
 
-$PREP_STYLE_CONTEXT
+## FEEDBACK FROM PAST PERFORMANCE:
+$TOP_REPORT
+
+$STYLES_BLOCK
 
 ## WORKFLOW
 There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
 
 For each chosen candidate:
-$PREP_WORKFLOW_READ_STEP
+1. Navigate to CANDIDATE_URL using the navigate tool from the BROWSER BACKEND block above (READ-ONLY).
+2. Read the thread to understand context.
 3. DRAFT HANDLING (existing vs fresh):
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
    - Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.
@@ -1917,7 +1885,7 @@ CRITICAL:
 - DO NOT call twitter_browser.py.
 - DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
 - DO NOT call log_post.py or campaign_bump.py.
-$PREP_BROWSER_CRITICAL
+- Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step.
 - NEVER use em dashes. Use commas, periods, or regular dashes (-).
 - Reply in the SAME LANGUAGE as the parent tweet."
 
