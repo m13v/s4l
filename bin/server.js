@@ -20992,6 +20992,11 @@ async function warmJobRunsCache(host, port) {
 
 function startDashboardWarmers(host, port) {
   if (auth.CLIENT_MODE) return; // local operator dashboard only
+  const warmerSetting = String(process.env.SAPS_DASHBOARD_WARMERS || '1').trim().toLowerCase();
+  if (['0', 'false', 'off', 'no'].includes(warmerSetting)) {
+    console.log('[warmer] dashboard cache warmers disabled by SAPS_DASHBOARD_WARMERS');
+    return;
+  }
   const inFlight = new Map();
   const runWarmPass = (name, fn) => async () => {
     const previous = inFlight.get(name);
