@@ -92,6 +92,19 @@ const REVIEW_QUEUE_ID = "review-queue";
 // (the legacy launchd autopilot is retired).
 const AUTOPILOT_TASK_ID = "social-autoposter-autopilot";
 
+// ---- Queue-backed drafting (2026-06-23) -----------------------------------
+// Customer .mcpb boxes have no `claude` CLI, so the deterministic pipeline can't
+// run its `claude -p` steps directly. Instead a launchd job kicks the REAL
+// pipeline (run-twitter-cycle.sh in DRAFT_ONLY mode with SAPS_CLAUDE_PROVIDER=
+// queue); each `claude -p` call enqueues onto scripts/claude_job.py's file queue
+// and blocks. Two Claude Desktop scheduled tasks — one per job type — drain that
+// queue, run the pipeline's own prompt as a Claude turn, and write the result
+// back, unblocking the cycle. This reuses the entire pipeline (styles, voice,
+// top-performers, em-dash rules) instead of the old scan_candidates host-draft
+// reimplementation. See scripts/claude_job.py + run_claude.sh's provider seam.
+const PHASE1_TASK_ID = "saps-phase1-query"; // drains "twitter-query" jobs
+const PHASE2B_TASK_ID = "saps-phase2b-draft"; // drains "twitter-prep" jobs
+
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
   os.homedir(),
@@ -155,6 +168,7 @@ function plistXml(opts: {
   runAtLoad: boolean;
   stdoutLog: string;
   stderrLog: string;
+  extraEnv?: Record<string, string>;
 }): string {
   const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
   // Background (cron/autopilot) runs get the same Chrome the interactive cycle
@@ -164,6 +178,13 @@ function plistXml(opts: {
   const chrome = resolveChrome();
   const chromeEnv = chrome
     ? `\n\t\t<key>BH_CHROME_BIN</key>\n\t\t<string>${chrome}</string>`
+    : "";
+  // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY / SAPS_CLAUDE_PROVIDER).
+  // Rendered after the baked-in vars so a caller can also override SAPS_STATE_DIR.
+  const extraEnv = opts.extraEnv
+    ? Object.entries(opts.extraEnv)
+        .map(([k, v]) => `\n\t\t<key>${k}</key>\n\t\t<string>${v}</string>`)
+        .join("")
     : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -190,7 +211,7 @@ ${args}
 \t\t<key>SAPS_REPO_DIR</key>
 \t\t<string>${repoDir()}</string>
 \t\t<key>SAPS_PYTHON</key>
-\t\t<string>${resolvePython()}</string>${chromeEnv}
+\t\t<string>${resolvePython()}</string>${chromeEnv}${extraEnv}
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<${opts.runAtLoad ? "true" : "false"}/>
