@@ -371,17 +371,20 @@ def main() -> int:
     pp = sub.add_parser("provider", help="enqueue + block-poll (run by run_claude.sh)")
     pp.add_argument("--tag", required=True)
     pp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
+    pp.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
     pp.add_argument("claude_args", nargs=argparse.REMAINDER)
     pp.set_defaults(func=cmd_provider)
 
     pn = sub.add_parser("next", help="claim oldest pending job of a type")
     pn.add_argument("--type", required=True)
+    pn.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
     pn.set_defaults(func=cmd_next)
 
     pr = sub.add_parser("result", help="store a job's result")
     pr.add_argument("--job", required=True)
     pr.add_argument("--result-file", default="-", help="path to JSON, or - for stdin")
     pr.add_argument("--error", action="store_true", help="record a failure")
+    pr.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
     pr.set_defaults(func=cmd_result)
 
     ns = p.parse_args()
