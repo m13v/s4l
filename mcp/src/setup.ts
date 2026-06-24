@@ -200,6 +200,16 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
     weight: 10,
     platform: "twitter",
     voice_relationship: "first_party",
+    // A freshly onboarded customer has NOT shipped the @m13v/seo-components
+    // /r/[code] resolver on their own domain, so a wrapped short link minted
+    // against project.website would 404 ("this link doesn't exist"). Default
+    // new projects to route /r/<code> through the social-autoposter-owned
+    // resolver at https://s4l.ai instead: short_links_live=false makes
+    // _project_short_links_host / getProjectWrapperHost fall back to
+    // DEFAULT_FALLBACK_HOST. The customer flips this to true (or removes it)
+    // only AFTER they ship their own /r/[code] handler. See the "URL wrapping"
+    // section in CLAUDE.md.
+    short_links_live: false,
     ...userFields(input),
   };
   // Generic fields can override the defaults above (e.g. platform/weight) and
@@ -262,6 +272,51 @@ export function applySetup(input: ProjectInput): {
     fields_set,
     fields_removed,
   };
+}
+
+// Heal installs that onboarded BEFORE short_links_live defaulted to false.
+// Such a project has neither short_links_host nor an explicit short_links_live,
+// so the wrapper host resolves to project.website — but the customer never
+// shipped a /r/[code] resolver there, so every minted short link 404s. Set
+// short_links_live=false (route /r/<code> through s4l.ai) for those projects.
+//
+// Scoped to projects this install actually manages, so a hand-maintained dev
+// config with branded-resolver projects isn't rewritten. Idempotent: a project
+// that already has either short-link field set is left untouched (someone made
+// a deliberate choice). Best-effort; never throws.
+export function ensureShortLinksDefault(): { healed: string[] } {
+  const healed: string[] = [];
+  try {
+    const cfg = readConfig();
+    const projects = cfg.projects || [];
+    if (!projects.length) return { healed };
+    const managed = new Set(managedProjects());
+    let changed = false;
+    for (const p of projects) {
+      const name = typeof p.name === "string" ? p.name : "";
+      if (!name || !managed.has(name)) continue;
+      const hasHost =
+        typeof p.short_links_host === "string" && p.short_links_host.trim() !== "";
+      const hasLiveFlag =
+        p.short_links_live === true || p.short_links_live === false;
+      if (hasHost || hasLiveFlag) continue; // deliberate config: leave it.
+      p.short_links_live = false;
+      healed.push(name);
+      changed = true;
+    }
+    if (changed) {
+      const cfgPath = configPath();
+      if (fs.existsSync(cfgPath)) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+      }
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+      fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    }
+  } catch {
+    // best-effort heal; a failure here must never block boot.
+  }
+  return { healed };
 }
 
 // ---------------------------------------------------------------------------
