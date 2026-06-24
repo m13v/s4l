@@ -781,6 +781,29 @@ async function ensurePostingHandle(): Promise<void> {
   }
 }
 
+async function ensureTwitterBrowserForPost() {
+  const chrome = resolveChrome();
+  const env: NodeJS.ProcessEnv = {
+    SAPS_REPO_DIR: repoDir(),
+    SAPS_PYTHON: resolvePython(),
+    PATH: pipelinePath(),
+    TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
+  };
+  if (chrome) env.BH_CHROME_BIN = chrome;
+  return run(
+    "bash",
+    ["-lc", ". skill/lib/twitter-backend.sh && ensure_twitter_browser_for_backend"],
+    {
+      timeoutMs: 90_000,
+      env,
+      onLine: (line: string) => {
+        const t = line.replace(/\s+$/, "");
+        if (t.trim()) console.error(`[post-browser] ${t}`);
+      },
+    }
+  );
+}
+
 async function postApproved(batchId: string, plan: Plan) {
   // Post every card the user APPROVED that hasn't already landed or been ruled out.
   // `approved` is now a DURABLE decision (sticky, never cleared by a later call), so
@@ -834,6 +857,21 @@ async function postApproved(batchId: string, plan: Plan) {
   // A/B disclosure experiment keeps running on autopilot/cron and on Reddit.
   const res = await (async () => {
     try {
+      const browser = await ensureTwitterBrowserForPost();
+      if (browser.code !== 0) {
+        const failure = {
+          posted: 0,
+          skipped: 0,
+          failed: approved.length,
+          failure_reasons: "browser_bootstrap_failed",
+          skip_reasons: "",
+        };
+        return {
+          code: browser.code,
+          stdout: `${JSON.stringify(failure)}\n`,
+          stderr: [browser.stderr, browser.stdout].filter(Boolean).join("\n"),
+        };
+      }
       return await runPython(
         "scripts/twitter_post_plan.py",
         ["--plan", planPath(approvedBatch)],
