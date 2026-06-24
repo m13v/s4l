@@ -113,6 +113,21 @@ const TWITTER_AUTOPILOT_PLIST = path.join(
   `${TWITTER_AUTOPILOT_LABEL}.plist`
 );
 
+// Self-healing reaper for leaked Claude agent-mode worker sessions. The queue
+// autopilot fires two scheduled tasks every ~1 min; each fire spawns a ~200 MB
+// `claude` agent-mode session that finishes its one queue turn but never exits
+// (Desktop keeps the stream-json session warm), so they pile up — 226 procs /
+// 22.5 GB on the test box in ~1h, load 75, near-OOM. We can't change Desktop's
+// teardown, so a 60s launchd job kills the leaked sessions (see the script for
+// the uuid-grouping safety that spares real interactive sessions).
+const REAPER_LABEL = "com.m13v.social-claude-reaper";
+const REAPER_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${REAPER_LABEL}.plist`
+);
+
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
 // install keeps itself current — the interactive `runtime` tool (action:'update')
 // only helps when
@@ -2575,6 +2590,57 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
   }
 }
 
+// ---- launchd reaper: kill leaked agent-mode claude worker sessions ----------
+// Independent guardrail (NOT gated on a project being ready): the leak happens
+// whenever the scheduled-task workers fire, and a no-leak run is a cheap no-op.
+// Runs the stdlib-only reaper under SYSTEM python (always present, zero deps) so
+// it works even before the owned runtime provisions. Content-aware install so an
+// already-installed box picks up a changed interval/path on the next Claude boot.
+const REAPER_INTERVAL_SECS = 60; // match the ~1/min worker spawn cadence
+
+async function ensureClaudeReaperInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: REAPER_LABEL,
+      programArgs: ["/usr/bin/python3", path.join(repoDir(), "scripts", "reap_stale_claude_sessions.py")],
+      intervalSecs: REAPER_INTERVAL_SECS,
+      runAtLoad: true, // clean up an existing backlog the instant Claude launches
+      stdoutLog: path.join(logDir, "launchd-claude-reaper-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-claude-reaper-stderr.log"),
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(REAPER_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(REAPER_LABEL, REAPER_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(REAPER_LABEL, REAPER_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(REAPER_PLIST), { recursive: true });
+      fs.writeFileSync(REAPER_PLIST, xml, "utf-8");
+      const res = await loadPlist(REAPER_LABEL, REAPER_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
@@ -3925,6 +3991,13 @@ async function main() {
   void ensureQueueKickerInstalled()
     .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
+  // Self-healing reaper for the agent-mode session leak the queue autopilot
+  // produces (finished `claude` worker sessions Desktop never tears down). A
+  // standalone guardrail; install unconditionally so it caps memory even on a
+  // box whose project isn't ready yet. Best-effort; must never block boot.
+  void ensureClaudeReaperInstalled()
+    .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
