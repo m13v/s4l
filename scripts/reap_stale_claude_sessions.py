@@ -47,11 +47,26 @@ import subprocess
 import sys
 import time
 
-# A worker session that has been alive longer than this (seconds) and is NOT the
-# newest in its uuid group is considered leaked and gets reaped. A legitimate
-# one-shot queue turn finishes in well under a minute; 5 min is a generous margin
-# so we never clip a slow draft. Tunable via env for tightening from observation.
-DEFAULT_MAX_AGE_SEC = 300
+# Age (seconds) past which a leaked worker session is reaped. The threshold MUST
+# sit above the longest a worker's output can still matter, so we never kill a
+# session that is legitimately mid-draft.
+#
+# What bounds a legit worker turn — measured, not assumed:
+#   * The producer (claude_job.py) abandons a queued job after
+#     SAPS_CLAUDE_QUEUE_TIMEOUT (default 600s / 10 min): once a worker has been
+#     going longer than that, the producer has already removed the job and
+#     discarded whatever the worker eventually writes. So 600s is the hard ceiling
+#     on USEFUL worker work, empirically confirmed by provider.log
+#     ("timed out after 600s ... removed the job").
+#   * The 180-MINUTE budgets in watchdog_hung_runs.py are NOT this. Those govern
+#     run-twitter-cycle.sh / stats.sh, which run as `bash`/python pipeline
+#     processes, not `claude` agent-mode sessions — the reaper signature can never
+#     match them. Do not conflate the pipeline budget with the worker-turn ceiling.
+#
+# So the floor is the queue timeout; we take 2x it as the default for margin. A
+# session older than 2x the producer's own deadline is provably done/abandoned.
+_QUEUE_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "600"))
+DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S * 2  # 1200s (20 min) by default
 
 # Hard cap on kills per run, so a pathological ps parse can never SIGKILL the world.
 MAX_KILL_PER_RUN = 500
