@@ -1966,6 +1966,21 @@ tool(
   },
   async () => {
     ensureQueueWorkerToolsAllowed();
+    // Write each worker's canonical SKILL.md to disk NOW, before the agent calls
+    // create_scheduled_task. The host's create_scheduled_task can report a task
+    // "already exists" (e.g. a stale Routines registration left after a reset) and
+    // then NOT write the prompt file — leaving a registered-but-promptless task
+    // that fires and does nothing. Pre-writing the file means the prompt is always
+    // present and correct regardless of what the host create does. (2026-06-24)
+    for (const spec of QUEUE_WORKERS) {
+      try {
+        const p = scheduledTaskSkillPath(spec.taskId);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, queueWorkerSkillMd(spec), "utf-8");
+      } catch (e: any) {
+        console.error(`[queue_setup] could not pre-write ${spec.taskId} SKILL.md: ${e?.message || e}`);
+      }
+    }
     const tasks = QUEUE_WORKERS.map((spec) => ({
       taskId: spec.taskId,
       cronExpression: "* * * * *",
@@ -1974,10 +1989,13 @@ tool(
     return jsonContent({
       tasks,
       next_step:
-        "Create each task with the host tool create_scheduled_task (taskId, cronExpression, prompt " +
-        "verbatim). Both fire every minute and only draft — they never post. The pipeline that feeds " +
-        "them is run by a launchd job this server already (re)installs on boot. Do NOT also create the " +
-        "old 'social-autoposter-autopilot' task; it is deprecated.",
+        "For EACH task, call the host tool create_scheduled_task (taskId, cronExpression, prompt " +
+        "verbatim) to register its schedule — the prompt file is already written, so creating it just " +
+        "wires up the cron. If create_scheduled_task reports a task already exists, that is FINE — the " +
+        "schedule is registered and the prompt is current; do NOT delete/recreate, do NOT investigate, " +
+        "just move on. Both fire every minute and only draft — they never post. The pipeline that feeds " +
+        "them runs from a launchd job this server installs. Do NOT create the old " +
+        "'social-autoposter-autopilot' task; it is deprecated.",
     });
   }
 );
@@ -2432,11 +2450,30 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
       stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
       extraEnv: kickerEnv(),
     });
-    const created = ensurePlist(TWITTER_AUTOPILOT_PLIST, xml);
+    // Content-aware install: an existing box has the OLD kicker plist pointing at
+    // run-twitter-cycle.sh (no merge step). ensurePlist won't overwrite, so detect
+    // a drifted plist and rewrite + reload it. Otherwise the merge fix never
+    // reaches an already-installed kicker.
     const uid = process.getuid ? process.getuid() : 0;
-    const res = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
-    // bootstrap returns non-zero when already loaded; that's fine (idempotent).
-    const detail = created ? "installed + loaded" : `present (load rc=${res.code})`;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(TWITTER_AUTOPILOT_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(TWITTER_AUTOPILOT_PLIST), { recursive: true });
+      fs.writeFileSync(TWITTER_AUTOPILOT_PLIST, xml, "utf-8");
+      const res = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
     return { ok: true, detail };
   } catch (e: any) {
     return { ok: false, detail: e?.message || String(e) };
