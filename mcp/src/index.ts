@@ -1567,9 +1567,9 @@ tool(
         note: (result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
-            `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts ` +
-            `to verify without posting, then schedule the autopilot: call queue_setup and create each ` +
-            `returned task with create_scheduled_task (prompt verbatim).`
+            `action:'connect_x', confirm:true immediately. Once X is connected, schedule the autopilot ` +
+            `(queue_setup + create_scheduled_task per task), then call run_draft_cycle and poll the ` +
+            `dashboard until a draft card appears — that verifies the real pipeline without posting.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
             `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
@@ -2398,14 +2398,14 @@ function queueWorkerAllowedTools(): string[] {
     "Glob",
     "Grep",
     // This server's tools, both namespaces (manifest name + protocol name).
-    "mcp__social-autoposter__scan_candidates",
-    "mcp__social-autoposter__submit_drafts",
+    "mcp__social-autoposter__run_draft_cycle",
+    "mcp__social-autoposter__queue_setup",
     "mcp__social-autoposter__post_drafts",
     "mcp__social-autoposter__project_config",
     "mcp__social-autoposter__get_stats",
     "mcp__social-autoposter__dashboard",
-    "mcp__S4L__scan_candidates",
-    "mcp__S4L__submit_drafts",
+    "mcp__S4L__run_draft_cycle",
+    "mcp__S4L__queue_setup",
     "mcp__S4L__post_drafts",
     "mcp__S4L__project_config",
     "mcp__S4L__get_stats",
