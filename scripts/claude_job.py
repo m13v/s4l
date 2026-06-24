@@ -120,6 +120,13 @@ def _atomic_write(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def _sweep_stale() -> int:
     """Remove pending/running job files older than STALE_TTL_S. Returns count."""
     removed = 0
@@ -305,17 +312,27 @@ def cmd_next(ns) -> int:
                 job = json.load(f)
         except Exception:
             continue
+        prompt_file = None
+        schema_file = None
+        if ns.prompt_file:
+            prompt_file = os.path.join(queue_root(), f"prompt-{job['job_id']}.md")
+            _atomic_write_text(prompt_file, job.get("prompt") or "")
+            job["prompt_file"] = prompt_file
+            schema = job.get("schema")
+            if schema:
+                schema_file = os.path.join(queue_root(), f"schema-{job['job_id']}.json")
+                _atomic_write_text(schema_file, schema)
+                job["schema_file"] = schema_file
+            _atomic_write(dst, job)
         # Hand the consumer exactly what it needs to do the work and report back.
-        print(
-            json.dumps(
-                {
-                    "job_id": job["job_id"],
-                    "type": job["type"],
-                    "prompt": job["prompt"],
-                    "schema": job.get("schema"),
-                }
-            )
-        )
+        payload = {"job_id": job["job_id"], "type": job["type"]}
+        if ns.prompt_file:
+            payload["prompt_file"] = prompt_file
+            payload["schema_file"] = schema_file
+        else:
+            payload["prompt"] = job["prompt"]
+            payload["schema"] = job.get("schema")
+        print(json.dumps(payload))
         return 0
     print(json.dumps({}))  # no work
     return 0
@@ -362,11 +379,16 @@ def cmd_result(ns) -> int:
     running = None
     # Locate the claimed job to recover its schema (filename carries job_id).
     schema_text = None
+    cleanup_files: list[str] = []
     try:
         for name in os.listdir(running_dir()):
             if name.endswith(f"_{job_id}.json"):
                 with open(os.path.join(running_dir(), name)) as f:
-                    schema_text = json.load(f).get("schema")
+                    job = json.load(f)
+                    schema_text = job.get("schema")
+                    cleanup_files = [
+                        p for p in (job.get("prompt_file"), job.get("schema_file")) if p
+                    ]
                 running = os.path.join(running_dir(), name)
                 break
     except FileNotFoundError:
@@ -379,6 +401,11 @@ def cmd_result(ns) -> int:
         )
         if running and os.path.exists(running):
             os.remove(running)
+        for p in cleanup_files:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
         print(f"[claude_job] recorded error for job {job_id}", file=sys.stderr)
         return 0
 
@@ -402,6 +429,11 @@ def cmd_result(ns) -> int:
     )
     if running and os.path.exists(running):
         os.remove(running)
+    for p in cleanup_files:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     print(f"[claude_job] stored result for job {job_id}", file=sys.stderr)
     return 0
 
@@ -420,6 +452,11 @@ def main() -> int:
     pn = sub.add_parser("next", help="claim oldest pending job of a type")
     pn.add_argument("--type", required=True)
     pn.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
+    pn.add_argument(
+        "--prompt-file",
+        action="store_true",
+        help="write the prompt/schema to sidecar files and print their paths",
+    )
     pn.set_defaults(func=cmd_next)
 
     pr = sub.add_parser("result", help="store a job's result")
