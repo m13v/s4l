@@ -823,6 +823,15 @@ async function postApproved(batchId: string, plan: Plan) {
             // with override, so nothing clobbers it. Cron is untouched (it never goes
             // through this MCP path), so the 0.9 experiment keeps running there.
             TWITTER_TAIL_LINK_RATE: "1.0",
+            // Plugin flow only: skip the link_tail Claude call. It just rewords
+            // prose around the URL (the minted short link comes from the
+            // deterministic wrap step), and on .mcpb boxes there's no `claude`
+            // binary so it wastes ~35s/post of run_claude.sh retry backoff before
+            // falling back to the mechanical concat anyway. link_tail.py honors
+            // this and short-circuits to that concat instantly. The local
+            // cron/plist autopilot never sets this, so it keeps generating the
+            // bridge sentence.
+            SAPS_SKIP_LINK_TAIL: "1",
             // The poster attaches to the twitter-harness Chrome over CDP. The cron
             // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
             // must set it explicitly or twitter_browser.py fails with "No twitter-
