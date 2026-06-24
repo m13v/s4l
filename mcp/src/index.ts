@@ -3717,6 +3717,27 @@ registerAppResource(
   })
 );
 
+// Post any cards the user APPROVED that never landed — e.g. a restart killed the
+// batch mid-way. "Proceed to post the already-approved items." postApproved is
+// idempotent (it filters posted/terminal), so this only drains the genuine
+// backlog and never double-posts. Best-effort; never throws.
+async function drainApprovedBacklog(): Promise<void> {
+  try {
+    const plan = readPlan(REVIEW_QUEUE_ID);
+    const cands = (plan?.candidates as PlanCandidate[]) || [];
+    const backlog = cands.filter(
+      (c) => c.approved === true && c.posted !== true && c.terminal !== true
+    );
+    if (!backlog.length) return;
+    console.error(
+      `[post] draining ${backlog.length} approved-but-unposted card(s) left from before`
+    );
+    await postApproved(REVIEW_QUEUE_ID, plan!);
+  } catch (e: any) {
+    console.error("[post] drainApprovedBacklog error:", e?.message || e);
+  }
+}
+
 async function main() {
   initSentry();
   // Tee the verbatim stdout/stderr of every pipeline subprocess to the s4l
@@ -3784,6 +3805,12 @@ async function main() {
   void startLocalPanel()
     .then((url) => console.error(`[social-autoposter-mcp] panel loopback ready at ${url}`))
     .catch((e) => console.error("[social-autoposter-mcp] panel loopback start failed:", e?.message || e));
+  // Resume posting any approved-but-unposted cards a prior run/restart left behind.
+  // Delayed so the runtime + harness Chrome have settled; never blocks boot.
+  {
+    const t = setTimeout(() => void drainApprovedBacklog(), 30_000);
+    if (typeof t.unref === "function") t.unref();
+  }
   // Ensure the macOS menu bar mini-dashboard is installed + running. Idempotent
   // and cheap when already present, so existing installs pick it up on the next
   // Claude restart without re-provisioning. Best-effort: never blocks boot.
