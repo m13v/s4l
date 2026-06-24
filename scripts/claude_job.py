@@ -71,6 +71,15 @@ DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "600"))
 # --------------------------------------------------------------------------- #
 # Queue layout                                                                #
 # --------------------------------------------------------------------------- #
+def _apply_state_dir_override(ns) -> None:
+    """`--state-dir` wins over $SAPS_STATE_DIR. The scheduled-task worker passes
+    it explicitly so it always reads the SAME queue the launchd kicker writes to,
+    regardless of what env the task session inherits."""
+    sd = getattr(ns, "state_dir", None)
+    if sd:
+        os.environ["SAPS_STATE_DIR"] = sd
+
+
 def state_dir() -> str:
     return os.environ.get("SAPS_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
@@ -134,6 +143,7 @@ def _parse_claude_args(args: list[str]) -> tuple[str | None, str | None]:
 
 
 def cmd_provider(ns) -> int:
+    _apply_state_dir_override(ns)
     qtype = TAG_TO_TYPE.get(ns.tag)
     if not qtype:
         # Not a queue-eligible call. Exit non-zero so run_claude.sh's caller
@@ -231,6 +241,7 @@ def cmd_provider(ns) -> int:
 # next (consumer side, run by a scheduled task)                               #
 # --------------------------------------------------------------------------- #
 def cmd_next(ns) -> int:
+    _apply_state_dir_override(ns)
     qtype = ns.type
     _ensure_dirs(qtype)
     pend = pending_dir(qtype)
@@ -295,6 +306,7 @@ def _validate_against_schema(obj, schema_text: str | None) -> str | None:
 
 
 def cmd_result(ns) -> int:
+    _apply_state_dir_override(ns)
     _ensure_dirs()
     job_id = ns.job
     # Read the produced result (JSON object) from a file or stdin.
