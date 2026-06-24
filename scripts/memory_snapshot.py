@@ -591,11 +591,18 @@ def main() -> int:
         fh.write(json.dumps(snapshot, sort_keys=True, separators=(",", ":")) + "\n")
 
     groups = snapshot.get("groups", {})
+    queues = snapshot.get("queues", {})
+    claude_queue = queues.get("claude_queue", {}) if isinstance(queues, dict) else {}
     print(
         "memory_snapshot "
         f"ts={snapshot['ts']} "
-        f"social_repo_mb={groups.get('social_autoposter_repo', {}).get('rss_mb', 0)} "
-        f"mcp_mb={groups.get('social_autoposter_mcp', {}).get('rss_mb', 0)} "
+        f"social_repo_processes_mb={groups.get('social_autoposter_repo_processes', {}).get('rss_mb', 0)} "
+        f"saps_mcp_servers={groups.get('social_autoposter_mcp_servers', {}).get('count', 0)} "
+        f"saps_mcp_servers_mb={groups.get('social_autoposter_mcp_servers', {}).get('rss_mb', 0)} "
+        f"saps_configured_sessions={groups.get('sessions_configured_social_autoposter_mcp', {}).get('count', 0)} "
+        f"remote_macos_mcp_servers_mb={groups.get('remote_macos_mcp_servers', {}).get('rss_mb', 0)} "
+        f"claude_queue_pending={claude_queue.get('pending_total', 0)} "
+        f"claude_queue_running={claude_queue.get('running_total', 0)} "
         f"output={output}"
     )
     return 0
