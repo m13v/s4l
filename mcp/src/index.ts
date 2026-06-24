@@ -2305,7 +2305,7 @@ function ensureAutopilotToolsAllowed(): void {
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 1;
+const QUEUE_WORKER_PROMPT_VERSION = 2;
 const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
@@ -2346,14 +2346,16 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     ``,
     `Steps:`,
     `1. Claim the next job. Run this EXACT Bash command:`,
-    `     ${py} ${job} next --type ${spec.queueType} --state-dir ${sd}`,
+    `     ${py} ${job} next --type ${spec.queueType} --prompt-file --state-dir ${sd}`,
     `   It prints one line of JSON. If it prints "{}" (empty), there is NO work — ` +
       `report "no jobs" in one line and STOP. You are done.`,
-    `2. Otherwise it prints {"job_id":"...","prompt":"...","schema":...}. The "prompt" ` +
-      `field is a complete, self-contained instruction the pipeline wrote for you. ` +
-      `Follow it EXACTLY and produce the SINGLE JSON object it asks for. If "schema" ` +
-      `is present, your JSON MUST satisfy it. Output ONLY that JSON object — no prose, ` +
-      `no markdown, no code fences.`,
+    `2. Otherwise it prints {"job_id":"...","prompt_file":"...","schema_file":...}. ` +
+      `Use the Read tool to read prompt_file; it is the complete, self-contained ` +
+      `instruction the pipeline wrote for you. If the Read result says it is partial ` +
+      `or truncated, keep reading the same file with offsets until EOF. If schema_file ` +
+      `is not null, read it too. Follow the prompt EXACTLY and produce the SINGLE JSON ` +
+      `object it asks for. If a schema is present, your JSON MUST satisfy it. Output ` +
+      `ONLY that JSON object — no prose, no markdown, no code fences.`,
     `3. Submit it. Write your JSON object to ${outDir}/out-<job_id>.json using the ` +
       `Write tool (substitute the real job_id), then run this EXACT Bash command:`,
     `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json --state-dir ${sd}`,
@@ -2364,10 +2366,11 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
       `do NOT loop, do NOT read other files, do NOT call any other tool.`,
     ``,
-    `HARD RULES: ONLY the Bash tool (to run claude_job.py) and the Write tool (to ` +
-      `write the result file). NEVER run any other shell command. NEVER edit, post, ` +
-      `or touch anything else. An empty queue is the NORMAL, expected case most ` +
-      `minutes — it is success, not a problem to debug.`,
+    `HARD RULES: ONLY the Bash tool (to run claude_job.py), the Read tool (to read ` +
+      `the prompt/schema sidecar files), and the Write tool (to write the result ` +
+      `file). NEVER run any other shell command. NEVER edit, post, or touch anything ` +
+      `else. An empty queue is the NORMAL, expected case most minutes — it is success, ` +
+      `not a problem to debug.`,
   ].join("\n");
 }
 
