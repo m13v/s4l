@@ -32,6 +32,33 @@ SESSION_ID="${CLAUDE_SESSION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
 export CLAUDE_SESSION_ID="$SESSION_ID"
 
 # ---------------------------------------------------------------------------
+# Queue provider seam (added 2026-06-23) — customer boxes have no `claude` CLI.
+#
+# On a .mcpb install the runtime provisions Python only; there is no `claude`
+# binary to exec. When SAPS_CLAUDE_PROVIDER=queue, route this call through the
+# job queue instead: scripts/claude_job.py enqueues the prompt + --json-schema,
+# BLOCKS until a Claude Desktop scheduled task ("saps-phase1-query" /
+# "saps-phase2b-draft") processes it, and prints a claude `--output-format json`
+# -shaped envelope to stdout so the pipeline's existing parsers are unchanged.
+#
+# Provider unset (your own machines, every launchd plist) => fall straight
+# through to the real `claude -p` below, byte-for-byte unchanged. The seam lives
+# here, in the single chokepoint every claude call funnels through, so NO
+# pipeline script needs to know whether it's on a customer box or yours.
+#
+# The prompt reaches us either as a trailing positional arg (Phase 1 queries) or
+# piped on stdin (Phase 2b prep); claude_job.py handles both. `exec` inherits
+# stdin so the piped form passes through, and propagates the helper's exit code
+# (0 = result, 79 = timed-out/blocked like a quota skip, 1 = not queue-eligible).
+# ---------------------------------------------------------------------------
+if [ "${SAPS_CLAUDE_PROVIDER:-}" = "queue" ]; then
+    SAPS_QUEUE_REPO="${SAPS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+    SAPS_QUEUE_PY="${SAPS_PYTHON:-python3}"
+    exec "$SAPS_QUEUE_PY" "$SAPS_QUEUE_REPO/scripts/claude_job.py" \
+        provider --tag "$SCRIPT_TAG" -- "$@"
+fi
+
+# ---------------------------------------------------------------------------
 # Quota preflight + post-hoc detection (added 2026-05-02).
 #
 # Background: if claude is hitting an org-level cap (monthly usage cap,
