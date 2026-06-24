@@ -172,16 +172,30 @@ def _parse_claude_args(args: list[str]) -> tuple[str | None, str | None]:
     return prompt, schema_path
 
 
+def _plog(msg: str) -> None:
+    """Provider diagnostics go to a log file, NEVER stderr.
+
+    The pipeline captures this wrapper's output with `2>&1` and parses the FIRST
+    JSON value (raw_decode). Anything we print to stderr BEFORE the envelope (e.g.
+    an "enqueued, waiting" line) lands ahead of the JSON and breaks the parse with
+    "Expecting value: line 1 column 2". So stdout carries ONLY the final envelope
+    and stderr stays silent; humans read provider.log instead. (fix 2026-06-24)
+    """
+    try:
+        os.makedirs(queue_root(), exist_ok=True)
+        with open(os.path.join(queue_root(), "provider.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} pid={os.getpid()} {msg}\n")
+    except Exception:
+        pass
+
+
 def cmd_provider(ns) -> int:
     _apply_state_dir_override(ns)
     qtype = TAG_TO_TYPE.get(ns.tag)
     if not qtype:
         # Not a queue-eligible call. Exit non-zero so run_claude.sh's caller
         # treats it as a claude failure and runs its own fallback path.
-        print(
-            f"[claude_job] tag '{ns.tag}' is not queue-eligible; no provider",
-            file=sys.stderr,
-        )
+        _plog(f"tag '{ns.tag}' is not queue-eligible; no provider")
         return 1
 
     stdin_text = ""
