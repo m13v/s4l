@@ -461,6 +461,32 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
+    # Plugin (MCP post_drafts) flow sets SAPS_SKIP_LINK_TAIL=1. The bridge only
+    # rewords prose around the URL — the minted short link is produced by a
+    # separate deterministic wrap step in twitter_post_plan.py — so the Claude
+    # call buys nothing there, and on .mcpb customer boxes (no `claude` binary)
+    # it burns ~35s of run_claude.sh retry backoff per post before falling back
+    # to this exact mechanical concat. Short-circuit straight to the concat.
+    # The local cron/plist autopilot leaves this env unset and still generates
+    # the bridge sentence.
+    if os.environ.get("SAPS_SKIP_LINK_TAIL") == "1":
+        limit = TWEET_LIMIT if args.platform == "twitter" else None
+        fb_text, fb_trim = enforce_budget(
+            mechanical_fallback(reply_text, link_url), link_url,
+            limit if limit is not None else TWEET_LIMIT * 100)
+        out = {
+            "ok": True,
+            "text": fb_text,
+            "tail": link_url,
+            "model_call_ok": False,
+            "fallback_used": True,
+            "budget_trimmed": fb_trim,
+            "error": "skipped_plugin_flow",
+            "elapsed_sec": 0.0,
+        }
+        print(json.dumps(out), flush=True)
+        return 0
+
     voice_relationship = args.voice_relationship or resolve_voice_relationship(args.project)
     # Length cap is X-specific; reddit/linkedin pass None (no tail trim).
     limit = TWEET_LIMIT if args.platform == "twitter" else None
