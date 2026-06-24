@@ -2169,6 +2169,7 @@ function queueDir(): string {
 function queueWorkerBody(spec: { taskId: string; queueType: string; human: string }): string {
   const py = resolvePython();
   const job = path.join(repoDir(), "scripts", "claude_job.py");
+  const sd = sapsStateDir();
   const outDir = queueDir();
   return [
     `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
@@ -2181,7 +2182,7 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     ``,
     `Steps:`,
     `1. Claim the next job. Run this EXACT Bash command:`,
-    `     ${py} ${job} next --type ${spec.queueType}`,
+    `     ${py} ${job} next --type ${spec.queueType} --state-dir ${sd}`,
     `   It prints one line of JSON. If it prints "{}" (empty), there is NO work — ` +
       `report "no jobs" in one line and STOP. You are done.`,
     `2. Otherwise it prints {"job_id":"...","prompt":"...","schema":...}. The "prompt" ` +
@@ -2191,11 +2192,11 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `no markdown, no code fences.`,
     `3. Submit it. Write your JSON object to ${outDir}/out-<job_id>.json using the ` +
       `Write tool (substitute the real job_id), then run this EXACT Bash command:`,
-    `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json`,
+    `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json --state-dir ${sd}`,
     `   If it reports the result was rejected (bad JSON / missing keys), fix your JSON ` +
       `and submit again — at most twice. If it still fails, run ` +
-      `\`${py} ${job} result --job <job_id> --error\` (type a one-line reason, then ` +
-      `Ctrl-D) and STOP.`,
+      `\`${py} ${job} result --job <job_id> --error --state-dir ${sd}\` (type a one-line ` +
+      `reason, then Ctrl-D) and STOP.`,
     `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
       `do NOT loop, do NOT read other files, do NOT call any other tool.`,
     ``,
