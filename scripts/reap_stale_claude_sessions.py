@@ -67,8 +67,14 @@ SIG_REQUIRED = (
     "local-agent-mode-sessions",
 )
 
-UUID_RE = re.compile(r"local-agent-mode-sessions/([0-9a-fA-F-]{36})")
+# The `disclaimer` launcher stub's command line embeds the full claude invocation
+# it spawned, so it ALSO matches SIG_REQUIRED. Exclude it here: we only want the
+# real `claude` child in the uuid groups. The stub is the child's parent, reaped
+# separately via the ppid path so each pair is cleaned together.
 DISCLAIMER_HINT = "Helpers/disclaimer"
+SIG_EXCLUDED = (DISCLAIMER_HINT,)
+
+UUID_RE = re.compile(r"local-agent-mode-sessions/([0-9a-fA-F-]{36})")
 
 
 def parse_etime(etime: str) -> int:
@@ -109,6 +115,8 @@ def snapshot():
         if pid == me or pid <= 1:
             continue
         if not all(tok in cmd for tok in SIG_REQUIRED):
+            continue
+        if any(tok in cmd for tok in SIG_EXCLUDED):
             continue
         u = UUID_RE.search(cmd)
         if not u:
