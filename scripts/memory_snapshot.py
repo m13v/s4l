@@ -204,21 +204,118 @@ def launchd_jobs(by_pid: dict[int, dict[str, Any]], children: dict[int, list[int
     return jobs
 
 
-GROUPS = {
-    "social_autoposter_repo": ["social-autoposter"],
-    "social_autoposter_mcp": ["/social-autoposter/mcp/dist/index.js"],
-    "dashboard_server": ["social-autoposter/bin/server.js", " node bin/server.js", "/node bin/server.js"],
-    "claude_cli": ["/claude ", " claude --", "/claude.app/Contents/MacOS/claude"],
-    "browser_harness": [".claude/browser-profiles/browser-harness"],
-    "remote_macos_mcp": ["macos-use-remote", "mcp-server-macos-use", "Codex Computer Use.app"],
-    "twitter_browser_pipeline": ["twitter_browser.py", "run-twitter-cycle"],
+SAPS_MCP_ENTRYPOINT = str(REPO_DIR / "mcp" / "dist" / "index.js")
+
+
+def _command(row: dict[str, Any]) -> str:
+    return str(row.get("_command_raw", ""))
+
+
+def _node_running_script(command: str, script_path: str) -> bool:
+    return bool(
+        re.search(
+            rf"(^|\s)(?:/[^ \t]+/)?node\s+{re.escape(script_path)}(?:\s|$)",
+            command,
+        )
+    )
+
+
+def _is_social_autoposter_mcp_server(row: dict[str, Any]) -> bool:
+    return _node_running_script(_command(row), SAPS_MCP_ENTRYPOINT)
+
+
+def _is_configured_with_social_autoposter_mcp(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    return SAPS_MCP_ENTRYPOINT in command and not _is_social_autoposter_mcp_server(row)
+
+
+def _is_dashboard_server(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    return (
+        _node_running_script(command, str(REPO_DIR / "bin" / "server.js"))
+        or bool(re.search(r"(^|\s)(?:/[^ \t]+/)?node\s+bin/server\.js(?:\s|$)", command))
+    )
+
+
+def _is_claude_cli(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    return (
+        "/claude.app/Contents/MacOS/claude" in command
+        or bool(re.search(r"(^|\s)(?:/[^ \t]+/)?claude(?:\s|$)", command))
+    )
+
+
+def _is_browser_harness(row: dict[str, Any]) -> bool:
+    return ".claude/browser-profiles/browser-harness" in _command(row)
+
+
+def _is_remote_macos_mcp_server(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    if "SkyComputerUseService" in command or "SkyComputerUseClient" in command:
+        return True
+    if bool(re.search(r"(^|\s)(?:/[^ \t]+/)?mcp-server-macos-use(?:\s|$)", command)):
+        return True
+    if "mcp-server-macos-use" in command and re.match(r"^(?:/[^ \t]+/)?ssh(?:\s|$)", command):
+        return True
+    return bool(
+        re.search(
+            r"(^|\s)(?:/bin/(?:bash|sh|zsh)\s+)?[^ \t]*macos-use-remote[^ \t]*(?:\s|$)",
+            command,
+        )
+        and not _is_claude_cli(row)
+    )
+
+
+def _is_configured_with_remote_macos_mcp(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    return (
+        any(
+            needle in command
+            for needle in ("macos-use-remote", "mcp-server-macos-use", "mcp__computer-use")
+        )
+        and not _is_remote_macos_mcp_server(row)
+    )
+
+
+def _is_twitter_browser_pipeline(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    return "twitter_browser.py" in command or "run-twitter-cycle" in command
+
+
+def _is_social_autoposter_repo_process(row: dict[str, Any]) -> bool:
+    command = _command(row)
+    repo = str(REPO_DIR)
+    if _is_configured_with_social_autoposter_mcp(row):
+        return False
+    if (
+        _is_social_autoposter_mcp_server(row)
+        or _is_dashboard_server(row)
+        or _is_twitter_browser_pipeline(row)
+    ):
+        return True
+    return any(
+        f"{repo}/{subdir}/" in command
+        for subdir in ("bin", "mcp", "scripts", "setup", "skill")
+    )
+
+
+GROUP_MATCHERS = {
+    "social_autoposter_repo_processes": _is_social_autoposter_repo_process,
+    "social_autoposter_mcp_servers": _is_social_autoposter_mcp_server,
+    "sessions_configured_social_autoposter_mcp": _is_configured_with_social_autoposter_mcp,
+    "dashboard_server": _is_dashboard_server,
+    "claude_cli": _is_claude_cli,
+    "browser_harness": _is_browser_harness,
+    "remote_macos_mcp_servers": _is_remote_macos_mcp_server,
+    "sessions_configured_remote_macos_mcp": _is_configured_with_remote_macos_mcp,
+    "twitter_browser_pipeline": _is_twitter_browser_pipeline,
 }
 
 
 def group_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summaries: dict[str, Any] = {}
-    for name, needles in GROUPS.items():
-        matched = [row for row in rows if any(needle in row["_command_raw"] for needle in needles)]
+    for name, matcher in GROUP_MATCHERS.items():
+        matched = [row for row in rows if matcher(row)]
         total_kb = sum(int(row["rss_kb"]) for row in matched)
         top = sorted(matched, key=lambda row: int(row["rss_kb"]), reverse=True)[:10]
         summaries[name] = {
