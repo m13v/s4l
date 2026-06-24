@@ -647,7 +647,7 @@ function renderDraftsTable(plan: Plan): string {
     // Number by FULL-array index (matches post_drafts + the menu bar), then drop
     // already-finished entries so the cards only show what's still pending.
     .map((c, i) => ({ c, n: i + 1 }))
-    .filter((e) => e.c.posted !== true && e.c.terminal !== true)
+    .filter((e) => e.c.posted !== true && e.c.terminal !== true && e.c.approved !== true)
     // The queue is append-only; newest drafts have the highest stable index.
     // Show those first so review starts with likely-live tweets instead of stale
     // low-number drafts that have been sitting around for hours.
@@ -774,7 +774,15 @@ async function ensurePostingHandle(): Promise<void> {
 }
 
 async function postApproved(batchId: string, plan: Plan) {
-  const approved = (plan.candidates || []).filter((c: PlanCandidate) => c.approved === true);
+  // Post every card the user APPROVED that hasn't already landed or been ruled out.
+  // `approved` is now a DURABLE decision (sticky, never cleared by a later call), so
+  // filtering out posted/terminal here makes this idempotent: re-running it only
+  // drains the not-yet-posted approved backlog (e.g. a card a restart interrupted),
+  // never re-posts a done one. This is what lets the startup backlog-drain and the
+  // per-card menu-bar calls share one code path safely.
+  const approved = (plan.candidates || []).filter(
+    (c: PlanCandidate) => c.approved === true && c.posted !== true && c.terminal !== true
+  );
   if (approved.length === 0) return { attempted: 0, exit_code: 0, summary: "nothing approved" };
   // PREFLIGHT: posting needs a configured @handle, or twitter_browser.py refuses
   // EVERY reply with no_account_configured and the whole batch skips — invisibly.
@@ -1601,9 +1609,16 @@ tool(
         .optional()
         .describe("Rewrites: each {n, text} replaces draft n's wording, then posts it."),
       post_all: z.boolean().optional().describe("Post every draft in the batch."),
+      reject: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe(
+          "1-based draft numbers the user REJECTED. They are marked done and never " +
+            "shown for review again, and are not posted."
+        ),
     },
   },
-  async ({ batch_id, post, edits, post_all }) => {
+  async ({ batch_id, post, edits, post_all, reject }) => {
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
@@ -3415,7 +3430,12 @@ tool(
       added++;
     }
     writePlan(REVIEW_QUEUE_ID, { candidates: queue });
-    const pending = queue.filter((c) => c.posted !== true && c.terminal !== true);
+    // Pending = NOT YET DECIDED. A card that's posted, terminal (rejected/dead), OR
+    // already approved is a settled decision and must never be re-presented for
+    // review — approved ones just proceed to post (see drainApprovedBacklog).
+    const pending = queue.filter(
+      (c) => c.posted !== true && c.terminal !== true && c.approved !== true
+    );
 
     // Drafts queued = the pipeline verified end-to-end without posting. This is the
     // onboarding "draft_verified" terminal goal (formerly completed by draft_cycle).
