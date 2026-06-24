@@ -1,15 +1,16 @@
 // Verifies ensureRuntimeProvisioned() gating logic against the built dist.
-// Runs in an isolated temp SAPS_STATE_DIR so it touches no real runtime state.
-// We process.exit immediately after the synchronous decision so the background
-// provision() (if kicked) never reaches any network step.
+// Policy = provision-on-boot (option a): a fresh, not-ready install MUST kick the
+// full provision; a second immediate call must NOT double-kick (inFlight guard).
+// Runs in an isolated temp SAPS_STATE_DIR and process.exit's right after the
+// synchronous decision so the background provision() never reaches a network step.
 import os from "os";
 import fs from "fs";
 import path from "path";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "saps-prov-test-"));
 process.env.SAPS_STATE_DIR = tmp;
-// Point at the real repo so a kicked provision's step 0 is a no-op (no untar,
-// no network) before we exit. We never let it reach the uv/python steps.
+// Real repo so a kicked provision's step 0 is a no-op (no untar, no network)
+// before we exit; we never let it reach the uv/python/download steps.
 process.env.SAPS_REPO_DIR = path.join(os.homedir(), "social-autoposter");
 
 const rt = await import(path.join(os.homedir(), "social-autoposter/mcp/dist/runtime.js"));
@@ -20,29 +21,15 @@ const check = (name, cond) => {
   if (!cond) failed = true;
 };
 
-// --- Scenario A: fresh install, no progress file => must NOT provision -------
-const aRet = rt.ensureRuntimeProvisioned();
-const aProg = rt.readProgress();
-check("A: fresh install returns false (no auto-kick)", aRet === false);
-check("A: fresh install writes NO progress file (no surprise downloads)", aProg === null);
+// --- Fresh install, runtime not ready => MUST provision everything on boot ----
+const r1 = rt.ensureRuntimeProvisioned();
+const p1 = rt.readProgress();
+check("fresh install returns true (provisions on boot)", r1 === true);
+check("fresh install wrote a running progress (download started)", !!p1 && p1.running === true);
 
-// --- Scenario B: prior FAILED provision on disk, runtime not ready => resume -
-fs.writeFileSync(
-  path.join(tmp, "install-progress.json"),
-  JSON.stringify({
-    running: false,
-    done: true,
-    ok: false,
-    error: "simulated prior failure",
-    steps: [{ id: "uv", label: "Install uv", status: "error" }],
-    started_at: "2026-01-01T00:00:00.000Z",
-    updated_at: "2026-01-01T00:00:00.000Z",
-  })
-);
-const bRet = rt.ensureRuntimeProvisioned();
-const bProg = rt.readProgress();
-check("B: interrupted install returns true (auto-resumes)", bRet === true);
-check("B: startProvisioning wrote a fresh running progress", !!bProg && bProg.running === true);
+// --- Re-entrancy: a second immediate call must NOT kick a second run ----------
+const r2 = rt.ensureRuntimeProvisioned();
+check("second call returns false (no double-kick while in flight)", r2 === false);
 
 console.log(failed ? "\nRESULT: FAILED" : "\nRESULT: ALL PASS");
 process.exit(failed ? 1 : 0); // halt before background provision touches the network
