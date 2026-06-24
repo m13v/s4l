@@ -151,7 +151,8 @@ def parse_vm_stat() -> dict[str, Any]:
         num_match = re.search(r"(-?\d+)", raw.replace(".", ""))
         if num_match:
             pages[key] = int(num_match.group(1))
-    total_bytes_raw = run(["sysctl", "-n", "hw.memsize"], timeout=2.0).strip()
+    sysctl_bin = "/usr/sbin/sysctl" if Path("/usr/sbin/sysctl").exists() else "sysctl"
+    total_bytes_raw = run([sysctl_bin, "-n", "hw.memsize"], timeout=2.0).strip()
     try:
         total_mb = round(int(total_bytes_raw) / 1024 / 1024, 1)
     except ValueError:
