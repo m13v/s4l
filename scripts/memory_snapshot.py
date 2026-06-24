@@ -210,6 +210,7 @@ GROUPS = {
     "dashboard_server": ["social-autoposter/bin/server.js", " node bin/server.js", "/node bin/server.js"],
     "claude_cli": ["/claude ", " claude --", "/claude.app/Contents/MacOS/claude"],
     "browser_harness": [".claude/browser-profiles/browser-harness"],
+    "remote_macos_mcp": ["macos-use-remote", "mcp-server-macos-use", "Codex Computer Use.app"],
     "twitter_browser_pipeline": ["twitter_browser.py", "run-twitter-cycle"],
 }
 
@@ -252,6 +253,188 @@ def active_claude_sidecars(by_pid: dict[int, dict[str, Any]], children: dict[int
     return sidecars
 
 
+def _json_file_metadata(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"path": str(path), "exists": False}
+    meta: dict[str, Any] = {
+        "path": str(path),
+        "size_bytes": stat.st_size,
+        "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        meta["error"] = str(exc)
+        return meta
+    for key in ("job_id", "type", "tag", "created_at", "status", "error"):
+        if key in data:
+            meta[key] = shorten(str(data[key]), 160)
+    if isinstance(data.get("created_at"), (int, float)):
+        meta["age_sec"] = round(max(0.0, dt.datetime.now().timestamp() - float(data["created_at"])), 1)
+    return meta
+
+
+def claude_queue_summary() -> dict[str, Any]:
+    root = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
+    summary: dict[str, Any] = {
+        "path": str(root),
+        "exists": root.exists(),
+        "pending_total": 0,
+        "pending_by_type": {},
+        "running_total": 0,
+        "result_total": 0,
+        "oldest_age_sec": None,
+        "running_jobs": [],
+        "oldest_pending": [],
+    }
+    if not root.exists():
+        return summary
+
+    ages: list[float] = []
+    pending_root = root / "pending"
+    if pending_root.exists():
+        for qtype_dir in sorted(p for p in pending_root.iterdir() if p.is_dir()):
+            files = sorted(qtype_dir.glob("*.json"))
+            summary["pending_by_type"][qtype_dir.name] = len(files)
+            summary["pending_total"] += len(files)
+            for path in files[:5]:
+                meta = _json_file_metadata(path)
+                if isinstance(meta.get("age_sec"), (int, float)):
+                    ages.append(float(meta["age_sec"]))
+                if len(summary["oldest_pending"]) < 10:
+                    summary["oldest_pending"].append(meta)
+
+    running_files = sorted((root / "running").glob("*.json")) if (root / "running").exists() else []
+    result_files = sorted((root / "result").glob("*.json")) if (root / "result").exists() else []
+    summary["running_total"] = len(running_files)
+    summary["result_total"] = len(result_files)
+    for path in running_files[:10]:
+        meta = _json_file_metadata(path)
+        if isinstance(meta.get("age_sec"), (int, float)):
+            ages.append(float(meta["age_sec"]))
+        summary["running_jobs"].append(meta)
+    summary["oldest_age_sec"] = max(ages) if ages else None
+    provider_log = root / "provider.log"
+    if provider_log.exists():
+        try:
+            stat = provider_log.stat()
+            summary["provider_log"] = {
+                "path": str(provider_log),
+                "size_bytes": stat.st_size,
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+            }
+        except OSError:
+            pass
+    return summary
+
+
+def lock_queue_summary(by_pid: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    now = dt.datetime.now().timestamp()
+    locks: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for path in Path("/tmp").glob("social-autoposter-*.lock"):
+        if path.is_dir():
+            names.add(path.name.removeprefix("social-autoposter-").removesuffix(".lock"))
+    for path in Path("/tmp").glob("social-autoposter-*.lock.queue"):
+        if path.is_dir():
+            names.add(path.name.removeprefix("social-autoposter-").removesuffix(".lock.queue"))
+
+    for name in sorted(names):
+        lock_dir = Path("/tmp") / f"social-autoposter-{name}.lock"
+        queue_dir = Path("/tmp") / f"social-autoposter-{name}.lock.queue"
+        item: dict[str, Any] = {"name": name, "locked": lock_dir.exists(), "queue_depth": 0}
+        if lock_dir.exists():
+            try:
+                stat = lock_dir.stat()
+                item["age_sec"] = round(max(0.0, now - stat.st_mtime), 1)
+            except OSError:
+                pass
+            try:
+                holder_pid = int((lock_dir / "pid").read_text().strip())
+                item["holder_pid"] = holder_pid
+                item["holder_alive"] = holder_pid in by_pid
+                if holder_pid in by_pid:
+                    item["holder_rss_mb"] = by_pid[holder_pid]["rss_mb"]
+                    item["holder_cmd"] = by_pid[holder_pid]["cmd"]
+            except Exception:
+                item["holder_pid"] = None
+            try:
+                expires_at = int((lock_dir / "expires_at").read_text().strip())
+                item["expires_in_sec"] = expires_at - int(now)
+            except Exception:
+                pass
+        if queue_dir.exists():
+            tickets = sorted(p for p in queue_dir.iterdir() if p.is_file())
+            item["queue_depth"] = len(tickets)
+            queued: list[dict[str, Any]] = []
+            for ticket in tickets[:10]:
+                entry: dict[str, Any] = {"ticket": ticket.name}
+                try:
+                    pid = int(ticket.read_text().strip())
+                    entry["pid"] = pid
+                    entry["alive"] = pid in by_pid
+                    if pid in by_pid:
+                        entry["cmd"] = by_pid[pid]["cmd"]
+                except Exception:
+                    pass
+                queued.append(entry)
+            item["queued"] = queued
+        locks.append(item)
+    return locks
+
+
+def scheduled_tasks_summary() -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "skill_files": [],
+        "registries": [],
+        "enabled_total": 0,
+        "disabled_total": 0,
+    }
+    scheduled_root = Path.home() / ".claude" / "scheduled-tasks"
+    if scheduled_root.exists():
+        for path in sorted(scheduled_root.glob("*/SKILL.md")):
+            summary["skill_files"].append({"id": path.parent.name, "path": str(path)})
+
+    sessions_root = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
+    if not sessions_root.exists():
+        return summary
+    for registry in sorted(sessions_root.glob("**/scheduled-tasks.json"))[:50]:
+        reg: dict[str, Any] = {"path": str(registry), "tasks": []}
+        try:
+            data = json.loads(registry.read_text())
+        except Exception as exc:
+            reg["error"] = str(exc)
+            summary["registries"].append(reg)
+            continue
+        for task in data.get("scheduledTasks", [])[:30]:
+            enabled = bool(task.get("enabled"))
+            if enabled:
+                summary["enabled_total"] += 1
+            else:
+                summary["disabled_total"] += 1
+            reg["tasks"].append({
+                "id": task.get("id"),
+                "enabled": enabled,
+                "fireAt": task.get("fireAt"),
+                "lastRunAt": task.get("lastRunAt"),
+                "lastScheduledFor": task.get("lastScheduledFor"),
+                "cwd": shorten(str(task.get("cwd", "")), 220),
+                "filePath": shorten(str(task.get("filePath", "")), 220),
+            })
+        summary["registries"].append(reg)
+    return summary
+
+
+def queues_summary(by_pid: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "claude_queue": claude_queue_summary(),
+        "social_locks": lock_queue_summary(by_pid),
+        "scheduled_tasks": scheduled_tasks_summary(),
+    }
+
+
 def rotate_log(path: Path, max_bytes: int, keep: int = 3) -> None:
     if max_bytes <= 0:
         return
@@ -291,6 +474,7 @@ def build_snapshot(top_n: int) -> dict[str, Any]:
         "groups": group_summaries(rows),
         "launchd_jobs": launchd_jobs(by_pid, children),
         "active_claude_sidecars": active_claude_sidecars(by_pid, children),
+        "queues": queues_summary(by_pid),
     }
 
 
