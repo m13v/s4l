@@ -264,7 +264,7 @@ const server = new McpServer(
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
       "the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
-      "without posting, AND the recurring autopilot scheduled task has been created and run once " +
+      "without posting, AND the two draft-autopilot scheduled tasks have been created via queue_setup " +
       "(see SCHEDULE THE AUTOPILOT below). Do not ask whether to inspect " +
       "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
       "X, scan the profile, research the product website, save conservative inferred fields, seed " +
@@ -277,7 +277,7 @@ const server = new McpServer(
       "DO schedule the draft-only autopilot as the final step (it only queues drafts for approval, it " +
       "never posts on its own). When setup reaches done (" +
       "runtime ready, a project configured with seeded topics, X connected, the draft path verified, " +
-      "and the autopilot scheduled task created and run once), call the `dashboard` tool so the user " +
+      "and the two draft-autopilot scheduled tasks created via queue_setup), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
       "SCHEDULE THE AUTOPILOT (final onboarding step). The autopilot now reuses the REAL drafting " +
@@ -1406,7 +1406,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. Then SCHEDULE THE AUTOPILOT: call create_scheduled_task (taskId 'social-autoposter-autopilot', cron '* * * * *', prompt = scan_candidates -> draft -> submit_drafts, draft-only) and run one cycle now. Then call the `dashboard` tool so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. Run scan_candidates, draft a reply or two, and submit_drafts now to verify end to end without posting. Then SCHEDULE THE AUTOPILOT: call the queue_setup tool and create each returned task with create_scheduled_task (prompt verbatim); do NOT create the deprecated 'social-autoposter-autopilot' task. Then call the `dashboard` tool so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1552,8 +1552,8 @@ tool(
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, run scan_candidates -> submit_drafts ` +
-            `to verify without posting, then schedule the draft-only autopilot (create_scheduled_task, cron '* * * * *', ` +
-            `prompt = scan_candidates -> draft -> submit_drafts) and run one cycle now.`
+            `to verify without posting, then schedule the autopilot: call queue_setup and create each ` +
+            `returned task with create_scheduled_task (prompt verbatim).`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
             `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
@@ -3676,16 +3676,17 @@ async function main() {
   // disk, BEFORE serving, so the very first scan uses the shipped pipeline (not
   // the version first materialized at install). Synchronous + best-effort.
   ensurePipelineCurrent();
-  // Deterministically finish what setup started: if a prior provision was kicked
-  // off (install-progress.json exists) but the owned runtime isn't ready — a step
-  // failed, or Claude/the host died mid-install — resume it on boot instead of
-  // waiting for the agent to re-call `runtime action:'install'`. Idempotent: it
-  // re-checks done steps and re-attempts only the missing ones. Fresh installs
-  // that never started setup are left untouched (no surprise downloads). The
-  // background provision() updates install-progress.json as it goes.
+  // Deterministically provision the owned runtime on boot: whenever it isn't
+  // ready (a fresh install, or one interrupted mid-way because a step failed or
+  // Claude/the host died mid-install) kick the full install in the background
+  // instead of waiting for the agent to call `runtime action:'install'`. The
+  // host spawns this server when the plugin loads, so the env starts installing
+  // the moment the plugin is active. Idempotent: it re-checks done steps and
+  // attempts only the missing ones; the background provision() updates
+  // install-progress.json as it goes.
   if (ensureRuntimeProvisioned()) {
     console.error(
-      "[social-autoposter-mcp] runtime not ready with a prior install on disk; auto-resuming provisioning"
+      "[social-autoposter-mcp] owned runtime not ready; provisioning on boot"
     );
   }
   // Same problem for the scheduled task's prompt: the host owns its SKILL.md and
