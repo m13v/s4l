@@ -4,7 +4,7 @@
   "display_name": "S4L",
   "version": "1.6.100",
   "description": "Draft, review, approve, and autopilot X/Twitter posts.",
-  "long_description": "The disclaimer above is generic Claude boilerplate.\n\nTo get started:\n\n1\\. Copy this prompt: `Set me up on S4L end to end`\n\n2\\. Quit fully with CMD+Q, restart Claude, and paste the prompt into a new chat.",
+  "long_description": "The disclaimer above is generic Claude boilerplate.\n\nTo get started:\n\n1\\. Copy this prompt: **Set me up on S4L end to end**\n\n2\\. Quit fully with CMD+Q, restart Claude, and paste the prompt into a new chat.",
   "author": {
     "name": "m13v",
     "email": "i@m13v.com",
