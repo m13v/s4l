@@ -155,7 +155,7 @@ PY
   )
 fi
 if [ "${#EXT_IDS[@]}" -gt 0 ]; then
-  mapfile -t EXT_IDS < <(printf '%s\n' "${EXT_IDS[@]}" | awk 'NF && !seen[$0]++')
+  EXT_IDS=($(printf '%s\n' "${EXT_IDS[@]}" | awk 'NF && !seen[$0]++'))
 fi
 for EXT_ID in "${EXT_IDS[@]}"; do
   rm_path "$CLAUDE_SUPPORT/Claude Extensions/$EXT_ID" "ext-install"
@@ -171,7 +171,7 @@ d = json.load(open(p))
 sys.exit(0 if ids.intersection((d.get("extensions") or {}).keys()) else 1)
 PY
       json_edit "remove social-autoposter extension entries from $INSTALL_REG" \
-        python3 - "$INSTALL_REG" "${EXT_IDS[@]}" <<'PY'
+        sh -c 'cp "$1" "$1.bak" 2>/dev/null || true; shift; python3 - "$@"' sh "$INSTALL_REG" "$INSTALL_REG" "${EXT_IDS[@]}" <<'PY'
 import json, sys
 p, ids = sys.argv[1], set(sys.argv[2:])
 d = json.load(open(p))
@@ -212,14 +212,13 @@ for t in saps-phase1-query saps-phase2b-draft social-autoposter-autopilot; do
   TASK_IDS+=("$t")
 done
 if [ "${#TASK_IDS[@]}" -gt 0 ]; then
-  mapfile -t TASK_IDS < <(printf '%s\n' "${TASK_IDS[@]}" | awk 'NF && !seen[$0]++')
+  TASK_IDS=($(printf '%s\n' "${TASK_IDS[@]}" | awk 'NF && !seen[$0]++'))
 fi
 for t in "${TASK_IDS[@]}"; do
   rm_path "$SCHED_DIR/$t" "scheduled-task"
 done
 if command -v python3 >/dev/null 2>&1; then
-  mapfile -t TASK_REGS < <(find "$CLAUDE_SUPPORT/claude-code-sessions" -path '*/scheduled-tasks.json' -type f 2>/dev/null || true)
-  for reg in "${TASK_REGS[@]}"; do
+  while IFS= read -r reg; do
     if python3 - "$reg" "$SCHED_DIR" "${TASK_IDS[@]}" <<'PY' >/dev/null 2>&1; then
 import json, os, sys
 p, sched_dir, ids = sys.argv[1], os.path.realpath(sys.argv[2]), set(sys.argv[3:])
@@ -238,7 +237,7 @@ def owned(t):
 sys.exit(0 if any(owned(t) for t in tasks) else 1)
 PY
       json_edit "remove social-autoposter scheduled-task entries from $reg" \
-        python3 - "$reg" "$SCHED_DIR" "${TASK_IDS[@]}" <<'PY'
+        sh -c 'cp "$1" "$1.bak" 2>/dev/null || true; shift; python3 - "$@"' sh "$reg" "$reg" "$SCHED_DIR" "${TASK_IDS[@]}" <<'PY'
 import json, os, sys
 p, sched_dir, ids = sys.argv[1], os.path.realpath(sys.argv[2]), set(sys.argv[3:])
 d = json.load(open(p))
@@ -258,7 +257,7 @@ json.dump(d, open(p, "w"), indent=2)
 open(p, "a").write("\n")
 PY
     fi
-  done
+  done < <(find "$CLAUDE_SUPPORT/claude-code-sessions" -path '*/scheduled-tasks.json' -type f 2>/dev/null || true)
 else
   echo "  NOTE    python3 not on PATH — could not scrub Claude scheduled-tasks.json registries"
 fi
