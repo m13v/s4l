@@ -85,6 +85,27 @@ fi
 rm_path "$MENUBAR_PLIST" "menubar-plist"
 echo
 
+# ---- 0c. autopilot LaunchAgents (twitter-cycle kicker + daily updater) ------
+# The queue-backed draft autopilot kicks the pipeline from a launchd job
+# (com.m13v.social-twitter-cycle) and a daily self-updater. Both plists live in
+# ~/Library/LaunchAgents, OUTSIDE the state dir removed in [1], so a reset that
+# skips them leaves a loaded job that keeps firing cycles against a half-wiped
+# install. Bootout + remove them (and any .disabled-* variant left by a manual
+# stop). KEEP these labels in sync with src/index.ts.
+echo "[0c] autopilot LaunchAgents (twitter-cycle kicker + daily updater)"
+for LBL in com.m13v.social-twitter-cycle com.m13v.social-autoposter-update; do
+  PL="$HOME_DIR/Library/LaunchAgents/$LBL.plist"
+  if [ "$DRY" -eq 0 ]; then
+    launchctl bootout "gui/$(id -u)/$LBL" 2>/dev/null \
+      || launchctl unload "$PL" 2>/dev/null || true
+  else
+    echo "  (would bootout $LBL)"
+  fi
+  rm_path "$PL" "launchagent"
+  for d in "$PL".disabled*; do [ -e "$d" ] && rm_path "$d" "launchagent-disabled"; done
+done
+echo
+
 # ---- 1. MCP state dir (owned python + venv + materialized repo) ------------
 echo "[1] MCP state dir (uv-owned python, venv, materialized repo, runtime.json, setup-state)"
 rm_path "$HOME_DIR/.social-autoposter-mcp" "state"
@@ -132,6 +153,43 @@ PY
   else
     echo "  NOTE    python3 not on PATH — remove the \"$EXT_ID\" entry from $INSTALL_REG by hand"
   fi
+fi
+echo
+
+# ---- 1c. Claude Desktop scheduled tasks -----------------------------------
+# Onboarding creates the queue-worker tasks (and historically the deprecated
+# single autopilot) under ~/.claude/scheduled-tasks/. They live OUTSIDE the
+# state dir, so a reset that skips them leaves idle workers firing every minute
+# against a wiped install. Remove the task dirs. Like the .mcpb registry, the
+# host (Claude Desktop) owns the live schedule and rewrites it on quit, so this
+# only fully sticks when Claude isn't running.
+echo "[1c] Claude Desktop scheduled tasks (queue workers + deprecated autopilot)"
+SCHED_DIR="$HOME_DIR/.claude/scheduled-tasks"
+if pgrep -x "Claude" >/dev/null 2>&1; then
+  echo "  WARN    Claude Desktop is running — it owns the task schedule; quit it (Cmd+Q)"
+  echo "          before reset so the removed tasks aren't rewritten on exit."
+fi
+for t in saps-phase1-query saps-phase2b-draft social-autoposter-autopilot; do
+  rm_path "$SCHED_DIR/$t" "scheduled-task"
+done
+echo
+
+# ---- 1d. /tmp scratch (draft plans, queue, browser locks, run_claude) ------
+# The draft pipeline scatters state across /tmp that the state-dir wipe in [1]
+# does NOT cover: the review-queue + per-batch plan files, mkdir-based browser
+# locks, and run_claude.sh's quota stamp / active-session sidecars. Left behind,
+# stale plans resurface as phantom drafts and a stale lock blocks the first new
+# cycle. (The queue dir itself, ~/.social-autoposter-mcp/claude-queue, is removed
+# with the state dir in [1].)
+echo "[1d] /tmp scratch (draft plans, browser locks, run_claude artifacts)"
+if [ "$DRY" -eq 0 ]; then
+  rm -f /tmp/twitter_cycle_plan_*.json 2>/dev/null || true
+  rm -rf /tmp/social-autoposter-*.lock 2>/dev/null || true
+  rm -rf /tmp/sa-active-claude /tmp/sa-claude-blocked.json 2>/dev/null || true
+  rm -f /tmp/sa_run_claude_stdout.* 2>/dev/null || true
+else
+  echo "  (would remove /tmp/twitter_cycle_plan_*.json, /tmp/social-autoposter-*.lock,"
+  echo "   /tmp/sa-active-claude, /tmp/sa-claude-blocked.json, /tmp/sa_run_claude_stdout.*)"
 fi
 echo
 
