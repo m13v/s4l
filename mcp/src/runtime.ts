@@ -432,32 +432,30 @@ export function startProvisioning(): InstallProgress {
   return readProgress() ?? freshProgress();
 }
 
-// Boot-time deterministic self-heal: resume an interrupted/failed provision so
-// the owned runtime converges WITHOUT relying on the agent to (re-)call
-// `runtime action:'install'`. Called from main() on every server start.
+// Boot-time deterministic provisioning: bring the owned runtime to ready on
+// every server start WITHOUT relying on the agent to call `runtime
+// action:'install'`. Called from main() on every server start, which the host
+// spawns when the plugin loads — so the env starts installing the moment the
+// plugin is active, before any agent turn.
 //
-// Resume-to-completion policy (option b): only auto-fire when a provision was
-// ALREADY started once (install-progress.json exists) but the runtime is not
-// ready — i.e. a step failed, or the process died mid-install (e.g. the agent
-// bailed, or Claude was restarted between steps). A brand-new install that has
-// never started is left alone so we don't kick off ~150MB of downloads before
-// the user has opted into setup; the agent's first `runtime install` writes the
-// initial progress file, and from then on this guarantees it finishes across
-// restarts. provision() is idempotent, so resuming re-checks done steps and
-// skips them, re-attempting only what's missing. Returns true if it kicked a
-// run. Best-effort, never throws.
+// Provision-on-boot policy (option a): auto-fire whenever the runtime is not
+// ready, fresh install or interrupted one alike. A brand-new install downloads
+// and installs everything it needs (uv, Python, venv, deps, Chromium, harness,
+// Chrome — whatever the megabytes) up front; an install that died mid-way (a
+// failed step, or Claude restarted between steps) resumes. provision() is
+// idempotent, so this re-checks done steps and skips them, attempting only
+// what's missing. The single deterministic trigger is server boot, not agent
+// reasoning. Returns true if it kicked a run. Best-effort, never throws.
 export function ensureRuntimeProvisioned(): boolean {
   try {
     if (runtimeReady()) return false; // fully provisioned already
     if (isProvisioning()) return false; // a run is in flight in this process
-    const prog = readProgress();
-    if (!prog) return false; // never started (fresh install) → don't surprise; wait for explicit setup
-    // A prior provision left a progress file but the runtime isn't ready:
-    // it errored, or the host process died before it finished. Resume it.
+    // Not ready: provision everything now (startProvisioning is idempotent and
+    // re-entrant — a no-op if a run is already in flight).
     startProvisioning();
     return true;
   } catch {
-    return false; // best-effort; a boot self-heal must never break startup
+    return false; // best-effort; a boot provision must never break startup
   }
 }
 
