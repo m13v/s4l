@@ -787,6 +787,7 @@ async function postApproved(batchId: string, plan: Plan) {
   // the post for the browser. Reset is guaranteed by scheduleShellLockRelease()
   // in the finally below, so an early/failed post can't wedge scanning.
   postingActive = true;
+  startPostingFlagHeartbeat(); // cross-instance: a sibling MCP's scan defers too
   // Posting is a priority over scanning: abort any in-flight plugin scan so the
   // approved post takes the browser immediately instead of waiting on the lock.
   // Plugin pipeline only — never affects the plist autopilot.
@@ -2682,6 +2683,7 @@ function scheduleShellLockRelease(): void {
   shellLockReleaseTimer = setTimeout(() => {
     shellLockReleaseTimer = null;
     postingActive = false; // posting drained -> the autopilot may scan again
+    stopPostingFlagHeartbeat(); // clear the cross-instance flag too
     releaseShellBrowserLock();
   }, SHELL_LOCK_GRACE_MS);
 }
@@ -2961,7 +2963,7 @@ tool(
     // post are children of THIS MCP, so this in-process gate is exact — the
     // autopilot never even starts a scan to interrupt a post. Posting always wins;
     // the autopilot just re-calls and runs once the batch drains.
-    if (postingActive) return scanDeferredForPost();
+    if (postingActive || isPostingFlagFresh()) return scanDeferredForPost();
     // Long-poll the single in-flight scan job (see the ScanJob registry above).
     // A finished-but-unconsumed job: hand back its result and clear the slot so a
     // later call starts a fresh scan.
