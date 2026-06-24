@@ -35,6 +35,7 @@ import {
   resolveProject,
   hasReadyProject,
   listManagedProjectStatus,
+  ensureShortLinksDefault,
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   configPath,
@@ -3371,6 +3372,20 @@ async function main() {
   // scan -> submit path never stalls on an "Ask mode" permission prompt (see the
   // helper's note). Best-effort, allow-only, gated on the task existing.
   ensureAutopilotToolsAllowed();
+  // Heal installs onboarded before short_links_live defaulted to false: such a
+  // project wraps short links against the customer's own domain, which has no
+  // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
+  // resolver. Idempotent, scoped to managed projects, best-effort.
+  try {
+    const r = ensureShortLinksDefault();
+    if (r.healed.length) {
+      console.error(
+        `[social-autoposter-mcp] short-links heal: routed ${r.healed.join(", ")} through s4l.ai (short_links_live=false)`
+      );
+    }
+  } catch (e) {
+    console.error("[social-autoposter-mcp] short-links heal failed:", (e as Error)?.message || e);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
