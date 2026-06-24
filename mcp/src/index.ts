@@ -2265,6 +2265,63 @@ function sapsStateDir(): string {
   );
 }
 
+// ---- Cross-instance "posting active" flag ----------------------------------
+// posting-active.json in the shared state dir is the CROSS-MCP-INSTANCE version
+// of the in-process `postingActive` flag. The autopilot scan and the post
+// sometimes run in the SAME MCP (the in-process flag covers that) and sometimes
+// in TWO SEPARATE MCP instances (different agent sessions each spawn their own).
+// A file every instance's scan_candidates reads makes the mutual exclusion hold
+// regardless of which topology Claude Desktop happens to use. Heartbeat'd with a
+// short TTL so a crashed poster's flag self-clears and never wedges scanning.
+const POSTING_FLAG_TTL_MS = 45_000;
+let postingFlagHeartbeat: ReturnType<typeof setInterval> | null = null;
+function postingFlagPath(): string {
+  return path.join(sapsStateDir(), "posting-active.json");
+}
+function writePostingFlag(): void {
+  try {
+    fs.mkdirSync(sapsStateDir(), { recursive: true });
+    fs.writeFileSync(
+      postingFlagPath(),
+      JSON.stringify({ pid: process.pid, expires_at: Date.now() + POSTING_FLAG_TTL_MS }) + "\n",
+      "utf-8"
+    );
+  } catch {
+    /* best effort */
+  }
+}
+function startPostingFlagHeartbeat(): void {
+  writePostingFlag();
+  if (postingFlagHeartbeat) return;
+  // Refresh well within the TTL so a long batch stays flagged, but a dead poster
+  // expires within POSTING_FLAG_TTL_MS.
+  postingFlagHeartbeat = setInterval(() => {
+    if (postingActive) writePostingFlag();
+  }, Math.floor(POSTING_FLAG_TTL_MS / 2));
+  if (typeof postingFlagHeartbeat.unref === "function") postingFlagHeartbeat.unref();
+}
+function stopPostingFlagHeartbeat(): void {
+  if (postingFlagHeartbeat) {
+    clearInterval(postingFlagHeartbeat);
+    postingFlagHeartbeat = null;
+  }
+  try {
+    fs.rmSync(postingFlagPath(), { force: true });
+  } catch {
+    /* best effort */
+  }
+}
+// True when ANY MCP instance has a FRESH posting flag on disk. Absent or expired
+// == not posting. This is what makes a sibling instance's scan_candidates defer.
+function isPostingFlagFresh(): boolean {
+  try {
+    const j = JSON.parse(fs.readFileSync(postingFlagPath(), "utf-8"));
+    return typeof j?.expires_at === "number" && j.expires_at > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 // activity.json: a tiny "what's running right now" signal the menu bar reads to
 // show a loading spinner + label (scanning / drafting / posting / …). Written by
 // long-running tools, cleared when they finish. Best-effort; absence == idle.
