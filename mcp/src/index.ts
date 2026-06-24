@@ -2421,7 +2421,11 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
     }
     const xml = plistXml({
       label: TWITTER_AUTOPILOT_LABEL,
-      programArgs: ["bash", path.join(repoDir(), "skill", "run-twitter-cycle.sh")],
+      // Run the DRAFT-AND-PUBLISH wrapper, NOT run-twitter-cycle.sh directly:
+      // it runs the cycle (DRAFT_ONLY + queue) then MERGES the plan into the
+      // review-queue cards. The cycle alone leaves drafts in an orphan /tmp plan
+      // nobody reads (the 2026-06-24 merge gap). This is the ONLY card producer.
+      programArgs: ["bash", path.join(repoDir(), "skill", "run-draft-and-publish.sh")],
       intervalSecs: QUEUE_KICKER_INTERVAL_SECS,
       runAtLoad: false, // don't fire a heavy cycle the instant Claude launches
       stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
