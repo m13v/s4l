@@ -1630,6 +1630,26 @@ tool(
     const warnings: string[] = [];
     const inRange = (n: number) => n >= 1 && n <= total;
 
+    // ---- Rejections: durable + final --------------------------------------
+    // A rejected draft is marked terminal so it NEVER re-appears for review and is
+    // never posted. A reject overrides any earlier approve on the same card.
+    const rejected: number[] = [];
+    (reject || []).forEach((n) => {
+      if (!inRange(n)) {
+        warnings.push(`ignored reject #${n}: out of range (1-${total})`);
+        return;
+      }
+      const c = candidates[n - 1];
+      if (c.posted === true) {
+        warnings.push(`#${n} already posted; not rejecting`);
+        return;
+      }
+      c.terminal = true;
+      c.terminal_reason = "rejected";
+      c.approved = false;
+      rejected.push(n);
+    });
+
     // Apply edits first; an edited draft is always posted.
     const approve = new Set<number>();
     let editedCount = 0;
@@ -1657,19 +1677,27 @@ tool(
     });
 
     // Cross-surface de-dup: chat and the menu-bar pop-ups can both approve, so
-    // never re-post a candidate the other surface already posted.
-    const alreadyPosted: number[] = [];
+    // never re-post a candidate the other surface already posted OR ruled out.
+    const alreadyDone: number[] = [];
     for (const n of Array.from(approve)) {
-      if (candidates[n - 1]?.posted === true) {
+      if (candidates[n - 1]?.posted === true || candidates[n - 1]?.terminal === true) {
         approve.delete(n);
-        alreadyPosted.push(n);
+        alreadyDone.push(n);
       }
     }
-    if (alreadyPosted.length) {
-      warnings.push(`already posted (skipped): ${alreadyPosted.sort((a, b) => a - b).join(", ")}`);
+    if (alreadyDone.length) {
+      warnings.push(`already posted/decided (skipped): ${alreadyDone.sort((a, b) => a - b).join(", ")}`);
     }
 
-    candidates.forEach((c, i) => (c.approved = approve.has(i + 1)));
+    // STICKY approve: record the approval DURABLY and never clear another card's
+    // prior approval. The old `c.approved = approve.has(i+1)` reset every card on
+    // each call, so a later post_drafts for a different card dropped a
+    // restart-interrupted approved card back into "pending". postApproved filters
+    // posted/terminal, so the approved set only ever drains what's genuinely left.
+    approve.forEach((n) => {
+      const c = candidates[n - 1];
+      if (c) c.approved = true;
+    });
     writePlan(batch_id, plan);
 
     if (approve.size === 0) {
@@ -1677,9 +1705,12 @@ tool(
         batch_id,
         drafted: total,
         posted: 0,
+        rejected: rejected.length,
         skipped: total,
         edited: editedCount,
-        note: "No drafts selected to post. Nothing was posted.",
+        note: rejected.length
+          ? `Rejected ${rejected.length} draft(s); they won't be shown for review again. Nothing was posted.`
+          : "No drafts selected to post. Nothing was posted.",
         warnings,
       });
     }
@@ -1700,6 +1731,7 @@ tool(
       drafted: total,
       posted: actuallyPosted,
       approved: approve.size,
+      rejected: rejected.length,
       skipped: total - actuallyPosted,
       edited: editedCount,
       result,
