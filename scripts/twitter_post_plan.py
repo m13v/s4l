@@ -1055,9 +1055,13 @@ def main() -> int:
 
     try:
         for _idx, c in enumerate(candidates, start=1):
-            # Live per-post status for the S4L menu bar: "posting 3/10" while this
-            # one is in flight, then "posted 3/10 ✓" once it lands. Cosmetic only.
-            _write_activity(f"posting {_idx}/{_total}")
+            # Live per-post status for the S4L menu bar. LEAD with `posted` (the
+            # REAL count of replies that actually landed), not `_idx` (the loop
+            # position). _idx races through already-posted / deleted cards as instant
+            # dedup-skips, so a bare "posting 88/139" looked like 88 were sent when
+            # 0 were — misleading on every restart. "{posted} sent · {_idx}/{_total}"
+            # keeps the honest number in front; the position is secondary context.
+            _write_activity(f"posting {posted} sent · {_idx}/{_total}")
             # Re-stamp the batch hold at each candidate boundary so the
             # POST_LOCK_EXPIRY failsafe measures silence from the LAST real
             # progress, not from batch start. Insurance on top of the child's own
@@ -1082,7 +1086,8 @@ def main() -> int:
                 posted += 1
                 # Flash the confirmation with a short dwell so the menu bar shows
                 # it before the next iteration's "posting" overwrites the label.
-                _write_activity(f"posted {_idx}/{_total} ✓")
+                # `posted` was just incremented, so it reflects the reply that landed.
+                _write_activity(f"posting {posted} sent ✓ · {_idx}/{_total}")
                 time.sleep(0.6)
             elif outcome == "skipped":
                 skipped += 1
