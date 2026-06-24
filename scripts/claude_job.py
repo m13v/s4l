@@ -66,6 +66,10 @@ VALUE_FLAGS = {
 
 POLL_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "600"))
+# Jobs older than this (pending or running) are swept — a job nobody drained in
+# this long is a leftover from a timed-out producer or a dead worker, and keeping
+# it would feed a stale prompt to a worker much later. Default 2x the timeout.
+STALE_TTL_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_STALE_TTL", str(DEFAULT_TIMEOUT_S * 2)))
 
 
 # --------------------------------------------------------------------------- #
@@ -114,6 +118,32 @@ def _atomic_write(path: str, obj) -> None:
     with open(tmp, "w") as f:
         json.dump(obj, f)
     os.replace(tmp, path)
+
+
+def _sweep_stale() -> int:
+    """Remove pending/running job files older than STALE_TTL_S. Returns count."""
+    removed = 0
+    now = time.time()
+    roots = [running_dir()]
+    pend = os.path.join(queue_root(), "pending")
+    if os.path.isdir(pend):
+        roots += [os.path.join(pend, d) for d in os.listdir(pend)]
+    for d in roots:
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            fp = os.path.join(d, name)
+            try:
+                with open(fp) as f:
+                    created = json.load(f).get("created_at", 0)
+                if now - float(created) > STALE_TTL_S:
+                    os.remove(fp)
+                    removed += 1
+            except Exception:
+                continue
+    return removed
 
 
 # --------------------------------------------------------------------------- #
@@ -178,6 +208,7 @@ def cmd_provider(ns) -> int:
     job_id = uuid.uuid4().hex
     created = time.time()
     _ensure_dirs(qtype)
+    _sweep_stale()  # clear leftovers from prior timed-out producers before enqueuing
     job = {
         "job_id": job_id,
         "type": qtype,
@@ -188,7 +219,9 @@ def cmd_provider(ns) -> int:
     }
     # Filename is <created_ns>_<job_id>.json so a plain sorted() listing is FIFO.
     fname = f"{int(created * 1e9):020d}_{job_id}.json"
-    _atomic_write(os.path.join(pending_dir(qtype), fname), job)
+    pending_path = os.path.join(pending_dir(qtype), fname)
+    running_path = os.path.join(running_dir(), fname)
+    _atomic_write(pending_path, job)
     print(
         f"[claude_job] enqueued {qtype} job {job_id}; waiting for a scheduled "
         f"task to process it (timeout {ns.timeout}s)",
@@ -229,9 +262,16 @@ def cmd_provider(ns) -> int:
             return 0
         time.sleep(POLL_INTERVAL_S)
 
+    # Don't leak the job: remove it from pending/running so it can't be drafted
+    # later with a stale prompt (and so /tmp doesn't accumulate stuck jobs).
+    for p in (pending_path, running_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     print(
         f"[claude_job] timed out after {ns.timeout}s waiting for job {job_id} "
-        f"({qtype}); is the {qtype} scheduled task running?",
+        f"({qtype}); removed the job. Is the {qtype} scheduled task running?",
         file=sys.stderr,
     )
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
