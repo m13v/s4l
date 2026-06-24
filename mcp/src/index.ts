@@ -2102,6 +2102,252 @@ function ensureAutopilotToolsAllowed(): void {
   }
 }
 
+// ===========================================================================
+// Queue-worker scheduled tasks + launchd kicker (2026-06-23)
+//
+// Replaces the scan_candidates -> host-draft -> submit_drafts autopilot. The
+// REAL pipeline runs in DRAFT_ONLY mode under launchd; its `claude -p` calls go
+// through scripts/claude_job.py's file queue (run_claude.sh provider seam); two
+// scheduled tasks drain that queue. Each task is single-purpose (one job type),
+// fires every minute, claims ONE job, runs the pipeline's own prompt as its
+// Claude turn, writes the result back, and stops.
+// ===========================================================================
+const QUEUE_WORKER_PROMPT_VERSION = 1;
+const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
+
+// One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
+const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
+  { taskId: PHASE1_TASK_ID, queueType: "twitter-query", human: "Phase 1 X search-query drafting" },
+  { taskId: PHASE2B_TASK_ID, queueType: "twitter-prep", human: "Phase 2b reply drafting" },
+];
+
+function scheduledTaskSkillPath(taskId: string): string {
+  const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  return path.join(cfg, "scheduled-tasks", taskId, "SKILL.md");
+}
+
+// The queue dir the worker reads/writes. MUST equal what the launchd kicker sets
+// (kickerEnv below) and what claude_job.py uses, so both ends meet on one path.
+function queueDir(): string {
+  return path.join(sapsStateDir(), "claude-queue");
+}
+
+// A single worker task's SKILL.md. Bash-only: claim -> follow the job's own
+// prompt -> write JSON -> submit. Paths are baked in at generation time because
+// the unattended Bash session can't resolve our env. The job's `prompt` field is
+// the pipeline's real Phase-1/Phase-2b prompt (full styles/voice/em-dash rules),
+// so drafting quality is identical to the legacy `claude -p` path.
+function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: string }): string {
+  const py = resolvePython();
+  const job = path.join(repoDir(), "scripts", "claude_job.py");
+  const outDir = queueDir();
+  const body = [
+    `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
+    ``,
+    `The deterministic posting pipeline runs on this Mac. When it needs a Claude ` +
+      `turn it drops a job on a local file queue. Your only job: pick up the next ` +
+      `"${spec.queueType}" job, do EXACTLY what its prompt says, hand the result back. ` +
+      `You do this with Bash and Write, and NOTHING else. This run is unattended — ` +
+      `reaching for any other tool, or trying to "investigate", STALLS it forever.`,
+    ``,
+    `Steps:`,
+    `1. Claim the next job. Run this EXACT Bash command:`,
+    `     ${py} ${job} next --type ${spec.queueType}`,
+    `   It prints one line of JSON. If it prints "{}" (empty), there is NO work — ` +
+      `report "no jobs" in one line and STOP. You are done.`,
+    `2. Otherwise it prints {"job_id":"...","prompt":"...","schema":...}. The "prompt" ` +
+      `field is a complete, self-contained instruction the pipeline wrote for you. ` +
+      `Follow it EXACTLY and produce the SINGLE JSON object it asks for. If "schema" ` +
+      `is present, your JSON MUST satisfy it. Output ONLY that JSON object — no prose, ` +
+      `no markdown, no code fences.`,
+    `3. Submit it. Write your JSON object to ${outDir}/out-<job_id>.json using the ` +
+      `Write tool (substitute the real job_id), then run this EXACT Bash command:`,
+    `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json`,
+    `   If it reports the result was rejected (bad JSON / missing keys), fix your JSON ` +
+      `and submit again — at most twice. If it still fails, run ` +
+      `\`${py} ${job} result --job <job_id> --error\` (type a one-line reason, then ` +
+      `Ctrl-D) and STOP.`,
+    `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
+      `do NOT loop, do NOT read other files, do NOT call any other tool.`,
+    ``,
+    `HARD RULES: ONLY the Bash tool (to run claude_job.py) and the Write tool (to ` +
+      `write the result file). NEVER run any other shell command. NEVER edit, post, ` +
+      `or touch anything else. An empty queue is the NORMAL, expected case most ` +
+      `minutes — it is success, not a problem to debug.`,
+  ].join("\n");
+  return (
+    `---\n` +
+    `name: ${spec.taskId}\n` +
+    `description: S4L ${spec.human} queue worker — claims one ${spec.queueType} job ` +
+    `from the local pipeline queue, drafts it, writes the result back. Never posts.\n` +
+    `---\n\n` +
+    body +
+    `\n\n<!-- ${QUEUE_WORKER_PROMPT_MARKER}: ${QUEUE_WORKER_PROMPT_VERSION} -->\n`
+  );
+}
+
+// Refresh each worker task's SKILL.md when this build ships a newer prompt than
+// what's on disk. Mirrors ensureAutopilotPromptCurrent: best-effort, only touches
+// an EXISTING task (onboarding creates them), only when stale. Also rewrites when
+// the baked-in paths (python/repo) would have changed, since a stale absolute
+// path would break the Bash commands; we detect that by always rewriting on a
+// version bump and trust the version gate otherwise.
+function ensureQueueWorkerPromptsCurrent(): void {
+  for (const spec of QUEUE_WORKERS) {
+    try {
+      const skillPath = scheduledTaskSkillPath(spec.taskId);
+      if (!fs.existsSync(skillPath)) continue; // task not created yet
+      const cur = fs.readFileSync(skillPath, "utf-8");
+      const m = new RegExp(`${QUEUE_WORKER_PROMPT_MARKER}:\\s*(\\d+)`).exec(cur);
+      const curVer = m ? parseInt(m[1], 10) : 0;
+      if (curVer >= QUEUE_WORKER_PROMPT_VERSION) continue;
+      fs.writeFileSync(skillPath, queueWorkerSkillMd(spec), "utf-8");
+      console.error(
+        `[queue-worker] refreshed ${spec.taskId} prompt -> v${QUEUE_WORKER_PROMPT_VERSION} (was v${curVer})`
+      );
+    } catch (e: any) {
+      console.error(`[queue-worker] ensure ${spec.taskId} prompt error: ${e?.message || e}`);
+    }
+  }
+}
+
+// ---- Pre-approve tools for the unattended scheduled tasks --------------------
+// Scheduled tasks default to "Ask" mode; an un-pre-approved tool STALLS forever
+// (no human to click allow). settings.json allow-rules DO apply to scheduled-task
+// sessions. Per the user's directive, pre-approve GENEROUSLY so a worker never
+// wedges even if it reaches for something unexpected: the exact claude_job.py
+// command, python broadly, the file tools it legitimately uses, and this server's
+// own tools. Allow-only + merge-in-place; never clobbers a user's settings.
+function queueWorkerAllowedTools(): string[] {
+  const job = path.join(repoDir(), "scripts", "claude_job.py");
+  return [
+    // The worker's real commands (tightest match first).
+    `Bash(${resolvePython()} ${job}:*)`,
+    `Bash(python3 ${job}:*)`,
+    `Bash(${job}:*)`,
+    // Broad-but-scoped fallbacks so an unexpected phrasing still doesn't stall.
+    "Bash(python3:*)",
+    "Bash(python:*)",
+    // File tools the worker uses (Write) + ones it might reach for without stalling.
+    "Write",
+    "Read",
+    "Edit",
+    "Glob",
+    "Grep",
+    // This server's tools, both namespaces (manifest name + protocol name).
+    "mcp__social-autoposter__scan_candidates",
+    "mcp__social-autoposter__submit_drafts",
+    "mcp__social-autoposter__post_drafts",
+    "mcp__social-autoposter__project_config",
+    "mcp__social-autoposter__get_stats",
+    "mcp__social-autoposter__dashboard",
+    "mcp__S4L__scan_candidates",
+    "mcp__S4L__submit_drafts",
+    "mcp__S4L__post_drafts",
+    "mcp__S4L__project_config",
+    "mcp__S4L__get_stats",
+    "mcp__S4L__dashboard",
+  ];
+}
+
+// Merge a list of allow-rules into ~/.claude/settings.json. Returns count added.
+// Shared by the autopilot + queue-worker pre-approvers. Never throws.
+function mergeSettingsAllow(tools: string[]): number {
+  try {
+    const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    const settingsPath = path.join(cfg, "settings.json");
+    let settings: any = {};
+    if (fs.existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) || {};
+      } catch (e: any) {
+        console.error(`[pre-approve] settings.json unparseable; skipping: ${e?.message || e}`);
+        return 0;
+      }
+    }
+    if (typeof settings !== "object" || Array.isArray(settings)) return 0;
+    const perms = (settings.permissions ??= {});
+    if (typeof perms !== "object" || Array.isArray(perms)) return 0;
+    const allow: string[] = Array.isArray(perms.allow) ? perms.allow : (perms.allow = []);
+    let added = 0;
+    for (const t of tools) {
+      if (!allow.includes(t)) {
+        allow.push(t);
+        added++;
+      }
+    }
+    if (added === 0) return 0;
+    fs.mkdirSync(cfg, { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    return added;
+  } catch (e: any) {
+    console.error(`[pre-approve] mergeSettingsAllow error: ${e?.message || e}`);
+    return 0;
+  }
+}
+
+// Pre-approve the worker tools EAGERLY — NOT gated on a task existing — so the
+// settings are already in place before onboarding even creates the tasks, and
+// the very first unattended fire can never stall. Allow-only, idempotent.
+function ensureQueueWorkerToolsAllowed(): void {
+  const added = mergeSettingsAllow(queueWorkerAllowedTools());
+  if (added > 0) {
+    console.error(`[queue-worker] pre-approved ${added} tool rule(s) in settings.json (allow-only)`);
+  }
+}
+
+// ---- launchd kicker: run the REAL pipeline in DRAFT_ONLY + queue mode --------
+// Reinstates com.m13v.social-twitter-cycle as the customer-box kicker. It runs
+// run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen) but
+// STOPS before posting (DRAFT_ONLY=1), writing the plan to the review-queue the
+// approval cards read. Its `claude -p` steps route through the job queue
+// (SAPS_CLAUDE_PROVIDER=queue) for the scheduled-task workers to service.
+// link_tail is skipped for now (TWITTER_TAIL_LINK_RATE=0); the short link is
+// still baked by twitter_gen_links.py (pure Python).
+const QUEUE_KICKER_INTERVAL_SECS = 300; // a fresh draft cycle every 5 min
+
+function kickerEnv(): Record<string, string> {
+  return {
+    DRAFT_ONLY: "1",
+    SAPS_CLAUDE_PROVIDER: "queue",
+    SAPS_STATE_DIR: sapsStateDir(),
+    TWITTER_TAIL_LINK_RATE: "0",
+    TWITTER_PAGE_GEN_RATE: "0",
+  };
+}
+
+async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if (!runtimeReady()) return { ok: false, detail: "runtime not ready" };
+    const anyReady = listManagedProjectStatus().some((p) => p.ready);
+    if (!anyReady) return { ok: false, detail: "no configured project yet" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: TWITTER_AUTOPILOT_LABEL,
+      programArgs: ["bash", path.join(repoDir(), "skill", "run-twitter-cycle.sh")],
+      intervalSecs: QUEUE_KICKER_INTERVAL_SECS,
+      runAtLoad: false, // don't fire a heavy cycle the instant Claude launches
+      stdoutLog: path.join(logDir, "launchd-twitter-cycle-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-twitter-cycle-stderr.log"),
+      extraEnv: kickerEnv(),
+    });
+    const created = ensurePlist(TWITTER_AUTOPILOT_PLIST, xml);
+    const uid = process.getuid ? process.getuid() : 0;
+    const res = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
+    // bootstrap returns non-zero when already loaded; that's fine (idempotent).
+    const detail = created ? "installed + loaded" : `present (load rc=${res.code})`;
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
@@ -3415,6 +3661,16 @@ async function main() {
   // scan -> submit path never stalls on an "Ask mode" permission prompt (see the
   // helper's note). Best-effort, allow-only, gated on the task existing.
   ensureAutopilotToolsAllowed();
+  // Queue-backed drafting (2026-06-23): keep the two worker-task prompts current,
+  // pre-approve their tools EAGERLY (before onboarding even creates the tasks, so
+  // the first unattended fire can't stall), and (re)install the launchd kicker
+  // that runs the real DRAFT_ONLY pipeline whose claude -p calls feed the queue.
+  // All best-effort; none may block boot.
+  ensureQueueWorkerPromptsCurrent();
+  ensureQueueWorkerToolsAllowed();
+  void ensureQueueKickerInstalled()
+    .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
