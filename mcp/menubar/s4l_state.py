@@ -350,10 +350,12 @@ def read_plan(plan_path):
 
 
 def review_drafts(plan):
-    """Flatten a plan into the card model: only unfinished candidates."""
+    """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
+    posted, terminal (rejected/dead), or already approved is a settled decision and
+    must never be re-presented for review (approved ones proceed to post)."""
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
-        if c.get("posted") is True or c.get("terminal") is True:
+        if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
             continue
         out.append(
             {
@@ -370,11 +372,12 @@ def review_drafts(plan):
     return out
 
 
-def post_drafts(batch_id, post=None, edits=None, timeout=900, activity_label=None):
-    """Post approved drafts via the loopback tool. `post` = 1-based numbers to
-    post as-is; `edits` = [{n, text}] to rewrite then post. Returns the parsed
+def post_drafts(batch_id, post=None, edits=None, reject=None, timeout=900, activity_label=None):
+    """Post / reject drafts via the loopback tool. `post` = 1-based numbers to post
+    as-is; `edits` = [{n, text}] to rewrite then post; `reject` = numbers to mark
+    DONE so they're never shown for review again (not posted). Returns the parsed
     result, or None if the loopback is unreachable (Claude Desktop closed)."""
-    args = {"batch_id": batch_id, "post": post or [], "edits": edits or []}
+    args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or []}
     if activity_label:
         args["__saps_activity_label"] = activity_label
     return loopback_tool("post_drafts", args, timeout=timeout)
