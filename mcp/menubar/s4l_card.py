@@ -17,6 +17,7 @@ run loop, so that holds).
 import objc
 from Foundation import NSObject, NSMakeRect
 from AppKit import (
+    NSApp,
     NSPanel,
     NSButton,
     NSTextField,
@@ -108,8 +109,23 @@ class _ReviewController(NSObject):
         panel.setDelegate_(self)
         self._panel = panel
         self._render()
+        # The menu bar app runs as an accessory (LSUIElement, no dock icon), so
+        # ordering the panel front is NOT enough to type into the reply field:
+        # keystrokes only route to a text view when the OWNING APP is the active
+        # application. Without this activation the cursor appears in the field but
+        # every keypress goes to whatever app is actually frontmost, which is the
+        # "editable field that isn't editable at all" bug. Activate the app, make
+        # the panel key, then drop the caret into the reply text view.
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
         panel.makeKeyAndOrderFront_(None)
         panel.orderFrontRegardless()
+        # _render() already seated the caret in the reply field; re-seat once more
+        # after the panel is key so the very first card is editable immediately.
+        if self._textview is not None:
+            panel.makeFirstResponder_(self._textview)
 
     @objc.python_method
     def _render(self):
@@ -182,6 +198,10 @@ class _ReviewController(NSObject):
         self._panel.setContentView_(content)
         # Counter lives in the native title bar, not inside the content.
         self._panel.setTitle_(f"Review draft {self._idx + 1} of {len(self._drafts)}")
+        # setContentView_ rebuilds the view tree, so the caret would otherwise
+        # default to the Approve button. Re-seat it in the reply field for every
+        # card (not just the first) so each one is immediately editable.
+        self._panel.makeFirstResponder_(tv)
 
     @objc.python_method
     def _current_text(self):
