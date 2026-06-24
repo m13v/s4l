@@ -20939,9 +20939,32 @@ function _selfGet(host, port, reqPath, timeoutMs) {
 // python child per call; job-runs blocks the loop). One at a time keeps the
 // warm pass from starving real requests.
 async function _warmSequential(host, port, paths, timeoutMs) {
+  const summary = {
+    total: paths.length,
+    ok: 0,
+    fail: 0,
+    slow: 0,
+    failures: [],
+    elapsedMs: 0,
+  };
+  const started = Date.now();
   for (const reqPath of paths) {
-    try { await _selfGet(host, port, reqPath, timeoutMs); } catch {}
+    const reqStarted = Date.now();
+    let code = 0;
+    try { code = await _selfGet(host, port, reqPath, timeoutMs); } catch {}
+    const reqElapsed = Date.now() - reqStarted;
+    if (reqElapsed > 10000) summary.slow += 1;
+    if (code >= 200 && code < 400) {
+      summary.ok += 1;
+    } else {
+      summary.fail += 1;
+      if (summary.failures.length < 5) {
+        summary.failures.push({ path: reqPath, code, elapsedMs: reqElapsed });
+      }
+    }
   }
+  summary.elapsedMs = Date.now() - started;
+  return summary;
 }
 
 // Trends + Experiments: async-DB / child-process heavy but NOT main-thread
@@ -20955,7 +20978,7 @@ async function warmTrendsAndExperiments(host, port) {
     paths.push(`/api/funnel/per-day?days=${d}`);
     paths.push(`/api/cost/per-day?days=${d}`);
   }
-  await _warmSequential(host, port, paths, 120000);
+  return _warmSequential(host, port, paths, 120000);
 }
 
 // Job history: the cost-breakdown pass is O(runs*sessions) synchronous JS, so a
@@ -20964,19 +20987,41 @@ async function warmTrendsAndExperiments(host, port) {
 // pills (24h / 7d / 14d / 30d = 24 / 168 / 336 / 720 hours).
 async function warmJobRunsCache(host, port) {
   const paths = [24, 168, 336, 720].map(h => `/api/job-runs?hours=${h}`);
-  await _warmSequential(host, port, paths, 120000);
+  return _warmSequential(host, port, paths, 120000);
 }
 
 function startDashboardWarmers(host, port) {
   if (auth.CLIENT_MODE) return; // local operator dashboard only
-  const safe = (fn) => () => { try { fn(host, port).catch(() => {}); } catch {} };
+  const inFlight = new Map();
+  const runWarmPass = (name, fn) => async () => {
+    const previous = inFlight.get(name);
+    if (previous) {
+      console.warn(`[warmer] ${name} skip; previous pass still running age=${Date.now() - previous}ms`);
+      return;
+    }
+    const started = Date.now();
+    inFlight.set(name, started);
+    try {
+      const summary = await fn(host, port);
+      const failures = summary && summary.failures && summary.failures.length
+        ? ` failures=${JSON.stringify(summary.failures)}`
+        : '';
+      const line = `[warmer] ${name} done elapsed=${Date.now() - started}ms total=${summary && summary.total || 0} ok=${summary && summary.ok || 0} fail=${summary && summary.fail || 0} slow=${summary && summary.slow || 0}${failures}`;
+      if (summary && summary.fail) console.warn(line);
+      else console.log(line);
+    } catch (e) {
+      console.warn(`[warmer] ${name} error elapsed=${Date.now() - started}ms: ${e && e.message || e}`);
+    } finally {
+      if (inFlight.get(name) === started) inFlight.delete(name);
+    }
+  };
   // Initial warm shortly after boot (staggered so they don't pile up).
-  setTimeout(safe(warmTrendsAndExperiments), 6000);
-  setTimeout(safe(warmJobRunsCache), 12000);
+  setTimeout(runWarmPass('trends-experiments', warmTrendsAndExperiments), 6000);
+  setTimeout(runWarmPass('job-runs', warmJobRunsCache), 12000);
   // Re-warm before the per-request caches expire. Trends/experiments use 5-min
   // caches -> refresh every 4 min. Job-runs uses a 10-min cache -> every 8 min.
-  setInterval(safe(warmTrendsAndExperiments), 4 * 60 * 1000);
-  setInterval(safe(warmJobRunsCache), 8 * 60 * 1000);
+  setInterval(runWarmPass('trends-experiments', warmTrendsAndExperiments), 4 * 60 * 1000);
+  setInterval(runWarmPass('job-runs', warmJobRunsCache), 8 * 60 * 1000);
   console.log('[warmer] dashboard cache warmers started (job-history, trends, experiments)');
 }
 
