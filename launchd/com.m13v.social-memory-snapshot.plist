@@ -7,7 +7,7 @@
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
 		<key>PATH</key>
-		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>Label</key>
 	<string>com.m13v.social-memory-snapshot</string>
