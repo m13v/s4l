@@ -263,9 +263,9 @@ const server = new McpServer(
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
-      "the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
-      "without posting, AND the two draft-autopilot scheduled tasks have been created via queue_setup " +
-      "(see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
+      "the two draft-autopilot scheduled tasks have been created via queue_setup, AND one real draft " +
+      "cycle (`run_draft_cycle`) has produced a draft card — verifying the ACTUAL pipeline end to end " +
+      "without posting (see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
       "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
       "reports ready; only call runtime action:'install' or action:'doctor' to TROUBLESHOOT if status " +
       "shows the boot provision failed or stalled. Do not ask whether to inspect " +
@@ -277,27 +277,31 @@ const server = new McpServer(
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
       "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup, but " +
-      "DO schedule the draft-only autopilot as the final step (it only queues drafts for approval, it " +
-      "never posts on its own). When setup reaches done (" +
-      "runtime ready, a project configured with seeded topics, X connected, the draft path verified, " +
-      "and the two draft-autopilot scheduled tasks created via queue_setup), call the `dashboard` tool so the user " +
+      "DO schedule the draft autopilot and verify it with one real cycle as the final step (it only " +
+      "queues drafts for approval, it never posts on its own). When setup reaches done (" +
+      "runtime ready, a project configured with seeded topics, X connected, the two scheduled tasks " +
+      "created, and one real cycle has produced a draft card), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
-      "SCHEDULE THE AUTOPILOT (final onboarding step). The autopilot now reuses the REAL drafting " +
-      "pipeline: a launchd job this server installs kicks the pipeline in draft-only mode, and its " +
-      "Claude turns are serviced by TWO scheduled tasks that drain a local job queue. To set them up: " +
-      "(1) call the `queue_setup` tool — it returns two task specs (saps-phase1-query and " +
-      "saps-phase2b-draft), each with a taskId, cronExpression, and a ready-made prompt; (2) for EACH " +
-      "spec, call the HOST tool `create_scheduled_task` with that taskId, cronExpression, and the prompt " +
-      "VERBATIM (do not edit it — it contains exact local paths). Both fire every minute and ONLY draft, " +
-      "never post; drafts pile up in the menu-bar approval cards. Do NOT create the old " +
-      "'social-autoposter-autopilot' task — it is deprecated. If the host exposes no " +
-      "create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here; the launchd " +
-      "kicker still runs the pipeline, but its draft step will wait on the queue until the tasks exist.\n\n" +
+      "SCHEDULE + VERIFY THE AUTOPILOT (final onboarding step). There is ONE drafting pipeline: a launchd " +
+      "job this server installs runs the real cycle in draft-only mode, its Phase-2b Claude turn is " +
+      "serviced by a scheduled task that drains a local job queue, and the result is merged into the " +
+      "menu-bar approval cards. There is NO scan_candidates/submit_drafts host-draft path anymore — do " +
+      "NOT use those to draft or to verify. Steps, in order: " +
+      "(1) call `queue_setup` — it pre-writes the worker task prompts and returns two task specs " +
+      "(saps-phase1-query, saps-phase2b-draft); " +
+      "(2) for EACH spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
+      "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
+      "(3) call `run_draft_cycle` to fire one real cycle now, then poll the `dashboard` tool every ~30s " +
+      "for up to ~3 minutes until the pending-draft count rises — that card came through the real " +
+      "pipeline and verifies it end to end. Do NOT create the old 'social-autoposter-autopilot' task — " +
+      "it is deprecated. Do NOT ask the user to review the drafts or pause for input mid-onboarding; " +
+      "keep going until the card appears, then summarize. If the host exposes no create_scheduled_task " +
+      "tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
-      "(`scan_candidates` -> draft the replies -> `submit_drafts`) about it. A feature nobody hears " +
+      "(`run_draft_cycle`) about it. A feature nobody hears " +
       "about is wasted distribution. Use judgment, suggest it for " +
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
@@ -1996,6 +2000,55 @@ tool(
         "just move on. Both fire every minute and only draft — they never post. The pipeline that feeds " +
         "them runs from a launchd job this server installs. Do NOT create the old " +
         "'social-autoposter-autopilot' task; it is deprecated.",
+    });
+  }
+);
+
+// ---- run_draft_cycle: fire ONE real pipeline cycle now ---------------------
+// The single source of drafts. Ensures the launchd kicker is installed, then
+// kickstarts it so a DRAFT_ONLY cycle runs immediately (instead of waiting for
+// the 5-min timer). The cycle drafts via the queue + worker task and the wrapper
+// merges the result into the review-queue cards. Use this for onboarding
+// verification ("does the real pipeline produce a card?") and any on-demand
+// "draft now" — NOT scan_candidates/submit_drafts, which are gone.
+tool(
+  "run_draft_cycle",
+  {
+    title: "Run one draft cycle now",
+    description:
+      "Fires ONE real draft cycle immediately (the same pipeline the autopilot runs): it scans, drafts " +
+      "replies through the queue + worker task, and merges them into the menu-bar approval cards. " +
+      "Nothing posts. Use it to verify onboarding end-to-end (then poll the `dashboard` tool until the " +
+      "pending-draft count rises — allow ~1-3 minutes for the worker to draft), or whenever the user " +
+      "wants fresh drafts now. Requires the worker scheduled tasks to exist first (create them via " +
+      "queue_setup + create_scheduled_task).",
+    inputSchema: {},
+  },
+  async () => {
+    const k = await ensureQueueKickerInstalled();
+    if (!k.ok) {
+      return textContent(
+        `Couldn't start a draft cycle: ${k.detail}. ` +
+          (k.detail.includes("project")
+            ? "Configure a project first (project_config)."
+            : "The runtime must be ready.")
+      );
+    }
+    const uid = process.getuid ? process.getuid() : 0;
+    const res = await run(
+      "launchctl",
+      ["kickstart", "-k", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`],
+      { timeoutMs: 15_000 }
+    );
+    return jsonContent({
+      started: res.code === 0,
+      kicker: k.detail,
+      next_step:
+        "A draft cycle is now running. It drafts via the queue + the saps-phase2b-draft worker task " +
+        "(which fires every minute) and merges results into the approval cards. Poll the `dashboard` " +
+        "tool every ~30s for up to ~3 minutes; when the pending-draft count rises, the real pipeline is " +
+        "verified end to end. If after 3 minutes no card appears, check that the worker scheduled task " +
+        "exists (it drains the queue).",
     });
   }
 );
