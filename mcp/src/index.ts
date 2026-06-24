@@ -265,11 +265,14 @@ const server = new McpServer(
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
       "the draft path (`scan_candidates` -> draft -> `submit_drafts`) has verified the pipeline " +
       "without posting, AND the two draft-autopilot scheduled tasks have been created via queue_setup " +
-      "(see SCHEDULE THE AUTOPILOT below). Do not ask whether to inspect " +
-      "status, install or repair owned dependencies, choose an auto-detected browser profile, connect " +
+      "(see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
+      "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
+      "reports ready; only call runtime action:'install' or action:'doctor' to TROUBLESHOOT if status " +
+      "shows the boot provision failed or stalled. Do not ask whether to inspect " +
+      "status, repair a failed runtime, choose an auto-detected browser profile, connect " +
       "X, scan the profile, research the product website, save conservative inferred fields, seed " +
       "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
-      "explicit setup request authorizes the owned runtime install and importing ONLY x.com/" +
+      "explicit setup request authorizes runtime repair and importing ONLY x.com/" +
       "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
@@ -1408,7 +1411,7 @@ tool(
         onboarding: onboardingSnapshot(),
         next_step:
           !rtReady
-            ? "Runtime is not ready. Call runtime action:'install', poll runtime action:'status' to completion, then continue setup automatically."
+            ? "Runtime is not ready yet. It provisions automatically on boot — poll runtime action:'status' until ready (only call runtime action:'install' to retry if status shows the boot provision failed or stalled), then continue setup automatically."
             : projects.length === 0
             ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
@@ -1807,22 +1810,26 @@ tool(
 tool(
   "runtime",
   {
-    title: "Runtime: install, update & diagnostics",
+    title: "Runtime: status, update & diagnostics",
     description:
-      "The ONE plumbing tool for the autoposter's local runtime lifecycle. action:'status' (default) " +
+      "The ONE plumbing tool for the autoposter's local runtime lifecycle. The runtime PROVISIONS " +
+      "ITSELF automatically when the server boots, so you normally never call action:'install' — just " +
+      "poll action:'status'. action:'status' (default) " +
       "reports whether the self-contained Python/Chromium runtime is installed and, mid-install, the " +
-      "per-step progress (uv, Python, venv, dependencies, Chromium) — poll it after action:'install'. " +
-      "action:'install' provisions that runtime (a private Python via uv, NOT your system Python, plus " +
-      "deps and Chromium); it runs in the background and returns immediately, is safe to call " +
-      "repeatedly, and is a no-op once installed. action:'version' shows installed vs latest published " +
+      "per-step progress (uv, Python, venv, dependencies, Chromium) — poll it to watch boot " +
+      "provisioning finish. action:'install' is a TROUBLESHOOTING retry that re-provisions that runtime " +
+      "(a private Python via uv, NOT your system Python, plus " +
+      "deps and Chromium); it runs in the background, returns immediately, is safe to call " +
+      "repeatedly, and is a no-op once installed — only reach for it if status shows the boot provision " +
+      "failed or stalled. action:'version' shows installed vs latest published " +
       "and whether an update is available; action:'update' pulls and installs the latest release (runs " +
       "`npx social-autoposter@latest update`, taking effect after the client reconnects/restarts). " +
       "action:'doctor' runs structured environment diagnostics (phase:'pre_connect' is safe at " +
       "onboarding start and treats the missing X session/cookies as expected; phase:'full' verifies the " +
       "completed environment after X is connected); action:'doctor_status' returns the last persisted " +
-      "Doctor result without re-running. Use this the first time the user sets up, when another tool " +
-      "reports the runtime isn't ready, when the user asks what version they're on or to update, or to " +
-      "diagnose a broken environment.",
+      "Doctor result without re-running. Use action:'status' to confirm readiness during setup; reach " +
+      "for action:'install'/'doctor' only when status or another tool reports the runtime isn't ready " +
+      "or to diagnose a broken environment; use action:'version'/'update' for version checks.",
     inputSchema: {
       action: z
         .enum(["status", "install", "version", "update", "doctor", "doctor_status"])
