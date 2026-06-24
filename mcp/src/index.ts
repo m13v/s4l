@@ -280,27 +280,17 @@ const server = new McpServer(
       "and the autopilot scheduled task created and run once), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
-      "SCHEDULE THE AUTOPILOT (final onboarding step). Once the draft path is verified, start the " +
-      "autopilot by calling the HOST tool `create_scheduled_task` with: taskId " +
-      "'social-autoposter-autopilot'; cronExpression '* * * * *' (continuous, like the pipeline; the " +
-      "host runs one at a time and skips overlapping fires, so cycles run back-to-back); and a " +
-      "self-contained prompt telling the run to use ONLY two tools — scan_candidates and submit_drafts " +
-      "— and to IMPROVISE NOTHING ELSE. Specifically the prompt must say: (1) call scan_candidates " +
-      "(which long-polls — if it returns a `Scan in progress` status, call scan_candidates again with " +
-      "the same args and keep re-calling until it returns candidates; never sleep or use background " +
-      "waits between calls); (2) the brand voice + guardrails come back INLINE in the result's " +
-      "`project_voices[<matched_project>]` field — draft from THAT and NEVER read config files, call " +
-      "project_config, or run Bash/Read to find the voice; (3) draft ONE on-brand reply (<=250 chars, " +
-      "same language as the thread, adds real value) for each candidate worth engaging; (4) call " +
-      "submit_drafts with those drafts, and do NOT post (drafts pile up in the menu-bar approval cards). " +
-      "Add a HARD GUARD: if scan_candidates is NOT available (ToolSearch returns no matching tool — can " +
-      "happen when a run spawns before the extension's MCP server reconnects), STOP immediately and " +
-      "report 'S4L tools unavailable, skipping this cycle' — do NOT search the connector registry, do " +
-      "NOT call list_connectors, do NOT improvise any other tool. Then run ONE cycle yourself now " +
-      "(scan_candidates -> draft -> submit_drafts) to seed the cards AND pre-approve those two tools, " +
-      "so unattended fires never stall waiting on a per-tool permission prompt. If the host " +
-      "exposes no create_scheduled_task tool, tell the user " +
-      "the autopilot could not be scheduled here and to run a draft cycle manually instead.\n\n" +
+      "SCHEDULE THE AUTOPILOT (final onboarding step). The autopilot now reuses the REAL drafting " +
+      "pipeline: a launchd job this server installs kicks the pipeline in draft-only mode, and its " +
+      "Claude turns are serviced by TWO scheduled tasks that drain a local job queue. To set them up: " +
+      "(1) call the `queue_setup` tool — it returns two task specs (saps-phase1-query and " +
+      "saps-phase2b-draft), each with a taskId, cronExpression, and a ready-made prompt; (2) for EACH " +
+      "spec, call the HOST tool `create_scheduled_task` with that taskId, cronExpression, and the prompt " +
+      "VERBATIM (do not edit it — it contains exact local paths). Both fire every minute and ONLY draft, " +
+      "never post; drafts pile up in the menu-bar approval cards. Do NOT create the old " +
+      "'social-autoposter-autopilot' task — it is deprecated. If the host exposes no " +
+      "create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here; the launchd " +
+      "kicker still runs the pipeline, but its draft step will wait on the queue until the tasks exist.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
@@ -1899,6 +1889,45 @@ function runtimeSnapshot() {
   };
 }
 
+// ---- queue_setup: hand the agent the two worker-task specs -----------------
+// The customer-box autopilot is now two single-purpose scheduled tasks that
+// drain the pipeline's claude -p job queue (see the queue-worker section below).
+// The agent can't author their prompts (baked absolute paths to python +
+// claude_job.py), so this tool returns the EXACT specs to pass straight to the
+// host tool create_scheduled_task. Calling it also eagerly pre-approves the
+// worker tools, so the tasks never stall on a permission prompt. Read-only +
+// idempotent.
+tool(
+  "queue_setup",
+  {
+    title: "Get autopilot scheduled-task specs",
+    description:
+      "Returns the two scheduled tasks that run the hands-free draft autopilot on this machine " +
+      "(saps-phase1-query and saps-phase2b-draft). For EACH returned task, call the host tool " +
+      "create_scheduled_task with its taskId, cronExpression, and prompt VERBATIM (do not edit the " +
+      "prompt — it contains exact local paths). These tasks drain the local drafting queue that the " +
+      "real pipeline feeds; the pipeline itself is kicked by a launchd job this server installs. Use " +
+      "this as the final onboarding step instead of the old single autopilot task.",
+    inputSchema: {},
+  },
+  async () => {
+    ensureQueueWorkerToolsAllowed();
+    const tasks = QUEUE_WORKERS.map((spec) => ({
+      taskId: spec.taskId,
+      cronExpression: "* * * * *",
+      prompt: queueWorkerBody(spec),
+    }));
+    return jsonContent({
+      tasks,
+      next_step:
+        "Create each task with the host tool create_scheduled_task (taskId, cronExpression, prompt " +
+        "verbatim). Both fire every minute and only draft — they never post. The pipeline that feeds " +
+        "them is run by a launchd job this server already (re)installs on boot. Do NOT also create the " +
+        "old 'social-autoposter-autopilot' task; it is deprecated.",
+    });
+  }
+);
+
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
@@ -2137,11 +2166,11 @@ function queueDir(): string {
 // the unattended Bash session can't resolve our env. The job's `prompt` field is
 // the pipeline's real Phase-1/Phase-2b prompt (full styles/voice/em-dash rules),
 // so drafting quality is identical to the legacy `claude -p` path.
-function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: string }): string {
+function queueWorkerBody(spec: { taskId: string; queueType: string; human: string }): string {
   const py = resolvePython();
   const job = path.join(repoDir(), "scripts", "claude_job.py");
   const outDir = queueDir();
-  const body = [
+  return [
     `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
     ``,
     `The deterministic posting pipeline runs on this Mac. When it needs a Claude ` +
@@ -2175,13 +2204,20 @@ function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: st
       `or touch anything else. An empty queue is the NORMAL, expected case most ` +
       `minutes — it is success, not a problem to debug.`,
   ].join("\n");
+}
+
+// Full canonical SKILL.md (frontmatter + body + version marker) the MCP writes
+// to keep the task current. queueWorkerBody() is what the agent passes to
+// create_scheduled_task at onboarding (already complete + correct, baked paths);
+// this wrapper just adds the frontmatter + marker the refresh-on-boot gate reads.
+function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: string }): string {
   return (
     `---\n` +
     `name: ${spec.taskId}\n` +
     `description: S4L ${spec.human} queue worker — claims one ${spec.queueType} job ` +
     `from the local pipeline queue, drafts it, writes the result back. Never posts.\n` +
     `---\n\n` +
-    body +
+    queueWorkerBody(spec) +
     `\n\n<!-- ${QUEUE_WORKER_PROMPT_MARKER}: ${QUEUE_WORKER_PROMPT_VERSION} -->\n`
   );
 }
