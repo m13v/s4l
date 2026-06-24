@@ -432,6 +432,35 @@ export function startProvisioning(): InstallProgress {
   return readProgress() ?? freshProgress();
 }
 
+// Boot-time deterministic self-heal: resume an interrupted/failed provision so
+// the owned runtime converges WITHOUT relying on the agent to (re-)call
+// `runtime action:'install'`. Called from main() on every server start.
+//
+// Resume-to-completion policy (option b): only auto-fire when a provision was
+// ALREADY started once (install-progress.json exists) but the runtime is not
+// ready — i.e. a step failed, or the process died mid-install (e.g. the agent
+// bailed, or Claude was restarted between steps). A brand-new install that has
+// never started is left alone so we don't kick off ~150MB of downloads before
+// the user has opted into setup; the agent's first `runtime install` writes the
+// initial progress file, and from then on this guarantees it finishes across
+// restarts. provision() is idempotent, so resuming re-checks done steps and
+// skips them, re-attempting only what's missing. Returns true if it kicked a
+// run. Best-effort, never throws.
+export function ensureRuntimeProvisioned(): boolean {
+  try {
+    if (runtimeReady()) return false; // fully provisioned already
+    if (isProvisioning()) return false; // a run is in flight in this process
+    const prog = readProgress();
+    if (!prog) return false; // never started (fresh install) → don't surprise; wait for explicit setup
+    // A prior provision left a progress file but the runtime isn't ready:
+    // it errored, or the host process died before it finished. Resume it.
+    startProvisioning();
+    return true;
+  } catch {
+    return false; // best-effort; a boot self-heal must never break startup
+  }
+}
+
 async function provision(progress: InstallProgress): Promise<InstallProgress> {
   const setStep = (id: string, status: StepStatus, detail?: string) => {
     const st = progress.steps.find((s) => s.id === id);
