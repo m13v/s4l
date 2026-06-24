@@ -54,6 +54,10 @@ run() {  # run <description> <cmd...>
   echo "  run     $1"
   [ "$DRY" -eq 0 ] && shift && "$@" >/dev/null 2>&1 || true
 }
+json_edit() {  # json_edit <description> <cmd...>
+  echo "  edit    $1"
+  [ "$DRY" -eq 0 ] && shift && "$@" || true
+}
 
 # ---- 0. stop anything still running ---------------------------------------
 echo "[0] stop running processes"
@@ -119,7 +123,6 @@ echo
 # Scoped to social-autoposter only — other extensions (lede, s4l-plugin) are left
 # untouched.
 echo "[1b] Claude Desktop .mcpb extension (install dir + settings + registry)"
-EXT_ID="local.mcpb.m13v.social-autoposter"
 CLAUDE_SUPPORT="$HOME_DIR/Library/Application Support/Claude"
 INSTALL_REG="$CLAUDE_SUPPORT/extensions-installations.json"
 # The registry edit only sticks if Claude Desktop is NOT running (it rewrites
@@ -129,29 +132,59 @@ if pgrep -x "Claude" >/dev/null 2>&1; then
   echo "  WARN    Claude Desktop is running — quit it (Cmd+Q) so the registry edit"
   echo "          isn't rewritten on exit, then re-run this step if needed."
 fi
-rm_path "$CLAUDE_SUPPORT/Claude Extensions/$EXT_ID"            "ext-install"
-rm_path "$CLAUDE_SUPPORT/Claude Extensions Settings/$EXT_ID.json" "ext-settings"
-# Surgically drop only OUR entry from the installations registry (keep others).
+EXT_IDS=()
+for eid in \
+  local.mcpb.m13v.social-autoposter \
+  local.mcpb.s4l.ai.social-autoposter; do
+  EXT_IDS+=("$eid")
+done
+for d in "$CLAUDE_SUPPORT/Claude Extensions"/local.mcpb.*social-autoposter; do
+  [ -e "$d" ] && EXT_IDS+=("$(basename "$d")")
+done
+for f in "$CLAUDE_SUPPORT/Claude Extensions Settings"/local.mcpb.*social-autoposter.json; do
+  [ -e "$f" ] && EXT_IDS+=("$(basename "$f" .json)")
+done
+if [ -f "$INSTALL_REG" ] && command -v python3 >/dev/null 2>&1; then
+  while IFS= read -r eid; do [ -n "$eid" ] && EXT_IDS+=("$eid"); done < <(python3 - "$INSTALL_REG" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+for eid in sorted((d.get("extensions") or {}).keys()):
+    if "social-autoposter" in eid:
+        print(eid)
+PY
+  )
+fi
+if [ "${#EXT_IDS[@]}" -gt 0 ]; then
+  mapfile -t EXT_IDS < <(printf '%s\n' "${EXT_IDS[@]}" | awk 'NF && !seen[$0]++')
+fi
+for EXT_ID in "${EXT_IDS[@]}"; do
+  rm_path "$CLAUDE_SUPPORT/Claude Extensions/$EXT_ID" "ext-install"
+  rm_path "$CLAUDE_SUPPORT/Claude Extensions Settings/$EXT_ID.json" "ext-settings"
+done
+# Surgically drop only OUR entries from the installations registry (keep others).
 if [ -f "$INSTALL_REG" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get('extensions',{}) else 1)" "$INSTALL_REG" "$EXT_ID" 2>/dev/null; then
-      echo "  edit    remove [$EXT_ID] from $INSTALL_REG"
-      if [ "$DRY" -eq 0 ]; then
-        cp "$INSTALL_REG" "$INSTALL_REG.bak" 2>/dev/null || true
-        python3 - "$INSTALL_REG" "$EXT_ID" <<'PY'
+    if python3 - "$INSTALL_REG" "${EXT_IDS[@]}" <<'PY' >/dev/null 2>&1; then
 import json, sys
-p, eid = sys.argv[1], sys.argv[2]
+p, ids = sys.argv[1], set(sys.argv[2:])
 d = json.load(open(p))
-d.get("extensions", {}).pop(eid, None)
+sys.exit(0 if ids.intersection((d.get("extensions") or {}).keys()) else 1)
+PY
+      json_edit "remove social-autoposter extension entries from $INSTALL_REG" \
+        python3 - "$INSTALL_REG" "${EXT_IDS[@]}" <<'PY'
+import json, sys
+p, ids = sys.argv[1], set(sys.argv[2:])
+d = json.load(open(p))
+for eid in ids:
+    (d.get("extensions") or {}).pop(eid, None)
 json.dump(d, open(p, "w"), indent=2)
 open(p, "a").write("\n")
 PY
-      fi
     else
-      echo "  (registry has no $EXT_ID entry)"
+      echo "  (registry has no social-autoposter extension entry)"
     fi
   else
-    echo "  NOTE    python3 not on PATH — remove the \"$EXT_ID\" entry from $INSTALL_REG by hand"
+    echo "  NOTE    python3 not on PATH — remove social-autoposter entries from $INSTALL_REG by hand"
   fi
 fi
 echo
@@ -169,9 +202,66 @@ if pgrep -x "Claude" >/dev/null 2>&1; then
   echo "  WARN    Claude Desktop is running — it owns the task schedule; quit it (Cmd+Q)"
   echo "          before reset so the removed tasks aren't rewritten on exit."
 fi
+TASK_IDS=()
+if [ -d "$SCHED_DIR" ]; then
+  for d in "$SCHED_DIR"/saps-* "$SCHED_DIR"/social-autoposter*; do
+    [ -e "$d" ] && TASK_IDS+=("$(basename "$d")")
+  done
+fi
 for t in saps-phase1-query saps-phase2b-draft social-autoposter-autopilot; do
+  TASK_IDS+=("$t")
+done
+if [ "${#TASK_IDS[@]}" -gt 0 ]; then
+  mapfile -t TASK_IDS < <(printf '%s\n' "${TASK_IDS[@]}" | awk 'NF && !seen[$0]++')
+fi
+for t in "${TASK_IDS[@]}"; do
   rm_path "$SCHED_DIR/$t" "scheduled-task"
 done
+if command -v python3 >/dev/null 2>&1; then
+  mapfile -t TASK_REGS < <(find "$CLAUDE_SUPPORT/claude-code-sessions" -path '*/scheduled-tasks.json' -type f 2>/dev/null || true)
+  for reg in "${TASK_REGS[@]}"; do
+    if python3 - "$reg" "$SCHED_DIR" "${TASK_IDS[@]}" <<'PY' >/dev/null 2>&1; then
+import json, os, sys
+p, sched_dir, ids = sys.argv[1], os.path.realpath(sys.argv[2]), set(sys.argv[3:])
+d = json.load(open(p))
+tasks = d.get("scheduledTasks") or []
+def owned(t):
+    tid = str(t.get("id") or "")
+    fp = str(t.get("filePath") or "")
+    return (
+        tid in ids
+        or tid.startswith("saps-")
+        or tid.startswith("social-autoposter")
+        or os.path.realpath(fp).startswith(sched_dir + os.sep + "saps-")
+        or os.path.realpath(fp).startswith(sched_dir + os.sep + "social-autoposter")
+    )
+sys.exit(0 if any(owned(t) for t in tasks) else 1)
+PY
+      json_edit "remove social-autoposter scheduled-task entries from $reg" \
+        python3 - "$reg" "$SCHED_DIR" "${TASK_IDS[@]}" <<'PY'
+import json, os, sys
+p, sched_dir, ids = sys.argv[1], os.path.realpath(sys.argv[2]), set(sys.argv[3:])
+d = json.load(open(p))
+tasks = d.get("scheduledTasks") or []
+def owned(t):
+    tid = str(t.get("id") or "")
+    fp = str(t.get("filePath") or "")
+    return (
+        tid in ids
+        or tid.startswith("saps-")
+        or tid.startswith("social-autoposter")
+        or os.path.realpath(fp).startswith(sched_dir + os.sep + "saps-")
+        or os.path.realpath(fp).startswith(sched_dir + os.sep + "social-autoposter")
+    )
+d["scheduledTasks"] = [t for t in tasks if not owned(t)]
+json.dump(d, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+    fi
+  done
+else
+  echo "  NOTE    python3 not on PATH — could not scrub Claude scheduled-tasks.json registries"
+fi
 echo
 
 # ---- 1d. /tmp scratch (draft plans, queue, browser locks, run_claude) ------
