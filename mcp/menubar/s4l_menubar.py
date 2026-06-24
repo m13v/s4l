@@ -544,10 +544,20 @@ class S4LMenuBar(rumps.App):
 
     def _on_card_decision(self, batch, decision):
         # Runs on the main thread the INSTANT a card is approved/rejected. An
-        # approved card is enqueued for immediate posting; a rejected card does
-        # nothing. We never post inline here — posting can take minutes and would
-        # freeze the card UI while the user reviews the rest of the stack.
+        # approved card is enqueued for immediate posting; a REJECTED card is
+        # persisted (marked done so it's never re-shown for review) on a quick
+        # background thread. We never block inline here — posting can take minutes
+        # and would freeze the card UI while the user reviews the rest of the stack.
         if not decision.get("approved"):
+            n = decision.get("n")
+
+            def _persist_reject():
+                try:
+                    st.post_drafts(batch, reject=[n], timeout=30)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_persist_reject, daemon=True).start()
             return
         with self._review_lock:
             self._posts_outstanding += 1
