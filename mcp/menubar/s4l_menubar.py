@@ -521,8 +521,6 @@ class S4LMenuBar(rumps.App):
         self._posting_batch_done = 0
 
     def _maybe_start_review(self):
-        if self._review_active:
-            return
         req = st.read_review_request()
         if not req:
             return
@@ -545,6 +543,26 @@ class S4LMenuBar(rumps.App):
         # needed for new pending drafts to surface.
         sig = tuple((d.get("n"), d.get("reply_text") or "") for d in drafts)
         if sig == self._last_review_sig:
+            return
+        # A review is already in flight. Two cases:
+        #  - A card is ON SCREEN (_panel_open): push the newly-queued drafts into
+        #    the open card so the "X of N" counter and the reviewable stack grow
+        #    live. This is the fix for the "card froze at 1 of 4 while 137 piled
+        #    up" bug — drafts that arrived after the card opened used to be
+        #    stranded because this method returned early on _review_active.
+        #  - Posting is DRAINING with no panel up (_review_active but not
+        #    _panel_open): leave the signature untouched so the full pending set
+        #    is presented fresh once the drain completes (don't pop a card mid-post).
+        if self._review_active:
+            if self._panel_open:
+                try:
+                    import s4l_card
+
+                    s4l_card.extend_active(drafts)
+                except Exception as e:
+                    sys.stderr.write(f"[s4l-menubar] extend cards failed: {e}\n")
+                    sys.stderr.flush()
+                self._last_review_sig = sig
             return
         with self._review_lock:
             self._reset_posting_progress_locked()
@@ -604,7 +622,23 @@ class S4LMenuBar(rumps.App):
             if self._posts_outstanding <= 0:
                 self._review_active = False
                 self._reset_posting_progress_locked()
-        st.clear_review_request()
+        # Only clear the review marker when the queue is actually drained. The old
+        # code cleared it unconditionally, so if the user closed the card with
+        # drafts still undecided (or more had piled up than they reviewed), the
+        # backlog was stranded — presentation is gated on this marker. Keep it when
+        # anything remains so the leftover re-presents fresh on the next tick.
+        remaining = 0
+        try:
+            req = st.read_review_request()
+            if req:
+                remaining = len(st.review_drafts(st.read_plan(req.get("plan_path") or "")))
+        except Exception:
+            remaining = 0
+        if remaining <= 0:
+            st.clear_review_request()
+        # Drop the dedup signature so whatever is left is presented fresh (not
+        # suppressed as "already shown") once posting finishes draining.
+        self._last_review_sig = None
         if not any(d.get("approved") for d in decisions):
             self._notify("S4L", "No drafts approved — nothing posted.")
 
