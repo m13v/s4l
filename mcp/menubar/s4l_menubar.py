@@ -168,6 +168,16 @@ class S4LMenuBar(rumps.App):
         self._posting_batch_done = 0
         self._spin_i = 0
         self._spinner = None  # fast rumps.Timer animating the title while busy
+        # Durable posting progress, derived from the review-queue PLAN rather than
+        # this process's in-memory burst queue. The in-memory counter dies on a
+        # menu bar restart and is blind to posts driven by the autopilot/agent, so
+        # the title used to fall back to plain "S4L" mid-drain. These track a drain
+        # by the plan's posted count climbing, with hysteresis across the multi-
+        # second gaps between individual posts so the indicator never blinks off.
+        self._posting_label = None
+        self._drain_baseline = None  # posted count just before this drain started
+        self._drain_last_posted = None
+        self._drain_last_change = 0.0
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -395,15 +405,70 @@ class S4LMenuBar(rumps.App):
     # animates the title with the label and stops itself when activity clears.
     # Both run on the main thread (rumps timers).
     def _poll_activity(self, _):
+        # Refresh the durable plan-based posting label (cheap: one small file read)
+        # so the title can show steady posting progress even when the server's
+        # per-post activity.json is momentarily empty between posts.
+        self._posting_label = self._compute_posting_label()
         act = st.read_activity()
-        if act and act.get("label") and self._spinner is None:
+        has_label = bool((act and act.get("label")) or self._posting_label)
+        if has_label and self._spinner is None:
             self._spin_i = 0
             self._spinner = rumps.Timer(self._spin, 0.12)
             self._spinner.start()
 
+    def _compute_posting_label(self):
+        """Posting progress from the durable review-queue plan, with hysteresis.
+
+        A drain is detected by the plan's posted count INCREASING (or the server's
+        activity.json reporting a post in flight) — never by the raw unposted
+        backlog, which sits non-zero for drafts merely awaiting review. The label
+        is held for a grace window after the last post so the indicator doesn't
+        blink back to "S4L" during the multi-second gaps between posts. Survives a
+        menu bar restart and reflects posts driven by the autopilot/agent, not just
+        this process's own approval queue."""
+        now = time.time()
+        try:
+            posted = st.review_queue_posted_count()
+        except Exception:
+            posted = None
+        act = st.read_activity()
+        act_posting = bool(act and "posting" in str(act.get("label") or ""))
+        if posted is None:
+            posted = self._drain_last_posted  # ride through a transient read miss
+        if posted is None:
+            return None
+        if self._drain_last_posted is None:
+            self._drain_last_posted = posted
+        advanced = posted > self._drain_last_posted
+        if advanced or act_posting:
+            if self._drain_baseline is None:
+                # New drain: baseline is the count just BEFORE its first post.
+                self._drain_baseline = self._drain_last_posted
+            self._drain_last_change = now
+        if advanced:
+            self._drain_last_posted = posted
+        if self._drain_baseline is None:
+            return None
+        # Drain is over once the server is idle AND no new post landed for a grace
+        # window (covers the long gaps between the last few slow posts).
+        if not act_posting and now - self._drain_last_change > 45.0:
+            self._drain_baseline = None
+            return None
+        sent = max(0, posted - self._drain_baseline)
+        return f"posting · {sent} sent"
+
     def _spin(self, _):
         act = st.read_activity()
         label = act.get("label") if act else None
+        act_state = act.get("state") if act else None
+        # For POSTING, prefer the menu bar's durable cumulative label over the
+        # server's per-call "1/1" so the count climbs smoothly and the indicator
+        # holds through the gaps between posts. Non-posting activity (scanning /
+        # drafting) keeps its own server label.
+        if self._posting_label and (
+            not label or act_state == "posting" or "posting" in str(label)
+        ):
+            label = self._posting_label
         if label:
             # The update arrow must stay visible even while a tool runs, so the
             # "update available" signal is never masked by activity. _tick skips the
