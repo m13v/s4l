@@ -8682,9 +8682,24 @@ async function handleApi(req, res) {
     // platforms_disabled is an explicit deny list (e.g. paperback-expert opts
     // out of moltbook because the HN audience isn't its ICP).
     const isDisabled = (p, plat) => Array.isArray(p.platforms_disabled) && p.platforms_disabled.includes(plat);
-    // search_topics is the single source of truth (post 2026-04-24 unified
-    // migration; legacy per-platform topic lists were removed 2026-04-30).
-    const hasSearchTopics = p => Array.isArray(p.search_topics) && p.search_topics.length > 0;
+    // Eligibility for the query-drafting platforms (twitter/linkedin/github) is
+    // gated on the LIVE topic universe the picker actually reads
+    // (project_search_topics, status='active'), NOT config.json's search_topics[]
+    // seed. The two can disagree: the seed can be present while the DB is empty
+    // (seed never mirrored into the DB) or the reverse (every topic decayed or
+    // excluded). The runtime picks on the DB (scripts/pick_project.py
+    // _eligible_pool -> topics_for_project), so the dashboard must too, or it
+    // shows a project as ready while the cycle silently skips it. (Capstacker
+    // 2026-06: config carried 33 topics, the DB had zero, the dashboard showed it
+    // eligible, and nothing ever posted.)
+    const topicRows = await pq(
+      "SELECT project_name, COUNT(*)::int AS n FROM project_search_topics " +
+      "WHERE status = 'active' GROUP BY project_name"
+    ) || [];
+    const activeTopicProjects = new Set(
+      topicRows.filter(r => Number(r.n) > 0).map(r => r.project_name)
+    );
+    const hasSearchTopics = p => activeTopicProjects.has(p.name);
     const platformEligible = {
       github:   p => !isDisabled(p, 'github')   && hasSearchTopics(p),
       twitter:  p => !isDisabled(p, 'twitter')  && hasSearchTopics(p),
