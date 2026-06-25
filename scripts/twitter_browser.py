@@ -884,8 +884,8 @@ def _like_first_tweet_on_page(page):
         print("[like] clicked like but unlike state not confirmed", file=sys.stderr)
         return {"ok": False, "liked": False, "error": "like_unconfirmed"}
     except Exception as e:
-        print(f"[like] error liking parent tweet: {e}", file=sys.stderr)
-        return {"ok": False, "error": str(e)}
+        print(f"[like] parent tweet not liked (non-fatal): {str(e).splitlines()[0]}", file=sys.stderr)
+        return {"ok": False, "error": str(e).splitlines()[0]}
 
 
 def like_tweet(tweet_url):
