@@ -667,11 +667,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
             flush=True,
         )
     else:
-        print(
-            f"[like] candidate {cid} parent tweet NOT liked: "
-            f"{like_result.get('error', 'unknown')}",
-            flush=True,
-        )
+        err = str(like_result.get("error", "unknown")).splitlines()[0]
+        print(f"[like] candidate {cid} parent tweet not liked (non-fatal): {err}", flush=True)
 
     if not reply_url or not REPLY_URL_RE.match(reply_url):
         # Reply was likely sent (browser action returned ok=True with verified)
