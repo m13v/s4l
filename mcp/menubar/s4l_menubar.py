@@ -249,10 +249,37 @@ class S4LMenuBar(rumps.App):
         self._send_to_claude(UPDATE_PROMPT)
 
     # ---- .mcpb self-update (menu-bar driven) ------------------------------
-    EXT_DIR = os.path.expanduser(
-        "~/Library/Application Support/Claude/Claude Extensions/"
-        "local.mcpb.m13v.social-autoposter"
-    )
+    @staticmethod
+    def _ext_dir():
+        """Resolve this plugin's Claude Desktop extension dir.
+
+        Claude derives the extension id from the manifest author, so it changed
+        `local.mcpb.m13v.social-autoposter` ->
+        `local.mcpb.s4l.ai.social-autoposter` when the author became "S4L.ai". A
+        hardcoded id silently breaks the self-update button on every fresh
+        install (the update unzips into a dir that doesn't exist, so the version
+        never advances and fixes never land). Pick the newest `*social-autoposter`
+        extension dir that actually has a manifest.json; fall back to the
+        historical id so old boxes are unaffected.
+        """
+        root = os.path.expanduser(
+            "~/Library/Application Support/Claude/Claude Extensions"
+        )
+        best, best_mtime = None, -1.0
+        try:
+            for name in os.listdir(root):
+                if not name.endswith("social-autoposter"):
+                    continue
+                d = os.path.join(root, name)
+                if not os.path.exists(os.path.join(d, "manifest.json")):
+                    continue
+                m = os.path.getmtime(d)
+                if m > best_mtime:
+                    best, best_mtime = d, m
+        except OSError:
+            pass
+        return best or os.path.join(root, "local.mcpb.m13v.social-autoposter")
+
     MCPB_URL = (
         "https://github.com/m13v/social-autoposter/releases/latest/download/"
         "social-autoposter.mcpb"
@@ -275,7 +302,7 @@ class S4LMenuBar(rumps.App):
         transient failure). A change forces a title + menu repaint."""
         installed = None
         try:
-            with open(os.path.join(self.EXT_DIR, "manifest.json")) as f:
+            with open(os.path.join(self._ext_dir(), "manifest.json")) as f:
                 installed = (json.load(f) or {}).get("version")
         except Exception:
             return  # not a .mcpb install (or no manifest) -> nothing to offer
@@ -314,7 +341,7 @@ class S4LMenuBar(rumps.App):
             if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
                 self._notify("S4L update failed", "Couldn't download the update — check your connection.")
                 return
-            r = subprocess.run(["unzip", "-oq", mcpb, "-d", self.EXT_DIR],
+            r = subprocess.run(["unzip", "-oq", mcpb, "-d", self._ext_dir()],
                                capture_output=True, timeout=180)
             if r.returncode != 0:
                 self._notify("S4L update failed", "Couldn't unpack the update.")
