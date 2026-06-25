@@ -14,7 +14,23 @@
 # Exits: 0 ok / already current, 2 download failed, 3 unpack failed, 4 no install.
 set -euo pipefail
 
-EXT_DIR="$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.m13v.social-autoposter"
+# Resolve the Claude Desktop extension dir. Claude derives its name from the
+# manifest author, so the id changed `local.mcpb.m13v.social-autoposter` ->
+# `local.mcpb.s4l.ai.social-autoposter` when the author became "S4L.ai". A
+# hardcoded id silently breaks the updater on every fresh install (the box
+# reported "no .mcpb install" for exactly this reason). Glob for any
+# `*social-autoposter` extension dir that actually has a manifest.json, newest
+# first, so this keeps working across future renames.
+EXT_ROOT="$HOME/Library/Application Support/Claude/Claude Extensions"
+EXT_DIR=""
+if [ -d "$EXT_ROOT" ]; then
+  for d in "$EXT_ROOT"/*social-autoposter; do
+    [ -f "$d/manifest.json" ] || continue
+    if [ -z "$EXT_DIR" ] || [ "$d" -nt "$EXT_DIR" ]; then EXT_DIR="$d"; fi
+  done
+fi
+# Last-resort fallback to the historical id so behavior is unchanged on old boxes.
+[ -n "$EXT_DIR" ] || EXT_DIR="$EXT_ROOT/local.mcpb.m13v.social-autoposter"
 MCPB_URL="https://github.com/m13v/social-autoposter/releases/latest/download/social-autoposter.mcpb"
 RELEASE_API="https://api.github.com/repos/m13v/social-autoposter/releases/latest"
 PY="/usr/bin/python3"
