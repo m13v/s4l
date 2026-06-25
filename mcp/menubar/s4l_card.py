@@ -242,6 +242,30 @@ class _ReviewController(NSObject):
             self._render()
 
     @objc.python_method
+    def extend_drafts(self, drafts):
+        """Append newly-queued drafts to an OPEN card. Without this, a card built
+        when N drafts were pending froze at "of N": every draft that arrived after
+        the card opened was stranded behind it (the menu bar bailed while a panel
+        was up). Dedups by plan index `n`, never disturbs the card on screen, and
+        refreshes the title-bar counter live so the backlog is honest."""
+        if self._panel is None:
+            return 0
+        have = {d.get("n") for d in self._drafts}
+        added = [d for d in drafts if d.get("n") not in have]
+        if not added:
+            return 0
+        self._drafts.extend(added)
+        # Update only the "X of N" counter; do NOT re-render the body (that would
+        # reset the caret / clobber an in-progress edit on the current card).
+        try:
+            self._panel.setTitle_(
+                f"Review draft {self._idx + 1} of {len(self._drafts)}"
+            )
+        except Exception:
+            pass
+        return len(added)
+
+    @objc.python_method
     def _fire_decision(self):
         # Fire the per-card callback the instant a decision is made, so an
         # approved draft starts posting immediately instead of waiting for the
@@ -305,3 +329,15 @@ def present_review(drafts, on_decision=None, on_complete=None):
     _active = _ReviewController.alloc().initWithDrafts_onDecision_onComplete_(
         drafts, on_decision, on_complete
     )
+
+
+def extend_active(drafts):
+    """Push newly-queued drafts into the open review card, if one is up. Returns
+    the count actually added (0 if no card is open or nothing is new). Main thread
+    only (called from the menu bar's rumps timer)."""
+    if _active is None:
+        return 0
+    try:
+        return _active.extend_drafts(drafts)
+    except Exception:
+        return 0
