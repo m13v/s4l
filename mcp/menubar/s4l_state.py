@@ -349,6 +349,26 @@ def read_plan(plan_path):
         return None
 
 
+def review_queue_posted_count():
+    """Posts that have LANDED in the review-queue plan — the durable, cross-process
+    truth. Independent of the menu bar's in-memory burst queue (which dies on a
+    restart) and of WHICH process is posting (the menu bar worker, the autopilot,
+    or a host agent draining via post_drafts). Returns the posted count, or None
+    when the plan can't be read. Drives the menu-bar posting indicator so progress
+    stays visible regardless of how the drain is driven."""
+    plan_path = None
+    req = read_review_request()
+    if req:
+        plan_path = req.get("plan_path")
+    if not plan_path:
+        plan_path = "/tmp/twitter_cycle_plan_review-queue.json"
+    plan = read_plan(plan_path)
+    cands = (plan or {}).get("candidates")
+    if not cands:
+        return None
+    return sum(1 for c in cands if c.get("posted") is True)
+
+
 def review_drafts(plan):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
