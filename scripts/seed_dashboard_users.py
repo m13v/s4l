@@ -58,6 +58,10 @@ SEED = [
         "medewanouleonce@gmail.com", False, ["NightOwl"], "Leonce Medewanou",
         "NightOwl founder (github lemed99).",
     ),
+    (
+        "mustafa@capstacker.io", False, ["Capstacker"], "Mustafa Abbasoglu",
+        "Capstacker founder (capstacker.io). Retainer $100/mo (provisioned 2026-06-25).",
+    ),
 ]
 
 
