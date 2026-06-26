@@ -20,8 +20,14 @@ Everything is best-effort: any failure degrades to "unknown / open Claude".
 import json
 import os
 import subprocess
+import threading
 import urllib.request
 from pathlib import Path
+
+# Serializes read-modify-write on approved-queue.json. The menu bar's main thread
+# (approve click / restart resume) and the post-worker thread (status updates)
+# both mutate it; without this a concurrent interleave would drop an approval.
+_approved_lock = threading.Lock()
 
 # Mirrors shared/onboarding-ledger.cjs MILESTONES (same order).
 MILESTONES = [
@@ -471,13 +477,14 @@ def approved_queue_pending():
 
 
 def approved_queue_active_ns(batch):
-    """Plan indices the user has already approved and that are still in flight
-    (queued/posting) for this batch — review_drafts() excludes these. `posted`
-    cards are already excluded via the plan's posted flag; `failed` cards are
-    intentionally NOT excluded, so a failed post falls back to manual review
-    rather than vanishing."""
+    """Plan indices the user has already approved for this batch — review_drafts()
+    excludes these so an approved card is never re-shown. Covers queued/posting
+    (in flight) AND posted: relying on the plan's posted flag alone leaves a window
+    (and breaks if the plan is regenerated), so the durable queue excludes posted
+    cards independently. `failed` is intentionally NOT excluded, so a failed post
+    falls back to manual review rather than silently vanishing."""
     return {it.get("n") for it in read_approved_queue()["items"]
-            if it.get("batch") == batch and it.get("status") in ("queued", "posting")}
+            if it.get("batch") == batch and it.get("status") in ("queued", "posting", "posted")}
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, timeout=900, activity_label=None):
