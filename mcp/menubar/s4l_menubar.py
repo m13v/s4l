@@ -178,6 +178,11 @@ class S4LMenuBar(rumps.App):
         self._drain_baseline = None  # posted count just before this drain started
         self._drain_last_posted = None
         self._drain_last_change = 0.0
+        # One-shot: on the first tick where the loopback is reachable, re-enqueue
+        # any approvals the durable queue recorded but never confirmed posted (a
+        # restart wiped the in-memory _post_q). Deferred until the loopback is up
+        # so post_drafts can actually reach the server.
+        self._resumed = False
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -491,8 +496,63 @@ class S4LMenuBar(rumps.App):
         self.title = "S4L"
         self._sig = None  # force the next tick to repaint title + menu
 
+    def _resume_approved_queue(self):
+        """Restart recovery: re-enqueue approvals that were recorded durably but
+        never confirmed posted (the in-memory _post_q died with the old process).
+        Skip any the plan already shows as posted, so a card that landed on X just
+        before the kill — but whose status update was lost — isn't posted twice."""
+        pending = st.approved_queue_pending()
+        if not pending:
+            return
+        posted_ns = set()
+        try:
+            req = st.read_review_request()
+            plan_path = (req or {}).get("plan_path") or "/tmp/twitter_cycle_plan_review-queue.json"
+            plan = st.read_plan(plan_path)
+            for i, c in enumerate(((plan or {}).get("candidates") or [])):
+                if c.get("posted") is True:
+                    posted_ns.add(i + 1)
+        except Exception:
+            pass
+        resumed = 0
+        for it in pending:
+            batch, n = it.get("batch"), it.get("n")
+            if n in posted_ns:
+                st.approved_queue_set_status(batch, n, "posted")  # reconcile lost update
+                continue
+            decision = {
+                "n": n,
+                "approved": True,
+                "text": it.get("text") or "",
+                "edited": bool(it.get("edited")),
+            }
+            with self._review_lock:
+                self._posts_outstanding += 1
+                self._posting_batch_total += 1
+                self._review_active = True
+                self._write_posting_activity_locked()
+            self._post_q.put((batch, decision))
+            resumed += 1
+        if resumed:
+            self._ensure_post_worker()
+            sys.stderr.write(
+                f"[s4l-menubar] resumed {resumed} approved-but-unposted draft(s) after restart\n"
+            )
+            sys.stderr.flush()
+            self._notify("S4L", f"Resuming {resumed} approved draft(s) after restart…")
+
     # ---- tick: read state, set title, (re)build menu ----------------------
     def _tick(self, _):
+        # Restart recovery (one-shot, once the loopback is up so posting can reach
+        # the server): resume any approved-but-unposted drafts the durable queue
+        # recorded, instead of stranding them and re-presenting the cards.
+        if not self._resumed and st.loopback_reachable():
+            self._resumed = True
+            try:
+                self._resume_approved_queue()
+            except Exception as e:
+                sys.stderr.write(f"[s4l-menubar] resume approved queue failed: {e}\n")
+                sys.stderr.flush()
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
         # 0.12s), but the menu + update indicator must still refresh mid-run —
         # otherwise the "Please update now" item never appears on a box that's always
@@ -669,6 +729,17 @@ class S4LMenuBar(rumps.App):
 
             threading.Thread(target=_persist_reject, daemon=True).start()
             return
+        n = decision.get("n")
+        # Persist the approval DURABLY before posting, so a menu bar / Claude
+        # restart resumes the drain instead of stranding it and re-presenting the
+        # card. The in-memory _post_q below is just the fast path; this file is the
+        # source of truth review_drafts() consults to avoid re-showing it.
+        st.approved_queue_add(
+            batch,
+            n,
+            text=decision.get("text") or "",
+            edited=bool(decision.get("edited")),
+        )
         with self._review_lock:
             self._posts_outstanding += 1
             self._posting_batch_total += 1
@@ -725,6 +796,7 @@ class S4LMenuBar(rumps.App):
             n = decision.get("n")
             try:
                 self._notify("S4L", f"Posting draft {n}…")
+                st.approved_queue_set_status(batch, n, "posting")
                 with self._review_lock:
                     activity_label = self._posting_activity_label_locked()
                 if decision.get("edited"):
@@ -736,16 +808,22 @@ class S4LMenuBar(rumps.App):
                 else:
                     res = st.post_drafts(batch, post=[n], activity_label=activity_label)
                 if res is None:
+                    # Loopback unreachable (Claude closed). Mark failed so the card
+                    # falls back to manual review rather than silently vanishing.
+                    st.approved_queue_set_status(batch, n, "failed", error="loopback_unreachable")
                     self._notify(
                         "S4L", "Couldn't post — open Claude Desktop and try the draft again."
                     )
                 else:
                     posted = res.get("posted") if isinstance(res, dict) else None
                     if posted == 0:
+                        st.approved_queue_set_status(batch, n, "failed", error="posted_0")
                         self._notify("S4L", f"Draft {n} didn't post — see the dashboard for why.")
                     else:
+                        st.approved_queue_set_status(batch, n, "posted")
                         self._notify("S4L", f"Posted draft {n}.")
             except Exception as e:
+                st.approved_queue_set_status(batch, n, "failed", error=str(e)[:200])
                 sys.stderr.write(f"[s4l-menubar] post draft {n} failed: {e}\n")
                 sys.stderr.flush()
                 _capture(e, phase="post_card")
