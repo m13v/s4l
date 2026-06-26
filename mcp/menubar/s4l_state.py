@@ -369,13 +369,22 @@ def review_queue_posted_count():
     return sum(1 for c in cands if c.get("posted") is True)
 
 
-def review_drafts(plan):
+def review_drafts(plan, batch="review-queue"):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
-    must never be re-presented for review (approved ones proceed to post)."""
+    must never be re-presented for review (approved ones proceed to post).
+
+    Also excludes cards already sitting in the durable approved-queue (queued or
+    posting). The main plan's `approved`/`posted` flags are only stamped once a
+    post LANDS, so without this a card the user just approved would re-present
+    while it drains — and after a restart the whole un-posted approval backlog
+    would re-present (the exact "I approved these already" bug)."""
+    approved_ns = approved_queue_active_ns(batch)
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
         if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
+            continue
+        if (i + 1) in approved_ns:
             continue
         out.append(
             {
@@ -390,6 +399,85 @@ def review_drafts(plan):
     # most likely to still be live on X.
     out.sort(key=lambda d: d["n"], reverse=True)
     return out
+
+
+# ---- durable approved-card queue ------------------------------------------
+# Card approvals MUST survive a menu bar / Claude restart. The in-memory post
+# queue does not: a restart strands every approved-but-unposted card, which then
+# re-presents for approval (the system had no record the user already approved
+# it). This file is the durable record, owned SOLELY by the menu bar — persisting
+# the approval in the main plan instead would race with the autopilot, which
+# rewrites that plan continuously and would silently drop the flag. Status flow:
+# queued -> posting -> posted | failed. review_drafts() excludes queued/posting
+# so an approved card is never re-shown while it drains; a restart re-enqueues
+# queued/posting items instead of re-presenting them.
+APPROVED_QUEUE = "approved-queue.json"
+
+
+def read_approved_queue():
+    d = read_json(APPROVED_QUEUE)
+    if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+        return {"items": []}
+    return d
+
+
+def _write_approved_queue(d):
+    try:
+        p = Path(state_dir()) / APPROVED_QUEUE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d))
+        os.replace(str(tmp), str(p))  # atomic: a crash never leaves a half file
+    except Exception:
+        pass
+
+
+def approved_queue_add(batch, n, text="", edited=False, candidate_url=""):
+    """Record an approval the INSTANT the user clicks, before any posting. Dedups
+    on (batch, n): re-approving a card that's still queued/posting/posted is a
+    no-op; a previously FAILED card is reset to queued so it retries."""
+    d = read_approved_queue()
+    for it in d["items"]:
+        if it.get("batch") == batch and it.get("n") == n:
+            if it.get("status") == "failed":
+                it.update(status="queued", text=text, edited=bool(edited),
+                          error=None, ts=time_iso())
+                _write_approved_queue(d)
+            return
+    d["items"].append({
+        "batch": batch, "n": n, "text": text, "edited": bool(edited),
+        "candidate_url": candidate_url, "status": "queued",
+        "error": None, "ts": time_iso(),
+    })
+    _write_approved_queue(d)
+
+
+def approved_queue_set_status(batch, n, status, error=None):
+    d = read_approved_queue()
+    changed = False
+    for it in d["items"]:
+        if it.get("batch") == batch and it.get("n") == n:
+            it.update(status=status, error=error, ts=time_iso())
+            changed = True
+    if changed:
+        _write_approved_queue(d)
+
+
+def approved_queue_pending():
+    """Approvals not yet confirmed posted (queued or posting). Re-enqueued by the
+    menu bar on startup so a restart RESUMES the drain instead of re-presenting."""
+    return [it for it in read_approved_queue()["items"]
+            if it.get("status") in ("queued", "posting")]
+
+
+def approved_queue_active_ns(batch):
+    """Plan indices the user has already approved and that are still in flight
+    (queued/posting) for this batch — review_drafts() excludes these. `posted`
+    cards are already excluded via the plan's posted flag; `failed` cards are
+    intentionally NOT excluded, so a failed post falls back to manual review
+    rather than vanishing."""
+    return {it.get("n") for it in read_approved_queue()["items"]
+            if it.get("batch") == batch and it.get("status") in ("queued", "posting")}
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, timeout=900, activity_label=None):
