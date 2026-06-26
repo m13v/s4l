@@ -229,7 +229,17 @@ source "$REPO_DIR/skill/lock.sh"
 # honors TWITTER_CDP_URL exported by this lib.
 source "$REPO_DIR/skill/lib/twitter-backend.sh"
 TW_MCP_CONFIG="$MCP_CONFIG_FILE"
-TW_ENGINE_PREFIX="${BROWSER_INSTRUCTIONS}"$'\n\n' # inject backend + translation table at top of every prompt
+# 2026-06-26: the model-facing steps (Phase 1 query draft, Phase 2b prep draft) are
+# TOOL-FREE. All browser work is done deterministically by the shell's CDP scan
+# (browser-harness over port 9555) + Phase 2b-post's twitter_browser.py, NOT by the
+# model. The old BROWSER BACKEND / bh_run "translation table" block is no longer
+# injected: prep drafts purely from the inlined candidate context (Text: $ctext per
+# candidate) + MEDIA_BLOCK, which is exactly what the model's rare bh_run fallback
+# used to re-fetch (1 call/week vs ~18.5k/wk deterministic CDP scans). The 9555 Chrome
+# is still launched by twitter-backend.sh above for the shell scan + post step; only
+# the model's browser fallback is removed. This also drops the hardcoded "logged in as
+# m13v_" identity that the block carried, so prompts are no longer single-tenant.
+TW_ENGINE_PREFIX=""
 
 # --- Phase tracking: start the twitter_batches row + chain into lock.sh trap -
 # Per-cycle phase row (twitter_batches.current_phase + phase_started_at) is
@@ -1794,7 +1804,7 @@ PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items"
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
-  1. Read each thread you decide to reply to (browser tools from the BROWSER BACKEND block above, READ-ONLY).
+  1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have NO browser and NO tools this session — draft ONLY from the context inlined in this prompt; do not attempt to fetch, navigate, or open any URL.
   2. Draft a reply for each.
   3. Persist each fresh draft via log_draft.py.
   4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
@@ -1822,8 +1832,8 @@ $STYLES_BLOCK
 There is NO cap on how many candidates you may pick this cycle. Pick EVERY candidate whose thread is genuinely on-brand and worth a substantive reply. Skip a candidate ONLY when its thread is off-topic for the matched project, toxic / hateful, low-quality / spam, an audience mismatch, or a near-duplicate of something already replied to. Do NOT cap, quota, or balance picks by project: if the strongest candidates this cycle all belong to one project, pick all of them. Project routing matters; project diversification does not. Never force a weak entry just to add volume, and never drop a strong on-brand entry just to limit volume.
 
 For each chosen candidate:
-1. Navigate to CANDIDATE_URL using the navigate tool from the BROWSER BACKEND block above (READ-ONLY).
-2. Read the thread to understand context.
+1. Read the candidate's parent tweet from its 'Text:' field in the PRE-SCORED CANDIDATES block above.
+2. Understand the context from that inlined text (you have no browser; everything you need to draft is already in this prompt).
 3. DRAFT HANDLING (existing vs fresh):
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
    - Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.
@@ -1885,7 +1895,7 @@ CRITICAL:
 - DO NOT call twitter_browser.py.
 - DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
 - DO NOT call log_post.py or campaign_bump.py.
-- Browser tools (from the BROWSER BACKEND block) are READ-ONLY in this step.
+- You have NO browser and NO tools this session; draft only from the inlined candidate context above. Do not navigate, fetch, or open any URL.
 - NEVER use em dashes. Use commas, periods, or regular dashes (-).
 - Reply in the SAME LANGUAGE as the parent tweet."
 
