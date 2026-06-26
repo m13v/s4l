@@ -442,31 +442,33 @@ def approved_queue_add(batch, n, text="", edited=False, candidate_url=""):
     """Record an approval the INSTANT the user clicks, before any posting. Dedups
     on (batch, n): re-approving a card that's still queued/posting/posted is a
     no-op; a previously FAILED card is reset to queued so it retries."""
-    d = read_approved_queue()
-    for it in d["items"]:
-        if it.get("batch") == batch and it.get("n") == n:
-            if it.get("status") == "failed":
-                it.update(status="queued", text=text, edited=bool(edited),
-                          error=None, ts=time_iso())
-                _write_approved_queue(d)
-            return
-    d["items"].append({
-        "batch": batch, "n": n, "text": text, "edited": bool(edited),
-        "candidate_url": candidate_url, "status": "queued",
-        "error": None, "ts": time_iso(),
-    })
-    _write_approved_queue(d)
+    with _approved_lock:
+        d = read_approved_queue()
+        for it in d["items"]:
+            if it.get("batch") == batch and it.get("n") == n:
+                if it.get("status") == "failed":
+                    it.update(status="queued", text=text, edited=bool(edited),
+                              error=None, ts=time_iso())
+                    _write_approved_queue(d)
+                return
+        d["items"].append({
+            "batch": batch, "n": n, "text": text, "edited": bool(edited),
+            "candidate_url": candidate_url, "status": "queued",
+            "error": None, "ts": time_iso(),
+        })
+        _write_approved_queue(d)
 
 
 def approved_queue_set_status(batch, n, status, error=None):
-    d = read_approved_queue()
-    changed = False
-    for it in d["items"]:
-        if it.get("batch") == batch and it.get("n") == n:
-            it.update(status=status, error=error, ts=time_iso())
-            changed = True
-    if changed:
-        _write_approved_queue(d)
+    with _approved_lock:
+        d = read_approved_queue()
+        changed = False
+        for it in d["items"]:
+            if it.get("batch") == batch and it.get("n") == n:
+                it.update(status=status, error=error, ts=time_iso())
+                changed = True
+        if changed:
+            _write_approved_queue(d)
 
 
 def approved_queue_pending():
