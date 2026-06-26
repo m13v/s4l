@@ -50,6 +50,13 @@ export TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}"
 # cleanup_harness_tabs to decide whether we own this Chrome (and should
 # launch/clean it) or whether it is externally managed (AppMaker, BYO).
 _BH_DEFAULT_URL="http://127.0.0.1:9555"
+# DEPRECATED 2026-06-26: this block is NO LONGER injected into any model prompt.
+# run-twitter-cycle.sh now sets TW_ENGINE_PREFIX="" — Phase 1 (query) and Phase 2b
+# (prep) are tool-free; the model drafts from inlined candidate context only, and all
+# browser work is the shell's deterministic CDP scan + Phase 2b-post's
+# twitter_browser.py. Kept only so ensure_twitter_browser_for_backend's existing
+# assignment doesn't break; safe to delete once confirmed unreferenced. Do NOT
+# reintroduce the "logged in as m13v_" hardcode or a model-facing bh_run contract.
 BROWSER_INSTRUCTIONS=$(cat <<'BROWSER_HARNESS_EOF'
 BROWSER BACKEND: twitter-harness (browser-harness MCP, CDP-driven REAL Google Chrome on
 port 9555, profile ~/.claude/browser-profiles/browser-harness). The Chrome is already
