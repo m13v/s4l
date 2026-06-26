@@ -151,10 +151,8 @@
     "node": ">=16"
   },
   "dependencies": {
-    "ws": "^8.0.0"
-  },
-  "devDependencies": {
     "firebase-admin": "^13.8.0",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "ws": "^8.0.0"
   }
 }
