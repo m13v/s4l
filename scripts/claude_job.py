@@ -39,11 +39,49 @@ import sys
 import time
 import uuid
 
+# Best-effort menu-bar activity narration. Importable because this script's own
+# directory (scripts/) is on sys.path[0] when run as `python3 .../claude_job.py`.
+# A failure to import (or to write) must NEVER affect the queue's real work.
+try:
+    import saps_activity as _activity  # type: ignore
+except Exception:  # pragma: no cover - cosmetic only
+    _activity = None
+
 # script_tag -> queue type. ONLY pure text->JSON claude calls belong here.
 TAG_TO_TYPE = {
     "run-twitter-cycle-queries": "twitter-query",
     "run-twitter-cycle-prep": "twitter-prep",
 }
+
+# queue type -> (activity state, label) the menu bar shows while the job is in
+# flight. Phase-1 queries drive the X search ("finding threads"); Phase-2b prep is
+# the reply drafting. Both the launchd provider (which blocks for minutes) and the
+# scheduled-task worker (which does the LLM turn) narrate from this one map.
+TYPE_TO_ACTIVITY = {
+    "twitter-query": ("scanning", "finding threads"),
+    "twitter-prep": ("drafting", "drafting replies"),
+}
+
+
+def _act_write(qtype: str) -> None:
+    if _activity is None:
+        return
+    sl = TYPE_TO_ACTIVITY.get(qtype)
+    if not sl:
+        return
+    try:
+        _activity.write(sl[0], sl[1])
+    except Exception:
+        pass
+
+
+def _act_clear() -> None:
+    if _activity is None:
+        return
+    try:
+        _activity.clear()
+    except Exception:
+        pass
 
 # claude flags that consume the following argv token as their value, so the
 # value is never mistaken for the positional prompt.
@@ -244,6 +282,12 @@ def cmd_provider(ns) -> int:
     running_path = os.path.join(running_dir(), fname)
     _atomic_write(pending_path, job)
     _plog(f"enqueued {qtype} job {job_id}; waiting for a scheduled task (timeout {ns.timeout}s)")
+    # Narrate the (multi-minute) block to the menu bar. The launchd draft lane has
+    # no other activity writer, so without this the box looks idle while it works.
+    # Cleared by run-draft-and-publish.sh's exit trap at cycle end (and by the
+    # worker's cmd_result), so we deliberately do NOT clear on the success path
+    # here — that would flicker the indicator off between the cycle's claude calls.
+    _act_write(qtype)
 
     res_path = os.path.join(result_dir(), f"{job_id}.json")
     deadline = created + ns.timeout
