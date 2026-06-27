@@ -68,6 +68,30 @@ def write(state: str, label: str) -> None:
         pass
 
 
+def read() -> dict | None:
+    """Current signal as a dict, or None when absent/unreadable. Best-effort."""
+    try:
+        with open(_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def heartbeat(state: str, label: str) -> None:
+    """Refresh `since` for a phase that's still ongoing, but ONLY if the current
+    signal is still that same phase (or there is none). This lets a shell lane
+    keep a long 'scanning' phase fresh against the menu bar's staleness TTL
+    WITHOUT fighting a later writer that has already advanced the phase: once the
+    queue provider flips the label to 'finding threads'/'drafting replies', the
+    state no longer matches and this goes quiet (no flicker between the two)."""
+    try:
+        cur = read()
+        if cur is None or cur.get("state") == state:
+            write(state, label)
+    except Exception:
+        pass
+
+
 def clear() -> None:
     """Remove the activity signal so no stuck 'scanning/drafting' lingers after a
     cycle, a worker turn, or an early exit. Idempotent; safe to double-clear."""
@@ -82,16 +106,17 @@ def clear() -> None:
 def _main(argv: list[str]) -> int:
     # CLI used by shell lanes (run-draft-and-publish.sh):
     #   saps_activity.py write <state> <label words...>
+    #   saps_activity.py heartbeat <state> <label words...>   (conditional refresh)
     #   saps_activity.py clear
     if not argv:
         return 0
     cmd = argv[0]
     if cmd == "clear":
         clear()
-    elif cmd == "write":
+    elif cmd in ("write", "heartbeat"):
         state = argv[1] if len(argv) > 1 else "working"
         label = " ".join(argv[2:]) if len(argv) > 2 else ""
-        write(state, label)
+        (heartbeat if cmd == "heartbeat" else write)(state, label)
     return 0
 
 
