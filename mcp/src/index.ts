@@ -35,6 +35,8 @@ import {
   hasReadyProject,
   listManagedProjectStatus,
   ensureShortLinksDefault,
+  ensurePersonaProject,
+  findPersonaProject,
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   configPath,
@@ -1142,6 +1144,137 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
 // across several calls — readiness is derived from config.json, never a stored
 // flag. Call with status:true (or just no name) to list every project this
 // install manages and what each still needs.
+// ---- engagement_mode: choose personal-brand vs product (setup-time) --------
+// Part of onboarding: AFTER X connect + profile_scan, BEFORE product config, the
+// agent asks the user which mode they want and calls this. It persists the mode
+// (scripts/saps_mode.py, the single source of truth the cycle reads) and
+// provisions the persona project (grounded in the profile scan), then the agent
+// continues to product setup — a product is always configured regardless of mode.
+tool(
+  "engagement_mode",
+  {
+    title: "Choose engagement mode (personal brand vs product)",
+    description:
+      "Set or read the engagement MODE the autopilot drafts in. This is a SETUP step: AFTER X is " +
+      "connected and the profile is scanned, and BEFORE configuring the product, ASK the user which " +
+      "they want — (a) grow their PERSONAL BRAND (organic, link-free engagement in their own voice) or " +
+      "(b) PROMOTE a PRODUCT (the default marketing pipeline) — then call action:'set' with their " +
+      "choice. Pass the voice/description/topics you extracted from the profile scan so the persona is " +
+      "grounded in who they actually are (do this even for promotion, so the menu-bar toggle can flip " +
+      "to a good persona later). EITHER way, continue to configure the product project as usual " +
+      "afterward; a product is always set up. The user flips this mode any time from the menu-bar " +
+      "toggle.",
+    inputSchema: {
+      action: z
+        .enum(["get", "set"])
+        .optional()
+        .describe("get = read current mode + persona status. set = record the user's chosen mode."),
+      mode: z
+        .enum(["personal_brand", "promotion"])
+        .optional()
+        .describe(
+          "Required for action:'set'. personal_brand = organic brand growth (link-free, the user's " +
+            "own voice); promotion = market the configured product (default)."
+        ),
+      description: z
+        .string()
+        .optional()
+        .describe("Persona grounding from the scan: 2-3 sentences on who this person is as a builder/voice."),
+      content_angle: z
+        .string()
+        .optional()
+        .describe("Persona grounding: a paragraph of concrete first-hand experience the persona speaks from."),
+      voice: z
+        .any()
+        .optional()
+        .describe("Persona voice object {tone, never:[...]} captured from how they actually write."),
+      search_topics: z
+        .union([z.array(z.string()), z.string()])
+        .optional()
+        .describe("~15 topics the persona has genuine experience with, drawn from the scan."),
+    },
+  },
+  async (args: any) => {
+    const action = args.action || "get";
+    if (action === "get") {
+      const cur = await runPython("scripts/saps_mode.py", ["get"], { timeoutMs: 15_000 });
+      const mode = (cur.stdout || "").trim() || "promotion";
+      const persona = findPersonaProject();
+      return jsonContent({ mode, persona: persona ? persona.name : null });
+    }
+
+    const mode = args.mode;
+    if (mode !== "personal_brand" && mode !== "promotion") {
+      return textContent(
+        "Ask the user which they want, then call again with mode:'personal_brand' (organic brand " +
+          "growth, link-free) or mode:'promotion' (market the product, the default)."
+      );
+    }
+
+    recordOnboardingAttempt("mode_chosen", { mode });
+
+    const setRes = await runPython("scripts/saps_mode.py", ["set", mode], { timeoutMs: 15_000 });
+    if (setRes.code !== 0) {
+      const tail = (setRes.stderr || setRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+      blockOnboardingMilestone("mode_chosen", "mode_set_failed", tail, { mode });
+      return textContent(`Couldn't save the engagement mode: ${tail}`);
+    }
+
+    // Provision the persona (grounded from the scan when supplied) regardless of
+    // mode, so the toggle always has a real persona to flip to.
+    let personaName: string;
+    let personaCreated = false;
+    try {
+      const r = ensurePersonaProject({
+        description: args.description,
+        content_angle: args.content_angle,
+        voice: args.voice,
+        search_topics: args.search_topics,
+      });
+      personaName = r.name;
+      personaCreated = r.created;
+    } catch (e: any) {
+      blockOnboardingMilestone("mode_chosen", "persona_provision_failed", e?.message || String(e), { mode });
+      return textContent(
+        `Mode saved as ${mode}, but provisioning the persona project failed: ${e?.message || e}. ` +
+          `Retry engagement_mode action:'set'.`
+      );
+    }
+
+    // Seed the persona's topics into the DB universe the cycle reads (best-effort;
+    // the cycle's own fail-loud path still reports if topics are missing).
+    let personaTopicsSeeded = false;
+    let personaTopicCount = 0;
+    const seed = await runPython("scripts/seed_search_topics.py", ["--project", personaName], {
+      timeoutMs: 60_000,
+    });
+    if (seed.code === 0) {
+      const m = /planned=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(seed.stdout);
+      personaTopicCount = m ? Number(m[1]) : 0;
+      personaTopicsSeeded = true;
+    }
+
+    completeOnboardingMilestone("mode_chosen", { mode, persona: personaName });
+
+    return jsonContent({
+      ok: true,
+      mode,
+      persona: personaName,
+      persona_created: personaCreated,
+      persona_topics_seeded: personaTopicsSeeded,
+      persona_topic_count: personaTopicCount,
+      onboarding: onboardingSnapshot(),
+      next_step:
+        (mode === "personal_brand"
+          ? "Personal-brand mode is set and the persona is provisioned + topic-seeded. "
+          : "Promotion mode is set (the default), and the persona is provisioned so the user can flip " +
+            "to personal-brand from the menu-bar toggle any time. ") +
+        "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
+        "site and fill description, icp, voice, search_topics) — a product is set up regardless of mode.",
+    });
+  }
+);
+
 tool(
   "project_config",
   {
