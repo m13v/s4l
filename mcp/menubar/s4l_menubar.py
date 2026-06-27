@@ -525,6 +525,7 @@ class S4LMenuBar(rumps.App):
                 "approved": True,
                 "text": it.get("text") or "",
                 "edited": bool(it.get("edited")),
+                "drop_link": bool(it.get("drop_link")),
             }
             with self._review_lock:
                 self._posts_outstanding += 1
@@ -739,6 +740,7 @@ class S4LMenuBar(rumps.App):
             n,
             text=decision.get("text") or "",
             edited=bool(decision.get("edited")),
+            drop_link=bool(decision.get("drop_link")),
         )
         with self._review_lock:
             self._posts_outstanding += 1
@@ -799,14 +801,16 @@ class S4LMenuBar(rumps.App):
                 st.approved_queue_set_status(batch, n, "posting")
                 with self._review_lock:
                     activity_label = self._posting_activity_label_locked()
+                cl = [n] if decision.get("drop_link") else None
                 if decision.get("edited"):
                     res = st.post_drafts(
                         batch,
                         edits=[{"n": n, "text": decision.get("text") or ""}],
+                        clear_link=cl,
                         activity_label=activity_label,
                     )
                 else:
-                    res = st.post_drafts(batch, post=[n], activity_label=activity_label)
+                    res = st.post_drafts(batch, post=[n], clear_link=cl, activity_label=activity_label)
                 if res is None:
                     # Loopback unreachable (Claude closed). Mark failed so the card
                     # falls back to manual review rather than silently vanishing.
