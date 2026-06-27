@@ -172,12 +172,54 @@ def kill(pid: int) -> bool:
     return True
 
 
+def _state_dir() -> str:
+    """Same resolution claude_job.py uses: $SAPS_STATE_DIR or ~/.social-autoposter-mcp."""
+    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".social-autoposter-mcp"
+    )
+
+
+def count_running_jobs():
+    """Number of IN-FLIGHT claimed jobs, or None if the queue dir is unreadable.
+
+    The producer (claude_job.py) moves a job into <state_dir>/claude-queue/running/
+    the instant a worker CLAIMS it (`next`), and removes it the instant the worker
+    REPORTS back (`result`) OR the producer abandons it at its own timeout. So the
+    count of files here is an upper bound on how many workers are legitimately busy
+    right now. When this is readable we spare exactly that many (plus a margin) of
+    the newest workers and reap the rest immediately — no 20-minute wait. When it is
+    unreadable we return None and the caller falls back to the pure age gate, so a
+    missing/renamed queue can never turn the reaper INTO a regression.
+    """
+    d = os.path.join(_state_dir(), "claude-queue", "running")
+    try:
+        return sum(
+            1 for n in os.listdir(d) if n.endswith(".json") and not n.endswith(".tmp")
+        )
+    except OSError:
+        return None
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv
-    try:
-        max_age = int(os.environ.get("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC))
-    except ValueError:
-        max_age = DEFAULT_MAX_AGE_SEC
+    max_age = _env_int("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
+    # (1) Queue-correlated reaping knobs.
+    grace = _env_int("SAPS_REAPER_GRACE_SEC", 90)  # spawn->claim race guard
+    keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
+    # (2) Count-cap backstop: never let one uuid group hold more than this many live
+    # workers, regardless of queue state. 0 disables. The default rarely fires once
+    # (1) is active (it keeps groups at ~inflight+1), but it bounds a pathological
+    # pileup if the queue signal is ever wrong or stale.
+    max_group = _env_int("SAPS_REAPER_MAX_GROUP", 12)
+
+    inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
 
     procs, by_pid = snapshot()
 
@@ -186,20 +228,35 @@ def main() -> int:
     for p in procs:
         groups.setdefault(p["uuid"], []).append(p)
 
-    targets: list[dict] = []
+    targets_by_pid: dict[int, dict] = {}  # dedup across the two rules below
     for uuid, members in groups.items():
         if len(members) <= 1:
             continue  # a healthy / interactive session — never touch.
         members.sort(key=lambda p: p["age"])  # ascending: newest first
-        newest = members[0]
-        for p in members[1:]:  # everything except the single newest
-            if p["age"] >= max_age:
-                targets.append(p)
-        # newest is always spared (may be mid-draft); also spare anything younger
-        # than the threshold (handled by the age check above).
-        _ = newest
 
-    targets = targets[:MAX_KILL_PER_RUN]
+        if inflight is not None:
+            # (1) Spare the (inflight + margin) newest — these cover every worker that
+            # could still hold a live claim — and reap the rest once past a short grace.
+            spare_n = max(1, inflight + keep_margin)
+            for p in members[spare_n:]:
+                if p["age"] >= grace:
+                    targets_by_pid[p["pid"]] = p
+        else:
+            # Fallback: queue unreadable -> legacy age gate, keep only the newest.
+            for p in members[1:]:
+                if p["age"] >= max_age:
+                    targets_by_pid[p["pid"]] = p
+
+        # (2) Count-cap backstop. Never caps BELOW the queue-spared busy set, so it
+        # can only ever add provably-idle workers — no false positives.
+        if max_group > 0:
+            keep = max_group
+            if inflight is not None:
+                keep = max(keep, inflight + keep_margin)
+            for p in members[keep:]:
+                targets_by_pid[p["pid"]] = p
+
+    targets = list(targets_by_pid.values())[:MAX_KILL_PER_RUN]
 
     if not targets:
         # Stay quiet on the common no-leak path to keep the log stream clean.
@@ -219,11 +276,13 @@ def main() -> int:
             if dry or kill(p["ppid"]):
                 disclaimers += 1
 
+    mode = "queue" if inflight is not None else "age-fallback"
     prefix = "[claude-reaper]" + (" DRY-RUN" if dry else "")
     print(
         f"{prefix} reaped {killed} stale agent-mode claude session(s)"
         f" + {disclaimers} disclaimer stub(s) across {sum(1 for g in groups.values() if len(g) > 1)}"
-        f" leaked uuid group(s); threshold={max_age}s",
+        f" leaked uuid group(s); mode={mode} inflight={inflight} grace={grace}s"
+        f" max_group={max_group} (age_fallback={max_age}s)",
         file=sys.stderr,
     )
     return 0
