@@ -315,11 +315,50 @@ def request_accessibility() -> bool:
 # produced), present the cards, then post the approved subset via the loopback
 # post_drafts tool. The chat-table review still works in parallel; both surfaces
 # de-dup on the plan's per-candidate `posted` flag.
+# How long an activity signal may go un-refreshed before the menu bar treats it
+# as idle. This is the SELF-HEAL for a frozen spinner: a writer can set a label
+# (e.g. the queue worker writing "drafting replies" on job-claim, or a kicker
+# writing "scanning") and then die WITHOUT clearing it — the leaked-worker reaper
+# SIGKILLs a draft worker before it can call `claude_job.py result`, a divergent
+# lane runs the cycle with no exit-trap clear, or a process crashes mid-phase. In
+# every such case the clear never runs and the old code showed the label forever.
+# Live work keeps `since` fresh well under this window (the queue provider's poll
+# loop heartbeats every ~10s, the kicker re-stamps "scanning" every ~30s, and the
+# poster writes per post), so a signal older than this can only be a stuck stamp.
+ACTIVITY_TTL_SECONDS = float(os.environ.get("SAPS_ACTIVITY_TTL_S", "120"))
+
+
+def _activity_is_stale(act) -> bool:
+    """True when act['since'] is older than ACTIVITY_TTL_SECONDS. A missing/unparsable
+    `since` is treated as NOT stale (fail open: never hide a label we can't age)."""
+    try:
+        import datetime
+
+        since = (act or {}).get("since")
+        if not since:
+            return False
+        s = since.replace("Z", "+00:00")
+        ts = datetime.datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+        return age > ACTIVITY_TTL_SECONDS
+    except Exception:
+        return False
+
+
 def read_activity():
     """What the server is doing right now: {state, label} or None when idle.
     Written by long-running tools (scanning/drafting/posting/…); drives the
-    menu-bar loading spinner."""
-    return read_json("activity.json")
+    menu-bar loading spinner.
+
+    Stale signals are reported as idle (None): see ACTIVITY_TTL_SECONDS. This is
+    what keeps the spinner from freezing on a label whose writer died before
+    clearing it."""
+    act = read_json("activity.json")
+    if act and _activity_is_stale(act):
+        return None
+    return act
 
 
 def write_activity(state: str, label: str):
