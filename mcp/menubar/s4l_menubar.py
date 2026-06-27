@@ -537,6 +537,7 @@ class S4LMenuBar(rumps.App):
             time.sleep(1)
             self._rewrite_scheduled_task_cwd()
             subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
                 self._cwd_healed = True
         except Exception:
