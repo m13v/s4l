@@ -77,10 +77,25 @@ def read_onboarding():
     if not d or not isinstance(d.get("milestones"), dict):
         return None
     ms = d["milestones"]
-    milestones = [{"id": mid, **(ms.get(mid) or {})} for mid in MILESTONES]
-    complete = all(
-        (ms.get(mid) or {}).get("status") == "complete" for mid in MILESTONES
-    )
+
+    # mode_chosen (added 2026-06-26) won't exist in ledgers written before it.
+    # Mirror the server's backfill so adding this milestone never flips an already-
+    # onboarded box back to "Setting up…" in the offline view: treat it complete
+    # when the user has picked a mode (mode.json exists) OR the install is already
+    # past setup (project_ready complete = a legacy onboard).
+    def _status(mid):
+        st = (ms.get(mid) or {}).get("status")
+        if mid == "mode_chosen" and st != "complete":
+            mode_picked = (Path(state_dir()) / MODE_FILE).exists()
+            past_setup = (ms.get("project_ready") or {}).get("status") == "complete"
+            if mode_picked or past_setup:
+                return "complete"
+        return st
+
+    milestones = [
+        {"id": mid, **(ms.get(mid) or {}), "status": _status(mid)} for mid in MILESTONES
+    ]
+    complete = all(_status(mid) == "complete" for mid in MILESTONES)
     return {
         "complete": complete,
         "milestones": milestones,
