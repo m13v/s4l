@@ -2,13 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>HOME</key>
-		<string>/Users/matthewdi</string>
-		<key>PATH</key>
-		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-	</dict>
 	<key>Label</key>
 	<string>com.m13v.social-memory-snapshot</string>
 	<key>ProgramArguments</key>
@@ -16,13 +9,26 @@
 		<string>/bin/bash</string>
 		<string>/Users/matthewdi/social-autoposter/skill/memory-snapshot.sh</string>
 	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardErrorPath</key>
-	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stderr.log</string>
-	<key>StandardOutPath</key>
-	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stdout.log</string>
 	<key>StartInterval</key>
 	<integer>60</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stderr.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/matthewdi/.social-autoposter-mcp/runtime/.venv/bin:/Users/matthewdi/.local/bin:/opt/homebrew/Cellar/node/25.9.0_2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/matthewdi</string>
+		<key>SAPS_REPO_DIR</key>
+		<string>/Users/matthewdi/social-autoposter</string>
+		<key>SAPS_PYTHON</key>
+		<string>/Users/matthewdi/.social-autoposter-mcp/runtime/.venv/bin/python3</string>
+		<key>BH_CHROME_BIN</key>
+		<string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
 </dict>
 </plist>
