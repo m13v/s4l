@@ -53,11 +53,14 @@ import time
 #
 # What bounds a legit worker turn — measured, not assumed:
 #   * The producer (claude_job.py) abandons a queued job after
-#     SAPS_CLAUDE_QUEUE_TIMEOUT (default 600s / 10 min): once a worker has been
+#     SAPS_CLAUDE_QUEUE_TIMEOUT (default 1800s / 30 min): once a worker has been
 #     going longer than that, the producer has already removed the job and
-#     discarded whatever the worker eventually writes. So 600s is the hard ceiling
-#     on USEFUL worker work, empirically confirmed by provider.log
-#     ("timed out after 600s ... removed the job").
+#     discarded whatever the worker eventually writes. So the queue timeout is the
+#     hard ceiling on USEFUL worker work. (It was 600s until 2026-06-27, but 600s
+#     sat at the edge of the ~9-10 min draft call and dropped ~41% of twitter-prep
+#     jobs on the QA box; raised to 1800s to match the draft's real need + the
+#     direct `claude -p` lane's tolerance. This base MUST stay in lockstep with
+#     claude_job.py:DEFAULT_TIMEOUT_S — both read SAPS_CLAUDE_QUEUE_TIMEOUT.)
 #   * The 180-MINUTE budgets in watchdog_hung_runs.py are NOT this. Those govern
 #     run-twitter-cycle.sh / stats.sh, which run as `bash`/python pipeline
 #     processes, not `claude` agent-mode sessions — the reaper signature can never
@@ -65,8 +68,10 @@ import time
 #
 # So the floor is the queue timeout; we take 2x it as the default for margin. A
 # session older than 2x the producer's own deadline is provably done/abandoned.
-_QUEUE_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "600"))
-DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S * 2  # 1200s (20 min) by default
+# The 2x relationship is what guarantees the reaper never SIGKILLs a draft the
+# producer is still legitimately waiting on (reaper threshold >= producer timeout).
+_QUEUE_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
+DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S * 2  # 3600s (60 min) by default
 
 # Hard cap on kills per run, so a pathological ps parse can never SIGKILL the world.
 MAX_KILL_PER_RUN = 500
