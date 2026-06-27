@@ -145,6 +145,29 @@ def _node_version():
     return v.lstrip("v") or None
 
 
+def _app_version():
+    """Version of the installed S4L plugin.
+
+    On a .mcpb box the extension dir has manifest.json + package.json at its
+    root (one level above scripts/); read whichever resolves first. Honors
+    SAPS_REPO_DIR / REPO_DIR when the pipeline sets it (launchd plists do).
+    """
+    root = Path(
+        os.environ.get("SAPS_REPO_DIR")
+        or os.environ.get("REPO_DIR")
+        or Path(__file__).resolve().parents[1]
+    )
+    for name in ("manifest.json", "package.json"):
+        try:
+            data = json.loads((root / name).read_text())
+        except Exception:
+            continue
+        v = data.get("version")
+        if v:
+            return str(v).strip() or None
+    return None
+
+
 def _tz():
     try:
         from datetime import datetime
@@ -168,6 +191,7 @@ def _build_fresh_identity():
         "cpu_arch": platform.machine() or None,
         "python_version": platform.python_version() or None,
         "node_version": _node_version(),
+        "app_version": _app_version(),
         "git_email": _git_email(),
         "tz": _tz(),
         "first_seen_at": int(time.time()),
