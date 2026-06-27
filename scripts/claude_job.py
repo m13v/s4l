@@ -35,6 +35,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -156,6 +159,129 @@ def running_dir() -> str:
 
 def result_dir() -> str:
     return os.path.join(queue_root(), "result")
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in worker self-reap (2026-06-27)                                         #
+# --------------------------------------------------------------------------- #
+# A scheduled-task worker turn finishes its one queue iteration but Claude
+# Desktop keeps the agent-mode `claude` process warm (`--input-format
+# stream-json`), so finished workers pile up and leak RAM. The launchd reaper
+# (reap_stale_claude_sessions.py) is the GUARANTEE that bounds this. This opt-in
+# path is a faster, source-side trim: once THIS worker is provably done (no work
+# to do, or its result is already on disk), terminate OUR OWN session so it never
+# becomes part of the standing pool. Strictly off unless SAPS_WORKER_SELF_REAP is
+# set, so it ships dormant and cannot destabilize the default behaviour.
+#
+# Safety properties:
+#   * No-op unless the env flag is set.
+#   * Only ever targets a process in OUR OWN ancestry that matches the reaper's
+#     worker signature (claude-code agent-mode session). The producer side
+#     (run-twitter-cycle.sh -> python) has no such ancestor, so a misplaced call
+#     there finds nothing and does nothing.
+#   * Detached + delayed: a double-forked grandchild waits a few seconds (so the
+#     current turn returns and prints its final line normally) before signalling.
+#   * Re-verifies the target's cmdline right before SIGTERM, so a recycled PID is
+#     never signalled.
+#   * Best-effort throughout: never raises into the caller, never changes the
+#     worker's exit code, never touches the result already written to disk.
+_SELF_REAP_SIG = (
+    "claude-code/",
+    "/Contents/MacOS/claude ",
+    "--input-format stream-json",
+    "local-agent-mode-sessions",
+)
+_SELF_REAP_UUID_RE = re.compile(r"local-agent-mode-sessions/[0-9a-fA-F-]{36}")
+
+
+def _self_reap_enabled() -> bool:
+    return os.environ.get("SAPS_WORKER_SELF_REAP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _ps_pid_map() -> dict:
+    """pid -> (ppid, command) for every process. Empty dict on any failure."""
+    out: dict = {}
+    try:
+        res = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return out
+    for line in res.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        out[pid] = (ppid, parts[2])
+    return out
+
+
+def _find_own_session(psmap: dict):
+    """Walk OUR ancestry to the nearest claude agent-mode worker session that
+    matches the reaper signature. Returns (pid, uuid_token) or None."""
+    pid = os.getpid()
+    seen: set = set()
+    for _ in range(40):  # bounded climb up the process tree
+        if pid in seen:
+            break
+        seen.add(pid)
+        ent = psmap.get(pid)
+        if not ent:
+            break
+        ppid, cmd = ent
+        if all(t in cmd for t in _SELF_REAP_SIG) and "Helpers/disclaimer" not in cmd:
+            m = _SELF_REAP_UUID_RE.search(cmd)
+            if m:
+                return pid, m.group(0)
+        pid = ppid
+        if pid <= 1:
+            break
+    return None
+
+
+def _maybe_self_reap(delay: float = 6.0) -> None:
+    """Opt-in: terminate our own finished worker session. See block comment above."""
+    if not _self_reap_enabled():
+        return
+    try:
+        found = _find_own_session(_ps_pid_map())
+        if not found:
+            return
+        target_pid, token = found
+        if os.fork() != 0:
+            return  # the worker continues + exits normally
+    except Exception:
+        return
+    # child -> detach into its own session, then exit, orphaning the grandchild
+    try:
+        os.setsid()
+        if os.fork() != 0:
+            os._exit(0)
+    except Exception:
+        os._exit(0)
+    # grandchild (fully detached): wait, re-verify, signal
+    try:
+        time.sleep(delay)
+        cur = _ps_pid_map().get(target_pid)
+        if cur and token in cur[1]:  # same session, not a recycled PID
+            try:
+                os.kill(target_pid, signal.SIGTERM)
+            except OSError:
+                pass
+    except Exception:
+        pass
+    os._exit(0)
 
 
 def _ensure_dirs(qtype: str | None = None) -> None:
