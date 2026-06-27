@@ -260,6 +260,26 @@ class S4LMenuBar(rumps.App):
     def _draft(self, _=None):
         self._send_to_claude(DRAFT_PROMPT)
 
+    def _toggle_mode(self, _=None):
+        """Flip personal-brand <-> promotion. Pure local state write (no model,
+        no network): the cycle reads mode.json on its next run. Rebuild the menu
+        right away so the checkmark + sublabel reflect the new mode instantly."""
+        new = st.toggle_mode()
+        self._notify(
+            "S4L engagement mode",
+            "Personal brand: organic, link-free"
+            if new == st.MODE_PERSONAL_BRAND
+            else "Promotion: marketing your products",
+        )
+        # Force the next tick to rebuild (mode is in the signature, but null it so
+        # the rebuild can't be skipped) and rebuild now for snappy feedback.
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] mode toggle rebuild failed: {e}\n")
+            sys.stderr.flush()
+
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
 
@@ -609,6 +629,7 @@ class S4LMenuBar(rumps.App):
             snap.get("x_handle"),
             snap.get("projects_ready"),
             snap.get("projects_total"),
+            st.read_mode(),
         )
         if sig != self._sig:
             self._sig = sig
@@ -962,6 +983,27 @@ class S4LMenuBar(rumps.App):
             )
         else:
             out.append(self._label("7d stats — open dashboard"))
+
+        out.append(rumps.separator)
+        # Engagement-mode toggle (2026-06-26). A checkmark = personal-brand mode
+        # (link-free organic engagement for the user's own brand); unchecked =
+        # the default promotion pipeline (marketing the configured products).
+        # The cycle reads this on its next run via scripts/saps_mode.py, so the
+        # flip takes effect without restarting anything.
+        mode = st.read_mode()
+        personal = mode == st.MODE_PERSONAL_BRAND
+        mode_item = rumps.MenuItem(
+            "Personal brand mode", callback=self._toggle_mode
+        )
+        mode_item.state = 1 if personal else 0
+        out.append(mode_item)
+        out.append(
+            self._label(
+                "   organic, link-free engagement"
+                if personal
+                else "   promoting your products"
+            )
+        )
 
         out.append(rumps.separator)
         out.append(
