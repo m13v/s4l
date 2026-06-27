@@ -575,12 +575,84 @@ def build_snapshot(top_n: int) -> dict[str, Any]:
     }
 
 
+def build_summary() -> dict[str, Any]:
+    """Slim, cheap snapshot for the heartbeat body.
+
+    Skips the heavier sections (launchd jobs, sidecars, lock queues, per-group
+    top_pids) so the MCP can compute it inline on every 15-min heartbeat. Just
+    the host memory totals, per-group RSS counts, the single biggest process,
+    and the claude-queue depth — enough to spot a leaking box centrally.
+    """
+    rows, by_pid, children = parse_ps()
+    mem = parse_vm_stat()
+    total = mem.get("total_mb")
+    free = mem.get("free_mb")
+    used = (
+        round(float(total) - float(free), 1)
+        if isinstance(total, (int, float)) and isinstance(free, (int, float))
+        else None
+    )
+    slim_groups = {
+        name: {"count": g["count"], "rss_mb": g["rss_mb"]}
+        for name, g in group_summaries(rows).items()
+    }
+    top = sorted(rows, key=lambda row: int(row["rss_kb"]), reverse=True)[:1]
+    top_proc = (
+        {"pid": top[0]["pid"], "rss_mb": top[0]["rss_mb"], "cmd": top[0]["cmd"]}
+        if top
+        else None
+    )
+    cq = claude_queue_summary()
+    return {
+        "ts": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "hostname": socket.gethostname(),
+        "app_version": _app_version(),
+        "process_count": len(rows),
+        "mem": {
+            "total_mb": total,
+            "used_mb": used,
+            "free_mb": free,
+            "wired_mb": mem.get("wired_mb"),
+            "compressed_mb": mem.get("compressed_mb"),
+            "swapouts": mem.get("swapouts"),
+        },
+        "groups": slim_groups,
+        "top": top_proc,
+        "claude_queue": {
+            "pending": cq.get("pending_total", 0),
+            "running": cq.get("running_total", 0),
+        },
+    }
+
+
+def _app_version() -> str | None:
+    """Plugin version from manifest.json / package.json at the repo root."""
+    for name in ("manifest.json", "package.json"):
+        try:
+            data = json.loads((REPO_DIR / name).read_text())
+        except Exception:
+            continue
+        v = data.get("version")
+        if v:
+            return str(v).strip() or None
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default=os.environ.get("SAPS_MEMORY_SNAPSHOT_LOG", str(DEFAULT_OUTPUT)))
     parser.add_argument("--top", type=int, default=int(os.environ.get("SAPS_MEMORY_TOP_N", "30")))
     parser.add_argument("--max-bytes", type=int, default=int(os.environ.get("SAPS_MEMORY_MAX_BYTES", str(100 * 1024 * 1024))))
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a slim JSON summary to stdout and exit (no JSONL write). Used by the heartbeat.",
+    )
     args = parser.parse_args()
+
+    if args.summary:
+        sys.stdout.write(json.dumps(build_summary(), separators=(",", ":")))
+        return 0
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
