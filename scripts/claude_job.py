@@ -368,6 +368,10 @@ def cmd_next(ns) -> int:
                 _atomic_write_text(schema_file, schema)
                 job["schema_file"] = schema_file
             _atomic_write(dst, job)
+        # Narrate the scheduled-task worker's drafting turn to the menu bar. This
+        # is the lane that actually runs the LLM; it persists until cmd_result
+        # clears it (or the kicker's exit trap does). Covers the box's autopilot.
+        _act_write(job.get("type") or qtype)
         # Hand the consumer exactly what it needs to do the work and report back.
         payload = {"job_id": job["job_id"], "type": job["type"]}
         if ns.prompt_file:
@@ -411,6 +415,10 @@ def _validate_against_schema(obj, schema_text: str | None) -> str | None:
 def cmd_result(ns) -> int:
     _apply_state_dir_override(ns)
     _ensure_dirs()
+    # The worker's drafting turn ends here (success or failure); drop the menu-bar
+    # label so nothing lingers. The provider's next enqueue re-asserts the right
+    # label for the cycle's following claude call, if any.
+    _act_clear()
     job_id = ns.job
     # Read the produced result (JSON object) from a file or stdin.
     if ns.result_file and ns.result_file != "-":
