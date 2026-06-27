@@ -3052,7 +3052,9 @@ function isPostingFlagFresh(): boolean {
 // activity.json: a tiny "what's running right now" signal the menu bar reads to
 // show a loading spinner + label (scanning / drafting / posting / …). Written by
 // long-running tools, cleared when they finish. Best-effort; absence == idle.
-function writeActivity(state: string, label: string): void {
+let _activityLast: { state: string; label: string } | null = null;
+let _activityHb: ReturnType<typeof setInterval> | null = null;
+function _writeActivityFile(state: string, label: string): void {
   try {
     const dir = sapsStateDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -3065,7 +3067,29 @@ function writeActivity(state: string, label: string): void {
     /* best effort: a status write must never break the work it's narrating */
   }
 }
+function writeActivity(state: string, label: string): void {
+  _activityLast = { state, label };
+  _writeActivityFile(state, label);
+  // Heartbeat: re-stamp `since` so the menu bar's staleness TTL (s4l_state.py
+  // ACTIVITY_TTL_SECONDS) never ages out a genuinely-running tool whose current
+  // phase emits no further updates — e.g. a silent multi-minute `claude -p` draft
+  // turn between "Phase 2b-prep" and the next marker. Without this, the spinner
+  // would wrongly blink to idle mid-work; with it, the label is fresh exactly
+  // while the tool runs and the TTL only expires it once clearActivity stops the
+  // heartbeat (or the writer dies). Single shared interval; tracks the latest label.
+  if (!_activityHb) {
+    _activityHb = setInterval(() => {
+      if (_activityLast) _writeActivityFile(_activityLast.state, _activityLast.label);
+    }, 30_000);
+    if (typeof _activityHb.unref === "function") _activityHb.unref();
+  }
+}
 function clearActivity(): void {
+  _activityLast = null;
+  if (_activityHb) {
+    clearInterval(_activityHb);
+    _activityHb = null;
+  }
   try {
     fs.rmSync(path.join(sapsStateDir(), "activity.json"), { force: true });
   } catch {
