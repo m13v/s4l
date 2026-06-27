@@ -8,11 +8,13 @@ fires once the last card is decided or the window is closed. The whole AppKit
 surface is isolated behind that one function so the menu bar wiring doesn't
 depend on the windowing details.
 
-Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool}
+Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool, "drop_link": bool}
 
 Must be driven on the main thread (the menu bar's rumps timer is on the main
 run loop, so that holds).
 """
+
+import re
 
 import objc
 from Foundation import NSObject, NSMakeRect
@@ -247,13 +249,27 @@ class _ReviewController(NSObject):
         d = self._drafts[self._idx]
         orig = (d.get("reply_text") or "").strip()
         link = d.get("link_url") or ""
+        drop_link = False
         if approved:
             text = self._current_text()
-            # Strip the link we folded into the field so the pipeline mints the
-            # tracked short link itself (avoids a double link / bare URL).
-            if link and text.rstrip().endswith(link):
-                text = text.rstrip()[: -len(link)]
-            body = text.strip()
+            # The card folds link_url into the editable field (see _render). On
+            # send we must reconcile what the user did with that link:
+            #   - link still present anywhere -> remove ALL occurrences so the
+            #     poster mints the single tracked /r/<code> short link (no double
+            #     link, no bare URL). Generalizes the old endswith() strip, which
+            #     missed the link whenever the user typed anything after it.
+            #   - link gone (user deleted it while editing) -> drop_link=True so
+            #     the poster does NOT re-append it. Without this signal the post
+            #     pipeline's forced TWITTER_TAIL_LINK_RATE=1.0 silently revived a
+            #     link the user intentionally removed.
+            if link:
+                if link in text:
+                    text = text.replace(link, "")
+                else:
+                    drop_link = True
+            # Collapse only horizontal whitespace left by the removal; preserve
+            # any newlines the user intended.
+            body = re.sub(r"[ \t]{2,}", " ", text).strip()
         else:
             body = orig
         self._decisions.append(
@@ -262,6 +278,7 @@ class _ReviewController(NSObject):
                 "approved": bool(approved),
                 "text": body,
                 "edited": bool(approved and body != orig),
+                "drop_link": bool(approved and drop_link),
             }
         )
 
