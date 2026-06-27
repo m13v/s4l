@@ -1676,9 +1676,16 @@ tool(
           "1-based draft numbers the user REJECTED. They are marked done and never " +
             "shown for review again, and are not posted."
         ),
+      clear_link: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe(
+          "1-based draft numbers whose link the user removed while editing. Their " +
+            "link_url is cleared so the poster does not silently re-append it."
+        ),
     },
   },
-  async ({ batch_id, post, edits, post_all, reject }) => {
+  async ({ batch_id, post, edits, post_all, reject, clear_link }) => {
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
@@ -1726,6 +1733,21 @@ tool(
       candidates[e.n - 1].reply_text = text;
       approve.add(e.n);
       editedCount++;
+    });
+
+    // Honor "user deleted the link while editing": clear the link fields so the
+    // poster (which runs with forced TWITTER_TAIL_LINK_RATE=1.0 on this path)
+    // does NOT silently re-append a link the user intentionally removed. Without
+    // this, link_url survives on the candidate row and the poster revives it.
+    (clear_link || []).forEach((n) => {
+      if (!inRange(n)) {
+        warnings.push(`ignored clear_link #${n}: out of range (1-${total})`);
+        return;
+      }
+      const c = candidates[n - 1];
+      c.link_url = undefined;
+      c.link_keyword = undefined;
+      c.link_slug = undefined;
     });
 
     if (post_all) {
