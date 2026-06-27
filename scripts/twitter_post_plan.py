@@ -637,7 +637,13 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     if not parsed.get("ok"):
         reason = parsed.get("error") or "no_reply_json"
         print(f"[post] candidate {cid} reply failed: {reason}", flush=True)
-        if reason in ("rate_limited", "tweet_not_found", "reply_box_not_found"):
+        if reason in ("rate_limited", "tweet_not_found", "reply_box_not_found",
+                      "reply_restricted", "tweet_unavailable"):
+            # reply_restricted / tweet_unavailable are PERMANENT, thread-intrinsic
+            # conditions (the author limits who can reply, or the tweet is gone):
+            # record the specific skip_reason so discovery can suppress the thread
+            # (and, for restrictions, the author) and never burn another draft
+            # re-attempting it.
             update_candidate(cid, "skipped", reason)
             return ("skipped", reason)
         # everything else (incl. timeout, parse errors): the reply did NOT
