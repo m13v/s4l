@@ -94,31 +94,39 @@ sleep 1
 # running app caches the scheduled-tasks registry in memory and clobbers a live
 # edit on the next fire. Kept in sync with the menu-bar updater's
 # _rewrite_scheduled_task_cwd() and queueWorkerCwd() in mcp/src/index.ts.
-echo "relocating autopilot task cwd -> ~/.s4l-worker ..."
+echo "relocating worker task cwd -> ~/.s4l-worker + removing deprecated autopilot ..."
 /usr/bin/python3 - <<'PYCWD' 2>/dev/null || true
-import json, os, glob, tempfile
+import json, os, glob, tempfile, shutil
 home = os.path.expanduser("~")
 worker = os.path.join(home, ".s4l-worker")
 os.makedirs(worker, exist_ok=True)
-IDS = {"saps-phase1-query", "saps-phase2b-draft", "social-autoposter-autopilot"}
+WORKERS = {"saps-phase1-query", "saps-phase2b-draft"}
+DEPRECATED = {"social-autoposter-autopilot"}
 pat = os.path.join(home, "Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json")
 for f in glob.glob(pat):
     try:
         d = json.load(open(f))
     except Exception:
         continue
-    dirty = False
-    for t in d.get("scheduledTasks", []):
-        if t.get("id") in IDS and t.get("cwd") != worker:
+    out, dirty = [], False
+    for t in d.get("scheduledTasks", []) or []:
+        tid = t.get("id")
+        if tid in DEPRECATED:
+            dirty = True; continue           # drop deprecated autopilot
+        if tid in WORKERS and t.get("cwd") != worker:
             t["cwd"] = worker; dirty = True
+        out.append(t)
     if dirty:
+        d["scheduledTasks"] = out
         try:
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
             with os.fdopen(fd, "w") as fh: json.dump(d, fh, indent=2)
             os.replace(tmp, f)
-            print("  cwd-fix: relocated tasks in", os.path.basename(os.path.dirname(f)))
+            print("  cwd-fix: updated", os.path.basename(os.path.dirname(f)))
         except Exception as e:
             print("  cwd-fix: write failed:", e)
+for tid in DEPRECATED:
+    shutil.rmtree(os.path.join(home, ".claude", "scheduled-tasks", tid), ignore_errors=True)
 PYCWD
 open -a Claude 2>/dev/null || true
 echo "done; Claude restarting on v$new_ver."
