@@ -29,6 +29,7 @@ from AppKit import (
     NSView,
     NSBackingStoreBuffered,
     NSFloatingWindowLevel,
+    NSApplicationActivationPolicyAccessory,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskUtilityWindow,
@@ -44,6 +45,16 @@ W = 380
 H = 300
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
+
+
+class _ReviewPanel(NSPanel):
+    """A status-bar app panel that can actually own text input."""
+
+    def canBecomeKeyWindow(self):
+        return True
+
+    def canBecomeMainWindow(self):
+        return True
 
 
 def _truncate(s, n=320):
@@ -98,7 +109,7 @@ class _ReviewController(NSObject):
             | NSWindowStyleMaskClosable
             | NSWindowStyleMaskUtilityWindow
         )
-        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, W, H), style, NSBackingStoreBuffered, False
         )
         panel.setLevel_(NSFloatingWindowLevel)
@@ -109,23 +120,42 @@ class _ReviewController(NSObject):
         panel.setDelegate_(self)
         self._panel = panel
         self._render()
-        # The menu bar app runs as an accessory (LSUIElement, no dock icon), so
-        # ordering the panel front is NOT enough to type into the reply field:
-        # keystrokes only route to a text view when the OWNING APP is the active
-        # application. Without this activation the cursor appears in the field but
-        # every keypress goes to whatever app is actually frontmost, which is the
-        # "editable field that isn't editable at all" bug. Activate the app, make
-        # the panel key, then drop the caret into the reply text view.
+        panel.makeKeyAndOrderFront_(None)
+        panel.orderFrontRegardless()
+        self.focusReply_(None)
+        # App activation/key-window promotion lands on the run loop; do one
+        # deferred pass so the first card is editable even when opened from the
+        # status-bar timer while another app is frontmost.
+        self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
+
+    def focusReply_(self, sender):
+        panel = self._panel
+        tv = self._textview
+        if panel is None or tv is None:
+            return
+        # A launchd/rumps status item can show a window while remaining a
+        # non-activating process. Accessory policy keeps it out of the Dock but
+        # lets the review panel become the key/main recipient for NSTextView input.
+        try:
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
         try:
             NSApp.activateIgnoringOtherApps_(True)
         except Exception:
             pass
-        panel.makeKeyAndOrderFront_(None)
-        panel.orderFrontRegardless()
-        # _render() already seated the caret in the reply field; re-seat once more
-        # after the panel is key so the very first card is editable immediately.
-        if self._textview is not None:
-            panel.makeFirstResponder_(self._textview)
+        try:
+            panel.makeKeyAndOrderFront_(None)
+            panel.orderFrontRegardless()
+            panel.makeMainWindow()
+        except Exception:
+            pass
+        try:
+            tv.setEditable_(True)
+            tv.setSelectable_(True)
+            panel.makeFirstResponder_(tv)
+        except Exception:
+            pass
 
     @objc.python_method
     def _render(self):
@@ -190,6 +220,7 @@ class _ReviewController(NSObject):
         tv.setFont_(NSFont.systemFontOfSize_(12))
         tv.setRichText_(False)
         tv.setEditable_(True)
+        tv.setSelectable_(True)
         tv.setString_(composed)
         scroll.setDocumentView_(tv)
         content.addSubview_(scroll)
@@ -202,6 +233,7 @@ class _ReviewController(NSObject):
         # default to the Approve button. Re-seat it in the reply field for every
         # card (not just the first) so each one is immediately editable.
         self._panel.makeFirstResponder_(tv)
+        self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     @objc.python_method
     def _current_text(self):
