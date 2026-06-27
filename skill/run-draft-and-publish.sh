@@ -14,15 +14,23 @@ REPO_DIR="${SAPS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${SAPS_PYTHON:-python3}"
 
 OUT="$(mktemp -t saps_draft_publish.XXXXXX)"
+HB_PID=""  # scan-phase heartbeat (started below); torn down by the EXIT trap
 # Clear the menu-bar activity signal on ANY exit so a crash/early-exit mid-cycle
-# never leaves a stuck "scanning/drafting" label. Best-effort; the || true keeps
-# the trap from changing the cycle's exit code.
-trap 'rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/saps_activity.py" clear 2>/dev/null || true' EXIT
+# never leaves a stuck "scanning/drafting" label, and stop the heartbeat so it
+# can't outlive the cycle. Best-effort; the || true keeps the trap from changing
+# the cycle's exit code.
+trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/saps_activity.py" clear 2>/dev/null || true' EXIT
 
 # Narrate the scan phase. The CDP scan runs inside the (locked) run-twitter-cycle.sh
 # which has no activity writer; this covers that window until the queue provider
 # flips the label to "finding threads"/"drafting replies" on its first claude call.
 "$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scanning X for threads" 2>/dev/null || true
+# Keep "scanning" fresh against the menu bar's staleness TTL for the whole scan
+# (which can run minutes with no other writer). The heartbeat re-stamps ONLY while
+# the state is still "scanning", so once the queue provider advances the phase to
+# "finding threads"/"drafting replies" it goes quiet and never fights that writer.
+( while true; do sleep 30; "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "scanning X for threads" 2>/dev/null || true; done ) &
+HB_PID=$!
 
 # Engagement mode (2026-06-26). The menu-bar toggle writes mode.json; this reads
 # it and, in personal_brand mode, exports SAPS_FORCE_PROJECT=<persona project> and
