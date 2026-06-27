@@ -431,7 +431,19 @@ def cmd_provider(ns) -> int:
 
     res_path = os.path.join(result_dir(), f"{job_id}.json")
     deadline = created + ns.timeout
+    last_hb = created  # last menu-bar heartbeat (see below)
     while time.time() < deadline:
+        # Heartbeat the menu-bar label so its `since` stays fresh for the whole
+        # multi-minute block. The consumer (s4l_state.read_activity) ages a label
+        # out after a TTL, so without this refresh a long drafting turn would look
+        # stale and the spinner would wrongly blink to idle. Refreshing here means
+        # the label is fresh EXACTLY while real work is happening, and stops the
+        # instant we return or die — so the consumer's TTL can then expire it
+        # instead of it freezing forever. Throttled to ~10s; best-effort only.
+        now = time.time()
+        if now - last_hb >= 10:
+            _act_write(qtype)
+            last_hb = now
         if os.path.exists(res_path):
             try:
                 with open(res_path) as f:
