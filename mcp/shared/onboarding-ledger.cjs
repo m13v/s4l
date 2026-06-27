@@ -11,6 +11,7 @@ const MILESTONES = [
   "runtime_ready",
   "x_connected",
   "profile_scanned",
+  "mode_chosen",
   "project_ready",
   "topics_seeded",
   "draft_verified",
