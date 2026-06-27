@@ -829,6 +829,18 @@ def _dump_reply_failure_diag(page, tweet_url):
     try:
         diag["dom"] = page.evaluate("""() => {
             const tbs = Array.from(document.querySelectorAll('[role="textbox"]'));
+            const body = (document.body && document.body.innerText || '');
+            const tweetRendered = !!document.querySelector('article[data-testid="tweet"]');
+            // Reply-audience restriction: X renders one of these phrasings when the
+            // author limits who can reply. "Only some accounts can reply" is the
+            // confirmed live string; the others cover the documented variants.
+            const RESTRICT = /Only some accounts can reply|People who follow .{0,40} can reply|Accounts .{0,40} (follows?|mentioned) can reply|People .{0,40} mentioned can reply|Verified accounts can reply|Subscribers can reply|You can.?t reply to this/i;
+            const m = body.match(RESTRICT);
+            // The audience control aria-label ("Everyone can reply" vs a restricted label).
+            const audLabel = (Array.from(document.querySelectorAll('[aria-label]'))
+                .map(e => e.getAttribute('aria-label') || '')
+                .find(s => /can reply$/i.test(s)) || '');
+            const restrictedByAud = !!audLabel && !/everyone can reply/i.test(audLabel);
             return {
                 title: (document.title || '').slice(0, 120),
                 textbox_count: tbs.length,
@@ -836,7 +848,10 @@ def _dump_reply_failure_diag(page, tweet_url):
                 has_tweetTextarea_0: !!document.querySelector('[data-testid="tweetTextarea_0"]'),
                 has_login_modal: !!document.querySelector('[data-testid="loginButton"]'),
                 has_age_gate: !!document.querySelector('[data-testid="sensitive-media-button"]'),
-                page_text_snippet: (document.body && document.body.innerText || '').slice(0, 300),
+                tweet_rendered: tweetRendered,
+                reply_restricted: !!(m || restrictedByAud),
+                restriction_label: (m ? m[0] : (restrictedByAud ? audLabel : '')).slice(0, 80),
+                page_text_snippet: body.slice(0, 300),
             };
         }""")
     except Exception as _e:
@@ -1139,6 +1154,21 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 diag = _dump_reply_failure_diag(page, tweet_url)
                 print(f"[reply_to_tweet] reply_box_not_found diag: "
                       f"{json.dumps(diag, default=str)}", file=sys.stderr)
+                dom = diag.get("dom") or {}
+                # Classify WHY the composer is missing so the poster can suppress
+                # PERMANENT conditions (never re-attempt) vs retry TRANSIENT ones:
+                #  - reply_restricted: author limits who can reply -> permanent,
+                #    suppress thread + author.
+                #  - tweet_unavailable: tweet deleted/suspended (nothing rendered)
+                #    -> permanent, suppress thread. A login modal is OUR session
+                #    problem, not the tweet's, so it stays transient.
+                #  - else: composer just didn't mount -> transient, retry as before.
+                if dom.get("reply_restricted"):
+                    return {"ok": False, "error": "reply_restricted",
+                            "restriction_label": dom.get("restriction_label") or "",
+                            "diag": diag}
+                if not dom.get("tweet_rendered") and not dom.get("has_login_modal"):
+                    return {"ok": False, "error": "tweet_unavailable", "diag": diag}
                 return {"ok": False, "error": "reply_box_not_found", "diag": diag}
 
             # Snapshot our reply links right before posting (to detect the new one)
