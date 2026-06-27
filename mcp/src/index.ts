@@ -334,7 +334,10 @@ const server = new McpServer(
       "release, call the `runtime` tool (action:'version'). If `update_available` is true, tell the " +
       "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
-      "TYPICAL FLOW: `project_config` (configure OR edit the project, and connect X) -> `queue_setup` + " +
+      "TYPICAL FLOW: `project_config` (connect X + scan the profile) -> `engagement_mode` (after the " +
+      "profile scan, ASK the user: grow their personal brand or promote a product, and set it — this " +
+      "provisions the persona) -> `project_config` (configure the product project; always, regardless " +
+      "of mode) -> `queue_setup` + " +
       "`create_scheduled_task` (set up the draft autopilot once) -> `run_draft_cycle` (the real pipeline " +
       "scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
       "user approves in the menu bar -> `post_drafts` (post the approved ones) -> `get_stats` (see " +
@@ -1552,13 +1555,18 @@ tool(
         website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
         onboarding: onboardingSnapshot(),
         next_step:
-          "TWO steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
+          "THREE steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
           "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
           "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
-          "SECOND (product, from their website): then follow website_research_instructions — discover " +
-          "the product URL from config, context, profile links/posts, or public research and read 5+ " +
-          "of its pages to fill description, " +
+          "SECOND (engagement mode — ASK THE USER, do not infer): ask whether they want to grow their " +
+          "PERSONAL BRAND (organic, link-free engagement in their own voice) or PROMOTE a PRODUCT (the " +
+          "default marketing pipeline), then call the `engagement_mode` tool action:'set' with their " +
+          "choice AND the voice/description/topics you just extracted (this provisions a persona " +
+          "grounded in this scan; pass the grounding even for promotion). " +
+          "THIRD (product, from their website — always, regardless of mode): follow " +
+          "website_research_instructions — discover the product URL from config, context, profile " +
+          "links/posts, or public research and read 5+ of its pages to fill description, " +
           "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
           "just captured. Save the best conservative supported fields without a confirmation " +
           "round-trip. Ask only if no product can be identified or a required field is unknowable.",
@@ -1586,6 +1594,14 @@ tool(
       if (configured) {
         completeOnboardingMilestone("project_ready", {
           missing_count: 0,
+        });
+      }
+      // mode_chosen completes when the user explicitly picked a mode (mode.json
+      // exists) OR this is a legacy install already past setup (a ready product),
+      // so adding this step never regresses an already-onboarded box.
+      if (modeChosen() || configured) {
+        completeOnboardingMilestone("mode_chosen", {
+          source: modeChosen() ? "chosen" : "backfilled_legacy",
         });
       }
       return jsonContent({
@@ -2904,6 +2920,17 @@ function sapsStateDir(): string {
     process.env.SAPS_STATE_DIR ||
     path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
   );
+}
+
+// Has the user explicitly chosen an engagement mode? mode.json is written by the
+// engagement_mode tool (setup) and the menu-bar toggle. Used to complete the
+// mode_chosen onboarding milestone. (Source of truth: scripts/saps_mode.py.)
+function modeChosen(): boolean {
+  try {
+    return fs.existsSync(path.join(sapsStateDir(), "mode.json"));
+  } catch {
+    return false;
+  }
 }
 
 // ---- Cross-instance "posting active" flag ----------------------------------
