@@ -2023,13 +2023,24 @@ tool(
         console.error(`[queue_setup] could not pre-write ${spec.taskId} SKILL.md: ${e?.message || e}`);
       }
     }
+    // Pre-create the dedicated worker folder so the host can set it as each task's
+    // working directory at creation; this keeps the per-minute worker sessions out
+    // of the user's interactive `claude --resume` picker (see queueWorkerCwd()).
+    const workerFolder = queueWorkerCwd();
+    try {
+      fs.mkdirSync(workerFolder, { recursive: true });
+    } catch (e: any) {
+      console.error(`[queue_setup] could not create worker folder ${workerFolder}: ${e?.message || e}`);
+    }
     const tasks = QUEUE_WORKERS.map((spec) => ({
       taskId: spec.taskId,
       cronExpression: "* * * * *",
+      folder: workerFolder,
       prompt: queueWorkerBody(spec),
     }));
     return jsonContent({
       tasks,
+      worker_folder: workerFolder,
       next_step:
         "For EACH task, call the host tool create_scheduled_task (taskId, cronExpression, prompt " +
         "verbatim) to register its schedule — the prompt file is already written, so creating it just " +
@@ -2037,7 +2048,14 @@ tool(
         "schedule is registered and the prompt is current; do NOT delete/recreate, do NOT investigate, " +
         "just move on. Both fire every minute and only draft — they never post. The pipeline that feeds " +
         "them runs from a launchd job this server installs. Do NOT create the old " +
-        "'social-autoposter-autopilot' task; it is deprecated.",
+        "'social-autoposter-autopilot' task; it is deprecated. " +
+        "IMPORTANT — keep these once-a-minute runs OUT of the user's interactive session history: set " +
+        `EACH task's working folder to ${workerFolder} (it is already created). create_scheduled_task ` +
+        "has no folder argument, so do this host-side — in the Routines list open each task -> Edit -> " +
+        "Folder -> " + workerFolder + ". The tasks behave identically from there (the prompt uses " +
+        "absolute paths); this only moves their sessions into a separate bucket so `claude --resume` in " +
+        "the project folder is not flooded. If you cannot set the folder programmatically, tell the user " +
+        "to set it once via that Routines Edit form.",
     });
   }
 );
@@ -2153,6 +2171,28 @@ function scheduledTaskSkillPath(taskId: string): string {
 // (kickerEnv below) and what claude_job.py uses, so both ends meet on one path.
 function queueDir(): string {
   return path.join(sapsStateDir(), "claude-queue");
+}
+
+// Dedicated working directory the queue-worker scheduled tasks should RUN in.
+//
+// Claude Code/Desktop buckets every session under
+// ~/.claude/projects/<encoded-run-cwd>/, and the interactive resume/history
+// picker is scoped to the CURRENT folder's bucket by default. The two workers
+// fire every minute, so if they run in the user's project folder they flood that
+// folder's `claude --resume` picker with `<scheduled-task ...>` sessions
+// (~2,880/day, mostly empty no-ops). Pointing them at a dedicated folder the user
+// never opens interactively keeps those sessions in a SEPARATE bucket
+// (-Users-<user>--s4l-worker), leaving the project's picker clean. Safe because
+// the worker body uses absolute paths and the MCP + settings.json allow-rules are
+// global, not folder-scoped, so the run cwd is functionally irrelevant — only the
+// session bucketing changes. The "autopilot on" signal keys off the SKILL.md under
+// the config dir (scheduledTaskSkillPath), not the run folder, so it is unaffected.
+//
+// NOTE: the host tool create_scheduled_task exposes no `folder` param, so the run
+// folder is set host-side at creation (the onboarding session's folder) or via the
+// Routines UI -> Edit -> Folder. queue_setup surfaces this path + the instruction.
+function queueWorkerCwd(): string {
+  return path.join(process.env.HOME || os.homedir(), ".s4l-worker");
 }
 
 // A single worker task's SKILL.md. Bash-only: claim -> follow the job's own
@@ -3296,6 +3336,15 @@ async function main() {
   // All best-effort; none may block boot.
   ensureQueueWorkerPromptsCurrent();
   ensureQueueWorkerToolsAllowed();
+  // Pre-create the dedicated worker folder so a box that already has the tasks can
+  // be re-pointed at it (Routines -> Edit -> Folder) without the folder missing.
+  // Keeps the per-minute worker sessions out of the project's interactive
+  // `claude --resume` picker once the folder is set. Best-effort.
+  try {
+    fs.mkdirSync(queueWorkerCwd(), { recursive: true });
+  } catch (e: any) {
+    console.error(`[queue-worker] could not create worker folder: ${e?.message || e}`);
+  }
   void ensureQueueKickerInstalled()
     .then((r) => console.error(`[queue-worker] launchd kicker: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[queue-worker] kicker install failed:", e?.message || e));
