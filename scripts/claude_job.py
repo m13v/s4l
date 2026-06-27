@@ -523,6 +523,7 @@ def cmd_next(ns) -> int:
         print(json.dumps(payload))
         return 0
     print(json.dumps({}))  # no work
+    _maybe_self_reap()  # idle turn, no job claimed — safe to retire this session
     return 0
 
 
@@ -599,6 +600,7 @@ def cmd_result(ns) -> int:
             except OSError:
                 pass
         print(f"[claude_job] recorded error for job {job_id}", file=sys.stderr)
+        _maybe_self_reap()  # error recorded, turn done — safe to retire this session
         return 0
 
     try:
@@ -627,6 +629,7 @@ def cmd_result(ns) -> int:
         except OSError:
             pass
     print(f"[claude_job] stored result for job {job_id}", file=sys.stderr)
+    _maybe_self_reap()  # result delivered to disk — safe to retire this session
     return 0
 
 
