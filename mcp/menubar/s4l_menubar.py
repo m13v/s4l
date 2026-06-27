@@ -16,6 +16,7 @@ runtime install step). No .app bundle, so notifications go through osascript
 rather than rumps.notification (which needs a bundle id).
 """
 
+import glob
 import json
 import os
 import queue
