@@ -14,7 +14,15 @@ REPO_DIR="${SAPS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${SAPS_PYTHON:-python3}"
 
 OUT="$(mktemp -t saps_draft_publish.XXXXXX)"
-trap 'rm -f "$OUT"' EXIT
+# Clear the menu-bar activity signal on ANY exit so a crash/early-exit mid-cycle
+# never leaves a stuck "scanning/drafting" label. Best-effort; the || true keeps
+# the trap from changing the cycle's exit code.
+trap 'rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/saps_activity.py" clear 2>/dev/null || true' EXIT
+
+# Narrate the scan phase. The CDP scan runs inside the (locked) run-twitter-cycle.sh
+# which has no activity writer; this covers that window until the queue provider
+# flips the label to "finding threads"/"drafting replies" on its first claude call.
+"$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scanning X for threads" 2>/dev/null || true
 
 # Engagement mode (2026-06-26). The menu-bar toggle writes mode.json; this reads
 # it and, in personal_brand mode, exports SAPS_FORCE_PROJECT=<persona project> and
