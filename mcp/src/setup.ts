@@ -274,6 +274,141 @@ export function applySetup(input: ProjectInput): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Personal-brand PERSONA project (2026-06-26).
+//
+// The persona is a project the autopilot can draft for in personal_brand mode:
+// link-free organic engagement in the user's own voice (the revived 2026-02
+// flow). It is NOT a product, so it is deliberately kept OUT of the managed-
+// products scope list (no recordManagedProject) — that keeps it off the product-
+// readiness counts and the "all projects ready" gate. It is identified by
+// `persona: true`, runs with `enabled: false` (so the normal weighted pick never
+// touches it) and is force-selected via SAPS_FORCE_PROJECT only when the mode
+// toggle is on. Keep these defaults in lockstep with scripts/saps_mode.py and the
+// hand-authored PersonalBrand entry in config.json.
+export const PERSONA_DEFAULT_NAME = "PersonalBrand";
+
+const PERSONA_DEFAULTS: Record<string, unknown> = {
+  persona: true,
+  enabled: false,
+  weight: 10, // for the FUTURE personal/promo percentage blend; ignored while enabled:false
+  voice_relationship: "first_party",
+  description:
+    "The user's own personal brand. Not a product. Goal is pure organic " +
+    "engagement that grows the user's authority and following by adding genuine " +
+    "value to conversations they have real experience with. No company, no " +
+    "signup, no pitch.",
+  content_angle:
+    "Ground every reply in the user's actual first-hand experience. Only engage " +
+    "a thread when there is a concrete, specific angle from that lived " +
+    "experience; otherwise skip it.",
+  voice: {
+    tone:
+      "write like you're texting a coworker. lowercase is fine, sentence " +
+      "fragments are fine. first person and specific. reply to high-signal " +
+      "comments, not just OP. match the thread's energy and length (1-2 " +
+      "sentences is ideal).",
+    never: [
+      "self-promotion, links, or feature lists",
+      "mentioning a product or company unless it directly solves OP's problem",
+      "opening with 'Makes sense', 'The nuance here is', or 'What everyone here is describing'",
+      "sounding like a blog post, a thought-leader, or an AI",
+      "generic advice with no specific personal angle",
+      "em dashes or en dashes",
+    ],
+  },
+  content_guardrails: {
+    summary:
+      "This is personal-brand growth, not marketing. Follow a 60/30/10 mix: " +
+      "~60% humor (self-deprecating dev stories, funny bugs, relatable pain), " +
+      "~30% inspirational (cool technical wins, 'look what's possible'), ~10% " +
+      "light personal mention only when it genuinely fits. NEVER attach a link " +
+      "or a CTA. NEVER list features or name a product to sell it. Only reply " +
+      "when the user has a real, specific angle from their own work; if the " +
+      "thread doesn't connect to something they've actually done, skip it. Be a " +
+      "value-adding peer, not a promoter.",
+  },
+  search_topics: [
+    "AI agents",
+    "Claude Code",
+    "coding agents",
+    "AI coding tools",
+    "LLM developer workflow",
+    "prompt engineering",
+    "MCP servers",
+    "macOS automation",
+    "browser automation",
+    "desktop app development",
+    "building in public",
+    "indie hacking",
+    "shipping solo",
+    "API costs",
+    "developer productivity",
+  ],
+};
+
+export interface PersonaGrounding {
+  description?: string;
+  content_angle?: string;
+  voice?: unknown;
+  search_topics?: string[] | string;
+}
+
+// The persona project entry (the one with persona:true), or null if none yet.
+export function findPersonaProject(): { name: string } | null {
+  try {
+    const proj = (readConfig().projects || []).find((p) => p.persona === true);
+    return proj ? { name: String(proj.name) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Create the persona project if it doesn't exist; otherwise merge ONLY the
+// supplied grounding fields (from the profile scan) onto the existing entry,
+// never touching persona/enabled/weight. Writes config.json (backup + full
+// rewrite, same as applySetup). Deliberately does NOT recordManagedProject.
+export function ensurePersonaProject(
+  grounding?: PersonaGrounding
+): { name: string; created: boolean } {
+  const cfg = readConfig();
+  cfg.projects = cfg.projects || [];
+
+  const g: Record<string, unknown> = {};
+  if (grounding) {
+    if (grounding.description && String(grounding.description).trim())
+      g.description = grounding.description;
+    if (grounding.content_angle && String(grounding.content_angle).trim())
+      g.content_angle = grounding.content_angle;
+    if (grounding.voice && typeof grounding.voice === "object")
+      g.voice = grounding.voice;
+    const topics = normalizeTopics(grounding.search_topics);
+    if (topics && topics.length) g.search_topics = topics;
+  }
+
+  const existing = cfg.projects.find((p) => p.persona === true);
+  let name: string;
+  let created: boolean;
+  if (existing) {
+    Object.assign(existing, g); // merge only provided grounding; keep persona flags
+    name = String(existing.name);
+    created = false;
+  } else {
+    cfg.projects.push({ name: PERSONA_DEFAULT_NAME, ...PERSONA_DEFAULTS, ...g });
+    name = PERSONA_DEFAULT_NAME;
+    created = true;
+  }
+
+  const cfgPath = configPath();
+  if (fs.existsSync(cfgPath)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.copyFileSync(cfgPath, `${cfgPath}.bak-${stamp}`);
+  }
+  fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  return { name, created };
+}
+
 // Heal installs that onboarded BEFORE short_links_live defaulted to false.
 // Such a project has neither short_links_host nor an explicit short_links_live,
 // so the wrapper host resolves to project.website — but the customer never
