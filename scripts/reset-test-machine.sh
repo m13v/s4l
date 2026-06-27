@@ -282,6 +282,36 @@ else
 fi
 echo
 
+# ---- 1e. scheduled-task session transcripts (autopilot run history) --------
+# Each autopilot fire writes a Claude Code session transcript under
+# ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl. Those are what flood the
+# interactive `claude --resume` / history picker. Step [1c] removes the TASKS but
+# NOT their accumulated run transcripts. Clear only OUR automated runs, identified
+# by the injected <scheduled-task name="saps-…"/"social-autoposter…"> marker in
+# the first user message — never the user's interactive sessions. Only reads the
+# head of each .jsonl (the marker is in the opening message) and is scoped to
+# *.jsonl files, so it can't block on a stray FIFO.
+echo "[1e] scheduled-task session transcripts (autopilot run history)"
+PROJDIR="$HOME_DIR/.claude/projects"
+if [ -d "$PROJDIR" ]; then
+  found=0
+  while IFS= read -r jf; do
+    [ -n "$jf" ] || continue
+    if head -c 8000 "$jf" 2>/dev/null | grep -qE 'scheduled-task name=\\"(saps-|social-autoposter)'; then
+      found=$((found+1))
+      [ "$DRY" -eq 0 ] && rm -f "$jf"
+    fi
+  done < <(find "$PROJDIR" -type f -name '*.jsonl' 2>/dev/null)
+  if [ "$DRY" -eq 1 ]; then
+    echo "  would remove $found scheduled-task transcript(s) under $PROJDIR"
+  else
+    echo "  removed $found scheduled-task transcript(s)"
+  fi
+else
+  echo "  (~/.claude/projects not present)"
+fi
+echo
+
 # ---- 2. global npm library -------------------------------------------------
 echo "[2] global npm library"
 if command -v npm >/dev/null 2>&1; then
