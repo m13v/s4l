@@ -2215,6 +2215,9 @@ tool(
     const workerFolder = queueWorkerCwd();
     try {
       fs.mkdirSync(workerFolder, { recursive: true });
+      // Trust it now, before the routines point at it — otherwise the first
+      // unattended fire stalls at Claude's per-folder checkTrust on a headless box.
+      ensureWorkerFolderTrusted();
     } catch (e: any) {
       console.error(`[queue_setup] could not create worker folder ${workerFolder}: ${e?.message || e}`);
     }
@@ -2553,6 +2556,62 @@ function ensureQueueWorkerToolsAllowed(): void {
   const added = mergeSettingsAllow(queueWorkerAllowedTools());
   if (added > 0) {
     console.error(`[queue-worker] pre-approved ${added} tool rule(s) in settings.json (allow-only)`);
+  }
+}
+
+// Mark the dedicated worker folder as trusted in ~/.claude.json so the unattended
+// scheduled-task sessions can actually START there. Claude Code/Desktop gates every
+// session behind a per-folder trust check (hasTrustDialogAccepted). A brand-new
+// folder like ~/.s4l-worker has no project entry, so on a headless box the worker
+// session stalls at checkTrust forever — there is no human to click "trust the files
+// in this folder" — and the queue never drains. We create the folder ourselves
+// (boot + queue_setup), so we own trusting it too. Without this, repointing the two
+// routines at the dedicated folder silently wedges the WHOLE pipeline: seen 2026-06-26
+// when a box's worker cwd switched to ~/.s4l-worker and every worker session died at
+// checkTrust (Starting/Mapping never logged), producing 0 drafts for hours. Idempotent
+// and atomic; never throws. (The already-trusted onboarding project folder works
+// because the setup session triggered the trust dialog there once.)
+function ensureWorkerFolderTrusted(): void {
+  try {
+    const home = process.env.HOME || os.homedir();
+    const cfgPath = path.join(home, ".claude.json");
+    if (!fs.existsSync(cfgPath)) return; // Claude Code not initialised yet; nothing to merge into
+    let cfg: any;
+    try {
+      cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+    } catch (e: any) {
+      console.error(`[queue-worker] ~/.claude.json unparseable; skip trust: ${e?.message || e}`);
+      return;
+    }
+    if (typeof cfg !== "object" || Array.isArray(cfg) || cfg === null) return;
+    const projects = (cfg.projects ??= {});
+    if (typeof projects !== "object" || Array.isArray(projects)) return;
+    const folder = queueWorkerCwd();
+    const existing = projects[folder];
+    if (existing && existing.hasTrustDialogAccepted === true) return; // already trusted; no write
+    // Preserve any fields a prior interactive open wrote; only force the trust flag.
+    const entry =
+      existing && typeof existing === "object" && !Array.isArray(existing)
+        ? { ...existing }
+        : {
+            allowedTools: [],
+            disabledMcpjsonServers: [],
+            enabledMcpjsonServers: [],
+            hasClaudeMdExternalIncludesApproved: false,
+            hasClaudeMdExternalIncludesWarningShown: false,
+            mcpContextUris: [],
+            projectOnboardingSeenCount: 0,
+          };
+    entry.hasTrustDialogAccepted = true;
+    projects[folder] = entry;
+    // Atomic write: ~/.claude.json is large and read by every CLI session; a torn
+    // write would brick Claude Code. Stage a temp sibling, then rename over it.
+    const tmp = `${cfgPath}.s4l-trust.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    fs.renameSync(tmp, cfgPath);
+    console.error(`[queue-worker] trusted worker folder in ~/.claude.json: ${folder}`);
+  } catch (e: any) {
+    console.error(`[queue-worker] ensureWorkerFolderTrusted error: ${e?.message || e}`);
   }
 }
 
@@ -3583,6 +3642,9 @@ async function main() {
   // `claude --resume` picker once the folder is set. Best-effort.
   try {
     fs.mkdirSync(queueWorkerCwd(), { recursive: true });
+    // Trust the folder too — without this the per-minute worker sessions stall at
+    // Claude's per-folder checkTrust on a headless box and never drain the queue.
+    ensureWorkerFolderTrusted();
   } catch (e: any) {
     console.error(`[queue-worker] could not create worker folder: ${e?.message || e}`);
   }
