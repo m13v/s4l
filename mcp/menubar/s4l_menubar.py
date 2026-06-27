@@ -389,6 +389,12 @@ class S4LMenuBar(rumps.App):
             time.sleep(2)
             subprocess.run(["killall", "-9", "Claude"], capture_output=True)
             time.sleep(1)
+            # Claude is fully down now — relocate the autopilot scheduled tasks'
+            # cwd so their once-a-minute runs stop flooding the user's interactive
+            # `claude --resume` history. MUST happen while Claude is down (it caches
+            # the registry in memory and clobbers live edits). See queueWorkerCwd()
+            # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
+            self._rewrite_scheduled_task_cwd()
             subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
             self._update_available = False
             self._sig = None
@@ -401,6 +407,44 @@ class S4LMenuBar(rumps.App):
                 shutil.rmtree(tmpd, ignore_errors=True)
             except Exception:
                 pass
+
+    def _rewrite_scheduled_task_cwd(self):
+        """Point the autopilot scheduled tasks' working dir at ~/.s4l-worker so
+        their once-a-minute runs don't pollute the user's interactive Claude Code
+        session history (Claude buckets sessions by cwd). Caller MUST invoke this
+        only while Claude is down — the running app caches the scheduled-tasks
+        registry in memory and clobbers a live edit on the next fire. Best-effort:
+        never raises. Kept in sync with scripts/s4l_box_update.sh and
+        queueWorkerCwd() in mcp/src/index.ts."""
+        try:
+            home = os.path.expanduser("~")
+            worker = os.path.join(home, ".s4l-worker")
+            os.makedirs(worker, exist_ok=True)
+            ids = {"saps-phase1-query", "saps-phase2b-draft", "social-autoposter-autopilot"}
+            pat = os.path.join(home, "Library/Application Support/Claude",
+                               "claude-code-sessions", "*", "*", "scheduled-tasks.json")
+            for f in glob.glob(pat):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                dirty = False
+                for t in d.get("scheduledTasks", []):
+                    if t.get("id") in ids and t.get("cwd") != worker:
+                        t["cwd"] = worker
+                        dirty = True
+                if not dirty:
+                    continue
+                try:
+                    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(d, fh, indent=2)
+                    os.replace(tmp, f)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _open_dashboard(self, _=None):
         url = st.panel_url()
