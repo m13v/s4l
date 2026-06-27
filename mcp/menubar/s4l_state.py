@@ -438,6 +438,53 @@ def _write_approved_queue(d):
         pass
 
 
+# ---- Engagement mode (2026-06-26) -----------------------------------------
+# The menu-bar toggle flips between "promotion" (default product-marketing
+# pipeline) and "personal_brand" (link-free organic engagement for the user's
+# own brand). State is ONE file the cycle wrapper also reads via
+# scripts/saps_mode.py; keep the filename + shape in lockstep with it.
+MODE_FILE = "mode.json"
+MODE_PROMOTION = "promotion"
+MODE_PERSONAL_BRAND = "personal_brand"
+_VALID_MODES = (MODE_PROMOTION, MODE_PERSONAL_BRAND)
+
+
+def read_mode():
+    """Current engagement mode, defaulting to promotion (prior behavior)."""
+    d = read_json(MODE_FILE)
+    if isinstance(d, dict):
+        m = str(d.get("mode") or "").strip()
+        if m in _VALID_MODES:
+            return m
+    return MODE_PROMOTION
+
+
+def write_mode(mode):
+    """Persist the mode atomically. Returns the written mode, or the current one
+    on an invalid value (never raises — a menu click must not crash the app)."""
+    if mode not in _VALID_MODES:
+        return read_mode()
+    try:
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"mode": mode}))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return mode
+
+
+def toggle_mode():
+    """Flip to the other mode and return the new value."""
+    new = (
+        MODE_PROMOTION
+        if read_mode() == MODE_PERSONAL_BRAND
+        else MODE_PERSONAL_BRAND
+    )
+    return write_mode(new)
+
+
 def approved_queue_add(batch, n, text="", edited=False, candidate_url="", drop_link=False):
     """Record an approval the INSTANT the user clicks, before any posting. Dedups
     on (batch, n): re-approving a card that's still queued/posting/posted is a
