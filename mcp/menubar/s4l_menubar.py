@@ -82,6 +82,19 @@ import s4l_state as st  # noqa: E402
 CLAUDE_APP = "Claude"
 POLL_SECONDS = 5
 
+# Autopilot scheduled tasks. The two queue workers must RUN in a dedicated folder
+# (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
+# interactive Claude Code history (Claude buckets sessions by cwd). The single
+# pre-queue autopilot task is deprecated and removed outright. Keep this in sync
+# with queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts and scripts/s4l_box_update.sh.
+WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
+WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
+SCHED_REGISTRY_GLOB = os.path.join(
+    os.path.expanduser("~"), "Library", "Application Support", "Claude",
+    "claude-code-sessions", "*", "*", "scheduled-tasks.json",
+)
+
 GLYPH = {"complete": "✓", "in_progress": "…", "blocked": "✗"}
 
 # Menu-bar title spinner shown while a post is in flight.
@@ -206,6 +219,16 @@ class S4LMenuBar(rumps.App):
         self._upd_timer = rumps.Timer(self._check_update, 60)  # every 1 min
         self._upd_timer.start()
         self._check_update(None)
+        # One-shot self-heal: if the autopilot scheduled tasks are running in the
+        # wrong folder (or the deprecated single autopilot task still exists),
+        # relocate them to ~/.s4l-worker so their once-a-minute runs stop polluting
+        # the user's interactive Claude Code history. Needs a single Claude restart
+        # (the app caches the registry in memory), so it is capped per process.
+        self._relocating = False
+        self._cwd_healed = False
+        self._relocate_attempts = 0
+        self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
+        self._reloc_timer.start()
         self._tick(None)
 
     # ---- side effects -----------------------------------------------------
@@ -409,34 +432,60 @@ class S4LMenuBar(rumps.App):
             except Exception:
                 pass
 
-    def _rewrite_scheduled_task_cwd(self):
-        """Point the autopilot scheduled tasks' working dir at ~/.s4l-worker so
-        their once-a-minute runs don't pollute the user's interactive Claude Code
-        session history (Claude buckets sessions by cwd). Caller MUST invoke this
-        only while Claude is down — the running app caches the scheduled-tasks
-        registry in memory and clobbers a live edit on the next fire. Best-effort:
-        never raises. Kept in sync with scripts/s4l_box_update.sh and
-        queueWorkerCwd() in mcp/src/index.ts."""
+    @staticmethod
+    def _scheduled_task_cwd_needs_fix():
+        """Read-only: True if any worker task runs in the wrong folder OR the
+        deprecated autopilot task still exists. Drives the one-shot self-heal."""
         try:
-            home = os.path.expanduser("~")
-            worker = os.path.join(home, ".s4l-worker")
-            os.makedirs(worker, exist_ok=True)
-            ids = {"saps-phase1-query", "saps-phase2b-draft", "social-autoposter-autopilot"}
-            pat = os.path.join(home, "Library/Application Support/Claude",
-                               "claude-code-sessions", "*", "*", "scheduled-tasks.json")
-            for f in glob.glob(pat):
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
                 try:
                     with open(f) as fh:
                         d = json.load(fh)
                 except Exception:
                     continue
-                dirty = False
                 for t in d.get("scheduledTasks", []):
-                    if t.get("id") in ids and t.get("cwd") != worker:
-                        t["cwd"] = worker
+                    tid = t.get("id")
+                    if tid in DEPRECATED_TASK_IDS:
+                        return True
+                    if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _rewrite_scheduled_task_cwd(self):
+        """Point the queue-worker tasks' cwd at ~/.s4l-worker and REMOVE the
+        deprecated single autopilot task, across every scheduled-tasks.json
+        registry. Caller MUST invoke this only while Claude is DOWN — the running
+        app caches the registry in memory and clobbers a live edit on the next
+        fire. Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
+        and queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts."""
+        try:
+            os.makedirs(WORKER_CWD, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                tasks = d.get("scheduledTasks") or []
+                new_tasks = []
+                dirty = False
+                for t in tasks:
+                    tid = t.get("id")
+                    if tid in DEPRECATED_TASK_IDS:
+                        dirty = True          # drop it
+                        continue
+                    if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
+                        t["cwd"] = WORKER_CWD
                         dirty = True
+                    new_tasks.append(t)
                 if not dirty:
                     continue
+                d["scheduledTasks"] = new_tasks
                 try:
                     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
                     with os.fdopen(fd, "w") as fh:
@@ -446,6 +495,54 @@ class S4LMenuBar(rumps.App):
                     pass
         except Exception:
             pass
+        # Remove the deprecated task's on-disk SKILL.md dir too, so it can't be
+        # re-registered from a stale prompt file.
+        try:
+            for tid in DEPRECATED_TASK_IDS:
+                import shutil
+                shutil.rmtree(os.path.join(os.path.expanduser("~"), ".claude",
+                                           "scheduled-tasks", tid), ignore_errors=True)
+        except Exception:
+            pass
+
+    def _maybe_relocate_tasks(self, _=None):
+        """Timer callback: one-shot self-heal. If the autopilot tasks are in the
+        wrong folder (or the deprecated task lingers), relocate them once, which
+        needs a single Claude restart (the app caches the registry). Capped at a
+        couple of attempts per process so a persistent failure can't restart-loop."""
+        if self._relocating or self._cwd_healed or self._relocate_attempts >= 2:
+            return
+        try:
+            if not self._scheduled_task_cwd_needs_fix():
+                return
+            self._relocating = True
+            self._relocate_attempts += 1
+            self._notify("S4L", "Tidying autopilot… Claude will restart once.")
+            threading.Thread(target=self._relocate_restart_work, daemon=True).start()
+        except Exception:
+            self._relocating = False
+
+    def _relocate_restart_work(self):
+        """Restart Claude with the tasks relocated. Mirror of _mcpb_update_work's
+        restart block: quit/kill Claude, rewrite the registry while it's down, then
+        relaunch. The menu bar is a separate launchd process, so killing Claude does
+        not kill us."""
+        try:
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           capture_output=True, timeout=20)
+            time.sleep(4)
+            subprocess.run(["killall", "Claude"], capture_output=True)
+            time.sleep(2)
+            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
+            time.sleep(1)
+            self._rewrite_scheduled_task_cwd()
+            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            if not self._scheduled_task_cwd_needs_fix():
+                self._cwd_healed = True
+        except Exception:
+            pass
+        finally:
+            self._relocating = False
 
     def _open_dashboard(self, _=None):
         url = st.panel_url()
