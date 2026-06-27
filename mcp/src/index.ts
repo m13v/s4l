@@ -122,6 +122,21 @@ const REAPER_PLIST = path.join(
   `${REAPER_LABEL}.plist`
 );
 
+// Periodic host-resource sampler. Appends one redacted memory/process snapshot
+// per minute to skill/logs/memory-snapshots.jsonl (rotated) so we have local
+// history when SSHing into a box, and so the heartbeat's --summary path has a
+// warm picture. The plist is fully templated (repoDir/$HOME/resolvePython), so
+// unlike the legacy dev-box plist in launchd/ it runs anywhere. Cheap +
+// short-lived (one ps/vm_stat pass, then exits).
+const MEMORY_SNAPSHOT_LABEL = "com.m13v.social-memory-snapshot";
+const MEMORY_SNAPSHOT_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${MEMORY_SNAPSHOT_LABEL}.plist`
+);
+const MEMORY_SNAPSHOT_INTERVAL_SECS = 60;
+
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
 // install keeps itself current — the interactive `runtime` tool (action:'update')
 // only helps when
@@ -2496,6 +2511,50 @@ async function ensureClaudeReaperInstalled(): Promise<{ ok: boolean; detail: str
   }
 }
 
+async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if (process.env.SAPS_MEMORY_SNAPSHOT === "0") return { ok: false, detail: "disabled (SAPS_MEMORY_SNAPSHOT=0)" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: MEMORY_SNAPSHOT_LABEL,
+      programArgs: ["/bin/bash", path.join(repoDir(), "skill", "memory-snapshot.sh")],
+      intervalSecs: MEMORY_SNAPSHOT_INTERVAL_SECS,
+      runAtLoad: true,
+      stdoutLog: path.join(logDir, "launchd-memory-snapshot-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-memory-snapshot-stderr.log"),
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(MEMORY_SNAPSHOT_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(MEMORY_SNAPSHOT_LABEL, MEMORY_SNAPSHOT_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(MEMORY_SNAPSHOT_LABEL, MEMORY_SNAPSHOT_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(MEMORY_SNAPSHOT_PLIST), { recursive: true });
+      fs.writeFileSync(MEMORY_SNAPSHOT_PLIST, xml, "utf-8");
+      const res = await loadPlist(MEMORY_SNAPSHOT_LABEL, MEMORY_SNAPSHOT_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
@@ -3355,6 +3414,12 @@ async function main() {
   void ensureClaudeReaperInstalled()
     .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
+  // Periodic host-resource sampler (memory/process snapshot -> local JSONL). Gives
+  // us per-box resource history to diagnose RAM blowups (e.g. the agent-mode
+  // session leak). Best-effort; never blocks boot. Disable with SAPS_MEMORY_SNAPSHOT=0.
+  void ensureMemorySnapshotInstalled()
+    .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
