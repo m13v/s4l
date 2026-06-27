@@ -16,6 +16,19 @@ PY="${SAPS_PYTHON:-python3}"
 OUT="$(mktemp -t saps_draft_publish.XXXXXX)"
 trap 'rm -f "$OUT"' EXIT
 
+# Engagement mode (2026-06-26). The menu-bar toggle writes mode.json; this reads
+# it and, in personal_brand mode, exports SAPS_FORCE_PROJECT=<persona project> and
+# TWITTER_TAIL_LINK_RATE=0 so the (locked) cycle below drafts link-free organic
+# replies for the persona instead of the normal weighted product pick. In the
+# default promotion mode it exports nothing and the cycle runs exactly as before.
+# Read at cycle runtime (NOT baked into the plist) so flipping the toggle takes
+# effect on the very next cycle with no launchd reload. Best-effort: any failure
+# leaves the env untouched and the promotion pipeline runs.
+eval "$("$PY" "$REPO_DIR/scripts/saps_mode.py" env 2>/dev/null || true)"
+if [ -n "${SAPS_FORCE_PROJECT:-}" ]; then
+    echo "[run-draft-and-publish] personal_brand mode: forcing project '$SAPS_FORCE_PROJECT' (link-free)" >&2
+fi
+
 # Run the cycle; tee stdout so we can scan it for the DRAFT_ONLY_PLAN marker.
 # Phase 2b blocks on the queue until the worker drafts it, so this can take a
 # few minutes — that is expected.
