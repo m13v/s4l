@@ -438,21 +438,25 @@ def _write_approved_queue(d):
         pass
 
 
-def approved_queue_add(batch, n, text="", edited=False, candidate_url=""):
+def approved_queue_add(batch, n, text="", edited=False, candidate_url="", drop_link=False):
     """Record an approval the INSTANT the user clicks, before any posting. Dedups
     on (batch, n): re-approving a card that's still queued/posting/posted is a
-    no-op; a previously FAILED card is reset to queued so it retries."""
+    no-op; a previously FAILED card is reset to queued so it retries.
+
+    drop_link carries the user's "I deleted the link while editing" intent so a
+    restart-resumed post honors it too (else the poster re-appends the link)."""
     with _approved_lock:
         d = read_approved_queue()
         for it in d["items"]:
             if it.get("batch") == batch and it.get("n") == n:
                 if it.get("status") == "failed":
                     it.update(status="queued", text=text, edited=bool(edited),
-                              error=None, ts=time_iso())
+                              drop_link=bool(drop_link), error=None, ts=time_iso())
                     _write_approved_queue(d)
                 return
         d["items"].append({
             "batch": batch, "n": n, "text": text, "edited": bool(edited),
+            "drop_link": bool(drop_link),
             "candidate_url": candidate_url, "status": "queued",
             "error": None, "ts": time_iso(),
         })
@@ -489,12 +493,14 @@ def approved_queue_active_ns(batch):
             if it.get("batch") == batch and it.get("status") in ("queued", "posting", "posted")}
 
 
-def post_drafts(batch_id, post=None, edits=None, reject=None, timeout=900, activity_label=None):
+def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
     """Post / reject drafts via the loopback tool. `post` = 1-based numbers to post
     as-is; `edits` = [{n, text}] to rewrite then post; `reject` = numbers to mark
-    DONE so they're never shown for review again (not posted). Returns the parsed
-    result, or None if the loopback is unreachable (Claude Desktop closed)."""
-    args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or []}
+    DONE so they're never shown for review again (not posted); `clear_link` =
+    numbers whose link the user removed while editing, so the poster clears
+    link_url and does NOT re-append it. Returns the parsed result, or None if the
+    loopback is unreachable (Claude Desktop closed)."""
+    args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or [], "clear_link": clear_link or []}
     if activity_label:
         args["__saps_activity_label"] = activity_label
     return loopback_tool("post_drafts", args, timeout=timeout)
