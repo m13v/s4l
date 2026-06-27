@@ -103,7 +103,21 @@ VALUE_FLAGS = {
 }
 
 POLL_INTERVAL_S = 2.0
-DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "600"))
+# Per-call budget the producer waits for ONE claude job (a query or a draft-prep
+# reasoning turn). Was 600s, which sat right at the edge of the draft call's real
+# ~9-10 min need: on the QA box ~41% of twitter-prep jobs breached 600s and got
+# dropped (each drop = a lost draft AND an orphaned over-running worker that
+# becomes a leaked agent-mode session). The DIRECT launchd `claude -p` lane has no
+# such per-call cap — its draft call just runs inside the 180-min cycle watchdog —
+# so 600s here made the queue lane diverge and silently fail where the direct lane
+# would not. 1800s (30 min) = 3x the real draft need, matching the sibling Twitter
+# engagement claude cap (engage-twitter Phase B gtimeout 1800), which removes the
+# drops while staying a bounded per-call value (not the whole-cycle budget).
+# COUPLING: reap_stale_claude_sessions.py reaps leaked workers at 2x THIS value and
+# MUST stay >= it (a lower reaper would SIGKILL a draft the producer is still
+# waiting on). Both read SAPS_CLAUDE_QUEUE_TIMEOUT and both default to 1800 — keep
+# the two defaults in lockstep if you change either.
+DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
 # Jobs older than this (pending or running) are swept — a job nobody drained in
 # this long is a leftover from a timed-out producer or a dead worker, and keeping
 # it would feed a stale prompt to a worker much later. Default 2x the timeout.
