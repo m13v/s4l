@@ -89,6 +89,32 @@ def _consecutive_timeouts() -> int:
         return 0
 
 
+def _recent_rate_limit(window: int = 1200) -> bool:
+    """True if a worker run in the last `window` seconds hit the Claude weekly/usage
+    limit. That stall is EXPECTED and auto-resets, so it must NOT page Sentry —
+    paging would be pure noise. Reads the ~/.s4l-worker transcript bucket."""
+    try:
+        now = time.time()
+        files = glob.glob(
+            os.path.expanduser("~/.claude/projects/*s4l-worker*/*.jsonl")
+        )
+        recent = sorted(
+            (f for f in files if (now - os.path.getmtime(f)) <= window),
+            key=os.path.getmtime,
+            reverse=True,
+        )[:5]
+        for f in recent:
+            try:
+                low = open(f).read().lower()
+            except Exception:
+                continue
+            if "weekly limit" in low or "usage limit" in low or "hit your limit" in low:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _oldest_pending_age() -> float | None:
     """Seconds since the oldest unclaimed pending draft job was written, or None
     if nothing is pending (idle queue). The FAST signal: catches a fresh stall
@@ -149,6 +175,11 @@ def main() -> int:
     stalled = _autopilot_configured() and (
         timeouts >= 1 or (age is not None and age > STALL_SECONDS)
     )
+    # A rate-limit stall is expected and self-heals at the quota reset — never page
+    # for it (and re-arm can't fix it). Treat it as "not an actionable stall" so the
+    # episode resets and a LATER real stall (orphaned routines) still alerts.
+    if stalled and _recent_rate_limit():
+        stalled = False
 
     st = _read_state()
     consecutive = int(st.get("consecutive", 0))
