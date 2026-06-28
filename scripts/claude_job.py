@@ -161,6 +161,28 @@ def result_dir() -> str:
     return os.path.join(queue_root(), "result")
 
 
+def heartbeat_path() -> str:
+    """Single file the worker stamps each time it claims or completes a job. Its
+    mtime/contents prove the scheduled-task worker is actually draining the queue
+    (vs. the SKILL.md merely existing on disk, which survives a Claude account
+    switch and gave a false-green). Read by the MCP's autopilot liveness check and
+    the stall detector. Empty-queue ("no jobs") fires deliberately do NOT stamp it
+    — we want "is a job getting DRAINED", not "did a worker tick"."""
+    return os.path.join(queue_root(), "worker-heartbeat.json")
+
+
+def _stamp_heartbeat(event: str, qtype: str | None = None) -> None:
+    """Best-effort: never let a heartbeat write failure break the queue."""
+    try:
+        os.makedirs(queue_root(), exist_ok=True)
+        _atomic_write(
+            heartbeat_path(),
+            {"at": time.time(), "event": event, "type": qtype or ""},
+        )
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Opt-in worker self-reap (2026-06-27)                                         #
 # --------------------------------------------------------------------------- #
@@ -524,6 +546,9 @@ def cmd_next(ns) -> int:
         # is the lane that actually runs the LLM; it persists until cmd_result
         # clears it (or the kicker's exit trap does). Covers the box's autopilot.
         _act_write(job.get("type") or qtype)
+        # Liveness pulse: a routine actually claimed a job. Proves the worker is
+        # firing, not just that its SKILL.md exists (see heartbeat_path()).
+        _stamp_heartbeat("claim", job.get("type") or qtype)
         # Hand the consumer exactly what it needs to do the work and report back.
         payload = {"job_id": job["job_id"], "type": job["type"]}
         if ns.prompt_file:
@@ -572,6 +597,9 @@ def cmd_result(ns) -> int:
     # label so nothing lingers. The provider's next enqueue re-asserts the right
     # label for the cycle's following claude call, if any.
     _act_clear()
+    # Liveness pulse: a routine completed a drain. Keeps the heartbeat fresh
+    # across the whole claim->result span the worker was alive.
+    _stamp_heartbeat("result")
     job_id = ns.job
     # Read the produced result (JSON object) from a file or stdin.
     if ns.result_file and ns.result_file != "-":
