@@ -246,6 +246,10 @@ class S4LMenuBar(rumps.App):
         # Cached stall flag (set each _tick) so the 1s activity poll can suppress a
         # stale "drafting" spinner that would otherwise mask the ⚠ in the title.
         self._stalled = False
+        # Cached (kind, detail) explaining a stall so the menu offers the right
+        # action: 'orphaned' -> Re-arm, 'rate_limited' -> wait/switch (no Re-arm),
+        # 'failing' -> generic. Recomputed each tick while stalled.
+        self._stall_reason_info = ("", "")
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
         self._tick(None)
@@ -528,6 +532,57 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         return False
+
+    def _recent_worker_outcome(self, window=600):
+        """Inspect worker transcripts written in the last `window` seconds (the
+        ~/.s4l-worker bucket). Returns (ran, rate_limit_msg):
+          ran           — a routine actually EXECUTED recently (a worker that runs
+                          leaves a transcript; an orphaned/not-firing account leaves
+                          none). This is what tells "routines fire but fail" apart
+                          from "routines gone".
+          rate_limit_msg— set when a recent run hit the Claude weekly/usage limit
+                          (re-arm cannot fix that); carries a short 'resets …' string.
+        Account-agnostic on purpose: it keys off actual execution, not a per-account
+        lastRunAt that freezes (and lies) after an account switch."""
+        ran = False
+        limit_msg = None
+        try:
+            now = time.time()
+            files = glob.glob(
+                os.path.expanduser("~/.claude/projects/*s4l-worker*/*.jsonl")
+            )
+            recent = [f for f in files if (now - os.path.getmtime(f)) <= window]
+            recent.sort(key=os.path.getmtime, reverse=True)
+            if recent:
+                ran = True
+            for f in recent[:5]:
+                try:
+                    txt = open(f).read()
+                except Exception:
+                    continue
+                low = txt.lower()
+                if "weekly limit" in low or "usage limit" in low or "hit your limit" in low:
+                    import re
+                    m = re.search(r"resets [^\"\\]{0,40}", txt)
+                    limit_msg = m.group(0).strip().rstrip(".") if m else "Claude usage limit reached"
+                    break
+        except Exception:
+            pass
+        return ran, limit_msg
+
+    def _stall_reason(self):
+        """Why drafts aren't draining, so the menu offers the RIGHT action:
+          ('orphaned', '')        routines aren't firing -> Re-arm fixes it.
+          ('rate_limited', msg)   routines fire but the account hit its Claude
+                                  limit -> Re-arm is useless; wait/switch account.
+          ('failing', '')         routines fire but drafts fail for another reason.
+        Only meaningful when _autopilot_stalled() is True."""
+        ran, limit_msg = self._recent_worker_outcome()
+        if limit_msg:
+            return ("rate_limited", limit_msg)
+        if not ran:
+            return ("orphaned", "")
+        return ("failing", "")
 
     def _toggle_mode(self, _=None):
         """Flip personal-brand <-> promotion. Pure local state write (no model,
@@ -1018,6 +1073,11 @@ class S4LMenuBar(rumps.App):
         # which would otherwise own the title and hide the ⚠. _poll_activity reads
         # this to drop that stale spinner.
         self._stalled = stalled
+        # When stalled, work out WHY so the menu (and this notification) offer the
+        # right action — re-arm only helps when routines aren't firing, not when
+        # they fire but hit the Claude usage limit. Only computed while stalled
+        # (it reads worker transcripts), and cached for _build_menu.
+        self._stall_reason_info = self._stall_reason() if stalled else ("", "")
 
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
         if not busy:
@@ -1030,14 +1090,27 @@ class S4LMenuBar(rumps.App):
                 blocker.get("message", "Setup is blocked"),
             )
         self._last_blocker_code = blocker_code
-        # Notify once on the transition into a stall, with the one action that fixes
-        # it. Re-arms are user-driven (composer), so we don't spam every tick.
+        # Notify once on the transition into a stall, with the cause-specific action.
         if stalled and not self._stall_notified:
-            self._notify(
-                "S4L autopilot not running",
-                "No drafts are being generated (routines missing — did Claude's "
-                "account change?). Open the S4L menu and click “Re-arm autopilot”.",
-            )
+            kind, detail = self._stall_reason_info
+            if kind == "rate_limited":
+                self._notify(
+                    "S4L autopilot paused",
+                    "Claude usage limit reached" + (f" ({detail})" if detail else "")
+                    + ". Drafting resumes when the limit resets, or sign into a "
+                    "Claude account with quota.",
+                )
+            elif kind == "orphaned":
+                self._notify(
+                    "S4L autopilot not running",
+                    "The draft routines aren't running (did Claude's account "
+                    "change?). Open the S4L menu and click “Re-arm autopilot”.",
+                )
+            else:
+                self._notify(
+                    "S4L autopilot stalled",
+                    "Drafts aren't being produced. Open the S4L menu for options.",
+                )
             self._stall_notified = True
         elif not stalled:
             self._stall_notified = False
