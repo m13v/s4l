@@ -112,12 +112,19 @@ SETUP_PROMPT = (
 )
 DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
 UPDATE_PROMPT = "Update social-autoposter to the latest version."
-# NOTE: re-arm does NOT drive the Claude UI. Pasting a prompt to make the agent
-# call create_scheduled_task proved unreliable (keystroke automation into Electron
-# races focus/timing even with Accessibility granted). Instead, re-arm writes the
-# two worker routines straight into the host's scheduled-tasks.json registry during
-# a Claude restart (the same down-window mechanism the cwd-rewrite already uses) —
-# deterministic, no Accessibility, works headless. See _rearm_work().
+# Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
+# uses) — it registers the routines under whatever account is logged in and shows
+# up in Routines. The host tool only runs inside an agent chat, so the menu bar
+# hands Claude this prompt (auto-typed, clipboard+paste fallback). We do NOT write
+# scheduled-tasks.json directly — that can't reliably target a just-switched-into
+# account, which is exactly the bug it caused.
+REARM_PROMPT = (
+    "Set up the social-autoposter draft autopilot for this Claude account. "
+    "Call queue_setup, then for EACH returned task call the host tool "
+    "create_scheduled_task with its taskId, cronExpression, and prompt verbatim, "
+    "then call run_draft_cycle once to verify. Do not redo my X connection or "
+    "project setup — only (re)register the scheduled tasks."
+)
 
 # A pending draft job older than this (seconds) with nothing claiming it means no
 # routine is draining the queue — the worker would claim within a minute if it
