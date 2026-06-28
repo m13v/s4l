@@ -2810,7 +2810,13 @@ async function buildSnapshot() {
   if (projects.some((project) => project.ready)) {
     completeOnboardingMilestone("project_ready", { missing_count: 0 });
   }
-  return {
+  // The ONE authoritative "is this install set up" rule: runtime provisioned, at
+  // least one ready project, and X connected. Computed here so there is a single
+  // definition — the menu bar must NOT re-derive its own (it used to, from the
+  // milestone-ledger count, which disagreed with this whenever a milestone was
+  // added late or never recorded, causing the 7/8-vs-"set up" flip-flop).
+  const setupComplete = rtReady && projects.some((p) => p.ready) && !!x.connected;
+  const snap = {
     projects,
     projects_total: projects.length,
     projects_ready: projects.filter((p) => p.ready).length,
@@ -2826,8 +2832,16 @@ async function buildSnapshot() {
     // action buttons) until the owned Python/Chromium runtime is provisioned.
     runtime_ready: rtReady,
     runtime_provisioning: isProvisioning(),
+    setup_complete: setupComplete,
     onboarding: onboardingSnapshot(),
   };
+  // Persist this snapshot so the menu bar can answer "set up?" the SAME way when
+  // the loopback server is unreachable (Claude Desktop closed or mid-restart)
+  // instead of falling back to a divergent local rule. Refreshed on every
+  // dashboard call (≈1s while the menu bar polls online), so the on-disk copy is
+  // never more than a poll stale. Best-effort; never fails the snapshot.
+  persistStatusSummary(snap);
+  return snap;
 }
 
 // ---- dashboard localhost fallback -----------------------------------------
@@ -3094,6 +3108,27 @@ function clearActivity(): void {
     fs.rmSync(path.join(sapsStateDir(), "activity.json"), { force: true });
   } catch {
     /* best effort */
+  }
+}
+
+// status-summary.json: the server's last-known dashboard snapshot, persisted so
+// the menu bar's OFFLINE path (loopback unreachable) reads a precomputed answer
+// instead of re-deriving setup_complete with its own copy of the rules. One
+// producer (buildSnapshot), one consumer (menubar/s4l_state.py snapshot()).
+// Written atomically so a 1s poll never sees a half-written file.
+function persistStatusSummary(snap: Record<string, unknown>): void {
+  try {
+    const dir = sapsStateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `status-summary.json.${process.pid}.tmp`);
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify({ ...snap, written_at: new Date().toISOString() }) + "\n",
+      "utf-8"
+    );
+    fs.renameSync(tmp, path.join(dir, "status-summary.json"));
+  } catch {
+    /* best effort: a status cache write must never break the dashboard */
   }
 }
 
