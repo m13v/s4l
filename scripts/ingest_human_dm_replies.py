@@ -3,16 +3,26 @@
 
 Flow:
   1. flag_human() in dm_conversation.py sends an escalation email with subject
-     `[DM #<id>] <author> [<platform>]: <reason>` from i@m13v.com to NOTIFICATION_EMAIL.
-  2. The human reads it, hits Reply in Gmail, writes what they want to say, sends.
-     Gmail keeps `[DM #<id>]` in the subject (prefixed with Re:) by default.
-  3. This script polls i@m13v.com inbox for messages matching that subject token
-     that are (a) unread, (b) not authored by us. For each, it extracts the dm_id,
-     strips the quoted history from the reply body, and inserts a row into
-     human_dm_replies with status='pending' (unique on gmail message id).
+     `[DM #<id>] <author> [<platform>]: <reason>` FROM matt@s4l.ai TO
+     NOTIFICATION_EMAIL (i@m13v.com).
+  2. The human reads it in i@m13v.com, hits Reply in Gmail, writes what they want
+     to say, sends. Gmail keeps `[DM #<id>]` in the subject (prefixed with Re:).
+     Because the escalation's From is matt@s4l.ai, the reply is delivered TO the
+     matt@s4l.ai mailbox as a fresh unread inbound message (the reply is sent from
+     i@m13v.com, a different account, so it lands in matt@s4l.ai's inbox, not Sent).
+  3. This script polls the matt@s4l.ai mailbox for messages matching that subject
+     token that are unread. For each, it extracts the dm_id, strips the quoted
+     history from the reply body, and inserts a row into human_dm_replies with
+     status='pending' (unique on gmail message id).
   4. It marks the Gmail message as read so we don't re-ingest.
   5. Phase 0 of skill/engage-dm-replies.sh then picks up pending rows and sends
      them as DMs on the target platform.
+
+  Auth: matt@s4l.ai is reached via the keyless Domain-Wide Delegation lane (the
+  service account gmail-dwd-impersonator impersonates it; s4l.ai is a secondary
+  domain in the mediar.ai Workspace). The short-lived access token is kept warm by
+  launchd job com.m13v.gmail-dwd-keepalive-s4l; this script also refreshes inline
+  if the token is missing or about to expire.
 
 Usage:
     python3 scripts/ingest_human_dm_replies.py             # ingest and report
@@ -21,9 +31,12 @@ Usage:
 
 import argparse
 import base64
+import json
 import os
 import re
+import subprocess
 import sys
+import time
 from email import message_from_bytes
 from email.policy import default as email_default_policy
 
@@ -33,14 +46,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 2026-06-01; DATABASE_URL is deliberately ignored, no DB path, no fallback.
 from http_api import api_get, api_post
 
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-GMAIL_TOKEN_PATH = os.path.expanduser("~/gmail-api/token_i_at_m13v.com.json")
 GMAIL_SCOPES = ["https://mail.google.com/"]
 
-SELF_ADDRESSES = {"i@m13v.com"}
+# matt@s4l.ai via keyless Domain-Wide Delegation. The keepalive launchd job
+# (com.m13v.gmail-dwd-keepalive-s4l) keeps this access token warm; we also
+# refresh inline below if it is missing or within 60s of expiry.
+DWD_CREDS_PATH = os.path.expanduser("~/.gmail-mcp-s4l/credentials.json")
+DWD_REFRESHER = os.path.expanduser("~/gmail-dwd-keepalive/refresh_token_s4l.py")
+DWD_PYTHON = os.path.expanduser("~/gmail-dwd-keepalive/.venv/bin/python")
+
+SELF_ADDRESSES = {"matt@s4l.ai"}
 DM_ID_RE = re.compile(r"\[DM\s*#(\d+)\]", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re\s*:", re.IGNORECASE)
 
@@ -50,13 +68,27 @@ RE_PREFIX_RE = re.compile(r"^\s*re\s*:", re.IGNORECASE)
 GMAIL_QUERY = 'is:unread subject:"Re: [DM #"'
 
 
+def _run_refresher():
+    subprocess.run([DWD_PYTHON, DWD_REFRESHER], check=True, timeout=60)
+
+
 def gmail_service():
-    creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(GMAIL_TOKEN_PATH, "w") as f:
-            f.write(creds.to_json())
-    return build("gmail", "v1", credentials=creds)
+    """Build the Gmail service for matt@s4l.ai from the DWD access token.
+
+    Reads the short-lived token minted by the keepalive job. If the file is
+    missing or the token is within 60s of expiry, runs the refresher inline.
+    """
+    if not os.path.exists(DWD_CREDS_PATH):
+        _run_refresher()
+    with open(DWD_CREDS_PATH) as f:
+        payload = json.load(f)
+    expiry_ms = payload.get("expiry_date", 0)
+    if not payload.get("access_token") or (expiry_ms and expiry_ms / 1000 <= time.time() + 60):
+        _run_refresher()
+        with open(DWD_CREDS_PATH) as f:
+            payload = json.load(f)
+    creds = Credentials(token=payload["access_token"], scopes=GMAIL_SCOPES)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
 def list_candidate_messages(service):
