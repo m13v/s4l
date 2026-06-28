@@ -77,9 +77,22 @@ def _autopilot_configured() -> bool:
     )
 
 
+def _consecutive_timeouts() -> int:
+    """The producer's LATCHED stall count: consecutive enqueue->timeout cycles with
+    no drain since. Persists across the between-cycle gap, so it's the durable
+    signal (the pending file is gone between cycles). Cleared on any successful
+    drain. See claude_job.py::drain_status_path."""
+    try:
+        with open(os.path.join(_queue_root(), "drain-status.json")) as f:
+            return int((json.load(f) or {}).get("consecutive_timeouts", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _oldest_pending_age() -> float | None:
     """Seconds since the oldest unclaimed pending draft job was written, or None
-    if nothing is pending (idle queue)."""
+    if nothing is pending (idle queue). The FAST signal: catches a fresh stall
+    before the first full producer timeout has latched."""
     pend_root = os.path.join(_queue_root(), "pending")
     oldest = None
     for sub in glob.glob(os.path.join(pend_root, "*")):
@@ -130,7 +143,12 @@ def _sentry():
 
 def main() -> int:
     age = _oldest_pending_age()
-    stalled = _autopilot_configured() and age is not None and age > STALL_SECONDS
+    timeouts = _consecutive_timeouts()
+    # Durable latch OR fast pending-age (see the two helpers). Either alone is a
+    # stall; both must be gated on the autopilot actually being configured here.
+    stalled = _autopilot_configured() and (
+        timeouts >= 1 or (age is not None and age > STALL_SECONDS)
+    )
 
     st = _read_state()
     consecutive = int(st.get("consecutive", 0))
@@ -143,6 +161,7 @@ def main() -> int:
         return 0
 
     consecutive += 1
+    age_str = f"{int(age)}s" if age is not None else "n/a (between cycles)"
     if consecutive >= ALERT_AFTER and not alerted:
         try:
             sentry = _sentry()
@@ -150,21 +169,22 @@ def main() -> int:
             sentry.capture_message(
                 "social-autoposter autopilot stalled: draft jobs are not being "
                 "drained (scheduled-task routines likely orphaned — Claude Desktop "
-                f"account change?). oldest pending job age={int(age)}s, "
-                f"sustained {consecutive} checks.",
+                f"account change?). producer consecutive timeouts={timeouts}, "
+                f"oldest pending job age={age_str}, sustained {consecutive} checks.",
                 level="error",
                 tags={
                     "component": "autopilot",
                     "issue": "stall",
-                    "oldest_pending_age_s": str(int(age)),
+                    "consecutive_timeouts": str(timeouts),
+                    "oldest_pending_age_s": str(int(age)) if age is not None else "",
                 },
             )
             sentry.flush()
         except Exception:
             # No Sentry (helper/SDK missing) -> at least leave a local breadcrumb.
             sys.stderr.write(
-                f"[stall-watch] autopilot stalled (age={int(age)}s) but Sentry "
-                "report failed\n"
+                f"[stall-watch] autopilot stalled (timeouts={timeouts}, "
+                f"age={age_str}) but Sentry report failed\n"
             )
         alerted = True
 
