@@ -195,12 +195,28 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
 
 # ---- the snapshot the menu bar renders ------------------------------------
 def snapshot():
-    """Full live snapshot via the loopback dashboard tool, else a file-built
-    fallback covering the essentials (runtime, onboarding, autopilot)."""
+    """Full live snapshot via the loopback dashboard tool, else the server's last
+    persisted summary, else a thin file-built fallback.
+
+    Three tiers, in order:
+      1. LIVE — loopback reachable: the real dashboard snapshot, with `setup_complete`
+         already computed by the server (the single authoritative rule).
+      2. SUMMARY — loopback down but the server wrote `status-summary.json` while it
+         was last up: read that. It carries the SAME `setup_complete` the live path
+         would, so a server restart can't flip the menu bar's "set up" answer. This
+         is the consolidation that removes the menu bar's old divergent rule.
+      3. LEDGER — no summary ever written (a truly fresh install that has never
+         reached the server): derive the essentials from the onboarding ledger so
+         onboarding progress still shows with nothing running."""
     snap = loopback_tool("dashboard", {})
     if isinstance(snap, dict) and "projects_total" in snap:
         snap["_live"] = True
         return snap
+    summ = read_json("status-summary.json")
+    if isinstance(summ, dict) and "projects_total" in summ:
+        summ["_live"] = False
+        summ["_from_summary"] = True
+        return summ
     ob = read_onboarding()
     return {
         "_live": False,
