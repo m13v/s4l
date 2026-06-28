@@ -112,21 +112,12 @@ SETUP_PROMPT = (
 )
 DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
 UPDATE_PROMPT = "Update social-autoposter to the latest version."
-# Re-arm after the draft autopilot's scheduled-task routines got orphaned — most
-# often because the user logged Claude Desktop into a different account, which
-# leaves the routines registered only under the OLD account's session so nothing
-# drains the draft queue (the SKILL.md files persist globally, so the old presence
-# check stayed falsely "green"). The host's create_scheduled_task only exists
-# inside an interactive Desktop session, so recovery routes through the composer
-# like Setup/Draft do. Targeted: it does NOT redo X/login/project setup.
-REARM_PROMPT = (
-    "The social-autoposter draft autopilot stopped running (its scheduled-task "
-    "routines are missing under this Claude account). Re-arm it now: call "
-    "queue_setup, then for EACH returned task call the host tool "
-    "create_scheduled_task with its taskId, cronExpression, and prompt verbatim, "
-    "then call run_draft_cycle once to verify a draft card appears. Do not redo my "
-    "X connection or project setup."
-)
+# NOTE: re-arm does NOT drive the Claude UI. Pasting a prompt to make the agent
+# call create_scheduled_task proved unreliable (keystroke automation into Electron
+# races focus/timing even with Accessibility granted). Instead, re-arm writes the
+# two worker routines straight into the host's scheduled-tasks.json registry during
+# a Claude restart (the same down-window mechanism the cwd-rewrite already uses) —
+# deterministic, no Accessibility, works headless. See _rearm_work().
 
 # A pending draft job older than this (seconds) with nothing claiming it means no
 # routine is draining the queue — the worker would claim within a minute if it
@@ -339,21 +330,161 @@ class S4LMenuBar(rumps.App):
         self._send_to_claude(DRAFT_PROMPT)
 
     def _rearm(self, _=None):
-        self._send_to_claude(REARM_PROMPT)
+        """One-click recovery: re-create the draft autopilot's scheduled-task
+        routines under the CURRENT Claude account, deterministically — no GUI
+        keystrokes, no Accessibility. The host caches its registry in memory and
+        clobbers live edits, so we must edit while Claude is DOWN; this therefore
+        restarts Claude. Heavy work + the restart run off the main thread."""
+        self._notify("S4L", "Re-arming autopilot… Claude will restart briefly.")
+        threading.Thread(target=self._rearm_work, daemon=True).start()
 
-    def _rearm_copy(self, _=None):
-        """Always-works fallback: copy the re-arm prompt to the clipboard and open
-        Claude, no Accessibility/automation needed. The user pastes it (⌘V) and
-        presses Enter. This is the escape hatch for when the keystroke-paste path
-        is blocked by a stale TCC grant."""
-        copied = self._copy_to_clipboard(REARM_PROMPT)
-        self._open_claude()
-        self._notify(
-            "S4L · re-arm prompt copied" if copied else "S4L",
-            "Paste it into Claude (⌘V) and press Enter to re-arm the autopilot."
-            if copied
-            else "Open Claude and ask it to re-arm the draft autopilot.",
+    def _rearm_work(self):
+        try:
+            # Bring Claude down so registry edits stick (it reloads the file fresh
+            # at launch; a live edit is clobbered on the next scheduler fire).
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           capture_output=True, timeout=20)
+            time.sleep(4)
+            subprocess.run(["killall", "Claude"], capture_output=True)
+            time.sleep(2)
+            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
+            time.sleep(1)
+            n = self._ensure_routines_registered()
+            # Keep cwd correct + drop the deprecated task while we're down.
+            self._rewrite_scheduled_task_cwd()
+            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._sig = None
+            if n:
+                self._notify(
+                    "S4L re-armed",
+                    "Draft autopilot routines restored. Drafts resume within a few minutes.",
+                )
+            else:
+                self._notify(
+                    "S4L",
+                    "Couldn't find where to register routines. Try again, or sign back "
+                    "into the original Claude account.",
+                )
+        except Exception as e:
+            self._notify("S4L re-arm failed", str(e)[:140])
+            _capture(e, phase="rearm")
+
+    # ---- re-arm: write routines straight into the host registry -----------
+    def _worker_record_templates(self):
+        """Clone existing host-authored worker records (so the shape is EXACTLY what
+        the scheduler accepts). Returns {taskId: record_dict}. Empty if none found
+        (e.g. a box that never had them)."""
+        out = {}
+        try:
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                for t in d.get("scheduledTasks", []) or []:
+                    tid = t.get("id")
+                    if tid in WORKER_TASK_IDS and tid not in out:
+                        out[tid] = dict(t)
+        except Exception:
+            pass
+        return out
+
+    def _make_worker_record(self, tid, template):
+        """Build a routine record. Prefer cloning a host-authored template (exact
+        accepted shape); override the fields that must be right for this account."""
+        rec = dict(template) if template else {}
+        rec["id"] = tid
+        rec["cronExpression"] = "* * * * *"
+        rec["enabled"] = True
+        rec["filePath"] = os.path.join(
+            os.path.expanduser("~"), ".claude", "scheduled-tasks", tid, "SKILL.md"
         )
+        rec["cwd"] = WORKER_CWD
+        rec.setdefault("createdAt", int(time.time() * 1000))
+        # Let the host recompute run-history for this account.
+        for k in ("lastRunAt", "lastScheduledFor", "fireAt"):
+            rec.pop(k, None)
+        return rec
+
+    def _session_registry_targets(self):
+        """Where to write routines: every existing scheduled-tasks.json (fix in
+        place) PLUS the most-recently-active session dir (the live account, which
+        may have no registry yet). Covers whichever account is logged in without
+        having to know which it is."""
+        targets = set(glob.glob(SCHED_REGISTRY_GLOB))
+        base = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "Claude",
+            "claude-code-sessions",
+        )
+        best, best_m = None, -1.0
+        try:
+            for ws in os.listdir(base):
+                wsp = os.path.join(base, ws)
+                if not os.path.isdir(wsp):
+                    continue
+                for inner in os.listdir(wsp):
+                    ip = os.path.join(wsp, inner)
+                    if not os.path.isdir(ip):
+                        continue
+                    try:
+                        m = os.path.getmtime(ip)
+                    except OSError:
+                        continue
+                    if m > best_m:
+                        best_m, best = m, ip
+        except Exception:
+            pass
+        if best:
+            targets.add(os.path.join(best, "scheduled-tasks.json"))
+        return sorted(targets)
+
+    def _ensure_routines_registered(self):
+        """Create the two queue-worker routines (cwd=~/.s4l-worker, enabled) in the
+        live account's registry — recovering an account-switch orphan WITHOUT the
+        Claude UI. Caller MUST run this while Claude is DOWN. Best-effort; never
+        raises. Returns the number of registry files written."""
+        templates = self._worker_record_templates()
+        try:
+            os.makedirs(WORKER_CWD, exist_ok=True)
+        except Exception:
+            pass
+        written = 0
+        for f in self._session_registry_targets():
+            try:
+                if os.path.exists(f):
+                    with open(f) as fh:
+                        d = json.load(fh)
+                else:
+                    d = {"scheduledTasks": [], "recordedSkips": {}}
+            except Exception:
+                d = {"scheduledTasks": [], "recordedSkips": {}}
+            tasks = d.get("scheduledTasks") or []
+            by_id = {t.get("id"): t for t in tasks}
+            dirty = False
+            for tid in WORKER_TASK_IDS:
+                if tid in by_id:
+                    t = by_id[tid]
+                    if not t.get("enabled") or t.get("cwd") != WORKER_CWD:
+                        t["enabled"] = True
+                        t["cwd"] = WORKER_CWD
+                        dirty = True
+                else:
+                    tasks.append(self._make_worker_record(tid, templates.get(tid)))
+                    dirty = True
+            if not dirty:
+                continue
+            d["scheduledTasks"] = tasks
+            try:
+                os.makedirs(os.path.dirname(f), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(d, fh, indent=2)
+                os.replace(tmp, f)
+                written += 1
+            except Exception:
+                pass
+        return written
 
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
@@ -1196,11 +1327,6 @@ class S4LMenuBar(rumps.App):
         if stalled:
             items.append(self._label("⚠ Autopilot not running — no drafts"))
             items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
-            # Always-works fallback when the keystroke-paste path is blocked by a
-            # stale Accessibility grant: copy the prompt so the user can paste it.
-            items.append(
-                rumps.MenuItem("Re-arm: copy prompt (paste in Claude)", callback=self._rearm_copy)
-            )
             items.append(rumps.separator)
 
         if not runtime_ready:
