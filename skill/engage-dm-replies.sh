@@ -193,7 +193,7 @@ if [ -n "$PLATFORM" ]; then
     HR_PLATFORM_ARG="--platform $PLATFORM"
 fi
 
-# Ingest any human replies that have landed in the i@m13v.com inbox since the
+# Ingest any human replies that have landed in the matt@s4l.ai inbox since the
 # last run. Parses [DM #N] from the subject, strips quoted history, inserts
 # into human_dm_replies with status='pending'. Safe to run every cycle (no-op
 # when inbox is empty; deduped by Gmail message id).
