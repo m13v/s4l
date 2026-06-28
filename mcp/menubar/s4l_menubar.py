@@ -726,14 +726,22 @@ class S4LMenuBar(rumps.App):
         snap = st.snapshot()
         ob = snap.get("onboarding") or st.read_onboarding()
         runtime_ready = bool(snap.get("runtime_ready"))
-        if snap.get("_live"):
+        if "setup_complete" in snap:
+            # Single source of truth: the server computes setup_complete (runtime +
+            # a ready project + X connected) and we read it the SAME way whether it
+            # came live from the loopback or from the persisted status-summary.json.
+            # This is what stops the old 7/8-vs-"set up" flip-flop between the live
+            # and offline paths — they no longer use different rules.
+            setup_complete = bool(snap.get("setup_complete"))
+        elif snap.get("_live"):
+            # Legacy live server (pre-setup_complete) during a version skew.
             setup_complete = (
                 runtime_ready
                 and snap.get("projects_ready", 0) > 0
                 and bool(snap.get("x_connected"))
             )
         else:
-            # Offline: the ledger's "complete" (all 7 milestones) is the proxy.
+            # Truly fresh install, no summary yet: the ledger's "complete" is the proxy.
             setup_complete = bool(ob and ob.get("complete"))
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
