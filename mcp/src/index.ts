@@ -139,6 +139,23 @@ const MEMORY_SNAPSHOT_PLIST = path.join(
 );
 const MEMORY_SNAPSHOT_INTERVAL_SECS = 60;
 
+// Autopilot stall watchdog (fleet backstop). The draft autopilot's two scheduled-
+// task routines stop draining the queue when the user switches Claude Desktop
+// accounts (the routines are registered per-account; their global SKILL.md files
+// survive, so the presence-based "autopilot_on" reads a false green). The menu bar
+// surfaces this to the user (S4L ⚠ + Re-arm); this launchd job is the part the
+// user can't see — it emits a Sentry event on a sustained stall so we catch it
+// fleet-wide. Runs off the venv python (needs sentry-sdk). See
+// scripts/autopilot_stall_watch.py.
+const STALL_WATCH_LABEL = "com.m13v.social-autopilot-stall-watch";
+const STALL_WATCH_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${STALL_WATCH_LABEL}.plist`
+);
+const STALL_WATCH_INTERVAL_SECS = 120;
+
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
 // install keeps itself current — the interactive `runtime` tool (action:'update')
 // only helps when
@@ -2776,6 +2793,53 @@ async function ensureClaudeReaperInstalled(): Promise<{ ok: boolean; detail: str
   }
 }
 
+// Install/refresh the autopilot stall watchdog launchd job. Runs off the owned
+// venv python so scripts/autopilot_stall_watch.py can import sentry_init +
+// sentry-sdk. RunAtLoad so a box that boots already-stalled reports promptly.
+async function ensureStallWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if (process.env.SAPS_STALL_WATCH === "0") return { ok: false, detail: "disabled (SAPS_STALL_WATCH=0)" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: STALL_WATCH_LABEL,
+      programArgs: [resolvePython(), path.join(repoDir(), "scripts", "autopilot_stall_watch.py")],
+      intervalSecs: STALL_WATCH_INTERVAL_SECS,
+      runAtLoad: true,
+      stdoutLog: path.join(logDir, "launchd-stall-watch-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-stall-watch-stderr.log"),
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(STALL_WATCH_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(STALL_WATCH_LABEL, STALL_WATCH_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(STALL_WATCH_LABEL, STALL_WATCH_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(STALL_WATCH_PLIST), { recursive: true });
+      fs.writeFileSync(STALL_WATCH_PLIST, xml, "utf-8");
+      const res = await loadPlist(STALL_WATCH_LABEL, STALL_WATCH_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
@@ -3756,6 +3820,12 @@ async function main() {
   void ensureClaudeReaperInstalled()
     .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
+  // Autopilot stall watchdog: fleet-side Sentry alert when the draft routines stop
+  // draining (most often an account switch orphaning them). The menu bar shows the
+  // user the Re-arm action; this is the part we see. Best-effort; never blocks boot.
+  void ensureStallWatchInstalled()
+    .then((r) => console.error(`[stall-watch] launchd watchdog: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[stall-watch] watchdog install failed:", e?.message || e));
   // Periodic host-resource sampler (memory/process snapshot -> local JSONL). Gives
   // us per-box resource history to diagnose RAM blowups (e.g. the agent-mode
   // session leak). Best-effort; never blocks boot. Disable with SAPS_MEMORY_SNAPSHOT=0.
