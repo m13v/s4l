@@ -2387,10 +2387,25 @@ function queueDir(): string {
 // menu bar's AUTOPILOT_STALL_SECONDS in mcp/menubar/s4l_menubar.py — keep in sync.
 const AUTOPILOT_STALL_MS = 180_000;
 
-// True when a draft job has sat unclaimed past AUTOPILOT_STALL_MS. False-positive
-// free: an idle queue (no candidates) has no pending job, so a quiet pipeline
-// never trips this. Pure filesystem read; never throws.
+// True when no scheduled-task routine is draining the draft queue. Two signals,
+// OR'd (keep in lockstep with mcp/menubar/s4l_menubar.py::_autopilot_stalled and
+// scripts/autopilot_stall_watch.py):
+//   (1) LATCHED: the producer's drain-status.json shows >=1 consecutive timeout
+//       with no drain since. Survives the between-cycle gap (no pending file then),
+//       so the signal is CONTINUOUS, not flickery. The durable signal.
+//   (2) FAST: a draft job has sat unclaimed past AUTOPILOT_STALL_MS — catches a
+//       fresh stall before the first full producer timeout has latched (1).
+// False-positive free: an idle queue (no candidates) has no pending job and the
+// producer clears the latch on every successful drain.
 function autopilotStalled(): boolean {
+  // (1) latched producer drain-status
+  try {
+    const ds = JSON.parse(fs.readFileSync(path.join(queueDir(), "drain-status.json"), "utf-8"));
+    if (Number(ds?.consecutive_timeouts || 0) >= 1) return true;
+  } catch {
+    /* no marker yet */
+  }
+  // (2) fast pending-age
   try {
     const pendRoot = path.join(queueDir(), "pending");
     let oldest = Infinity;
@@ -2407,11 +2422,11 @@ function autopilotStalled(): boolean {
         }
       }
     }
-    if (oldest === Infinity) return false; // nothing pending -> idle, not stalled
-    return Date.now() - oldest > AUTOPILOT_STALL_MS;
+    if (oldest !== Infinity && Date.now() - oldest > AUTOPILOT_STALL_MS) return true;
   } catch {
-    return false;
+    /* no pending dir */
   }
+  return false;
 }
 
 // Dedicated working directory the queue-worker scheduled tasks should RUN in.
