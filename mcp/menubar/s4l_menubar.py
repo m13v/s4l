@@ -318,14 +318,31 @@ class S4LMenuBar(rumps.App):
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
         """True when setup is done but no scheduled-task routine is draining the
-        draft queue — i.e. a draft job has sat unclaimed in pending/ past
-        AUTOPILOT_STALL_SECONDS. This is the signal that survives a Claude account
-        switch, which orphans the routines while their global SKILL.md files (the
-        old "autopilot_on" proxy) stay put. Pure filesystem read; best-effort."""
+        draft queue — the signature of a Claude account switch orphaning the
+        routines while their global SKILL.md files (the old "autopilot_on" proxy)
+        stay put. Two complementary signals, OR'd; best-effort, pure file reads:
+
+          (1) LATCHED: the producer's drain-status shows >=1 consecutive timeout
+              with no successful drain since. Persists across the gap between cycles
+              (the producer removes the job on timeout, so there's no pending file
+              to see between cycles) -> the ⚠ stays on continuously instead of
+              flickering off. This is the durable signal.
+          (2) FAST: a draft job has sat unclaimed in pending/ past
+              AUTOPILOT_STALL_SECONDS -> catches a fresh stall ~3 min in, before
+              the first full producer timeout has even latched (1).
+        """
+        qroot = os.path.join(st.state_dir(), "claude-queue")
+        # (1) latched producer drain-status
         try:
-            pend_root = os.path.join(st.state_dir(), "claude-queue", "pending")
+            with open(os.path.join(qroot, "drain-status.json")) as f:
+                if int((json.load(f) or {}).get("consecutive_timeouts", 0) or 0) >= 1:
+                    return True
+        except Exception:
+            pass
+        # (2) fast pending-age
+        try:
             oldest = None
-            for sub in glob.glob(os.path.join(pend_root, "*")):
+            for sub in glob.glob(os.path.join(qroot, "pending", "*")):
                 for jf in glob.glob(os.path.join(sub, "*.json")):
                     if jf.endswith(".tmp"):
                         continue
@@ -335,11 +352,11 @@ class S4LMenuBar(rumps.App):
                         continue
                     if oldest is None or m < oldest:
                         oldest = m
-            if oldest is None:
-                return False  # nothing pending -> idle, not stalled
-            return (time.time() - oldest) > AUTOPILOT_STALL_SECONDS
+            if oldest is not None and (time.time() - oldest) > AUTOPILOT_STALL_SECONDS:
+                return True
         except Exception:
-            return False
+            pass
+        return False
 
     def _toggle_mode(self, _=None):
         """Flip personal-brand <-> promotion. Pure local state write (no model,
