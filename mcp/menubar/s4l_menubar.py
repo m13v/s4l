@@ -249,6 +249,9 @@ class S4LMenuBar(rumps.App):
         self._relocating = False
         self._cwd_healed = False
         self._relocate_attempts = 0
+        # One-shot guard so the "autopilot not running" notification fires once per
+        # stall episode, not every poll. Reset when the stall clears.
+        self._stall_notified = False
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
         self._tick(None)
@@ -796,10 +799,13 @@ class S4LMenuBar(rumps.App):
             setup_complete = bool(ob and ob.get("complete"))
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
+        # Autopilot liveness: only meaningful once setup is complete (before that,
+        # "no drafts draining" is just unfinished setup, surfaced via the blocker).
+        stalled = setup_complete and self._autopilot_stalled()
 
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
         if not busy:
-            self._render_title(setup_complete, ob, blocker)
+            self._render_title(setup_complete, ob, blocker, stalled)
 
         # Blocker notification only on transition into a new blocker.
         if blocker and blocker_code != self._last_blocker_code:
@@ -808,6 +814,17 @@ class S4LMenuBar(rumps.App):
                 blocker.get("message", "Setup is blocked"),
             )
         self._last_blocker_code = blocker_code
+        # Notify once on the transition into a stall, with the one action that fixes
+        # it. Re-arms are user-driven (composer), so we don't spam every tick.
+        if stalled and not self._stall_notified:
+            self._notify(
+                "S4L autopilot not running",
+                "No drafts are being generated (routines missing — did Claude's "
+                "account change?). Open the S4L menu and click “Re-arm autopilot”.",
+            )
+            self._stall_notified = True
+        elif not stalled:
+            self._stall_notified = False
 
         # Only rebuild the menu when something user-visible changed, so an open
         # menu isn't torn down under the user's cursor every poll.
@@ -832,10 +849,11 @@ class S4LMenuBar(rumps.App):
             snap.get("projects_ready"),
             snap.get("projects_total"),
             st.read_mode(),
+            stalled,
         )
         if sig != self._sig:
             self._sig = sig
-            self._build_menu(runtime_ready, setup_complete, ob, blocker, snap)
+            self._build_menu(runtime_ready, setup_complete, ob, blocker, snap, stalled)
 
         # Draft-review pop-ups: if a draft cycle left a review request, present the
         # cards. Don't start a review mid-run (the spinner means a tool is active).
@@ -1065,9 +1083,9 @@ class S4LMenuBar(rumps.App):
                         self._reset_posting_progress_locked()
                 self._post_q.task_done()
 
-    def _render_title(self, setup_complete, ob, blocker):
-        if blocker:
-            self.title = "S4L ⚠"  # warning sign
+    def _render_title(self, setup_complete, ob, blocker, stalled=False):
+        if blocker or stalled:
+            self.title = "S4L ⚠"  # warning sign (setup blocked OR autopilot stalled)
         elif not setup_complete and ob and not ob.get("complete"):
             done = sum(1 for m in ob["milestones"] if m.get("status") == "complete")
             self.title = f"S4L {done}/{len(ob['milestones'])}"
@@ -1077,7 +1095,7 @@ class S4LMenuBar(rumps.App):
             self.title = "S4L"
 
     # ---- menu construction ------------------------------------------------
-    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap):
+    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, stalled=False):
         self.menu.clear()
         items = []
 
@@ -1086,6 +1104,14 @@ class S4LMenuBar(rumps.App):
         header.set_callback(None)  # non-clickable label
         items.append(header)
         items.append(rumps.separator)
+
+        # Autopilot stalled (most often the routines were orphaned by a Claude
+        # account switch): surface the one-click recovery FIRST, above the normal
+        # state items, so it's the obvious next action.
+        if stalled:
+            items.append(self._label("⚠ Autopilot not running — no drafts"))
+            items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
+            items.append(rumps.separator)
 
         if not runtime_ready:
             items += self._state_a()
