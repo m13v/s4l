@@ -341,161 +341,72 @@ class S4LMenuBar(rumps.App):
         self._send_to_claude(DRAFT_PROMPT)
 
     def _rearm(self, _=None):
-        """One-click recovery: re-create the draft autopilot's scheduled-task
-        routines under the CURRENT Claude account, deterministically — no GUI
-        keystrokes, no Accessibility. The host caches its registry in memory and
-        clobbers live edits, so we must edit while Claude is DOWN; this therefore
-        restarts Claude. Heavy work + the restart run off the main thread."""
-        self._notify("S4L", "Re-arming autopilot… Claude will restart briefly.")
-        threading.Thread(target=self._rearm_work, daemon=True).start()
+        """Set up / re-register the draft autopilot's scheduled tasks for the
+        CURRENT Claude account — the correct way, through the HOST create_scheduled_task
+        flow (same as onboarding). It registers under whatever account is logged in
+        and shows in Routines. The host tool only runs inside an agent chat, so we
+        hand Claude the setup prompt (auto-typed, clipboard+paste fallback). We do
+        NOT write scheduled-tasks.json directly — that can't reliably target a
+        just-switched-into account."""
+        self._send_to_claude(REARM_PROMPT)
 
-    def _rearm_work(self):
+    # ---- schedule-state detection (reads the ACTUAL schedule, reliably) ----
+    def _active_session_id(self):
+        """The CURRENT account's session id, from config.json's per-session
+        `dxt:allowlistLastUpdated:<id>` keys — the most-recently-updated one is the
+        live session (it matches the MCP's own start time to the ms). This is what
+        lets us read the schedule for the ACTUAL logged-in account instead of
+        guessing a folder by mtime. None if undeterminable."""
         try:
-            # Bring Claude down so registry edits stick (it reloads the file fresh
-            # at launch; a live edit is clobbered on the next scheduler fire).
-            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
-                           capture_output=True, timeout=20)
-            time.sleep(4)
-            subprocess.run(["killall", "Claude"], capture_output=True)
-            time.sleep(2)
-            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
-            time.sleep(1)
-            n = self._ensure_routines_registered()
-            # Keep cwd correct + drop the deprecated task while we're down.
-            self._rewrite_scheduled_task_cwd()
-            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
-            self._sig = None
-            if n:
-                self._notify(
-                    "S4L re-armed",
-                    "Draft autopilot routines restored. Drafts resume within a few minutes.",
-                )
-            else:
-                self._notify(
-                    "S4L",
-                    "Couldn't find where to register routines. Try again, or sign back "
-                    "into the original Claude account.",
-                )
-        except Exception as e:
-            self._notify("S4L re-arm failed", str(e)[:140])
-            _capture(e, phase="rearm")
-
-    # ---- re-arm: write routines straight into the host registry -----------
-    def _worker_record_templates(self):
-        """Clone existing host-authored worker records (so the shape is EXACTLY what
-        the scheduler accepts). Returns {taskId: record_dict}. Empty if none found
-        (e.g. a box that never had them)."""
-        out = {}
-        try:
-            for f in glob.glob(SCHED_REGISTRY_GLOB):
-                try:
-                    with open(f) as fh:
-                        d = json.load(fh)
-                except Exception:
-                    continue
-                for t in d.get("scheduledTasks", []) or []:
-                    tid = t.get("id")
-                    if tid in WORKER_TASK_IDS and tid not in out:
-                        out[tid] = dict(t)
+            p = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                             "Claude", "config.json")
+            with open(p) as fh:
+                d = json.load(fh)
+            best_id, best_ts = None, ""
+            for k, v in d.items():
+                if k.startswith("dxt:allowlistLastUpdated:") and isinstance(v, str):
+                    if v > best_ts:  # ISO-8601 sorts lexically by time
+                        best_ts, best_id = v, k.split(":", 2)[2]
+            return best_id
         except Exception:
-            pass
-        return out
+            return None
 
-    def _make_worker_record(self, tid, template):
-        """Build a routine record. Prefer cloning a host-authored template (exact
-        accepted shape); override the fields that must be right for this account."""
-        rec = dict(template) if template else {}
-        rec["id"] = tid
-        rec["cronExpression"] = "* * * * *"
-        rec["enabled"] = True
-        rec["filePath"] = os.path.join(
-            os.path.expanduser("~"), ".claude", "scheduled-tasks", tid, "SKILL.md"
-        )
-        rec["cwd"] = WORKER_CWD
-        rec.setdefault("createdAt", int(time.time() * 1000))
-        # Let the host recompute run-history for this account.
-        for k in ("lastRunAt", "lastScheduledFor", "fireAt"):
-            rec.pop(k, None)
-        return rec
-
-    def _session_registry_targets(self):
-        """Where to write routines: every existing scheduled-tasks.json (fix in
-        place) PLUS the most-recently-active session dir (the live account, which
-        may have no registry yet). Covers whichever account is logged in without
-        having to know which it is."""
-        targets = set(glob.glob(SCHED_REGISTRY_GLOB))
-        base = os.path.join(
+    def _active_session_registry_path(self):
+        """Path to the current account's scheduled-tasks.json (claude-code-sessions/
+        <workspace>/<active-session>/...). None if the active session can't be found
+        or its dir doesn't exist yet (brand-new account -> schedule absent)."""
+        sid = self._active_session_id()
+        if not sid:
+            return None
+        hits = glob.glob(os.path.join(
             os.path.expanduser("~"), "Library", "Application Support", "Claude",
-            "claude-code-sessions",
-        )
-        best, best_m = None, -1.0
-        try:
-            for ws in os.listdir(base):
-                wsp = os.path.join(base, ws)
-                if not os.path.isdir(wsp):
-                    continue
-                for inner in os.listdir(wsp):
-                    ip = os.path.join(wsp, inner)
-                    if not os.path.isdir(ip):
-                        continue
-                    try:
-                        m = os.path.getmtime(ip)
-                    except OSError:
-                        continue
-                    if m > best_m:
-                        best_m, best = m, ip
-        except Exception:
-            pass
-        if best:
-            targets.add(os.path.join(best, "scheduled-tasks.json"))
-        return sorted(targets)
+            "claude-code-sessions", "*", sid, "scheduled-tasks.json"))
+        return hits[0] if hits else None
 
-    def _ensure_routines_registered(self):
-        """Create the two queue-worker routines (cwd=~/.s4l-worker, enabled) in the
-        live account's registry — recovering an account-switch orphan WITHOUT the
-        Claude UI. Caller MUST run this while Claude is DOWN. Best-effort; never
-        raises. Returns the number of registry files written."""
-        templates = self._worker_record_templates()
+    def _schedule_state(self):
+        """Read the ACTUAL schedule for the current account (not inferred from
+        whether it fired — 'not fired' != 'not scheduled'):
+          'missing'  — no registry / a worker task absent for this account
+          'disabled' — both present but at least one enabled=false
+          'ok'       — both worker tasks present and enabled
+          'unknown'  — couldn't determine the active session (degrade gracefully)"""
+        if not self._active_session_id():
+            return "unknown"
+        path = self._active_session_registry_path()
+        if not path:
+            return "missing"
         try:
-            os.makedirs(WORKER_CWD, exist_ok=True)
+            with open(path) as fh:
+                d = json.load(fh)
         except Exception:
-            pass
-        written = 0
-        for f in self._session_registry_targets():
-            try:
-                if os.path.exists(f):
-                    with open(f) as fh:
-                        d = json.load(fh)
-                else:
-                    d = {"scheduledTasks": [], "recordedSkips": {}}
-            except Exception:
-                d = {"scheduledTasks": [], "recordedSkips": {}}
-            tasks = d.get("scheduledTasks") or []
-            by_id = {t.get("id"): t for t in tasks}
-            dirty = False
-            for tid in WORKER_TASK_IDS:
-                if tid in by_id:
-                    t = by_id[tid]
-                    if not t.get("enabled") or t.get("cwd") != WORKER_CWD:
-                        t["enabled"] = True
-                        t["cwd"] = WORKER_CWD
-                        dirty = True
-                else:
-                    tasks.append(self._make_worker_record(tid, templates.get(tid)))
-                    dirty = True
-            if not dirty:
-                continue
-            d["scheduledTasks"] = tasks
-            try:
-                os.makedirs(os.path.dirname(f), exist_ok=True)
-                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
-                with os.fdopen(fd, "w") as fh:
-                    json.dump(d, fh, indent=2)
-                os.replace(tmp, f)
-                written += 1
-            except Exception:
-                pass
-        return written
+            return "missing"
+        by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+        recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
+        if any(r is None for r in recs):
+            return "missing"
+        if any(not r.get("enabled") for r in recs):
+            return "disabled"
+        return "ok"
 
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
