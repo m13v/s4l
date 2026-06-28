@@ -500,6 +500,11 @@ def cmd_provider(ns) -> int:
             os.remove(p)
         except OSError:
             pass
+    # We gave up waiting for a worker — drop the "drafting" menu-bar label we kept
+    # re-asserting while blocked. Otherwise it lingers and the menu bar shows
+    # "drafting replies" forever (masking the autopilot-stalled ⚠) even though no
+    # routine ever claimed the job.
+    _act_clear()
     _plog(f"timed out after {ns.timeout}s waiting for job {job_id} ({qtype}); removed the job")
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
 
