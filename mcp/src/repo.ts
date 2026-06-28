@@ -96,6 +96,11 @@ export function run(
     // derived from cmd/args). Callers can set a friendlier name (e.g. the tool
     // that invoked the run) without changing the line stream itself.
     logContext?: string;
+    // Suppress teeing this command's stdout/stderr to the Cloud Logging relay.
+    // For high-volume status probes (e.g. `launchctl list`) whose output is a
+    // big useless dump — they still return stdout to the caller in-memory, they
+    // just don't flood Cloud Logging. Buffered stdout/stderr are unaffected.
+    noTee?: boolean;
     onLine?: (line: string, stream: "stdout" | "stderr") => void;
     // Hands the spawned child to the caller so a long-running job (e.g. a scan)
     // can be aborted out-of-band — used to preempt an in-flight scan when the
@@ -140,7 +145,7 @@ export function run(
     let sinkOutBuf = "";
     let sinkErrBuf = "";
     const sinkPump = (chunk: string, which: "stdout" | "stderr", buf: string): string => {
-      const sink = lineSink;
+      const sink = opts.noTee ? null : lineSink;
       if (!sink) return buf;
       buf += chunk;
       let nl: number;
@@ -190,7 +195,7 @@ export function run(
             /* ignore */
           }
       }
-      const sink = lineSink;
+      const sink = opts.noTee ? null : lineSink;
       if (sink) {
         if (sinkOutBuf)
           try {
