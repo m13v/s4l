@@ -2362,6 +2362,41 @@ function queueDir(): string {
   return path.join(sapsStateDir(), "claude-queue");
 }
 
+// A draft job left unclaimed in pending/ this long (ms) means no scheduled-task
+// routine is draining the queue — the worker would claim within a minute if it
+// were firing. This is the liveness signal that survives a Claude account switch
+// (which orphans the routines while their global SKILL.md files stay put, so the
+// SKILL.md-presence check in autopilotLoaded() reads a FALSE green). Mirrors the
+// menu bar's AUTOPILOT_STALL_SECONDS in mcp/menubar/s4l_menubar.py — keep in sync.
+const AUTOPILOT_STALL_MS = 180_000;
+
+// True when a draft job has sat unclaimed past AUTOPILOT_STALL_MS. False-positive
+// free: an idle queue (no candidates) has no pending job, so a quiet pipeline
+// never trips this. Pure filesystem read; never throws.
+function autopilotStalled(): boolean {
+  try {
+    const pendRoot = path.join(queueDir(), "pending");
+    let oldest = Infinity;
+    for (const sub of fs.readdirSync(pendRoot, { withFileTypes: true })) {
+      if (!sub.isDirectory()) continue;
+      const subPath = path.join(pendRoot, sub.name);
+      for (const f of fs.readdirSync(subPath)) {
+        if (!f.endsWith(".json") || f.endsWith(".tmp")) continue;
+        try {
+          const m = fs.statSync(path.join(subPath, f)).mtimeMs;
+          if (m < oldest) oldest = m;
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    if (oldest === Infinity) return false; // nothing pending -> idle, not stalled
+    return Date.now() - oldest > AUTOPILOT_STALL_MS;
+  } catch {
+    return false;
+  }
+}
+
 // Dedicated working directory the queue-worker scheduled tasks should RUN in.
 //
 // Claude Code/Desktop buckets every session under
@@ -2824,6 +2859,10 @@ async function buildSnapshot() {
     x_state: x.state || "",
     x_handle: x.handle ?? null,
     autopilot_on: ap.autopilot_on,
+    // Liveness, not just presence: the routines can be registered (SKILL.md on
+    // disk -> autopilot_on true) yet not firing after a Claude account switch.
+    // autopilot_stalled is the true "drafts aren't being produced" signal.
+    autopilot_stalled: setupComplete && autopilotStalled(),
     auto_update_on: ap.auto_update_on,
     version: ver.installed || VERSION,
     latest_version: ver.latest ?? null,
