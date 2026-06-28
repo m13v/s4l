@@ -263,24 +263,54 @@ class S4LMenuBar(rumps.App):
     def _open_claude(self, _=None):
         subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True)
 
+    def _copy_to_clipboard(self, text):
+        """Put text on the clipboard via pbcopy. Unlike the AppleScript keystroke
+        paste, this needs NO Accessibility grant, so it's the always-works fallback
+        when automation can't run. Returns True on success."""
+        try:
+            p = subprocess.run(["pbcopy"], input=text, text=True, timeout=10)
+            return p.returncode == 0
+        except Exception:
+            return False
+
+    def _manual_paste_fallback(self, prompt, reason):
+        """Automation couldn't paste (no Accessibility, or osascript failed). Don't
+        dead-end: drop the prompt on the clipboard and open Claude so the user can
+        paste it themselves (Cmd+V, Enter). This is what makes re-arm/setup usable
+        even when the TCC grant is stale (granted but the running process still
+        reads untrusted until restart)."""
+        copied = self._copy_to_clipboard(prompt)
+        self._open_claude()
+        if copied:
+            self._notify(
+                "S4L · prompt copied to clipboard",
+                f"{reason} Paste it into Claude (⌘V) and press Enter to continue.",
+            )
+        else:
+            self._notify("S4L", f"{reason} Open Claude and type your request there.")
+        return False
+
     def _send_to_claude(self, prompt):
         """Type a prompt into the Claude Desktop composer and submit it via
         AppleScript GUI scripting. The menu bar can't use the in-iframe
-        sendMessage bridge, so this drives the keyboard instead. On failure
-        (most often Accessibility permission not yet granted) it degrades to
-        just focusing Claude and tells the user what to do."""
-        # Reliably know up front whether we can post keystrokes; if not, prompt
-        # for the grant + open Settings instead of a paste that would silently
-        # go nowhere.
+        sendMessage bridge, so this drives the keyboard instead. On any failure
+        (most often Accessibility not yet effective) it ALWAYS degrades to copying
+        the prompt to the clipboard + opening Claude, so the user can paste it
+        manually rather than hitting a dead end."""
+        # If we can't post keystrokes, don't silently go nowhere: request the grant
+        # AND copy the prompt to the clipboard so the user can paste it right now,
+        # without waiting for the TCC grant to take effect (it often needs a
+        # restart of this process to register).
         if not st.accessibility_trusted():
-            st.request_accessibility()
-            self._open_claude()
-            self._notify(
-                "S4L needs Accessibility",
-                "Enable S4L (python) under System Settings → Privacy & Security "
-                "→ Accessibility, then click again.",
+            try:
+                st.request_accessibility()
+            except Exception:
+                pass
+            return self._manual_paste_fallback(
+                prompt,
+                "Couldn't auto-type (enable S4L under System Settings → Privacy & "
+                "Security → Accessibility to automate next time).",
             )
-            return False
         try:
             r = subprocess.run(
                 ["osascript", "-e", _claude_send_script(prompt)],
@@ -292,18 +322,14 @@ class S4LMenuBar(rumps.App):
             r = None
         if r is not None and r.returncode == 0:
             return True
-        # Failed: bring Claude forward anyway, then explain.
-        self._open_claude()
+        # Automation failed despite a trusted check (stale grant / transient): fall
+        # back to the clipboard so the action still completes by a manual paste.
         err = (r.stderr or "").lower() if r else ""
         if "1743" in err or "assistive" in err or "not allowed" in err or "-25211" in err:
-            self._notify(
-                "S4L needs Accessibility",
-                "Enable the S4L menu bar app under System Settings → Privacy & "
-                "Security → Accessibility, then try again.",
-            )
+            reason = "Accessibility isn't effective yet (it can need a restart)."
         else:
-            self._notify("S4L", "Opened Claude — type your request there.")
-        return False
+            reason = "Couldn't auto-type into Claude."
+        return self._manual_paste_fallback(prompt, reason)
 
     # Model-driven actions: type the matching prompt into Claude's composer.
     def _setup(self, _=None):
@@ -314,6 +340,20 @@ class S4LMenuBar(rumps.App):
 
     def _rearm(self, _=None):
         self._send_to_claude(REARM_PROMPT)
+
+    def _rearm_copy(self, _=None):
+        """Always-works fallback: copy the re-arm prompt to the clipboard and open
+        Claude, no Accessibility/automation needed. The user pastes it (⌘V) and
+        presses Enter. This is the escape hatch for when the keystroke-paste path
+        is blocked by a stale TCC grant."""
+        copied = self._copy_to_clipboard(REARM_PROMPT)
+        self._open_claude()
+        self._notify(
+            "S4L · re-arm prompt copied" if copied else "S4L",
+            "Paste it into Claude (⌘V) and press Enter to re-arm the autopilot."
+            if copied
+            else "Open Claude and ask it to re-arm the draft autopilot.",
+        )
 
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
@@ -1156,6 +1196,11 @@ class S4LMenuBar(rumps.App):
         if stalled:
             items.append(self._label("⚠ Autopilot not running — no drafts"))
             items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
+            # Always-works fallback when the keystroke-paste path is blocked by a
+            # stale Accessibility grant: copy the prompt so the user can paste it.
+            items.append(
+                rumps.MenuItem("Re-arm: copy prompt (paste in Claude)", callback=self._rearm_copy)
+            )
             items.append(rumps.separator)
 
         if not runtime_ready:
