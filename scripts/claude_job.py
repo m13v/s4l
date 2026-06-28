@@ -183,6 +183,50 @@ def _stamp_heartbeat(event: str, qtype: str | None = None) -> None:
         pass
 
 
+def drain_status_path() -> str:
+    """LATCHED autopilot-liveness marker the producer maintains: how many times in
+    a row it has enqueued a job and timed out with NO worker draining it. Unlike a
+    pending-job age check, this persists across the gaps between cycles (the
+    producer removes the job on timeout, so there's no pending file to look at
+    between cycles) — so the menu bar / dashboard / Sentry watcher can show a
+    CONTINUOUS stall instead of one that flickers off every time a job is removed.
+    Cleared (consecutive_timeouts=0) the moment a draft actually drains."""
+    return os.path.join(queue_root(), "drain-status.json")
+
+
+def _read_drain_status() -> dict:
+    try:
+        with open(drain_status_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _mark_drain_success() -> None:
+    """A job drained successfully -> clear the latched stall."""
+    try:
+        os.makedirs(queue_root(), exist_ok=True)
+        _atomic_write(
+            drain_status_path(),
+            {"consecutive_timeouts": 0, "last_success_at": time.time()},
+        )
+    except Exception:
+        pass
+
+
+def _bump_drain_timeout() -> None:
+    """The producer gave up waiting -> latch/escalate the stall."""
+    try:
+        os.makedirs(queue_root(), exist_ok=True)
+        cur = _read_drain_status()
+        prev = int(cur.get("consecutive_timeouts", 0) or 0)
+        cur["consecutive_timeouts"] = prev + 1
+        cur["last_timeout_at"] = time.time()
+        _atomic_write(drain_status_path(), cur)
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Opt-in worker self-reap (2026-06-27)                                         #
 # --------------------------------------------------------------------------- #
@@ -490,6 +534,9 @@ def cmd_provider(ns) -> int:
             }
             sys.stdout.write(json.dumps(envelope))
             sys.stdout.flush()
+            # A worker drained this job -> the autopilot is alive; clear any latched
+            # stall so the menu bar / dashboard / Sentry watcher recover.
+            _mark_drain_success()
             return 0
         time.sleep(POLL_INTERVAL_S)
 
@@ -505,6 +552,10 @@ def cmd_provider(ns) -> int:
     # "drafting replies" forever (masking the autopilot-stalled ⚠) even though no
     # routine ever claimed the job.
     _act_clear()
+    # Latch the stall so it persists across the gap until the next cycle enqueues
+    # (no pending file exists between cycles, so an instantaneous queue check would
+    # flicker the ⚠ off). Cleared only when a draft actually drains.
+    _bump_drain_timeout()
     _plog(f"timed out after {ns.timeout}s waiting for job {job_id} ({qtype}); removed the job")
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
 
