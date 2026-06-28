@@ -116,10 +116,11 @@ POLL_INTERVAL_S = 2.0
 # would not. 1800s (30 min) = 3x the real draft need, matching the sibling Twitter
 # engagement claude cap (engage-twitter Phase B gtimeout 1800), which removes the
 # drops while staying a bounded per-call value (not the whole-cycle budget).
-# COUPLING: reap_stale_claude_sessions.py reaps leaked workers at 2x THIS value and
-# MUST stay >= it (a lower reaper would SIGKILL a draft the producer is still
-# waiting on). Both read SAPS_CLAUDE_QUEUE_TIMEOUT and both default to 1800 — keep
-# the two defaults in lockstep if you change either.
+# COUPLING: reap_stale_claude_sessions.py reaps leaked workers at THIS value plus a
+# fixed margin (SAPS_REAPER_AGE_MARGIN_SEC, default 300s) and MUST stay > it (a lower
+# reaper would SIGKILL a draft the producer is still waiting on). Both read
+# SAPS_CLAUDE_QUEUE_TIMEOUT and both default to 1800; keep them in lockstep if you
+# change the base.
 DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
 # Jobs older than this (pending or running) are swept — a job nobody drained in
 # this long is a leftover from a timed-out producer or a dead worker, and keeping
