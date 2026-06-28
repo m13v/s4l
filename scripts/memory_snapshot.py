@@ -424,6 +424,21 @@ def claude_queue_summary() -> dict[str, Any]:
             }
         except OSError:
             pass
+    # The producer's drain latch: consecutive_timeouts>=1 means the scheduled-task
+    # worker stopped draining (the definitive phase2b-stall signal). Surfacing it
+    # here lets the heartbeat carry it server-side, so a stall is visible centrally
+    # without SSHing the box. See claude_job.py _bump_drain_timeout / _clear_drain.
+    drain_path = root / "drain-status.json"
+    if drain_path.exists():
+        try:
+            ds = json.loads(drain_path.read_text())
+            summary["drain_status"] = {
+                "consecutive_timeouts": int(ds.get("consecutive_timeouts", 0) or 0),
+                "last_success_at": ds.get("last_success_at"),
+                "last_timeout_at": ds.get("last_timeout_at"),
+            }
+        except (OSError, ValueError, TypeError):
+            pass
     return summary
 
 
@@ -603,6 +618,14 @@ def build_summary() -> dict[str, Any]:
         else None
     )
     cq = claude_queue_summary()
+    ds = cq.get("drain_status") or {}
+    oldest = cq.get("oldest_age_sec")
+    consec = int(ds.get("consecutive_timeouts", 0) or 0)
+    # Mirror the MCP's autopilotStalled(): a latched producer timeout, OR a draft
+    # job that has sat unclaimed past 180s, means no scheduled-task worker is
+    # draining the queue. Carrying this on the heartbeat makes a phase2b stall
+    # visible in installation_resource_samples without SSHing the box.
+    stalled = bool(consec >= 1 or (isinstance(oldest, (int, float)) and oldest > 180))
     return {
         "ts": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
         "hostname": socket.gethostname(),
@@ -621,6 +644,10 @@ def build_summary() -> dict[str, Any]:
         "claude_queue": {
             "pending": cq.get("pending_total", 0),
             "running": cq.get("running_total", 0),
+            "oldest_age_sec": oldest,
+            "stalled": stalled,
+            "consecutive_timeouts": consec,
+            "last_success_at": ds.get("last_success_at"),
         },
     }
 
