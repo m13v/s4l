@@ -2341,7 +2341,11 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
   }
   let auto_update_on = false;
   try {
-    const res = await run("launchctl", ["list"], { timeoutMs: 10_000 });
+    // noTee: this status probe dumps the entire launchd job table (hundreds of
+    // lines) and fires on every dashboard/status poll — teeing it flooded Cloud
+    // Logging (~98% of an install's log volume). We only need the substring
+    // check, so keep the output in-memory and out of the relay. (2026-06-28)
+    const res = await run("launchctl", ["list"], { timeoutMs: 10_000, noTee: true });
     auto_update_on = res.stdout.split("\n").some((l) => l.includes(UPDATER_LABEL));
   } catch {
     /* leave false */
