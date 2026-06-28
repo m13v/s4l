@@ -66,12 +66,19 @@ import time
 #     processes, not `claude` agent-mode sessions — the reaper signature can never
 #     match them. Do not conflate the pipeline budget with the worker-turn ceiling.
 #
-# So the floor is the queue timeout; we take 2x it as the default for margin. A
-# session older than 2x the producer's own deadline is provably done/abandoned.
-# The 2x relationship is what guarantees the reaper never SIGKILLs a draft the
-# producer is still legitimately waiting on (reaper threshold >= producer timeout).
+# The floor is the queue timeout; we add a FIXED MARGIN (not a full 2x) on top.
+# Once a worker outlives the producer's deadline the producer has already discarded
+# its result, so the session is provably useless: there is nothing left to protect,
+# and killing it sooner is strictly better. A ~200MB agent-mode session that lingers
+# to the old 2x (60 min) piles up toward OOM on busy boxes (cf. the Ezra leaked-
+# session pileup: 29 sessions, ~4GB, near-OOM). The margin's only job is to avoid
+# racing a draft the producer is still reading AT the deadline. Invariant preserved:
+# the reaper threshold (timeout + margin) is always strictly greater than the
+# producer timeout. Override the margin with SAPS_REAPER_AGE_MARGIN_SEC, or pin an
+# absolute age with SAPS_REAPER_MAX_AGE_SEC.
 _QUEUE_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
-DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S * 2  # 3600s (60 min) by default
+_REAPER_AGE_MARGIN_S = int(os.environ.get("SAPS_REAPER_AGE_MARGIN_SEC", "300"))
+DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S + _REAPER_AGE_MARGIN_S  # 2100s (35 min) by default
 
 # Hard cap on kills per run, so a pathological ps parse can never SIGKILL the world.
 MAX_KILL_PER_RUN = 500
