@@ -253,10 +253,12 @@ class S4LMenuBar(rumps.App):
         # Cached stall flag (set each _tick) so the 1s activity poll can suppress a
         # stale "drafting" spinner that would otherwise mask the ⚠ in the title.
         self._stalled = False
-        # Cached (kind, detail) explaining a stall so the menu offers the right
-        # action: 'orphaned' -> Re-arm, 'rate_limited' -> wait/switch (no Re-arm),
-        # 'failing' -> generic. Recomputed each tick while stalled.
+        # Cached (kind, detail) explaining why a SCHEDULED autopilot isn't draining
+        # ('rate_limited' -> wait/switch, no setup button; 'failing' -> generic).
         self._stall_reason_info = ("", "")
+        # Cached schedule state for the current account: 'missing'/'disabled'/'ok'/
+        # 'unknown'. PRIMARY driver of the menu's attention section.
+        self._schedule_state_cache = "ok"
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
         self._tick(None)
@@ -983,23 +985,27 @@ class S4LMenuBar(rumps.App):
             setup_complete = bool(ob and ob.get("complete"))
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
-        # Autopilot liveness: only meaningful once setup is complete (before that,
-        # "no drafts draining" is just unfinished setup, surfaced via the blocker).
+        # --- Autopilot health (only meaningful once setup is complete) --------
+        # PRIMARY signal: read the ACTUAL schedule for the CURRENT account
+        # (missing/disabled/ok) — reliable, NOT inferred from whether it fired
+        # ("not fired" != "not scheduled"). SECONDARY: if scheduled+enabled but
+        # still not draining, work out why (rate-limit vs other).
+        schedule_state = self._schedule_state() if setup_complete else "ok"
         stalled = setup_complete and self._autopilot_stalled()
-        # Cache for the 1s activity poll: while stalled, the producer keeps
-        # re-asserting a "drafting" activity label on a job no routine will claim,
-        # which would otherwise own the title and hide the ⚠. _poll_activity reads
-        # this to drop that stale spinner.
-        self._stalled = stalled
-        # When stalled, work out WHY so the menu (and this notification) offer the
-        # right action — re-arm only helps when routines aren't firing, not when
-        # they fire but hit the Claude usage limit. Only computed while stalled
-        # (it reads worker transcripts), and cached for _build_menu.
-        self._stall_reason_info = self._stall_reason() if stalled else ("", "")
+        self._schedule_state_cache = schedule_state
+        # Stall reason only matters when the schedule IS on but drafts still aren't
+        # draining (rate-limit / other) — not when it's simply unscheduled.
+        self._stall_reason_info = (
+            self._stall_reason() if (stalled and schedule_state in ("ok", "unknown")) else ("", "")
+        )
+        # Any non-healthy state drops the stale "drafting" spinner so the ⚠ in the
+        # title isn't masked (see _poll_activity).
+        attention = setup_complete and (schedule_state in ("missing", "disabled") or stalled)
+        self._stalled = attention
 
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
         if not busy:
-            self._render_title(setup_complete, ob, blocker, stalled)
+            self._render_title(setup_complete, ob, blocker, attention)
 
         # Blocker notification only on transition into a new blocker.
         if blocker and blocker_code != self._last_blocker_code:
@@ -1008,29 +1014,35 @@ class S4LMenuBar(rumps.App):
                 blocker.get("message", "Setup is blocked"),
             )
         self._last_blocker_code = blocker_code
-        # Notify once on the transition into a stall, with the cause-specific action.
-        if stalled and not self._stall_notified:
+        # Notify once per episode, naming the actual problem + the right action.
+        if attention and not self._stall_notified:
             kind, detail = self._stall_reason_info
-            if kind == "rate_limited":
+            if schedule_state == "missing":
+                self._notify(
+                    "S4L draft autopilot not scheduled",
+                    "No draft tasks are scheduled on this Claude account (switching "
+                    "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
+                )
+            elif schedule_state == "disabled":
+                self._notify(
+                    "S4L draft tasks disabled",
+                    "The draft tasks are scheduled but disabled. Open the S4L menu → "
+                    "“Set up draft schedule” to re-enable.",
+                )
+            elif kind == "rate_limited":
                 self._notify(
                     "S4L autopilot paused",
                     "Claude usage limit reached" + (f" ({detail})" if detail else "")
-                    + ". Drafting resumes when the limit resets, or sign into a "
-                    "Claude account with quota.",
-                )
-            elif kind == "orphaned":
-                self._notify(
-                    "S4L autopilot not running",
-                    "The draft routines aren't running (did Claude's account "
-                    "change?). Open the S4L menu and click “Re-arm autopilot”.",
+                    + ". Drafting resumes at reset, or sign into an account with quota.",
                 )
             else:
                 self._notify(
                     "S4L autopilot stalled",
-                    "Drafts aren't being produced. Open the S4L menu for options.",
+                    "Drafts aren't being produced though the schedule is on. Open the "
+                    "S4L menu for options.",
                 )
             self._stall_notified = True
-        elif not stalled:
+        elif not attention:
             self._stall_notified = False
 
         # Only rebuild the menu when something user-visible changed, so an open
@@ -1056,12 +1068,13 @@ class S4LMenuBar(rumps.App):
             snap.get("projects_ready"),
             snap.get("projects_total"),
             st.read_mode(),
-            stalled,
+            attention,
+            schedule_state,
             self._stall_reason_info,
         )
         if sig != self._sig:
             self._sig = sig
-            self._build_menu(runtime_ready, setup_complete, ob, blocker, snap, stalled)
+            self._build_menu(runtime_ready, setup_complete, ob, blocker, snap, attention, schedule_state)
 
         # Draft-review pop-ups: if a draft cycle left a review request, present the
         # cards. Don't start a review mid-run (the spinner means a tool is active).
@@ -1291,9 +1304,9 @@ class S4LMenuBar(rumps.App):
                         self._reset_posting_progress_locked()
                 self._post_q.task_done()
 
-    def _render_title(self, setup_complete, ob, blocker, stalled=False):
-        if blocker or stalled:
-            self.title = "S4L ⚠"  # warning sign (setup blocked OR autopilot stalled)
+    def _render_title(self, setup_complete, ob, blocker, attention=False):
+        if blocker or attention:
+            self.title = "S4L ⚠"  # warning (setup blocked OR autopilot needs attention)
         elif not setup_complete and ob and not ob.get("complete"):
             done = sum(1 for m in ob["milestones"] if m.get("status") == "complete")
             self.title = f"S4L {done}/{len(ob['milestones'])}"
@@ -1303,7 +1316,7 @@ class S4LMenuBar(rumps.App):
             self.title = "S4L"
 
     # ---- menu construction ------------------------------------------------
-    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, stalled=False):
+    def _build_menu(self, runtime_ready, setup_complete, ob, blocker, snap, attention=False, schedule_state="ok"):
         self.menu.clear()
         items = []
 
@@ -1313,25 +1326,29 @@ class S4LMenuBar(rumps.App):
         items.append(header)
         items.append(rumps.separator)
 
-        # Autopilot stalled (most often the routines were orphaned by a Claude
-        # account switch): surface the one-click recovery FIRST, above the normal
-        # state items, so it's the obvious next action.
-        if stalled:
-            kind, detail = self._stall_reason_info
-            if kind == "rate_limited":
-                # Routines ARE firing; the account hit its Claude limit. Re-arm
-                # cannot fix that, so DON'T offer it — show the cause instead.
-                items.append(self._label("⚠ Autopilot paused — Claude usage limit"))
-                if detail:
-                    items.append(self._label(f"   {detail}"))
-                items.append(self._label("   Resumes at reset, or switch Claude account"))
-            elif kind == "orphaned":
-                # Routines aren't firing -> re-arm re-creates them.
-                items.append(self._label("⚠ Autopilot not running — no drafts"))
-                items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
-            else:  # 'failing' — routines fire but drafts fail for another reason
-                items.append(self._label("⚠ Autopilot stalled — drafts failing"))
-                items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
+        # Autopilot needs attention: surface the right action FIRST, above the
+        # normal state items. PRIMARY driver = the actual schedule state for THIS
+        # account (missing/disabled) — that's what "Set up draft schedule" fixes
+        # (host create_scheduled_task). Only when the schedule IS on but drafts
+        # aren't draining do we fall to the stall-reason wording (rate-limit/other),
+        # where re-creating the schedule wouldn't help.
+        if attention:
+            if schedule_state == "missing":
+                items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            elif schedule_state == "disabled":
+                items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            else:
+                kind, detail = self._stall_reason_info
+                if kind == "rate_limited":
+                    items.append(self._label("⚠ Autopilot paused — Claude usage limit"))
+                    if detail:
+                        items.append(self._label(f"   {detail}"))
+                    items.append(self._label("   Resumes at reset, or switch Claude account"))
+                else:
+                    items.append(self._label("⚠ Scheduled, but no drafts are being produced"))
+                    items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
