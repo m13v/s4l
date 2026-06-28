@@ -252,6 +252,9 @@ class S4LMenuBar(rumps.App):
         # One-shot guard so the "autopilot not running" notification fires once per
         # stall episode, not every poll. Reset when the stall clears.
         self._stall_notified = False
+        # Cached stall flag (set each _tick) so the 1s activity poll can suppress a
+        # stale "drafting" spinner that would otherwise mask the ⚠ in the title.
+        self._stalled = False
         self._reloc_timer = rumps.Timer(self._maybe_relocate_tasks, 90)
         self._reloc_timer.start()
         self._tick(None)
@@ -631,6 +634,17 @@ class S4LMenuBar(rumps.App):
         # so the title can show steady posting progress even when the server's
         # per-post activity.json is momentarily empty between posts.
         self._posting_label = self._compute_posting_label()
+        # While the autopilot is stalled, the server's "drafting"/"scanning" label is
+        # stale (the producer re-asserts it for the whole time it blocks on a job no
+        # routine will claim). Don't let the spinner own the title with that lie —
+        # drop it and paint the ⚠ stall state. A genuine posting drain (durable
+        # posting label) is real work, so it still shows.
+        if self._stalled and not self._posting_label:
+            if self._spinner is not None:
+                self._spinner.stop()
+                self._spinner = None
+            self.title = "S4L ⚠"
+            return
         act = st.read_activity()
         has_label = bool((act and act.get("label")) or self._posting_label)
         if has_label and self._spinner is None:
@@ -680,6 +694,15 @@ class S4LMenuBar(rumps.App):
         return f"posting · {sent} sent"
 
     def _spin(self, _):
+        # Stall beats a stale activity label: bail (and self-stop) so the title
+        # falls back to "S4L ⚠" rather than a "drafting" lie. _poll_activity also
+        # stops us within 1s; this makes the switch immediate.
+        if self._stalled and not self._posting_label:
+            if self._spinner is not None:
+                self._spinner.stop()
+                self._spinner = None
+            self.title = "S4L ⚠"
+            return
         act = st.read_activity()
         label = act.get("label") if act else None
         act_state = act.get("state") if act else None
@@ -802,6 +825,11 @@ class S4LMenuBar(rumps.App):
         # Autopilot liveness: only meaningful once setup is complete (before that,
         # "no drafts draining" is just unfinished setup, surfaced via the blocker).
         stalled = setup_complete and self._autopilot_stalled()
+        # Cache for the 1s activity poll: while stalled, the producer keeps
+        # re-asserting a "drafting" activity label on a job no routine will claim,
+        # which would otherwise own the title and hide the ⚠. _poll_activity reads
+        # this to drop that stale spinner.
+        self._stalled = stalled
 
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
         if not busy:
