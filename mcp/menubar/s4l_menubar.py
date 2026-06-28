@@ -112,6 +112,28 @@ SETUP_PROMPT = (
 )
 DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
 UPDATE_PROMPT = "Update social-autoposter to the latest version."
+# Re-arm after the draft autopilot's scheduled-task routines got orphaned — most
+# often because the user logged Claude Desktop into a different account, which
+# leaves the routines registered only under the OLD account's session so nothing
+# drains the draft queue (the SKILL.md files persist globally, so the old presence
+# check stayed falsely "green"). The host's create_scheduled_task only exists
+# inside an interactive Desktop session, so recovery routes through the composer
+# like Setup/Draft do. Targeted: it does NOT redo X/login/project setup.
+REARM_PROMPT = (
+    "The social-autoposter draft autopilot stopped running (its scheduled-task "
+    "routines are missing under this Claude account). Re-arm it now: call "
+    "queue_setup, then for EACH returned task call the host tool "
+    "create_scheduled_task with its taskId, cronExpression, and prompt verbatim, "
+    "then call run_draft_cycle once to verify a draft card appears. Do not redo my "
+    "X connection or project setup."
+)
+
+# A pending draft job older than this (seconds) with nothing claiming it means no
+# routine is draining the queue — the worker would claim within a minute if it
+# were firing. False-positive-free: an idle queue has no pending job at all, so a
+# quiet pipeline (no candidates) never trips this. Comfortably above the host
+# scheduler's per-minute cadence + a slow claim.
+AUTOPILOT_STALL_SECONDS = 180
 
 
 def _glyph(status):
@@ -283,6 +305,35 @@ class S4LMenuBar(rumps.App):
 
     def _draft(self, _=None):
         self._send_to_claude(DRAFT_PROMPT)
+
+    def _rearm(self, _=None):
+        self._send_to_claude(REARM_PROMPT)
+
+    # ---- autopilot liveness (the false-green fix) -------------------------
+    def _autopilot_stalled(self):
+        """True when setup is done but no scheduled-task routine is draining the
+        draft queue — i.e. a draft job has sat unclaimed in pending/ past
+        AUTOPILOT_STALL_SECONDS. This is the signal that survives a Claude account
+        switch, which orphans the routines while their global SKILL.md files (the
+        old "autopilot_on" proxy) stay put. Pure filesystem read; best-effort."""
+        try:
+            pend_root = os.path.join(st.state_dir(), "claude-queue", "pending")
+            oldest = None
+            for sub in glob.glob(os.path.join(pend_root, "*")):
+                for jf in glob.glob(os.path.join(sub, "*.json")):
+                    if jf.endswith(".tmp"):
+                        continue
+                    try:
+                        m = os.path.getmtime(jf)
+                    except OSError:
+                        continue
+                    if oldest is None or m < oldest:
+                        oldest = m
+            if oldest is None:
+                return False  # nothing pending -> idle, not stalled
+            return (time.time() - oldest) > AUTOPILOT_STALL_SECONDS
+        except Exception:
+            return False
 
     def _toggle_mode(self, _=None):
         """Flip personal-brand <-> promotion. Pure local state write (no model,
