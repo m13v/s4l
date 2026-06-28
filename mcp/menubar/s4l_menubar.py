@@ -1139,6 +1139,7 @@ class S4LMenuBar(rumps.App):
             snap.get("projects_total"),
             st.read_mode(),
             stalled,
+            self._stall_reason_info,
         )
         if sig != self._sig:
             self._sig = sig
@@ -1398,8 +1399,21 @@ class S4LMenuBar(rumps.App):
         # account switch): surface the one-click recovery FIRST, above the normal
         # state items, so it's the obvious next action.
         if stalled:
-            items.append(self._label("⚠ Autopilot not running — no drafts"))
-            items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
+            kind, detail = self._stall_reason_info
+            if kind == "rate_limited":
+                # Routines ARE firing; the account hit its Claude limit. Re-arm
+                # cannot fix that, so DON'T offer it — show the cause instead.
+                items.append(self._label("⚠ Autopilot paused — Claude usage limit"))
+                if detail:
+                    items.append(self._label(f"   {detail}"))
+                items.append(self._label("   Resumes at reset, or switch Claude account"))
+            elif kind == "orphaned":
+                # Routines aren't firing -> re-arm re-creates them.
+                items.append(self._label("⚠ Autopilot not running — no drafts"))
+                items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
+            else:  # 'failing' — routines fire but drafts fail for another reason
+                items.append(self._label("⚠ Autopilot stalled — drafts failing"))
+                items.append(rumps.MenuItem("Re-arm autopilot", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
