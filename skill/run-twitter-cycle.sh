@@ -794,7 +794,7 @@ else
     exit 1
 fi
 
-# --- Pre-flight 2: live access-gate probe (added 2026-06-29) -----------------
+# --- Pre-flight 2: live access-gate probe + backoff (added 2026-06-29) -------
 # The cookie probe above only proves an auth_token EXISTS. X can still gate a
 # perfectly valid session: from a datacenter IP (e.g. the MacStadium box) it
 # commonly 302s authenticated routes to /account/access ("verify it's you") or
@@ -806,17 +806,62 @@ fi
 # and STOP the cycle if X is gating us. Fails OPEN: a probe error or an
 # ok/unknown render never blocks, so a transient hydration miss can't halt
 # posting — only a positively-detected gate (gated:true) stops the cycle.
+#
+# BACKOFF: this launchd job fires every 5 min, and a gated cycle exits in ~2s,
+# so without backoff we'd hit Cloudflare /account/access ~12x/hr (~288/day),
+# which only deepens the datacenter-IP trust penalty. A state marker records the
+# gate and an exponential cooldown (15m -> 30m -> 60m -> cap 120m). While the
+# cooldown is live we skip the cycle WITHOUT navigating (no flagged traffic);
+# once it elapses we re-probe; an 'ok' probe clears the marker and resumes. Only
+# gated:true ever writes the marker, so fail-open is preserved.
+_SAPS_STATE_DIR="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+_GATE_FILE="$_SAPS_STATE_DIR/x-access-gate.json"
+_NOW=$(date +%s)
+
+# Backoff short-circuit: still inside a cooldown window -> skip without probing.
+if [ -f "$_GATE_FILE" ]; then
+    _CD_UNTIL=$(python3 -c 'import json,sys
+try: print(int(json.load(open(sys.argv[1])).get("cooldown_until",0)))
+except Exception: print(0)' "$_GATE_FILE" 2>/dev/null || echo 0)
+    if [ "${_CD_UNTIL:-0}" -gt "$_NOW" ]; then
+        _MINS=$(( (_CD_UNTIL - _NOW + 59) / 60 ))
+        log "Pre-flight: X access-gate backoff active (~${_MINS}m left); skipping cycle without re-probing to avoid adding flagged Cloudflare traffic."
+        echo "twitter_batches: ended $BATCH_ID"
+        release_lock "twitter-browser" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
 log "Pre-flight: probing for an X access gate (/account/access, Cloudflare)..."
 _ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
     python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
 if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
+    # Write/refresh the backoff marker with an exponential cooldown.
+    _NEXT_MINS=$(python3 -c 'import json,sys
+gf, now = sys.argv[1], int(sys.argv[2])
+base, cap, factor = 900, 7200, 2
+try: prev = json.load(open(gf))
+except Exception: prev = {}
+cd = prev.get("cooldown_secs")
+cd = base if not cd else min(int(cd)*factor, cap)
+out = {"first_seen": prev.get("first_seen", now), "last_seen": now,
+       "reason": "access_gated", "consecutive": int(prev.get("consecutive",0))+1,
+       "cooldown_secs": cd, "cooldown_until": now+cd}
+json.dump(out, open(gf,"w"))
+print(cd//60)' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo 15)
     log "  Pre-flight FAILED: X is gating this session (access gate detected)."
     log "  Probe: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
     log "  X redirected an authenticated route to /account/access or served a Cloudflare verification page. This is usually datacenter-IP trust degradation: the session cookie is still valid but X hides content from it, so a scan would return phantom 'doesn't exist' results."
-    log "  Action: open the harness Chrome (CDP :9555) and complete the verification at https://x.com/account/access once, or route the box through a residential/clean IP, then re-run the cycle."
+    log "  Backoff engaged: next access re-probe in ~${_NEXT_MINS}m (intervening 5-min firings skip without touching Cloudflare)."
+    log "  Action: open the harness Chrome (CDP :9555) and complete the verification at https://x.com/account/access once, or route the box through a residential/clean IP. The cycle auto-resumes within one cooldown of the gate lifting."
     echo "twitter_batches: ended $BATCH_ID"
     release_lock "twitter-browser" 2>/dev/null || true
     exit 1
+fi
+# Probe came back clean: clear any prior backoff marker and resume normally.
+if [ -f "$_GATE_FILE" ]; then
+    rm -f "$_GATE_FILE"
+    log "  X access gate lifted; cleared backoff marker and resuming normal cycle."
 fi
 log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
 
