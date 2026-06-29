@@ -21,15 +21,32 @@ HB_PID=""  # scan-phase heartbeat (started below); torn down by the EXIT trap
 # the cycle's exit code.
 trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/saps_activity.py" clear 2>/dev/null || true' EXIT
 
-# Narrate the scan phase. The CDP scan runs inside the (locked) run-twitter-cycle.sh
-# which has no activity writer; this covers that window until the queue provider
-# flips the label to "finding threads"/"drafting replies" on its first claude call.
+# Narrate the scan phase, GRANULARLY. The CDP scan runs inside the (locked)
+# run-twitter-cycle.sh which has no activity writer; this covers that window until
+# the queue provider flips the label to "finding threads"/"drafting replies".
+# Instead of a frozen "scanning X for threads" for the whole multi-minute scan,
+# each heartbeat recomputes elapsed and scrapes THIS cycle's own stdout ($OUT, the
+# tee target below) for live progress — queries run, and candidates found once
+# Phase 1 reports them — so the menu bar actually moves. Reads $OUT only; never
+# touches the locked cycle. heartbeat() re-stamps ONLY while the state is still
+# "scanning", so once the provider advances the phase it goes quiet (no flicker).
 "$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scanning X for threads" 2>/dev/null || true
-# Keep "scanning" fresh against the menu bar's staleness TTL for the whole scan
-# (which can run minutes with no other writer). The heartbeat re-stamps ONLY while
-# the state is still "scanning", so once the queue provider advances the phase to
-# "finding threads"/"drafting replies" it goes quiet and never fights that writer.
-( while true; do sleep 30; "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "scanning X for threads" 2>/dev/null || true; done ) &
+SCAN_T0=$(date +%s)
+(
+  while true; do
+    sleep 20
+    _el=$(( $(date +%s) - SCAN_T0 ))
+    if [ "$_el" -lt 60 ]; then _dur="${_el}s"; else _dur="$(( _el / 60 ))m"; fi
+    _q=$(grep -c "kept=" "$OUT" 2>/dev/null || true); _q=${_q:-0}
+    _found=$(grep -oE "Batch has [0-9]+" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | tail -1 || true)
+    if [ -n "$_found" ]; then
+      _lbl="scanning X for threads (${_dur} · ${_q} queries, ${_found} found)"
+    else
+      _lbl="scanning X for threads (${_dur} · ${_q} queries)"
+    fi
+    "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "$_lbl" 2>/dev/null || true
+  done
+) &
 HB_PID=$!
 
 # Engagement mode (2026-06-26). The menu-bar toggle writes mode.json; this reads
