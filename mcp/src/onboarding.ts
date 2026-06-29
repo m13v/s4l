@@ -21,7 +21,7 @@ export const ONBOARDING_MILESTONES = [
   "mode_chosen",
   "project_ready",
   "topics_seeded",
-  "draft_verified",
+  "tasks_scheduled",
 ] as const;
 
 export type OnboardingMilestone = (typeof ONBOARDING_MILESTONES)[number];
