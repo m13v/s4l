@@ -306,8 +306,8 @@ const server = new McpServer(
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
       "project is fully configured with seeded search topics, X is connected with its real handle, " +
-      "the two draft-autopilot scheduled tasks have been created via queue_setup, AND one real draft " +
-      "cycle (`run_draft_cycle`) has produced a draft card — verifying the ACTUAL pipeline end to end " +
+      "the two draft-autopilot scheduled tasks have been created via queue_setup, AND the scheduled " +
+      "cycle has produced a draft card (poll the `dashboard` pending-draft count) — verifying the ACTUAL pipeline end to end " +
       "without posting (see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
       "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
       "reports ready; only call runtime action:'install' or action:'doctor' to TROUBLESHOOT if status " +
@@ -320,7 +320,7 @@ const server = new McpServer(
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
       "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup, but " +
-      "DO schedule the draft autopilot and verify it with one real cycle as the final step (it only " +
+      "DO schedule the draft autopilot and verify it produced a draft card as the final step (it only " +
       "queues drafts for approval, it never posts on its own). When setup reaches done (" +
       "runtime ready, a project configured with seeded topics, X connected, the two scheduled tasks " +
       "created, and one real cycle has produced a draft card), call the `dashboard` tool so the user " +
@@ -329,22 +329,22 @@ const server = new McpServer(
       "SCHEDULE + VERIFY THE AUTOPILOT (final onboarding step). There is ONE drafting pipeline: a launchd " +
       "job this server installs runs the real cycle in draft-only mode, its Phase-2b Claude turn is " +
       "serviced by a scheduled task that drains a local job queue, and the result is merged into the " +
-      "menu-bar approval cards. Drafting is the queue + worker path; `run_draft_cycle` is how you " +
-      "fire a real cycle on demand. Steps, in order: " +
+      "menu-bar approval cards. Drafting is the queue + worker path, fired automatically by a launchd " +
+      "kicker this server installs (every few minutes). Steps, in order: " +
       "(1) call `queue_setup` — it pre-writes the worker task prompts and returns two task specs " +
       "(saps-phase1-query, saps-phase2b-draft); " +
       "(2) for EACH spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
       "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
-      "(3) call `run_draft_cycle` to fire one real cycle now, then poll the `dashboard` tool every ~30s " +
-      "for up to ~3 minutes until the pending-draft count rises — that card came through the real " +
+      "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — poll the `dashboard` tool every ~30s " +
+      "for up to ~5 minutes until the pending-draft count rises — that card came through the real " +
       "pipeline and verifies it end to end. Do NOT create the old 'social-autoposter-autopilot' task — " +
       "it is deprecated. Do NOT ask the user to review the drafts or pause for input mid-onboarding; " +
       "keep going until the card appears, then summarize. If the host exposes no create_scheduled_task " +
       "tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
-      "milestone), don't wait to be asked: offer to tell the world by running a draft cycle " +
-      "(`run_draft_cycle`) about it. A feature nobody hears " +
+      "milestone), don't wait to be asked: point it out to the user — the draft autopilot runs " +
+      "continuously and will surface relevant posts to approve. A feature nobody hears " +
       "about is wasted distribution. Use judgment, suggest it for " +
       "genuinely shareable moments, not routine refactors, chores, or internal cleanup.\n\n" +
       "STAY CURRENT. At the start of a session, and again right after you help the user ship/merge/" +
@@ -355,14 +355,14 @@ const server = new McpServer(
       "profile scan, ASK the user: grow their personal brand or promote a product, and set it — this " +
       "provisions the persona) -> `project_config` (configure the product project; always, regardless " +
       "of mode) -> `queue_setup` + " +
-      "`create_scheduled_task` (set up the draft autopilot once) -> `run_draft_cycle` (the real pipeline " +
-      "scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
+      "`create_scheduled_task` (set up the draft autopilot once) -> the autopilot then runs on its own " +
+      "(scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
       "user approves in the menu bar -> `post_drafts` (post the approved ones) -> `get_stats` (see " +
       "performance). Run `project_config` first; the other tools refuse until a " +
       "project is fully configured. To change anything about a project later, call `project_config` " +
       "again with the project's name and just the changed fields — there is no separate config editor.\n\n" +
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
-      "(`run_draft_cycle`, `post_drafts`, `get_stats`), end your turn by " +
+      "(`post_drafts`, `get_stats`, `project_config`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
       "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
   }
