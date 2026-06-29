@@ -277,12 +277,97 @@ def diagnose_tweet_access(
     return final
 
 
+def diagnose_session_access(
+    probe_url: str = "https://x.com/home",
+    wait_ms: int = 9000,
+) -> dict:
+    """Navigate one authenticated route and report whether X is gating us.
+
+    Unlike a cookie probe (which only proves an auth_token exists), this loads a
+    real authenticated page and classifies the rendered result. It returns a
+    `gated` boolean that callers (e.g. the cycle preflight) use to STOP before
+    scanning/posting against a session X is limiting, instead of mistaking the
+    resulting phantom "doesn't exist" renders for real, empty results.
+
+    status: access_gated | logged_out | ok | unknown
+    """
+    from playwright.sync_api import sync_playwright
+
+    cf_phrases = (
+        "performing security verification",
+        "verify you are human",
+        "checking if the site connection is secure",
+        "security service to protect",
+        "needs to review the security of your connection",
+    )
+    final: dict = {"status": "unknown", "reason": "no_signal"}
+    with sync_playwright() as p:
+        browser, page, is_cdp = tb.get_browser_and_page(p)
+        try:
+            try:
+                page.goto(probe_url, wait_until="domcontentloaded", timeout=45000)
+            except Exception as e:
+                print(f"[twitter_access] session navigate failed: {e}", file=sys.stderr)
+
+            deadline = time.time() + max(2.0, wait_ms / 1000.0)
+            while True:
+                page.wait_for_timeout(1000)
+                state = page_state(page)
+                href = (state.get("href") or "").lower()
+                text_norm = _norm(state.get("text_prefix") or "")
+                articles = state.get("article_count") or 0
+                if "/account/access" in href:
+                    final = {"status": "access_gated", "reason": "account_access_redirect"}
+                elif "/login" in href or "/i/flow/login" in href or "/logout" in href:
+                    final = {"status": "logged_out", "reason": "login_url"}
+                elif any(s in text_norm for s in cf_phrases):
+                    final = {"status": "access_gated", "reason": "cloudflare_challenge"}
+                elif articles > 0:
+                    final = {"status": "ok", "reason": "timeline_rendered"}
+                else:
+                    final = {"status": "unknown", "reason": "no_signal_yet"}
+                if final["status"] in ("access_gated", "logged_out", "ok") or time.time() >= deadline:
+                    final["current_url"] = state.get("href")
+                    final["title"] = state.get("title")
+                    final["body_len"] = state.get("body_len")
+                    final["article_count"] = articles
+                    break
+        finally:
+            if not is_cdp:
+                page.close()
+                browser.close()
+
+    final["probe_url"] = probe_url
+    # Only the two positively-detected gate states halt the caller. ok/unknown
+    # never block, so a transient hydration miss can't silently stop posting.
+    final["gated"] = final.get("status") in ("access_gated", "logged_out")
+    return final
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("tweet_url")
+    parser.add_argument("tweet_url", nargs="?")
     parser.add_argument("--wait-ms", type=int, default=12000)
     parser.add_argument("--no-public-control", action="store_true")
+    parser.add_argument(
+        "--session-probe",
+        action="store_true",
+        help="Navigate an authenticated route and report whether X is gating "
+        "this session (access_gated/logged_out/ok). No tweet_url needed.",
+    )
+    parser.add_argument("--probe-url", default="https://x.com/home")
     args = parser.parse_args()
+
+    if args.session_probe:
+        result = diagnose_session_access(
+            probe_url=args.probe_url,
+            wait_ms=min(args.wait_ms, 12000),
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+
+    if not args.tweet_url:
+        parser.error("tweet_url is required unless --session-probe is given")
 
     result = diagnose_tweet_access(
         args.tweet_url,
