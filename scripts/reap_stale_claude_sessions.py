@@ -248,30 +248,24 @@ def _env_int(name: str, default: int) -> int:
 def main() -> int:
     dry = "--dry-run" in sys.argv
     max_age = _env_int("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
-    # (1) Queue-correlated reaping knobs.
-    # grace: how long an UNCLAIMED session may live before its AGE makes it reapable.
+    # (1) Queue-correlated reaping knob.
     #
-    # 2026-06-29, second pass: this used to default to 90s, and the queue-readable
-    # branch below used it as the ONLY age gate -- which meant a separate, short,
-    # activity-BLIND timer governed normal operation and silently overrode the 35-min
-    # `max_age` ceiling that the whole top-of-file rationale is built around (producer
-    # deadline 1800s + margin). An actively-DRAFTING session ages out of the
-    # "inflight+margin newest" window after ~2 min as fresh empty workers spawn on top
-    # of it, then got SIGTERMed at 90s mid-draft -> the mysterious "~120s code-143
-    # kill". Raising it to 300s only moved the cliff.
+    # ONE age ceiling, `max_age` (35 min = producer deadline 1800s + margin). There is
+    # deliberately no second, shorter timer.
     #
-    # The fix is to stop having two timers. There is now ONE overall age ceiling
-    # (`max_age`, 35 min = producer deadline + margin): past it the producer has
-    # already discarded the worker's result, so the session is provably useless and
-    # safe to reap whether or not it ever claimed. `grace` therefore defaults to
-    # `max_age` -- the queue-readable branch is no longer allowed to preempt a session
-    # earlier than the producer's own deadline. What keeps MEMORY bounded instead of a
-    # short timer is (a) claim-holders are spared outright via running_claim_pids() and
-    # (b) the count-cap (max_group) reaps the oldest-beyond-N by COUNT, regardless of
-    # age, and never touches a claim-holder. Override only to deliberately re-introduce
-    # an earlier age gate (not recommended); it can never exceed max_age in effect.
-    grace = _env_int("SAPS_REAPER_GRACE_SEC", DEFAULT_MAX_AGE_SEC)  # = max_age: one ceiling
-    grace = min(grace, max_age)  # an override may only shorten, never outlive the ceiling
+    # History (2026-06-29): the queue-readable branch below used to apply its OWN short
+    # `grace` (90s, then 300s) as the age gate -- an activity-BLIND timer that governed
+    # normal operation and silently overrode this 35-min ceiling. An actively-DRAFTING
+    # session ages out of the "inflight+margin newest" window after ~2 min as fresh
+    # empty workers spawn on top of it, so the short grace SIGTERMed it mid-draft -> the
+    # "~120s code-143 kill". That second timer is removed: a session is reapable by age
+    # ONLY once it outlives max_age, by which point the producer has already discarded
+    # its result, so it is provably useless regardless of whether it ever claimed.
+    #
+    # What bounds MEMORY instead of a short timer: (a) claim-holders are spared outright
+    # via running_claim_pids() -- the actively-drafting session is "dragged" along and
+    # never reaped; (b) the count-cap (max_group) reaps the oldest-beyond-N by COUNT,
+    # regardless of age, and never touches a claim-holder.
     keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
     # (2) Count-cap backstop: never let one uuid group hold more than this many live
     # workers, regardless of queue state. 0 disables. The default rarely fires once
@@ -298,12 +292,12 @@ def main() -> int:
         if inflight is not None:
             # (1) Spare any session that HOLDS a live claim (it's actively drafting),
             # plus the (inflight + margin) newest as a fallback for sessions that
-            # claimed before this build stamped claim_pid. Reap the rest past grace.
+            # claimed before this build stamped claim_pid. Reap the rest past max_age.
             spare_n = max(1, inflight + keep_margin)
             for p in members[spare_n:]:
                 if p["pid"] in claim_pids:
                     continue  # actively holds a claim — never reap, no matter its age
-                if p["age"] >= grace:
+                if p["age"] >= max_age:  # single 35-min ceiling, same as the fallback
                     targets_by_pid[p["pid"]] = p
         else:
             # Fallback: queue unreadable -> legacy age gate, keep only the newest.
@@ -337,7 +331,7 @@ def main() -> int:
         print(
             f"[claude-reaper] sparing {len(live)} live claim-holder session(s)"
             f" pids={live}" + (f" (stale-claim pids={dead})" if dead else "")
-            + f"; inflight={inflight} grace={grace}s",
+            + f"; inflight={inflight} ceiling={max_age}s",
             file=sys.stderr,
         )
 
@@ -364,9 +358,8 @@ def main() -> int:
     print(
         f"{prefix} reaped {killed} stale agent-mode claude session(s)"
         f" + {disclaimers} disclaimer stub(s) across {sum(1 for g in groups.values() if len(g) > 1)}"
-        f" leaked uuid group(s); mode={mode} inflight={inflight} grace={grace}s"
-        f" spared_claim_pids={sorted(claim_pids)} max_group={max_group}"
-        f" (age_fallback={max_age}s)",
+        f" leaked uuid group(s); mode={mode} inflight={inflight} ceiling={max_age}s"
+        f" spared_claim_pids={sorted(claim_pids)} max_group={max_group}",
         file=sys.stderr,
     )
     return 0
