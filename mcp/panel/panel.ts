@@ -494,6 +494,34 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
   }
 }));
 
+// Set up draft schedule for THIS account. Like Setup, this needs the model in the
+// loop (only the host create_scheduled_task can register a routine, and it runs
+// inside a chat turn), so we inject a user turn via sendMessage. The worker prompt
+// files already exist on disk (the server writes them on boot), so the agent just
+// registers them via create_scheduled_task \u2014 no dependency on queue_setup.
+btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026", async () => {
+  log("Asking Claude to schedule the draft tasks for this account\u2026");
+  try {
+    const res = await app.sendMessage({
+      role: "user",
+      content: [{
+        type: "text",
+        text:
+          "Set up the social-autoposter draft autopilot schedule for this Claude account. " +
+          "If queue_setup is available, call it; then for EACH of saps-phase1-query and " +
+          "saps-phase2b-draft call the host tool create_scheduled_task with taskId, " +
+          "cronExpression \"* * * * *\", and the prompt \u2014 read it from " +
+          "~/.claude/scheduled-tasks/<taskId>/SKILL.md (already on disk). Do NOT redo my X " +
+          "connection or project setup. Keep replies to me very short.",
+      }],
+    });
+    if ((res as any)?.isError) log("The host rejected it \u2014 type \u201cset up the draft schedule\u201d in the chat instead.");
+    else log("Scheduling is running in the chat. The draft tasks will register for this account.");
+  } catch (e: any) {
+    log("Couldn\u2019t start scheduling: " + (e?.message || e));
+  }
+}));
+
 // ---- collapsible sections -------------------------------------------------
 // The header setup dropdown and the "Last 7 days stats" header are the only two
 // expand/collapse controls. Both just flip a local boolean and re-apply it; the
