@@ -281,31 +281,53 @@ def main() -> int:
         members.sort(key=lambda p: p["age"])  # ascending: newest first
 
         if inflight is not None:
-            # (1) Spare the (inflight + margin) newest — these cover every worker that
-            # could still hold a live claim — and reap the rest once past a short grace.
+            # (1) Spare any session that HOLDS a live claim (it's actively drafting),
+            # plus the (inflight + margin) newest as a fallback for sessions that
+            # claimed before this build stamped claim_pid. Reap the rest past grace.
             spare_n = max(1, inflight + keep_margin)
             for p in members[spare_n:]:
+                if p["pid"] in claim_pids:
+                    continue  # actively holds a claim — never reap, no matter its age
                 if p["age"] >= grace:
                     targets_by_pid[p["pid"]] = p
         else:
             # Fallback: queue unreadable -> legacy age gate, keep only the newest.
             for p in members[1:]:
+                if p["pid"] in claim_pids:
+                    continue
                 if p["age"] >= max_age:
                     targets_by_pid[p["pid"]] = p
 
-        # (2) Count-cap backstop. Never caps BELOW the queue-spared busy set, so it
-        # can only ever add provably-idle workers — no false positives.
+        # (2) Count-cap backstop. Never caps BELOW the queue-spared busy set, and
+        # never reaps a live claim-holder, so it can only ever add provably-idle
+        # workers — no false positives.
         if max_group > 0:
             keep = max_group
             if inflight is not None:
                 keep = max(keep, inflight + keep_margin)
             for p in members[keep:]:
+                if p["pid"] in claim_pids:
+                    continue
                 targets_by_pid[p["pid"]] = p
 
     targets = list(targets_by_pid.values())[:MAX_KILL_PER_RUN]
 
+    # Visibility (per the 2026-06-29 draft-kill investigation): whenever a draft is
+    # in flight, log that we SAW the claim-holder(s) and are sparing them, so a
+    # future "why did the draft die" check can confirm the reaper protected the
+    # right session — or catch it red-handed if this logic ever regresses.
+    if claim_pids:
+        live = sorted(p for p in claim_pids if p in by_pid)
+        dead = sorted(p for p in claim_pids if p not in by_pid)
+        print(
+            f"[claude-reaper] sparing {len(live)} live claim-holder session(s)"
+            f" pids={live}" + (f" (stale-claim pids={dead})" if dead else "")
+            + f"; inflight={inflight} grace={grace}s",
+            file=sys.stderr,
+        )
+
     if not targets:
-        # Stay quiet on the common no-leak path to keep the log stream clean.
+        # No reapable sessions this run (common no-leak path).
         return 0
 
     freed_kb = 0
@@ -328,7 +350,8 @@ def main() -> int:
         f"{prefix} reaped {killed} stale agent-mode claude session(s)"
         f" + {disclaimers} disclaimer stub(s) across {sum(1 for g in groups.values() if len(g) > 1)}"
         f" leaked uuid group(s); mode={mode} inflight={inflight} grace={grace}s"
-        f" max_group={max_group} (age_fallback={max_age}s)",
+        f" spared_claim_pids={sorted(claim_pids)} max_group={max_group}"
+        f" (age_fallback={max_age}s)",
         file=sys.stderr,
     )
     return 0
