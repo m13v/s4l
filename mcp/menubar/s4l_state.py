@@ -50,7 +50,7 @@ MILESTONE_LABELS = {
     "mode_chosen": "Mode chosen",
     "project_ready": "Project ready",
     "topics_seeded": "Topics seeded",
-    "tasks_scheduled": "Autopilot scheduled",
+    "tasks_scheduled": "Tasks scheduled",
 }
 
 # Mirrors index.ts TWITTER_AUTOPILOT_LABEL.
