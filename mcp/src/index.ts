@@ -2,9 +2,10 @@
 // social-autoposter MCP server (X/Twitter rail).
 //
 // Core tools:
-//   run_draft_cycle - fire ONE real pipeline cycle (scan -> draft via the queue + worker
-//                     task), merging the resulting drafts into the menu-bar approval cards
-//                     (posts nothing).
+//   queue_setup     - return the two draft-autopilot scheduled-task specs to register
+//                     via the host create_scheduled_task. The autopilot then drafts
+//                     on its own (launchd kicker + queue worker); there is no manual
+//                     "draft now" tool.
 //   post_drafts     - post the drafts the user chose by number from a batch.
 //   get_stats    - read-only post + engagement stats.
 //
@@ -474,14 +475,14 @@ function blockedReasonMessage(reason: string): string {
         "couldn't run. (It DID find and rank threads, it just couldn't draft replies.) This " +
         "CLI uses its own login, separate from Claude Desktop. To fix it, open a terminal and run:\n\n" +
         "    claude\n\n" +
-        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, run `run_draft_cycle` again."
+        "then `/login` inside it (or run `claude setup-token`). Once it's logged in, the autopilot will retry on its next scheduled cycle."
       );
     case "monthly_limit":
     case "daily_limit":
     case "rate_limit_5h":
       return (
         `The drafting step hit an Anthropic usage limit (${reason}), so no replies were drafted. ` +
-        "Wait for the limit to reset, then run `run_draft_cycle` again."
+        "Wait for the limit to reset, then the autopilot will retry on its next scheduled cycle."
       );
     case "no_search_topics":
       return (
@@ -489,23 +490,23 @@ function blockedReasonMessage(reason: string): string {
         "DB (project_search_topics) and are seeded from your project's `search_topics` when you " +
         "configure it. Re-run the `project_config` tool for this project with a `search_topics` list " +
         "(comma-separated keywords/phrases your buyers tweet about); it seeds them automatically, then " +
-        "run `run_draft_cycle` again."
+        "the autopilot will retry on its next scheduled cycle."
       );
     case "topics_api_unreachable":
       return (
         "Couldn't reach the search-topics service to load this project's topics, so the cycle stopped " +
-        "before scanning. This is usually a transient backend/network issue. Try `run_draft_cycle` again in a " +
-        "moment; if it persists, check connectivity to the autoposter backend."
+        "before scanning. This is usually a transient backend/network issue. It should clear on the " +
+        "autopilot's next scheduled cycle; if it persists, check connectivity to the autoposter backend."
       );
     case "credit_balance":
       return (
         "The drafting step failed because the Anthropic account is out of credits. " +
-        "Add credits, then run `run_draft_cycle` again."
+        "Add credits, then the autopilot will retry on its next scheduled cycle."
       );
     default:
       return (
         `The drafting step failed (${reason}) and produced no drafts. ` +
-        "Check skill/logs/twitter-cycle-*.log on this machine for details, then run `run_draft_cycle` again."
+        "Check skill/logs/twitter-cycle-*.log on this machine for details, then the autopilot will retry on its next scheduled cycle."
       );
   }
 }
@@ -1328,7 +1329,7 @@ tool(
       "Call with status:true (or no name) to list every configured project, its remaining fields, AND " +
       "whether X is connected. Use config, conversation context, profile_scan, and website research " +
       "before asking for fields. Ask only if no product can be identified or an interactive login is " +
-      "unavoidable. The run_draft_cycle and get_stats tools refuse to run until a project is " +
+      "unavoidable. The get_stats tool refuses to run until a project is " +
       "fully set up.",
     inputSchema: {
       status: z.boolean().optional(),
@@ -1520,7 +1521,7 @@ tool(
         next_step: r.connected
           ? "X is connected. Next, run project_config action:'profile_scan' to read this account's bio + recent " +
             "posts + replies and draft the project's voice/icp/search_topics in the user's own register " +
-            "before saving. Then set up the autopilot (queue_setup + create_scheduled_task) and run a real cycle (run_draft_cycle) once the project is fully set up."
+            "before saving. Then set up the autopilot (queue_setup + create_scheduled_task) once the project is fully set up; it then drafts on its own."
           : r.state === "needs_login"
             ? "The user must finish signing in to x.com in the Chrome window that just opened. Tell " +
               "them that single required action, then call project_config action:'connect_x', confirm:true again."
