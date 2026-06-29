@@ -63,6 +63,10 @@ interface Snapshot {
   update_available: boolean;
   runtime_ready: boolean;
   runtime_provisioning?: boolean;
+  // Schedule state for the CURRENT Claude account: 'missing'/'disabled' means the
+  // draft tasks aren't registered here (e.g. after an account switch) and the
+  // "Set up draft schedule" button should show.
+  schedule_state?: "missing" | "disabled" | "ok" | "unknown";
   onboarding?: OnboardingSnapshot;
 }
 
@@ -89,6 +93,7 @@ const $ = (id: string) => document.getElementById(id)!;
 const verEl = $("ver");
 const btnSetup = $("btn-setup") as HTMLButtonElement;
 const btnDraft = $("btn-draft") as HTMLButtonElement;
+const btnSchedule = $("btn-schedule") as HTMLButtonElement;
 const statsGrid = $("stats-grid");
 const statsToggle = $("stats-toggle") as HTMLButtonElement;
 const logEl = $("log");
@@ -257,6 +262,17 @@ function render() {
   btnDraft.disabled = needsRuntime || !hasReady;
   btnSetup.classList.toggle("primary", !setupComplete);
   btnDraft.classList.toggle("primary", setupComplete);
+
+  // After setup, if the draft tasks aren't scheduled on THIS Claude account
+  // (e.g. the user switched accounts, which orphans them), surface a one-click
+  // "Set up draft schedule" — it injects the setup prompt into the chat so the
+  // agent registers them via create_scheduled_task under the current account.
+  const needsSchedule =
+    setupComplete && (state.schedule_state === "missing" || state.schedule_state === "disabled");
+  btnSchedule.hidden = !needsSchedule;
+  btnSchedule.classList.toggle("primary", needsSchedule);
+  // When the schedule needs (re)arming, that's the primary action, not Run draft.
+  if (needsSchedule) btnDraft.classList.remove("primary");
 
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
