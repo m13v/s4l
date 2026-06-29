@@ -501,18 +501,28 @@ class S4LMenuBar(rumps.App):
                 except Exception:
                     continue
                 low = txt.lower()
-                # (a) Human "usage limit reached" prose (the older shape).
-                if "weekly limit" in low or "usage limit" in low or "hit your limit" in low:
+                # CRITICAL: only treat this as a limit when it is an actual API
+                # ERROR in this run — NEVER loose prose anywhere in the transcript.
+                # The drafting prompt embeds candidate threads + the feedback report,
+                # which frequently contain phrases like "weekly limit" / "rate limit"
+                # as CONTENT (an AI-product timeline is full of them — a 'claude-meter'
+                # example post "reached your weekly limit by tuesday" false-tripped the
+                # old prose match on 2026-06-29). The api-error markers below are set
+                # by the SDK only on real errors, so they can't appear in content.
+                #
+                # (a) HTTP-429 rate_limit — the definitive routines-lane shape:
+                #     {"error":"rate_limit",...,"isApiErrorMessage":true,"apiErrorStatus":429}
+                if '"apierrorstatus":429' in low or '"error":"rate_limit"' in low:
+                    limit_msg = "Claude rate limit reached (429)"
+                    break
+                # (b) Weekly/usage-limit prose, but ONLY when carried inside a real
+                #     API-error message (gated on the marker so content can't trip it).
+                if '"isapierrormessage":true' in low and (
+                    "weekly limit" in low or "usage limit" in low or "hit your limit" in low
+                ):
                     import re
                     m = re.search(r"resets [^\"\\]{0,40}", txt)
                     limit_msg = m.group(0).strip().rstrip(".") if m else "Claude usage limit reached"
-                    break
-                # (b) HTTP-429 rate_limit api_error — the shape the Claude Desktop
-                # routines lane ACTUALLY returns when the account is over its limit.
-                # The prose strings above never appear in this case; the routine
-                # transcript carries {"error":"rate_limit",...,"apiErrorStatus":429}.
-                if '"apierrorstatus":429' in low or '"error":"rate_limit"' in low:
-                    limit_msg = "Claude rate limit reached (429)"
                     break
         except Exception:
             pass
