@@ -119,11 +119,12 @@ UPDATE_PROMPT = "Update social-autoposter to the latest version."
 # scheduled-tasks.json directly — that can't reliably target a just-switched-into
 # account, which is exactly the bug it caused.
 REARM_PROMPT = (
-    "Set up the social-autoposter draft autopilot for this Claude account. "
-    "Call queue_setup, then for EACH returned task call the host tool "
-    "create_scheduled_task with its taskId, cronExpression, and prompt verbatim, "
-    "then call run_draft_cycle once to verify. Do not redo my X connection or "
-    "project setup — only (re)register the scheduled tasks."
+    "Set up the social-autoposter draft autopilot schedule for this Claude account. "
+    "If queue_setup is available, call it; then for EACH of saps-phase1-query and "
+    "saps-phase2b-draft call the host tool create_scheduled_task with taskId, "
+    "cronExpression \"* * * * *\", and the prompt — read it from "
+    "~/.claude/scheduled-tasks/<taskId>/SKILL.md (already on disk). Do not redo my X "
+    "connection or project setup — only register the scheduled tasks. Keep replies short."
 )
 
 # A pending draft job older than this (seconds) with nothing claiming it means no
@@ -343,14 +344,28 @@ class S4LMenuBar(rumps.App):
         self._send_to_claude(DRAFT_PROMPT)
 
     def _rearm(self, _=None):
-        """Set up / re-register the draft autopilot's scheduled tasks for the
-        CURRENT Claude account — the correct way, through the HOST create_scheduled_task
-        flow (same as onboarding). It registers under whatever account is logged in
-        and shows in Routines. The host tool only runs inside an agent chat, so we
-        hand Claude the setup prompt (auto-typed, clipboard+paste fallback). We do
-        NOT write scheduled-tasks.json directly — that can't reliably target a
-        just-switched-into account."""
-        self._send_to_claude(REARM_PROMPT)
+        """Register the draft schedule for the CURRENT account via the host
+        create_scheduled_task flow (same as onboarding) — it registers under
+        whatever account is logged in and shows in Routines. The host tool only
+        runs inside a chat turn, and the menu bar CANNOT inject into the chat (that
+        bridge is panel-only), so the reliable path here is: copy the prompt to the
+        clipboard, open Claude, and tell the user to paste it. (The dashboard
+        widget's button does this in one click via app.sendMessage — no paste.) We
+        do NOT auto-type (focus/timing flaky) and do NOT write the registry directly
+        (can't reliably target a just-switched-into account)."""
+        copied = self._copy_to_clipboard(REARM_PROMPT)
+        self._open_claude()
+        if copied:
+            self._notify(
+                "S4L · setup prompt copied",
+                "Paste it into Claude (⌘V) and press Enter to schedule the draft "
+                "tasks for this account.",
+            )
+        else:
+            self._notify(
+                "S4L",
+                "Open Claude and ask it to set up the draft schedule for this account.",
+            )
 
     # ---- schedule-state detection (reads the ACTUAL schedule, reliably) ----
     def _active_session_id(self):
