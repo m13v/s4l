@@ -249,14 +249,29 @@ def main() -> int:
     dry = "--dry-run" in sys.argv
     max_age = _env_int("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
     # (1) Queue-correlated reaping knobs.
-    # grace: how long an UNCLAIMED session may live before it's reapable. Raised
-    # 90 -> 300 on 2026-06-29: at 90s the reaper was SIGTERMing actively-DRAFTING
-    # worker sessions (a draft legitimately runs minutes), which presented as the
-    # mysterious "~120s code-143 kill". Claim-holders are now spared outright via
-    # running_claim_pids() regardless of grace, so this only governs idle/leaked
-    # sessions; 5 min is a comfortable backstop for them and the count-cap still
-    # bounds memory if the queue signal is ever wrong.
-    grace = _env_int("SAPS_REAPER_GRACE_SEC", 300)  # idle/leaked-session backstop
+    # grace: how long an UNCLAIMED session may live before its AGE makes it reapable.
+    #
+    # 2026-06-29, second pass: this used to default to 90s, and the queue-readable
+    # branch below used it as the ONLY age gate -- which meant a separate, short,
+    # activity-BLIND timer governed normal operation and silently overrode the 35-min
+    # `max_age` ceiling that the whole top-of-file rationale is built around (producer
+    # deadline 1800s + margin). An actively-DRAFTING session ages out of the
+    # "inflight+margin newest" window after ~2 min as fresh empty workers spawn on top
+    # of it, then got SIGTERMed at 90s mid-draft -> the mysterious "~120s code-143
+    # kill". Raising it to 300s only moved the cliff.
+    #
+    # The fix is to stop having two timers. There is now ONE overall age ceiling
+    # (`max_age`, 35 min = producer deadline + margin): past it the producer has
+    # already discarded the worker's result, so the session is provably useless and
+    # safe to reap whether or not it ever claimed. `grace` therefore defaults to
+    # `max_age` -- the queue-readable branch is no longer allowed to preempt a session
+    # earlier than the producer's own deadline. What keeps MEMORY bounded instead of a
+    # short timer is (a) claim-holders are spared outright via running_claim_pids() and
+    # (b) the count-cap (max_group) reaps the oldest-beyond-N by COUNT, regardless of
+    # age, and never touches a claim-holder. Override only to deliberately re-introduce
+    # an earlier age gate (not recommended); it can never exceed max_age in effect.
+    grace = _env_int("SAPS_REAPER_GRACE_SEC", DEFAULT_MAX_AGE_SEC)  # = max_age: one ceiling
+    grace = min(grace, max_age)  # an override may only shorten, never outlive the ceiling
     keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
     # (2) Count-cap backstop: never let one uuid group hold more than this many live
     # workers, regardless of queue state. 0 disables. The default rarely fires once
