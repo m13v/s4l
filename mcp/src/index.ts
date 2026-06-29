@@ -1650,7 +1650,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) call run_draft_cycle to fire one real cycle; (3) poll the `dashboard` tool for ~3 min until the pending-draft count rises — that card came through the real pipeline. Do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) the autopilot then runs on its own (launchd kicker + queue worker) — poll the `dashboard` tool for ~5 min until the pending-draft count rises — that card came through the real pipeline. Do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1711,7 +1711,7 @@ tool(
             tail,
             { exit_code: seed.code }
           );
-          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. run_draft_cycle will tell you clearly if topics are missing.)`;
+          seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. The autopilot will report clearly if topics are missing.)`;
         }
 
         // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
@@ -1796,7 +1796,7 @@ tool(
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, schedule the autopilot ` +
-            `(queue_setup + create_scheduled_task per task), then call run_draft_cycle and poll the ` +
+            `(queue_setup + create_scheduled_task per task); the autopilot then drafts on its own — poll the ` +
             `dashboard until a draft card appears — that verifies the real pipeline without posting.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
@@ -1856,7 +1856,7 @@ tool(
     const plan = readPlan(batch_id);
     if (!plan || !(plan.candidates && plan.candidates.length)) {
       return textContent(
-        `No drafts found for batch ${batch_id}. Run a draft cycle (run_draft_cycle) again to produce a fresh batch.`
+        `No drafts found for batch ${batch_id}. The autopilot produces a fresh batch on its next scheduled cycle.`
       );
     }
     const candidates = plan.candidates;
@@ -2278,7 +2278,7 @@ tool(
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
 // desktop/web, etc.). It duplicates NO pipeline logic: each button calls one of
-// the tools above (run_draft_cycle / project_config / get_stats) through the host
+// the tools above (project_config / get_stats / dashboard) through the host
 // and re-reads status. The tool itself returns the first-paint snapshot so the
 // view has data the instant it loads.
 
@@ -2540,13 +2540,11 @@ function queueWorkerAllowedTools(): string[] {
     "Glob",
     "Grep",
     // This server's tools, both namespaces (manifest name + protocol name).
-    "mcp__social-autoposter__run_draft_cycle",
     "mcp__social-autoposter__queue_setup",
     "mcp__social-autoposter__post_drafts",
     "mcp__social-autoposter__project_config",
     "mcp__social-autoposter__get_stats",
     "mcp__social-autoposter__dashboard",
-    "mcp__S4L__run_draft_cycle",
     "mcp__S4L__queue_setup",
     "mcp__S4L__post_drafts",
     "mcp__S4L__project_config",
