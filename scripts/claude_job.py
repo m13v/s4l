@@ -61,8 +61,8 @@ TAG_TO_TYPE = {
 # the reply drafting. Both the launchd provider (which blocks for minutes) and the
 # scheduled-task worker (which does the LLM turn) narrate from this one map.
 TYPE_TO_ACTIVITY = {
-    "twitter-query": ("scanning", "finding threads"),
-    "twitter-prep": ("drafting", "drafting replies"),
+    "twitter-query": ("scanning", "queries"),
+    "twitter-prep": ("drafting", "draft"),
 }
 
 
@@ -73,7 +73,7 @@ def _act_write(qtype: str) -> None:
     if not sl:
         return
     try:
-        _activity.write(sl[0], sl[1])
+        _activity.write(sl[0], f"{sl[1]}: starting")
     except Exception:
         pass
 
@@ -115,9 +115,9 @@ def _act_write_progress(
         return
     state, base = sl
     if claimed_at is None:
-        label = f"{base} (queued {_fmt_dur(now - created)})"
+        label = f"{base}: queued {_fmt_dur(now - created)}"
     else:
-        label = f"{base} ({_fmt_dur(now - claimed_at)})"
+        label = f"{base}: {_fmt_dur(now - claimed_at)}"
     try:
         _activity.write(state, label)
     except Exception:
