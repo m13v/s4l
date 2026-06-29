@@ -20,6 +20,7 @@ Everything is best-effort: any failure degrades to "unknown / open Claude".
 import json
 import os
 import subprocess
+import sys
 import threading
 import urllib.request
 from pathlib import Path
@@ -195,23 +196,31 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
 
 # ---- the snapshot the menu bar renders ------------------------------------
 def snapshot():
-    """Full live snapshot via the loopback dashboard tool, else the server's last
-    persisted summary, else a thin file-built fallback.
+    """Full snapshot computed DIRECTLY from the stateful files via
+    scripts/snapshot.py — the SAME single-source module the MCP shells out to, so
+    the two surfaces can't diverge. The menu bar no longer depends on the MCP /
+    Claude being up: there is NO loopback call here, so a restarting or closed
+    Claude can't freeze or stale the menu (the old tier-1 `loopback_tool` blocked
+    the UI thread up to 20s and was the freeze).
 
     Three tiers, in order:
-      1. LIVE — loopback reachable: the real dashboard snapshot, with `setup_complete`
-         already computed by the server (the single authoritative rule).
-      2. SUMMARY — loopback down but the server wrote `status-summary.json` while it
-         was last up: read that. It carries the SAME `setup_complete` the live path
-         would, so a server restart can't flip the menu bar's "set up" answer. This
-         is the consolidation that removes the menu bar's old divergent rule.
-      3. LEDGER — no summary ever written (a truly fresh install that has never
-         reached the server): derive the essentials from the onboarding ledger so
-         onboarding progress still shows with nothing running."""
-    snap = loopback_tool("dashboard", {})
-    if isinstance(snap, dict) and "projects_total" in snap:
-        snap["_live"] = True
-        return snap
+      1. LIVE — compute locally from the files (zero MCP dependency).
+      2. SUMMARY — the server's last persisted `status-summary.json`, if the local
+         compute somehow failed.
+      3. LEDGER — nothing else available: derive the essentials from the onboarding
+         ledger so progress still shows."""
+    try:
+        repo = os.environ.get("SAPS_REPO_DIR") or str(Path.home() / "social-autoposter")
+        scripts = os.path.join(repo, "scripts")
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        import snapshot as _snapshot_mod  # scripts/snapshot.py
+        snap = _snapshot_mod.compute()
+        if isinstance(snap, dict) and "projects_total" in snap:
+            snap["_live"] = True
+            return snap
+    except Exception:
+        pass
     summ = read_json("status-summary.json")
     if isinstance(summ, dict) and "projects_total" in summ:
         summ["_live"] = False
