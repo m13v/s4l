@@ -1207,9 +1207,9 @@ tool(
       "toggle.",
     inputSchema: {
       action: z
-        .enum(["get", "set"])
+        .enum(["get", "set", "toggle"])
         .optional()
-        .describe("get = read current mode + persona status. set = record the user's chosen mode."),
+        .describe("get = read current mode + persona status. set = record the user's chosen mode (provisions the persona). toggle = lightweight flip promotion<->personal_brand (mode.json only, no persona work) — the dashboard/menu-bar quick toggle."),
       mode: z
         .enum(["personal_brand", "promotion"])
         .optional()
@@ -1242,6 +1242,21 @@ tool(
       const mode = (cur.stdout || "").trim() || "promotion";
       const persona = findPersonaProject();
       return jsonContent({ mode, persona: persona ? persona.name : null });
+    }
+
+    // Lightweight flip (the dashboard/menu-bar quick toggle): just rewrite
+    // mode.json via saps_mode.py — NO persona provisioning. Mirrors the menu
+    // bar's pure-local _toggle_mode so flipping from either surface is cheap.
+    if (action === "toggle") {
+      const cur = await runPython("scripts/saps_mode.py", ["get"], { timeoutMs: 15_000 });
+      const now = (cur.stdout || "").trim() || "promotion";
+      const next = now === "personal_brand" ? "promotion" : "personal_brand";
+      const res = await runPython("scripts/saps_mode.py", ["set", next], { timeoutMs: 15_000 });
+      if (res.code !== 0) {
+        const tail = (res.stderr || res.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+        return textContent(`Could not switch mode: ${tail}`);
+      }
+      return jsonContent({ mode: next });
     }
 
     const mode = args.mode;
@@ -3016,6 +3031,8 @@ async function buildSnapshot() {
     runtime_ready: rtReady,
     runtime_provisioning: isProvisioning(),
     setup_complete: setupComplete,
+    // Engagement mode for display in BOTH surfaces (single source: mode.json).
+    mode: currentMode(),
     onboarding: onboardingLive,
   };
   // Persist this snapshot so the menu bar can answer "set up?" the SAME way when
@@ -3186,6 +3203,18 @@ function modeChosen(): boolean {
     return fs.existsSync(path.join(sapsStateDir(), "mode.json"));
   } catch {
     return false;
+  }
+}
+
+// The current engagement mode ('promotion' | 'personal_brand'), surfaced in the
+// snapshot so the dashboard AND menu bar read it from ONE place (mode.json, the
+// same file saps_mode.py writes). Defaults to promotion when unset.
+function currentMode(): "promotion" | "personal_brand" {
+  try {
+    const m = (JSON.parse(fs.readFileSync(path.join(sapsStateDir(), "mode.json"), "utf-8")).mode || "").trim();
+    return m === "personal_brand" ? "personal_brand" : "promotion";
+  } catch {
+    return "promotion";
   }
 }
 
