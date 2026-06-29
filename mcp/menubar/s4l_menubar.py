@@ -1022,21 +1022,17 @@ class S4LMenuBar(rumps.App):
         blocker = (ob or {}).get("current_blocker")
         blocker_code = (blocker or {}).get("code")
         # --- Autopilot health (only meaningful once setup is complete) --------
-        # PRIMARY signal: read the ACTUAL schedule for the CURRENT account
-        # (missing/disabled/ok) — reliable, NOT inferred from whether it fired
-        # ("not fired" != "not scheduled"). SECONDARY: if scheduled+enabled but
-        # still not draining, work out why (rate-limit vs other).
+        # SINGLE signal: is the draft schedule registered AND firing for the live
+        # account (schedule_state)? 'ok' = the host is running the tasks -> healthy,
+        # NO warning (even if no draft has drained yet — that's just an empty queue
+        # between cycles, not a setup problem). 'missing'/'disabled' = not running
+        # for this account -> show re-arm. We deliberately do NOT drive the menu off
+        # the drain-status latch anymore: it stayed stale after recovery and made a
+        # firing, healthy autopilot look "not set up".
         schedule_state = self._schedule_state() if setup_complete else "ok"
-        stalled = setup_complete and self._autopilot_stalled()
         self._schedule_state_cache = schedule_state
-        # Stall reason only matters when the schedule IS on but drafts still aren't
-        # draining (rate-limit / other) — not when it's simply unscheduled.
-        self._stall_reason_info = (
-            self._stall_reason() if (stalled and schedule_state in ("ok", "unknown")) else ("", "")
-        )
-        # Any non-healthy state drops the stale "drafting" spinner so the ⚠ in the
-        # title isn't masked (see _poll_activity).
-        attention = setup_complete and (schedule_state in ("missing", "disabled") or stalled)
+        attention = setup_complete and schedule_state in ("missing", "disabled")
+        # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
         # Spinner owns the title while busy; _spin already keeps the ⬆ visible there.
@@ -1050,32 +1046,19 @@ class S4LMenuBar(rumps.App):
                 blocker.get("message", "Setup is blocked"),
             )
         self._last_blocker_code = blocker_code
-        # Notify once per episode, naming the actual problem + the right action.
+        # Notify once per episode (the draft schedule isn't running for this account).
         if attention and not self._stall_notified:
-            kind, detail = self._stall_reason_info
-            if schedule_state == "missing":
-                self._notify(
-                    "S4L draft autopilot not scheduled",
-                    "No draft tasks are scheduled on this Claude account (switching "
-                    "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
-                )
-            elif schedule_state == "disabled":
+            if schedule_state == "disabled":
                 self._notify(
                     "S4L draft tasks disabled",
                     "The draft tasks are scheduled but disabled. Open the S4L menu → "
                     "“Set up draft schedule” to re-enable.",
                 )
-            elif kind == "rate_limited":
-                self._notify(
-                    "S4L autopilot paused",
-                    "Claude usage limit reached" + (f" ({detail})" if detail else "")
-                    + ". Drafting resumes at reset, or sign into an account with quota.",
-                )
             else:
                 self._notify(
-                    "S4L autopilot stalled",
-                    "Drafts aren't being produced though the schedule is on. Open the "
-                    "S4L menu for options.",
+                    "S4L draft autopilot not scheduled",
+                    "No draft tasks are running on this Claude account (switching "
+                    "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
                 )
             self._stall_notified = True
         elif not attention:
