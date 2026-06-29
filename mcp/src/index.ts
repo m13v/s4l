@@ -2976,97 +2976,37 @@ async function scheduleState(): Promise<"missing" | "disabled" | "ok"> {
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
 async function buildSnapshot() {
-  const projects = listManagedProjectStatus().map((p) => ({
-    name: p.name,
-    ready: p.ready,
-    missing_required: p.missing_required,
-  }));
-  const rtReady = runtimeReady();
-  const [x, ap, ver] = await Promise.all([
-    rtReady
-      ? xStatus().catch(() => ({ connected: false, state: "" }) as any)
-      : Promise.resolve({ connected: false, state: "runtime_not_ready" } as any),
-    autopilotLoaded(),
-    versionStatus().catch(() => ({ installed: VERSION, latest: null, update_available: false }) as any),
-  ]);
-  await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
-  if (rtReady) completeOnboardingMilestone("runtime_ready");
-  if (x.connected) {
-    completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
+  // Single source of truth: scripts/snapshot.py computes the snapshot PURELY from
+  // the stateful files (the SAME module the always-on menu bar imports directly,
+  // so the two surfaces can't diverge — and the menu bar no longer depends on this
+  // Node process being up). We shell out for the data, then layer on the MCP-only
+  // side effects snapshot.py deliberately omits (it is a pure reader): the doctor
+  // phase, onboarding-milestone telemetry, and persistence.
+  let snap: Record<string, any>;
+  try {
+    const res = await runPython("scripts/snapshot.py", [], { timeoutMs: 95_000 });
+    snap = JSON.parse(res.stdout.trim().split("\n").slice(-50).join("\n"));
+    if (snap && snap._error) throw new Error(String(snap._error));
+  } catch {
+    // Never fail the whole panel: fall back to a minimal locally-derived snapshot.
+    snap = {
+      projects: [], projects_total: 0, projects_ready: 0,
+      x_connected: false, x_state: "", x_handle: null,
+      autopilot_on: false, autopilot_stalled: false, schedule_state: "missing",
+      auto_update_on: false, version: VERSION, latest_version: null,
+      update_available: false, runtime_ready: runtimeReady(),
+      runtime_provisioning: isProvisioning(), setup_complete: false,
+      mode: "promotion", onboarding: onboardingSnapshot(),
+    };
   }
-  if (projects.some((project) => project.ready)) {
-    completeOnboardingMilestone("project_ready", { missing_count: 0 });
-  }
-  // The ONE authoritative "is this install set up" rule: runtime provisioned, at
-  // least one ready project, and X connected. Computed here so there is a single
-  // definition — the menu bar must NOT re-derive its own (it used to, from the
-  // milestone-ledger count, which disagreed with this whenever a milestone was
-  // added late or never recorded, causing the 7/8-vs-"set up" flip-flop).
-  const setupComplete = rtReady && projects.some((p) => p.ready) && !!x.connected;
-  // Read the REAL schedule state at all times (during setup AND while running) —
-  // no setup_complete fallback that lied "ok". Source of truth: schedule_state.py.
-  // The re-arm WARNING stays gated on setup_complete below (we don't nag the user
-  // mid-onboarding); only the value here is always honest.
-  const schedule_state = await scheduleState();
-  // The two draft-autopilot tasks are registered AND firing -> the terminal
-  // onboarding milestone is satisfied (this replaced the removed draft_verified,
-  // which depended on the deleted run_draft_cycle tool and could never complete).
-  if (schedule_state === "ok") {
-    completeOnboardingMilestone("tasks_scheduled");
-  }
-  // ---- Live-truthful onboarding checklist -------------------------------------
-  // The ledger (onboarding-progress.json) is append-only HISTORY: a completed
-  // milestone never reverts, which is right for telemetry (attempts/blockers/
-  // funnel) but WRONG as a live "is it set up now?" checklist. So for the
-  // milestones that have a cheap live signal, overlay their CURRENT state for
-  // DISPLAY (the dashboard + menu bar render this); the ledger file itself stays
-  // untouched for telemetry. Milestones with no cheap live signal
-  // (environment_checked, profile_scanned, topics_seeded) keep their ledger value.
-  const liveMilestoneStatus: Record<string, "complete" | "pending"> = {
-    runtime_ready: rtReady ? "complete" : "pending",
-    x_connected: x.connected ? "complete" : "pending",
-    mode_chosen: modeChosen() ? "complete" : "pending",
-    project_ready: projects.some((p) => p.ready) ? "complete" : "pending",
-    tasks_scheduled: schedule_state === "ok" ? "complete" : "pending",
-  };
-  const ledgerSnapshot = onboardingSnapshot();
-  const liveMilestones = (ledgerSnapshot.milestones || []).map((m: any) =>
-    liveMilestoneStatus[m.id] ? { ...m, status: liveMilestoneStatus[m.id] } : m
-  );
-  const onboardingLive = {
-    ...ledgerSnapshot,
-    milestones: liveMilestones,
-    complete: liveMilestones.every((m: any) => m.status === "complete"),
-  };
-  const snap = {
-    projects,
-    projects_total: projects.length,
-    projects_ready: projects.filter((p) => p.ready).length,
-    x_connected: !!x.connected,
-    x_state: x.state || "",
-    x_handle: x.handle ?? null,
-    autopilot_on: ap.autopilot_on,
-    // Liveness, not just presence: the routines can be registered (SKILL.md on
-    // disk -> autopilot_on true) yet not firing after a Claude account switch.
-    // autopilot_stalled is the true "drafts aren't being produced" signal.
-    autopilot_stalled: setupComplete && autopilotStalled(),
-    // The ACTUAL schedule state for the CURRENT account ('missing'/'disabled'/
-    // 'ok'). Always the real registry reading; drives the dashboard's "Set up
-    // draft schedule" button (gated on setup_complete in the consumer, not here).
-    schedule_state,
-    auto_update_on: ap.auto_update_on,
-    version: ver.installed || VERSION,
-    latest_version: ver.latest ?? null,
-    update_available: !!ver.update_available,
-    // Runtime install gate: the panel shows the Install card (and disables the
-    // action buttons) until the owned Python/Chromium runtime is provisioned.
-    runtime_ready: rtReady,
-    runtime_provisioning: isProvisioning(),
-    setup_complete: setupComplete,
-    // Engagement mode for display in BOTH surfaces (single source: mode.json).
-    mode: currentMode(),
-    onboarding: onboardingLive,
-  };
+  // MCP-only side effects (snapshot.py is a pure reader and does none of these):
+  // the onboarding LEDGER writes here are telemetry/history; the live DISPLAY
+  // statuses already come from snapshot.py's overlay.
+  await ensureDoctorPhase(snap.x_connected ? "full" : "pre_connect");
+  if (snap.runtime_ready) completeOnboardingMilestone("runtime_ready");
+  if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
+  if ((snap.projects_ready || 0) > 0) completeOnboardingMilestone("project_ready", { missing_count: 0 });
+  if (snap.schedule_state === "ok") completeOnboardingMilestone("tasks_scheduled");
   // Persist this snapshot so the menu bar can answer "set up?" the SAME way when
   // the loopback server is unreachable (Claude Desktop closed or mid-restart)
   // instead of falling back to a divergent local rule. Refreshed on every
