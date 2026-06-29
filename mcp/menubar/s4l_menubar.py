@@ -139,11 +139,9 @@ AUTOPILOT_STALL_SECONDS = 180
 # Keep in sync with RUNNING_STALL_SECONDS (scripts/autopilot_stall_watch.py).
 AUTOPILOT_RUNNING_STALL_SECONDS = 900
 
-# A worker task whose lastRunAt is within this many seconds is "firing" — the host
-# scheduler runs them every minute, so a fresh stamp means the live account's
-# schedule is active. 7 min tolerates host throttling + a restart gap without
-# false "not scheduled". Used by _schedule_state.
-FIRING_WINDOW = 420
+# The "firing" window (how fresh lastRunAt must be) lives in the single source of
+# truth, scripts/schedule_state.py (FIRING_WINDOW there). _schedule_state delegates
+# to it, so it is intentionally NOT redefined here.
 
 
 def _glyph(status):
@@ -389,59 +387,20 @@ class S4LMenuBar(rumps.App):
         self._open_claude()
 
     # ---- schedule-state detection ----------------------------------------
-    # Identify the LIVE account's registry by which one the host is actually
-    # FIRING (freshest lastRunAt — only the active account's scheduler advances
-    # it), then read THAT registry's enabled state. This is robust across the
-    # session-id churn that restarts cause; the old "active session = newest
-    # config.json allowlist key" heuristic mis-reported "missing" after a restart
-    # even while the tasks were firing.
-    @staticmethod
-    def _iso_to_epoch(s):
-        if not s:
-            return None
-        try:
-            import calendar
-            return calendar.timegm(
-                time.strptime(str(s).strip().rstrip("Z").split(".")[0], "%Y-%m-%dT%H:%M:%S")
-            )
-        except Exception:
-            return None
-
     def _schedule_state(self):
         """Is the draft schedule registered AND running for the live account?
-          'ok'       — worker tasks present+enabled and FIRING (lastRunAt within
-                       FIRING_WINDOW) — the host is actively running them.
-          'disabled' — present but a worker task is disabled.
-          'missing'  — not firing anywhere (orphaned / not registered for the live
-                       account) -> offer re-arm.
-        The active account is identified by the freshest-firing registry, NOT a
-        session id (which churns on restart)."""
-        newest_epoch, newest_enabled = None, False
-        any_present, any_enabled = False, False
-        for f in glob.glob(SCHED_REGISTRY_GLOB):
-            try:
-                with open(f) as fh:
-                    d = json.load(fh)
-            except Exception:
-                continue
-            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-            recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
-            if any(r is None for r in recs):
-                continue
-            any_present = True
-            enabled = all(r.get("enabled") for r in recs)
-            any_enabled = any_enabled or enabled
-            epochs = [self._iso_to_epoch(r.get("lastRunAt")) for r in recs]
-            e = max([x for x in epochs if x is not None], default=None)
-            if e is not None and (newest_epoch is None or e > newest_epoch):
-                newest_epoch, newest_enabled = e, enabled
-        # Firing recently => the live account's schedule is active and healthy.
-        if newest_epoch is not None and (time.time() - newest_epoch) <= FIRING_WINDOW:
-            return "ok" if newest_enabled else "disabled"
-        # Not firing anywhere. Registered-but-disabled => disabled; else missing.
-        if any_present and not any_enabled:
-            return "disabled"
-        return "missing"
+        Returns 'ok' | 'disabled' | 'missing'. Delegates to the SINGLE source of
+        truth, scripts/schedule_state.py (shared with the Node MCP server, which
+        shells out to the same script), so the firing-detection algorithm lives in
+        exactly one place and the menu bar + dashboard can never drift. The script
+        is on sys.path via the SAPS_REPO_DIR/scripts insertion near the top of this
+        file. Any failure -> 'missing' (safe: never a false 'ok')."""
+        try:
+            import schedule_state
+            return schedule_state.compute()
+        except Exception as e:
+            _capture(e, phase="schedule_state")
+            return "missing"
 
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
@@ -1054,7 +1013,10 @@ class S4LMenuBar(rumps.App):
         # for this account -> show re-arm. We deliberately do NOT drive the menu off
         # the drain-status latch anymore: it stayed stale after recovery and made a
         # firing, healthy autopilot look "not set up".
-        schedule_state = self._schedule_state() if setup_complete else "ok"
+        # Always read the REAL schedule state (no setup-gated "ok" fallback that
+        # lied). The re-arm WARNING still only fires once setup is complete, so we
+        # never nag the user mid-onboarding — only the value is now always honest.
+        schedule_state = self._schedule_state()
         self._schedule_state_cache = schedule_state
         attention = setup_complete and schedule_state in ("missing", "disabled")
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
