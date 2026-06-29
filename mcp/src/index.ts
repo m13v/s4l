@@ -2266,54 +2266,13 @@ tool(
   }
 );
 
-// ---- run_draft_cycle: fire ONE real pipeline cycle now ---------------------
-// The single source of drafts. Ensures the launchd kicker is installed, then
-// kickstarts it so a DRAFT_ONLY cycle runs immediately (instead of waiting for
-// the 5-min timer). The cycle drafts via the queue + worker task and the wrapper
-// merges the result into the review-queue cards. Use this for onboarding
-// verification ("does the real pipeline produce a card?") and any on-demand
-// "draft now". This is the single draft path.
-tool(
-  "run_draft_cycle",
-  {
-    title: "Run one draft cycle now",
-    description:
-      "Fires ONE real draft cycle immediately (the same pipeline the autopilot runs): it scans, drafts " +
-      "replies through the queue + worker task, and merges them into the menu-bar approval cards. " +
-      "Nothing posts. Use it to verify onboarding end-to-end (then poll the `dashboard` tool until the " +
-      "pending-draft count rises — allow ~1-3 minutes for the worker to draft), or whenever the user " +
-      "wants fresh drafts now. Requires the worker scheduled tasks to exist first (create them via " +
-      "queue_setup + create_scheduled_task).",
-    inputSchema: {},
-  },
-  async () => {
-    const k = await ensureQueueKickerInstalled();
-    if (!k.ok) {
-      return textContent(
-        `Couldn't start a draft cycle: ${k.detail}. ` +
-          (k.detail.includes("project")
-            ? "Configure a project first (project_config)."
-            : "The runtime must be ready.")
-      );
-    }
-    const uid = process.getuid ? process.getuid() : 0;
-    const res = await run(
-      "launchctl",
-      ["kickstart", "-k", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`],
-      { timeoutMs: 15_000 }
-    );
-    return jsonContent({
-      started: res.code === 0,
-      kicker: k.detail,
-      next_step:
-        "A draft cycle is now running. It drafts via the queue + the saps-phase2b-draft worker task " +
-        "(which fires every minute) and merges results into the approval cards. Poll the `dashboard` " +
-        "tool every ~30s for up to ~3 minutes; when the pending-draft count rises, the real pipeline is " +
-        "verified end to end. If after 3 minutes no card appears, check that the worker scheduled task " +
-        "exists (it drains the queue).",
-    });
-  }
-);
+// NOTE: the `run_draft_cycle` tool was REMOVED (2026-06-28, per user). The
+// autopilot drafts on its own — the launchd kicker (ensureQueueKickerInstalled)
+// fires a DRAFT_ONLY cycle every ~5 min and the queue worker drains it — so a
+// manual "draft now" tool is redundant. Onboarding now verifies by polling the
+// `dashboard` pending-draft count after the scheduled tasks are created (the
+// scheduled cycle produces the first card within a few minutes). Do NOT
+// re-introduce a run_draft_cycle / draft_cycle tool.
 
 // ---- panel: MCP Apps control surface --------------------------------------
 // A self-contained HTML view rendered by hosts that support MCP Apps (Claude
