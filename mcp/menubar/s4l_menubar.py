@@ -133,6 +133,12 @@ REARM_PROMPT = (
 # scheduler's per-minute cadence + a slow claim.
 AUTOPILOT_STALL_SECONDS = 180
 
+# A job CLAIMED but never finished (sits in running/ this long) means a worker
+# picked it up and then wedged mid-run (the claude -p drafting child died / never
+# spawned). Generous enough that the longest real drafting turn never trips it.
+# Keep in sync with RUNNING_STALL_SECONDS (scripts/autopilot_stall_watch.py).
+AUTOPILOT_RUNNING_STALL_SECONDS = 900
+
 # A worker task whose lastRunAt is within this many seconds is "firing" — the host
 # scheduler runs them every minute, so a fresh stamp means the live account's
 # schedule is active. 7 min tolerates host throttling + a restart gap without
@@ -452,6 +458,18 @@ class S4LMenuBar(rumps.App):
           (2) FAST: a draft job has sat unclaimed in pending/ past
               AUTOPILOT_STALL_SECONDS -> catches a fresh stall ~3 min in, before
               the first full producer timeout has even latched (1).
+          (3) IN-FLIGHT: a draft job was claimed (moved to running/) but never
+              finished within AUTOPILOT_RUNNING_STALL_SECONDS -> the worker picked
+              it up and then wedged mid-run. Self-clearing (the file is removed on
+              result or swept next cycle), so unlike the abandoned drain latch it
+              does NOT stay stale after recovery.
+
+        NOTE: kept in sync with scripts/autopilot_stall_watch.py (the fleet Sentry
+        backstop). The menu-bar ⚠ itself is driven by _schedule_state, NOT this
+        method — the attention/⚠ path keys off schedule_state so a firing-but-
+        momentarily-empty queue stays green (an earlier drain-latch ⚠ stayed stale
+        after recovery and was deliberately removed). This method exists for the
+        watcher-parity contract and _stall_reason.
         """
         qroot = os.path.join(st.state_dir(), "claude-queue")
         # (1) latched producer drain-status
@@ -475,6 +493,22 @@ class S4LMenuBar(rumps.App):
                     if oldest is None or m < oldest:
                         oldest = m
             if oldest is not None and (time.time() - oldest) > AUTOPILOT_STALL_SECONDS:
+                return True
+        except Exception:
+            pass
+        # (3) in-flight running-age (claimed then wedged). running/ is flat.
+        try:
+            oldest = None
+            for jf in glob.glob(os.path.join(qroot, "running", "*.json")):
+                if jf.endswith(".tmp"):
+                    continue
+                try:
+                    m = os.path.getmtime(jf)
+                except OSError:
+                    continue
+                if oldest is None or m < oldest:
+                    oldest = m
+            if oldest is not None and (time.time() - oldest) > AUTOPILOT_RUNNING_STALL_SECONDS:
                 return True
         except Exception:
             pass
