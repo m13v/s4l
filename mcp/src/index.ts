@@ -2946,6 +2946,30 @@ async function buildSnapshot() {
   if (schedule_state === "ok") {
     completeOnboardingMilestone("tasks_scheduled");
   }
+  // ---- Live-truthful onboarding checklist -------------------------------------
+  // The ledger (onboarding-progress.json) is append-only HISTORY: a completed
+  // milestone never reverts, which is right for telemetry (attempts/blockers/
+  // funnel) but WRONG as a live "is it set up now?" checklist. So for the
+  // milestones that have a cheap live signal, overlay their CURRENT state for
+  // DISPLAY (the dashboard + menu bar render this); the ledger file itself stays
+  // untouched for telemetry. Milestones with no cheap live signal
+  // (environment_checked, profile_scanned, topics_seeded) keep their ledger value.
+  const liveMilestoneStatus: Record<string, "complete" | "pending"> = {
+    runtime_ready: rtReady ? "complete" : "pending",
+    x_connected: x.connected ? "complete" : "pending",
+    mode_chosen: modeChosen() ? "complete" : "pending",
+    project_ready: projects.some((p) => p.ready) ? "complete" : "pending",
+    tasks_scheduled: schedule_state === "ok" ? "complete" : "pending",
+  };
+  const ledgerSnapshot = onboardingSnapshot();
+  const liveMilestones = (ledgerSnapshot.milestones || []).map((m: any) =>
+    liveMilestoneStatus[m.id] ? { ...m, status: liveMilestoneStatus[m.id] } : m
+  );
+  const onboardingLive = {
+    ...ledgerSnapshot,
+    milestones: liveMilestones,
+    complete: liveMilestones.every((m: any) => m.status === "complete"),
+  };
   const snap = {
     projects,
     projects_total: projects.length,
@@ -2971,7 +2995,7 @@ async function buildSnapshot() {
     runtime_ready: rtReady,
     runtime_provisioning: isProvisioning(),
     setup_complete: setupComplete,
-    onboarding: onboardingSnapshot(),
+    onboarding: onboardingLive,
   };
   // Persist this snapshot so the menu bar can answer "set up?" the SAME way when
   // the loopback server is unreachable (Claude Desktop closed or mid-restart)
