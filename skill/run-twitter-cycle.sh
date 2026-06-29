@@ -1762,6 +1762,35 @@ except Exception:
 " 2>/dev/null)
 log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)}"
 
+# --- Draft-prompt A/B: decouple product pivot (2026-06-29) -------------------
+# Per-CYCLE arm (the prep session drafts the whole batch from ONE prompt, so
+# assignment is at cycle granularity, not per post; the whole batch shares it).
+#   control   = the current draft directive verbatim.
+#   treatment = "decoupled" wording: the reply must stand on its own and NOT be
+#               built as a concede-the-obvious-then-pivot-to-the-product setup;
+#               product mentioned only when genuinely relevant.
+# The arm is stamped onto every post this cycle via SAPS_DRAFT_PROMPT_VARIANT
+# (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
+# mirroring the tail_link_variant plumbing. Split tunable via
+# TWITTER_DRAFT_PROMPT_AB_RATE (fraction assigned to 'treatment', default 0.5).
+DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
+SAPS_DRAFT_PROMPT_VARIANT=$(python3 -c "
+import random
+try:
+    rate = float('$DRAFT_PROMPT_AB_RATE')
+except Exception:
+    rate = 0.5
+rate = min(1.0, max(0.0, rate))
+print('treatment' if random.random() < rate else 'control')
+" 2>/dev/null || echo control)
+export SAPS_DRAFT_PROMPT_VARIANT
+log "Draft-prompt A/B arm: $SAPS_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
+if [ "$SAPS_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
+    DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. Do NOT build the reply as a concede-the-obvious-then-pivot-to-the-product setup. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
+else
+    DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
+fi
+
 if [ -n "$PICKED_STYLE" ]; then
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
 else
@@ -1923,7 +1952,7 @@ For each chosen candidate:
 2. Understand the context from that inlined text (you have no browser; everything you need to draft is already in this prompt).
 3. DRAFT HANDLING (existing vs fresh):
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
-   - Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present.
+   - $DRAFT_DIRECTIVE
 3a. PERSIST FRESH DRAFTS (skip for reused drafts):
      python3 $REPO_DIR/scripts/log_draft.py --candidate-id CANDIDATE_ID --text 'YOUR_REPLY_TEXT' --style STYLE --assigned-style '$PICKED_STYLE' --assigned-mode '$PICKED_MODE'
    The --assigned-style / --assigned-mode flags carry the orchestrator's picker output (this cycle: mode=$PICKED_MODE style='${PICKED_STYLE:-(invent)}') into the candidate row so the post pipeline can coerce drift and register invented styles. Pass them VERBATIM as shown.
