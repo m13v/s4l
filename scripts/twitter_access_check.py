@@ -11,6 +11,12 @@ twitter_browser.get_browser_and_page(), but returns a small access diagnosis:
   blocked           - X rendered a block-specific message
   protected         - X rendered protected-account copy
   unavailable       - X rendered deleted/suspended/not-found/unavailable copy
+  access_gated      - X redirected to /account/access ("verify it's you") or a
+                      Cloudflare "security verification" interstitial gated the
+                      page. The session cookie is valid but X is limiting it
+                      (commonly datacenter-IP trust degradation). Acting on this
+                      session yields phantom "doesn't exist" results, so callers
+                      should STOP rather than treat the empty render as truth.
   app_error         - X rendered a generic retry/error state
   logged_out        - the harness session is no longer logged in
   app_not_hydrated  - X served the app shell but no DOM content rendered
@@ -149,6 +155,19 @@ def classify_current_page(page, tweet_url: str, tweets: list[dict] | None = None
     reason = "no_access_signal"
     if matched:
         status, reason = "visible", "anchor_tweet_rendered"
+    elif "/account/access" in href:
+        # X 302'd the session to its "verify it's you" gate. Valid cookie, but
+        # X is limiting this session — treat as gated, not deleted/blocked.
+        status, reason = "access_gated", "account_access_redirect"
+    elif has_any([
+        "performing security verification",
+        "verify you are human",
+        "checking if the site connection is secure",
+        "security service to protect",
+        "needs to review the security of your connection",
+    ]):
+        # Cloudflare interstitial in front of x.com (datacenter-IP trust gate).
+        status, reason = "access_gated", "cloudflare_challenge"
     elif has_any([
         "you're blocked",
         "you are blocked",
