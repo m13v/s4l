@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Single source of truth for the S4L status snapshot.
+
+Produces the SAME dict as the MCP's buildSnapshot() (mcp/src/index.ts), but in
+Python, reading directly from the stateful files plus two existing Python helpers
+(setup_twitter_auth.py for X, schedule_state.py for the draft schedule) and npm
+for the latest version.
+
+WHY this exists: the menu bar must render with Claude / the MCP fully closed. The
+MCP is a Node process tied to Claude Desktop's lifecycle, and it was the ONLY
+thing computing the snapshot — so the always-on menu bar had to ask it over a
+blocking loopback call, which froze the menu whenever the MCP was restarting.
+Moving the compute here lets the menu bar build the snapshot itself from the
+files (zero MCP dependency), while the MCP shells out to this SAME module so
+there's one implementation, no divergence — the schedule_state.py pattern applied
+to the whole snapshot. The source of truth is the FILES; this is just the reader.
+
+PURE READ/COMPUTE: never writes (no onboarding-milestone telemetry, no
+persistence) — the MCP keeps those side effects around this. Slow fields (X
+session, npm latest) are cached per-process with a TTL so a 5s menu-bar tick that
+imports this module stays cheap.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+
+
+def _state_dir() -> str:
+    return os.environ.get("SAPS_STATE_DIR") or os.path.join(HOME, ".social-autoposter-mcp")
+
+
+def _repo_dir() -> str:
+    return os.environ.get("SAPS_REPO_DIR") or os.path.join(HOME, "social-autoposter")
+
+
+def _claude_cfg_dir() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+
+
+def _config_path() -> str:
+    return os.environ.get("SAPS_CONFIG_PATH") or os.path.join(_repo_dir(), "config.json")
+
+
+# Keep in sync with REQUIRED_FIELDS (mcp/src/setup.ts), QUEUE_WORKERS / UPDATER_LABEL
+# / AUTOPILOT_STALL_MS (mcp/src/index.ts).
+REQUIRED_FIELDS = ["name", "website", "description", "icp", "voice", "search_topics"]
+WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+UPDATER_LABEL = "com.m13v.social-autoposter-update"
+AUTOPILOT_STALL_MS = 180_000
+
+# Milestones overlaid with LIVE state for display (the rest keep their ledger
+# value). Mirrors the overlay in buildSnapshot().
+_OVERLAY_IDS = ("runtime_ready", "x_connected", "mode_chosen", "project_ready", "tasks_scheduled")
+
+
+def _read_json(path: str):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# ---- projects (config.json + setup-state.json + REQUIRED_FIELDS) -----------
+def _managed_projects():
+    st = _read_json(os.path.join(_state_dir(), "setup-state.json")) or {}
+    return st.get("projects") or []
+
+
+def _project_status(name, cfg_projects):
+    proj = next((p for p in cfg_projects if p.get("name") == name), None)
+    if proj is None:
+        return {"name": name, "ready": False, "missing_required": list(REQUIRED_FIELDS)}
+    missing = []
+    for f in REQUIRED_FIELDS:
+        v = proj.get(f)
+        if v is None:
+            missing.append(f)
+        elif isinstance(v, str) and not v.strip():
+            missing.append(f)
+        elif isinstance(v, (list, tuple)) and len(v) == 0:
+            missing.append(f)
+        elif isinstance(v, dict) and len(v) == 0:
+            missing.append(f)
+    return {"name": name, "ready": len(missing) == 0, "missing_required": missing}
+
+
+def _projects():
+    cfg = _read_json(_config_path()) or {}
+    cfg_projects = cfg.get("projects") or []
+    return [_project_status(n, cfg_projects) for n in _managed_projects()]
+
+
+# ---- runtime / mode / autopilot (all file/launchctl) -----------------------
+def _runtime_ready() -> bool:
+    rt = _read_json(os.path.join(_state_dir(), "runtime.json")) or {}
+    py = rt.get("python")
+    return bool(rt.get("ready") and py and os.path.exists(py))
+
+
+def _runtime_provisioning() -> bool:
+    p = _read_json(os.path.join(_state_dir(), "install-progress.json")) or {}
+    return str(p.get("status") or "").lower() in ("installing", "in_progress", "running", "provisioning")
+
+
+def _mode() -> str:
+    m = ((_read_json(os.path.join(_state_dir(), "mode.json")) or {}).get("mode") or "").strip()
+    return "personal_brand" if m == "personal_brand" else "promotion"
+
+
+def _mode_chosen() -> bool:
+    return os.path.exists(os.path.join(_state_dir(), "mode.json"))
+
+
+def _autopilot_on() -> bool:
+    base = os.path.join(_claude_cfg_dir(), "scheduled-tasks")
+    try:
+        return all(os.path.exists(os.path.join(base, t, "SKILL.md")) for t in WORKER_TASK_IDS)
+    except Exception:
+        return False
+
+
+def _auto_update_on() -> bool:
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10).stdout
+        return any(UPDATER_LABEL in line for line in out.splitlines())
+    except Exception:
+        return False
+
+
+def _autopilot_stalled() -> bool:
+    qdir = os.path.join(_state_dir(), "claude-queue")
+    ds = _read_json(os.path.join(qdir, "drain-status.json")) or {}
+    try:
+        if int(ds.get("consecutive_timeouts") or 0) >= 1:
+            return True
+    except Exception:
+        pass
+    oldest = None
+    try:
+        pend = os.path.join(qdir, "pending")
+        for sub in os.listdir(pend):
+            subp = os.path.join(pend, sub)
+            if not os.path.isdir(subp):
+                continue
+            for f in os.listdir(subp):
+                if not f.endswith(".json") or f.endswith(".tmp"):
+                    continue
+                try:
+                    m = os.stat(os.path.join(subp, f)).st_mtime * 1000.0
+                    if oldest is None or m < oldest:
+                        oldest = m
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return oldest is not None and (time.time() * 1000.0 - oldest) > AUTOPILOT_STALL_MS
+
+
+# ---- schedule_state (reuse the shared module) ------------------------------
+def _schedule_state() -> str:
+    try:
+        scripts = os.path.join(_repo_dir(), "scripts")
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        import schedule_state  # noqa: E402
+        return schedule_state.compute()
+    except Exception:
+        return "missing"
+
+
+# ---- X status (setup_twitter_auth.py status), cached -----------------------
+_x_cache = {"at": 0.0, "val": None}
+_X_TTL = 60.0
+
+
+def _x_status():
+    now = time.time()
+    if _x_cache["val"] is not None and now - _x_cache["at"] < _X_TTL:
+        return _x_cache["val"]
+    val = {"connected": False, "state": "", "handle": None}
+    if _runtime_ready():
+        try:
+            py = os.environ.get("SAPS_PYTHON") or sys.executable or "python3"
+            res = subprocess.run(
+                [py, os.path.join(_repo_dir(), "scripts", "setup_twitter_auth.py"), "status"],
+                capture_output=True, text=True, timeout=90,
+            )
+            # Mirror twitterAuth.ts::parse — JSON in the last lines of stdout.
+            parsed = json.loads("\n".join(res.stdout.strip().splitlines()[-50:]))
+            val = {
+                "connected": bool(parsed.get("connected")),
+                "state": parsed.get("state") or "",
+                "handle": parsed.get("handle"),
+            }
+        except Exception:
+            val = {"connected": False, "state": "status_unavailable", "handle": None}
+    else:
+        val = {"connected": False, "state": "runtime_not_ready", "handle": None}
+    _x_cache.update(at=now, val=val)
+    return val
+
+
+# ---- version (resolveVersion + npm latest + semver), cached ----------------
+_ver_cache = {"at": 0.0, "latest": None}
+_VER_TTL = 600.0
+
+
+def _resolve_version() -> str:
+    for p in (
+        os.path.join(_repo_dir(), "mcp", "dist", "version.json"),
+        os.path.join(_repo_dir(), "package.json"),
+        os.path.join(_repo_dir(), "mcp", "package.json"),
+    ):
+        v = (_read_json(p) or {}).get("version")
+        if isinstance(v, str) and v:
+            return v
+    return "0.0.0-unknown"
+
+
+def _latest_published():
+    now = time.time()
+    if _ver_cache["latest"] is not None and now - _ver_cache["at"] < _VER_TTL:
+        return _ver_cache["latest"]
+    latest = None
+    try:
+        res = subprocess.run(["npm", "view", "social-autoposter", "version"],
+                             capture_output=True, text=True, timeout=8)
+        line = (res.stdout.strip().splitlines() or [""])[-1].strip()
+        if line and line[0].isdigit():
+            latest = line
+    except Exception:
+        latest = None
+    _ver_cache.update(at=now, latest=latest)
+    return latest
+
+
+def _is_newer(latest, current) -> bool:
+    def norm(v):
+        return [int(x) if x.isdigit() else 0 for x in str(v).split("-")[0].split("+")[0].split(".")]
+    a, b = norm(latest), norm(current)
+    for i in range(max(len(a), len(b))):
+        x = a[i] if i < len(a) else 0
+        y = b[i] if i < len(b) else 0
+        if x != y:
+            return x > y
+    return False
+
+
+# ---- onboarding ledger + live overlay --------------------------------------
+def _onboarding_live(live_status):
+    led = _read_json(os.path.join(_state_dir(), "onboarding-progress.json")) or {}
+    ms = led.get("milestones")
+    # The ledger stores milestones as a dict id->record; the snapshot exposes a
+    # list. Mirror onboarding-ledger.cjs publicSnapshot() ordering via MILESTONES.
+    order = ["environment_checked", "runtime_ready", "x_connected", "profile_scanned",
+             "mode_chosen", "project_ready", "topics_seeded", "tasks_scheduled"]
+    out = []
+    if isinstance(ms, dict):
+        for mid in order:
+            rec = dict(ms.get(mid) or {"status": "pending", "attempts": 0})
+            rec["id"] = mid
+            if mid in live_status:
+                rec["status"] = live_status[mid]
+            out.append(rec)
+    elif isinstance(ms, list):
+        for rec in ms:
+            rec = dict(rec)
+            if rec.get("id") in live_status:
+                rec["status"] = live_status[rec["id"]]
+            out.append(rec)
+    result = dict(led)
+    result["milestones"] = out
+    result["complete"] = bool(out) and all(m.get("status") == "complete" for m in out)
+    return result
+
+
+def compute() -> dict:
+    """Build the full snapshot dict (same shape as buildSnapshot())."""
+    projects = _projects()
+    rt_ready = _runtime_ready()
+    x = _x_status()
+    mode = _mode()
+    schedule_state = _schedule_state()
+    any_ready = any(p["ready"] for p in projects)
+    setup_complete = rt_ready and any_ready and bool(x["connected"])
+
+    installed = _resolve_version()
+    latest = _latest_published()
+    update_available = bool(latest) and _is_newer(latest, installed)
+
+    live_status = {
+        "runtime_ready": "complete" if rt_ready else "pending",
+        "x_connected": "complete" if x["connected"] else "pending",
+        "mode_chosen": "complete" if _mode_chosen() else "pending",
+        "project_ready": "complete" if any_ready else "pending",
+        "tasks_scheduled": "complete" if schedule_state == "ok" else "pending",
+    }
+
+    return {
+        "projects": projects,
+        "projects_total": len(projects),
+        "projects_ready": sum(1 for p in projects if p["ready"]),
+        "x_connected": bool(x["connected"]),
+        "x_state": x["state"] or "",
+        "x_handle": x["handle"],
+        "autopilot_on": _autopilot_on(),
+        "autopilot_stalled": setup_complete and _autopilot_stalled(),
+        "schedule_state": schedule_state,
+        "auto_update_on": _auto_update_on(),
+        "version": installed,
+        "latest_version": latest,
+        "update_available": update_available,
+        "runtime_ready": rt_ready,
+        "runtime_provisioning": _runtime_provisioning(),
+        "setup_complete": setup_complete,
+        "mode": mode,
+        "onboarding": _onboarding_live(live_status),
+    }
+
+
+def main() -> int:
+    try:
+        print(json.dumps(compute()))
+    except Exception as e:
+        print(json.dumps({"_error": str(e)}))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
