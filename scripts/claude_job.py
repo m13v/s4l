@@ -86,6 +86,43 @@ def _act_clear() -> None:
     except Exception:
         pass
 
+
+def _fmt_dur(secs: float) -> str:
+    """Compact human duration for the menu-bar label: '45s', '12m'."""
+    s = int(max(0, secs))
+    return f"{s}s" if s < 60 else f"{s // 60}m"
+
+
+def _act_write_progress(
+    qtype: str, created: float, claimed_at: float | None, now: float
+) -> None:
+    """Granular in-flight menu-bar label, so a wedged cycle reads as the TRUTH
+    instead of a static 'drafting replies' that lingers for the whole producer
+    timeout (the failure mode where the worker never claims the job, or claims it
+    and dies mid-run, looked identical to healthy drafting before this).
+
+      - job still in pending/ (no worker has claimed it) -> '<base> (queued <dur>)'
+        counting from enqueue. A growing 'queued 18m' is the unmistakable tell that
+        a scheduled-task worker is orphaned and nothing is draining.
+      - job claimed (pending file gone -> moved to running/) -> '<base> (<dur>)'
+        counting from the claim, i.e. real drafting elapsed.
+
+    Purely cosmetic and best-effort: a write failure must never affect the queue."""
+    if _activity is None:
+        return
+    sl = TYPE_TO_ACTIVITY.get(qtype)
+    if not sl:
+        return
+    state, base = sl
+    if claimed_at is None:
+        label = f"{base} (queued {_fmt_dur(now - created)})"
+    else:
+        label = f"{base} ({_fmt_dur(now - claimed_at)})"
+    try:
+        _activity.write(state, label)
+    except Exception:
+        pass
+
 # claude flags that consume the following argv token as their value, so the
 # value is never mistaken for the positional prompt.
 VALUE_FLAGS = {
@@ -499,17 +536,27 @@ def cmd_provider(ns) -> int:
     res_path = os.path.join(result_dir(), f"{job_id}.json")
     deadline = created + ns.timeout
     last_hb = created  # last menu-bar heartbeat (see below)
+    claimed_at = None  # set the moment a worker moves the job pending/ -> running/
     while time.time() < deadline:
+        now = time.time()
+        # A worker claims a job by atomically renaming pending/ -> running/, so the
+        # pending file vanishing is our signal that drafting actually STARTED (vs.
+        # the job still sitting unclaimed). Latch the claim time once so the label
+        # can distinguish "waiting for a worker" from "worker is drafting" and show
+        # the right elapsed for each.
+        if claimed_at is None and not os.path.exists(pending_path):
+            claimed_at = now
         # Heartbeat the menu-bar label so its `since` stays fresh for the whole
         # multi-minute block. The consumer (s4l_state.read_activity) ages a label
         # out after a TTL, so without this refresh a long drafting turn would look
         # stale and the spinner would wrongly blink to idle. Refreshing here means
         # the label is fresh EXACTLY while real work is happening, and stops the
         # instant we return or die — so the consumer's TTL can then expire it
-        # instead of it freezing forever. Throttled to ~10s; best-effort only.
-        now = time.time()
+        # instead of it freezing forever. Throttled to ~10s; best-effort only. The
+        # label now carries claim-state + elapsed so a stuck cycle reads honestly
+        # ("queued 18m") instead of a reassuring static "drafting replies".
         if now - last_hb >= 10:
-            _act_write(qtype)
+            _act_write_progress(qtype, created, claimed_at, now)
             last_hb = now
         if os.path.exists(res_path):
             try:
