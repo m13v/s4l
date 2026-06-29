@@ -2530,7 +2530,18 @@ function ensureQueueWorkerPromptsCurrent(): void {
   for (const spec of QUEUE_WORKERS) {
     try {
       const skillPath = scheduledTaskSkillPath(spec.taskId);
-      if (!fs.existsSync(skillPath)) continue; // task not created yet
+      // Write the prompt on boot if it's MISSING (not just when stale). This makes
+      // the worker SKILL.md ALWAYS present, so re-arm only ever needs the host
+      // create_scheduled_task (which points filePath at it) — it never depends on
+      // queue_setup being callable. Previously we skipped when absent, which left a
+      // freshly-switched/onboarded account with no prompt file and forced the
+      // queue_setup path (broken when the tool isn't exposed). create-if-missing.
+      if (!fs.existsSync(skillPath)) {
+        fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+        fs.writeFileSync(skillPath, queueWorkerSkillMd(spec), "utf-8");
+        console.error(`[queue-worker] wrote missing ${spec.taskId} prompt -> v${QUEUE_WORKER_PROMPT_VERSION}`);
+        continue;
+      }
       const cur = fs.readFileSync(skillPath, "utf-8");
       const m = new RegExp(`${QUEUE_WORKER_PROMPT_MARKER}:\\s*(\\d+)`).exec(cur);
       const curVer = m ? parseInt(m[1], 10) : 0;
@@ -2903,6 +2914,61 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
   }
 }
 
+// The CURRENT Claude account's session id, from config.json's per-session
+// `dxt:allowlistLastUpdated:<id>` keys (most-recent = live session; matches this
+// MCP's own start time). Lets us read the schedule for the ACTUAL logged-in
+// account instead of guessing. Mirrors s4l_menubar.py::_active_session_id.
+function activeSessionId(): string | null {
+  try {
+    const p = path.join(os.homedir(), "Library", "Application Support", "Claude", "config.json");
+    const d = JSON.parse(fs.readFileSync(p, "utf-8"));
+    let bestId: string | null = null;
+    let bestTs = "";
+    for (const [k, v] of Object.entries(d)) {
+      if (k.startsWith("dxt:allowlistLastUpdated:") && typeof v === "string" && v > bestTs) {
+        bestTs = v;
+        bestId = k.slice("dxt:allowlistLastUpdated:".length);
+      }
+    }
+    return bestId;
+  } catch {
+    return null;
+  }
+}
+
+// The ACTUAL schedule state for the current account (read, not inferred from
+// firing): 'missing' | 'disabled' | 'ok' | 'unknown'. Drives the dashboard's
+// "Set up draft schedule" button. Mirrors s4l_menubar.py::_schedule_state.
+function scheduleState(): "missing" | "disabled" | "ok" | "unknown" {
+  const sid = activeSessionId();
+  if (!sid) return "unknown";
+  let regPath: string | null = null;
+  try {
+    const base = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
+    for (const ws of fs.readdirSync(base)) {
+      const cand = path.join(base, ws, sid, "scheduled-tasks.json");
+      if (fs.existsSync(cand)) {
+        regPath = cand;
+        break;
+      }
+    }
+  } catch {
+    /* base missing */
+  }
+  if (!regPath) return "missing";
+  try {
+    const d = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+    const byId: Record<string, any> = {};
+    for (const t of d.scheduledTasks || []) byId[t.id] = t;
+    const recs = QUEUE_WORKERS.map((s) => byId[s.taskId]);
+    if (recs.some((r) => !r)) return "missing";
+    if (recs.some((r) => !r.enabled)) return "disabled";
+    return "ok";
+  } catch {
+    return "missing";
+  }
+}
+
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
 // version). Resilient: any probe that throws degrades to a safe default rather
 // than failing the whole snapshot.
@@ -2946,6 +3012,10 @@ async function buildSnapshot() {
     // disk -> autopilot_on true) yet not firing after a Claude account switch.
     // autopilot_stalled is the true "drafts aren't being produced" signal.
     autopilot_stalled: setupComplete && autopilotStalled(),
+    // The ACTUAL schedule state for the CURRENT account ('missing'/'disabled'/
+    // 'ok'/'unknown'). Drives the dashboard's "Set up draft schedule" button —
+    // read directly from the host registry, not inferred from firing.
+    schedule_state: setupComplete ? scheduleState() : "ok",
     auto_update_on: ap.auto_update_on,
     version: ver.installed || VERSION,
     latest_version: ver.latest ?? null,
