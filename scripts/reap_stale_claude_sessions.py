@@ -40,6 +40,7 @@ even before the owned runtime is provisioned.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -207,6 +208,36 @@ def count_running_jobs():
         return None
 
 
+def running_claim_pids():
+    """Set of agent-session pids that currently hold a LIVE claim. The worker stamps
+    its agent-session pid into <state_dir>/claude-queue/running/<job>.json the instant
+    it claims a job (claude_job.py::cmd_next). A session that holds a claim is, by
+    definition, the one doing real drafting work right now — so we spare those pids
+    UNCONDITIONALLY (regardless of age / group size) and only reap sessions that do
+    NOT hold a claim. This is what makes a multi-minute draft survive: it is no longer
+    confused with a leaked/done zombie just because newer empty sessions spawned on
+    top of it. Empty set if the dir is unreadable or nothing has been stamped (then
+    the caller falls back to the newest-spare heuristic, i.e. prior behaviour)."""
+    d = os.path.join(_state_dir(), "claude-queue", "running")
+    pids: set[int] = set()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return pids
+    for n in names:
+        if not n.endswith(".json") or n.endswith(".tmp"):
+            continue
+        try:
+            with open(os.path.join(d, n)) as f:
+                job = json.load(f)
+            pid = job.get("claim_pid")
+            if isinstance(pid, int) and pid > 1:
+                pids.add(pid)
+        except Exception:
+            continue
+    return pids
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
@@ -218,7 +249,14 @@ def main() -> int:
     dry = "--dry-run" in sys.argv
     max_age = _env_int("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
     # (1) Queue-correlated reaping knobs.
-    grace = _env_int("SAPS_REAPER_GRACE_SEC", 90)  # spawn->claim race guard
+    # grace: how long an UNCLAIMED session may live before it's reapable. Raised
+    # 90 -> 300 on 2026-06-29: at 90s the reaper was SIGTERMing actively-DRAFTING
+    # worker sessions (a draft legitimately runs minutes), which presented as the
+    # mysterious "~120s code-143 kill". Claim-holders are now spared outright via
+    # running_claim_pids() regardless of grace, so this only governs idle/leaked
+    # sessions; 5 min is a comfortable backstop for them and the count-cap still
+    # bounds memory if the queue signal is ever wrong.
+    grace = _env_int("SAPS_REAPER_GRACE_SEC", 300)  # idle/leaked-session backstop
     keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
     # (2) Count-cap backstop: never let one uuid group hold more than this many live
     # workers, regardless of queue state. 0 disables. The default rarely fires once
@@ -227,6 +265,7 @@ def main() -> int:
     max_group = _env_int("SAPS_REAPER_MAX_GROUP", 12)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
+    claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
 
     procs, by_pid = snapshot()
 
