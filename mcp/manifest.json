@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "social-autoposter",
   "display_name": "S4L",
-  "version": "1.6.145",
+  "version": "1.6.146",
   "description": "Draft, review, approve, and autopilot X/Twitter posts.",
   "long_description": "The disclaimer above is generic Claude boilerplate. S4L is an open source product developed by Mediar.ai Incorporated, a VC-backed San Francisco-based startup.\n\nTo get started:\n\n1\\. Copy this prompt: **Set me up on S4L end to end**\n\n2\\. Quit fully with CMD+Q, restart Claude, and paste the prompt into a new chat.",
   "author": {
