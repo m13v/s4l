@@ -13,31 +13,60 @@
 #
 # DEFAULT IS A DRY RUN. Nothing is deleted until you pass --yes.
 #
+# Three scopes, widest to narrowest:
+#   --deep         full set + the SHARED toolchain (uv binary, uv cache, packaged
+#                  Chromium). Other tools on the machine that rely on uv/Chromium
+#                  re-provision after this. Use to reproduce a true bare-metal box.
+#   (default)      everything social-autoposter owns AND the shared browser layer
+#                  it touches: per-agent Chrome profiles + cookies (reddit/linkedin/
+#                  twitter) and the browser-harness backend. Leaves the toolchain.
+#   --plugin-only  JUST the plugin: menu-bar app, the .mcpb/npm plugin itself, the
+#                  scheduled tasks, and the user's state+config (~/.social-autoposter-mcp,
+#                  including config.json + mode.json). PRESERVES the imported X login
+#                  (browser-harness profile), all shared browser profiles, the
+#                  browser-harness backend, and the toolchain. The lightest reset:
+#                  uninstall + forget the plugin without disturbing the environment.
+#
 # Usage:
-#   scripts/reset-test-machine.sh            # dry run: print what WOULD be removed
-#   scripts/reset-test-machine.sh --yes      # remove owned state (safe set)
-#   scripts/reset-test-machine.sh --yes --deep   # also nuke uv + uv cache + ms-playwright (1.7G)
+#   scripts/reset-test-machine.sh                     # dry run: print what WOULD be removed
+#   scripts/reset-test-machine.sh --yes               # remove owned state + shared browser layer
+#   scripts/reset-test-machine.sh --yes --deep        # also nuke uv + uv cache + ms-playwright (1.7G)
+#   scripts/reset-test-machine.sh --yes --plugin-only # JUST the plugin; keep X login + browser layer + toolchain
 #
 set -u
 
 HOME_DIR="${HOME}"
 DRY=1
 DEEP=0
+PLUGIN_ONLY=0
 for a in "$@"; do
   case "$a" in
-    --yes|-y) DRY=0 ;;
-    --deep)   DEEP=1 ;;
+    --yes|-y)      DRY=0 ;;
+    --deep)        DEEP=1 ;;
+    --plugin-only) PLUGIN_ONLY=1 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed '/^!/d'
       exit 0 ;;
-    *) echo "unknown arg: $a (use --yes, --deep, --help)"; exit 2 ;;
+    *) echo "unknown arg: $a (use --yes, --deep, --plugin-only, --help)"; exit 2 ;;
   esac
 done
+
+# --plugin-only is the narrowest scope; it always wins over --deep (which only
+# widens by removing the shared toolchain). Surface the conflict instead of
+# silently doing something between the two.
+if [ "$PLUGIN_ONLY" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
+  echo "NOTE: --plugin-only overrides --deep (the shared toolchain is preserved)."
+  echo
+  DEEP=0
+fi
 
 if [ "$DRY" -eq 1 ]; then
   echo "=== DRY RUN — nothing will be deleted. Re-run with --yes to apply. ==="
 else
   echo "=== APPLYING — removing social-autoposter install ==="
+fi
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  echo "=== SCOPE: --plugin-only (app + plugin + tasks + state/config; keeping X login, browser layer, toolchain) ==="
 fi
 echo
 
@@ -347,32 +376,48 @@ done
 echo
 
 # ---- 4. packaged Chrome profiles + imported cookies ------------------------
-echo "[4] packaged Chrome profiles + imported cookies"
-PROF="$HOME_DIR/.claude/browser-profiles"
-for d in browser-harness browser-harness-linkedin browser-harness-reddit reddit linkedin twitter; do
-  rm_path "$PROF/$d" "profile"
-done
-# cookie mirrors + harness logs/pids
-if [ -d "$PROF" ]; then
-  for f in "$PROF"/*.x-cookies.json "$PROF"/*.chrome.log "$PROF"/*.chrome.pid \
-           "$PROF"/*.mcp.log "$PROF"/browser-activity.log*; do
-    [ -e "$f" ] && rm_path "$f" "cookie/log"
+# Skipped under --plugin-only: the per-agent profiles (reddit/linkedin/twitter)
+# belong to the OTHER agents, and the browser-harness profile holds the imported
+# X login the user asked to preserve.
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  echo "[4] packaged Chrome profiles + imported cookies — skipped (--plugin-only: X login + shared profiles preserved)"
+else
+  echo "[4] packaged Chrome profiles + imported cookies"
+  PROF="$HOME_DIR/.claude/browser-profiles"
+  for d in browser-harness browser-harness-linkedin browser-harness-reddit reddit linkedin twitter; do
+    rm_path "$PROF/$d" "profile"
   done
+  # cookie mirrors + harness logs/pids
+  if [ -d "$PROF" ]; then
+    for f in "$PROF"/*.x-cookies.json "$PROF"/*.chrome.log "$PROF"/*.chrome.pid \
+             "$PROF"/*.mcp.log "$PROF"/browser-activity.log*; do
+      [ -e "$f" ] && rm_path "$f" "cookie/log"
+    done
+  fi
 fi
 echo
 
 # ---- 5. browser-harness backend -------------------------------------------
-echo "[5] browser-harness backend (clone + uv-tool CLI + server.py)"
-rm_path "$HOME_DIR/Developer/browser-harness"               "harness-clone"
-rm_path "$HOME_DIR/.claude/mcp-servers/browser-harness"     "harness-server"
-rm_path "$HOME_DIR/.local/bin/browser-harness"              "harness-cli"
-if command -v uv >/dev/null 2>&1; then
-  echo "  run     uv tool uninstall browser-harness"
-  [ "$DRY" -eq 0 ] && uv tool uninstall browser-harness >/dev/null 2>&1 || true
+# Skipped under --plugin-only: the harness backend is shared infra (twitter-harness
+# MCP + per-platform agents drive it), not the plugin itself.
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  echo "[5] browser-harness backend — skipped (--plugin-only: shared harness backend preserved)"
+else
+  echo "[5] browser-harness backend (clone + uv-tool CLI + server.py)"
+  rm_path "$HOME_DIR/Developer/browser-harness"               "harness-clone"
+  rm_path "$HOME_DIR/.claude/mcp-servers/browser-harness"     "harness-server"
+  rm_path "$HOME_DIR/.local/bin/browser-harness"              "harness-cli"
+  if command -v uv >/dev/null 2>&1; then
+    echo "  run     uv tool uninstall browser-harness"
+    [ "$DRY" -eq 0 ] && uv tool uninstall browser-harness >/dev/null 2>&1 || true
+  fi
 fi
 echo
 
 # ---- 6. DEEP: shared toolchain we package (uv + chromium) ------------------
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  echo "[6] shared toolchain (uv, uv cache, packaged Chromium) — skipped (--plugin-only)"
+else
 echo "[6] shared toolchain (uv, uv cache, packaged Chromium) — ${DEEP:+}$([ "$DEEP" -eq 1 ] && echo ENABLED || echo 'skipped (pass --deep)')"
 if [ "$DEEP" -eq 1 ]; then
   rm_path "$HOME_DIR/Library/Caches/ms-playwright" "chromium"
@@ -382,6 +427,7 @@ if [ "$DEEP" -eq 1 ]; then
   echo "  WARN    --deep removed uv + ms-playwright; other tools on this machine that rely on them will re-provision."
 else
   echo "  (left uv + ~/Library/Caches/ms-playwright + ~/.cache/uv in place)"
+fi
 fi
 echo
 
