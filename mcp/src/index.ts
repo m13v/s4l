@@ -2323,8 +2323,13 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 2;
+const QUEUE_WORKER_PROMPT_VERSION = 3; // v3: per-run draft cap so the prep worker finishes inside the ~90s scheduled-session kill window
 const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
+
+// Max replies the Phase-2b draft worker may draft in ONE scheduled run. The host
+// SIGTERMs scheduled sessions after ~90-110s; drafting more than a handful never
+// submits in time. Undrafted candidates stay "pending" and return next cycle.
+const DRAFT_BUDGET_CANDIDATES = 5;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
@@ -2425,6 +2430,17 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
   const job = path.join(repoDir(), "scripts", "claude_job.py");
   const sd = sapsStateDir();
   const outDir = queueDir();
+  // The Phase-2b "twitter-prep" worker drafts replies inside the scheduled
+  // session, which the host hard-kills (SIGTERM) after ~90-110s of wall time.
+  // Drafting all of one cycle's candidates blows past that every time, so the
+  // job is never submitted and times out (see provider.log drain timeouts).
+  // Cap how many it drafts per run so it always finishes and submits in time;
+  // the inner prompt already treats undrafted candidates as "pending" timing
+  // deferrals, so they come back next cycle (lossless, self-healing).
+  const isDraft = spec.queueType === "twitter-prep";
+  const draftBudgetNote = isDraft
+    ? ` Per the TIME BUDGET above, draft AT MOST the first ${DRAFT_BUDGET_CANDIDATES} candidates and OMIT the rest; do not attempt them all.`
+    : "";
   return [
     `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
     ``,
@@ -2434,6 +2450,26 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `You do this with Bash and Write, and NOTHING else. This run is unattended — ` +
       `reaching for any other tool, or trying to "investigate", STALLS it forever.`,
     ``,
+    ...(isDraft
+      ? [
+          `TIME BUDGET (read before step 2; this OVERRIDES anything the inner prompt ` +
+            `says about "no cap" or drafting "every" candidate): this unattended ` +
+            `session is HARD-KILLED after about 90 seconds. You physically cannot ` +
+            `draft more than a few replies before that kill, and if you are killed ` +
+            `mid-draft the pipeline receives NOTHING and the whole cycle is wasted. ` +
+            `So work to this rule: draft replies for AT MOST the first ` +
+            `${DRAFT_BUDGET_CANDIDATES} candidates in the prompt (they are pre-sorted ` +
+            `strongest-first), then IMMEDIATELY do step 3 (write your result and ` +
+            `submit). Every candidate you do not draft is a TIMING DEFERRAL, NOT a ` +
+            `rejection: OMIT it from BOTH the "candidates" and "rejected" arrays. The ` +
+            `inner prompt explicitly allows this (omitted candidates stay "pending" ` +
+            `and a later run re-judges them, so nothing is lost). A valid result with ` +
+            `${DRAFT_BUDGET_CANDIDATES} or FEWER solid drafts that you submit IN TIME ` +
+            `is a SUCCESS; being killed with nothing submitted is the only failure. ` +
+            `When unsure, draft fewer and submit sooner.`,
+          ``,
+        ]
+      : []),
     `Steps:`,
     `1. Claim the next job. Run this EXACT Bash command:`,
     `     ${py} ${job} next --type ${spec.queueType} --prompt-file --state-dir ${sd}`,
@@ -2445,7 +2481,7 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `or truncated, keep reading the same file with offsets until EOF. If schema_file ` +
       `is not null, read it too. Follow the prompt EXACTLY and produce the SINGLE JSON ` +
       `object it asks for. If a schema is present, your JSON MUST satisfy it. Output ` +
-      `ONLY that JSON object — no prose, no markdown, no code fences.`,
+      `ONLY that JSON object — no prose, no markdown, no code fences.${draftBudgetNote}`,
     `3. Submit it. Write your JSON object to ${outDir}/out-<job_id>.json using the ` +
       `Write tool (substitute the real job_id), then run this EXACT Bash command:`,
     `     ${py} ${job} result --job <job_id> --result-file ${outDir}/out-<job_id>.json --state-dir ${sd}`,
