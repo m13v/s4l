@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Single source of truth for the draft-autopilot schedule state.
+
+Both the Node MCP server (mcp/src/index.ts::scheduleState, via subprocess) and
+the Python menu bar (mcp/menubar/s4l_menubar.py, via in-process import) read the
+schedule state from HERE so the two surfaces can never drift. Previously the same
+~40-line algorithm was hand-maintained in both languages.
+
+The data source is the host's scheduled-task registries on disk:
+  ~/Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json
+Both worker tasks (saps-phase1-query, saps-phase2b-draft) must be present; the
+LIVE account is the registry whose tasks have the freshest lastRunAt (only the
+active account's scheduler advances it, so this is robust across the session-id
+churn that Claude restarts cause).
+
+States:
+  'ok'       — both worker tasks present, enabled, and FIRING (lastRunAt within
+               FIRING_WINDOW seconds).
+  'disabled' — present but a worker task is disabled.
+  'missing'  — not firing anywhere (orphaned / not registered for the live
+               account) -> the dashboard offers "Set up draft schedule".
+
+stdlib-only on purpose, so the MCP can run it with system python3 before the
+owned runtime is provisioned. Run as a script -> prints {"state": "..."} as JSON.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import sys
+import time
+
+# Keep in sync with QUEUE_WORKERS in mcp/src/index.ts and WORKER_TASK_IDS in
+# mcp/menubar/s4l_menubar.py.
+WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+
+# A worker task whose lastRunAt is within this many seconds counts as "firing".
+# 7 min tolerates the host's per-task throttle + Claude restart gaps without a
+# false "not scheduled".
+FIRING_WINDOW = 420
+
+SCHED_REGISTRY_GLOB = os.path.join(
+    os.path.expanduser("~"), "Library", "Application Support", "Claude",
+    "claude-code-sessions", "*", "*", "scheduled-tasks.json",
+)
+
+
+def _iso_to_epoch(s):
+    if not s:
+        return None
+    try:
+        import calendar
+        return calendar.timegm(
+            time.strptime(str(s).strip().rstrip("Z").split(".")[0], "%Y-%m-%dT%H:%M:%S")
+        )
+    except Exception:
+        return None
+
+
+def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
+    """Return 'ok' | 'disabled' | 'missing' for the live account's draft schedule."""
+    newest_epoch, newest_enabled = None, False
+    any_present, any_enabled = False, False
+    for f in glob.glob(glob_pattern):
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+        recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
+        if any(r is None for r in recs):
+            continue
+        any_present = True
+        enabled = all(r.get("enabled") for r in recs)
+        any_enabled = any_enabled or enabled
+        epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
+        e = max([x for x in epochs if x is not None], default=None)
+        if e is not None and (newest_epoch is None or e > newest_epoch):
+            newest_epoch, newest_enabled = e, enabled
+    # Firing recently => the live account's schedule is active and healthy.
+    if newest_epoch is not None and (time.time() - newest_epoch) <= FIRING_WINDOW:
+        return "ok" if newest_enabled else "disabled"
+    # Not firing anywhere. Registered-but-disabled => disabled; else missing.
+    if any_present and not any_enabled:
+        return "disabled"
+    return "missing"
+
+
+def main() -> int:
+    try:
+        state = compute()
+    except Exception:
+        state = "missing"
+    print(json.dumps({"state": state}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
