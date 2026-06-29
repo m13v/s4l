@@ -1667,6 +1667,7 @@ tool(
         mcp_version: ver.installed,
         latest_version: ver.latest,
         update_available: ver.update_available,
+        mode: currentMode(),
         update_hint: ver.update_available
           ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
             `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
@@ -2461,6 +2462,13 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
   const job = path.join(repoDir(), "scripts", "claude_job.py");
   const sd = sapsStateDir();
   const outDir = queueDir();
+  // The Phase-2b "twitter-prep" worker drafts replies for several candidates. The
+  // host kills an unattended scheduled session ~90s after its LAST tool call (an
+  // inactivity watchdog). Drafting everything in one silent turn starves that clock
+  // and the session is killed mid-draft having submitted nothing. So it MUST work
+  // incrementally — draft + run log_draft.py per candidate — which persists drafts
+  // (the pipeline already wants this) AND keeps the activity clock alive.
+  const isDraft = spec.queueType === "twitter-prep";
   return [
     `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
     ``,
@@ -2470,6 +2478,23 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
       `You do this with Bash and Write, and NOTHING else. This run is unattended — ` +
       `reaching for any other tool, or trying to "investigate", STALLS it forever.`,
     ``,
+    ...(isDraft
+      ? [
+          `PACING — CRITICAL: this unattended session is terminated ~90 seconds after ` +
+            `your LAST tool call (a host inactivity timeout). The prompt below asks ` +
+            `you to draft replies for SEVERAL candidates. Do NOT draft them all ` +
+            `silently in one turn — that emits no tool calls, the clock expires, and ` +
+            `you are KILLED mid-draft having submitted NOTHING. Work ONE candidate at ` +
+            `a time: draft its reply, then IMMEDIATELY run that candidate's ` +
+            `log_draft.py command exactly as the prompt's persist step (3a) specifies ` +
+            `(a quick Bash call), THEN move to the next. Those per-candidate Bash ` +
+            `calls are what keep the session alive. Begin the first candidate ` +
+            `promptly — do NOT spend a long silent stretch analysing before your ` +
+            `first tool call. Only after EVERY candidate is drafted and logged do you ` +
+            `do step 3.`,
+          ``,
+        ]
+      : []),
     `Steps:`,
     `1. Claim the next job. Run this EXACT Bash command:`,
     `     ${py} ${job} next --type ${spec.queueType} --prompt-file --state-dir ${sd}`,
@@ -2492,11 +2517,18 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
       `do NOT loop, do NOT read other files, do NOT call any other tool.`,
     ``,
-    `HARD RULES: ONLY the Bash tool (to run claude_job.py), the Read tool (to read ` +
-      `the prompt/schema sidecar files), and the Write tool (to write the result ` +
-      `file). NEVER run any other shell command. NEVER edit, post, or touch anything ` +
-      `else. An empty queue is the NORMAL, expected case most minutes — it is success, ` +
-      `not a problem to debug.`,
+    isDraft
+      ? `HARD RULES: use ONLY the Bash tool (to run claude_job.py AND the per-candidate ` +
+        `log_draft.py persist commands the prompt tells you to run), the Read tool (the ` +
+        `prompt/schema sidecar + the SKILL/config files the prompt names), and the Write ` +
+        `tool (the result file). NEVER post, reply, edit a draft, open a browser, or run ` +
+        `any command the prompt does not explicitly give you. An empty queue is the ` +
+        `NORMAL, expected case most minutes — it is success, not a problem to debug.`
+      : `HARD RULES: ONLY the Bash tool (to run claude_job.py), the Read tool (to read ` +
+        `the prompt/schema sidecar files), and the Write tool (to write the result ` +
+        `file). NEVER run any other shell command. NEVER edit, post, or touch anything ` +
+        `else. An empty queue is the NORMAL, expected case most minutes — it is success, ` +
+        `not a problem to debug.`,
   ].join("\n");
 }
 
