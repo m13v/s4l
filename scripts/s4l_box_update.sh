@@ -66,9 +66,22 @@ trap 'rm -rf "$tmpd"' EXIT
 mcpb="$tmpd/social-autoposter.mcpb"
 
 echo "downloading $MCPB_URL ..."
-curl -fLs -m 300 "$MCPB_URL" -o "$mcpb" || { echo "download failed" >&2; exit 2; }
-sz=$(stat -f%z "$mcpb" 2>/dev/null || echo 0)
-[ "$sz" -ge 100000 ] || { echo "download too small ($sz bytes), aborting" >&2; exit 2; }
+# Retry: a freshly-cut GitHub release's asset download endpoint 404s for up to a
+# couple minutes while the CDN propagates (the release API shows the tag/asset as
+# "uploaded" before the download URL serves it). A single curl loses that race and
+# the update silently "fails." Retry with backoff so the standard pipeline is
+# robust to that window.
+sz=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -fLs -m 300 "$MCPB_URL" -o "$mcpb" 2>/dev/null; then
+    sz=$(stat -f%z "$mcpb" 2>/dev/null || echo 0)
+    [ "$sz" -ge 100000 ] && break
+  fi
+  echo "  download attempt $attempt not ready yet (asset propagating); retrying in 15s..." >&2
+  sz=0
+  sleep 15
+done
+[ "$sz" -ge 100000 ] || { echo "download failed after retries (asset never became available)" >&2; exit 2; }
 
 echo "unpacking into extension dir ..."
 unzip -oq "$mcpb" -d "$EXT_DIR" || { echo "unpack failed" >&2; exit 3; }
