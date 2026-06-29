@@ -727,6 +727,13 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         log_args += ["--search-topic", search_topic]
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
+    # Draft-prompt A/B arm: assigned ONCE per cycle in run-twitter-cycle.sh and
+    # exported as SAPS_DRAFT_PROMPT_VARIANT, so every post this cycle inherits the
+    # same arm (the whole prep batch shared one draft directive). Stamp it onto
+    # posts.draft_prompt_variant, mirroring tail_link_variant.
+    draft_prompt_variant = os.environ.get("SAPS_DRAFT_PROMPT_VARIANT") or None
+    if draft_prompt_variant:
+        log_args += ["--draft-prompt-variant", draft_prompt_variant]
     # LENGTH A/B concluded 2026-06-04; future production posts are no longer
     # stamped into posts.length_arm so the archived experiment readout stays
     # frozen to the actual test window.
