@@ -8,8 +8,8 @@ down).
 
 The one capability it cannot have is injecting a prompt into the Claude Desktop
 chat (that bridge only exists for the inline panel iframe). So the model-driven
-actions (Set up, Run draft cycle) degrade to focusing Claude Desktop; the
-no-model actions (autopilot toggle, open dashboard) work standalone.
+actions (Set up, Re-arm schedule) degrade to copying the prompt to the clipboard
++ focusing Claude Desktop; the no-model actions (open dashboard) work standalone.
 
 Runs as a LaunchAgent off the owned venv (rumps is installed there by the
 runtime install step). No .app bundle, so notifications go through osascript
