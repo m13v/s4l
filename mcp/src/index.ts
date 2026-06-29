@@ -2872,59 +2872,58 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
   }
 }
 
-// The CURRENT Claude account's session id, from config.json's per-session
-// `dxt:allowlistLastUpdated:<id>` keys (most-recent = live session; matches this
-// MCP's own start time). Lets us read the schedule for the ACTUAL logged-in
-// account instead of guessing. Mirrors s4l_menubar.py::_active_session_id.
-function activeSessionId(): string | null {
-  try {
-    const p = path.join(os.homedir(), "Library", "Application Support", "Claude", "config.json");
-    const d = JSON.parse(fs.readFileSync(p, "utf-8"));
-    let bestId: string | null = null;
-    let bestTs = "";
-    for (const [k, v] of Object.entries(d)) {
-      if (k.startsWith("dxt:allowlistLastUpdated:") && typeof v === "string" && v > bestTs) {
-        bestTs = v;
-        bestId = k.slice("dxt:allowlistLastUpdated:".length);
-      }
-    }
-    return bestId;
-  } catch {
-    return null;
-  }
-}
-
-// The ACTUAL schedule state for the current account (read, not inferred from
-// firing): 'missing' | 'disabled' | 'ok' | 'unknown'. Drives the dashboard's
-// "Set up draft schedule" button. Mirrors s4l_menubar.py::_schedule_state.
-function scheduleState(): "missing" | "disabled" | "ok" | "unknown" {
-  const sid = activeSessionId();
-  if (!sid) return "unknown";
-  let regPath: string | null = null;
+// Is the draft schedule registered AND running for the LIVE account?
+//   'ok'       — worker tasks present+enabled and FIRING (lastRunAt within
+//                SCHEDULE_FIRING_MS) — the host is actively running them.
+//   'disabled' — present but a worker task is disabled.
+//   'missing'  — not firing anywhere (orphaned / not registered for the live
+//                account) -> dashboard offers "Set up draft schedule".
+// The live account is identified by the registry the host is actually FIRING
+// (freshest lastRunAt — only the active account's scheduler advances it), NOT a
+// session id (which churns on every Claude restart and mis-read "missing" while
+// the tasks were firing). Mirrors s4l_menubar.py::_schedule_state.
+const SCHEDULE_FIRING_MS = 420_000; // 7 min; tolerates throttle + restart gaps
+function scheduleState(): "missing" | "disabled" | "ok" {
+  let newestMs: number | null = null;
+  let newestEnabled = false;
+  let anyPresent = false;
+  let anyEnabled = false;
   try {
     const base = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
     for (const ws of fs.readdirSync(base)) {
-      const cand = path.join(base, ws, sid, "scheduled-tasks.json");
-      if (fs.existsSync(cand)) {
-        regPath = cand;
-        break;
+      for (const inner of fs.readdirSync(path.join(base, ws))) {
+        const reg = path.join(base, ws, inner, "scheduled-tasks.json");
+        let d: any;
+        try {
+          d = JSON.parse(fs.readFileSync(reg, "utf-8"));
+        } catch {
+          continue;
+        }
+        const byId: Record<string, any> = {};
+        for (const t of d.scheduledTasks || []) byId[t.id] = t;
+        const recs = QUEUE_WORKERS.map((s) => byId[s.taskId]);
+        if (recs.some((r) => !r)) continue;
+        anyPresent = true;
+        const enabled = recs.every((r) => r.enabled);
+        anyEnabled = anyEnabled || enabled;
+        const epochs = recs
+          .map((r) => Date.parse(r.lastRunAt || ""))
+          .filter((n) => !Number.isNaN(n));
+        const e = epochs.length ? Math.max(...epochs) : null;
+        if (e !== null && (newestMs === null || e > newestMs)) {
+          newestMs = e;
+          newestEnabled = enabled;
+        }
       }
     }
   } catch {
-    /* base missing */
+    /* base missing -> treat as missing */
   }
-  if (!regPath) return "missing";
-  try {
-    const d = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-    const byId: Record<string, any> = {};
-    for (const t of d.scheduledTasks || []) byId[t.id] = t;
-    const recs = QUEUE_WORKERS.map((s) => byId[s.taskId]);
-    if (recs.some((r) => !r)) return "missing";
-    if (recs.some((r) => !r.enabled)) return "disabled";
-    return "ok";
-  } catch {
-    return "missing";
+  if (newestMs !== null && Date.now() - newestMs <= SCHEDULE_FIRING_MS) {
+    return newestEnabled ? "ok" : "disabled";
   }
+  if (anyPresent && !anyEnabled) return "disabled";
+  return "missing";
 }
 
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
