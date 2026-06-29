@@ -169,11 +169,36 @@ def parse_vm_stat() -> dict[str, Any]:
         "inactive_mb": pages_mb("pages_inactive"),
         "speculative_mb": pages_mb("pages_speculative"),
         "wired_mb": pages_mb("pages_wired_down"),
+        "purgeable_mb": pages_mb("pages_purgeable"),
         "compressed_mb": pages_mb("pages_occupied_by_compressor"),
         "swapins": pages.get("swapins"),
         "swapouts": pages.get("swapouts"),
         "pages": pages,
     }
+
+
+def memory_pressure_pct_free() -> float | None:
+    """macOS-authoritative availability signal.
+
+    `memory_pressure` prints "System-wide memory free percentage: N%". THIS is the
+    number to trust for "is the box starved?" — NOT vm_stat "pages free", which sits
+    near-zero by design (macOS hoards RAM as cached/inactive/compressed pages, so a
+    tiny "free" is the normal healthy state, not starvation). Best-effort; returns
+    None if the tool is unavailable so the caller can fall back to a pages estimate.
+    """
+    out = run(["/usr/bin/memory_pressure"], timeout=6.0)
+    if not out:
+        return None
+    m = re.search(r"free percentage:\s*([\d.]+)", out)
+    return round(float(m.group(1)), 1) if m else None
+
+
+def swap_used_mb() -> float | None:
+    """Active swap in MB from vm.swapusage (a real-pressure corroborator)."""
+    sysctl_bin = "/usr/sbin/sysctl" if Path("/usr/sbin/sysctl").exists() else "sysctl"
+    out = run([sysctl_bin, "-n", "vm.swapusage"], timeout=2.0)
+    m = re.search(r"used\s*=\s*([\d.]+)M", out or "")
+    return round(float(m.group(1)), 1) if m else None
 
 
 def launchd_jobs(by_pid: dict[int, dict[str, Any]], children: dict[int, list[int]]) -> list[dict[str, Any]]:
