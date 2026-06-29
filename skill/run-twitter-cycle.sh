@@ -794,6 +794,32 @@ else
     exit 1
 fi
 
+# --- Pre-flight 2: live access-gate probe (added 2026-06-29) -----------------
+# The cookie probe above only proves an auth_token EXISTS. X can still gate a
+# perfectly valid session: from a datacenter IP (e.g. the MacStadium box) it
+# commonly 302s authenticated routes to /account/access ("verify it's you") or
+# fronts them with a Cloudflare "security verification" interstitial. A gated
+# session renders real, public tweets as "this page doesn't exist", so the scan
+# silently returns 0-few candidates and we'd draft/post against phantom
+# emptiness (this is one root of the old "Phase 1 returned 0 tweets" mysteries
+# that the cookie probe alone never caught). Navigate ONE authenticated route
+# and STOP the cycle if X is gating us. Fails OPEN: a probe error or an
+# ok/unknown render never blocks, so a transient hydration miss can't halt
+# posting — only a positively-detected gate (gated:true) stops the cycle.
+log "Pre-flight: probing for an X access gate (/account/access, Cloudflare)..."
+_ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
+    python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
+if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
+    log "  Pre-flight FAILED: X is gating this session (access gate detected)."
+    log "  Probe: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+    log "  X redirected an authenticated route to /account/access or served a Cloudflare verification page. This is usually datacenter-IP trust degradation: the session cookie is still valid but X hides content from it, so a scan would return phantom 'doesn't exist' results."
+    log "  Action: open the harness Chrome (CDP :9555) and complete the verification at https://x.com/account/access once, or route the box through a residential/clean IP, then re-run the cycle."
+    echo "twitter_batches: ended $BATCH_ID"
+    release_lock "twitter-browser" 2>/dev/null || true
+    exit 1
+fi
+log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+
 # --- Phase 1 retry loop (2026-05-27) ----------------------------------------
 # When a single scan produces fewer than RETRY_TARGET candidates that survive
 # all Phase 1 filters (harness age gate, scorer stale_age cutoff, already-
