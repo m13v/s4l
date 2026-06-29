@@ -1772,21 +1772,23 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # The arm is stamped onto every post this cycle via SAPS_DRAFT_PROMPT_VARIANT
 # (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
 # mirroring the tail_link_variant plumbing. Split tunable via
-# TWITTER_DRAFT_PROMPT_AB_RATE (fraction assigned to 'treatment'). DEFAULT 0 =
-# 100% control = experiment OFF (no behavior change anywhere until explicitly
-# enabled, mirroring how the "written with ai" tag is off by default). Set it to
-# e.g. 0.5 in .env to activate a 50/50 split. The dashboard reads the SAME var
+# TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment' (the
+# decoupled directive). CODE DEFAULT 1 = 100% treatment: a fresh plugin install /
+# new user with no override drafts in the DECOUPLED style by default (the old
+# concede->pivot 'control' is opt-in, not the default for customers). OUR own
+# install pins this to 0.5 in .env for a 50/50 holdback so we can measure
+# decoupled vs the old behavior on our account. The dashboard reads the SAME var
 # with the SAME default (bin/server.js), so display and routing never diverge.
-DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0}"
+DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-1}"
 SAPS_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
     rate = float('$DRAFT_PROMPT_AB_RATE')
 except Exception:
-    rate = 0.0
+    rate = 1.0
 rate = min(1.0, max(0.0, rate))
 print('treatment' if random.random() < rate else 'control')
-" 2>/dev/null || echo control)
+" 2>/dev/null || echo treatment)
 export SAPS_DRAFT_PROMPT_VARIANT
 log "Draft-prompt A/B arm: $SAPS_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
 if [ "$SAPS_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
