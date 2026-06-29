@@ -2328,8 +2328,10 @@ const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 
 // Max replies the Phase-2b draft worker may draft in ONE scheduled run. The host
 // SIGTERMs scheduled sessions after ~90-110s; drafting more than a handful never
-// submits in time. Undrafted candidates stay "pending" and return next cycle.
-const DRAFT_BUDGET_CANDIDATES = 5;
+// submits in time. Start conservative so a run always finishes inside the window;
+// undrafted candidates stay "pending" and return next cycle (lossless). Can be
+// raised once drains are confirmed reliably under the kill budget.
+const DRAFT_BUDGET_CANDIDATES = 3;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
