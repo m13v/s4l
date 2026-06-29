@@ -133,6 +133,12 @@ REARM_PROMPT = (
 # scheduler's per-minute cadence + a slow claim.
 AUTOPILOT_STALL_SECONDS = 180
 
+# A worker task whose lastRunAt is within this many seconds is "firing" — the host
+# scheduler runs them every minute, so a fresh stamp means the live account's
+# schedule is active. 7 min tolerates host throttling + a restart gap without
+# false "not scheduled". Used by _schedule_state.
+FIRING_WINDOW = 420
+
 
 def _glyph(status):
     return GLYPH.get(status, "·")
@@ -385,63 +391,60 @@ class S4LMenuBar(rumps.App):
                 "Paste it into Claude (Cmd+V) and press Enter to schedule the draft tasks.",
             )
 
-    # ---- schedule-state detection (reads the ACTUAL schedule, reliably) ----
-    def _active_session_id(self):
-        """The CURRENT account's session id, from config.json's per-session
-        `dxt:allowlistLastUpdated:<id>` keys — the most-recently-updated one is the
-        live session (it matches the MCP's own start time to the ms). This is what
-        lets us read the schedule for the ACTUAL logged-in account instead of
-        guessing a folder by mtime. None if undeterminable."""
+    # ---- schedule-state detection ----------------------------------------
+    # Identify the LIVE account's registry by which one the host is actually
+    # FIRING (freshest lastRunAt — only the active account's scheduler advances
+    # it), then read THAT registry's enabled state. This is robust across the
+    # session-id churn that restarts cause; the old "active session = newest
+    # config.json allowlist key" heuristic mis-reported "missing" after a restart
+    # even while the tasks were firing.
+    @staticmethod
+    def _iso_to_epoch(s):
+        if not s:
+            return None
         try:
-            p = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
-                             "Claude", "config.json")
-            with open(p) as fh:
-                d = json.load(fh)
-            best_id, best_ts = None, ""
-            for k, v in d.items():
-                if k.startswith("dxt:allowlistLastUpdated:") and isinstance(v, str):
-                    if v > best_ts:  # ISO-8601 sorts lexically by time
-                        best_ts, best_id = v, k.split(":", 2)[2]
-            return best_id
+            import calendar
+            return calendar.timegm(
+                time.strptime(str(s).strip().rstrip("Z").split(".")[0], "%Y-%m-%dT%H:%M:%S")
+            )
         except Exception:
             return None
-
-    def _active_session_registry_path(self):
-        """Path to the current account's scheduled-tasks.json (claude-code-sessions/
-        <workspace>/<active-session>/...). None if the active session can't be found
-        or its dir doesn't exist yet (brand-new account -> schedule absent)."""
-        sid = self._active_session_id()
-        if not sid:
-            return None
-        hits = glob.glob(os.path.join(
-            os.path.expanduser("~"), "Library", "Application Support", "Claude",
-            "claude-code-sessions", "*", sid, "scheduled-tasks.json"))
-        return hits[0] if hits else None
 
     def _schedule_state(self):
-        """Read the ACTUAL schedule for the current account (not inferred from
-        whether it fired — 'not fired' != 'not scheduled'):
-          'missing'  — no registry / a worker task absent for this account
-          'disabled' — both present but at least one enabled=false
-          'ok'       — both worker tasks present and enabled
-          'unknown'  — couldn't determine the active session (degrade gracefully)"""
-        if not self._active_session_id():
-            return "unknown"
-        path = self._active_session_registry_path()
-        if not path:
-            return "missing"
-        try:
-            with open(path) as fh:
-                d = json.load(fh)
-        except Exception:
-            return "missing"
-        by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-        recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
-        if any(r is None for r in recs):
-            return "missing"
-        if any(not r.get("enabled") for r in recs):
+        """Is the draft schedule registered AND running for the live account?
+          'ok'       — worker tasks present+enabled and FIRING (lastRunAt within
+                       FIRING_WINDOW) — the host is actively running them.
+          'disabled' — present but a worker task is disabled.
+          'missing'  — not firing anywhere (orphaned / not registered for the live
+                       account) -> offer re-arm.
+        The active account is identified by the freshest-firing registry, NOT a
+        session id (which churns on restart)."""
+        newest_epoch, newest_enabled = None, False
+        any_present, any_enabled = False, False
+        for f in glob.glob(SCHED_REGISTRY_GLOB):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+            except Exception:
+                continue
+            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+            recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
+            if any(r is None for r in recs):
+                continue
+            any_present = True
+            enabled = all(r.get("enabled") for r in recs)
+            any_enabled = any_enabled or enabled
+            epochs = [self._iso_to_epoch(r.get("lastRunAt")) for r in recs]
+            e = max([x for x in epochs if x is not None], default=None)
+            if e is not None and (newest_epoch is None or e > newest_epoch):
+                newest_epoch, newest_enabled = e, enabled
+        # Firing recently => the live account's schedule is active and healthy.
+        if newest_epoch is not None and (time.time() - newest_epoch) <= FIRING_WINDOW:
+            return "ok" if newest_enabled else "disabled"
+        # Not firing anywhere. Registered-but-disabled => disabled; else missing.
+        if any_present and not any_enabled:
             return "disabled"
-        return "ok"
+        return "missing"
 
     # ---- autopilot liveness (the false-green fix) -------------------------
     def _autopilot_stalled(self):
