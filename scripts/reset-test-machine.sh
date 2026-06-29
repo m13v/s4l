@@ -1,64 +1,50 @@
 #!/usr/bin/env bash
 # reset-test-machine.sh — wipe a social-autoposter install back to factory-fresh.
 #
-# For TEST MACHINES. Removes everything an install scatters so you can re-run a
-# clean first-install and reproduce new-user bugs:
-#   - MCP state dir (owned uv-python venv + materialized repo + runtime.json + setup-state)
-#   - the Claude Desktop .mcpb extension (install dir + per-extension settings + installations registry entry)
-#   - the global npm library
-#   - the MCP registration (claude mcp + Claude Desktop config)
-#   - packaged Chrome profiles + imported cookies (browser-harness / reddit / linkedin)
-#   - the browser-harness backend (clone + uv-tool CLI + server.py)
-#   - (with --deep) the shared toolchain we package: uv binary, uv cache, packaged Chromium
+# For TEST MACHINES. Removes what a social-autoposter install scatters so you can
+# re-run a clean first-install and reproduce new-user bugs.
 #
 # DEFAULT IS A DRY RUN. Nothing is deleted until you pass --yes.
 #
-# Three scopes, widest to narrowest:
-#   --deep         full set + the SHARED toolchain (uv binary, uv cache, packaged
-#                  Chromium). Other tools on the machine that rely on uv/Chromium
-#                  re-provision after this. Use to reproduce a true bare-metal box.
-#   (default)      everything social-autoposter owns AND the shared browser layer
-#                  it touches: per-agent Chrome profiles + cookies (reddit/linkedin/
-#                  twitter) and the browser-harness backend. Leaves the toolchain.
-#   --plugin-only  JUST the plugin: menu-bar app, the .mcpb/npm plugin itself, the
-#                  scheduled tasks, and the user's state+config (~/.social-autoposter-mcp,
-#                  including config.json + mode.json). PRESERVES the imported X login
-#                  (browser-harness profile), all shared browser profiles, the
-#                  browser-harness backend, and the toolchain. The lightest reset:
-#                  uninstall + forget the plugin without disturbing the environment.
+# Two scopes:
+#   (default)  PLUGIN RESET — just the plugin: the menu-bar app, the .mcpb/npm
+#              plugin itself, the scheduled tasks, the user's state+config
+#              (~/.social-autoposter-mcp, including config.json + mode.json), the
+#              /tmp scratch, autopilot transcripts, and the social-autoposter MCP
+#              registration. PRESERVES the imported X login (browser-harness
+#              profile), all shared browser profiles, the browser-harness backend,
+#              and the packaged toolchain. Uninstall + forget the plugin without
+#              disturbing the rest of the environment.
+#   --deep     FULL NUKE — the plugin reset above PLUS the shared layer it touches:
+#              per-agent Chrome profiles + cookies (reddit/linkedin/twitter), the
+#              browser-harness backend, and the packaged toolchain (uv binary, uv
+#              cache, Chromium ~1.7G). Other tools that rely on uv/Chromium
+#              re-provision afterward. Use to reproduce a true bare-metal box.
 #
 # Usage:
-#   scripts/reset-test-machine.sh                     # dry run: print what WOULD be removed
-#   scripts/reset-test-machine.sh --yes               # remove owned state + shared browser layer
-#   scripts/reset-test-machine.sh --yes --deep        # also nuke uv + uv cache + ms-playwright (1.7G)
-#   scripts/reset-test-machine.sh --yes --plugin-only # JUST the plugin; keep X login + browser layer + toolchain
+#   scripts/reset-test-machine.sh            # dry run: print what the plugin reset WOULD remove
+#   scripts/reset-test-machine.sh --yes      # plugin reset (light)
+#   scripts/reset-test-machine.sh --yes --deep   # full nuke incl. shared browser layer + toolchain
 #
 set -u
 
 HOME_DIR="${HOME}"
 DRY=1
 DEEP=0
-PLUGIN_ONLY=0
 for a in "$@"; do
   case "$a" in
-    --yes|-y)      DRY=0 ;;
-    --deep)        DEEP=1 ;;
-    --plugin-only) PLUGIN_ONLY=1 ;;
+    --yes|-y) DRY=0 ;;
+    --deep)   DEEP=1 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed '/^!/d'
       exit 0 ;;
-    *) echo "unknown arg: $a (use --yes, --deep, --plugin-only, --help)"; exit 2 ;;
+    *) echo "unknown arg: $a (use --yes, --deep, --help)"; exit 2 ;;
   esac
 done
 
-# --plugin-only is the narrowest scope; it always wins over --deep (which only
-# widens by removing the shared toolchain). Surface the conflict instead of
-# silently doing something between the two.
-if [ "$PLUGIN_ONLY" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
-  echo "NOTE: --plugin-only overrides --deep (the shared toolchain is preserved)."
-  echo
-  DEEP=0
-fi
+# The plugin reset is the default; --deep widens it to the shared browser layer +
+# toolchain. PLUGIN_ONLY (the inverse of DEEP) gates the shared-layer steps below.
+if [ "$DEEP" -eq 1 ]; then PLUGIN_ONLY=0; else PLUGIN_ONLY=1; fi
 
 if [ "$DRY" -eq 1 ]; then
   echo "=== DRY RUN — nothing will be deleted. Re-run with --yes to apply. ==="
@@ -66,7 +52,9 @@ else
   echo "=== APPLYING — removing social-autoposter install ==="
 fi
 if [ "$PLUGIN_ONLY" -eq 1 ]; then
-  echo "=== SCOPE: --plugin-only (app + plugin + tasks + state/config; keeping X login, browser layer, toolchain) ==="
+  echo "=== SCOPE: plugin reset (app + plugin + tasks + state/config; keeping X login, browser layer, toolchain). Pass --deep for the full nuke. ==="
+else
+  echo "=== SCOPE: --deep full nuke (plugin + shared browser profiles + harness backend + toolchain) ==="
 fi
 echo
 
@@ -356,9 +344,9 @@ fi
 echo
 
 # ---- 3. MCP registration ---------------------------------------------------
-# Under --plugin-only, deregister ONLY social-autoposter; the browser-agent MCPs
-# (twitter-harness/reddit-agent/linkedin-agent) are shared infra we're preserving
-# (their profiles + backend survive in steps 4/5).
+# In the default plugin reset, deregister ONLY social-autoposter; the browser-agent
+# MCPs (twitter-harness/reddit-agent/linkedin-agent) are shared infra we preserve
+# (their profiles + backend survive in steps 4/5). --deep deregisters them too.
 echo "[3] MCP registration (claude CLI + config files)"
 if [ "$PLUGIN_ONLY" -eq 1 ]; then
   MCP_NAMES="social-autoposter"
@@ -384,11 +372,11 @@ done
 echo
 
 # ---- 4. packaged Chrome profiles + imported cookies ------------------------
-# Skipped under --plugin-only: the per-agent profiles (reddit/linkedin/twitter)
-# belong to the OTHER agents, and the browser-harness profile holds the imported
-# X login the user asked to preserve.
+# Skipped in the default plugin reset: the per-agent profiles (reddit/linkedin/
+# twitter) belong to the OTHER agents, and the browser-harness profile holds the
+# imported X login we preserve. Only --deep removes these.
 if [ "$PLUGIN_ONLY" -eq 1 ]; then
-  echo "[4] packaged Chrome profiles + imported cookies — skipped (--plugin-only: X login + shared profiles preserved)"
+  echo "[4] packaged Chrome profiles + imported cookies — skipped (plugin reset: X login + shared profiles preserved; pass --deep to remove)"
 else
   echo "[4] packaged Chrome profiles + imported cookies"
   PROF="$HOME_DIR/.claude/browser-profiles"
@@ -406,10 +394,11 @@ fi
 echo
 
 # ---- 5. browser-harness backend -------------------------------------------
-# Skipped under --plugin-only: the harness backend is shared infra (twitter-harness
-# MCP + per-platform agents drive it), not the plugin itself.
+# Skipped in the default plugin reset: the harness backend is shared infra
+# (twitter-harness MCP + per-platform agents drive it), not the plugin itself.
+# Only --deep removes it.
 if [ "$PLUGIN_ONLY" -eq 1 ]; then
-  echo "[5] browser-harness backend — skipped (--plugin-only: shared harness backend preserved)"
+  echo "[5] browser-harness backend — skipped (plugin reset: shared harness backend preserved; pass --deep to remove)"
 else
   echo "[5] browser-harness backend (clone + uv-tool CLI + server.py)"
   rm_path "$HOME_DIR/Developer/browser-harness"               "harness-clone"
@@ -424,7 +413,7 @@ echo
 
 # ---- 6. DEEP: shared toolchain we package (uv + chromium) ------------------
 if [ "$PLUGIN_ONLY" -eq 1 ]; then
-  echo "[6] shared toolchain (uv, uv cache, packaged Chromium) — skipped (--plugin-only)"
+  echo "[6] shared toolchain (uv, uv cache, packaged Chromium) — skipped (plugin reset; pass --deep to remove)"
 else
 echo "[6] shared toolchain (uv, uv cache, packaged Chromium) — ${DEEP:+}$([ "$DEEP" -eq 1 ] && echo ENABLED || echo 'skipped (pass --deep)')"
 if [ "$DEEP" -eq 1 ]; then
