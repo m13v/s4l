@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -195,32 +196,58 @@ def loopback_tool(name: str, args=None, timeout: float = 20.0):
 
 
 # ---- the snapshot the menu bar renders ------------------------------------
+# Background snapshot cache. scripts/snapshot.py reads files but may spawn the
+# X-status subprocess (setup_twitter_auth.py -> CDP to Chrome), which must NEVER
+# run on the menu bar's UI thread — a hung Chrome would freeze the menu. So a
+# daemon thread recomputes and snapshot() returns the last cached value INSTANTLY.
+_snap_cache = {"val": None, "at": 0.0}
+_snap_lock = threading.Lock()
+_snap_refreshing = [False]
+
+
+def _compute_snapshot_full():
+    repo = os.environ.get("SAPS_REPO_DIR") or str(Path.home() / "social-autoposter")
+    scripts = os.path.join(repo, "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import snapshot as _snapshot_mod  # scripts/snapshot.py
+    return _snapshot_mod.compute()
+
+
+def _refresh_snapshot_bg():
+    try:
+        snap = _compute_snapshot_full()
+        if isinstance(snap, dict) and "projects_total" in snap:
+            with _snap_lock:
+                _snap_cache["val"] = snap
+                _snap_cache["at"] = time.time()
+    except Exception:
+        pass
+    finally:
+        _snap_refreshing[0] = False
+
+
 def snapshot():
     """Full snapshot computed DIRECTLY from the stateful files via
     scripts/snapshot.py — the SAME single-source module the MCP shells out to, so
-    the two surfaces can't diverge. The menu bar no longer depends on the MCP /
-    Claude being up: there is NO loopback call here, so a restarting or closed
-    Claude can't freeze or stale the menu (the old tier-1 `loopback_tool` blocked
-    the UI thread up to 20s and was the freeze).
+    the two surfaces can't diverge. NO loopback / MCP dependency, so a restarting
+    or closed Claude can't freeze or stale the menu (the old tier-1 `loopback_tool`
+    blocked the UI thread up to 20s and was the freeze). The heavy compute runs on
+    a BACKGROUND thread; this returns the last cached result instantly.
 
-    Three tiers, in order:
-      1. LIVE — compute locally from the files (zero MCP dependency).
-      2. SUMMARY — the server's last persisted `status-summary.json`, if the local
-         compute somehow failed.
-      3. LEDGER — nothing else available: derive the essentials from the onboarding
-         ledger so progress still shows."""
-    try:
-        repo = os.environ.get("SAPS_REPO_DIR") or str(Path.home() / "social-autoposter")
-        scripts = os.path.join(repo, "scripts")
-        if scripts not in sys.path:
-            sys.path.insert(0, scripts)
-        import snapshot as _snapshot_mod  # scripts/snapshot.py
-        snap = _snapshot_mod.compute()
-        if isinstance(snap, dict) and "projects_total" in snap:
-            snap["_live"] = True
-            return snap
-    except Exception:
-        pass
+    Tiers: (1) the background-computed local snapshot; (2) the server's last
+    persisted `status-summary.json`; (3) the onboarding ledger."""
+    now = time.time()
+    with _snap_lock:
+        cached = _snap_cache["val"]
+        age = now - _snap_cache["at"]
+    if (cached is None or age > 4.0) and not _snap_refreshing[0]:
+        _snap_refreshing[0] = True
+        threading.Thread(target=_refresh_snapshot_bg, daemon=True).start()
+    if cached is not None:
+        out = dict(cached)
+        out["_live"] = True
+        return out
     summ = read_json("status-summary.json")
     if isinstance(summ, dict) and "projects_total" in summ:
         summ["_live"] = False
