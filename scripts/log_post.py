@@ -436,6 +436,15 @@ def main():
                              "longer passes this flag; keep it for old rows and "
                              "manual/backfill writes to posts.length_arm. Expected "
                              "values: 'treatment' or 'control'.")
+    parser.add_argument("--draft-prompt-variant", default=None,
+                        help="Draft-prompt A/B arm for Twitter posts: 'treatment' "
+                             "(decoupled draft directive; reply stands on its own, "
+                             "no forced concede->pivot to product) or 'control' "
+                             "(current directive). Assigned per cycle in "
+                             "run-twitter-cycle.sh and read from SAPS_DRAFT_PROMPT_VARIANT "
+                             "by twitter_post_plan.py. NULL for non-Twitter rows and "
+                             "rows pre-dating the experiment. Stored in "
+                             "posts.draft_prompt_variant.")
     parser.add_argument("--urns", default=None,
                         help="LinkedIn-only: comma- or whitespace-separated list "
                              "of 16-19 digit URN IDs that identify this post "
@@ -574,6 +583,8 @@ def main():
         body["link_source"] = args.link_source
     if args.tail_link_variant:
         body["tail_link_variant"] = args.tail_link_variant
+    if args.draft_prompt_variant:
+        body["draft_prompt_variant"] = args.draft_prompt_variant
     if args.target_chars:
         body["target_chars"] = args.target_chars
     if args.length_arm:
