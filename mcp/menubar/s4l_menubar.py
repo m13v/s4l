@@ -110,7 +110,6 @@ SETUP_PROMPT = (
     "Keep going without asking me to approve each safe setup step. Ask only if I "
     "must interactively sign in or no product can be identified."
 )
-DRAFT_PROMPT = "Run a social-autoposter draft cycle and show me the drafts to review."
 UPDATE_PROMPT = "Update social-autoposter to the latest version."
 # Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
 # uses) — it registers the routines under whatever account is logged in and shows
@@ -340,8 +339,6 @@ class S4LMenuBar(rumps.App):
     def _setup(self, _=None):
         self._send_to_claude(SETUP_PROMPT)
 
-    def _draft(self, _=None):
-        self._send_to_claude(DRAFT_PROMPT)
 
     def _rearm(self, _=None):
         """Register the draft schedule for the CURRENT account via the host
@@ -1486,10 +1483,8 @@ class S4LMenuBar(rumps.App):
             )
         )
 
-        out.append(rumps.separator)
-        out.append(
-            rumps.MenuItem("Run draft cycle in Claude", callback=self._draft)
-        )
+        # No "Run draft cycle" item: the autopilot drafts on its own (launchd
+        # kicker + queue worker), so a manual draft-now action is redundant.
         # No "Post approved drafts" item: approving a review card already posts
         # that card directly + programmatically (_on_card_decision -> queue ->
         # _post_worker_loop -> st.post_drafts -> the CDP poster). A menu button
