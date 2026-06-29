@@ -156,7 +156,7 @@ const MILESTONE_LABELS: Record<string, string> = {
   profile_scanned: "Profile scanned",
   project_ready: "Project ready",
   topics_seeded: "Topics seeded",
-  draft_verified: "Draft cycle verified",
+  tasks_scheduled: "Autopilot scheduled",
 };
 
 function milestoneGlyph(status: MilestoneStatus): string {
