@@ -778,6 +778,16 @@ const LENGTH_VARIANT_DEFS = {
   control:   { label: 'Unconstrained',     desc: 'no length target (legacy, longer replies)' },
 };
 
+// twitter draft-prompt variant defs (experiment started 2026-06-29). Per-CYCLE
+// arm assigned in run-twitter-cycle.sh; lives on posts.draft_prompt_variant.
+// 'treatment' drops the forced concede->pivot-to-product scaffold from the
+// draft directive; 'control' keeps the current directive. Mirrors the
+// tail_link_variant readout. Tunable via TWITTER_DRAFT_PROMPT_AB_RATE.
+const DRAFT_PROMPT_VARIANT_DEFS = {
+  treatment: { label: 'Decoupled pivot', desc: 'reply stands on its own; product only when relevant, no forced concede->pivot' },
+  control:   { label: 'Current',         desc: 'current draft directive (style + product pivot)' },
+};
+
 // Standalone jobs with no platform axis. script_name -> display label.
 const STANDALONE_JOBS = {
   serp_seo: { job_type: 'seo', job_label: 'SERP SEO' },
@@ -6613,6 +6623,90 @@ async function handleApi(req, res) {
           // Log but don't break the whole response if the tail-link block
           // fails; the first experiment is still useful on its own.
           console.error('[api/experiments] tail-link block failed:', e2 && e2.message || e2);
+        }
+
+        // twitter-draft-prompt (running 2026-06-29). Per-CYCLE arm assigned in
+        // run-twitter-cycle.sh; variant lives on posts.draft_prompt_variant.
+        // Whole prep batch shares one arm, so (like tail-link) there is no
+        // candidate-funnel axis: n_candidates == n_posted. Click attribution
+        // joins post_links + post_link_clicks (is_bot=false). 30-day window,
+        // mirroring the tail-link block exactly.
+        try {
+          const dpRows = await pq(`
+            SELECT p.draft_prompt_variant AS variant,
+                   COUNT(*) AS n_posts,
+                   AVG(p.views) AS avg_views,
+                   AVG(GREATEST(0, COALESCE(p.upvotes,0) - 1)) AS avg_likes,
+                   AVG(p.comments_count) AS avg_replies,
+                   COALESCE(SUM(pl.total_clicks), 0)::float / NULLIF(COUNT(*),0) AS avg_clicks,
+                   MIN(p.posted_at) AS started_at
+            FROM posts p
+            LEFT JOIN (
+              SELECT pl2.post_id, COUNT(plc.id)::int AS total_clicks
+              FROM post_links pl2
+              LEFT JOIN post_link_clicks plc ON plc.code = pl2.code AND plc.is_bot = false
+              WHERE pl2.post_id IS NOT NULL
+              GROUP BY pl2.post_id
+            ) pl ON pl.post_id = p.id
+            WHERE p.draft_prompt_variant IS NOT NULL
+              AND p.posted_at > NOW() - INTERVAL '30 days'
+              AND LOWER(CASE WHEN LOWER(p.platform)='x' THEN 'twitter' ELSE p.platform END) = 'twitter'
+              AND p.our_content <> '(mention - no original post)'
+            GROUP BY p.draft_prompt_variant
+          `, []);
+          const dpDefs = DRAFT_PROMPT_VARIANT_DEFS;
+          const dpVariants = ['treatment', 'control'].map(k => {
+            const row = (dpRows || []).find(r => r.variant === k) || {};
+            const n = Number(row.n_posts || 0);
+            return {
+              key: k,
+              label: dpDefs[k].label,
+              desc: dpDefs[k].desc,
+              n_candidates: n,
+              n_batches: null,
+              n_posted: n,
+              n_skipped: 0,
+              n_expired: 0,
+              n_pending: 0,
+              post_rate_pct: null,
+              thread_age_min_p50: null,
+              avg_views: row.avg_views != null ? Number(row.avg_views) : null,
+              avg_likes: row.avg_likes != null ? Number(row.avg_likes) : null,
+              avg_replies: row.avg_replies != null ? Number(row.avg_replies) : null,
+              avg_clicks: row.avg_clicks != null ? Number(row.avg_clicks) : null,
+              started_at: row.started_at || null,
+            };
+          });
+          const dpTotals = dpVariants.reduce((acc, v) => {
+            acc.n_candidates += v.n_candidates;
+            acc.n_posted += v.n_posted;
+            return acc;
+          }, { n_candidates: 0, n_posted: 0, n_batches: null });
+          // Assignment weight read LIVE from .env (fraction to 'treatment').
+          const dpRate = (() => {
+            const raw = (loadEnv().TWITTER_DRAFT_PROMPT_AB_RATE || '').trim();
+            const n = Number(raw);
+            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
+          })();
+          const dpWeightTreatment = Math.round(dpRate * 1000) / 10;
+          const dpWeightControl = Math.round((1 - dpRate) * 1000) / 10;
+          dpVariants.forEach(v => {
+            v.weight_pct = v.key === 'treatment' ? dpWeightTreatment : dpWeightControl;
+          });
+          const dpStartedAt = dpVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
+          experiments.push({
+            id: 'twitter-draft-prompt',
+            name: 'Twitter draft prompt (decoupled product pivot)',
+            status: 'running',
+            started_at: dpStartedAt,
+            hypothesis: 'Replies drafted without the forced concede-then-pivot-to-product scaffold read less like a bot and earn more engagement (views, likes, replies) than the current product-pivot directive. Click-through is the offsetting cost to watch.',
+            primary_metric: 'avg_replies',
+            progress: null,  // no fixed target
+            totals: dpTotals,
+            variants: dpVariants,
+          });
+        } catch (e4) {
+          console.error('[api/experiments] draft-prompt block failed:', e4 && e4.message || e4);
         }
 
         // Third experiment: ai-disclosure-suffix (campaigns.id=3,
