@@ -14,7 +14,7 @@ const MILESTONES = [
   "mode_chosen",
   "project_ready",
   "topics_seeded",
-  "draft_verified",
+  "tasks_scheduled",
 ];
 
 function stateDir(opts = {}) {
