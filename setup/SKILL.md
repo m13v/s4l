@@ -1,6 +1,6 @@
 ---
 name: social-autoposter-setup
-description: "Set up social-autoposter for a new user end to end. Installs/repairs the runtime, discovers product and voice context, connects X/Twitter, seeds search topics, and verifies with a draft cycle. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
+description: "Set up social-autoposter for a new user end to end. Installs/repairs the runtime, discovers product and voice context, connects X/Twitter, seeds search topics, schedules the draft autopilot, and verifies it produces a draft. Use when: 'set up social autoposter', 'install social autoposter', 'configure social posting'."
 ---
 
 # Social Autoposter Setup
@@ -25,8 +25,9 @@ goal, not as the beginning of an interview.
   cannot be discovered or safely inferred. The usual legitimate blocker is:
   there is no configured project, no clear product URL in context or the X
   profile, and no way to identify what product to market.
-- Never post a draft or enable autopilot during setup unless the user explicitly
-  asked for that. A draft-only cycle is safe and required for verification.
+- Never post a draft during setup unless the user explicitly asked for that.
+  Draft-only verification (the autopilot drafts without posting) is safe and
+  required.
 - Do not edit the MCP server, plugin source, or an unrelated user workspace to
   work around setup failures. Use the product's setup/install tools.
 
@@ -39,9 +40,10 @@ Do not report setup complete until all of these are true:
    and search topics.
 3. Search topics have been seeded into the backend.
 4. X is connected and the real handle has been auto-detected.
-5. `draft_cycle` has been run without posting. A returned review batch is the
-   strongest success signal. If X simply has no matching supply, report that
-   precise result only after configuration/auth/runtime checks pass.
+5. The draft autopilot is scheduled and has produced a draft card without
+   posting. A returned/pending review batch is the strongest success signal. If X
+   simply has no matching supply, report that precise result only after
+   configuration/auth/runtime checks pass.
 
 ## Architecture
 
@@ -57,7 +59,7 @@ Do not report setup complete until all of these are true:
 ## Choose the path
 
 - If the social-autoposter MCP tools are connected (`project_config`, `runtime`,
-  `draft_cycle`, `autopilot`, `get_stats`), use the MCP path.
+  `queue_setup`, `post_drafts`, `get_stats`, `dashboard`), use the MCP path.
   Do not hand-edit `config.json`.
 - If only the CLI/skill is installed, use the CLI fallback.
 
@@ -150,11 +152,17 @@ If required fields remain, first attempt to derive them from the sources already
 collected. Ask the user only if a genuinely unknowable required field blocks
 readiness. Optional/recommended fields never justify stopping setup.
 
-### 5. Verify end to end
+### 5. Schedule the autopilot + verify end to end
 
-Run `draft_cycle`. It scans X and drafts replies for review; it posts nothing.
+Schedule the draft autopilot: call `queue_setup`, then for EACH returned task
+call the host tool `create_scheduled_task` (taskId, cronExpression, prompt
+verbatim; "already exists" is fine). The autopilot then drafts on its own — a
+launchd kicker fires a draft-only cycle and the queue worker drafts the replies;
+nothing posts. Poll the `dashboard` tool until the pending-draft count rises; a
+returned review batch is the strongest success signal.
 
-If it returns a fixable reason, fix it and retry in the same setup run:
+If no card appears, diagnose the fixable reason, fix it, and let the autopilot
+retry on its next scheduled cycle:
 
 - missing topics: derive/add topics through `project_config`, then retry;
 - runtime/browser-harness/Chrome issue: run/repair the owned runtime, then retry;
@@ -203,7 +211,7 @@ Runtime:       ready
 Project:       NAME — ready
 Topics seeded: N
 X/Twitter:     @HANDLE
-Verification:  draft cycle completed without posting
+Verification:  autopilot produced a draft (not posted)
 Autopilot:     off
 Stats:         https://s4l.ai/stats/HANDLE
 ```
