@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "social-autoposter",
   "display_name": "S4L",
-  "version": "1.6.132",
+  "version": "1.6.133",
   "description": "Draft, review, approve, and autopilot X/Twitter posts.",
   "long_description": "The disclaimer above is generic Claude boilerplate. S4L is an open source product developed by Mediar.ai Incorporated, a VC-backed San Francisco-based startup.\n\nTo get started:\n\n1\\. Copy this prompt: **Set me up on S4L end to end**\n\n2\\. Quit fully with CMD+Q, restart Claude, and paste the prompt into a new chat.",
   "author": {
@@ -25,24 +25,44 @@
   },
   "tools": [
     {
+      "name": "engagement_mode",
+      "description": "Choose engagement mode (personal brand vs product)"
+    },
+    {
       "name": "project_config",
-      "description": "The one tool to configure, edit, and connect a project's X account. Run first and continue end to end: inspect status, connect X, discover and configure (or later edit) the product, seed topics, and proceed to draft-only verification."
+      "description": "Configure or edit a project"
     },
     {
-      "name": "runtime",
-      "description": "The one plumbing tool for the local runtime lifecycle, action-based: status (is the owned Python/Chromium runtime installed, plus mid-install progress), install (provision/repair it, safe and idempotent), version + update (report and install new releases), and doctor + doctor_status (structured environment diagnostics, pre-connect during onboarding and full after X is connected)."
-    },
-    {
-      "name": "draft_cycle",
-      "description": "Scan X, draft replies locally, walk through each one (approve or skip), post only the approved ones."
+      "name": "post_drafts",
+      "description": "Post chosen drafts"
     },
     {
       "name": "get_stats",
-      "description": "Read-only post and engagement stats for the X/Twitter rail over the last N days."
+      "description": "Get X/Twitter stats"
+    },
+    {
+      "name": "runtime",
+      "description": "Runtime: status, update & diagnostics"
+    },
+    {
+      "name": "queue_setup",
+      "description": "Get autopilot scheduled-task specs"
+    },
+    {
+      "name": "run_draft_cycle",
+      "description": "Run one draft cycle now"
     },
     {
       "name": "dashboard",
-      "description": "Render the visual dashboard (MCP Apps UI): project setup, X connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, and refresh. Also rendered automatically after state-changing actions."
+      "description": "S4L dashboard"
+    },
+    {
+      "name": "connect_product",
+      "description": "Add your product"
+    },
+    {
+      "name": "show_browser_to_user",
+      "description": "Show browser to user"
     }
   ],
   "keywords": [
