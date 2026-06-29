@@ -362,34 +362,25 @@ class S4LMenuBar(rumps.App):
         do NOT auto-type (focus/timing flaky) and do NOT write the registry directly
         (can't reliably target a just-switched-into account)."""
         copied = self._copy_to_clipboard(REARM_PROMPT)
-        self._open_claude()
-        # Use a MODAL alert, not _notify: osascript `display notification` from this
-        # bundle-less launchd menu-bar process silently no-ops (no notification
-        # permission), so the user got zero feedback. rumps.alert is an NSAlert that
-        # always shows and requires an explicit dismiss — unmissable.
+        # Show the modal BEFORE opening Claude. If we raise Claude first, the NSAlert
+        # renders BEHIND it (invisible) while still blocking the main thread, which
+        # is what made the menu look frozen/greyed with no visible dialog. Showing
+        # it first keeps it frontmost; we open Claude after the user dismisses it.
+        # (_notify's osascript notification silently no-ops from this bundle-less
+        # launchd process, so a modal is the only reliable feedback.)
+        msg = (
+            "The setup prompt is copied to your clipboard.\n\nClick OK, then click into "
+            "the Claude chat, paste it (Cmd+V), and press Enter — that schedules the "
+            "draft tasks for this account."
+            if copied
+            else "Click OK, then open Claude and ask it to set up the draft schedule for this account."
+        )
         try:
-            if copied:
-                rumps.alert(
-                    title="Paste in Claude to finish",
-                    message=(
-                        "The setup prompt is copied to your clipboard.\n\n"
-                        "Click into the Claude chat, paste it (Cmd+V), and press Enter. "
-                        "That schedules the draft tasks for this account."
-                    ),
-                    ok="Got it",
-                )
-            else:
-                rumps.alert(
-                    title="Set up the draft schedule",
-                    message="Open Claude and ask it to set up the draft schedule for this account.",
-                    ok="OK",
-                )
+            rumps.alert(title="Set up the draft schedule", message=msg, ok="OK")
         except Exception:
-            # Best-effort fallback if the modal can't show for some reason.
-            self._notify(
-                "S4L · setup prompt copied" if copied else "S4L",
-                "Paste it into Claude (Cmd+V) and press Enter to schedule the draft tasks.",
-            )
+            self._notify("S4L · setup prompt copied" if copied else "S4L",
+                         "Paste the prompt into Claude (Cmd+V) and press Enter.")
+        self._open_claude()
 
     # ---- schedule-state detection ----------------------------------------
     # Identify the LIVE account's registry by which one the host is actually
@@ -1345,29 +1336,16 @@ class S4LMenuBar(rumps.App):
         items.append(header)
         items.append(rumps.separator)
 
-        # Autopilot needs attention: surface the right action FIRST, above the
-        # normal state items. PRIMARY driver = the actual schedule state for THIS
-        # account (missing/disabled) — that's what "Set up draft schedule" fixes
-        # (host create_scheduled_task). Only when the schedule IS on but drafts
-        # aren't draining do we fall to the stall-reason wording (rate-limit/other),
-        # where re-creating the schedule wouldn't help.
+        # Attention = the draft schedule isn't running for THIS account (missing or
+        # disabled). "Set up draft schedule" fixes it via host create_scheduled_task.
+        # When the schedule IS firing (ok), attention is False and nothing shows here
+        # — a firing autopilot reads as healthy even if no draft has drained yet.
         if attention:
-            if schedule_state == "missing":
-                items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
-                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
-            elif schedule_state == "disabled":
+            if schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
-                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
-                kind, detail = self._stall_reason_info
-                if kind == "rate_limited":
-                    items.append(self._label("⚠ Autopilot paused — Claude usage limit"))
-                    if detail:
-                        items.append(self._label(f"   {detail}"))
-                    items.append(self._label("   Resumes at reset, or switch Claude account"))
-                else:
-                    items.append(self._label("⚠ Scheduled, but no drafts are being produced"))
-                    items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+                items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
+            items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
