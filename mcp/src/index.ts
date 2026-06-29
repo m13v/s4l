@@ -3573,10 +3573,10 @@ appTool(
     title: "S4L dashboard",
     description:
       "Render the S4L dashboard in chat: a visual surface showing project setup, X " +
-      "connection, autopilot state, and 7-day stats, with buttons to run a draft cycle, connect X, " +
+      "connection, autopilot state, and 7-day stats, with buttons to set up the schedule, connect X, " +
       "and refresh. Use when the user asks to see the dashboard, panel, " +
       "status, or controls. ALSO call this at the end of any state-changing or results-producing " +
-      "action (run_draft_cycle, post_drafts, get_stats) so the user sees the " +
+      "action (post_drafts, get_stats, project_config) so the user sees the " +
       "updated dashboard. Hosts without UI support get the same data as text.",
     inputSchema: {},
     // fallback_url is set only when the host can't render the ui:// resource and
