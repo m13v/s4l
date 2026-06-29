@@ -2323,7 +2323,7 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 3; // v3: per-run draft cap so the prep worker finishes inside the ~90s scheduled-session kill window
+const QUEUE_WORKER_PROMPT_VERSION = 4; // v4: tighten per-run draft cap to 2 (v3's 3 still overran the ~100-134s kill window on heavy cycles, ~20% timeouts)
 const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 
 // Max replies the Phase-2b draft worker may draft in ONE scheduled run. The host
@@ -2331,7 +2331,7 @@ const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 // submits in time. Start conservative so a run always finishes inside the window;
 // undrafted candidates stay "pending" and return next cycle (lossless). Can be
 // raised once drains are confirmed reliably under the kill budget.
-const DRAFT_BUDGET_CANDIDATES = 3;
+const DRAFT_BUDGET_CANDIDATES = 2;
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
