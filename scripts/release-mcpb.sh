@@ -158,6 +158,29 @@ if (fs.existsSync(lp)) {
 }
 "
 
+# ---- 3c. Regenerate manifest.json `tools` from the SERVER's registrations ---
+# Claude Desktop exposes a .mcpb extension's tools to agent chats from the
+# manifest's `tools` array. It was hand-written and drifted: it listed 5 old
+# tools while the server registers ~10 (queue_setup, run_draft_cycle, …), so the
+# newer ones were INVISIBLE to the in-chat agent — which silently broke onboarding
+# / re-arm on every .mcpb install (the agent couldn't call queue_setup). Derive
+# the list from the source's tool()/appTool() registrations so it can never drift
+# again. (name + title; the title is the human description Desktop shows.)
+say "Regenerating mcp/manifest.json tools from src/index.ts registrations"
+node -e "
+const fs=require('fs');
+const src=fs.readFileSync('$MCP_DIR/src/index.ts','utf8');
+const re=/(?:^|\n)\s*(?:tool|appTool)\(\s*\n\s*\"([a-z0-9_]+)\"\s*,\s*\{\s*\n\s*title:\s*\"((?:[^\"\\\\]|\\\\.)*)\"/g;
+const tools=[]; let m;
+while((m=re.exec(src))!==null) tools.push({name:m[1], description:m[2]});
+if(tools.length < 6) { console.error('  refusing: only '+tools.length+' tools parsed (regex drift?)'); process.exit(1); }
+const p='$MCP_DIR/manifest.json';
+const j=JSON.parse(fs.readFileSync(p,'utf8'));
+j.tools=tools;
+fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+console.log('  manifest tools ('+tools.length+'): '+tools.map(t=>t.name).join(', '));
+"
+
 # ---- 4. Pack the .mcpb ------------------------------------------------------
 say "Packing $BUNDLE"
 rm -f "$BUNDLE"
