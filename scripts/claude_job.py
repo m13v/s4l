@@ -677,6 +677,41 @@ def cmd_provider(ns) -> int:
 # --------------------------------------------------------------------------- #
 # next (consumer side, run by a scheduled task)                               #
 # --------------------------------------------------------------------------- #
+def _agent_session_pid():
+    """Best-effort: the Claude agent-mode SESSION pid running THIS worker — the
+    exact process the stale-session reaper (reap_stale_claude_sessions.py) would
+    target. We climb our own process tree to the ancestor whose cmd carries the
+    reaper's worker signature ('claude-code/' + 'local-agent-mode-sessions') and
+    return its pid, so the claim can be stamped with it and the reaper can SPARE
+    that session for the whole drafting turn (instead of SIGTERMing it at the short
+    grace window — the 2026-06-29 draft-kill regression). None if not identifiable;
+    the reaper then falls back to its newest-spare heuristic.
+    """
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        info = {}
+        for line in out.splitlines():
+            m = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)$", line)
+            if m:
+                info[int(m.group(1))] = (int(m.group(2)), m.group(3))
+        pid = os.getpid()
+        for _ in range(16):  # bounded climb up the tree
+            ent = info.get(pid)
+            if not ent or ent[0] <= 1:
+                break
+            ppid = ent[0]
+            pcmd = info.get(ppid, (0, ""))[1]
+            if ("claude-code/" in pcmd) and ("local-agent-mode-sessions" in pcmd):
+                return ppid
+            pid = ppid
+    except Exception:
+        return None
+    return None
+
+
 def cmd_next(ns) -> int:
     _apply_state_dir_override(ns)
     qtype = ns.type
@@ -700,6 +735,12 @@ def cmd_next(ns) -> int:
                 job = json.load(f)
         except Exception:
             continue
+        # Stamp the agent-session pid that holds THIS claim so the reaper spares it
+        # for the whole drafting turn (see _agent_session_pid above).
+        agent_pid = _agent_session_pid()
+        if agent_pid:
+            job["claim_pid"] = agent_pid
+        job["claimed_at"] = time.time()
         prompt_file = None
         schema_file = None
         if ns.prompt_file:
@@ -711,7 +752,16 @@ def cmd_next(ns) -> int:
                 schema_file = os.path.join(queue_root(), f"schema-{job['job_id']}.json")
                 _atomic_write_text(schema_file, schema)
                 job["schema_file"] = schema_file
-            _atomic_write(dst, job)
+        # ALWAYS persist the claim back (claim_pid + any prompt/schema sidecars) so
+        # the reaper can read claim_pid; previously this only happened on the
+        # --prompt-file lane, leaving claim_pid unstamped for inline callers.
+        _atomic_write(dst, job)
+        _plog(
+            f"claimed {job.get('type') or qtype} job {job['job_id']}; "
+            + (f"agent-session pid={agent_pid} stamped (reaper will spare it)"
+               if agent_pid else
+               "agent-session pid NOT found (reaper falls back to newest-spare)")
+        )
         # Narrate the scheduled-task worker's drafting turn to the menu bar. This
         # is the lane that actually runs the LLM; it persists until cmd_result
         # clears it (or the kicker's exit trap does). Covers the box's autopilot.
