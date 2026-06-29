@@ -641,21 +641,23 @@ def build_summary() -> dict[str, Any]:
         if isinstance(total, (int, float)) and isinstance(available, (int, float))
         else None
     )
-    # pct_free from `memory_pressure` is the macOS-blessed availability signal;
-    # fall back to an available/total estimate only if the tool is unavailable.
-    pct_free = memory_pressure_pct_free()
-    if (
-        pct_free is None
-        and isinstance(total, (int, float))
-        and isinstance(available, (int, float))
-        and total
-    ):
-        pct_free = round(available / total * 100, 1)
-    if pct_free is None:
+    # pct_free is kept CONSISTENT with the MB figures above (available / total) so a
+    # reader never sees two contradictory percentages. `pressure_pct` is the separate
+    # OS pressure gauge from `memory_pressure` (counts evictable file cache as free, so
+    # it reads higher) — it is the most robust starvation detector, so `health` is
+    # derived from it, falling back to pct_free only when the tool is unavailable.
+    pct_free = (
+        round(available / total * 100, 1)
+        if isinstance(total, (int, float)) and isinstance(available, (int, float)) and total
+        else None
+    )
+    pressure_pct = memory_pressure_pct_free()
+    basis = pressure_pct if pressure_pct is not None else pct_free
+    if basis is None:
         health = "unknown"
-    elif pct_free < 10:
+    elif basis < 10:
         health = "critical"
-    elif pct_free < 20:
+    elif basis < 20:
         health = "warn"
     else:
         health = "ok"
@@ -689,6 +691,7 @@ def build_summary() -> dict[str, Any]:
             "used_mb": used,
             "available_mb": available,
             "pct_free": pct_free,
+            "pressure_pct": pressure_pct,
             "health": health,
             "wired_mb": mem.get("wired_mb"),
             "compressed_mb": mem.get("compressed_mb"),
