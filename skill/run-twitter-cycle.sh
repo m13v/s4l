@@ -836,32 +836,48 @@ log "Pre-flight: probing for an X access gate (/account/access, Cloudflare)..."
 _ACCESS_OUT=$(TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}" \
     python3 "$REPO_DIR/scripts/twitter_access_check.py" --session-probe --wait-ms 12000 2>/dev/null)
 if printf '%s' "$_ACCESS_OUT" | grep -q '"gated": *true'; then
-    # Write/refresh the backoff marker with an exponential cooldown.
-    _NEXT_MINS=$(python3 -c 'import json,sys
+    # Write/refresh the backoff marker with an exponential cooldown. Python
+    # prints "<next_mins> <consecutive> <cooldown_secs> <gate_age_secs>".
+    _GATE_FIELDS=$(python3 -c 'import json,sys
 gf, now = sys.argv[1], int(sys.argv[2])
 base, cap, factor = 900, 7200, 2
 try: prev = json.load(open(gf))
 except Exception: prev = {}
 cd = prev.get("cooldown_secs")
 cd = base if not cd else min(int(cd)*factor, cap)
-out = {"first_seen": prev.get("first_seen", now), "last_seen": now,
-       "reason": "access_gated", "consecutive": int(prev.get("consecutive",0))+1,
-       "cooldown_secs": cd, "cooldown_until": now+cd}
-json.dump(out, open(gf,"w"))
-print(cd//60)' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo 15)
+fs = int(prev.get("first_seen", now))
+cons = int(prev.get("consecutive", 0)) + 1
+out = {"first_seen": fs, "last_seen": now, "reason": "access_gated",
+       "consecutive": cons, "cooldown_secs": cd, "cooldown_until": now+cd}
+json.dump(out, open(gf, "w"))
+print(cd//60, cons, cd, max(0, now-fs))' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo "15 1 900 0")
+    read -r _NEXT_MINS _CONS _CD_SECS _AGE_SECS <<< "$_GATE_FIELDS"
     log "  Pre-flight FAILED: X is gating this session (access gate detected)."
     log "  Probe: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
     log "  X redirected an authenticated route to /account/access or served a Cloudflare verification page. This is usually datacenter-IP trust degradation: the session cookie is still valid but X hides content from it, so a scan would return phantom 'doesn't exist' results."
     log "  Backoff engaged: next access re-probe in ~${_NEXT_MINS}m (intervening 5-min firings skip without touching Cloudflare)."
     log "  Action: open the harness Chrome (CDP :9555) and complete the verification at https://x.com/account/access once, or route the box through a residential/clean IP. The cycle auto-resumes within one cooldown of the gate lifting."
+    # Machine-greppable marker (additive; mirrors the stderr-marker convention
+    # bin/server.js parses). Pairs with twitter_access_gate:recovered below.
+    echo "twitter_access_gate: gated consecutive=${_CONS} age_s=${_AGE_SECS} next_reprobe_s=${_CD_SECS}" >&2
     echo "twitter_batches: ended $BATCH_ID"
     release_lock "twitter-browser" 2>/dev/null || true
     exit 1
 fi
-# Probe came back clean: clear any prior backoff marker and resume normally.
+# Probe came back clean. If a backoff marker exists we were gated: record the
+# recovery (how long the gate lasted, since first_seen) BEFORE deleting it, so
+# the lift event + duration survive in the log even though the marker is gone.
 if [ -f "$_GATE_FILE" ]; then
+    _REC=$(python3 -c 'import json,sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: d = {}
+now = int(sys.argv[2]); fs = int(d.get("first_seen", now)); cons = int(d.get("consecutive", 0))
+dur = max(0, now-fs)
+print(dur, dur//60, cons)' "$_GATE_FILE" "$_NOW" 2>/dev/null || echo "0 0 0")
+    read -r _DUR_S _DUR_M _RCONS <<< "$_REC"
     rm -f "$_GATE_FILE"
-    log "  X access gate lifted; cleared backoff marker and resuming normal cycle."
+    echo "twitter_access_gate: recovered_after_s=${_DUR_S} consecutive=${_RCONS}" >&2
+    log "  X access gate lifted after ~${_DUR_M}m (${_RCONS} consecutive gated probes); cleared backoff marker and resuming normal cycle."
 fi
 log "  Pre-flight access OK: $(printf '%s' "$_ACCESS_OUT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
 
