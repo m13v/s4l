@@ -38,11 +38,16 @@ SCAN_T0=$(date +%s)
     _el=$(( $(date +%s) - SCAN_T0 ))
     if [ "$_el" -lt 60 ]; then _dur="${_el}s"; else _dur="$(( _el / 60 ))m"; fi
     _q=$(grep -c "kept=" "$OUT" 2>/dev/null || true); _q=${_q:-0}
+    # Total planned queries IS announced upfront by Phase 1:
+    #   "Lean Phase 1: executing 118 queries via browser-harness CDP"
+    # so show K/total once that line lands (it precedes the per-query "kept=" lines).
+    _total=$(grep -oE "executing [0-9]+ queries" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | head -1 || true)
+    if [ -n "$_total" ]; then _qpart="${_q}/${_total} queries"; else _qpart="${_q} queries"; fi
     _found=$(grep -oE "Batch has [0-9]+" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | tail -1 || true)
     if [ -n "$_found" ]; then
-      _lbl="scanning X for threads (${_dur} · ${_q} queries, ${_found} found)"
+      _lbl="scanning X for threads (${_dur} · ${_qpart}, ${_found} found)"
     else
-      _lbl="scanning X for threads (${_dur} · ${_q} queries)"
+      _lbl="scanning X for threads (${_dur} · ${_qpart})"
     fi
     "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "$_lbl" 2>/dev/null || true
   done
