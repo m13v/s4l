@@ -143,6 +143,31 @@ AUTOPILOT_RUNNING_STALL_SECONDS = 900
 # truth, scripts/schedule_state.py (FIRING_WINDOW there). _schedule_state delegates
 # to it, so it is intentionally NOT redefined here.
 
+# How long the producer can sit narrating "drafting replies (Nm)" before we treat
+# the draft as STUCK rather than healthy. The producer writes that label the whole
+# time it blocks waiting for a worker to return a result (up to its 30-min queue
+# timeout). A healthy drain clears in ~1-2 min; if the label has been "drafting"
+# this long, the worker keeps dying mid-run (host inactivity-kill) or never claims,
+# and nothing is draining — so we flip the menu bar from a reassuring spinner to
+# ⚠ instead of letting the stale "drafting (8m)" lie persist. Well above any
+# healthy single drain (the worker itself dies at ~2 min today).
+DRAFT_STUCK_SECONDS = 300
+
+
+def _label_elapsed_secs(label):
+    """Parse the trailing duration the producer encodes in a drafting activity
+    label — 'drafting replies (8m)', '... (queued 18m)', '... (45s)' — into
+    seconds. Returns 0 when there's no parseable duration. _fmt_dur (claude_job.py)
+    only ever emits '<n>s' (<60s) or '<n>m', so this mirror stays trivial."""
+    if not label:
+        return 0
+    import re
+    matches = re.findall(r"(\d+)\s*([sm])\b", str(label))
+    if not matches:
+        return 0
+    n, unit = matches[-1]
+    return int(n) * (60 if unit == "m" else 1)
+
 
 def _glyph(status):
     return GLYPH.get(status, "·")
@@ -1013,6 +1038,22 @@ class S4LMenuBar(rumps.App):
                 attention = True
         else:
             self._stall_reason_info = ("", "")
+        # Draft worker stuck/killed: the producer narrates "drafting replies (Nm)"
+        # the whole time it blocks waiting for a worker to return a result, with NO
+        # idea the worker died. A healthy drain clears in ~1-2 min; once that label
+        # has been "drafting" past DRAFT_STUCK_SECONDS the worker keeps getting
+        # killed mid-run (or never claims) and nothing is draining — flip to ⚠
+        # instead of leaving the reassuring "drafting (8m)" spinner up. Skip when a
+        # more specific cause (rate limit) already owns the reason.
+        if setup_complete and self._stall_reason_info[0] != "rate_limited":
+            _act = st.read_activity()
+            if (
+                _act
+                and _act.get("state") == "drafting"
+                and _label_elapsed_secs(_act.get("label")) >= DRAFT_STUCK_SECONDS
+            ):
+                attention = True
+                self._stall_reason_info = ("draft_stuck", _act.get("label") or "")
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
@@ -1349,6 +1390,14 @@ class S4LMenuBar(rumps.App):
                 items.append(self._label("⚠ Claude rate-limited — drafts can’t run"))
                 items.append(self._label(
                     "   " + (self._stall_reason_info[1] or "wait for reset or switch account")
+                ))
+            elif self._stall_reason_info[0] == "draft_stuck":
+                # Routines fire and the producer keeps narrating "drafting" but the
+                # worker keeps getting killed mid-run / never returns a result. Don't
+                # offer Re-arm (routines are fine); state the real problem.
+                items.append(self._label("⚠ Draft not completing — worker keeps getting killed"))
+                items.append(self._label(
+                    "   " + (self._stall_reason_info[1] or "drafting") + " — no result yet"
                 ))
             elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
