@@ -236,9 +236,14 @@ class S4LMenuBar(rumps.App):
         # indicator + the "Please update now" menu item.
         self._update_available = False
         self._latest_version = None
-        self._upd_timer = rumps.Timer(self._check_update, 60)  # every 1 min
+        # Poll every 15 min, NOT every 60s. _check_update hits GitHub's
+        # releases/latest UNAUTHENTICATED (60 req/hr per IP); a 60s poll = 60/hr,
+        # right at the cap, so it got 403-rate-limited and silently stopped
+        # detecting updates (the "update available" badge never showed). 15 min =
+        # 4/hr leaves ample headroom; updates aren't urgent enough to poll faster.
+        self._upd_timer = rumps.Timer(self._check_update, 900)
         self._upd_timer.start()
-        self._check_update(None)
+        self._check_update(None)  # one check at launch (badge appears ~immediately)
         # One-shot self-heal: if the autopilot scheduled tasks are running in the
         # wrong folder (or the deprecated single autopilot task still exists),
         # relocate them to ~/.s4l-worker so their once-a-minute runs stop polluting
@@ -352,16 +357,32 @@ class S4LMenuBar(rumps.App):
         (can't reliably target a just-switched-into account)."""
         copied = self._copy_to_clipboard(REARM_PROMPT)
         self._open_claude()
-        if copied:
+        # Use a MODAL alert, not _notify: osascript `display notification` from this
+        # bundle-less launchd menu-bar process silently no-ops (no notification
+        # permission), so the user got zero feedback. rumps.alert is an NSAlert that
+        # always shows and requires an explicit dismiss — unmissable.
+        try:
+            if copied:
+                rumps.alert(
+                    title="Paste in Claude to finish",
+                    message=(
+                        "The setup prompt is copied to your clipboard.\n\n"
+                        "Click into the Claude chat, paste it (Cmd+V), and press Enter. "
+                        "That schedules the draft tasks for this account."
+                    ),
+                    ok="Got it",
+                )
+            else:
+                rumps.alert(
+                    title="Set up the draft schedule",
+                    message="Open Claude and ask it to set up the draft schedule for this account.",
+                    ok="OK",
+                )
+        except Exception:
+            # Best-effort fallback if the modal can't show for some reason.
             self._notify(
-                "S4L · setup prompt copied",
-                "Paste it into Claude (⌘V) and press Enter to schedule the draft "
-                "tasks for this account.",
-            )
-        else:
-            self._notify(
-                "S4L",
-                "Open Claude and ask it to set up the draft schedule for this account.",
+                "S4L · setup prompt copied" if copied else "S4L",
+                "Paste it into Claude (Cmd+V) and press Enter to schedule the draft tasks.",
             )
 
     # ---- schedule-state detection (reads the ACTUAL schedule, reliably) ----
