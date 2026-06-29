@@ -164,6 +164,59 @@ DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
 # it would feed a stale prompt to a worker much later. Default 2x the timeout.
 STALE_TTL_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_STALE_TTL", str(DEFAULT_TIMEOUT_S * 2)))
 
+# ---------------------------------------------------------------------------
+# EXPERIMENT (2026-06-29, per user): hide the "Top Posts by Project" few-shot
+# block from the Phase-2b drafting prompt.
+#
+# WHY: that block is ~42% of the prompt — top_performers.py emits up to 5 curated
+# example posts for EVERY project (~20 projects = ~74 examples, ~16k tokens), and
+# it is NOT scoped to the projects in this cycle's candidates. On a `.mcpb` box the
+# drafting runs inside a Claude Desktop scheduled-task session that the app
+# SIGTERMs after ~120s; the 38k-token prompt pushed the worker past that window
+# before it could submit, so jobs never drained. Dropping this block shrinks the
+# prompt to ~22k tokens (one Read, faster turns) while KEEPING the "Best Example
+# Per Style" block (which is style-scoped and tiny).
+#
+# This is a DELIVERY-LAYER trim only: the generator (top_performers.py, locked) is
+# untouched — we strip the section from the prompt text right before it is queued.
+# A loud marker is left in its place and a provider.log line is emitted, so it is
+# obvious the section was intentionally hidden, not lost.
+#
+# DEFAULT: ON (hidden). Set SAPS_HIDE_TOP_BY_PROJECT=0 (or false/no) to restore the
+# full per-project example block.
+HIDE_TOP_BY_PROJECT = (
+    os.environ.get("SAPS_HIDE_TOP_BY_PROJECT", "1").strip().lower()
+    not in ("0", "false", "no", "off", "")
+)
+
+
+def _strip_top_by_project(prompt: str) -> str:
+    """Remove the '### Top Posts by Project' block from a drafting prompt.
+
+    Returns the prompt with that one section replaced by a clearly-labelled
+    HIDDEN marker (so anyone reading the prompt sees it was intentionally hidden
+    behind SAPS_HIDE_TOP_BY_PROJECT, not silently dropped). No-op if the block is
+    absent (e.g. query prompts, or a report that produced no per-project posts).
+    The section runs from its '### Top Posts by Project' header to the next '##'/
+    '###' header (normally '### Bottom N Posts').
+    """
+    start = "### Top Posts by Project"
+    i = prompt.find(start)
+    if i < 0:
+        return prompt
+    m = re.search(r"\n#{2,3} ", prompt[i + len(start):])
+    j = (i + len(start) + m.start() + 1) if m else len(prompt)
+    marker = (
+        "### Top Posts by Project — HIDDEN\n"
+        "[This per-project few-shot block (~16k tokens) was hidden at the delivery "
+        "layer by claude_job.py via SAPS_HIDE_TOP_BY_PROJECT (default ON, added "
+        "2026-06-29) so the drafting worker fits Claude Desktop's ~120s "
+        "scheduled-session window. Set SAPS_HIDE_TOP_BY_PROJECT=0 to restore it. "
+        "The 'Best Example Per Style' block above is kept.]\n\n"
+    )
+    return prompt[:i] + marker + prompt[j:]
+
+
 
 # --------------------------------------------------------------------------- #
 # Queue layout                                                                #
@@ -507,6 +560,19 @@ def cmd_provider(ns) -> int:
                 schema_text = f.read()
         except Exception:
             schema_text = None
+
+    # Delivery-layer trim: hide the "Top Posts by Project" block from drafting
+    # prompts so the worker fits the ~120s scheduled-session window. See
+    # HIDE_TOP_BY_PROJECT / _strip_top_by_project above. Drafting jobs only.
+    if qtype == "twitter-prep" and HIDE_TOP_BY_PROJECT:
+        _before_len = len(prompt)
+        prompt = _strip_top_by_project(prompt)
+        if len(prompt) != _before_len:
+            _plog(
+                "hid 'Top Posts by Project' block: -%d chars "
+                "(SAPS_HIDE_TOP_BY_PROJECT on; set =0 to restore)"
+                % (_before_len - len(prompt))
+            )
 
     job_id = uuid.uuid4().hex
     created = time.time()
