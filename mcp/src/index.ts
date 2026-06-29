@@ -601,6 +601,14 @@ async function produceDrafts(
   await ensureOverlayWatch();
   let step = 0;
   let lastMsg = "";
+  // Granular scan progress for the menu-bar label. Phase 1 logs one
+  // `executing N queries` line (the total), then one `ok/err project=… kept=K`
+  // line per query. We count those to paint `scanning X · N/M · kept K` instead
+  // of a static "scanning X". Best-effort: missing total falls back to a plain
+  // count, and any parse miss just leaves the prior label up.
+  let scanTotal = 0;
+  let scanDone = 0;
+  let scanKept = 0;
   // ONE predictable, host-independent place to watch a draft_cycle run, so any
   // agent (or human) debugging "the cycle looks stuck" has an obvious path:
   //   ~/social-autoposter/skill/logs/draft_cycle-mcp.log
@@ -641,6 +649,19 @@ async function produceDrafts(
       if (t.trim()) {
         appendLog(`${t}\n`);
         console.error(`[draft_cycle] ${t}`);
+      }
+      // Per-query scan progress -> granular menu-bar label. These lines only
+      // appear during Phase 1 (before 2b-prep), so they never fight the
+      // "drafting" label below.
+      let sm: RegExpExecArray | null;
+      if ((sm = /executing (\d+) quer/.exec(t))) {
+        scanTotal = parseInt(sm[1], 10) || 0;
+      } else if ((sm = /^\s*(?:ok|err)\s+project=/.exec(t))) {
+        scanDone += 1;
+        const km = /kept=(\d+)/.exec(t);
+        if (km) scanKept += parseInt(km[1], 10) || 0;
+        const prog = scanTotal ? `${scanDone}/${scanTotal}` : `${scanDone}`;
+        writeActivity("scanning", `scanning X · ${prog} · kept ${scanKept}`);
       }
       if (/Phase 2b-prep/.test(t)) writeActivity("drafting", "drafting replies");
       if (!onProgress) return;
