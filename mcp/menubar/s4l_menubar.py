@@ -1365,6 +1365,19 @@ class S4LMenuBar(rumps.App):
         else:
             items += self._state_c(snap)
 
+        # Engagement mode — ALWAYS visible (every state), not just post-setup, so
+        # the user can see the current mode + flip it any time. Single source:
+        # snap['mode'] (mode.json), same value the dashboard shows.
+        mode = snap.get("mode") or st.read_mode()
+        personal = mode == st.MODE_PERSONAL_BRAND
+        items.append(rumps.separator)
+        mode_item = rumps.MenuItem("Personal brand mode", callback=self._toggle_mode)
+        mode_item.state = 1 if personal else 0
+        items.append(mode_item)
+        items.append(self._label(
+            "   organic, link-free engagement" if personal else "   promoting your products"
+        ))
+
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
         if self._update_available and self._latest_version:
@@ -1457,26 +1470,8 @@ class S4LMenuBar(rumps.App):
         else:
             out.append(self._label("7d stats — open dashboard"))
 
-        out.append(rumps.separator)
-        # Engagement-mode toggle (2026-06-26). A checkmark = personal-brand mode
-        # (link-free organic engagement for the user's own brand); unchecked =
-        # the default promotion pipeline (marketing the configured products).
-        # The cycle reads this on its next run via scripts/saps_mode.py, so the
-        # flip takes effect without restarting anything.
-        mode = st.read_mode()
-        personal = mode == st.MODE_PERSONAL_BRAND
-        mode_item = rumps.MenuItem(
-            "Personal brand mode", callback=self._toggle_mode
-        )
-        mode_item.state = 1 if personal else 0
-        out.append(mode_item)
-        out.append(
-            self._label(
-                "   organic, link-free engagement"
-                if personal
-                else "   promoting your products"
-            )
-        )
+        # (Engagement-mode toggle moved to _build_menu so it shows in EVERY state,
+        # not just post-setup — see the always-visible block there.)
 
         # No "Run draft cycle" item: the autopilot drafts on its own (launchd
         # kicker + queue worker), so a manual draft-now action is redundant.
