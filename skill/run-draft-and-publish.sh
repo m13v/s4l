@@ -30,7 +30,7 @@ trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts
 # Phase 1 reports them — so the menu bar actually moves. Reads $OUT only; never
 # touches the locked cycle. heartbeat() re-stamps ONLY while the state is still
 # "scanning", so once the provider advances the phase it goes quiet (no flicker).
-"$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scanning X for threads" 2>/dev/null || true
+"$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scan: starting" 2>/dev/null || true
 SCAN_T0=$(date +%s)
 (
   while true; do
@@ -45,9 +45,9 @@ SCAN_T0=$(date +%s)
     if [ -n "$_total" ]; then _qpart="${_q}/${_total} queries"; else _qpart="${_q} queries"; fi
     _found=$(grep -oE "Batch has [0-9]+" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | tail -1 || true)
     if [ -n "$_found" ]; then
-      _lbl="scanning X for threads (${_dur} · ${_qpart}, ${_found} found)"
+      _lbl="scan: ${_dur} · ${_qpart}, ${_found} found"
     else
-      _lbl="scanning X for threads (${_dur} · ${_qpart})"
+      _lbl="scan: ${_dur} · ${_qpart}"
     fi
     "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "$_lbl" 2>/dev/null || true
   done
