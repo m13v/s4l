@@ -530,18 +530,8 @@ statsToggle.addEventListener("click", () => {
   statsToggle.classList.toggle("expanded", statsOpen);
 });
 
-btnDraft.addEventListener("click", () => busy(btnDraft, "Drafting\u2026", async () => {
-  log("Drafting\u2026 the draft list appears in the chat for review.");
-  try {
-    const r = await call("draft_cycle");
-    const n = r.drafted ?? 0;
-    if (r.onboarding) applyState({ onboarding: r.onboarding });
-    if (n) log(`Drafted ${n} \u2014 review them in the chat and choose which to post.`);
-    else log("No drafts produced.");
-    void refresh();
-    void loadStats();
-  } catch (e: any) { log("Draft cycle failed: " + (e?.message || e)); }
-}));
+// (The "Run draft cycle" button was removed \u2014 the autopilot drafts on its own via
+// the launchd kicker + queue worker, so there is no manual draft-now action.)
 
 // In-header update button. Created fresh by render() whenever an update is
 // available, so the click is delegated off verEl rather than bound to the
