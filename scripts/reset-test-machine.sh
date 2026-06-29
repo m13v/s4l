@@ -356,9 +356,17 @@ fi
 echo
 
 # ---- 3. MCP registration ---------------------------------------------------
+# Under --plugin-only, deregister ONLY social-autoposter; the browser-agent MCPs
+# (twitter-harness/reddit-agent/linkedin-agent) are shared infra we're preserving
+# (their profiles + backend survive in steps 4/5).
 echo "[3] MCP registration (claude CLI + config files)"
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  MCP_NAMES="social-autoposter"
+else
+  MCP_NAMES="social-autoposter twitter-harness reddit-agent linkedin-agent"
+fi
 if command -v claude >/dev/null 2>&1; then
-  for name in social-autoposter twitter-harness reddit-agent linkedin-agent; do
+  for name in $MCP_NAMES; do
     echo "  run     claude mcp remove $name"
     [ "$DRY" -eq 0 ] && claude mcp remove "$name" >/dev/null 2>&1 || true
   done
