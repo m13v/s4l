@@ -2360,7 +2360,7 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 5; // v5: drop the per-run draft cap (v3/v4). The ~90s kills were NOT a drafting-time limit; they were unattended permission-prompt stalls on un-auto-approved Bash calls. Real fix = blanket Bash allow in queueWorkerAllowedTools so no prompt is ever emitted. Worker drafts the FULL set again.
+const QUEUE_WORKER_PROMPT_VERSION = 6; // v6: the ~90s kill is a host INACTIVITY watchdog (resets on each tool call), not a fixed cap. The worker was drafting all candidates in ONE silent turn (its HARD RULES even forbade log_draft.py), starving the clock -> killed mid-draft. v6 requires incremental draft-then-log per candidate and allows the log_draft.py persist commands, so per-candidate tool calls keep the session alive and the full set drains.
 const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
