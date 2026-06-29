@@ -67,6 +67,8 @@ interface Snapshot {
   // draft tasks aren't registered here (e.g. after an account switch) and the
   // "Set up draft schedule" button should show.
   schedule_state?: "missing" | "disabled" | "ok" | "unknown";
+  // Engagement mode (single source: mode.json via the server snapshot).
+  mode?: "promotion" | "personal_brand";
   onboarding?: OnboardingSnapshot;
 }
 
@@ -113,6 +115,9 @@ const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
+const btnMode = $("btn-mode") as HTMLButtonElement;
+const modeCurrent = $("mode-current");
+const modeSub = $("mode-sub");
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
@@ -266,6 +271,15 @@ function render() {
   btnSchedule.hidden = !needsSchedule;
   btnSchedule.classList.toggle("primary", needsSchedule);
 
+  // Engagement mode — always shown, mirroring the menu-bar toggle. Single source:
+  // state.mode (the server snapshot's mode.json read).
+  const personal = state.mode === "personal_brand";
+  modeCurrent.textContent = personal ? "Personal brand" : "Promotion";
+  modeSub.textContent = personal
+    ? "Organic, link-free engagement in your own voice."
+    : "Marketing your configured products.";
+  btnMode.textContent = personal ? "Switch to promotion" : "Switch to personal brand";
+
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
   // pre-setup view stays a minimal "just set up" interface; the Install card
@@ -292,6 +306,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
+    mode: o.mode ?? state?.mode,
     onboarding: o.onboarding,
   };
 }
@@ -511,6 +526,19 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
     else log("Scheduling is running in the chat. The draft tasks will register for this account.");
   } catch (e: any) {
     log("Couldn\u2019t start scheduling: " + (e?.message || e));
+  }
+}));
+
+// Engagement-mode toggle: lightweight flip via engagement_mode action:'toggle'
+// (mode.json only, no persona provisioning), then refresh so the new mode renders.
+// Mirrors the menu-bar toggle — same single source (mode.json).
+btnMode.addEventListener("click", () => busy(btnMode, "Switching…", async () => {
+  try {
+    const res = await call("engagement_mode", { action: "toggle" });
+    if (res && res.mode) applyState({ mode: res.mode });
+    await refresh();
+  } catch (e: any) {
+    log("Couldn’t switch mode: " + (e?.message || e));
   }
 }));
 
