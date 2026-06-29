@@ -40,6 +40,12 @@ import time
 
 # Keep in sync with AUTOPILOT_STALL_SECONDS (menubar) / AUTOPILOT_STALL_MS (index.ts).
 STALL_SECONDS = 180
+# A job CLAIMED but never finished (sits in running/ this long) means a worker
+# picked it up and then died mid-run — the claude -p drafting child never came up
+# or crashed. Must be generous enough to clear the longest real drafting turn so a
+# healthy run never trips it. Keep in sync with AUTOPILOT_RUNNING_STALL_SECONDS
+# (menubar). See _oldest_running_age.
+RUNNING_STALL_SECONDS = 900
 # Require the stall to persist this many consecutive checks before paging, so a
 # transient slow claim (e.g. right after a Claude restart) doesn't false-alarm.
 # At StartInterval 120 that is ~6 min of continuous stall.
@@ -136,6 +142,30 @@ def _oldest_pending_age() -> float | None:
     return time.time() - oldest
 
 
+def _oldest_running_age() -> float | None:
+    """Seconds since the oldest CLAIMED-but-unfinished job was written, or None if
+    nothing is in flight. A worker claims by moving a job pending/ -> running/ and
+    only removes it on result, so a job lingering in running/ far past any real
+    drafting turn means the worker claimed it and then wedged mid-run (dead/never-
+    spawned claude -p child). This is the ONLY signal for that case: pending-age is
+    silent (the job left pending/) and the producer's drain latch hasn't fired yet
+    (it's still inside its own timeout). running/ is flat (see claude_job.py)."""
+    run_root = os.path.join(_queue_root(), "running")
+    oldest = None
+    for jf in glob.glob(os.path.join(run_root, "*.json")):
+        if jf.endswith(".tmp"):
+            continue
+        try:
+            m = os.path.getmtime(jf)
+        except OSError:
+            continue
+        if oldest is None or m < oldest:
+            oldest = m
+    if oldest is None:
+        return None
+    return time.time() - oldest
+
+
 def _read_state() -> dict:
     try:
         with open(_watch_state_path()) as f:
@@ -169,11 +199,16 @@ def _sentry():
 
 def main() -> int:
     age = _oldest_pending_age()
+    run_age = _oldest_running_age()
     timeouts = _consecutive_timeouts()
-    # Durable latch OR fast pending-age (see the two helpers). Either alone is a
-    # stall; both must be gated on the autopilot actually being configured here.
+    # Three complementary signals, OR'd; all gated on the autopilot actually being
+    # configured here. (1) durable producer drain latch, (2) fast pending-age (job
+    # never claimed), (3) running-age (job claimed then wedged mid-run). (3) is the
+    # only one that catches a worker dying after it picked up the job.
     stalled = _autopilot_configured() and (
-        timeouts >= 1 or (age is not None and age > STALL_SECONDS)
+        timeouts >= 1
+        or (age is not None and age > STALL_SECONDS)
+        or (run_age is not None and run_age > RUNNING_STALL_SECONDS)
     )
     # A rate-limit stall is expected and self-heals at the quota reset — never page
     # for it (and re-arm can't fix it). Treat it as "not an actionable stall" so the
@@ -193,21 +228,33 @@ def main() -> int:
 
     consecutive += 1
     age_str = f"{int(age)}s" if age is not None else "n/a (between cycles)"
+    run_age_str = f"{int(run_age)}s" if run_age is not None else "n/a (none in flight)"
+    # Distinguish the two shapes so the alert points at the right cause: a claimed-
+    # but-wedged job (running-age) is a mid-run worker death, not an orphaned routine.
+    wedged_inflight = run_age is not None and run_age > RUNNING_STALL_SECONDS
     if consecutive >= ALERT_AFTER and not alerted:
         try:
             sentry = _sentry()
             sentry.init()
+            cause = (
+                "a worker claimed a draft job and then died mid-run (claude -p child "
+                "never came up / crashed)"
+                if wedged_inflight
+                else "scheduled-task routines likely orphaned — Claude Desktop account change?"
+            )
             sentry.capture_message(
                 "social-autoposter autopilot stalled: draft jobs are not being "
-                "drained (scheduled-task routines likely orphaned — Claude Desktop "
-                f"account change?). producer consecutive timeouts={timeouts}, "
-                f"oldest pending job age={age_str}, sustained {consecutive} checks.",
+                f"drained ({cause}). producer consecutive timeouts={timeouts}, "
+                f"oldest pending job age={age_str}, oldest in-flight (running) job "
+                f"age={run_age_str}, sustained {consecutive} checks.",
                 level="error",
                 tags={
                     "component": "autopilot",
                     "issue": "stall",
+                    "stall_shape": "inflight_wedged" if wedged_inflight else "not_draining",
                     "consecutive_timeouts": str(timeouts),
                     "oldest_pending_age_s": str(int(age)) if age is not None else "",
+                    "oldest_running_age_s": str(int(run_age)) if run_age is not None else "",
                 },
             )
             sentry.flush()
@@ -215,7 +262,7 @@ def main() -> int:
             # No Sentry (helper/SDK missing) -> at least leave a local breadcrumb.
             sys.stderr.write(
                 f"[stall-watch] autopilot stalled (timeouts={timeouts}, "
-                f"age={age_str}) but Sentry report failed\n"
+                f"pending_age={age_str}, running_age={run_age_str}) but Sentry report failed\n"
             )
         alerted = True
 
