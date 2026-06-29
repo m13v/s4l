@@ -626,12 +626,40 @@ def build_summary() -> dict[str, Any]:
     rows, by_pid, children = parse_ps()
     mem = parse_vm_stat()
     total = mem.get("total_mb")
-    free = mem.get("free_mb")
+    # macOS memory accounting: "available" headroom is what can be handed to a
+    # process WITHOUT paging — free + inactive + speculative + purgeable, all of
+    # which the OS reclaims on demand. The real footprint is total - available.
+    # Do NOT use vm_stat "pages free" as the headline: it is near-zero by design
+    # (macOS keeps RAM full of reclaimable cache), so total-minus-free reads ~99%
+    # and falsely looks like starvation. That trap caused a wrong OOM call once.
+    avail_parts = [mem.get(k) for k in ("free_mb", "inactive_mb", "speculative_mb", "purgeable_mb")]
+    available = (
+        round(sum(p for p in avail_parts if isinstance(p, (int, float))), 1) if mem else None
+    )
     used = (
-        round(float(total) - float(free), 1)
-        if isinstance(total, (int, float)) and isinstance(free, (int, float))
+        round(float(total) - float(available), 1)
+        if isinstance(total, (int, float)) and isinstance(available, (int, float))
         else None
     )
+    # pct_free from `memory_pressure` is the macOS-blessed availability signal;
+    # fall back to an available/total estimate only if the tool is unavailable.
+    pct_free = memory_pressure_pct_free()
+    if (
+        pct_free is None
+        and isinstance(total, (int, float))
+        and isinstance(available, (int, float))
+        and total
+    ):
+        pct_free = round(available / total * 100, 1)
+    if pct_free is None:
+        health = "unknown"
+    elif pct_free < 10:
+        health = "critical"
+    elif pct_free < 20:
+        health = "warn"
+    else:
+        health = "ok"
+    swap_used = swap_used_mb()
     slim_groups = {
         name: {"count": g["count"], "rss_mb": g["rss_mb"]}
         for name, g in group_summaries(rows).items()
@@ -659,9 +687,12 @@ def build_summary() -> dict[str, Any]:
         "mem": {
             "total_mb": total,
             "used_mb": used,
-            "free_mb": free,
+            "available_mb": available,
+            "pct_free": pct_free,
+            "health": health,
             "wired_mb": mem.get("wired_mb"),
             "compressed_mb": mem.get("compressed_mb"),
+            "swap_used_mb": swap_used,
             "swapouts": mem.get("swapouts"),
         },
         "groups": slim_groups,
