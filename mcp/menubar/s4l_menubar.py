@@ -501,10 +501,18 @@ class S4LMenuBar(rumps.App):
                 except Exception:
                     continue
                 low = txt.lower()
+                # (a) Human "usage limit reached" prose (the older shape).
                 if "weekly limit" in low or "usage limit" in low or "hit your limit" in low:
                     import re
                     m = re.search(r"resets [^\"\\]{0,40}", txt)
                     limit_msg = m.group(0).strip().rstrip(".") if m else "Claude usage limit reached"
+                    break
+                # (b) HTTP-429 rate_limit api_error — the shape the Claude Desktop
+                # routines lane ACTUALLY returns when the account is over its limit.
+                # The prose strings above never appear in this case; the routine
+                # transcript carries {"error":"rate_limit",...,"apiErrorStatus":429}.
+                if '"apierrorstatus":429' in low or '"error":"rate_limit"' in low:
+                    limit_msg = "Claude rate limit reached (429)"
                     break
         except Exception:
             pass
@@ -1019,6 +1027,22 @@ class S4LMenuBar(rumps.App):
         schedule_state = self._schedule_state()
         self._schedule_state_cache = schedule_state
         attention = setup_complete and schedule_state in ("missing", "disabled")
+        # Routines-lane rate limit (429): the draft tasks ARE registered and firing
+        # for this account, but every run dies on a Claude rate limit, so nothing
+        # drafts. Re-arm can't fix that — surface it as its own ⚠ attention state
+        # with a "rate-limited" reason. Only meaningful when the schedule is firing
+        # ('ok'); the missing/disabled case already owns the ⚠. Throttled (~30s):
+        # scanning the worker-transcript bucket is glob-heavy and changes slowly.
+        if setup_complete and schedule_state == "ok":
+            now_rl = time.time()
+            if now_rl - getattr(self, "_rl_checked_at", 0.0) >= 30:
+                self._rl_checked_at = now_rl
+                reason, msg = self._stall_reason()
+                self._stall_reason_info = (reason, msg) if reason == "rate_limited" else ("", "")
+            if self._stall_reason_info[0] == "rate_limited":
+                attention = True
+        else:
+            self._stall_reason_info = ("", "")
         # Drop the stale "drafting" spinner while we need attention so the ⚠ shows.
         self._stalled = attention
 
@@ -1035,7 +1059,13 @@ class S4LMenuBar(rumps.App):
         self._last_blocker_code = blocker_code
         # Notify once per episode (the draft schedule isn't running for this account).
         if attention and not self._stall_notified:
-            if schedule_state == "disabled":
+            if self._stall_reason_info[0] == "rate_limited":
+                self._notify(
+                    "S4L Claude rate-limited",
+                    "Drafts can’t run — this Claude account hit its rate limit. "
+                    + (self._stall_reason_info[1] or "Wait for the limit to reset or switch account."),
+                )
+            elif schedule_state == "disabled":
                 self._notify(
                     "S4L draft tasks disabled",
                     "The draft tasks are scheduled but disabled. Open the S4L menu → "
@@ -1337,11 +1367,19 @@ class S4LMenuBar(rumps.App):
         # When the schedule IS firing (ok), attention is False and nothing shows here
         # — a firing autopilot reads as healthy even if no draft has drained yet.
         if attention:
-            if schedule_state == "disabled":
+            if self._stall_reason_info[0] == "rate_limited":
+                # Routines fire but every run dies on a Claude rate limit (429).
+                # Re-arm can't fix this, so don't offer it — just say what's wrong.
+                items.append(self._label("⚠ Claude rate-limited — drafts can’t run"))
+                items.append(self._label(
+                    "   " + (self._stall_reason_info[1] or "wait for reset or switch account")
+                ))
+            elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
-            items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             items.append(rumps.separator)
 
         if not runtime_ready:
