@@ -2881,57 +2881,27 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
 }
 
 // Is the draft schedule registered AND running for the LIVE account?
-//   'ok'       — worker tasks present+enabled and FIRING (lastRunAt within
-//                SCHEDULE_FIRING_MS) — the host is actively running them.
+//   'ok'       — worker tasks present+enabled and FIRING (host actively running).
 //   'disabled' — present but a worker task is disabled.
 //   'missing'  — not firing anywhere (orphaned / not registered for the live
 //                account) -> dashboard offers "Set up draft schedule".
-// The live account is identified by the registry the host is actually FIRING
-// (freshest lastRunAt — only the active account's scheduler advances it), NOT a
-// session id (which churns on every Claude restart and mis-read "missing" while
-// the tasks were firing). Mirrors s4l_menubar.py::_schedule_state.
-const SCHEDULE_FIRING_MS = 420_000; // 7 min; tolerates throttle + restart gaps
-function scheduleState(): "missing" | "disabled" | "ok" {
-  let newestMs: number | null = null;
-  let newestEnabled = false;
-  let anyPresent = false;
-  let anyEnabled = false;
+// The algorithm (live-account detection by freshest lastRunAt, firing window,
+// etc.) lives in ONE place: scripts/schedule_state.py. The Python menu bar imports
+// that module in-process; we shell out to it here. Keeping a single implementation
+// is the whole point — the two surfaces can no longer drift. The script is
+// stdlib-only and resolvePython() falls back to system python3, so this works even
+// before the owned runtime is provisioned. Any failure -> "missing" (safe: a
+// schedule we can't read is treated as not-firing, which only ever surfaces the
+// re-arm affordance, never a false "ok").
+async function scheduleState(): Promise<"missing" | "disabled" | "ok"> {
   try {
-    const base = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
-    for (const ws of fs.readdirSync(base)) {
-      for (const inner of fs.readdirSync(path.join(base, ws))) {
-        const reg = path.join(base, ws, inner, "scheduled-tasks.json");
-        let d: any;
-        try {
-          d = JSON.parse(fs.readFileSync(reg, "utf-8"));
-        } catch {
-          continue;
-        }
-        const byId: Record<string, any> = {};
-        for (const t of d.scheduledTasks || []) byId[t.id] = t;
-        const recs = QUEUE_WORKERS.map((s) => byId[s.taskId]);
-        if (recs.some((r) => !r)) continue;
-        anyPresent = true;
-        const enabled = recs.every((r) => r.enabled);
-        anyEnabled = anyEnabled || enabled;
-        const epochs = recs
-          .map((r) => Date.parse(r.lastRunAt || ""))
-          .filter((n) => !Number.isNaN(n));
-        const e = epochs.length ? Math.max(...epochs) : null;
-        if (e !== null && (newestMs === null || e > newestMs)) {
-          newestMs = e;
-          newestEnabled = enabled;
-        }
-      }
-    }
+    const res = await runPython("scripts/schedule_state.py", [], { timeoutMs: 15_000 });
+    const state = JSON.parse(res.stdout.trim()).state;
+    if (state === "ok" || state === "disabled") return state;
+    return "missing";
   } catch {
-    /* base missing -> treat as missing */
+    return "missing";
   }
-  if (newestMs !== null && Date.now() - newestMs <= SCHEDULE_FIRING_MS) {
-    return newestEnabled ? "ok" : "disabled";
-  }
-  if (anyPresent && !anyEnabled) return "disabled";
-  return "missing";
 }
 
 // Assemble everything the panel needs in one shot (projects + X + autopilot +
@@ -2965,6 +2935,17 @@ async function buildSnapshot() {
   // milestone-ledger count, which disagreed with this whenever a milestone was
   // added late or never recorded, causing the 7/8-vs-"set up" flip-flop).
   const setupComplete = rtReady && projects.some((p) => p.ready) && !!x.connected;
+  // Read the REAL schedule state at all times (during setup AND while running) —
+  // no setup_complete fallback that lied "ok". Source of truth: schedule_state.py.
+  // The re-arm WARNING stays gated on setup_complete below (we don't nag the user
+  // mid-onboarding); only the value here is always honest.
+  const schedule_state = await scheduleState();
+  // The two draft-autopilot tasks are registered AND firing -> the terminal
+  // onboarding milestone is satisfied (this replaced the removed draft_verified,
+  // which depended on the deleted run_draft_cycle tool and could never complete).
+  if (schedule_state === "ok") {
+    completeOnboardingMilestone("tasks_scheduled");
+  }
   const snap = {
     projects,
     projects_total: projects.length,
@@ -2978,9 +2959,9 @@ async function buildSnapshot() {
     // autopilot_stalled is the true "drafts aren't being produced" signal.
     autopilot_stalled: setupComplete && autopilotStalled(),
     // The ACTUAL schedule state for the CURRENT account ('missing'/'disabled'/
-    // 'ok'/'unknown'). Drives the dashboard's "Set up draft schedule" button —
-    // read directly from the host registry, not inferred from firing.
-    schedule_state: setupComplete ? scheduleState() : "ok",
+    // 'ok'). Always the real registry reading; drives the dashboard's "Set up
+    // draft schedule" button (gated on setup_complete in the consumer, not here).
+    schedule_state,
     auto_update_on: ap.auto_update_on,
     version: ver.installed || VERSION,
     latest_version: ver.latest ?? null,
