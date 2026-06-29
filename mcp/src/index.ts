@@ -306,42 +306,41 @@ const server = new McpServer(
       "can run them hands-free on autopilot.\n\n" +
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
-      "project is fully configured with seeded search topics, X is connected with its real handle, " +
-      "the two draft-autopilot scheduled tasks have been created via queue_setup, AND the scheduled " +
-      "cycle has produced a draft card (poll the `dashboard` pending-draft count) — verifying the ACTUAL pipeline end to end " +
-      "without posting (see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
+      "project is fully configured with seeded search topics, X is connected with its real handle, AND " +
+      "the two draft-autopilot scheduled tasks have been created via queue_setup and are firing " +
+      "(see SCHEDULE THE AUTOPILOT below). The owned runtime (private Python + Chromium) provisions " +
       "ITSELF automatically on boot — you do NOT install it. Just poll runtime action:'status' until it " +
       "reports ready; only call runtime action:'install' or action:'doctor' to TROUBLESHOOT if status " +
       "shows the boot provision failed or stalled. Do not ask whether to inspect " +
       "status, repair a failed runtime, choose an auto-detected browser profile, connect " +
-      "X, scan the profile, research the product website, save conservative inferred fields, seed " +
-      "topics, retry a recoverable failure, or run draft-only verification. Do those things. The " +
+      "X, scan the profile, research the product website, save conservative inferred fields, or seed " +
+      "topics. Do those things. The " +
       "explicit setup request authorizes runtime repair and importing ONLY x.com/" +
       "twitter.com session cookies into the managed browser: warn that macOS keychain prompts may " +
       "appear, then proceed without a separate yes/no turn. Ask at most one bundled question, only " +
       "when no product can be identified from config, context, the X profile, or public research, " +
-      "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup, but " +
-      "DO schedule the draft autopilot and verify it produced a draft card as the final step (it only " +
-      "queues drafts for approval, it never posts on its own). When setup reaches done (" +
-      "runtime ready, a project configured with seeded topics, X connected, the two scheduled tasks " +
-      "created, and one real cycle has produced a draft card), call the `dashboard` tool so the user " +
+      "or pause for an unavoidable interactive login or OS prompt. Never auto-POST during setup. " +
+      "DO schedule the draft autopilot as the final step (once running it only queues drafts for " +
+      "approval, it never posts on its own). When setup reaches done (" +
+      "runtime ready, a project configured with seeded topics, X connected, and the two scheduled tasks " +
+      "created and firing), call the `dashboard` tool so the user " +
       "sees the finished setup rendered, then give " +
       "the completion summary.\n\n" +
-      "SCHEDULE + VERIFY THE AUTOPILOT (final onboarding step). There is ONE drafting pipeline: a launchd " +
+      "SCHEDULE THE AUTOPILOT (final onboarding step). There is ONE drafting pipeline: a launchd " +
       "job this server installs runs the real cycle in draft-only mode, its Phase-2b Claude turn is " +
       "serviced by a scheduled task that drains a local job queue, and the result is merged into the " +
       "menu-bar approval cards. Drafting is the queue + worker path, fired automatically by a launchd " +
-      "kicker this server installs (every few minutes). Steps, in order: " +
+      "kicker this server installs (every few minutes) — it runs on its own once the tasks exist; " +
+      "onboarding does NOT need to wait for or verify a draft. Steps, in order: " +
       "(1) call `queue_setup` — it pre-writes the worker task prompts and returns two task specs " +
       "(saps-phase1-query, saps-phase2b-draft); " +
       "(2) for EACH spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
       "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
-      "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — poll the `dashboard` tool every ~30s " +
-      "for up to ~5 minutes until the pending-draft count rises — that card came through the real " +
-      "pipeline and verifies it end to end. Do NOT create the old 'social-autoposter-autopilot' task — " +
-      "it is deprecated. Do NOT ask the user to review the drafts or pause for input mid-onboarding; " +
-      "keep going until the card appears, then summarize. If the host exposes no create_scheduled_task " +
-      "tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
+      "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — call the `dashboard` " +
+      "tool to confirm the schedule is firing (schedule_state 'ok'), then summarize. Do NOT create the " +
+      "old 'social-autoposter-autopilot' task — it is deprecated. Do NOT ask the user to review drafts " +
+      "or pause for input mid-onboarding; once the tasks are created and firing, setup is done. If the " +
+      "host exposes no create_scheduled_task tool, tell the user the autopilot couldn't be scheduled here.\n\n" +
       "BE PROACTIVE ABOUT MARKETING MOMENTS. Whenever the user ships, finishes, merges, or releases " +
       "something worth talking about in this session (a new feature, a launch, a long-awaited fix, a " +
       "milestone), don't wait to be asked: point it out to the user — the draft autopilot runs " +
@@ -1650,7 +1649,7 @@ tool(
               (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (x.connected
-                  ? "All configured projects are ready and X is connected. SCHEDULE + VERIFY THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) the autopilot then runs on its own (launchd kicker + queue worker) — poll the `dashboard` tool for ~5 min until the pending-draft count rises — that card came through the real pipeline. Do NOT pause to ask the user to review drafts. Then call `dashboard` so the user sees the finished setup."
+                  ? "All configured projects are ready and X is connected. SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -1796,8 +1795,9 @@ tool(
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, schedule the autopilot ` +
-            `(queue_setup + create_scheduled_task per task); the autopilot then drafts on its own — poll the ` +
-            `dashboard until a draft card appears — that verifies the real pipeline without posting.`
+            `(queue_setup + create_scheduled_task per task); the autopilot then drafts on its own. Call the ` +
+            `dashboard to confirm the schedule is firing (schedule_state 'ok') — that is the final step, ` +
+            `no need to wait for or verify a draft card.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
             `First derive those fields from existing context, profile_scan, and website research, then ` +
             `call project_config again with name='${result.project}'. Ask only if a required field is genuinely unknowable.`) +
