@@ -125,6 +125,13 @@ Don't add per-project UTM templates to config.json. The scheme is fixed.
 
 Caller exception branches must call `utm_only_text(text=..., platform=..., project_name=...)` from `dm_short_links` rather than posting unwrapped, so even if `wrap_text_for_post` itself raises, no bare URL escapes. Pattern lives in `post_reddit.py`, `engage_reddit.py`, `post_github.py`, `twitter_post_plan.py` (all four hardened 2026-05-14).
 
+## Releasing: `bash scripts/release-mcpb.sh` only
+
+ONE command releases npm + the GitHub `.mcpb` in lockstep from a `package.json` bump. Rules:
+- **NEVER `--no-bump`/re-release an existing version.** npm versions are immutable, so it clobbers the `.mcpb` with new code while npm keeps the old → lanes diverge. A fix always gets a fresh patch bump.
+- **Never** the old manual `npm publish` + `gh release create` flow.
+- **Before releasing**, check repo `package.json` vs npm `latest` vs GitHub latest tag; if a version you didn't publish exists, a parallel agent released, so bump again.
+
 ## SKILL.md - Single File, No Copies
 
 `SKILL.md` lives at the repo root. There is no `skill/SKILL.md`.
