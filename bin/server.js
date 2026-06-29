@@ -6683,10 +6683,14 @@ async function handleApi(req, res) {
             return acc;
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
           // Assignment weight read LIVE from .env (fraction to 'treatment').
+          // SAME source + SAME default as the actual routing in
+          // run-twitter-cycle.sh (TWITTER_DRAFT_PROMPT_AB_RATE, default 0 =
+          // 100% control = experiment OFF), so display and logic never diverge.
           const dpRate = (() => {
             const raw = (loadEnv().TWITTER_DRAFT_PROMPT_AB_RATE || '').trim();
+            if (raw === '') return 0;
             const n = Number(raw);
-            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
+            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0;
           })();
           const dpWeightTreatment = Math.round(dpRate * 1000) / 10;
           const dpWeightControl = Math.round((1 - dpRate) * 1000) / 10;
