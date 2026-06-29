@@ -241,19 +241,14 @@ class S4LMenuBar(rumps.App):
         # read per second.
         self._act_poll = rumps.Timer(self._poll_activity, 1.0)
         self._act_poll.start()
-        # Self-check for a newer published .mcpb, independent of the MCP server's
-        # npm check (which has been flaky). Slow timer + cache; drives the title
-        # indicator + the "Please update now" menu item.
+        # Update availability comes from ONE source: the MCP's versionStatus
+        # (npm + semver `>`), surfaced in the snapshot as update_available/
+        # latest_version — the SAME source the dashboard uses. _tick copies those
+        # snapshot fields onto these attrs every poll. No second GitHub/manifest
+        # check here anymore (it diverged from the header and once showed an
+        # "update to an OLDER version" because it polled a different registry).
         self._update_available = False
         self._latest_version = None
-        # Poll every 15 min, NOT every 60s. _check_update hits GitHub's
-        # releases/latest UNAUTHENTICATED (60 req/hr per IP); a 60s poll = 60/hr,
-        # right at the cap, so it got 403-rate-limited and silently stopped
-        # detecting updates (the "update available" badge never showed). 15 min =
-        # 4/hr leaves ample headroom; updates aren't urgent enough to poll faster.
-        self._upd_timer = rumps.Timer(self._check_update, 900)
-        self._upd_timer.start()
-        self._check_update(None)  # one check at launch (badge appears ~immediately)
         # One-shot self-heal: if the autopilot scheduled tasks are running in the
         # wrong folder (or the deprecated single autopilot task still exists),
         # relocate them to ~/.s4l-worker so their once-a-minute runs stop polluting
@@ -605,41 +600,6 @@ class S4LMenuBar(rumps.App):
         "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
     )
 
-    @staticmethod
-    def _vtuple(v):
-        try:
-            return tuple(int(x) for x in str(v).split("."))
-        except Exception:
-            return (0,)
-
-    def _check_update(self, _=None):
-        """Is a newer .mcpb published than what's installed? Compare the GitHub
-        latest release tag to the installed extension manifest. Offline / API
-        errors leave the cached value untouched (never flips to 'no update' on a
-        transient failure). A change forces a title + menu repaint."""
-        installed = None
-        try:
-            with open(os.path.join(self._ext_dir(), "manifest.json")) as f:
-                installed = (json.load(f) or {}).get("version")
-        except Exception:
-            return  # not a .mcpb install (or no manifest) -> nothing to offer
-        try:
-            r = subprocess.run(
-                ["curl", "-fsSL", "-m", "15", self.RELEASE_API],
-                capture_output=True, text=True, timeout=20,
-            )
-            if r.returncode != 0:
-                return
-            latest = ((json.loads(r.stdout) or {}).get("tag_name") or "").lstrip("v")
-        except Exception:
-            return
-        if not latest:
-            return
-        available = bool(installed) and self._vtuple(latest) > self._vtuple(installed)
-        if available != self._update_available or latest != self._latest_version:
-            self._update_available = available
-            self._latest_version = latest
-            self._sig = None  # repaint on next tick
 
     def _do_mcpb_update(self, _=None):
         """User clicked 'Please update now'. Pull the latest .mcpb, unpack it over
@@ -1090,6 +1050,12 @@ class S4LMenuBar(rumps.App):
             self._stall_notified = True
         elif not attention:
             self._stall_notified = False
+
+        # Single-source update signal: copy the snapshot's versionStatus result
+        # (npm + semver >, surfaced as update_available/latest_version) — exactly
+        # what the dashboard uses. No separate GitHub/manifest poll anymore.
+        self._update_available = bool(snap.get("update_available"))
+        self._latest_version = snap.get("latest_version")
 
         # Only rebuild the menu when something user-visible changed, so an open
         # menu isn't torn down under the user's cursor every poll.
