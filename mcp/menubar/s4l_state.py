@@ -38,7 +38,7 @@ MILESTONES = [
     "mode_chosen",
     "project_ready",
     "topics_seeded",
-    "draft_verified",
+    "tasks_scheduled",
 ]
 
 # Mirrors panel.ts MILESTONE_LABELS.
@@ -50,7 +50,7 @@ MILESTONE_LABELS = {
     "mode_chosen": "Mode chosen",
     "project_ready": "Project ready",
     "topics_seeded": "Topics seeded",
-    "draft_verified": "Draft cycle verified",
+    "tasks_scheduled": "Autopilot scheduled",
 }
 
 # Mirrors index.ts TWITTER_AUTOPILOT_LABEL.
