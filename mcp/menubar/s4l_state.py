@@ -546,45 +546,87 @@ def _write_approved_queue(d):
         pass
 
 
-# ---- Engagement mode (2026-06-26) -----------------------------------------
-# The menu-bar toggle flips between "promotion" (default product-marketing
-# pipeline) and "personal_brand" (link-free organic engagement for the user's
-# own brand). State is ONE file the cycle wrapper also reads via
-# scripts/saps_mode.py; keep the filename + shape in lockstep with it.
+# ---- Engagement mode (2026-06-26, dual-flag 2026-06-29) -------------------
+# Two INDEPENDENT lanes the menu bar toggles separately:
+#   personal_brand (default ON)  -> link-free organic engagement for the user's
+#                                   own brand (forced persona project)
+#   promotion      (default OFF) -> the product-marketing pipeline (link replies)
+# Both can be ON (the cycle then splits 50/50). State is ONE file the cycle
+# wrapper also reads via scripts/saps_mode.py; keep the shape in lockstep with it.
 MODE_FILE = "mode.json"
 MODE_PROMOTION = "promotion"
 MODE_PERSONAL_BRAND = "personal_brand"
 _VALID_MODES = (MODE_PROMOTION, MODE_PERSONAL_BRAND)
+# 2026-06-29 default flip: personal brand on out of the box, promotion opt-in.
+_DEFAULT_FLAGS = {"personal_brand": True, "promotion": False}
+
+
+def read_flags():
+    """Current lane flags {"personal_brand": bool, "promotion": bool}.
+
+    Mirrors scripts/saps_mode.py get_flags(): explicit flag keys win; else map a
+    legacy {"mode": ...} string; else the default (personal ON / promotion OFF).
+    """
+    d = read_json(MODE_FILE)
+    if isinstance(d, dict):
+        if "personal_brand" in d or "promotion" in d:
+            return {
+                "personal_brand": bool(d.get("personal_brand")),
+                "promotion": bool(d.get("promotion")),
+            }
+        m = str(d.get("mode") or "").strip()
+        if m == MODE_PERSONAL_BRAND:
+            return {"personal_brand": True, "promotion": False}
+        if m == MODE_PROMOTION:
+            return {"personal_brand": False, "promotion": True}
+    return dict(_DEFAULT_FLAGS)
 
 
 def read_mode():
-    """Current engagement mode, defaulting to promotion (prior behavior)."""
-    d = read_json(MODE_FILE)
-    if isinstance(d, dict):
-        m = str(d.get("mode") or "").strip()
-        if m in _VALID_MODES:
-            return m
-    return MODE_PROMOTION
+    """Derived legacy single-mode string (personal_brand wins when on). Kept so
+    older menu-bar callers that expect one value keep working."""
+    f = read_flags()
+    return MODE_PERSONAL_BRAND if f.get("personal_brand") else MODE_PROMOTION
 
 
-def write_mode(mode):
-    """Persist the mode atomically. Returns the written mode, or the current one
-    on an invalid value (never raises — a menu click must not crash the app)."""
-    if mode not in _VALID_MODES:
-        return read_mode()
+def write_flags(personal_brand, promotion):
+    """Persist both lane flags atomically (plus the derived legacy `mode`).
+    Returns the written flags. Never raises — a menu click must not crash."""
+    flags = {"personal_brand": bool(personal_brand), "promotion": bool(promotion)}
     try:
+        payload = dict(flags)
+        payload["mode"] = MODE_PERSONAL_BRAND if flags["personal_brand"] else MODE_PROMOTION
         p = Path(state_dir()) / MODE_FILE
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"mode": mode}))
+        tmp.write_text(json.dumps(payload))
         os.replace(str(tmp), str(p))
     except Exception:
         pass
-    return mode
+    return flags
+
+
+def write_mode(mode):
+    """Legacy single-mode setter: named lane ON, the other OFF (compat)."""
+    if mode not in _VALID_MODES:
+        return read_flags()
+    return write_flags(
+        personal_brand=(mode == MODE_PERSONAL_BRAND),
+        promotion=(mode == MODE_PROMOTION),
+    )
+
+
+def toggle_lane(lane):
+    """Flip ONE lane (personal_brand|promotion) and return the new flags."""
+    if lane not in _VALID_MODES:
+        return read_flags()
+    f = read_flags()
+    f[lane] = not f.get(lane)
+    return write_flags(f["personal_brand"], f["promotion"])
 
 
 def toggle_mode():
-    """Flip to the other mode and return the new value."""
+    """Legacy whole-mode flip (mutually exclusive). Kept for old callers."""
     new = (
         MODE_PROMOTION
         if read_mode() == MODE_PERSONAL_BRAND
