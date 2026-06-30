@@ -2364,6 +2364,18 @@ tool(
     return jsonContent({
       tasks,
       worker_folder: workerFolder,
+      // Plain-language "what happens next" the agent MUST relay to the user once
+      // the tasks are created, so the setup experience sets expectations about
+      // cadence (a draft batch roughly every 5 min), what the jobs make (reply
+      // drafts for review), and that nothing posts on its own. (2026-06-30)
+      expectations: [
+        "What happens next (relay these lines to the user, in their words, right after the tasks are created):",
+        "- About every 5 minutes a background draft cycle scans X for posts that match your search topics and drafts replies in your voice.",
+        "- Drafts show up as review cards. The first one usually lands within a few minutes when there is matching supply on X; quiet topics mean fewer or no cards until something relevant is posted.",
+        "- Nothing is posted automatically. You approve each draft yourself (from the dashboard or the menu bar); posting autopilot stays OFF until you explicitly turn it on. Today it only drafts.",
+        "- Two helper jobs (saps-phase1-query and saps-phase2b-draft) run every minute to drain the draft queue. Leave them enabled; they only draft, they never post.",
+        "- You can edit your voice, topics, or the drafts themselves at any time, and check status on the dashboard.",
+      ],
       next_step:
         "For EACH task, call the host tool create_scheduled_task (taskId, cronExpression, prompt " +
         "verbatim) to register its schedule — the prompt file is already written, so creating it just " +
@@ -2372,6 +2384,9 @@ tool(
         "just move on. Both fire every minute and only draft — they never post. The pipeline that feeds " +
         "them runs from a launchd job this server installs. Do NOT create the old " +
         "'social-autoposter-autopilot' task; it is deprecated. " +
+        "After the tasks are registered, relay the `expectations` lines to the user so they know the " +
+        "cadence (a draft batch about every 5 minutes), that the jobs only draft and never post, and " +
+        "that they approve each card themselves. " +
         "IMPORTANT — keep these once-a-minute runs OUT of the user's interactive session history: set " +
         `EACH task's working folder to ${workerFolder} (it is already created). create_scheduled_task ` +
         "has no folder argument, so do this host-side — in the Routines list open each task -> Edit -> " +
