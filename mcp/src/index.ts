@@ -1382,6 +1382,26 @@ tool(
 
     completeOnboardingMilestone("mode_chosen", { personal_brand: personalBrand, promotion, persona: personaName });
 
+    // Install/refresh the launchd kicker NOW. For a personal-brand-only setup the
+    // persona is the only draftable project (no managed product), so nothing else
+    // would trigger the install until a later queue-worker boot — leaving the user
+    // with no autopilot and no drafts. ensureQueueKickerInstalled is persona-aware
+    // (see its gate); fire it best-effort so the kicker is live the moment the
+    // persona is seeded. (2026-06-30) Skipped when promotion-only, since the
+    // product project isn't configured yet (it stays gated until project_config).
+    let kickerInstall: { ok: boolean; detail: string } | null = null;
+    if (personalBrand) {
+      try {
+        kickerInstall = await ensureQueueKickerInstalled();
+        console.error(
+          `[engagement_mode] launchd kicker: ${kickerInstall.ok ? "ok" : "skip"} (${kickerInstall.detail})`
+        );
+      } catch (e: any) {
+        kickerInstall = { ok: false, detail: e?.message || String(e) };
+        console.error("[engagement_mode] kicker install failed:", e?.message || e);
+      }
+    }
+
     const bothOn = personalBrand && promotion;
     const next_step = promotion
       ? (bothOn
@@ -1390,9 +1410,11 @@ tool(
           : "Product promotion is on and the persona is provisioned. ") +
         "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
         "site and fill description, icp, voice, search_topics)."
-      : "Personal-brand lane is on (the default) and the persona is provisioned + topic-seeded. The " +
-        "user did not ask for product promotion, so no product project is needed; they can turn on " +
-        "the promotion lane any time from the menu-bar checkmark. Setup can finish here.";
+      : "Personal-brand lane is on (the default); the persona is provisioned + topic-seeded, so there " +
+        "is nothing more to configure (no product project is needed). NOW SCHEDULE THE AUTOPILOT: call " +
+        "queue_setup and create each returned task with create_scheduled_task (prompt verbatim; " +
+        "'already exists' is fine), then call the dashboard tool to confirm the schedule is firing. " +
+        "That is the final setup step — do NOT stop before the autopilot is scheduled.";
 
     return jsonContent({
       ok: true,
@@ -1402,6 +1424,8 @@ tool(
       persona_created: personaCreated,
       persona_topics_seeded: personaTopicsSeeded,
       persona_topic_count: personaTopicCount,
+      kicker_installed: kickerInstall ? kickerInstall.ok : null,
+      kicker_detail: kickerInstall ? kickerInstall.detail : null,
       onboarding: onboardingSnapshot(),
       next_step,
     });
