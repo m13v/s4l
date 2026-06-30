@@ -251,8 +251,8 @@ echo
 # single autopilot) under ~/.claude/scheduled-tasks/. They live OUTSIDE the
 # state dir, so a reset that skips them leaves idle workers firing every minute
 # against a wiped install. Remove the task dirs. Like the .mcpb registry, the
-# host (Claude Desktop) owns the live schedule and rewrites it on quit, so this
-# only fully sticks when Claude isn't running.
+# host (Claude Desktop) owns the live schedule and rewrites it on quit. Step [0]
+# already quit it; this warns only if it came back (--keep-claude / relaunch).
 echo "[1c] Claude Desktop scheduled tasks (queue workers + deprecated autopilot)"
 SCHED_DIR="$HOME_DIR/.claude/scheduled-tasks"
 if pgrep -x "Claude" >/dev/null 2>&1; then
