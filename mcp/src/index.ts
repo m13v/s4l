@@ -42,6 +42,7 @@ import {
   REQUIRED_FIELDS,
   RECOMMENDED_FIELDS,
   configPath,
+  normalizeStringList,
   type ProjectInput,
 } from "./setup.js";
 import { xStatus, xConnect, xDetectSources, xScanProfile, summarizeXAuth } from "./twitterAuth.js";
@@ -1526,7 +1527,7 @@ tool(
         .optional()
         .describe("Topics/keywords to monitor on X (comma-separated or array)"),
       search_queries: z
-        .array(z.string())
+        .union([z.array(z.string()), z.string()])
         .optional()
         .describe(
           "Cold-start X search-query bank YOU expand from search_topics, in this same call. " +
@@ -1867,9 +1868,14 @@ tool(
         // users hit). If the agent didn't supply queries, we skip expansion
         // entirely — the topic-as-query fallback still runs, just narrower — and
         // nudge the agent to re-run with search_queries. (2026-06-19)
-        const agentQueries = Array.isArray(args.search_queries)
-          ? (args.search_queries as string[]).map((q) => String(q).trim()).filter(Boolean)
-          : [];
+        // Accept search_queries as a real array OR a stringified JSON array /
+        // comma list — the model often passes the latter, and the old
+        // Array.isArray-only gate silently dropped it, leaving the query bank
+        // empty on a fresh install (Karol, 2026-06-30).
+        const agentQueries =
+          normalizeStringList(
+            args.search_queries as string[] | string | undefined
+          ) ?? [];
         if (seed.code === 0 && agentQueries.length) {
           try {
             const qfile = path.join(
