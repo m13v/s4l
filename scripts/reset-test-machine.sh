@@ -23,22 +23,31 @@
 #
 # Usage:
 #   scripts/reset-test-machine.sh            # dry run: print what the plugin reset WOULD remove
-#   scripts/reset-test-machine.sh --yes      # plugin reset (light)
+#   scripts/reset-test-machine.sh --yes      # plugin reset (light) — quits Claude Desktop first
 #   scripts/reset-test-machine.sh --yes --deep   # full nuke incl. shared browser layer + toolchain
+#   scripts/reset-test-machine.sh --yes --keep-claude  # don't quit Claude (run from inside a live session)
+#
+# IMPORTANT: by default --yes QUITS Claude Desktop before wiping. The .mcpb
+# registry ([1b]) and scheduled-task ([1c]) edits only STICK if Claude is not
+# running, because the host rewrites those files on quit. If you invoke this from
+# INSIDE a live Claude session and don't want the app taken down, pass
+# --keep-claude (the registry/task edits then won't persist until you quit Claude).
 #
 set -u
 
 HOME_DIR="${HOME}"
 DRY=1
 DEEP=0
+KEEP_CLAUDE=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) DRY=0 ;;
     --deep)   DEEP=1 ;;
+    --keep-claude) KEEP_CLAUDE=1 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed '/^!/d'
       exit 0 ;;
-    *) echo "unknown arg: $a (use --yes, --deep, --help)"; exit 2 ;;
+    *) echo "unknown arg: $a (use --yes, --deep, --keep-claude, --help)"; exit 2 ;;
   esac
 done
 
@@ -76,8 +85,39 @@ json_edit() {  # json_edit <description> <cmd...>
   [ "$DRY" -eq 0 ] && shift && "$@" || true
 }
 
-# ---- 0. stop anything still running ---------------------------------------
-echo "[0] stop running processes"
+# ---- 0. quit Claude Desktop (so [1b]/[1c] registry+task edits stick) -------
+# Claude Desktop OWNS the .mcpb installations registry and the scheduled-task
+# schedule, and REWRITES both files on quit. If it is running while we delete the
+# extension entry / task dirs, it resurrects them on its next exit — exactly the
+# "plugin still installed + scheduled tasks back" failure. So quit it FIRST
+# (graceful AppleScript quit, wait, then SIGKILL fallback) unless --keep-claude.
+echo "[0] quit Claude Desktop"
+if [ "$KEEP_CLAUDE" -eq 1 ]; then
+  echo "  (--keep-claude: leaving Claude Desktop running — [1b]/[1c] edits will NOT persist until you quit it)"
+elif [ "$DRY" -eq 0 ]; then
+  if pgrep -x "Claude" >/dev/null 2>&1; then
+    echo "  quit    Claude Desktop (graceful)"
+    osascript -e 'tell application "Claude" to quit' >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pgrep -x "Claude" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if pgrep -x "Claude" >/dev/null 2>&1; then
+      echo "  kill    Claude Desktop still up — SIGKILL"
+      pkill -9 -x "Claude" 2>/dev/null || true
+      sleep 1
+    fi
+    pgrep -x "Claude" >/dev/null 2>&1 && echo "  WARN    Claude Desktop still running after kill" || echo "  ok      Claude Desktop is down"
+  else
+    echo "  (Claude Desktop not running)"
+  fi
+else
+  echo "  (would quit Claude Desktop: AppleScript quit, then SIGKILL fallback)"
+fi
+echo
+
+# ---- 0a. stop anything still running ---------------------------------------
+echo "[0a] stop running processes"
 if [ "$DRY" -eq 0 ]; then
   pkill -f 'social-autoposter-mcp' 2>/dev/null || true
   pkill -f 'browser-harness'       2>/dev/null || true
@@ -143,8 +183,8 @@ echo "[1b] Claude Desktop .mcpb extension (install dir + settings + registry)"
 CLAUDE_SUPPORT="$HOME_DIR/Library/Application Support/Claude"
 INSTALL_REG="$CLAUDE_SUPPORT/extensions-installations.json"
 # The registry edit only sticks if Claude Desktop is NOT running (it rewrites
-# these files on quit). Warn rather than force-quit — the script may be invoked
-# from inside a live Claude session and killing the app would take it down.
+# these files on quit). Step [0] already quit it; this warns only if it came back
+# (e.g. --keep-claude, or a relaunch mid-run).
 if pgrep -x "Claude" >/dev/null 2>&1; then
   echo "  WARN    Claude Desktop is running — quit it (Cmd+Q) so the registry edit"
   echo "          isn't rewritten on exit, then re-run this step if needed."
