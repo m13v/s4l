@@ -1221,28 +1221,41 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
 tool(
   "engagement_mode",
   {
-    title: "Choose engagement mode (personal brand vs product)",
+    title: "Choose engagement lanes (personal brand + optional product promotion)",
     description:
-      "Set or read the engagement MODE the autopilot drafts in. This is a SETUP step: AFTER X is " +
-      "connected and the profile is scanned, and BEFORE configuring the product, ASK the user which " +
-      "they want — (a) grow their PERSONAL BRAND (organic, link-free engagement in their own voice) or " +
-      "(b) PROMOTE a PRODUCT (the default marketing pipeline) — then call action:'set' with their " +
-      "choice. Pass the voice/description/topics you extracted from the profile scan so the persona is " +
-      "grounded in who they actually are (do this even for promotion, so the menu-bar toggle can flip " +
-      "to a good persona later). EITHER way, continue to configure the product project as usual " +
-      "afterward; a product is always set up. The user flips this mode any time from the menu-bar " +
-      "toggle.",
+      "Set or read the engagement LANES the autopilot drafts in. There are TWO independent lanes that " +
+      "can BOTH be on (the cycle then splits 50/50): PERSONAL BRAND (organic, link-free engagement in " +
+      "the user's own voice — ON by default) and PRODUCT PROMOTION (the marketing pipeline, link " +
+      "replies — OFF by default, opt-in). This is a SETUP step: AFTER X is connected and the profile " +
+      "is scanned, personal-brand is already the default, so ASK the user the ONE question: do they " +
+      "ALSO want to promote a product? Then call action:'set' with personal_brand:true and " +
+      "promotion:true|false. Pass the voice/description/topics you extracted from the profile scan so " +
+      "the persona is grounded in who they actually are. If they want promotion too, continue to " +
+      "configure the product project with project_config afterward. The user flips either lane any " +
+      "time from the menu-bar checkmarks.",
     inputSchema: {
       action: z
         .enum(["get", "set", "toggle"])
         .optional()
-        .describe("get = read current mode + persona status. set = record the user's chosen mode (provisions the persona). toggle = lightweight flip promotion<->personal_brand (mode.json only, no persona work) — the dashboard/menu-bar quick toggle."),
+        .describe("get = read current lane flags + persona status. set = record the user's chosen lanes (provisions the persona). toggle = lightweight flip of ONE lane (pass `lane`); mode.json only, no persona work — the dashboard/menu-bar quick toggle."),
+      personal_brand: z
+        .boolean()
+        .optional()
+        .describe("action:'set' — turn the personal-brand lane on/off. Defaults to true (the out-of-the-box lane)."),
+      promotion: z
+        .boolean()
+        .optional()
+        .describe("action:'set' — turn the product-promotion lane on/off. Defaults to false; set true when the user says they also want to promote a product."),
+      lane: z
+        .enum(["personal_brand", "promotion"])
+        .optional()
+        .describe("action:'toggle' — which single lane to flip."),
       mode: z
         .enum(["personal_brand", "promotion"])
         .optional()
         .describe(
-          "Required for action:'set'. personal_brand = organic brand growth (link-free, the user's " +
-            "own voice); promotion = market the configured product (default)."
+          "LEGACY (compat). Single-lane shorthand for action:'set': turns the named lane ON and the " +
+            "other OFF. Prefer the explicit personal_brand/promotion booleans."
         ),
       description: z
         .string()
@@ -1264,43 +1277,71 @@ tool(
   },
   async (args: any) => {
     const action = args.action || "get";
+
+    const readFlags = async (): Promise<{ personal_brand: boolean; promotion: boolean }> => {
+      const cur = await runPython("scripts/saps_mode.py", ["flags"], { timeoutMs: 15_000 });
+      try {
+        const f = JSON.parse((cur.stdout || "").trim());
+        return { personal_brand: !!f.personal_brand, promotion: !!f.promotion };
+      } catch {
+        return { personal_brand: true, promotion: false };
+      }
+    };
+
     if (action === "get") {
-      const cur = await runPython("scripts/saps_mode.py", ["get"], { timeoutMs: 15_000 });
-      const mode = (cur.stdout || "").trim() || "promotion";
+      const flags = await readFlags();
       const persona = findPersonaProject();
-      return jsonContent({ mode, persona: persona ? persona.name : null });
+      const mode = flags.personal_brand ? "personal_brand" : "promotion";
+      return jsonContent({ flags, mode, persona: persona ? persona.name : null });
     }
 
-    // Lightweight flip (the dashboard/menu-bar quick toggle): just rewrite
-    // mode.json via saps_mode.py — NO persona provisioning. Mirrors the menu
-    // bar's pure-local _toggle_mode so flipping from either surface is cheap.
+    // Lightweight flip of ONE lane (the dashboard/menu-bar quick toggle): just
+    // rewrite mode.json via saps_mode.py — NO persona provisioning. Mirrors the
+    // menu bar's pure-local _toggle_lane so flipping from either surface is cheap.
     if (action === "toggle") {
-      const cur = await runPython("scripts/saps_mode.py", ["get"], { timeoutMs: 15_000 });
-      const now = (cur.stdout || "").trim() || "promotion";
-      const next = now === "personal_brand" ? "promotion" : "personal_brand";
-      const res = await runPython("scripts/saps_mode.py", ["set", next], { timeoutMs: 15_000 });
+      const lane = args.lane === "promotion" ? "promotion" : "personal_brand";
+      const res = await runPython("scripts/saps_mode.py", ["toggle", lane], { timeoutMs: 15_000 });
       if (res.code !== 0) {
         const tail = (res.stderr || res.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-        return textContent(`Could not switch mode: ${tail}`);
+        return textContent(`Could not switch lane: ${tail}`);
       }
-      return jsonContent({ mode: next });
+      try {
+        return jsonContent({ flags: JSON.parse((res.stdout || "").trim()) });
+      } catch {
+        return jsonContent({ flags: await readFlags() });
+      }
     }
 
-    const mode = args.mode;
-    if (mode !== "personal_brand" && mode !== "promotion") {
+    // action === 'set'. Resolve the two lane flags. Explicit booleans win; the
+    // legacy `mode` shorthand maps to single-lane; default is personal ON.
+    let personalBrand: boolean;
+    let promotion: boolean;
+    if (args.mode === "personal_brand" || args.mode === "promotion") {
+      personalBrand = args.mode === "personal_brand";
+      promotion = args.mode === "promotion";
+    } else {
+      personalBrand = args.personal_brand === undefined ? true : !!args.personal_brand;
+      promotion = !!args.promotion;
+    }
+    if (!personalBrand && !promotion) {
       return textContent(
-        "Ask the user which they want, then call again with mode:'personal_brand' (organic brand " +
-          "growth, link-free) or mode:'promotion' (market the product, the default)."
+        "At least one lane must be on. personal_brand is the default; set promotion:true if the user " +
+          "also wants product promotion (both on -> the cycle splits 50/50)."
       );
     }
+    const mode = personalBrand ? "personal_brand" : "promotion";
 
-    recordOnboardingAttempt("mode_chosen", { mode });
+    recordOnboardingAttempt("mode_chosen", { personal_brand: personalBrand, promotion });
 
-    const setRes = await runPython("scripts/saps_mode.py", ["set", mode], { timeoutMs: 15_000 });
+    const setRes = await runPython(
+      "scripts/saps_mode.py",
+      ["set-flags", personalBrand ? "1" : "0", promotion ? "1" : "0"],
+      { timeoutMs: 15_000 }
+    );
     if (setRes.code !== 0) {
       const tail = (setRes.stderr || setRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-      blockOnboardingMilestone("mode_chosen", "mode_set_failed", tail, { mode });
-      return textContent(`Couldn't save the engagement mode: ${tail}`);
+      blockOnboardingMilestone("mode_chosen", "mode_set_failed", tail, { personal_brand: personalBrand, promotion });
+      return textContent(`Couldn't save the engagement lanes: ${tail}`);
     }
 
     // Provision the persona (grounded from the scan when supplied) regardless of
