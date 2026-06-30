@@ -2810,6 +2810,60 @@ function ensureWorkerFolderTrusted(): void {
   }
 }
 
+// Register this .mcpb server into ~/.claude.json `mcpServers` so the embedded
+// Cowork/Code agent discovers S4L too. The Chat tab loads S4L via Desktop's
+// LocalMcpServerManager (.mcpb extensions); the Cowork/Code tab is a SEPARATE,
+// real `claude-code` binary launched with `--setting-sources=user,project,local`
+// that only reads MCP servers from its setting sources + plugin dirs and NEVER
+// sees .mcpb extensions. So S4L shows up in Chat but is absent in Cowork no matter
+// how many restarts — the two surfaces don't share MCP state (confirmed
+// 2026-06-30 from the embedded process args on the box: empty user `mcpServers`,
+// S4L only present as a .mcpb). Writing a user-scoped `mcpServers` entry is the
+// path `--setting-sources=user` honors, so Cowork picks it up on its next session.
+// We point the entry at THIS running server's own dist/index.js (absolute,
+// install-location-agnostic) so both npm and .mcpb installs self-register the
+// correct path. Idempotent (writes only when missing/drifted), atomic (every CLI
+// session reads this file; a torn write would brick Claude Code), never throws.
+// Runs on every boot, so a box whose ~/.claude.json didn't exist yet self-heals on
+// the next restart once a Code/Cowork session has created it. Kill switch:
+// SAPS_COWORK_MCP=0.
+function ensureCoworkMcpRegistered(): void {
+  try {
+    if (process.env.SAPS_COWORK_MCP === "0") return;
+    const home = process.env.HOME || os.homedir();
+    const cfgPath = path.join(home, ".claude.json");
+    if (!fs.existsSync(cfgPath)) return; // Claude Code not initialised yet; retry next boot
+    let cfg: any;
+    try {
+      cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+    } catch (e: any) {
+      console.error(`[cowork-mcp] ~/.claude.json unparseable; skip register: ${e?.message || e}`);
+      return;
+    }
+    if (typeof cfg !== "object" || Array.isArray(cfg) || cfg === null) return;
+    const servers = (cfg.mcpServers ??= {});
+    if (typeof servers !== "object" || Array.isArray(servers)) return;
+    const serverEntry = path.join(DIST_DIR, "index.js");
+    const desired = {
+      command: "node",
+      args: [serverEntry],
+      env: { PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" },
+    };
+    const current = servers["social-autoposter"];
+    // Skip the write when the entry already matches, to avoid churning a file every
+    // CLI session reads. Re-write when missing or drifted (install moved, older
+    // version registered a different path/env).
+    if (current && JSON.stringify(current) === JSON.stringify(desired)) return;
+    servers["social-autoposter"] = desired;
+    const tmp = `${cfgPath}.s4l-cowork.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    fs.renameSync(tmp, cfgPath);
+    console.error(`[cowork-mcp] registered S4L in ~/.claude.json mcpServers -> ${serverEntry}`);
+  } catch (e: any) {
+    console.error(`[cowork-mcp] ensureCoworkMcpRegistered error: ${e?.message || e}`);
+  }
+}
+
 // ---- launchd kicker: run the REAL pipeline in DRAFT_ONLY + queue mode --------
 // Reinstates com.m13v.social-twitter-cycle as the customer-box kicker. It runs
 // run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen) but
@@ -4089,6 +4143,11 @@ async function main() {
   } catch (e) {
     console.error("[social-autoposter-mcp] short-links heal failed:", (e as Error)?.message || e);
   }
+  // Make S4L visible in the Cowork/Code tab, not just the Chat tab: register this
+  // server into ~/.claude.json `mcpServers` so the embedded claude-code (launched
+  // with --setting-sources=user) discovers it. Synchronous, idempotent, atomic,
+  // best-effort; never blocks boot. See ensureCoworkMcpRegistered for the why.
+  ensureCoworkMcpRegistered();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[social-autoposter-mcp] connected. v=${VERSION} repo=${repoDir()}`);
