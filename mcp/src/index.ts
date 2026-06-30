@@ -157,6 +157,23 @@ const STALL_WATCH_PLIST = path.join(
 );
 const STALL_WATCH_INTERVAL_SECS = 120;
 
+// On-screen overlay watcher supervisor. The harness status overlay ("S4L
+// running" / idle banner) only renders WHILE `harness_overlay.py watch` is
+// alive. That watcher is fire-and-forget with no supervisor of its own, so when
+// it dies (or the harness Chrome restarts) nothing brings it back and the
+// overlay silently disappears. Promote it to a first-class launchd job like its
+// siblings: RunAtLoad starts it at boot, the 60s StartInterval re-invokes the
+// idempotent supervisor script (pgrep guard => no-op while up) so a dead watcher
+// is respawned within a minute. Disable with SAPS_OVERLAY_WATCH=0.
+const OVERLAY_WATCH_LABEL = "com.m13v.social-overlay-watch";
+const OVERLAY_WATCH_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${OVERLAY_WATCH_LABEL}.plist`
+);
+const OVERLAY_WATCH_INTERVAL_SECS = 60;
+
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
 // install keeps itself current — the interactive `runtime` tool (action:'update')
 // only helps when
