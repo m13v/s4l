@@ -13,7 +13,7 @@ goal, not as the beginning of an interview.
 - Keep taking the next safe setup action until the system is working end to end.
 - Do not ask whether to run setup, install a dependency, inspect status, connect
   X, scan the profile, research the website, save inferred fields, seed topics,
-  retry a recoverable failure, or run the draft-only verification. Do them.
+  or retry a recoverable failure. Do them.
 - An explicit request to set up social-autoposter authorizes its owned local
   runtime installation and importing only x.com/twitter.com session cookies
   into its managed browser. Briefly warn that macOS keychain prompts may appear,
@@ -26,8 +26,13 @@ goal, not as the beginning of an interview.
   there is no configured project, no clear product URL in context or the X
   profile, and no way to identify what product to market.
 - Never post a draft during setup unless the user explicitly asked for that.
-  Draft-only verification (the autopilot drafts without posting) is safe and
-  required.
+- Never hand-run the X cycle. Do not run `run-twitter-cycle.sh`,
+  `claude_job.py`, or any cycle script directly, and never offer to "trigger a
+  cycle" or "run one now" so a draft appears faster. Only the launchd kicker may
+  fire the cycle, with its required environment. A manual kick produces an
+  empty-plan artifact and blocks the autopilot. Verification means scheduling
+  the autopilot and letting the kicker drive it; you wait and poll, you never
+  trigger.
 - Do not edit the MCP server, plugin source, or an unrelated user workspace to
   work around setup failures. Use the product's setup/install tools.
 
@@ -156,10 +161,14 @@ readiness. Optional/recommended fields never justify stopping setup.
 
 Schedule the draft autopilot: call `queue_setup`, then for EACH returned task
 call the host tool `create_scheduled_task` (taskId, cronExpression, prompt
-verbatim; "already exists" is fine). The autopilot then drafts on its own — a
+verbatim; "already exists" is fine). The autopilot then drafts on its own — the
 launchd kicker fires a draft-only cycle and the queue worker drafts the replies;
-nothing posts. Poll the `dashboard` tool until the pending-draft count rises; a
-returned review batch is the strongest success signal.
+nothing posts. Then wait: poll the `dashboard` tool until the pending-draft
+count rises; a returned review batch is the strongest success signal.
+
+Do not hand-run a cycle to make this happen faster, and do not offer the user to
+trigger one. Scheduling the autopilot is the only sanctioned way to produce the
+verification draft; the kicker drives it on its own minute-by-minute schedule.
 
 If no card appears, diagnose the fixable reason, fix it, and let the autopilot
 retry on its next scheduled cycle:
@@ -195,9 +204,12 @@ turning it into instructions for the user.
    `python3 ~/social-autoposter/scripts/setup_twitter_auth.py connect`
    The user may need to approve a macOS keychain prompt or sign in once in the
    managed browser; continue automatically afterward.
-7. Verify without posting:
-   `DRAFT_ONLY=1 TWITTER_PAGE_GEN_RATE=0 bash ~/social-autoposter/skill/run-twitter-cycle.sh`
-8. Do not load launchd/autopilot jobs unless explicitly requested.
+7. Do not load launchd/autopilot jobs unless explicitly requested, and never
+   hand-run `run-twitter-cycle.sh` or any cycle script to "verify." A manual
+   kick produces an empty-plan artifact and blocks the autopilot. The cycle runs
+   only when the launchd autopilot is scheduled and the kicker fires it. In CLI
+   fallback, setup is configured once the project is saved, topics are seeded,
+   and X is connected; the first draft appears after the autopilot is scheduled.
 
 ## Completion summary
 
