@@ -571,6 +571,73 @@ class S4LMenuBar(rumps.App):
     def _toggle_promotion(self, _=None):
         self._toggle_lane(st.MODE_PROMOTION)
 
+    # ---- factory reset (menu-bar driven) ----------------------------------
+    def _reset_machine(self, _=None):
+        """One-click 'reset this test machine to factory-fresh'. Runs the repo's
+        scripts/reset-test-machine.sh, which quits Claude Desktop, removes the
+        Desktop extension + scheduled tasks, and wipes the state dir.
+
+        CRITICAL self-kill avoidance: that script does `pkill -f s4l_menubar.py`
+        and boots out the menubar LaunchAgent (steps near line 124/141). If we ran
+        it as a direct child it would kill itself mid-wipe. So we detach it into its
+        own session (start_new_session=True) with a distinct command line — `pkill`
+        can't match it and the menubar dying doesn't take it down. The menubar is a
+        launchd process (NOT a Claude child), so it's the right place to drive a
+        reset that has to outlive Claude Desktop. Output streams to a log the user
+        can inspect after the menubar disappears."""
+        repo = os.environ.get("SAPS_REPO_DIR") or ""
+        script = os.path.join(repo, "scripts", "reset-test-machine.sh")
+        if not repo or not os.path.exists(script):
+            self._alert("Reset unavailable",
+                        "Couldn't find reset-test-machine.sh. SAPS_REPO_DIR isn't "
+                        "pointing at a pipeline source on this machine.")
+            return
+        # ok=1 (plugin reset, keeps X login + browser layer), other=-1 (deep wipe),
+        # cancel=0. See rumps.alert: default=1, alternate=0, other=-1.
+        choice = rumps.alert(
+            title="Reset test machine?",
+            message=(
+                "This quits Claude Desktop, removes the S4L extension + its "
+                "scheduled tasks, and wipes the state dir so the next launch is a "
+                "fresh first-run. The menu bar will disappear during the reset.\n\n"
+                "Reset: keep your X login + browser layer (quick test reset).\n"
+                "Deep wipe: also remove the shared browser profiles + toolchain."
+            ),
+            ok="Reset", cancel="Cancel", other="Deep wipe",
+        )
+        if choice == 0:  # cancel
+            return
+        deep = (choice == -1)
+        args = ["bash", script, "--yes"] + (["--deep"] if deep else [])
+        log_path = "/tmp/s4l-reset.log"
+        try:
+            log = open(log_path, "ab", buffering=0)
+            subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,   # detach: survive pkill + menubar bootout
+                close_fds=True,
+                cwd=repo,
+            )
+        except Exception as e:
+            _capture(e, action="reset_machine")
+            self._alert("Reset failed to start", str(e)[:200])
+            return
+        # Best-effort heads-up before the menubar gets pkilled by the script.
+        self._notify(
+            "S4L reset started",
+            "Resetting" + (" (deep)" if deep else "") +
+            "… the menu bar will vanish; log at " + log_path,
+        )
+
+    def _alert(self, title, message):
+        try:
+            rumps.alert(title=title, message=message, ok="OK")
+        except Exception:
+            pass
+
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
 
@@ -1443,6 +1510,8 @@ class S4LMenuBar(rumps.App):
             items.append(
                 rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
             )
+        items.append(rumps.separator)
+        items.append(rumps.MenuItem("Reset test machine…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
         for it in items:
