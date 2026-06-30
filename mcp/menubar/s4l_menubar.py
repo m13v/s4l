@@ -274,14 +274,18 @@ class S4LMenuBar(rumps.App):
         # "update to an OLDER version" because it polled a different registry).
         self._update_available = False
         self._latest_version = None
-        # One-shot self-heal: if the autopilot scheduled tasks are running in the
-        # wrong folder (or the deprecated single autopilot task still exists),
-        # relocate them to ~/.s4l-worker so their once-a-minute runs stop polluting
-        # the user's interactive Claude Code history. Needs a single Claude restart
-        # (the app caches the registry in memory), so it is capped per process.
+        # Self-heal (modal-first): if the autopilot scheduled tasks are running in
+        # the wrong folder (or the deprecated single autopilot task still exists),
+        # OFFER to relocate them to ~/.s4l-worker so their once-a-minute runs stop
+        # polluting the user's interactive Claude Code history. The fix needs a
+        # single Claude restart (the app caches the registry in memory), so we ASK
+        # first with a modal — same consent pattern as Quit/re-arm — and never
+        # restart Claude out from under the user silently. Prompt at most once per
+        # process; a 'Later' is re-offered as a menu item.
         self._relocating = False
         self._cwd_healed = False
-        self._relocate_attempts = 0
+        self._reloc_prompted = False
+        self._reloc_needed = False
         # One-shot guard so the "autopilot not running" notification fires once per
         # stall episode, not every poll. Reset when the stall clears.
         self._stall_notified = False
@@ -908,21 +912,58 @@ class S4LMenuBar(rumps.App):
             pass
 
     def _maybe_relocate_tasks(self, _=None):
-        """Timer callback: one-shot self-heal. If the autopilot tasks are in the
-        wrong folder (or the deprecated task lingers), relocate them once, which
-        needs a single Claude restart (the app caches the registry). Capped at a
-        couple of attempts per process so a persistent failure can't restart-loop."""
-        if self._relocating or self._cwd_healed or self._relocate_attempts >= 2:
+        """Timer callback: detect, then ASK. If the autopilot tasks are in the wrong
+        folder (or the deprecated task lingers), prompt the user before relocating —
+        the fix needs a single Claude restart (the app caches the registry in
+        memory), so we never restart silently. Prompts at most once per process;
+        'Later' stops the auto-prompt but the fix stays available from the menu
+        ('Tidy autopilot history'). Runs on the main thread (rumps timer), so the
+        modal is safe to raise here."""
+        if self._relocating or self._cwd_healed or self._reloc_prompted:
             return
         try:
             if not self._scheduled_task_cwd_needs_fix():
+                self._reloc_needed = False
                 return
-            self._relocating = True
-            self._relocate_attempts += 1
-            self._notify("S4L", "Tidying autopilot… Claude will restart once.")
-            threading.Thread(target=self._relocate_restart_work, daemon=True).start()
+            self._reloc_needed = True
+            self._reloc_prompted = True
+            try:
+                self._reloc_timer.stop()   # one auto-prompt per process
+            except Exception:
+                pass
+            self._prompt_relocate_tasks()
         except Exception:
-            self._relocating = False
+            pass
+
+    def _prompt_relocate_tasks(self, _=None):
+        """Modal-first relocate. Warns (like Quit does) that Claude restarts once,
+        then runs the kill -> rewrite cwd -> relaunch on a background thread. Wired
+        to both the auto-detect timer and the 'Tidy autopilot history' menu item
+        (the `_` arg), so 'Later' is never a dead end."""
+        if self._relocating:
+            return
+        if not self._scheduled_task_cwd_needs_fix():
+            self._reloc_needed = False
+            self._cwd_healed = True
+            return
+        choice = rumps.alert(
+            title="Tidy the autopilot history?",
+            message=(
+                "The autopilot's draft + query tasks are writing their "
+                "once-a-minute runs into this project's Claude history, which "
+                "clutters your `claude --resume` list.\n\n"
+                "S4L can move them into a dedicated folder so your history stays "
+                "clean. Claude Desktop will restart once to apply — its window "
+                "will close and reopen in a moment. Your X login, drafts, and "
+                "config all stay."
+            ),
+            ok="Tidy & restart Claude", cancel="Later",
+        )
+        if choice != 1:  # only default button (OK) proceeds
+            return
+        self._relocating = True
+        self._notify("S4L", "Tidying autopilot… Claude will restart once.")
+        threading.Thread(target=self._relocate_restart_work, daemon=True).start()
 
     def _relocate_restart_work(self):
         """Restart Claude with the tasks relocated. Mirror of _mcpb_update_work's
@@ -942,6 +983,7 @@ class S4LMenuBar(rumps.App):
             time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
                 self._cwd_healed = True
+                self._reloc_needed = False
         except Exception:
             pass
         finally:
@@ -1613,6 +1655,9 @@ class S4LMenuBar(rumps.App):
             items.append(
                 rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
             )
+        if self._reloc_needed and not self._relocating:
+            items.append(rumps.separator)
+            items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Reset test machine…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
