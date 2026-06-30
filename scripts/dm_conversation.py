@@ -90,7 +90,17 @@ def get_our_account(config, platform):
     elif platform == "linkedin":
         return accounts.get("linkedin", {}).get("name", "Matthew Diakonov")
     elif platform == "x":
-        return accounts.get("twitter", {}).get("handle", "@m13v_").lstrip("@")
+        # No hardcoded fallback: stamping a default handle on an outbound DM
+        # silently mis-attributes it to the repo owner. Resolve from config / env
+        # and fail loud if absent.
+        from account_resolver import resolve as _resolve_account
+        h = _resolve_account("twitter")
+        if not h:
+            raise RuntimeError(
+                "no Twitter handle configured (accounts.twitter.handle / "
+                "AUTOPOSTER_TWITTER_HANDLE); refusing to stamp a fallback account "
+                "on an outbound DM to avoid wrong-attribution. Run connect_x first.")
+        return h.lstrip("@")
     return "unknown"
 
 
