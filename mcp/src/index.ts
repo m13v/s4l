@@ -1132,7 +1132,7 @@ server.registerPrompt(
         content: {
           type: "text" as const,
           text:
-            "Set up social-autoposter end to end now. Treat this as a terminal goal: inspect status, " +
+            "Set up social-autoposter plugin end to end now. Treat this as a terminal goal: inspect status, " +
             "install or repair the owned runtime, auto-detect and connect my X session, scan my " +
             "profile, discover and research the product I most clearly represent, infer and save a " +
             "conservative complete project with search topics, seed them, and run a draft-only " +
