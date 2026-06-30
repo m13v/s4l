@@ -1525,7 +1525,9 @@ class S4LMenuBar(rumps.App):
             batch, decision = self._post_q.get()  # blocks until a card is approved
             n = decision.get("n")
             try:
-                self._notify("S4L", f"Posting draft {n}…")
+                # No "Posting draft N…" banner: the menu-bar spinner already shows
+                # live posting progress, so a Notification Center toast per approved
+                # card is pure noise. Only failures (below) raise a notification.
                 st.approved_queue_set_status(batch, n, "posting")
                 with self._review_lock:
                     activity_label = self._posting_activity_label_locked()
@@ -1552,8 +1554,9 @@ class S4LMenuBar(rumps.App):
                         st.approved_queue_set_status(batch, n, "failed", error="posted_0")
                         self._notify("S4L", f"Draft {n} didn't post — see the dashboard for why.")
                     else:
+                        # Success is silent: the spinner + dashboard already reflect
+                        # it. No per-card "Posted draft N." banner.
                         st.approved_queue_set_status(batch, n, "posted")
-                        self._notify("S4L", f"Posted draft {n}.")
             except Exception as e:
                 st.approved_queue_set_status(batch, n, "failed", error=str(e)[:200])
                 sys.stderr.write(f"[s4l-menubar] post draft {n} failed: {e}\n")
