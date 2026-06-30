@@ -44,7 +44,15 @@ except Exception:
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
 MIN_WORDS = 3
-OUR_HANDLE = _resolve_account("twitter") or "m13v_"
+OUR_HANDLE = _resolve_account("twitter")
+if not OUR_HANDLE:
+    # No hardcoded fallback: scanning/attributing under a default handle silently
+    # impersonates the repo owner. Refuse to run so the missing config surfaces.
+    sys.stderr.write(
+        "[scan_twitter_mentions] no Twitter handle configured "
+        "(accounts.twitter.handle / AUTOPOSTER_TWITTER_HANDLE); refusing to run "
+        "to avoid wrong-account attribution. Run connect_x first.\n")
+    sys.exit(1)
 
 # Paginate the replies prefetch in chunks so we never blow the route's max
 # limit. 500 is the per-call cap inside /api/v1/replies; we walk pages until
