@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const { spawnSync } = require('child_process');
 
-const platform = require('./platform');
 const scheduler = require('./scheduler');
 const { formatDoctorReport, runDoctorSync } = require('../mcp/shared/doctor.cjs');
 const { recordDoctorReport } = require('../mcp/shared/onboarding-ledger.cjs');
