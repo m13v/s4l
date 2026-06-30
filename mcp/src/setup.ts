@@ -502,6 +502,20 @@ export function hasReadyProject(): boolean {
   return listManagedProjectStatus().some((s) => s.ready);
 }
 
+// The personal-brand persona project (persona:true) is intentionally kept OUT of
+// the managed-products scope, so listManagedProjectStatus()/hasReadyProject() never
+// count it. But in personal_brand mode the cycle DOES draft for it (force-selected
+// via SAPS_FORCE_PROJECT). Without this helper a personal-brand-only ("self promo")
+// setup looks like "no project configured" everywhere — the autopilot kicker never
+// installs and the doctor can't see it. Reports whether the persona exists AND is
+// fully configured (has every required field, incl. seeded topics). (2026-06-30)
+export function personaReady(): boolean {
+  const persona = findPersonaProject();
+  if (!persona) return false;
+  const missing = missingForProject(persona.name);
+  return missing !== null && missing.length === 0;
+}
+
 // ---------------------------------------------------------------------------
 // Gate the action tools call to resolve + validate the target project.
 // ---------------------------------------------------------------------------
