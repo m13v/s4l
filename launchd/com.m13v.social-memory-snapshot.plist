@@ -7,14 +7,14 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/matthewdi/social-autoposter/skill/memory-snapshot.sh</string>
+		<string>/Users/matthewdi/.social-autoposter-mcp/repo/package/skill/memory-snapshot.sh</string>
 	</array>
 	<key>StartInterval</key>
 	<integer>60</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stdout.log</string>
+	<string>/Users/matthewdi/.social-autoposter-mcp/repo/package/skill/logs/launchd-memory-snapshot-stdout.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/matthewdi/social-autoposter/skill/logs/launchd-memory-snapshot-stderr.log</string>
+	<string>/Users/matthewdi/.social-autoposter-mcp/repo/package/skill/logs/launchd-memory-snapshot-stderr.log</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
@@ -22,7 +22,7 @@
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
 		<key>SAPS_REPO_DIR</key>
-		<string>/Users/matthewdi/social-autoposter</string>
+		<string>/Users/matthewdi/.social-autoposter-mcp/repo/package</string>
 		<key>SAPS_PYTHON</key>
 		<string>/Users/matthewdi/.social-autoposter-mcp/runtime/.venv/bin/python3</string>
 		<key>BH_CHROME_BIN</key>
