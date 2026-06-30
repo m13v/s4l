@@ -30,7 +30,7 @@ const auth = require('./auth');
 const DEST = path.join(os.homedir(), 'social-autoposter');
 const LOG_DIR = path.join(DEST, 'skill', 'logs');
 const SCHED_KIND = platform.scheduler();
-const UNIT_DIR = path.join(DEST, SCHED_KIND === 'systemd' ? 'systemd' : 'launchd');
+const UNIT_DIR = path.join(DEST, 'launchd');
 const AGENT_DIR = platform.agentsDir();
 const driver = scheduler.driverFor();
 const CONFIG_FILE = path.join(DEST, 'config.json');
