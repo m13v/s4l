@@ -42,7 +42,7 @@ SCAN_T0=$(date +%s)
     #   "Lean Phase 1: executing 118 queries via browser-harness CDP"
     # so show K/total once that line lands (it precedes the per-query "kept=" lines).
     _total=$(grep -oE "executing [0-9]+ queries" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | head -1 || true)
-    if [ -n "$_total" ]; then _qpart="${_q}/${_total} queries"; else _qpart="${_q} queries"; fi
+    if [ -n "$_total" ]; then _qpart="${_q}/${_total}"; else _qpart="${_q}"; fi
     _found=$(grep -oE "Batch has [0-9]+" "$OUT" 2>/dev/null | tail -1 | grep -oE "[0-9]+" | tail -1 || true)
     if [ -n "$_found" ]; then
       _lbl="scan: ${_dur} · ${_qpart}, ${_found} found"
