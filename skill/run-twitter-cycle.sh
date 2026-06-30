@@ -2029,11 +2029,26 @@ PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "ru
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
 
+# --- TOP-N POST CAP (2026-06-29) -------------------------------------------
+# The prep model still drafts EVERY on-brand candidate, but autopilot now posts
+# only the single highest-Virality one per cycle. This caps per-account reply
+# volume (the May-June ~10x ramp that collapsed per-post reach ~15x) while
+# keeping the strongest thread. Deferred picks are dropped from the plan so they
+# stay status='pending' (NOT 'skipped'); Phase 0 salvage re-judges them next
+# cycle and reuses their fresh drafts. DRAFT_ONLY (manual MCP review) keeps every
+# draft so the human sees the full set. Override with SAPS_TWITTER_POST_TOP_N
+# (default 1; 0 = no cap).
+if [ "${DRAFT_ONLY:-0}" = "1" ]; then
+    POST_TOP_N=0
+else
+    POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
+fi
+
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
 # reason against every twitter_candidates row Claude reviewed but didn't pick.
-python3 -c "
-import json, sys
+SAPS_CAND_VIR="$CANDIDATES" SAPS_POST_TOP_N="$POST_TOP_N" python3 -c "
+import json, sys, os
 text = sys.stdin.read().strip()
 try:
     env, _ = json.JSONDecoder().raw_decode(text)
@@ -2047,6 +2062,24 @@ if isinstance(so, str):
     except Exception: pass
 candidates = so.get('candidates', []) if isinstance(so, dict) else []
 rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
+# TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
+# Build candidate_id -> virality_score from the pre-scored CANDIDATES block
+# (pipe cols: id|url|author|text|virality|delta|...), sort the model's picks by
+# it, and truncate. SAPS_POST_TOP_N=0 disables the cap (manual DRAFT_ONLY review).
+# Truncated picks are simply dropped from the plan, so they stay status='pending'
+# (NOT added to 'rejected'); no thread is blacklisted and Phase 0 salvages them.
+_top_n = int(os.environ.get('SAPS_POST_TOP_N', '1') or '1')
+_deferred = 0
+if _top_n > 0 and len(candidates) > _top_n:
+    _vir = {}
+    for _ln in (os.environ.get('SAPS_CAND_VIR', '') or '').splitlines():
+        _p = _ln.split('|')
+        if len(_p) >= 5 and _p[0].isdigit():
+            try: _vir[int(_p[0])] = float(_p[4] or 0)
+            except Exception: pass
+    candidates.sort(key=lambda c: _vir.get(c.get('candidate_id'), 0.0), reverse=True)
+    _deferred = len(candidates) - _top_n
+    candidates = candidates[:_top_n]
 # The picker assignment travels through the plan envelope so
 # twitter_post_plan.py can call validate_or_register(...) with the
 # original (assigned_style, assigned_mode) and coerce USE-mode drift
@@ -2060,7 +2093,7 @@ json.dump({'candidates': candidates,
            'assigned_style': '$PICKED_STYLE' or None,
            'assigned_mode': '$PICKED_MODE' or 'use'}, open('$PLAN_FILE', 'w'), indent=2)
 json.dump({'skips': rejected}, open('$SKIP_FILE', 'w'), indent=2)
-print(f'prep: wrote {len(candidates)} candidates and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
+print(f'prep: wrote {len(candidates)} candidate(s) (deferred {_deferred} lower-virality on-brand pick(s)) and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
 " <<< "$PREP_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
 
 PREP_PARSE_EXIT=${PIPESTATUS[0]:-1}
