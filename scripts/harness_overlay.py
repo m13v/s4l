@@ -36,6 +36,7 @@ down it sleeps and retries; it never crashes the pipeline.
 
 from __future__ import annotations
 
+import fcntl
 import glob
 import json
 import os
@@ -454,6 +455,20 @@ def cmd_watch(interval: float = 2.0) -> int:
     holds ONE CDP connection open across ticks (light, and friendly to the
     poster's concurrent CDP session) and only reconnects when the harness Chrome
     comes/goes. Never raises into the pipeline."""
+    # Singleton guard: there must be exactly ONE watcher painting at a time, or
+    # two loops fight over the same overlay (double heartbeat, flicker). Two start
+    # lanes can race to spawn this: the MCP's foreground KeepAlive launchd job and
+    # the best-effort run-overlay-watch.sh supervisor. Hold an exclusive,
+    # non-blocking flock for the life of the process; if another watcher already
+    # holds it, exit 0 quietly and let that one own the overlay. The lock fd is
+    # intentionally leaked (kept open) until the process dies so the OS releases
+    # it automatically on exit/kill.
+    try:
+        _lock_fd = os.open("/tmp/saps_overlay_watch.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another overlay watcher already running; exiting", file=sys.stderr)
+        return 0
     print(f"watching {LOG_DIR}/twitter-cycle-*.log -> overlay on {CDP_URL} (Ctrl-C to stop)")
     # Treat SIGTERM (launchd unload, `kill`) like Ctrl-C so the overlay is
     # cleared on the way out instead of lingering until the next navigation.
