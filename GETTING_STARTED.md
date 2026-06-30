@@ -11,7 +11,7 @@ one setup request drives the second stage through a draft-only verification.
 2. Paste the prompt below. Let the agent execute every safe installation and
    repair step without asking you to choose implementation details.
 3. When it finishes, relaunch Claude, then send
-   "Set me up on social-autoposter end to end."
+   "Set me up on social-autoposter plugin end to end."
 
 ---
 
@@ -54,14 +54,14 @@ TROUBLESHOOTING (handle these yourself, don't make me debug)
 
 When everything above succeeds, tell me the next step in your own words: I need
 to fully quit and relaunch Claude (Cmd+Q, not just close the window) so the new
-MCP loads, then send "Set me up on social-autoposter end to end."
+MCP loads, then send "Set me up on social-autoposter plugin end to end."
 ```
 
 ---
 
 ## What happens after they restart
 
-Sending **"Set me up on social-autoposter end to end"** (or picking the `/`
+Sending **"Set me up on social-autoposter plugin end to end"** (or picking the `/`
 slash-command "Set up social-autoposter" in Claude Desktop) gives the agent a
 terminal goal. It:
 
