@@ -2965,6 +2965,63 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
   }
 }
 
+// Install/refresh the on-screen overlay watcher launchd supervisor. Promotes the
+// harness status overlay from a best-effort, fired-from-other-tools nicety to a
+// first-class self-healing job (RunAtLoad + 60s StartInterval). The script it
+// drives (skill/run-overlay-watch.sh) is idempotent via a pgrep guard, so the
+// 60s re-invocation is a fast no-op while the watcher is up and respawns it
+// within a minute if it ever dies or the harness Chrome restarts. SAPS_PYTHON is
+// baked by plistXml; we add SAPS_LOG_DIR (so the watcher reads the same cycle
+// logs to decide busy/idle) and the harness CDP URL. Disable with
+// SAPS_OVERLAY_WATCH=0.
+async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    if (process.env.SAPS_OVERLAY_WATCH === "0") return { ok: false, detail: "disabled (SAPS_OVERLAY_WATCH=0)" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: OVERLAY_WATCH_LABEL,
+      programArgs: ["/bin/bash", path.join(repoDir(), "skill", "run-overlay-watch.sh")],
+      intervalSecs: OVERLAY_WATCH_INTERVAL_SECS,
+      runAtLoad: true,
+      stdoutLog: path.join(logDir, "launchd-overlay-watch-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-overlay-watch-stderr.log"),
+      extraEnv: {
+        SAPS_LOG_DIR: logDir,
+        TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
+      },
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(OVERLAY_WATCH_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(OVERLAY_WATCH_LABEL, OVERLAY_WATCH_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(OVERLAY_WATCH_LABEL, OVERLAY_WATCH_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(OVERLAY_WATCH_PLIST), { recursive: true });
+      fs.writeFileSync(OVERLAY_WATCH_PLIST, xml, "utf-8");
+      const res = await loadPlist(OVERLAY_WATCH_LABEL, OVERLAY_WATCH_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Is the draft schedule registered AND running for the LIVE account?
 //   'ok'       — worker tasks present+enabled and FIRING (host actively running).
 //   'disabled' — present but a worker task is disabled.
@@ -3930,6 +3987,14 @@ async function main() {
   void ensureMemorySnapshotInstalled()
     .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
+  // On-screen overlay watcher supervisor. The harness status overlay only renders
+  // while the watcher process is alive, and that watcher had no supervisor — when
+  // it died nothing respawned it and the overlay silently vanished. Install it as
+  // a first-class self-healing launchd job (RunAtLoad + 60s idempotent re-invoke).
+  // Best-effort; the overlay is a nicety and must never block boot.
+  void ensureOverlayWatchInstalled()
+    .then((r) => console.error(`[overlay-watch] launchd supervisor: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[overlay-watch] supervisor install failed:", e?.message || e));
   // Heal installs onboarded before short_links_live defaulted to false: such a
   // project wraps short links against the customer's own domain, which has no
   // /r/[code] resolver, so every minted link 404s. Re-point them at the s4l.ai
