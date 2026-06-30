@@ -34,6 +34,7 @@ import {
   applySetup,
   resolveProject,
   hasReadyProject,
+  personaReady,
   listManagedProjectStatus,
   ensureShortLinksDefault,
   ensurePersonaProject,
@@ -2903,8 +2904,21 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
     if (!runtimeReady()) return { ok: false, detail: "runtime not ready" };
-    const anyReady = listManagedProjectStatus().some((p) => p.ready);
-    if (!anyReady) return { ok: false, detail: "no configured project yet" };
+    // Gate: install the kicker when SOMETHING is draftable. Two paths qualify:
+    //   (a) a managed product project is ready (promotion lane), OR
+    //   (b) personal_brand mode is on AND the persona is ready (self-promo lane).
+    // Path (b) was the 2026-06-30 gap: a personal-brand-only setup has no managed
+    // project, so the old `anyReady` check was always false and the kicker never
+    // installed (no drafts, no first-run kick). The persona is excluded from
+    // managed scope by design, so check it explicitly.
+    const productReady = listManagedProjectStatus().some((p) => p.ready);
+    const personaActive = currentFlags().personal_brand && personaReady();
+    if (!productReady && !personaActive) {
+      return {
+        ok: false,
+        detail: "no ready project or active persona yet",
+      };
+    }
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
