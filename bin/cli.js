@@ -610,88 +610,9 @@ function generatePlists() {
 
   const driver = scheduler.driverFor();
   const env = driver.defaultEnv({ home: HOME, nodeBin });
-  const kind = platform.scheduler();
-  const outDir = path.join(DEST, kind === 'systemd' ? 'systemd' : 'launchd');
+  const outDir = path.join(DEST, 'launchd');
   driver.generate({ jobs, outDir, env });
-  console.log(`  generated ${kind} units at ${outDir}`);
-}
-
-// On Linux we translate every shipped launchd plist into a systemd
-// .service + .timer pair at install time. Plists remain the source of truth
-// so the macOS pipeline is untouched; the systemd/ dir is derived.
-function generateSystemdFromPlists() {
-  const launchdDriver = scheduler.driverFor('launchd');
-  const systemdDriver = scheduler.driverFor('systemd');
-  const srcDir = path.join(DEST, 'launchd');
-  const outDir = path.join(DEST, 'systemd');
-  if (!fs.existsSync(srcDir)) return 0;
-  const plists = fs.readdirSync(srcDir).filter(f => f.endsWith('.plist'));
-  const nodeBin = path.dirname(process.execPath);
-  const env = systemdDriver.defaultEnv({ home: HOME, nodeBin });
-
-  const jobs = [];
-  let skipped = 0;
-  for (const f of plists) {
-    const xml = fs.readFileSync(path.join(srcDir, f), 'utf8');
-    const { label, scriptPath } = launchdDriver.parseUnit(xml);
-    if (!label || !scriptPath) { skipped++; continue; }
-    const sched = launchdDriver.scheduleFromUnit(xml);
-    if (!sched.intervalSecs) {
-      console.log(`  skip ${f}: calendar schedule not yet translated to OnCalendar`);
-      skipped++;
-      continue;
-    }
-    // Plists ship with the publisher's absolute paths baked in. Rebuild
-    // paths against the current user's DEST so any user on any host gets
-    // correct units without us having to re-ship plists per install target.
-    const scriptBase = path.basename(scriptPath);
-    const stdoutMatch = (xml.match(/<key>StandardOutPath<\/key>\s*<string>([^<]+)<\/string>/) || [])[1];
-    const stderrMatch = (xml.match(/<key>StandardErrorPath<\/key>\s*<string>([^<]+)<\/string>/) || [])[1];
-    const shortLabel = label.replace(/^com\.m13v\.social-/, '');
-    const stdout = `${DEST}/skill/logs/${stdoutMatch ? path.basename(stdoutMatch) : `launchd-${shortLabel}-stdout.log`}`;
-    const stderr = `${DEST}/skill/logs/${stderrMatch ? path.basename(stderrMatch) : `launchd-${shortLabel}-stderr.log`}`;
-    const runAtLoad = /<key>RunAtLoad<\/key>\s*<true\s*\/>/.test(xml);
-    jobs.push({
-      file: f,
-      label,
-      script: `${DEST}/skill/${scriptBase}`,
-      interval: sched.intervalSecs,
-      runAtLoad,
-      stdoutLog: stdout,
-      stderrLog: stderr,
-    });
-  }
-  systemdDriver.generate({ jobs, outDir, env });
-  console.log(`  translated ${jobs.length} launchd plists -> systemd units (skipped ${skipped})`);
-  return jobs.length;
-}
-
-// Link every DEST/systemd/*.{service,timer} into ~/.config/systemd/user/ and
-// reload the user daemon. Caller is expected to `systemctl --user enable --now
-// <timer>` for each timer they actually want running; this mirrors how macOS
-// setup leaves loading to the user via the SKILL.md wizard.
-function installSystemdUnits() {
-  const driver = scheduler.driverFor('systemd');
-  const unitDir = path.join(DEST, 'systemd');
-  const agentsDir = platform.agentsDir();
-  if (!fs.existsSync(unitDir)) return;
-  fs.mkdirSync(agentsDir, { recursive: true });
-  const services = fs.readdirSync(unitDir).filter(f => f.endsWith('.service'));
-  let linked = 0;
-  for (const f of services) {
-    if (driver.install(path.join(unitDir, f), agentsDir)) linked++;
-  }
-  const r = spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8' });
-  if (r.status === 0) {
-    console.log(`  linked ${linked} unit pair(s) into ${agentsDir}; systemctl --user daemon-reload OK`);
-  } else {
-    console.warn(`  linked ${linked} unit pair(s); daemon-reload failed: ${(r.stderr || '').trim()}`);
-  }
-  const linger = spawnSync('loginctl', ['show-user', os.userInfo().username, '--property=Linger'], { encoding: 'utf8' });
-  if (!/Linger=yes/.test(linger.stdout || '')) {
-    console.log('  note: run `sudo loginctl enable-linger $USER` so timers fire when nobody is logged in');
-  }
-  console.log('  next: systemctl --user enable --now <timer> for each job you want scheduled');
+  console.log(`  generated launchd units at ${outDir}`);
 }
 
 function init() {
@@ -714,13 +635,6 @@ function init() {
 
   // Generate launchd plists with user's actual HOME
   generatePlists();
-
-  // On Linux, derive systemd units from every plist and link them into
-  // ~/.config/systemd/user/. macOS install is unchanged.
-  if (platform.scheduler() === 'systemd') {
-    generateSystemdFromPlists();
-    installSystemdUnits();
-  }
 
   // Provision the browser-harness toolchain BEFORE writing harness configs so
   // findUvBin() picks up a freshly-installed uv on first run.
@@ -800,12 +714,6 @@ function update() {
 
   // Regenerate launchd plists with correct paths
   generatePlists();
-
-  // Refresh systemd units on Linux so plist changes propagate.
-  if (platform.scheduler() === 'systemd') {
-    generateSystemdFromPlists();
-    installSystemdUnits();
-  }
 
   // Provision browser-harness (uv + clone + uv tool install + mcp pkg + server.py).
   // Idempotent: skips steps that are already done.
