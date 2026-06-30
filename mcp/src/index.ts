@@ -2387,13 +2387,13 @@ tool(
         "After the tasks are registered, relay the `expectations` lines to the user so they know the " +
         "cadence (a draft batch about every 5 minutes), that the jobs only draft and never post, and " +
         "that they approve each card themselves. " +
-        "IMPORTANT — keep these once-a-minute runs OUT of the user's interactive session history: set " +
-        `EACH task's working folder to ${workerFolder} (it is already created). create_scheduled_task ` +
-        "has no folder argument, so do this host-side — in the Routines list open each task -> Edit -> " +
-        "Folder -> " + workerFolder + ". The tasks behave identically from there (the prompt uses " +
-        "absolute paths); this only moves their sessions into a separate bucket so `claude --resume` in " +
-        "the project folder is not flooded. If you cannot set the folder programmatically, tell the user " +
-        "to set it once via that Routines Edit form.",
+        "Do NOT instruct the user to set each task's working folder by hand in the Routines Edit form — " +
+        "that edit does not stick (Claude Desktop caches the schedule registry in memory and clobbers a " +
+        `live edit on the next fire). The S4L menu-bar app relocates these tasks to ${workerFolder} ` +
+        "automatically: it detects the wrong folder, asks the user once with a modal, then restarts Claude " +
+        "once while it is down to apply the change (the only reliable way). So you do NOT need to set any " +
+        "folder here — just create the two tasks; the menu bar handles keeping their once-a-minute runs " +
+        "out of the user's `claude --resume` history.",
     });
   }
 );
@@ -2947,6 +2947,22 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
       fs.writeFileSync(TWITTER_AUTOPILOT_PLIST, xml, "utf-8");
       const res = await loadPlist(TWITTER_AUTOPILOT_LABEL, TWITTER_AUTOPILOT_PLIST, uid);
       detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+      // First-EVER install (cur === null): fire ONE immediate cycle so a brand-new
+      // user gets their first drafts at setup completion instead of waiting up to a
+      // full QUEUE_KICKER_INTERVAL_SECS tick. `launchctl kickstart` runs the job
+      // THROUGH launchd (full baked env + the run-*-singleton.sh lock), so it is
+      // NOT a bare manual kick — it cannot produce the empty-plan artifact that a
+      // hand-run of run-twitter-cycle.sh would. We keep RunAtLoad=false so this
+      // does NOT re-fire on every later Claude launch or on a drift-rewrite; the
+      // cur === null gate restricts the kick to true first-time onboarding only.
+      if (cur === null) {
+        const kick = await run(
+          "launchctl",
+          ["kickstart", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`],
+          { timeoutMs: 15_000 }
+        );
+        detail += ` + first-run kick (rc=${kick.code})`;
+      }
     }
     return { ok: true, detail };
   } catch (e: any) {
