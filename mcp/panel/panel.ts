@@ -67,8 +67,11 @@ interface Snapshot {
   // draft tasks aren't registered here (e.g. after an account switch) and the
   // "Set up draft schedule" button should show.
   schedule_state?: "missing" | "disabled" | "ok" | "unknown";
-  // Engagement mode (single source: mode.json via the server snapshot).
+  // Engagement lanes (single source: mode.json via the server snapshot). Two
+  // INDEPENDENT lanes; both can be on (the cycle then splits 50/50). `mode` is
+  // the derived legacy mirror kept for back-compat.
   mode?: "promotion" | "personal_brand";
+  flags?: { personal_brand?: boolean; promotion?: boolean };
   onboarding?: OnboardingSnapshot;
 }
 
@@ -271,14 +274,29 @@ function render() {
   btnSchedule.hidden = !needsSchedule;
   btnSchedule.classList.toggle("primary", needsSchedule);
 
-  // Engagement mode — always shown, mirroring the menu-bar toggle. Single source:
-  // state.mode (the server snapshot's mode.json read).
-  const personal = state.mode === "personal_brand";
-  modeCurrent.textContent = personal ? "Personal brand" : "Promotion";
-  modeSub.textContent = personal
-    ? "Organic, link-free engagement in your own voice."
-    : "Marketing your configured products.";
-  btnMode.textContent = personal ? "Switch to promotion" : "Switch to personal brand";
+  // Engagement lanes — always shown, mirroring the menu bar. Two independent
+  // lanes; both can be on (cycle splits 50/50). Single source: state.flags (the
+  // server snapshot's mode.json read), with state.mode as a legacy fallback.
+  const flags = state.flags || (state.mode === "promotion"
+    ? { personal_brand: false, promotion: true }
+    : { personal_brand: true, promotion: false });
+  const personalOn = !!flags.personal_brand;
+  const promoOn = !!flags.promotion;
+  const lanes: string[] = [];
+  if (personalOn) lanes.push("Personal brand");
+  if (promoOn) lanes.push("Promotion");
+  modeCurrent.textContent = lanes.length ? lanes.join(" + ") : "None";
+  modeSub.textContent =
+    personalOn && promoOn
+      ? "Both lanes on: cycles split 50/50 between link-free brand posts and product promotion."
+      : personalOn
+        ? "Organic, link-free engagement in your own voice."
+        : promoOn
+          ? "Marketing your configured products."
+          : "No lane on; the cycle falls back to personal brand.";
+  // The panel button toggles the PRODUCT-PROMOTION lane (personal brand is the
+  // default base lane; turn it off from the menu-bar checkmark if needed).
+  btnMode.textContent = promoOn ? "Turn off product promotion" : "Also promote a product";
 
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
@@ -307,6 +325,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
     mode: o.mode ?? state?.mode,
+    flags: o.flags ?? state?.flags,
     onboarding: o.onboarding,
   };
 }
@@ -529,16 +548,17 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
   }
 }));
 
-// Engagement-mode toggle: lightweight flip via engagement_mode action:'toggle'
-// (mode.json only, no persona provisioning), then refresh so the new mode renders.
-// Mirrors the menu-bar toggle — same single source (mode.json).
+// Engagement-lane toggle: lightweight flip of the PROMOTION lane via
+// engagement_mode action:'toggle' lane:'promotion' (mode.json only, no persona
+// provisioning), then refresh. Mirrors the menu-bar checkmarks (same single
+// source, mode.json). Personal brand is toggled from the menu bar.
 btnMode.addEventListener("click", () => busy(btnMode, "Switching…", async () => {
   try {
-    const res = await call("engagement_mode", { action: "toggle" });
-    if (res && res.mode) applyState({ mode: res.mode });
+    const res = await call("engagement_mode", { action: "toggle", lane: "promotion" });
+    if (res && res.flags) applyState({ flags: res.flags });
     await refresh();
   } catch (e: any) {
-    log("Couldn’t switch mode: " + (e?.message || e));
+    log("Couldn’t switch lane: " + (e?.message || e));
   }
 }));
 
