@@ -109,9 +109,26 @@ def _runtime_provisioning() -> bool:
     return str(p.get("status") or "").lower() in ("installing", "in_progress", "running", "provisioning")
 
 
+def _flags() -> dict:
+    """Engagement lane flags {"personal_brand": bool, "promotion": bool}.
+
+    Mirrors scripts/saps_mode.py get_flags(): explicit flag keys win; else map a
+    legacy {"mode": ...} string; else default personal ON / promotion OFF."""
+    d = _read_json(os.path.join(_state_dir(), "mode.json")) or {}
+    if "personal_brand" in d or "promotion" in d:
+        return {"personal_brand": bool(d.get("personal_brand")),
+                "promotion": bool(d.get("promotion"))}
+    m = str(d.get("mode") or "").strip()
+    if m == "personal_brand":
+        return {"personal_brand": True, "promotion": False}
+    if m == "promotion":
+        return {"personal_brand": False, "promotion": True}
+    return {"personal_brand": True, "promotion": False}
+
+
 def _mode() -> str:
-    m = ((_read_json(os.path.join(_state_dir(), "mode.json")) or {}).get("mode") or "").strip()
-    return "personal_brand" if m == "personal_brand" else "promotion"
+    # Derived legacy single-mode string (personal wins when on).
+    return "personal_brand" if _flags().get("personal_brand") else "promotion"
 
 
 def _mode_chosen() -> bool:
@@ -321,6 +338,7 @@ def compute() -> dict:
         "runtime_provisioning": _runtime_provisioning(),
         "setup_complete": setup_complete,
         "mode": mode,
+        "flags": _flags(),
         "onboarding": _onboarding_live(live_status),
     }
 
