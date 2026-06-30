@@ -157,14 +157,19 @@ const STALL_WATCH_PLIST = path.join(
 );
 const STALL_WATCH_INTERVAL_SECS = 120;
 
-// On-screen overlay watcher supervisor. The harness status overlay ("S4L
-// running" / idle banner) only renders WHILE `harness_overlay.py watch` is
-// alive. That watcher is fire-and-forget with no supervisor of its own, so when
-// it dies (or the harness Chrome restarts) nothing brings it back and the
-// overlay silently disappears. Promote it to a first-class launchd job like its
-// siblings: RunAtLoad starts it at boot, the 60s StartInterval re-invokes the
-// idempotent supervisor script (pgrep guard => no-op while up) so a dead watcher
-// is respawned within a minute. Disable with SAPS_OVERLAY_WATCH=0.
+// On-screen overlay watcher. The harness status overlay ("S4L running" / idle
+// banner) only renders WHILE `harness_overlay.py watch` is alive. That watcher
+// is fire-and-forget with no supervisor of its own, so when it dies (or the
+// harness Chrome restarts) nothing brings it back and the overlay silently
+// disappears. Promote it to a first-class launchd job, but run the long-lived
+// watcher in the FOREGROUND under KeepAlive (NOT a StartInterval that re-invokes
+// a spawn-and-exit supervisor). The supervisor pattern races launchd on macOS:
+// the instant the kicker shell exits, launchd SIGKILLs the whole job process
+// group and reaps the just-spawned watcher before it can detach. Running the
+// watcher AS the job's main process makes launchd supervise it directly:
+// RunAtLoad starts it at boot, KeepAlive restarts it if it ever exits, and on
+// unload its SIGTERM handler clears the overlay cleanly. Disable with
+// SAPS_OVERLAY_WATCH=0.
 const OVERLAY_WATCH_LABEL = "com.m13v.social-overlay-watch";
 const OVERLAY_WATCH_PLIST = path.join(
   os.homedir(),
@@ -172,7 +177,6 @@ const OVERLAY_WATCH_PLIST = path.join(
   "LaunchAgents",
   `${OVERLAY_WATCH_LABEL}.plist`
 );
-const OVERLAY_WATCH_INTERVAL_SECS = 60;
 
 // Daily self-updater. Enabled alongside autopilot so a hands-free (headless)
 // install keeps itself current — the interactive `runtime` tool (action:'update')
@@ -230,8 +234,15 @@ function plistXml(opts: {
   stdoutLog: string;
   stderrLog: string;
   extraEnv?: Record<string, string>;
+  // When true, the program is a long-lived foreground process: emit KeepAlive
+  // (launchd restarts it whenever it exits) instead of StartInterval (which
+  // re-invokes a short-lived command on a timer). intervalSecs is ignored.
+  keepAlive?: boolean;
 }): string {
   const args = opts.programArgs.map((a) => `\t\t<string>${a}</string>`).join("\n");
+  const schedule = opts.keepAlive
+    ? `\t<key>KeepAlive</key>\n\t<true/>`
+    : `\t<key>StartInterval</key>\n\t<integer>${opts.intervalSecs}</integer>`;
   // Background (cron/autopilot) runs get the same Chrome the interactive cycle
   // uses, so a no-sudo ~/Applications install (which the shell's own resolver
   // doesn't scan) is still found off-screen. Omitted when Chrome resolves via
@@ -257,8 +268,7 @@ function plistXml(opts: {
 \t<array>
 ${args}
 \t</array>
-\t<key>StartInterval</key>
-\t<integer>${opts.intervalSecs}</integer>
+${schedule}
 \t<key>StandardOutPath</key>
 \t<string>${opts.stdoutLog}</string>
 \t<key>StandardErrorPath</key>
@@ -2965,15 +2975,19 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
   }
 }
 
-// Install/refresh the on-screen overlay watcher launchd supervisor. Promotes the
+// Install/refresh the on-screen overlay watcher launchd job. Promotes the
 // harness status overlay from a best-effort, fired-from-other-tools nicety to a
-// first-class self-healing job (RunAtLoad + 60s StartInterval). The script it
-// drives (skill/run-overlay-watch.sh) is idempotent via a pgrep guard, so the
-// 60s re-invocation is a fast no-op while the watcher is up and respawns it
-// within a minute if it ever dies or the harness Chrome restarts. SAPS_PYTHON is
-// baked by plistXml; we add SAPS_LOG_DIR (so the watcher reads the same cycle
-// logs to decide busy/idle) and the harness CDP URL. Disable with
-// SAPS_OVERLAY_WATCH=0.
+// first-class self-healing job. We run `harness_overlay.py watch` directly in
+// the FOREGROUND under KeepAlive (RunAtLoad starts it at boot; launchd restarts
+// it if it ever exits) rather than a StartInterval that re-fires a spawn-and-exit
+// supervisor: on macOS that supervisor races launchd, which SIGKILLs the job's
+// process group the instant the kicker shell exits and reaps the just-spawned
+// watcher before it can detach (verified on the box: the watcher caught the
+// group SIGTERM and cleared the overlay every cycle). harness_overlay.py holds a
+// singleton flock so the MCP's best-effort run-overlay-watch.sh lane can never
+// double-paint. SAPS_PYTHON is baked by plistXml; we add SAPS_LOG_DIR (so the
+// watcher reads the same cycle logs to decide busy/idle) and the harness CDP
+// URL. Disable with SAPS_OVERLAY_WATCH=0.
 async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
@@ -2986,8 +3000,9 @@ async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: str
     }
     const xml = plistXml({
       label: OVERLAY_WATCH_LABEL,
-      programArgs: ["/bin/bash", path.join(repoDir(), "skill", "run-overlay-watch.sh")],
-      intervalSecs: OVERLAY_WATCH_INTERVAL_SECS,
+      programArgs: [resolvePython(), path.join(repoDir(), "scripts", "harness_overlay.py"), "watch"],
+      intervalSecs: 0,
+      keepAlive: true,
       runAtLoad: true,
       stdoutLog: path.join(logDir, "launchd-overlay-watch-stdout.log"),
       stderrLog: path.join(logDir, "launchd-overlay-watch-stderr.log"),
