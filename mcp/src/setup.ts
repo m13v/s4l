@@ -146,18 +146,21 @@ function stripTopicSyntax(x: string): string {
   return s;
 }
 
-function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
+// Normalize a list field the model may pass as a real array, a stringified
+// JSON array, or a comma/newline-delimited string, into a clean string[].
+// Used for BOTH search_topics and search_queries: the model frequently passes
+// a stringified JSON array for either, and the naive comma-split baked [, ] and
+// " into each element (Karol, 2026-06-30 — corrupted topics AND a silently
+// skipped query seed). Returns undefined only for nullish input.
+export function normalizeStringList(
+  t: string[] | string | undefined | null
+): string[] | undefined {
   if (t == null) return undefined;
   let raw: unknown[];
   if (Array.isArray(t)) {
     raw = t;
   } else {
     const s = String(t).trim();
-    // The model sometimes passes search_topics as a stringified JSON array,
-    // e.g. '["AI video generation", "ex-Google / interviewing engineers"]'.
-    // Splitting that on commas bakes [, ] and " into each topic, so parse it
-    // as JSON first and only fall back to comma/newline splitting for plain
-    // text. stripTopicSyntax below is a defensive second layer either way.
     let parsed: unknown = null;
     if (s.startsWith("[")) {
       try {
@@ -169,6 +172,10 @@ function normalizeTopics(t: string[] | string | undefined): string[] | undefined
     raw = Array.isArray(parsed) ? parsed : s.split(/[,\n]/);
   }
   return raw.map((x) => stripTopicSyntax(String(x))).filter(Boolean);
+}
+
+function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
+  return normalizeStringList(t);
 }
 
 // The fields the user actually supplies via setup. Only fields that are present
