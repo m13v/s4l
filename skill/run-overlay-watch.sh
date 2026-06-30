@@ -73,6 +73,20 @@ WATCH_LOG="${SAPS_LOG_DIR}/overlay-watch.log"
 # --- spawn detached ----------------------------------------------------------
 cd "${REPO_DIR}" || exit 0
 echo "[overlay-watch] $(date '+%Y-%m-%d %H:%M:%S') starting watcher py=${PYBIN} cdp=${TWITTER_CDP_URL} log=${SAPS_LOG_DIR}" >>"${WATCH_LOG}" 2>&1
-nohup "${PYBIN}" "${OVERLAY_PY}" watch >>"${WATCH_LOG}" 2>&1 &
+# Spawn the watcher in a NEW SESSION so it outlives this supervisor.
+# When launchd fires this script (StartInterval 60), the script is the job's
+# main process; the moment it exits, launchd reaps the WHOLE job process group.
+# `nohup` only blocks SIGHUP, not that group SIGKILL, so a plain `nohup ... &`
+# child dies the instant we `exit 0` (it survives only when this runs from an
+# interactive shell, which is NOT a launchd job). macOS ships no setsid(1), so
+# use the python we already resolved to os.setsid() off the launchd group, then
+# exec the real watcher. The watcher's own interpreter self-heal (os.execv)
+# keeps the new session.
+nohup "${PYBIN}" -c 'import os, sys
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execv(sys.argv[1], sys.argv[1:])' "${PYBIN}" "${OVERLAY_PY}" watch >>"${WATCH_LOG}" 2>&1 &
 disown 2>/dev/null || true
 exit 0
