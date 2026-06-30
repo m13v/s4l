@@ -658,34 +658,30 @@ class S4LMenuBar(rumps.App):
             pass
         return False
 
-    def _disable_scheduled_tasks(self, _=None):
-        """Stop the autopilot: remove the draft/query scheduled tasks so they no
-        longer fire. Claude Desktop OWNS the live schedule and caches the registry
-        in memory, clobbering any live edit on the next fire — so the only reliable
-        way to disable them is to quit Claude, strip the tasks while it's down, then
+    def _quit_app(self, _=None):
+        """The single Quit path. Quitting stops the autopilot completely: the
+        draft/query scheduled tasks are removed so they no longer fire. Claude
+        Desktop OWNS the live schedule and caches the registry in memory,
+        clobbering any live edit on the next fire — so the only reliable way to
+        disable them is to quit Claude, strip the tasks while it's down, then
         relaunch. We warn the user with a modal FIRST that Claude Desktop will
-        restart (same shape as the reset confirm), since the app window will close
-        and reopen under them."""
-        if not self._has_scheduled_tasks():
-            self._alert("Nothing to disable",
-                        "No S4L scheduled tasks are registered on this account.")
-            return
+        restart, since the app window will close and reopen under them."""
         choice = rumps.alert(
-            title="Disable scheduled tasks?",
+            title="Quit the S4L autoposter?",
             message=(
-                "This stops the autopilot: the draft + query scheduled tasks are "
-                "removed so they no longer fire.\n\n"
+                "Quitting stops the autoposter completely: the draft + query "
+                "scheduled tasks are removed so nothing fires anymore.\n\n"
                 "Claude Desktop will quit and restart to apply this — its window "
-                "will close and reopen in a moment. Nothing else is touched (your "
-                "X login, browser layer, and config all stay).\n\n"
-                "You can re-arm the schedule any time from this menu."
+                "will close and reopen in a moment. Your X login, browser layer, "
+                "and config all stay; you can re-arm the schedule any time from "
+                "this menu."
             ),
-            ok="Disable & restart", cancel="Cancel",
+            ok="Quit & restart Claude", cancel="Cancel",
         )
         if choice != 1:  # only default button (OK) proceeds
             return
-        self._notify("S4L", "Disabling scheduled tasks… Claude will restart in a moment.")
-        threading.Thread(target=self._disable_tasks_work, daemon=True).start()
+        self._notify("S4L", "Quitting… Claude will restart in a moment.")
+        threading.Thread(target=self._quit_work, daemon=True).start()
 
     def _remove_scheduled_tasks(self):
         """Strip ALL S4L worker + deprecated tasks from every scheduled-tasks.json
@@ -726,7 +722,7 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
-    def _disable_tasks_work(self):
+    def _quit_work(self):
         """Quit/kill Claude, strip the scheduled tasks while it's down, relaunch.
         Mirror of _relocate_restart_work's restart block. The menu bar is a separate
         launchd process, so killing Claude does not kill us."""
@@ -740,10 +736,10 @@ class S4LMenuBar(rumps.App):
             time.sleep(1)
             self._remove_scheduled_tasks()
             subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
-            self._notify("S4L", "Scheduled tasks disabled. Claude restarted.")
+            self._notify("S4L", "Autoposter stopped. Claude restarted.")
         except Exception as e:
-            _capture(e, action="disable_scheduled_tasks")
-            self._notify("S4L", "Couldn't fully disable scheduled tasks — see logs.")
+            _capture(e, action="quit_app")
+            self._notify("S4L", "Couldn't fully stop the autoposter — see logs.")
 
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
@@ -1618,10 +1614,8 @@ class S4LMenuBar(rumps.App):
                 rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
             )
         items.append(rumps.separator)
-        if self._has_scheduled_tasks():
-            items.append(rumps.MenuItem("Disable scheduled tasks…", callback=self._disable_scheduled_tasks))
         items.append(rumps.MenuItem("Reset test machine…", callback=self._reset_machine))
-        items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
+        items.append(rumps.MenuItem("Quit", callback=self._quit_app))
 
         for it in items:
             self.menu.add(it)
