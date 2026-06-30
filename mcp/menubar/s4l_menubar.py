@@ -541,25 +541,35 @@ class S4LMenuBar(rumps.App):
             return ("orphaned", "")
         return ("failing", "")
 
-    def _toggle_mode(self, _=None):
-        """Flip personal-brand <-> promotion. Pure local state write (no model,
-        no network): the cycle reads mode.json on its next run. Rebuild the menu
-        right away so the checkmark + sublabel reflect the new mode instantly."""
-        new = st.toggle_mode()
-        self._notify(
-            "S4L engagement mode",
-            "Personal brand: organic, link-free"
-            if new == st.MODE_PERSONAL_BRAND
-            else "Promotion: marketing your products",
-        )
-        # Force the next tick to rebuild (mode is in the signature, but null it so
-        # the rebuild can't be skipped) and rebuild now for snappy feedback.
+    def _toggle_lane(self, lane):
+        """Flip ONE engagement lane (personal_brand|promotion). Pure local state
+        write (no model, no network): the cycle reads mode.json on its next run.
+        Rebuild the menu right away so the checkmarks reflect the change instantly."""
+        flags = st.toggle_lane(lane)
+        pb, pr = flags.get("personal_brand"), flags.get("promotion")
+        if pb and pr:
+            msg = "Personal brand + promotion both on (cycles split 50/50)"
+        elif pb:
+            msg = "Personal brand only: organic, link-free"
+        elif pr:
+            msg = "Promotion only: marketing your products"
+        else:
+            msg = "Both lanes off (cycle falls back to personal brand)"
+        self._notify("S4L engagement lanes", msg)
+        # Force the next tick to rebuild (flags are in the signature, but null it
+        # so the rebuild can't be skipped) and rebuild now for snappy feedback.
         self._sig = None
         try:
             self._tick(None)
         except Exception as e:
-            sys.stderr.write(f"[s4l-menubar] mode toggle rebuild failed: {e}\n")
+            sys.stderr.write(f"[s4l-menubar] lane toggle rebuild failed: {e}\n")
             sys.stderr.flush()
+
+    def _toggle_personal(self, _=None):
+        self._toggle_lane(st.MODE_PERSONAL_BRAND)
+
+    def _toggle_promotion(self, _=None):
+        self._toggle_lane(st.MODE_PROMOTION)
 
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
@@ -1111,7 +1121,7 @@ class S4LMenuBar(rumps.App):
             snap.get("x_handle"),
             snap.get("projects_ready"),
             snap.get("projects_total"),
-            st.read_mode(),
+            tuple(sorted((st.read_flags() or {}).items())),
             attention,
             schedule_state,
             self._stall_reason_info,
@@ -1405,18 +1415,25 @@ class S4LMenuBar(rumps.App):
         else:
             items += self._state_c(snap)
 
-        # Engagement mode — ALWAYS visible (every state), not just post-setup, so
-        # the user can see the current mode + flip it any time. Single source:
-        # snap['mode'] (mode.json), same value the dashboard shows.
-        mode = snap.get("mode") or st.read_mode()
-        personal = mode == st.MODE_PERSONAL_BRAND
+        # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
+        # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
+        # (both can be on -> the cycle splits 50/50). Single source: snap['flags']
+        # (mode.json), same value the dashboard shows.
+        flags = snap.get("flags") or st.read_flags()
+        personal_on = bool(flags.get("personal_brand"))
+        promo_on = bool(flags.get("promotion"))
         items.append(rumps.separator)
-        mode_item = rumps.MenuItem("Personal brand mode", callback=self._toggle_mode)
-        mode_item.state = 1 if personal else 0
-        items.append(mode_item)
-        items.append(self._label(
-            "   organic, link-free engagement" if personal else "   promoting your products"
-        ))
+        items.append(self._label("Engagement lanes"))
+        pb_item = rumps.MenuItem("Personal brand", callback=self._toggle_personal)
+        pb_item.state = 1 if personal_on else 0
+        items.append(pb_item)
+        items.append(self._label("   organic, link-free engagement"))
+        pr_item = rumps.MenuItem("Product promotion", callback=self._toggle_promotion)
+        pr_item.state = 1 if promo_on else 0
+        items.append(pr_item)
+        items.append(self._label("   promoting your products (link replies)"))
+        if personal_on and promo_on:
+            items.append(self._label("   both on · cycles split 50/50"))
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
