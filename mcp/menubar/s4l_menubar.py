@@ -104,7 +104,7 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # SETUP_PROMPT mirrors the in-chat panel's Setup button (panel.ts) verbatim so
 # both entry points kick off the same end-to-end flow.
 SETUP_PROMPT = (
-    "Set up social autoposter end to end now. Inspect and repair the runtime, "
+    "Set up social autoposter plugin end to end now. Inspect and repair the runtime, "
     "auto-detect and connect my X session, scan my profile, discover and research "
     "my product, then infer and save a complete project with seeded search topics. "
     "Keep going without asking me to approve each safe setup step. Ask only if I "
