@@ -1378,23 +1378,30 @@ tool(
       personaTopicsSeeded = true;
     }
 
-    completeOnboardingMilestone("mode_chosen", { mode, persona: personaName });
+    completeOnboardingMilestone("mode_chosen", { personal_brand: personalBrand, promotion, persona: personaName });
+
+    const bothOn = personalBrand && promotion;
+    const next_step = promotion
+      ? (bothOn
+          ? "Personal brand + product promotion are BOTH on (the cycle splits 50/50), and the persona " +
+            "is provisioned + topic-seeded. "
+          : "Product promotion is on and the persona is provisioned. ") +
+        "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
+        "site and fill description, icp, voice, search_topics)."
+      : "Personal-brand lane is on (the default) and the persona is provisioned + topic-seeded. The " +
+        "user did not ask for product promotion, so no product project is needed; they can turn on " +
+        "the promotion lane any time from the menu-bar checkmark. Setup can finish here.";
 
     return jsonContent({
       ok: true,
+      flags: { personal_brand: personalBrand, promotion },
       mode,
       persona: personaName,
       persona_created: personaCreated,
       persona_topics_seeded: personaTopicsSeeded,
       persona_topic_count: personaTopicCount,
       onboarding: onboardingSnapshot(),
-      next_step:
-        (mode === "personal_brand"
-          ? "Personal-brand mode is set and the persona is provisioned + topic-seeded. "
-          : "Promotion mode is set (the default), and the persona is provisioned so the user can flip " +
-            "to personal-brand from the menu-bar toggle any time. ") +
-        "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
-        "site and fill description, icp, voice, search_topics) — a product is set up regardless of mode.",
+      next_step,
     });
   }
 );
@@ -1736,6 +1743,7 @@ tool(
         latest_version: ver.latest,
         update_available: ver.update_available,
         mode: currentMode(),
+        flags: currentFlags(),
         update_hint: ver.update_available
           ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
             `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
@@ -3308,16 +3316,29 @@ function modeChosen(): boolean {
   }
 }
 
-// The current engagement mode ('promotion' | 'personal_brand'), surfaced in the
-// snapshot so the dashboard AND menu bar read it from ONE place (mode.json, the
-// same file saps_mode.py writes). Defaults to promotion when unset.
-function currentMode(): "promotion" | "personal_brand" {
+// The current engagement lane flags, surfaced in the snapshot so the dashboard
+// AND menu bar read them from ONE place (mode.json, the same file saps_mode.py
+// writes). Mirrors saps_mode.py get_flags(): explicit flag keys win; else map a
+// legacy {"mode": ...} string; else default personal ON / promotion OFF.
+function currentFlags(): { personal_brand: boolean; promotion: boolean } {
   try {
-    const m = (JSON.parse(fs.readFileSync(path.join(sapsStateDir(), "mode.json"), "utf-8")).mode || "").trim();
-    return m === "personal_brand" ? "personal_brand" : "promotion";
+    const d = JSON.parse(fs.readFileSync(path.join(sapsStateDir(), "mode.json"), "utf-8"));
+    if ("personal_brand" in d || "promotion" in d) {
+      return { personal_brand: !!d.personal_brand, promotion: !!d.promotion };
+    }
+    const m = (d.mode || "").trim();
+    if (m === "personal_brand") return { personal_brand: true, promotion: false };
+    if (m === "promotion") return { personal_brand: false, promotion: true };
   } catch {
-    return "promotion";
+    /* fall through to default */
   }
+  return { personal_brand: true, promotion: false };
+}
+
+// Derived legacy single-mode string (personal wins when on). Defaults to
+// personal_brand when unset (2026-06-29 default flip).
+function currentMode(): "promotion" | "personal_brand" {
+  return currentFlags().personal_brand ? "personal_brand" : "promotion";
 }
 
 // ---- Cross-instance "posting active" flag ----------------------------------
