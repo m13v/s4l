@@ -53,13 +53,18 @@ def _compute_snapshot():
     return snap_mod.compute()
 
 
-def _toggle_mode():
+def _toggle_lane(lane):
+    """Flip ONE engagement lane (personal_brand|promotion) via saps_mode.py and
+    return the new flags dict."""
+    if lane not in ("personal_brand", "promotion"):
+        lane = "personal_brand"
     py = os.environ.get("SAPS_PYTHON") or sys.executable or "python3"
     sm = os.path.join(_repo_dir(), "scripts", "saps_mode.py")
-    cur = (subprocess.run([py, sm, "get"], capture_output=True, text=True, timeout=15).stdout or "").strip() or "promotion"
-    nxt = "promotion" if cur == "personal_brand" else "personal_brand"
-    subprocess.run([py, sm, "set", nxt], capture_output=True, text=True, timeout=15)
-    return nxt
+    out = (subprocess.run([py, sm, "toggle", lane], capture_output=True, text=True, timeout=15).stdout or "").strip()
+    try:
+        return json.loads(out)
+    except Exception:
+        return _compute_snapshot().get("flags") or {"personal_brand": True, "promotion": False}
 
 
 def _result(data):
@@ -90,6 +95,7 @@ def _handle_tool(name, args):
             "latest_version": s.get("latest_version"),
             "update_available": s.get("update_available"),
             "mode": s.get("mode"),
+            "flags": s.get("flags"),
             "onboarding": s.get("onboarding"),
         })
     if name == "runtime" and (args.get("action") in (None, "status")):
