@@ -480,7 +480,7 @@ btnSetup.addEventListener("click", () => busy(btnSetup, "Starting\u2026", async 
       content: [{
         type: "text",
         text:
-          "Set up S4L end to end now. Inspect and repair the runtime, auto-detect " +
+          "Set up S4L plugin end to end now. Inspect and repair the runtime, auto-detect " +
           "and connect my X session, scan my profile, discover and research my product, then infer " +
           "and save a complete project with seeded search topics. Keep going without asking me to " +
           "approve each safe setup step. Ask only if I must interactively sign in or no product " +
