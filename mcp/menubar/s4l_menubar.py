@@ -638,6 +638,113 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
 
+    # ---- disable scheduled tasks (menu-bar driven) ------------------------
+    def _has_scheduled_tasks(self):
+        """Read-only: True if any S4L worker/autopilot task is registered in any
+        scheduled-tasks.json. Gates whether the 'Disable scheduled tasks' item is
+        worth showing."""
+        try:
+            wanted = set(WORKER_TASK_IDS) | set(DEPRECATED_TASK_IDS)
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                for t in d.get("scheduledTasks", []):
+                    if t.get("id") in wanted:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _disable_scheduled_tasks(self, _=None):
+        """Stop the autopilot: remove the draft/query scheduled tasks so they no
+        longer fire. Claude Desktop OWNS the live schedule and caches the registry
+        in memory, clobbering any live edit on the next fire — so the only reliable
+        way to disable them is to quit Claude, strip the tasks while it's down, then
+        relaunch. We warn the user with a modal FIRST that Claude Desktop will
+        restart (same shape as the reset confirm), since the app window will close
+        and reopen under them."""
+        if not self._has_scheduled_tasks():
+            self._alert("Nothing to disable",
+                        "No S4L scheduled tasks are registered on this account.")
+            return
+        choice = rumps.alert(
+            title="Disable scheduled tasks?",
+            message=(
+                "This stops the autopilot: the draft + query scheduled tasks are "
+                "removed so they no longer fire.\n\n"
+                "Claude Desktop will quit and restart to apply this — its window "
+                "will close and reopen in a moment. Nothing else is touched (your "
+                "X login, browser layer, and config all stay).\n\n"
+                "You can re-arm the schedule any time from this menu."
+            ),
+            ok="Disable & restart", cancel="Cancel",
+        )
+        if choice != 1:  # only default button (OK) proceeds
+            return
+        self._notify("S4L", "Disabling scheduled tasks… Claude will restart in a moment.")
+        threading.Thread(target=self._disable_tasks_work, daemon=True).start()
+
+    def _remove_scheduled_tasks(self):
+        """Strip ALL S4L worker + deprecated tasks from every scheduled-tasks.json
+        registry, and remove their on-disk task dirs. Caller MUST invoke this only
+        while Claude is DOWN (the running app caches the registry and clobbers a
+        live edit on the next fire). Best-effort; never raises. Sibling of
+        _rewrite_scheduled_task_cwd, but it DELETES the worker tasks instead of
+        relocating them."""
+        wanted = set(WORKER_TASK_IDS) | set(DEPRECATED_TASK_IDS)
+        try:
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                tasks = d.get("scheduledTasks") or []
+                kept = [t for t in tasks if t.get("id") not in wanted]
+                if len(kept) == len(tasks):
+                    continue
+                d["scheduledTasks"] = kept
+                try:
+                    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f))
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(d, fh, indent=2)
+                    os.replace(tmp, f)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Remove the on-disk task dirs (prompt/SKILL.md) so a stale file can't
+        # re-register them.
+        try:
+            import shutil
+            base = os.path.join(os.path.expanduser("~"), ".claude", "scheduled-tasks")
+            for tid in wanted:
+                shutil.rmtree(os.path.join(base, tid), ignore_errors=True)
+        except Exception:
+            pass
+
+    def _disable_tasks_work(self):
+        """Quit/kill Claude, strip the scheduled tasks while it's down, relaunch.
+        Mirror of _relocate_restart_work's restart block. The menu bar is a separate
+        launchd process, so killing Claude does not kill us."""
+        try:
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           capture_output=True, timeout=20)
+            time.sleep(4)
+            subprocess.run(["killall", "Claude"], capture_output=True)       # if quit was blocked
+            time.sleep(2)
+            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
+            time.sleep(1)
+            self._remove_scheduled_tasks()
+            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._notify("S4L", "Scheduled tasks disabled. Claude restarted.")
+        except Exception as e:
+            _capture(e, action="disable_scheduled_tasks")
+            self._notify("S4L", "Couldn't fully disable scheduled tasks — see logs.")
+
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
 
@@ -1511,6 +1618,8 @@ class S4LMenuBar(rumps.App):
                 rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
             )
         items.append(rumps.separator)
+        if self._has_scheduled_tasks():
+            items.append(rumps.MenuItem("Disable scheduled tasks…", callback=self._disable_scheduled_tasks))
         items.append(rumps.MenuItem("Reset test machine…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
