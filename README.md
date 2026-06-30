@@ -45,7 +45,7 @@ npx social-autoposter update
 
 ## Configure
 
-Tell your Claude agent: **"set me up on social-autoposter end to end"**. The
+Tell your Claude agent: **"set me up on social-autoposter plugin end to end"**. The
 setup skill treats that as a terminal goal:
 
 1. Inspect and repair the owned runtime.
