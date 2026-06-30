@@ -768,7 +768,19 @@ class S4LMenuBar(rumps.App):
             self._relocating = False
 
     def _open_dashboard(self, _=None):
-        url = st.panel_url()
+        # Prefer the LIVE MCP loopback panel (full interactivity — its buttons
+        # reach the MCP tool handlers) when Claude is up. When it's NOT, fall back
+        # to the always-on menu-bar dashboard server, which serves the SAME
+        # panel.html and answers read tools from scripts/snapshot.py — so "Open
+        # dashboard" renders the status view even with Claude closed (actions there
+        # degrade to "open Claude", except the local mode toggle).
+        url = st.panel_url() if st.loopback_reachable() else None
+        if not url:
+            try:
+                import dashboard_server  # mcp/menubar/dashboard_server.py
+                url = dashboard_server.url() or dashboard_server.start()
+            except Exception:
+                url = None
         if url:
             subprocess.run(["open", url], capture_output=True)
         else:
