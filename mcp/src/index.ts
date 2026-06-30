@@ -379,9 +379,10 @@ const server = new McpServer(
       "user and offer to run `runtime` with action:'update'. The `project_config` tool's status also " +
       "surfaces `update_available` and an `update_hint`.\n\n" +
       "TYPICAL FLOW: `project_config` (connect X + scan the profile) -> `engagement_mode` (after the " +
-      "profile scan, ASK the user: grow their personal brand or promote a product, and set it — this " +
-      "provisions the persona) -> `project_config` (configure the product project; always, regardless " +
-      "of mode) -> `queue_setup` + " +
+      "profile scan: personal-brand is ON by default, so ASK the user the ONE question — do they ALSO " +
+      "want to promote a product? — and call action:'set' with personal_brand:true and " +
+      "promotion:true|false; this provisions the persona) -> IF they wanted promotion, `project_config` " +
+      "(configure the product project) -> `queue_setup` + " +
       "`create_scheduled_task` (set up the draft autopilot once) -> the autopilot then runs on its own " +
       "(scans, drafts via the queue + worker, and merges into the approval cards; nothing posts) -> the " +
       "user approves in the menu bar -> `post_drafts` (post the approved ones) -> `get_stats` (see " +
@@ -1687,17 +1688,19 @@ tool(
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
           "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
           "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
-          "SECOND (engagement mode — ASK THE USER, do not infer): ask whether they want to grow their " +
-          "PERSONAL BRAND (organic, link-free engagement in their own voice) or PROMOTE a PRODUCT (the " +
-          "default marketing pipeline), then call the `engagement_mode` tool action:'set' with their " +
-          "choice AND the voice/description/topics you just extracted (this provisions a persona " +
-          "grounded in this scan; pass the grounding even for promotion). " +
-          "THIRD (product, from their website — always, regardless of mode): follow " +
+          "SECOND (engagement lanes — ASK THE USER, do not infer): the PERSONAL BRAND lane (organic, " +
+          "link-free engagement in their own voice) is ON by default, so ask the ONE question — do they " +
+          "ALSO want to PROMOTE a PRODUCT (the marketing lane, link replies)? Both lanes can run (the " +
+          "cycle splits 50/50). Call the `engagement_mode` tool action:'set' with personal_brand:true, " +
+          "promotion:true|false AND the voice/description/topics you just extracted (this provisions a " +
+          "persona grounded in this scan). " +
+          "THIRD (product, ONLY if they wanted promotion): follow " +
           "website_research_instructions — discover the product URL from config, context, profile " +
           "links/posts, or public research and read 5+ of its pages to fill description, " +
           "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
           "just captured. Save the best conservative supported fields without a confirmation " +
-          "round-trip. Ask only if no product can be identified or a required field is unknowable.",
+          "round-trip. Ask only if no product can be identified or a required field is unknowable. If " +
+          "they only want personal brand, SKIP the product step.",
       });
     }
 
@@ -3134,7 +3137,7 @@ async function buildSnapshot() {
       auto_update_on: false, version: VERSION, latest_version: null,
       update_available: false, runtime_ready: runtimeReady(),
       runtime_provisioning: isProvisioning(), setup_complete: false,
-      mode: "promotion", onboarding: onboardingSnapshot(),
+      mode: currentMode(), flags: currentFlags(), onboarding: onboardingSnapshot(),
     };
   }
   // MCP-only side effects (snapshot.py is a pure reader and does none of these):
