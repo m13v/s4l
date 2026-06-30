@@ -51,7 +51,15 @@ except Exception:
         return None
 
 CONFIG_PATH = os.path.expanduser("~/social-autoposter/config.json")
-OUR_HANDLE = _resolve_account("twitter") or "m13v_"
+OUR_HANDLE = _resolve_account("twitter")
+if not OUR_HANDLE:
+    # No hardcoded fallback: scanning/attributing under a default handle silently
+    # impersonates the repo owner. Refuse to run so the missing config surfaces.
+    sys.stderr.write(
+        "[scan_twitter_followups] no Twitter handle configured "
+        "(accounts.twitter.handle / AUTOPOSTER_TWITTER_HANDLE); refusing to run "
+        "to avoid wrong-account attribution. Run connect_x first.\n")
+    sys.exit(1)
 DEFAULT_DAYS = 14
 DEFAULT_MAX_URLS = 40
 REPO_DIR = os.path.expanduser("~/social-autoposter")
