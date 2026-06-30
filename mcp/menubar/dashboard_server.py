@@ -107,8 +107,9 @@ def _handle_tool(name, args):
         })
     if name == "engagement_mode":
         if (args.get("action") or "get") == "toggle":
-            return _result({"mode": _toggle_mode()})
-        return _result({"mode": _compute_snapshot().get("mode")})
+            return _result({"flags": _toggle_lane(args.get("lane") or "personal_brand")})
+        s = _compute_snapshot()
+        return _result({"mode": s.get("mode"), "flags": s.get("flags")})
     # Everything else (setup, schedule, connect_x, install, show_browser, stats)
     # needs the agent/MCP — degrade gracefully.
     return _err(_NEEDS_CLAUDE)
