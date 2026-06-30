@@ -329,50 +329,44 @@ class S4LMenuBar(rumps.App):
             self._notify("S4L", f"{reason} Open Claude and type your request there.")
         return False
 
-    def _send_to_claude(self, prompt):
-        """Type a prompt into the Claude Desktop composer and submit it via
-        AppleScript GUI scripting. The menu bar can't use the in-iframe
-        sendMessage bridge, so this drives the keyboard instead. On any failure
-        (most often Accessibility not yet effective) it ALWAYS degrades to copying
-        the prompt to the clipboard + opening Claude, so the user can paste it
-        manually rather than hitting a dead end."""
-        # If we can't post keystrokes, don't silently go nowhere: request the grant
-        # AND copy the prompt to the clipboard so the user can paste it right now,
-        # without waiting for the TCC grant to take effect (it often needs a
-        # restart of this process to register).
-        if not st.accessibility_trusted():
-            try:
-                st.request_accessibility()
-            except Exception:
-                pass
-            return self._manual_paste_fallback(
-                prompt,
-                "Couldn't auto-type (enable S4L under System Settings → Privacy & "
-                "Security → Accessibility to automate next time).",
-            )
-        try:
-            r = subprocess.run(
-                ["osascript", "-e", _claude_send_script(prompt)],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-        except Exception:
-            r = None
-        if r is not None and r.returncode == 0:
-            return True
-        # Automation failed despite a trusted check (stale grant / transient): fall
-        # back to the clipboard so the action still completes by a manual paste.
-        err = (r.stderr or "").lower() if r else ""
-        if "1743" in err or "assistive" in err or "not allowed" in err or "-25211" in err:
-            reason = "Accessibility isn't effective yet (it can need a restart)."
+    def _clipboard_prompt(self, prompt, title, action_desc):
+        """The menu bar's UNIVERSAL way to hand an agent-driven action to Claude
+        without depending on the MCP/loopback being up (the menu bar can't inject
+        into the chat like the panel's sendMessage): copy the prompt to the
+        clipboard, show a modal, and open Claude so the user pastes it (Cmd+V,
+        Enter). This is the same reliable pattern re-arm has always used,
+        generalized to every agent action. NO auto-type (focus/timing/Accessibility
+        flaky — that path was the source of frozen-looking menus), NO MCP call."""
+        copied = self._copy_to_clipboard(prompt)
+        if copied:
+            msg = ("The prompt is copied to your clipboard.\n\nClick OK, then click "
+                   "into the Claude chat, paste it (Cmd+V), and press Enter — "
+                   + action_desc + ".")
         else:
-            reason = "Couldn't auto-type into Claude."
-        return self._manual_paste_fallback(prompt, reason)
+            msg = "Click OK, then open Claude and ask it to " + action_desc + "."
+        try:
+            rumps.alert(title=title, message=msg, ok="OK")
+        except Exception:
+            self._notify("S4L · prompt copied" if copied else "S4L",
+                         "Paste the prompt into Claude (Cmd+V) and press Enter.")
+        self._open_claude()
+        return True
 
-    # Model-driven actions: type the matching prompt into Claude's composer.
+    def _send_to_claude(self, prompt):
+        """Back-compat shim: every agent-driven menu action now uses the reliable
+        clipboard-prompt model (no flaky auto-type). Delegates to _clipboard_prompt."""
+        return self._clipboard_prompt(
+            prompt, "Send to Claude", "Claude will take it from there"
+        )
+
+    # Agent-driven action: hand the full setup prompt to Claude via the clipboard.
     def _setup(self, _=None):
-        self._send_to_claude(SETUP_PROMPT)
+        self._clipboard_prompt(
+            SETUP_PROMPT,
+            "Set up S4L in Claude",
+            "Claude will set up your runtime, connect X, configure your project, and "
+            "schedule the autopilot",
+        )
 
 
     def _rearm(self, _=None):
@@ -385,26 +379,11 @@ class S4LMenuBar(rumps.App):
         widget's button does this in one click via app.sendMessage — no paste.) We
         do NOT auto-type (focus/timing flaky) and do NOT write the registry directly
         (can't reliably target a just-switched-into account)."""
-        copied = self._copy_to_clipboard(REARM_PROMPT)
-        # Show the modal BEFORE opening Claude. If we raise Claude first, the NSAlert
-        # renders BEHIND it (invisible) while still blocking the main thread, which
-        # is what made the menu look frozen/greyed with no visible dialog. Showing
-        # it first keeps it frontmost; we open Claude after the user dismisses it.
-        # (_notify's osascript notification silently no-ops from this bundle-less
-        # launchd process, so a modal is the only reliable feedback.)
-        msg = (
-            "The setup prompt is copied to your clipboard.\n\nClick OK, then click into "
-            "the Claude chat, paste it (Cmd+V), and press Enter — that schedules the "
-            "draft tasks for this account."
-            if copied
-            else "Click OK, then open Claude and ask it to set up the draft schedule for this account."
+        self._clipboard_prompt(
+            REARM_PROMPT,
+            "Set up the draft schedule",
+            "that schedules the draft tasks for this account",
         )
-        try:
-            rumps.alert(title="Set up the draft schedule", message=msg, ok="OK")
-        except Exception:
-            self._notify("S4L · setup prompt copied" if copied else "S4L",
-                         "Paste the prompt into Claude (Cmd+V) and press Enter.")
-        self._open_claude()
 
     # ---- schedule-state detection ----------------------------------------
     def _schedule_state(self):
