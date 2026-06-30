@@ -315,6 +315,52 @@ function runDoctorSync(options = {}) {
         );
   });
 
+  add("autopilot_kicker", "Autopilot draft kicker installed + loaded", () => {
+    if (process.platform !== "darwin") {
+      return result("pass", "not applicable on this platform");
+    }
+    const label = "com.m13v.social-twitter-cycle";
+    const plist = path.join(
+      home,
+      "Library",
+      "LaunchAgents",
+      `${label}.plist`
+    );
+    const onDisk = fs.existsSync(plist);
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const printed = spawnSync(
+      "launchctl",
+      ["print", `gui/${uid}/${label}`],
+      { encoding: "utf8", timeout: 10000 }
+    );
+    const loaded = printed.status === 0;
+    if (loaded && onDisk) {
+      return result("pass", "kicker plist installed and loaded in launchd");
+    }
+    if (phase === "pre_connect") {
+      return result(
+        "expected",
+        "kicker installs after a project (or the personal-brand persona) is ready"
+      );
+    }
+    if (onDisk && !loaded) {
+      return result(
+        "fail",
+        "kicker plist exists but is NOT loaded in launchd (no drafts will be produced)",
+        "run runtime action:'install', or bootstrap the plist: " +
+          `launchctl bootstrap gui/${uid} ${plist}`
+      );
+    }
+    // plist missing: could be a legitimately-unconfigured box, so warn (non-blocking)
+    // rather than hard-fail — but make it visible so a stuck autopilot is caught.
+    return result(
+      "warn",
+      "autopilot kicker not installed (no drafts until it is)",
+      "finish setup: choose a mode (engagement_mode) and schedule the autopilot " +
+        "(queue_setup). The kicker auto-installs once a project or the persona is ready."
+    );
+  });
+
   const completedChecks = checks.map((check) => {
     const checkStarted = Date.now();
     try {
