@@ -134,13 +134,41 @@ export function projectExists(name: string): boolean {
   }
 }
 
+// Strip stray JSON-array syntax that leaks into a single topic when a
+// stringified array was split on commas (leading "[", trailing "]", and the
+// surrounding quotes on each element). Without this, topics like '["AI video
+// generation"' and '"ex-Google"]' get seeded verbatim and poison every search
+// query with literal [, ] and " characters (Karol, 2026-06-30).
+function stripTopicSyntax(x: string): string {
+  let s = String(x).trim();
+  s = s.replace(/^\[+/, "").replace(/\]+$/, "").trim();
+  s = s.replace(/^["']+/, "").replace(/["']+$/, "").trim();
+  return s;
+}
+
 function normalizeTopics(t: string[] | string | undefined): string[] | undefined {
   if (t == null) return undefined;
-  if (Array.isArray(t)) return t.map((x) => String(x).trim()).filter(Boolean);
-  return String(t)
-    .split(/[,\n]/)
-    .map((x) => x.trim())
-    .filter(Boolean);
+  let raw: unknown[];
+  if (Array.isArray(t)) {
+    raw = t;
+  } else {
+    const s = String(t).trim();
+    // The model sometimes passes search_topics as a stringified JSON array,
+    // e.g. '["AI video generation", "ex-Google / interviewing engineers"]'.
+    // Splitting that on commas bakes [, ] and " into each topic, so parse it
+    // as JSON first and only fall back to comma/newline splitting for plain
+    // text. stripTopicSyntax below is a defensive second layer either way.
+    let parsed: unknown = null;
+    if (s.startsWith("[")) {
+      try {
+        parsed = JSON.parse(s);
+      } catch {
+        parsed = null;
+      }
+    }
+    raw = Array.isArray(parsed) ? parsed : s.split(/[,\n]/);
+  }
+  return raw.map((x) => stripTopicSyntax(String(x))).filter(Boolean);
 }
 
 // The fields the user actually supplies via setup. Only fields that are present
