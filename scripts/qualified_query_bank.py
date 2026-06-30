@@ -62,6 +62,17 @@ from http_api import api_get  # noqa: E402
 INVENT_MIN_SUPPLY = 1
 INVENT_FETCH_LIMIT = 200
 
+# Per-layer bank caps (2026-06-29): the cycle replays the picked project's whole
+# bank every run, so an unbounded bank means hundreds of searches per cycle (S4L
+# hit 161 = 57 proven + 104 invented). Cap each layer to its strongest entries:
+# proven = top-N by clicks (build_bank already sorts that way), invented = top-N
+# by supply. Keeps the highest-converting queries, drops the long zero-click tail.
+# Overridable per-invocation via --proven-limit / --invented-limit. The seed
+# (cold-start) backfill target follows proven_limit + invented_limit so no
+# project, new or established, fans out past that combined ceiling.
+PROVEN_LIMIT = 10
+INVENTED_LIMIT = 10
+
 
 def normalize(q: str) -> str:
     """Strip per-cycle operators so phrasings that differ only by freshness/
@@ -276,6 +287,12 @@ def main():
                     help="...OR >= this many total non-bot clicks.")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap the bank to the top-N strongest queries (safety budget).")
+    ap.add_argument("--proven-limit", type=int, default=PROVEN_LIMIT,
+                    help=f"Cap the proven-engagement layer to its top-N by clicks "
+                         f"(default {PROVEN_LIMIT}).")
+    ap.add_argument("--invented-limit", type=int, default=INVENTED_LIMIT,
+                    help=f"Cap the invented-supply layer to its top-N by supply "
+                         f"(default {INVENTED_LIMIT}).")
     ap.add_argument("--all", action="store_true",
                     help="Debug: print per-project bank sizes instead of one project's queries.")
     ap.add_argument("--from-projects-json", action="store_true",
@@ -313,24 +330,32 @@ def main():
             name = (p or {}).get("name") if isinstance(p, dict) else None
             if not name:
                 continue
-            bank = build_bank(name, args.min_likes, args.min_clicks, args.limit)
+            bank = build_bank(name, args.min_likes, args.min_clicks, args.proven_limit)
             proven_size = len(bank)
             invent_added = 0
             if not args.no_invented:
                 invented = fetch_invented_queries(name, args.invent_min_supply)
+                # Cap the invented layer to its strongest-by-supply top-N before
+                # merge (2026-06-29). fetch returns up to INVENT_FETCH_LIMIT rows;
+                # we only replay the best `--invented-limit` of them per cycle.
+                invented = sorted(
+                    invented,
+                    key=lambda r: (r.get("supply") or r.get("tweets_found") or 0),
+                    reverse=True,
+                )[: args.invented_limit]
                 bank = merge_invented(bank, invented)
                 invent_added = len(bank) - proven_size
             # Seed-query backfill: when proven+invented is still thin, fan out
-            # from the >=30 real X queries setup persisted into
-            # project_search_queries (scripts/seed_search_queries.py). This is
-            # the cold-start QUERY supply — it turns a 1-query early cycle into a
-            # ~30-query one. Skipped entirely once the proven+invented bank
-            # already meets the target. (2026-06-04)
+            # from the real X queries setup persisted into project_search_queries
+            # (scripts/seed_search_queries.py). This is the cold-start QUERY supply.
+            # The target is the proven+invented ceiling (2026-06-29) so a cold-start
+            # project fans out to at most that many seed queries and an established
+            # project (already at the ceiling) adds none.
             seed_added = 0
             if not args.no_seed:
                 pre_seed = len(bank)
                 seed_q = fetch_seed_queries(name)
-                bank = backfill_seed(bank, seed_q, args.seed_target)
+                bank = backfill_seed(bank, seed_q, args.proven_limit + args.invented_limit)
                 seed_added = len(bank) - pre_seed
             # Cold-start bootstrap: even seed queries can be empty (setup's
             # query-expansion failed, or this is a legacy project configured
@@ -378,16 +403,22 @@ def main():
         print("qualified_query_bank: --project required (or --all)", file=sys.stderr)
         return 2
 
-    bank = build_bank(args.project, args.min_likes, args.min_clicks, args.limit)
+    bank = build_bank(args.project, args.min_likes, args.min_clicks, args.proven_limit)
     proven_size = len(bank)
     if not args.no_invented:
         invented = fetch_invented_queries(args.project, args.invent_min_supply)
+        invented = sorted(
+            invented,
+            key=lambda r: (r.get("supply") or r.get("tweets_found") or 0),
+            reverse=True,
+        )[: args.invented_limit]
         bank = merge_invented(bank, invented)
     invent_added = len(bank) - proven_size
     seed_added = 0
     if not args.no_seed:
         pre_seed = len(bank)
-        bank = backfill_seed(bank, fetch_seed_queries(args.project), args.seed_target)
+        bank = backfill_seed(bank, fetch_seed_queries(args.project),
+                             args.proven_limit + args.invented_limit)
         seed_added = len(bank) - pre_seed
     json.dump(bank, sys.stdout)
     print()
