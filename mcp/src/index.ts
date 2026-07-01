@@ -56,6 +56,7 @@ import {
   resolveChrome,
   ensureMenubar,
   menubarRunning,
+  clearMenubarStop,
   ensurePipelineCurrent,
   ensureRuntimeProvisioned,
 } from "./runtime.js";
@@ -2433,11 +2434,15 @@ tool(
     description:
       "Relaunch the always-on S4L menu bar (tray) app after it was quit. Re-loads its " +
       "LaunchAgent (installing the menu bar first if needed). Use when the dashboard reports the menu " +
-      "bar is not running, or the user asks to bring the S4L tray icon back. Does NOT touch the draft " +
+      "bar is not running, or the user asks to start S4L, restart S4L, or bring the S4L tray icon " +
+      "back. Does NOT touch the draft " +
       "schedule, X connection, or any posting — it only restarts the tray UI.",
     inputSchema: {},
   },
   async () => {
+    // Explicit user intent to start: lift the stop sentinel a tray Quit wrote,
+    // otherwise ensureMenubar() would no-op forever.
+    clearMenubarStop();
     const res = await ensureMenubar();
     const running = await menubarRunning();
     return jsonContent({
@@ -2485,6 +2490,11 @@ tool(
   },
   async () => {
     ensureQueueWorkerToolsAllowed();
+    // Re-arming the autopilot is an explicit "start S4L" action: lift a prior
+    // tray Quit so the review cards have a surface again. Best-effort and
+    // async — task specs must return regardless of tray state.
+    clearMenubarStop();
+    void ensureMenubar();
     // Write each worker's canonical SKILL.md to disk NOW, before the agent calls
     // create_scheduled_task. The host's create_scheduled_task can report a task
     // "already exists" (e.g. a stale Routines registration left after a reset) and
