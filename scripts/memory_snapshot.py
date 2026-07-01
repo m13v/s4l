@@ -799,6 +799,118 @@ def reaper_status() -> dict[str, Any] | None:
         return None
 
 
+def _tail_lines(path: Path, n: int, approx_line_bytes: int = 4096) -> list[str]:
+    """Return the last `n` lines of a possibly-large file without reading it all.
+    Reads a bounded tail window (n * approx_line_bytes) from the end. Best-effort."""
+    try:
+        size = path.stat().st_size
+        want = min(size, n * approx_line_bytes)
+        with path.open("rb") as f:
+            f.seek(size - want)
+            data = f.read()
+        text = data.decode("utf-8", "replace")
+        lines = text.splitlines()
+        # Drop a possibly-truncated first line when we did not start at byte 0.
+        if want < size and lines:
+            lines = lines[1:]
+        return lines[-n:]
+    except Exception:
+        return []
+
+
+def _maybe_leak_alert(output: Path, current: dict[str, Any]) -> None:
+    """Fire a Sentry event when a monitored process group climbs monotonically for
+    N consecutive snapshots — the leak SHAPE that took down Karol's box (claude
+    workers + remote-macos-use MCP servers ratcheting up unbounded). This catches a
+    leak while it is GROWING, hours before the box freezes, instead of us finding out
+    from a support ticket. Best-effort + rate-limited by a cooldown file so a genuine
+    ongoing leak pages once per window, not every minute.
+
+    Runs on the JSONL path (every ~minute), reading its own recent history from the
+    file just written, so it needs no extra state beyond a small cooldown marker."""
+    groups_to_watch = ("claude_cli", "remote_macos_mcp_servers")
+    samples = _env_int("SAPS_LEAK_ALERT_SAMPLES", 5)      # consecutive climbs required
+    floor = _env_int("SAPS_LEAK_ALERT_FLOOR", 20)          # ignore below this count
+    climb_min = _env_int("SAPS_LEAK_ALERT_CLIMB_MIN", 12)  # min first->last growth
+    cooldown_s = _env_int("SAPS_LEAK_ALERT_COOLDOWN", 1800)
+    if samples < 3:
+        samples = 3
+
+    tail = _tail_lines(output, samples)
+    series: list[dict[str, Any]] = []
+    for line in tail:
+        try:
+            series.append(json.loads(line))
+        except Exception:
+            continue
+    if len(series) < samples:
+        return
+
+    def counts(name: str) -> list[int]:
+        vals = []
+        for snap in series[-samples:]:
+            g = (snap.get("groups") or {}).get(name) or {}
+            c = g.get("count")
+            vals.append(int(c) if isinstance(c, (int, float)) else 0)
+        return vals
+
+    leaking: list[str] = []
+    for name in groups_to_watch:
+        vals = counts(name)
+        if len(vals) < samples:
+            continue
+        monotonic = all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
+        grew = (vals[-1] - vals[0]) >= climb_min
+        if monotonic and grew and vals[-1] >= floor:
+            leaking.append(f"{name} {vals[0]}->{vals[-1]} over {samples} samples")
+
+    if not leaking:
+        return
+
+    # Cooldown: one page per window even if the leak persists for hours.
+    state = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
+    cooldown = state / "leak-alert.cooldown"
+    now = time.time()
+    try:
+        if cooldown.exists() and (now - cooldown.stat().st_mtime) < cooldown_s:
+            return
+    except OSError:
+        pass
+
+    reason = "; ".join(leaking)
+    # Always emit the stderr marker (parsed into the dashboard even without Sentry).
+    print(f"LEAK_ALERT {reason}", file=sys.stderr)
+    try:
+        import sentry_init
+
+        sentry_init.init()
+        sentry_init.capture_message(
+            f"process-group leak climbing: {reason}",
+            level="warning",
+            tags={
+                "component": "leak_detector",
+                "hostname": socket.gethostname(),
+                "claude_desktop_version": claude_desktop_version() or "unknown",
+                "app_version": _app_version() or "unknown",
+            },
+        )
+        sentry_init.flush(3.0)
+    except Exception:
+        pass
+    try:
+        state.mkdir(parents=True, exist_ok=True)
+        cooldown.write_text(str(now))
+    except Exception:
+        pass
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default=os.environ.get("SAPS_MEMORY_SNAPSHOT_LOG", str(DEFAULT_OUTPUT)))
@@ -822,6 +934,10 @@ def main() -> int:
     snapshot = build_snapshot(max(1, args.top))
     with output.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(snapshot, sort_keys=True, separators=(",", ":")) + "\n")
+
+    # Proactive leak page: reads the tail of the JSONL we just appended to, so no
+    # extra state. Best-effort; never blocks the snapshot write.
+    _maybe_leak_alert(output, snapshot)
 
     groups = snapshot.get("groups", {})
     queues = snapshot.get("queues", {})
