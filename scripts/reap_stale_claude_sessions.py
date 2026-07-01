@@ -594,4 +594,15 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as e:  # never let the reaper itself crash the launchd job loudly
         print(f"[claude-reaper] error: {e}", file=sys.stderr)
+        # If the reaper itself dies, the queue-worker session leak resumes silently
+        # and the box climbs back toward OOM with no signal. This is the only channel
+        # that surfaces a dead reaper to us. The reaper doesn't import http_api, so
+        # Sentry was never init()'d; do it here. Best-effort, never re-raise.
+        try:
+            import sentry_init
+            sentry_init.init()
+            sentry_init.capture_exception(e, tags={"component": "claude_reaper"})
+            sentry_init.flush(2.0)
+        except Exception:
+            pass
         sys.exit(0)
