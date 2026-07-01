@@ -1384,6 +1384,18 @@ tool(
 
     completeOnboardingMilestone("mode_chosen", { personal_brand: personalBrand, promotion, persona: personaName });
 
+    // Personal-brand-only is a first-class setup path: the persona is the draftable
+    // project, so seeding its topics IS the topics_seeded milestone. Without this the
+    // product path (project_config) is the only place that completes it, leaving a
+    // persona-only checklist stuck at "topics pending" even though topics are live.
+    if (personalBrand && personaTopicsSeeded) {
+      completeOnboardingMilestone("topics_seeded", {
+        project: personaName,
+        topic_count: personaTopicCount,
+        persona: true,
+      });
+    }
+
     // Install/refresh the launchd kicker NOW. For a personal-brand-only setup the
     // persona is the only draftable project (no managed product), so nothing else
     // would trigger the install until a later queue-worker boot — leaving the user
