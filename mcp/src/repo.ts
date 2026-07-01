@@ -249,6 +249,7 @@ export interface PlanCandidate {
   engagement_style?: string;
   link_url?: string;
   link_keyword?: string;
+  matched_project?: string;
   search_topic?: string;
   language?: string;
   approved?: boolean;
