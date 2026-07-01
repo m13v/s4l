@@ -103,6 +103,16 @@ SIG_REQUIRED = (
 DISCLAIMER_HINT = "Helpers/disclaimer"
 SIG_EXCLUDED = (DISCLAIMER_HINT,)
 
+# A LOOSER probe used purely for telemetry (never for killing): any process that
+# looks like a bundled claude-code agent-mode worker, even if it does NOT satisfy
+# the full SIG_REQUIRED tuple or its session path fails UUID_RE. This is the exact
+# blind spot that let Karol's box leak undetected: a newer Claude Code changed the
+# session-path shape so UUID_RE stopped matching, the worker fell out of `procs`,
+# and the reaper saw "nothing to do" while ~289 workers piled up. We count these
+# separately (`unparsed_worker_procs`) so a future regression is VISIBLE centrally
+# instead of silent.
+WORKER_PROBE = ("claude-code/", "--input-format stream-json")
+
 UUID_RE = re.compile(r"local-agent-mode-sessions/([0-9a-fA-F-]{36})")
 
 # The paired leak: every leaked `claude` worker spawns a `mcp-server-macos-use`
@@ -158,15 +168,39 @@ def parse_etime(etime: str) -> int:
 def snapshot():
     """Snapshot the process table once.
 
-    Returns (procs, by_pid, macos_mcp, meta):
+    Returns (procs, by_pid, macos_mcp, meta, stats):
       * procs     — claude agent-mode worker-signature processes (the primary target).
       * by_pid    — {pid: cmd} for every process (used to pair the disclaimer stub).
       * macos_mcp — {pid, ppid, age, cmd} for every `mcp-server-macos-use` node server
                     (the paired leak, reaped in main()).
       * meta      — {pid: {ppid, age}} for every process, so main() can tell whether an
                     MCP server's parent is still alive (orphan detection).
+      * stats     — {ps_timed_out, snapshot_empty, worker_probe_seen, reapable_workers,
+                    unparsed_worker_procs, macos_mcp_seen, total_procs}. Pure telemetry
+                    so a future regression (e.g. UUID_RE stops matching a newer Claude
+                    Code, the exact blind spot on Karol's box) is VISIBLE centrally
+                    instead of silently piling up.
     """
-    out = _run_ps()
+    stats = {
+        "ps_timed_out": False,
+        "snapshot_empty": False,
+        "worker_probe_seen": 0,     # procs that look like a claude-code agent worker
+        "reapable_workers": 0,      # of those, ones that satisfy SIG + UUID (=len(procs))
+        "unparsed_worker_procs": 0, # probe-positive but NOT reapable (regex/sig miss)
+        "macos_mcp_seen": 0,
+        "total_procs": 0,
+    }
+    try:
+        out = _run_ps()
+    except subprocess.TimeoutExpired:
+        # ps timed out even after the retry (box is at load 75 / 90% sys under a
+        # runaway leak). Surface it: a blind reaper cycle is a first-class datapoint,
+        # not a swallowed exception.
+        stats["ps_timed_out"] = True
+        stats["snapshot_empty"] = True
+        return [], {}, [], {}, stats
+    if not out.strip():
+        stats["snapshot_empty"] = True
     me = os.getpid()
     procs = []
     macos_mcp = []
@@ -178,6 +212,7 @@ def snapshot():
             continue
         pid, ppid, etime, cmd = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
         by_pid[pid] = cmd
+        stats["total_procs"] += 1
         try:
             age = parse_etime(etime)
         except Exception:
@@ -189,17 +224,34 @@ def snapshot():
         # claude worker signature; these are separate node procs the workers spawn.
         if MACOS_MCP_RE.search(cmd) and not _SSH_RE.match(cmd):
             macos_mcp.append({"pid": pid, "ppid": ppid, "age": age, "cmd": cmd})
+            stats["macos_mcp_seen"] += 1
             continue
-        # (b) claude agent-mode worker sessions.
+        # Telemetry probe: does this look like a claude-code agent worker at all?
+        # Deliberately looser than SIG_REQUIRED, and it EXCLUDES the disclaimer stub
+        # so we don't double-count the launcher parent.
+        is_probe = (
+            all(tok in cmd for tok in WORKER_PROBE)
+            and not any(tok in cmd for tok in SIG_EXCLUDED)
+        )
+        if is_probe:
+            stats["worker_probe_seen"] += 1
+        # (b) claude agent-mode worker sessions — the REAPABLE set.
         if not all(tok in cmd for tok in SIG_REQUIRED):
+            if is_probe:
+                stats["unparsed_worker_procs"] += 1  # looks like a worker, sig miss
             continue
         if any(tok in cmd for tok in SIG_EXCLUDED):
             continue
         u = UUID_RE.search(cmd)
         if not u:
+            # Full signature but the session path shape defeated UUID_RE — THE Karol
+            # blind spot. Count it so the leak is never invisible again.
+            if is_probe:
+                stats["unparsed_worker_procs"] += 1
             continue
         procs.append({"pid": pid, "ppid": ppid, "age": age, "uuid": u.group(1), "cmd": cmd})
-    return procs, by_pid, macos_mcp, meta
+    stats["reapable_workers"] = len(procs)
+    return procs, by_pid, macos_mcp, meta, stats
 
 
 def kill(pid: int) -> bool:
@@ -230,6 +282,24 @@ def _state_dir() -> str:
     return os.environ.get("SAPS_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
+
+
+def write_status(status: dict) -> None:
+    """Persist the last reaper cycle to <state_dir>/claude-queue/reaper-status.json
+    (atomic write). memory_snapshot.py reads this file and carries it on the heartbeat,
+    so the reaper — a SEPARATE launchd job whose stderr only lands in a local file — is
+    finally observable centrally. Mirrors the drain_status.json pattern. Best-effort:
+    the reaper's real work must never fail because telemetry could not be written."""
+    try:
+        d = os.path.join(_state_dir(), "claude-queue")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "reaper-status.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(status, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 def count_running_jobs():
@@ -321,7 +391,7 @@ def main() -> int:
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
 
-    procs, by_pid, macos_mcp, meta = snapshot()
+    procs, by_pid, macos_mcp, meta, stats = snapshot()
 
     # Group by session uuid.
     groups: dict[str, list[dict]] = {}
@@ -417,18 +487,47 @@ def main() -> int:
         if dry or kill(mp["pid"]):
             macos_killed += 1
 
-    if not killed and not disclaimers and not macos_killed:
-        # Nothing reapable this run (common no-leak path).
-        return 0
-
     mode = "queue" if inflight is not None else "age-fallback"
+    leaked_groups = sum(1 for g in groups.values() if len(g) > 1)
+
+    # Always persist the cycle outcome + always emit ONE structured marker, even on
+    # the common no-leak path. Two reasons this replaced the old silent early-return:
+    #   * The reaper is a separate launchd job; without a per-cycle heartbeat there is
+    #     no way to tell "reaper ran and found nothing" from "reaper is dead/stuck".
+    #   * `unparsed_worker_procs > 0` on a quiet cycle is the EARLY WARNING that the
+    #     worker signature has drifted (Karol's blind spot) — it must be visible even
+    #     when we killed nothing, precisely because we killed nothing.
+    status = {
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "dry_run": bool(dry),
+        "mode": mode,
+        "inflight": inflight,
+        "ceiling_sec": max_age,
+        "max_group": max_group,
+        "leaked_groups": leaked_groups,
+        "claude_killed": killed,
+        "disclaimer_killed": disclaimers,
+        "macos_mcp_killed": macos_killed,
+        "spared_claim_pids": sorted(claim_pids),
+        "worker_probe_seen": stats["worker_probe_seen"],
+        "reapable_workers": stats["reapable_workers"],
+        "unparsed_worker_procs": stats["unparsed_worker_procs"],
+        "macos_mcp_seen": stats["macos_mcp_seen"],
+        "total_procs": stats["total_procs"],
+        "ps_timed_out": stats["ps_timed_out"],
+        "snapshot_empty": stats["snapshot_empty"],
+    }
+    write_status(status)
+
     prefix = "[claude-reaper]" + (" DRY-RUN" if dry else "")
     print(
-        f"{prefix} reaped {killed} stale agent-mode claude session(s)"
-        f" + {disclaimers} disclaimer stub(s) + {macos_killed} remote-macos-mcp server(s)"
-        f" across {sum(1 for g in groups.values() if len(g) > 1)}"
-        f" leaked uuid group(s); mode={mode} inflight={inflight} ceiling={max_age}s"
-        f" spared_claim_pids={sorted(claim_pids)} max_group={max_group}",
+        f"{prefix} cycle mode={mode} inflight={inflight} ceiling={max_age}s"
+        f" worker_seen={stats['worker_probe_seen']} reapable={stats['reapable_workers']}"
+        f" unparsed={stats['unparsed_worker_procs']} leaked_groups={leaked_groups}"
+        f" mcp_seen={stats['macos_mcp_seen']} killed={killed}"
+        f" disclaimer_killed={disclaimers} mcp_killed={macos_killed}"
+        f" ps_timeout={int(stats['ps_timed_out'])} empty={int(stats['snapshot_empty'])}"
+        f" max_group={max_group}",
         file=sys.stderr,
     )
     return 0
