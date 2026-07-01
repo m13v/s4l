@@ -483,6 +483,29 @@ def review_queue_posted_count():
     return sum(1 for c in cands if c.get("posted") is True)
 
 
+def _persona_project_names():
+    """Names of persona projects (config entries with `persona: true`).
+
+    Persona drafts are the personal-brand lane: the cycle runs with
+    TWITTER_TAIL_LINK_RATE=0, so the actual reply ships LINK-FREE. But the plan
+    still carries the resolved project website in `link_url` (twitter_gen_links.py
+    resolves it from the persona project's `website` regardless of the tail-link
+    rate), which made the review card render a tail link back to the user's own
+    profile that never actually posts. Strip link_url for these so the card
+    matches what lands on X. Returns a set; empty on any read failure (fail open =
+    keep showing the link)."""
+    try:
+        repo = os.environ.get("SAPS_REPO_DIR") or str(Path.home() / "social-autoposter")
+        cfg = json.loads(Path(repo, "config.json").read_text())
+        return {
+            str(p.get("name"))
+            for p in (cfg.get("projects") or [])
+            if p.get("persona") is True and p.get("name")
+        }
+    except Exception:
+        return set()
+
+
 def review_drafts(plan, batch="review-queue"):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
@@ -494,19 +517,25 @@ def review_drafts(plan, batch="review-queue"):
     while it drains — and after a restart the whole un-posted approval backlog
     would re-present (the exact "I approved these already" bug)."""
     approved_ns = approved_queue_active_ns(batch)
+    persona_projects = _persona_project_names()
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
         if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
             continue
         if (i + 1) in approved_ns:
             continue
+        # Personal-brand (persona) drafts post link-free; never show a tail link
+        # for them (it would be the user's own profile URL, which is wrong).
+        link_url = c.get("link_url")
+        if persona_projects and c.get("matched_project") in persona_projects:
+            link_url = None
         out.append(
             {
                 "n": i + 1,  # 1-based, matches post_drafts numbering
                 "thread_author": c.get("thread_author"),
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
-                "link_url": c.get("link_url"),
+                "link_url": link_url,
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
