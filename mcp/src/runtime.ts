@@ -108,6 +108,29 @@ const MENUBAR_DIR = path.join(STATE_DIR, "menubar");
 const MENUBAR_ENTRY = path.join(MENUBAR_DIR, "s4l_menubar.py");
 const MENUBAR_OUT_LOG = path.join(MENUBAR_DIR, "menubar.out.log");
 const MENUBAR_ERR_LOG = path.join(MENUBAR_DIR, "menubar.err.log");
+// Stop sentinel: the menu bar's Quit flow writes this file (and boots itself
+// out) to record that the USER explicitly stopped S4L. Every auto-start path
+// (boot-time ensureMenubar, runtime provision) must respect it, otherwise the
+// tray is guaranteed back on the next Claude restart — the exact bug users hit
+// after Quit. Only an explicit start action (restart_menubar tool, queue_setup
+// re-arm) clears it. KEEP the filename in sync with menubar/s4l_menubar.py.
+const MENUBAR_STOP_FLAG = path.join(STATE_DIR, "stopped.flag");
+
+export function menubarStopped(): boolean {
+  try {
+    return fs.existsSync(MENUBAR_STOP_FLAG);
+  } catch {
+    return false;
+  }
+}
+
+export function clearMenubarStop(): void {
+  try {
+    fs.rmSync(MENUBAR_STOP_FLAG, { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
 
 // A directory is a usable pipeline clone only if it carries requirements.txt
 // (the deps manifest) AND scripts/ (the pipeline). Guards against pointing at an
@@ -739,7 +762,13 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // Non-fatal: a menu bar failure must never block a usable runtime, so on any
   // problem we mark the step errored and still persist runtime.json below.
   setStep("menubar", "running");
-  if (process.platform === "darwin") {
+  if (process.platform !== "darwin") {
+    setStep("menubar", "done", "skipped (macOS only)");
+  } else if (menubarStopped()) {
+    // A runtime repair/re-provision must not resurrect a tray the user
+    // explicitly quit; an explicit start clears the flag first.
+    setStep("menubar", "done", "skipped (user stopped the menu bar)");
+  } else {
     const mb = await installMenubar(uv, uvEnv, VENV_PYTHON);
     setStep("menubar", mb.ok ? "done" : "error", mb.detail);
     // Non-fatal step, so the only prior signal of a menu bar install failure was
@@ -751,8 +780,6 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
         phase: "install",
       });
     }
-  } else {
-    setStep("menubar", "done", "skipped (macOS only)");
   }
 
   // --- Persist the result ---------------------------------------------------
@@ -876,6 +903,9 @@ export async function menubarLoaded(): Promise<boolean> {
 export async function menubarRunning(): Promise<boolean> {
   if (process.platform !== "darwin") return true;
   if (!runtimeReady()) return true;
+  // User explicitly quit the tray: it is down ON PURPOSE, so report "fine" —
+  // the dashboard banner must not nag about a state the user chose.
+  if (menubarStopped()) return true;
   try {
     return await menubarLoaded();
   } catch {
@@ -939,6 +969,12 @@ export async function ensureMenubar(): Promise<{
 }> {
   if (process.platform !== "darwin") return { ok: true, skipped: true, detail: "non-macOS" };
   if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
+  // The user clicked Quit in the tray: stay stopped across Claude restarts.
+  // Explicit start paths (restart_menubar tool, queue_setup) clear the flag
+  // before calling this.
+  if (menubarStopped()) {
+    return { ok: true, skipped: true, detail: "user stopped the menu bar (stopped.flag)" };
+  }
   if (
     fs.existsSync(MENUBAR_ENTRY) &&
     fs.existsSync(MENUBAR_PLIST) &&
