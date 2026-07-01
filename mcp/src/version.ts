@@ -44,23 +44,64 @@ export function resolveVersion(): string {
 
 export const VERSION = resolveVersion();
 
-// Best-effort latest published version from npm, cached per-process with a TTL.
-// Uses `npm view` (already a hard dependency of the installer) instead of fetch
-// so we need no DOM lib types and no extra network plumbing. Never throws.
+// Best-effort latest released version, cached per-process with a TTL. Never throws.
+//
+// SOURCE = GitHub releases/latest, NOT npm. This is deliberate and load-bearing:
+//   • The .mcpb boxes that run the menu-bar have NO npm/npx on PATH (PATH is just
+//     /usr/bin:/bin:/usr/sbin:/sbin). The old `npm view` probe threw there, so
+//     `latest` was always null, `update_available` was always false, and the
+//     "⬆ Update available" banner could NEVER fire on a box — even when a new
+//     release was live. (That is exactly the bug this replaced: box stuck on
+//     1.6.177 while 1.6.181 was out, banner silent.)
+//   • GitHub releases/latest is the SAME source the box updater installs from
+//     (scripts/s4l_box_update.sh + menu-bar `_mcpb_update_work` pull the .mcpb
+//     from releases/latest/download). Detecting from the same place the update
+//     comes from means "update available" and "what an update installs" can
+//     never disagree (npm publish and the GitHub release step could otherwise
+//     drift). curl lives at /usr/bin/curl, present in every PATH, so this works
+//     with zero npm dependency.
+// npm stays as a fallback only for the rare case GitHub is unreachable (and for
+// dev machines checking a version that is on npm but not yet released).
 let cache: { at: number; latest: string | null } | null = null;
 const TTL_MS = 10 * 60 * 1000;
+
+const RELEASES_LATEST_API =
+  "https://api.github.com/repos/m13v/social-autoposter/releases/latest";
+
+async function latestFromGithub(): Promise<string | null> {
+  try {
+    // -f: fail on HTTP error, -sSL: quiet + follow redirects, -m: hard timeout.
+    // GitHub's releases/latest already excludes drafts and prereleases, so a
+    // `--draft` release correctly does NOT trigger the update banner.
+    const res = await run(
+      "curl",
+      ["-fsSL", "-m", "10", "-H", "Accept: application/vnd.github+json", RELEASES_LATEST_API],
+      { timeoutMs: 12000, noTee: true }
+    );
+    const tag = (JSON.parse(res.stdout) as { tag_name?: unknown }).tag_name;
+    const v = typeof tag === "string" ? tag.replace(/^v/, "").trim() : "";
+    return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+async function latestFromNpm(): Promise<string | null> {
+  try {
+    const res = await run("npm", ["view", "social-autoposter", "version"], { timeoutMs: 8000 });
+    const line = res.stdout.trim().split("\n").pop()?.trim() ?? "";
+    return /^\d+\.\d+\.\d+/.test(line) ? line : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function latestPublishedVersion(): Promise<string | null> {
   const now = Date.now();
   if (cache && now - cache.at < TTL_MS) return cache.latest;
-  let latest: string | null = null;
-  try {
-    const res = await run("npm", ["view", "social-autoposter", "version"], { timeoutMs: 8000 });
-    const line = res.stdout.trim().split("\n").pop()?.trim() ?? "";
-    if (/^\d+\.\d+\.\d+/.test(line)) latest = line;
-  } catch {
-    latest = null;
-  }
+  // GitHub first (works on boxes, matches the updater), npm only as a fallback.
+  let latest = await latestFromGithub();
+  if (latest == null) latest = await latestFromNpm();
   cache = { at: now, latest };
   return latest;
 }
