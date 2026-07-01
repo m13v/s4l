@@ -864,9 +864,23 @@ function menubarPlistXml(python: string): string {
 `;
 }
 
-async function menubarLoaded(): Promise<boolean> {
+export async function menubarLoaded(): Promise<boolean> {
   const r = await sh("launchctl", ["list"], { timeoutMs: 10_000 });
   return r.out.includes(MENUBAR_LABEL);
+}
+
+// Is the menu bar app expected to be up right now? Only meaningful once the
+// runtime is provisioned (the LaunchAgent isn't installed before that) and only
+// on macOS. Any failure defaults to `true` so the panel never shows a spurious
+// "menu bar down" banner from a flaky launchctl read.
+export async function menubarRunning(): Promise<boolean> {
+  if (process.platform !== "darwin") return true;
+  if (!runtimeReady()) return true;
+  try {
+    return await menubarLoaded();
+  } catch {
+    return true;
+  }
 }
 
 export async function installMenubar(
