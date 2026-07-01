@@ -104,6 +104,37 @@ SIG_EXCLUDED = (DISCLAIMER_HINT,)
 
 UUID_RE = re.compile(r"local-agent-mode-sessions/([0-9a-fA-F-]{36})")
 
+# The paired leak: every leaked `claude` worker spawns a `mcp-server-macos-use`
+# node child (the remote-macos-use MCP). When the reaper SIGKILLs the worker, that
+# child is ORPHANED (reparented to launchd) and never exits — so it accumulates in
+# lockstep with the claude workers. Karol's box hit 280 orphaned MCP procs / 11 GB
+# this way. This regex mirrors memory_snapshot.py::_is_remote_macos_mcp_server so we
+# kill exactly the process the telemetry measures as leaking. ssh commands that merely
+# mention the string are excluded via _SSH_RE below.
+MACOS_MCP_RE = re.compile(r"(^|\s)(?:/[^ \t]+/)?mcp-server-macos-use(?:\s|$)")
+_SSH_RE = re.compile(r"^(?:/[^ \t]+/)?ssh(?:\s|$)")
+
+
+def _run_ps() -> str:
+    """`ps -axo` with a generous timeout + one retry. Under a runaway leak the box is
+    at load 75 / 90% sys CPU and a 20s ps can time out -> the old code raised, caught,
+    and reaped NOTHING exactly when reaping mattered most. Bump to 45s and retry once
+    before giving up."""
+    for attempt in range(2):
+        try:
+            return subprocess.run(
+                ["/bin/ps", "-axo", "pid=,ppid=,etime=,command="],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            ).stdout
+        except subprocess.TimeoutExpired:
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            raise
+    return ""
+
 
 def parse_etime(etime: str) -> int:
     """macOS `ps -o etime` -> seconds. Format: [[dd-]hh:]mm:ss."""
@@ -124,24 +155,41 @@ def parse_etime(etime: str) -> int:
 
 
 def snapshot():
-    """Return list of dicts {pid, ppid, age, cmd} for worker-signature processes."""
-    out = subprocess.run(
-        ["/bin/ps", "-axo", "pid=,ppid=,etime=,command="],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    ).stdout
+    """Snapshot the process table once.
+
+    Returns (procs, by_pid, macos_mcp, meta):
+      * procs     — claude agent-mode worker-signature processes (the primary target).
+      * by_pid    — {pid: cmd} for every process (used to pair the disclaimer stub).
+      * macos_mcp — {pid, ppid, age, cmd} for every `mcp-server-macos-use` node server
+                    (the paired leak, reaped in main()).
+      * meta      — {pid: {ppid, age}} for every process, so main() can tell whether an
+                    MCP server's parent is still alive (orphan detection).
+    """
+    out = _run_ps()
     me = os.getpid()
     procs = []
+    macos_mcp = []
     by_pid = {}
+    meta = {}
     for line in out.splitlines():
         m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
         if not m:
             continue
         pid, ppid, etime, cmd = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
         by_pid[pid] = cmd
+        try:
+            age = parse_etime(etime)
+        except Exception:
+            age = 0
+        meta[pid] = {"ppid": ppid, "age": age}
         if pid == me or pid <= 1:
             continue
+        # (a) remote-macos-use MCP node servers — the paired leak. NOT gated by the
+        # claude worker signature; these are separate node procs the workers spawn.
+        if MACOS_MCP_RE.search(cmd) and not _SSH_RE.match(cmd):
+            macos_mcp.append({"pid": pid, "ppid": ppid, "age": age, "cmd": cmd})
+            continue
+        # (b) claude agent-mode worker sessions.
         if not all(tok in cmd for tok in SIG_REQUIRED):
             continue
         if any(tok in cmd for tok in SIG_EXCLUDED):
@@ -149,12 +197,8 @@ def snapshot():
         u = UUID_RE.search(cmd)
         if not u:
             continue
-        try:
-            age = parse_etime(etime)
-        except Exception:
-            continue
         procs.append({"pid": pid, "ppid": ppid, "age": age, "uuid": u.group(1), "cmd": cmd})
-    return procs, by_pid
+    return procs, by_pid, macos_mcp, meta
 
 
 def kill(pid: int) -> bool:
@@ -276,7 +320,7 @@ def main() -> int:
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
 
-    procs, by_pid = snapshot()
+    procs, by_pid, macos_mcp, meta = snapshot()
 
     # Group by session uuid.
     groups: dict[str, list[dict]] = {}
@@ -335,29 +379,53 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    if not targets:
-        # No reapable sessions this run (common no-leak path).
-        return 0
+    live_pids = set(meta.keys())
 
-    freed_kb = 0
     killed = 0
     disclaimers = 0
+    killed_pids: set[int] = set()
     for p in targets:
         ok = dry or kill(p["pid"])
         if not ok:
             continue
         killed += 1
+        killed_pids.add(p["pid"])
         # Reap the paired `disclaimer` launcher stub (the claude proc's parent) too.
         parent_cmd = by_pid.get(p["ppid"], "")
         if DISCLAIMER_HINT in parent_cmd:
             if dry or kill(p["ppid"]):
                 disclaimers += 1
 
+    # (3) Reap paired / orphaned remote-macos-use MCP node servers — the SECOND half of
+    # the double leak. SIGKILLing a worker orphans its `mcp-server-macos-use` child
+    # (reparented to launchd), so it survives forever. Reap an MCP proc when (a) its
+    # parent is a worker we just killed, or (b) it is ALREADY orphaned (parent pid gone)
+    # AND older than max_age. An MCP proc whose parent is a LIVE process (a healthy
+    # in-flight worker, or the Desktop app itself) is never touched — so this can only
+    # remove provably dead-parented servers. This sweep runs even when no claude worker
+    # was reaped this cycle, to clean up orphans left by earlier reaps.
+    macos_killed = 0
+    for mp in macos_mcp:
+        pp = mp["ppid"]
+        if pp in killed_pids:
+            pass  # its worker just died -> orphan-to-be, take it out now
+        elif (pp <= 1 or pp not in live_pids) and mp["age"] >= max_age:
+            pass  # already orphaned + stale
+        else:
+            continue
+        if dry or kill(mp["pid"]):
+            macos_killed += 1
+
+    if not killed and not disclaimers and not macos_killed:
+        # Nothing reapable this run (common no-leak path).
+        return 0
+
     mode = "queue" if inflight is not None else "age-fallback"
     prefix = "[claude-reaper]" + (" DRY-RUN" if dry else "")
     print(
         f"{prefix} reaped {killed} stale agent-mode claude session(s)"
-        f" + {disclaimers} disclaimer stub(s) across {sum(1 for g in groups.values() if len(g) > 1)}"
+        f" + {disclaimers} disclaimer stub(s) + {macos_killed} remote-macos-mcp server(s)"
+        f" across {sum(1 for g in groups.values() if len(g) > 1)}"
         f" leaked uuid group(s); mode={mode} inflight={inflight} ceiling={max_age}s"
         f" spared_claim_pids={sorted(claim_pids)} max_group={max_group}",
         file=sys.stderr,
