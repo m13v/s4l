@@ -50,6 +50,12 @@ def _config_path() -> str:
 # Keep in sync with REQUIRED_FIELDS (mcp/src/setup.ts), QUEUE_WORKERS / UPDATER_LABEL
 # / AUTOPILOT_STALL_MS (mcp/src/index.ts).
 REQUIRED_FIELDS = ["name", "website", "description", "icp", "voice", "search_topics"]
+# Keep in sync with PERSONA_REQUIRED_FIELDS (mcp/src/setup.ts). A personal-brand
+# persona has no product website/icp by design; it is "ready" once it has the fields
+# the cycle consumes (name, voice, seedable topics). Without this, a personal-brand-
+# only setup can NEVER report setup_complete (any_ready requires a managed product),
+# leaving the menu bar stuck on "project not set up". (2026-06-30)
+PERSONA_REQUIRED_FIELDS = ["name", "description", "voice", "search_topics"]
 WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 UPDATER_LABEL = "com.m13v.social-autoposter-update"
 AUTOPILOT_STALL_MS = 180_000
@@ -95,6 +101,35 @@ def _projects():
     cfg = _read_json(_config_path()) or {}
     cfg_projects = cfg.get("projects") or []
     return [_project_status(n, cfg_projects) for n in _managed_projects()]
+
+
+def _persona_status():
+    """The personal-brand persona (config.json persona:true) as a project-status
+    dict, or None when there's no persona. Validated against PERSONA_REQUIRED_FIELDS
+    (a persona has no product website/icp). The persona is excluded from the managed
+    scope (_managed_projects) by design, but IS what the cycle drafts in
+    personal_brand mode, so it must count toward readiness."""
+    cfg = _read_json(_config_path()) or {}
+    persona = next((p for p in (cfg.get("projects") or []) if p.get("persona")), None)
+    if persona is None:
+        return None
+    missing = []
+    for f in PERSONA_REQUIRED_FIELDS:
+        v = persona.get(f)
+        if v is None:
+            missing.append(f)
+        elif isinstance(v, str) and not v.strip():
+            missing.append(f)
+        elif isinstance(v, (list, tuple)) and len(v) == 0:
+            missing.append(f)
+        elif isinstance(v, dict) and len(v) == 0:
+            missing.append(f)
+    return {
+        "name": persona.get("name") or "PersonalBrand",
+        "ready": len(missing) == 0,
+        "missing_required": missing,
+        "persona": True,
+    }
 
 
 # ---- runtime / mode / autopilot (all file/launchctl) -----------------------
@@ -304,7 +339,15 @@ def compute() -> dict:
     rt_ready = _runtime_ready()
     x = _x_status()
     mode = _mode()
+    flags = _flags()
     schedule_state = _schedule_state()
+    # Personal-brand-only setups have NO managed product project; the persona IS the
+    # draftable "project" for the self-promo lane. Surface it as a project row when
+    # that lane is on so projects_ready / setup_complete / project_ready reflect a
+    # persona-only setup instead of forever reading "not set up". (2026-06-30)
+    persona = _persona_status()
+    if persona is not None and flags.get("personal_brand"):
+        projects = projects + [persona]
     any_ready = any(p["ready"] for p in projects)
     setup_complete = rt_ready and any_ready and bool(x["connected"])
 
