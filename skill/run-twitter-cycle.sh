@@ -2049,7 +2049,13 @@ CRITICAL:
 # On Linux ARG_MAX is 2MB; the assembled prompt (config.json + top_report +
 # styles + schema + candidates) busts that on the VM, dying with E2BIG
 # "Argument list too long". stdin has no such cap.
-PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
+# --allowedTools WebSearch WebFetch: restore external fact-checking to the prep
+# drafter (removed 2026-06-26). --strict-mcp-config stays so the twitter-harness
+# browser MCP is NOT loaded: the model can search the web but can never touch the
+# CDP Chrome that Phase 2b-post drives (that would break the two-lock). On the box
+# (queue provider) these flags ride through claude_job.py; Desktop's own web
+# search + the reworded prompt are what actually enable it there.
+PREP_OUTPUT=$(printf '%s' "$PREP_PROMPT" | "$REPO_DIR/scripts/run_claude.sh" "run-twitter-cycle-prep" --strict-mcp-config --mcp-config "$TW_MCP_CONFIG" --allowedTools WebSearch WebFetch -p --output-format json --json-schema "$PREP_SCHEMA" 2>&1)
 
 echo "$PREP_OUTPUT" >> "$LOG_FILE"
 
