@@ -315,9 +315,10 @@ class S4LMenuBar(rumps.App):
         # read per second.
         self._act_poll = rumps.Timer(self._poll_activity, 1.0)
         self._act_poll.start()
-        # Update availability comes from ONE source: the MCP's versionStatus
-        # (npm + semver `>`), surfaced in the snapshot as update_available/
-        # latest_version — the SAME source the dashboard uses. _tick copies those
+        # Update availability comes from ONE source: scripts/snapshot.py's
+        # _latest_published (GitHub releases/latest first, npm fallback — boxes
+        # have no npm; same probe as mcp/src/version.ts), surfaced in the
+        # snapshot as update_available/latest_version. _tick copies those
         # snapshot fields onto these attrs every poll. No second GitHub/manifest
         # check here anymore (it diverged from the header and once showed an
         # "update to an OLDER version" because it polled a different registry).
@@ -1431,9 +1432,9 @@ class S4LMenuBar(rumps.App):
         elif not attention:
             self._stall_notified = False
 
-        # Single-source update signal: copy the snapshot's versionStatus result
-        # (npm + semver >, surfaced as update_available/latest_version) — exactly
-        # what the dashboard uses. No separate GitHub/manifest poll anymore.
+        # Single-source update signal: copy the snapshot's result (snapshot.py
+        # _latest_published: GitHub releases/latest first, npm fallback; semver >,
+        # surfaced as update_available/latest_version). No separate poll here.
         self._update_available = bool(snap.get("update_available"))
         self._latest_version = snap.get("latest_version")
 
