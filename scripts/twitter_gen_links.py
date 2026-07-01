@@ -171,6 +171,14 @@ def resolve_link(candidate: dict, projects: dict, page_gen_rate: float) -> tuple
     """
     proj_name = candidate.get("matched_project") or ""
     proj = projects.get(proj_name) or {}
+    # Personal-brand (persona) lane is link-free by definition. Self-promotion
+    # mode is pure organic engagement: no company, no signup, no profile URL. Any
+    # `website`/`url` a persona project happens to carry (some installs got the
+    # user's own X profile written there) must NEVER become a tail link. Enforce
+    # it here at the single source so no downstream surface (review card, manual
+    # post_drafts) has to strip a link that should never have been generated.
+    if proj.get("persona"):
+        return ("", "persona_no_link")
     plain_url = proj.get("website") or proj.get("url") or ""
     has_lp = bool(candidate.get("has_landing_pages"))
     keyword = (candidate.get("link_keyword") or "").strip()
