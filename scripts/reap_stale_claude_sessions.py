@@ -424,7 +424,14 @@ def main() -> int:
     # for the next worker), never a lost draft. A DRAFTING session is protected by
     # claim_pids, not by grace, so no grace value can kill a real draft (this is what
     # makes the old "~120s code-143 mid-draft kill" impossible now).
-    claim_grace = _env_int("SAPS_REAPER_CLAIM_GRACE_SEC", 120)
+    #
+    # Default 60s (2026-07-01, per Matthew): the boot+claim window is comfortably
+    # inside one cron tick — measured enqueue->claim was always < 60s (3-55s across 85
+    # claims) and that figure ALREADY includes the claiming worker's spawn+boot+cmd_next.
+    # 60s tightens the steady-state floor to ~2-3 warm sessions (one tick of newborns +
+    # any active drafter) instead of ~4, while still never racing a real claim. Bump it
+    # back up via SAPS_REAPER_CLAIM_GRACE_SEC if cold boots ever start exceeding a tick.
+    claim_grace = _env_int("SAPS_REAPER_CLAIM_GRACE_SEC", 60)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
