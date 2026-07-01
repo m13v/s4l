@@ -267,12 +267,6 @@ class _ReviewController(NSObject):
                     text = text.replace(link, "")
                 else:
                     drop_link = True
-            # Personal-brand (persona) drafts post link-free: link_url was stripped
-            # upstream so there's nothing to remove from the text, but the poster
-            # runs at forced TWITTER_TAIL_LINK_RATE=1.0 and would revive the plan's
-            # link_url. Force drop_link so post_drafts clears it (clear_link).
-            if d.get("link_free"):
-                drop_link = True
             # Collapse only horizontal whitespace left by the removal; preserve
             # any newlines the user intended.
             body = re.sub(r"[ \t]{2,}", " ", text).strip()
