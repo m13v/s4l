@@ -1308,9 +1308,11 @@ tool(
       "is scanned, personal-brand is already the default, so ASK the user the ONE question: do they " +
       "ALSO want to promote a product? Then call action:'set' with personal_brand:true and " +
       "promotion:true|false. Pass the voice/description/topics you extracted from the profile scan so " +
-      "the persona is grounded in who they actually are. If they want promotion too, continue to " +
-      "configure the product project with project_config afterward. The user flips either lane any " +
-      "time from the menu-bar checkmarks.",
+      "the persona is grounded in who they actually are, AND expand those topics into a search_queries " +
+      "array of ~30 concrete X advanced-search strings in the SAME call (identical to project_config) " +
+      "so the personal-brand cycle has a real query bank on day one instead of running one crude " +
+      "topic-as-query. If they want promotion too, continue to configure the product project with " +
+      "project_config afterward. The user flips either lane any time from the menu-bar checkmarks.",
     inputSchema: {
       action: z
         .enum(["get", "set", "toggle"])
@@ -1351,6 +1353,16 @@ tool(
         .union([z.array(z.string()), z.string()])
         .optional()
         .describe("~15 topics the persona has genuine experience with, drawn from the scan."),
+      search_queries: z
+        .union([z.array(z.string()), z.string()])
+        .optional()
+        .describe(
+          "Cold-start X search-query bank YOU expand from search_topics, in THIS same call — same " +
+            "as project_config. Fan each persona topic into a few concrete X advanced-search strings " +
+            "(aim ~30 total, e.g. 'mac menu bar app -filter:replies', 'screen recording lang:en') so " +
+            "the personal-brand cycle fans out instead of running one crude topic-as-query. Seeded " +
+            "directly with NO `claude -p`. Without it the persona bank is empty on day one."
+        ),
     },
   },
   async (args: any) => {
@@ -1456,6 +1468,21 @@ tool(
       personaTopicsSeeded = true;
     }
 
+    // Seed the persona's search QUERIES too — identical to the product path
+    // (project_config). Personal-brand-only setups used to seed topics but never
+    // queries, so their Phase 1 bank was empty and the cycle ran one crude
+    // topic-as-query (Karol, 2026-06-30). Only after the topic seed succeeds.
+    let personaQueryCount = 0;
+    let personaQueryNote = "";
+    if (personaTopicsSeeded) {
+      const qr = await seedSearchQueriesForProject(
+        personaName,
+        args.search_queries as string[] | string | undefined
+      );
+      personaQueryCount = qr.queries.length;
+      personaQueryNote = qr.note;
+    }
+
     completeOnboardingMilestone("mode_chosen", { personal_brand: personalBrand, promotion, persona: personaName });
 
     // Personal-brand-only is a first-class setup path: the persona is the draftable
@@ -1497,8 +1524,10 @@ tool(
             "is provisioned + topic-seeded. "
           : "Product promotion is on and the persona is provisioned. ") +
         "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
-        "site and fill description, icp, voice, search_topics)."
-      : "Personal-brand lane is on (the default); the persona is provisioned + topic-seeded, so there " +
+        "site and fill description, icp, voice, search_topics, search_queries)."
+      : (personaQueryCount > 0
+          ? `Personal-brand lane is on (the default); the persona is provisioned, topic-seeded, and ${personaQueryCount} search quer${personaQueryCount === 1 ? "y" : "ies"} seeded, so there `
+          : "Personal-brand lane is on (the default); the persona is provisioned + topic-seeded (but NO search_queries were supplied, so it will run one topic-as-query at a time — re-call engagement_mode action:'set' with a search_queries array of ~30 X search strings expanded from the persona topics to fan out). There ") +
         "is nothing more to configure (no product project is needed). NOW SCHEDULE THE AUTOPILOT: call " +
         "queue_setup and create each returned task with create_scheduled_task (prompt verbatim; " +
         "'already exists' is fine), then call the dashboard tool to confirm the schedule is firing. " +
@@ -1512,6 +1541,8 @@ tool(
       persona_created: personaCreated,
       persona_topics_seeded: personaTopicsSeeded,
       persona_topic_count: personaTopicCount,
+      persona_query_count: personaQueryCount,
+      persona_query_note: personaQueryNote || null,
       kicker_installed: kickerInstall ? kickerInstall.ok : null,
       kicker_detail: kickerInstall ? kickerInstall.detail : null,
       onboarding: onboardingSnapshot(),
@@ -1942,65 +1973,18 @@ tool(
           seedNote = ` (Heads up: couldn't seed search topics into the DB yet — ${tail}. The autopilot will report clearly if topics are missing.)`;
         }
 
-        // Cold-start QUERY supply: fan the seeded topics out into >=30 real X
-        // search queries (project_search_queries) so the deterministic Phase 1
-        // bank (qualified_query_bank.py) has something to run on day one.
-        // Without this, a freshly-configured project's bank is empty and the
-        // cycle falls back to ONE crude topic-as-query.
-        //
-        // CLAUDE-FREE: the in-session agent (you) expands topics -> queries and
-        // passes them as `search_queries` in THIS call. We seed them directly via
-        // --queries-json, so setup never shells out to `claude -p` (which isn't
-        // installed in the Desktop / .mcpb lane and was the FileNotFoundError
-        // users hit). If the agent didn't supply queries, we skip expansion
-        // entirely — the topic-as-query fallback still runs, just narrower — and
-        // nudge the agent to re-run with search_queries. (2026-06-19)
-        // Accept search_queries as a real array OR a stringified JSON array /
-        // comma list — the model often passes the latter, and the old
-        // Array.isArray-only gate silently dropped it, leaving the query bank
-        // empty on a fresh install (Karol, 2026-06-30).
-        const agentQueries =
-          normalizeStringList(
+        // Cold-start QUERY supply (shared with the persona/engagement_mode path
+        // via seedSearchQueriesForProject): fan the agent-supplied search_queries
+        // into project_search_queries so the Phase 1 bank fans out on day one
+        // instead of running ONE crude topic-as-query. Only after the topic seed
+        // succeeds, matching the persona path's guard.
+        if (seed.code === 0) {
+          const qr = await seedSearchQueriesForProject(
+            result.project,
             args.search_queries as string[] | string | undefined
-          ) ?? [];
-        if (seed.code === 0 && agentQueries.length) {
-          try {
-            const qfile = path.join(
-              os.tmpdir(),
-              `saps-queries-${result.project}-${Date.now()}.json`
-            );
-            fs.writeFileSync(
-              qfile,
-              JSON.stringify({ queries: agentQueries.map((q) => ({ query: q, topic: "" })) })
-            );
-            const qseed = await runPython(
-              "scripts/seed_search_queries.py",
-              ["--project", result.project, "--queries-json", qfile,
-                "--supply-test", "auto", "--emit-json"],
-              { timeoutMs: 600_000 }
-            );
-            try { fs.unlinkSync(qfile); } catch { /* best-effort cleanup */ }
-            const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
-            const qjson = qseed.stdout.split("===QUERIES_JSON===")[1];
-            if (qjson) {
-              try {
-                searchQueries = (JSON.parse(qjson.trim()).queries ?? []) as typeof searchQueries;
-              } catch {
-                /* leave empty; count note still informs the user */
-              }
-            }
-            if (qseed.code === 0 && qm) {
-              const n = searchQueries.length || Number(qm[1]);
-              seedNote += ` Seeded ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`;
-            } else if (qseed.code !== 0) {
-              const qtail = (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-              seedNote += ` (Search queries not seeded yet — ${qtail}. The cycle still runs off the seeded topics.)`;
-            }
-          } catch (e) {
-            seedNote += ` (Search-query seeding skipped — ${(e as Error).message}.)`;
-          }
-        } else if (seed.code === 0) {
-          seedNote += ` (No search_queries supplied, so the cycle will run off the seeded topics one at a time. To fan out, re-call project_config with a search_queries array of ~30 X search strings you expand from these topics — it seeds them directly, no claude CLI.)`;
+          );
+          seedNote += qr.note;
+          searchQueries = qr.queries as typeof searchQueries;
         }
       }
       // Surface any advanced (escape-hatch) field edits in the note so the
