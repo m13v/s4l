@@ -828,7 +828,12 @@ def _maybe_leak_alert(output: Path, current: dict[str, Any]) -> None:
 
     Runs on the JSONL path (every ~minute), reading its own recent history from the
     file just written, so it needs no extra state beyond a small cooldown marker."""
-    groups_to_watch = ("claude_cli", "remote_macos_mcp_servers")
+    # Watch claude_cli (the runaway worker fan-out) and the claude sessions
+    # CONFIGURED with the remote-macos-use MCP. Karol's 06-30 double-leak lived
+    # entirely in these two: claude_cli 289 + sessions_configured_remote_macos_mcp
+    # 280 at peak, while remote_macos_mcp_servers (the standalone server procs)
+    # stayed 0 the whole time. Watching the server group would have been blind.
+    groups_to_watch = ("claude_cli", "sessions_configured_remote_macos_mcp")
     samples = _env_int("SAPS_LEAK_ALERT_SAMPLES", 5)      # consecutive climbs required
     floor = _env_int("SAPS_LEAK_ALERT_FLOOR", 20)          # ignore below this count
     climb_min = _env_int("SAPS_LEAK_ALERT_CLIMB_MIN", 12)  # min first->last growth
