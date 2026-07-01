@@ -168,6 +168,35 @@ def _app_version():
     return None
 
 
+def _claude_desktop_version():
+    """CFBundleShortVersionString of the Claude Desktop app (macOS), or None.
+
+    Stamped into the install identity (and thus the X-Installation header on every
+    heartbeat) so the install-lane digest can correlate leaks/regressions with the
+    Desktop version. This is the variable we could not answer for Karol's box. Reads
+    Info.plist directly via plistlib; best-effort, never raises."""
+    if (platform.system() or "").lower() != "darwin":
+        return None
+    candidates = [
+        Path("/Applications/Claude.app/Contents/Info.plist"),
+        Path.home() / "Applications" / "Claude.app" / "Contents" / "Info.plist",
+    ]
+    for plist in candidates:
+        try:
+            if not plist.exists():
+                continue
+            import plistlib
+
+            with plist.open("rb") as f:
+                data = plistlib.load(f)
+            v = data.get("CFBundleShortVersionString") or data.get("CFBundleVersion")
+            if v:
+                return str(v).strip() or None
+        except Exception:
+            continue
+    return None
+
+
 def _tz():
     try:
         from datetime import datetime
@@ -192,6 +221,7 @@ def _build_fresh_identity():
         "python_version": platform.python_version() or None,
         "node_version": _node_version(),
         "app_version": _app_version(),
+        "claude_desktop_version": _claude_desktop_version(),
         "git_email": _git_email(),
         "tz": _tz(),
         "first_seen_at": int(time.time()),
