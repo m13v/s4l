@@ -488,17 +488,20 @@ def review_drafts(plan, batch="review-queue"):
     posted, terminal (rejected/dead), or already approved is a settled decision and
     must never be re-presented for review (approved ones proceed to post).
 
-    Also excludes cards already sitting in the durable approved-queue (queued or
-    posting). The main plan's `approved`/`posted` flags are only stamped once a
-    post LANDS, so without this a card the user just approved would re-present
-    while it drains — and after a restart the whole un-posted approval backlog
-    would re-present (the exact "I approved these already" bug)."""
-    approved_ns = approved_queue_active_ns(batch)
+    Also excludes cards with ANY durable decision (approved, edited, rejected, or a
+    decided-but-failed post) via review_settled_ns(). approve/reject/edit are now
+    IDENTICAL: each writes a durable local record the INSTANT the user clicks, so a
+    decided card never re-presents even if the loopback (Claude Desktop) is down
+    when the decision's plan-flag write is attempted. The main plan's
+    `approved`/`terminal`/`posted` flags are only stamped once the loopback write
+    lands, so without this a card the user just decided would re-present (the exact
+    "I already decided these" bug)."""
+    settled_ns = review_settled_ns(batch)
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
         if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
             continue
-        if (i + 1) in approved_ns:
+        if (i + 1) in settled_ns:
             continue
         out.append(
             {
@@ -635,6 +638,28 @@ def toggle_mode():
     return write_mode(new)
 
 
+def review_reject_add(batch, n):
+    """Record a REJECT the INSTANT the user clicks, mirroring approved_queue_add.
+    Reject and approve are now IDENTICAL: both write a durable local record before
+    any loopback call, so review_drafts() suppresses the card even if the loopback
+    (Claude Desktop) is down when the reject's plan `terminal` write is attempted.
+    Dedups on (batch, n); a reject is FINAL and overrides any earlier status."""
+    with _approved_lock:
+        d = read_approved_queue()
+        for it in d["items"]:
+            if it.get("batch") == batch and it.get("n") == n:
+                if it.get("status") != "rejected":
+                    it.update(status="rejected", error=None, ts=time_iso())
+                    _write_approved_queue(d)
+                return
+        d["items"].append({
+            "batch": batch, "n": n, "text": "", "edited": False,
+            "drop_link": False, "candidate_url": "", "status": "rejected",
+            "error": None, "ts": time_iso(),
+        })
+        _write_approved_queue(d)
+
+
 def approved_queue_add(batch, n, text="", edited=False, candidate_url="", drop_link=False):
     """Record an approval the INSTANT the user clicks, before any posting. Dedups
     on (batch, n): re-approving a card that's still queued/posting/posted is a
@@ -688,6 +713,18 @@ def approved_queue_active_ns(batch):
     falls back to manual review rather than silently vanishing."""
     return {it.get("n") for it in read_approved_queue()["items"]
             if it.get("batch") == batch and it.get("status") in ("queued", "posting", "posted")}
+
+
+def review_settled_ns(batch):
+    """Plan indices with ANY durable user DECISION for this batch — review_drafts()
+    excludes these so approve, edit, and reject behave IDENTICALLY: a decided card
+    never re-presents for review. Covers queued/posting/posted (approved, in flight
+    or landed), `rejected`, AND `failed` (a decided-but-failed post is surfaced via
+    the failure notification + dashboard, NOT by re-showing it as a fresh review
+    card — that re-show was the "I already decided these came back" bug)."""
+    return {it.get("n") for it in read_approved_queue()["items"]
+            if it.get("batch") == batch
+            and it.get("status") in ("queued", "posting", "posted", "failed", "rejected")}
 
 
 def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, timeout=900, activity_label=None):
