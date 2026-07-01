@@ -1012,10 +1012,29 @@ class S4LMenuBar(rumps.App):
             if not self._scheduled_task_cwd_needs_fix():
                 self._cwd_healed = True
                 self._reloc_needed = False
+            # Push a fresh heartbeat now so the server/dashboard reflects the
+            # corrected scheduled-task folder state within seconds instead of
+            # waiting up to ~15 min for the next MCP heartbeat. Best-effort.
+            self._fire_heartbeat()
         except Exception:
             pass
         finally:
             self._relocating = False
+
+    def _fire_heartbeat(self):
+        """Best-effort: run the npx-lane heartbeat.sh once so the install's
+        scheduled_tasks sample updates centrally right after a relocation. Never
+        raises; a missing repo/script or network hiccup is silently ignored (the
+        MCP's own ~15-min heartbeat is the durable channel)."""
+        try:
+            repo = os.environ.get("SAPS_REPO_DIR") or ""
+            hb = os.path.join(repo, "scripts", "heartbeat.sh")
+            if not (repo and os.path.exists(hb)):
+                return
+            env = dict(os.environ, REPO_DIR=repo)
+            subprocess.run(["bash", hb], capture_output=True, timeout=30, env=env)
+        except Exception:
+            pass
 
     def _open_dashboard(self, _=None):
         # Prefer the LIVE MCP loopback panel (full interactivity — its buttons
