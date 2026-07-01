@@ -217,6 +217,11 @@ def _persona_env_lines() -> str:
         [
             f"export SAPS_FORCE_PROJECT={shlex.quote(name)}",
             "export TWITTER_TAIL_LINK_RATE=0",
+            # Explicit lane signal so the (locked) cycle can branch the draft
+            # directive + inject the persona corpus without re-deriving the lane
+            # from SAPS_FORCE_PROJECT (which is also set by manual single-project
+            # MCP draft_cycle runs). Only the personal_brand lane sets this.
+            "export SAPS_ACTIVE_LANE=personal_brand",
         ]
     )
 
