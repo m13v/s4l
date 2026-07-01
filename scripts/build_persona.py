@@ -94,8 +94,13 @@ GROUNDING_INSTRUCTIONS = (
     "posts/replies in the x source). Keep the organic rules: first person, "
     "specific, no links, no feature lists, no sales, no em dashes.\n"
     "  search_topics  ~15 topics they have genuine experience with.\n"
+    "  content_corpus (OPTIONAL but STRONGLY encouraged) the RAW gathered "
+    "corpus as one plain-text block: the persona's actual posts, replies, repo "
+    "descriptions, site copy, verbatim. This is NOT synthesized. It becomes the "
+    "grounding pool the drafter quotes real specifics from, so keep it dense and "
+    "first-hand. Trim only obvious noise; do NOT paraphrase. Cap ~8000 chars.\n"
     + PUBLIC_ONLY_NOTE
-    + "\nThen write the four fields to /tmp/persona.json and run "
+    + "\nThen write the fields to /tmp/persona.json and run "
     "`build_persona.py apply --from /tmp/persona.json`, or hand them to the "
     "project_config tool for the persona project."
 )
@@ -331,15 +336,34 @@ def cmd_apply(args) -> int:
         proj["search_topics"] = [str(t).strip() for t in topics if str(t).strip()]
         changed.append("search_topics")
 
+    # Raw corpus -> sidecar file (NOT config.json). config.json is inlined into
+    # many prompts (ALL_PROJECTS_JSON), so a multi-KB corpus there would bloat
+    # every cycle's token bill. Instead persist it beside config.json and let the
+    # persona lane read it only when it actually drafts. cmd_apply is the single
+    # writer; the cycle is read-only.
+    corpus_written = None
+    corpus = data.get("content_corpus")
+    if isinstance(corpus, str) and corpus.strip():
+        corpus_path = cfg_path.parent / "persona_corpus.txt"
+        try:
+            corpus_path.write_text(corpus.strip()[:8000] + "\n")
+            corpus_written = str(corpus_path)
+            changed.append("content_corpus")
+        except Exception as e:
+            print(f"[build_persona] corpus sidecar write failed: {e}", file=sys.stderr)
+
     if args.dry_run:
         print(json.dumps({"would_update": name, "fields": changed,
-                          "search_topics": proj.get("search_topics")}, indent=2))
+                          "search_topics": proj.get("search_topics"),
+                          "corpus_sidecar": corpus_written}, indent=2))
         return 0
 
     tmp = cfg_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(cfg_path)
     print(f"[build_persona] updated config.json persona {name!r}: {', '.join(changed)}")
+    if corpus_written:
+        print(f"[build_persona] wrote raw corpus sidecar -> {corpus_written}")
 
     # Seed the (possibly new) topics into project_search_topics via the canonical
     # path, so pick_search_topic has a live universe for the persona.
