@@ -79,6 +79,28 @@ except Exception as _import_err:
 
 import s4l_state as st  # noqa: E402
 
+# AppKit is available in the owned venv (PyObjC is a rumps dependency). We use it
+# only to pull the accessory (LSUIElement) app to the front before showing an
+# NSAlert: an agent app that isn't the active app has its rumps.alert appear
+# BEHIND the frontmost window ("modal doesn't show on top"), because runModal
+# doesn't activate the app for us. Guarded so a missing AppKit never breaks the
+# menu bar — the alert still shows, just possibly not front-most.
+try:
+    from AppKit import NSApplication  # noqa: E402
+except Exception:
+    NSApplication = None
+
+
+def _activate_front():
+    """Bring this accessory app to the front so the next NSAlert (rumps.alert)
+    opens on top of whatever was frontmost, instead of behind it. Best-effort."""
+    try:
+        if NSApplication is not None:
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
 CLAUDE_APP = "Claude"
 POLL_SECONDS = 5
 
@@ -349,6 +371,7 @@ class S4LMenuBar(rumps.App):
         else:
             msg = "Click OK, then open Claude and ask it to " + action_desc + "."
         try:
+            _activate_front()
             rumps.alert(title=title, message=msg, ok="OK")
         except Exception:
             self._notify("S4L · prompt copied" if copied else "S4L",
@@ -598,6 +621,7 @@ class S4LMenuBar(rumps.App):
             return
         # ok=1 (plugin reset, keeps X login + browser layer), other=-1 (deep wipe),
         # cancel=0. See rumps.alert: default=1, alternate=0, other=-1.
+        _activate_front()
         choice = rumps.alert(
             title="Reset test machine?",
             message=(
@@ -638,6 +662,7 @@ class S4LMenuBar(rumps.App):
 
     def _alert(self, title, message):
         try:
+            _activate_front()
             rumps.alert(title=title, message=message, ok="OK")
         except Exception:
             pass
@@ -670,6 +695,7 @@ class S4LMenuBar(rumps.App):
         disable them is to quit Claude, strip the tasks while it's down, then
         relaunch. We warn the user with a modal FIRST that Claude Desktop will
         restart, since the app window will close and reopen under them."""
+        _activate_front()
         choice = rumps.alert(
             title="Quit the S4L autoposter?",
             message=(
@@ -946,6 +972,7 @@ class S4LMenuBar(rumps.App):
             self._reloc_needed = False
             self._cwd_healed = True
             return
+        _activate_front()
         choice = rumps.alert(
             title="Tidy the autopilot history?",
             message=(
