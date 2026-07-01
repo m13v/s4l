@@ -144,8 +144,6 @@ const LOG_FLUSH_MS = 3000; // otherwise flush on this cadence
 let logNoiseRe: RegExp | null = null;
 try {
   const extra = (process.env.SAPS_LOG_NOISE_RE || "").trim();
-  // Default signatures: a bare `ps`/`launchctl`-style table dump row is rare in
-  // pipeline output but floods when an agent shells one in. Keep this tight.
   const sources = [
     extra,
   ].filter(Boolean);
@@ -154,8 +152,19 @@ try {
   logNoiseRe = null;
 }
 
+// The X-Installation header (identity.py `header` output) is a single long base64
+// blob printed on stdout. Every heartbeat + every log flush shells identity.py to
+// mint it, and that stdout was being tee'd straight back into the log stream, which
+// re-triggered a flush — a self-referential loop that flooded Cloud Logging with
+// ~21k identical base64 lines/hour and buried real pipeline output. Karol's box was
+// impossible to read through it. Drop any line that is nothing but a long run of
+// base64 chars (no spaces): real pipeline output is never shaped like this, so the
+// filter is safe. Kept separate from logNoiseRe so an env override can't disable it.
+const BASE64_BLOB_RE = /^[A-Za-z0-9+/=_-]{120,}$/;
+
 function isNoise(line: string): boolean {
   if (!line || !line.trim()) return true; // blank / whitespace-only
+  if (BASE64_BLOB_RE.test(line.trim())) return true; // X-Installation header echo
   if (logNoiseRe && logNoiseRe.test(line)) return true;
   return false;
 }
