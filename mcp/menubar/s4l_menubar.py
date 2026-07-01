@@ -1476,6 +1476,16 @@ class S4LMenuBar(rumps.App):
         # and would freeze the card UI while the user reviews the rest of the stack.
         if not decision.get("approved"):
             n = decision.get("n")
+            # Durable local record FIRST, mirroring approved_queue_add for approvals.
+            # review_drafts() consults this, so the rejected card is suppressed from
+            # re-review IMMEDIATELY and even if the loopback is down when the
+            # background plan-flag write below runs. Without this, a reject was a
+            # fire-and-forget loopback call with a swallowed exception, so rejects
+            # silently vanished and the card "came back" — unlike durable approvals.
+            try:
+                st.review_reject_add(batch, n)
+            except Exception:
+                pass
 
             def _persist_reject():
                 try:
