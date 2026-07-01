@@ -62,25 +62,52 @@ export const VERSION = resolveVersion();
 //     with zero npm dependency.
 // npm stays as a fallback only for the rare case GitHub is unreachable (and for
 // dev machines checking a version that is on npm but not yet released).
+//
+// TTL is ~1 minute (a new release must surface within a minute — mirrored in
+// scripts/snapshot.py, the copy the menu bar actually renders from; keep the two
+// in lockstep). A 1-min cadence is only safe because the PRIMARY probe is the
+// plain website redirect (github.com/.../releases/latest 302s to
+// /releases/tag/vX.Y.Z), which is NOT API-rate-limited. The api.github.com
+// fallback allows 60 unauthenticated requests/hour per IP — a 1-min poll would
+// consume that whole quota, so the API is only consulted when the redirect fails.
 let cache: { at: number; latest: string | null } | null = null;
-const TTL_MS = 10 * 60 * 1000;
+const TTL_MS = 55 * 1000;
 
+const RELEASES_LATEST_URL = "https://github.com/m13v/social-autoposter/releases/latest";
 const RELEASES_LATEST_API =
   "https://api.github.com/repos/m13v/social-autoposter/releases/latest";
 
-async function latestFromGithub(): Promise<string | null> {
+function parseSemverish(v: string): string | null {
+  return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+}
+
+async function latestFromGithubRedirect(): Promise<string | null> {
   try {
-    // -f: fail on HTTP error, -sSL: quiet + follow redirects, -m: hard timeout.
-    // GitHub's releases/latest already excludes drafts and prereleases, so a
-    // `--draft` release correctly does NOT trigger the update banner.
+    // releases/latest already excludes drafts and prereleases, so a `--draft`
+    // release correctly does NOT trigger the update banner. No -L: read the
+    // first response's Location via %{redirect_url} and stop.
+    const res = await run(
+      "curl",
+      ["-fsS", "-m", "10", "-o", "/dev/null", "-w", "%{redirect_url}", RELEASES_LATEST_URL],
+      { timeoutMs: 12000, noTee: true }
+    );
+    const loc = (res.stdout || "").trim();
+    if (!loc.includes("/releases/tag/")) return null;
+    return parseSemverish(loc.split("/").pop()!.replace(/^v/, "").trim());
+  } catch {
+    return null;
+  }
+}
+
+async function latestFromGithubApi(): Promise<string | null> {
+  try {
     const res = await run(
       "curl",
       ["-fsSL", "-m", "10", "-H", "Accept: application/vnd.github+json", RELEASES_LATEST_API],
       { timeoutMs: 12000, noTee: true }
     );
     const tag = (JSON.parse(res.stdout) as { tag_name?: unknown }).tag_name;
-    const v = typeof tag === "string" ? tag.replace(/^v/, "").trim() : "";
-    return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+    return typeof tag === "string" ? parseSemverish(tag.replace(/^v/, "").trim()) : null;
   } catch {
     return null;
   }
@@ -100,7 +127,8 @@ export async function latestPublishedVersion(): Promise<string | null> {
   const now = Date.now();
   if (cache && now - cache.at < TTL_MS) return cache.latest;
   // GitHub first (works on boxes, matches the updater), npm only as a fallback.
-  let latest = await latestFromGithub();
+  let latest = await latestFromGithubRedirect();
+  if (latest == null) latest = await latestFromGithubApi();
   if (latest == null) latest = await latestFromNpm();
   cache = { at: now, latest };
   return latest;
