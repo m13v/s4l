@@ -749,9 +749,6 @@ async function produceDrafts(
 // posted nothing. Approval is conversational instead — numbers in chat.
 function renderDraftsTable(plan: Plan): string {
   const candidates = plan.candidates || [];
-  // Personal-brand (persona) drafts post link-free: never surface a tail link
-  // for them in the review table (and post_drafts clears it before posting).
-  const personaName = findPersonaProject()?.name ?? null;
   return candidates
     // Number by FULL-array index (matches post_drafts + the menu bar), then drop
     // already-finished entries so the cards only show what's still pending.
@@ -770,8 +767,7 @@ function renderDraftsTable(plan: Plan): string {
       // always carry the link (post_drafts forces TWITTER_TAIL_LINK_RATE=1.0), so
       // this is the target that WILL be appended. Show the TARGET only; never
       // pre-mint the real /r/ code (that would waste pool codes / split clicks).
-      const linkFree = personaName != null && c.matched_project === personaName;
-      const link = c.link_url && !linkFree
+      const link = c.link_url
         ? `\n    + link (appended as a short link at post time): ${c.link_url}`
         : "";
       // The original tweet we're replying to — context the reviewer needs to judge
@@ -2160,23 +2156,6 @@ tool(
       c.link_keyword = undefined;
       c.link_slug = undefined;
     });
-
-    // Personal-brand (persona) drafts must post link-free, always. The poster
-    // runs at forced TWITTER_TAIL_LINK_RATE=1.0 on this manual path and would
-    // revive any link_url the persona project resolved (e.g. the user's own X
-    // profile URL from config website). Strip link fields for every persona
-    // candidate so no self-referential tail link ever ships in self-promotion
-    // mode, regardless of which review surface approved it.
-    const personaName = findPersonaProject()?.name ?? null;
-    if (personaName != null) {
-      candidates.forEach((c) => {
-        if (c.matched_project === personaName) {
-          c.link_url = undefined;
-          c.link_keyword = undefined;
-          c.link_slug = undefined;
-        }
-      });
-    }
 
     if (post_all) {
       for (let i = 1; i <= total; i++) approve.add(i);
