@@ -383,10 +383,22 @@ def main() -> int:
     # regardless of age, and never touches a claim-holder.
     keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
     # (2) Count-cap backstop: never let one uuid group hold more than this many live
-    # workers, regardless of queue state. 0 disables. The default rarely fires once
-    # (1) is active (it keeps groups at ~inflight+1), but it bounds a pathological
-    # pileup if the queue signal is ever wrong or stale.
-    max_group = _env_int("SAPS_REAPER_MAX_GROUP", 12)
+    # workers, regardless of queue state. 0 disables. This is now the PRIMARY brake,
+    # not just a pathological backstop: at inflight=0 the age ceiling never fires
+    # (sessions never live 35 min), so the count-cap is the only thing trimming the
+    # pile of typeless empty warm sessions.
+    #
+    # Why 2 (2026-07-01, per Matthew): the Desktop scheduled-task launcher spawns every
+    # worker with a BYTE-IDENTICAL command line (verified on the box: task name, plugin
+    # token, and session uuid are the same across all 24 live workers), so the reaper
+    # cannot distinguish "scan" from "draft" workers via ps. It doesn't need to: the
+    # serial producer guarantees <=1 active job PER TYPE (<=2 total), those active
+    # sessions are the claim-holders spared outright by running_claim_pids(), and every
+    # session beyond them is a typeless idle empty. So a global cap of 2 == the intended
+    # "1 scan + 1 draft" per-type cap, without needing type visibility in ps. It never
+    # caps below inflight+margin (see keep = max(...) below), so an active drafter is
+    # never at risk.
+    max_group = _env_int("SAPS_REAPER_MAX_GROUP", 2)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
