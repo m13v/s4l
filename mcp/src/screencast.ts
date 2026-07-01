@@ -39,7 +39,7 @@ function candidatePorts(): number[] {
   const env = process.env.TWITTER_CDP_URL || "";
   const m = env.match(/:(\d+)/);
   if (m) ports.push(Number(m[1]));
-  for (const p of [9555, 9557, 9222, 9223, 9755]) {
+  for (const p of [9555, 9556, 9557, 9222, 9223, 9755]) {
     if (!ports.includes(p)) ports.push(p);
   }
   return ports;
@@ -146,6 +146,12 @@ class Screencast {
         clearTimeout(to);
         this.ws = ws;
         this.send("Page.enable");
+        // Activate this tab first. Chrome only streams screencast frames for a
+        // page whose RenderWidget is visible; a background tab (or one behind
+        // another window) emits zero frames, which strands the panel on
+        // "Connecting…". bringToFront makes the attached tab the foreground tab
+        // so startScreencast has something to render.
+        this.send("Page.bringToFront");
         this.send("Page.startScreencast", {
           format: "jpeg",
           quality: 55,
