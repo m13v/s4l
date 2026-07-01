@@ -60,6 +60,20 @@ def _capture(err, **tags):
         pass
 
 
+def _capture_msg(message, level="warning", **tags):
+    """Report a handled menu-bar CONDITION (not an exception) to Sentry so we get
+    fleet-wide signal on operational states like an orphaned/disabled/rate-limited
+    draft schedule. capture_exception only covers thrown errors; this covers the
+    "nothing crashed but the autopilot isn't running" case. No-op if the Sentry
+    bootstrap failed."""
+    try:
+        if _sentry is not None:
+            tags.setdefault("component", "menubar")
+            _sentry.capture_message(message, level=level, tags=tags)
+    except Exception:
+        pass
+
+
 def _flush():
     try:
         if _sentry is not None:
@@ -1330,6 +1344,22 @@ class S4LMenuBar(rumps.App):
         self._last_blocker_code = blocker_code
         # Notify once per episode (the draft schedule isn't running for this account).
         if attention and not self._stall_notified:
+            # Fleet-wide telemetry: the draft autopilot needs attention on THIS
+            # install (orphaned by an account switch, disabled, rate-limited, or a
+            # stuck worker). Only channel that surfaces "customer's autopilot silently
+            # stopped drafting" to us; the cycle log lives only on their machine.
+            # Once per episode (gated by _stall_notified), so it never spams.
+            _reason = (
+                self._stall_reason_info[0]
+                or ("disabled" if schedule_state == "disabled" else "missing")
+            )
+            _capture_msg(
+                f"S4L draft autopilot needs attention: {_reason}",
+                level="warning",
+                phase="draft_schedule",
+                reason=_reason,
+                schedule_state=str(schedule_state),
+            )
             if self._stall_reason_info[0] == "rate_limited":
                 self._notify(
                     "S4L Claude rate-limited",
