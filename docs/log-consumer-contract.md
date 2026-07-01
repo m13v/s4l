@@ -120,6 +120,88 @@ Every line is prefixed `[HH:MM:SS] `. Phase timing is derived from these exact s
 - `ERROR building brief` -> brief_error
 - `hit your limit | rate limit` (server.js:3059) -> limit
 
+## G. Incident diagnosis: pulling a client's logs (memory / reaper lane)
+
+Sections A-F are the DASHBOARD's read contract. This section is the RUNBOOK for
+diagnosing a client freeze/leak remotely (the "Karol" class: box climbs to hundreds
+of `claude` procs and OOM-freezes). Two remote data sources, both keyed on `install_id`.
+
+### 1. Cloud Logging (client log relay)
+
+Every client tees its pipeline stream to a Cloud Run relay. Query by install_id:
+
+```
+gcloud logging read \
+  'jsonPayload.install_id="<uuid>"' \
+  --project=s4l-app-prod --freshness=6h --limit=500 --format=json
+```
+
+- `install_id` is the client's install uuid (host path is the tell: `/Users/<name>/`).
+- The relay carries `memory_snapshot.py` heartbeats + pipeline stdout. It does NOT
+  carry the reaper's stderr (separate launchd job, never tee'd), so a dead reaper is
+  invisible here by design; read `reaper-status.json` (below) instead.
+- Noise caveat: `identity.py` heartbeats can flood ~21k lines/hr. Filter to the
+  `memory_snapshot` / `[claude-reaper]` payloads, do not scroll raw.
+
+### 2. installation_resource_samples (Cloud SQL, per-minute curve)
+
+The authoritative leak curve. One redacted snapshot per minute per install, created
+2026-06-27. Query the LIVE Cloud SQL DB (not the retired Neon `.env.production.local`).
+
+```
+SELECT created_at, groups->'claude_cli'->>'count'                       AS claude,
+       groups->'sessions_configured_remote_macos_mcp'->>'count'         AS mcp_sessions,
+       swap_used_mb, consecutive_timeouts
+FROM installation_resource_samples
+WHERE install_id='<uuid>' AND created_at > now() - interval '2 hours'
+ORDER BY created_at;
+```
+
+Reading the curve:
+- **Leak signature**: `claude` and `mcp_sessions` climb +4/min in lockstep, none exiting
+  (`claude ~= mcp_sessions + 7`). That is the double leak: each leaked worker drags one
+  `mcp-server-macos-use` child; kill the worker, orphan the child (reaper 1.6.176+ reaps
+  both).
+- `remote_macos_mcp_servers` is ALWAYS 0 here (standalone servers, not the leak). Do not
+  key alerts on it. The leak lives entirely in `claude_cli` + `sessions_configured_remote_macos_mcp`.
+- A row showing `0 0` mid-climb = the sampler's own `ps` timed out under swap thrash
+  (the death-spiral trigger, same failure that blinds the reaper). `consecutive_timeouts`
+  rising confirms it.
+
+### 3. Local telemetry shipped 1.6.178 (read on the box, or off the wire)
+
+These closed the exact blind spots this class of incident exposed. When SSH'd into a box:
+
+- **`claude_desktop_version`** stamped on every heartbeat + JSONL snapshot
+  (`memory_snapshot.py` reads `Claude.app/Contents/Info.plist` CFBundleShortVersionString).
+  Slice leaks by Desktop version to catch "Anthropic changed the session path" the day it
+  lands. We could NOT answer Karol's version before this existed.
+- **`reaper-status.json`** (written every cycle by `reap_stale_claude_sessions.py`) +
+  a per-cycle `[claude-reaper]` stderr marker. Fields: `candidates_seen`, `claude_killed`,
+  `mcp_orphans_killed`, `ps_timed_out`, `snapshot_empty`, `parse_misses` (NO_UUID_MATCH),
+  `max_group`. `ps_timed_out=true` or `snapshot_empty=true` or a nonzero `parse_misses`
+  = a blinded reaper (previously silent). A rising `parse_misses` is the smoking gun for
+  a session-path format change.
+- **Leak-rate Sentry alert** (`memory_snapshot.py::_maybe_leak_alert`): fires an event
+  tagged with `install_id` when `claude_cli` OR `sessions_configured_remote_macos_mcp`
+  climbs monotonically for N cycles with zero exits. Flips this from "user reports a
+  freeze after the fact" to "we get paged while it climbs."
+
+### 4. The mechanism (why it leaks at all)
+
+Customer `.mcpb` boxes have no `claude` CLI, so the pipeline's `claude -p` calls are
+intercepted by the queue provider seam (`SAPS_CLAUDE_PROVIDER=queue`): each becomes a
+file-queue job, and the real Claude turn is run by a **Claude Desktop scheduled task**
+(agent-mode stream-json session), NOT a `claude -p` subprocess. Those Desktop sessions
+finish their one queue turn but never exit (Desktop keeps the stream-json session warm),
+and Desktop starts a NEW one every ~1 min regardless of whether the prior finished. That
+is the pileup. (Our launchd autopilot uses `StartInterval`, which coalesces and does not
+double-fire, so the MacStadium box does not leak this way; a customer's Desktop scheduler
+does.) `SAPS_REAPER_MAX_GROUP` (default 12) is a per-session-uuid count-cap backstop, not
+a per-task-type limit; it only fires when the queue-aware spare signal is stale. The real
+fix is source-level (worker exits after one queue iteration); until then the reaper is the
+containment.
+
 ---
 
 When adding OTel: instrument `mcp/src/index.ts` tool handlers, export spans to a local
