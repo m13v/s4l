@@ -1216,6 +1216,80 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
 // across several calls — readiness is derived from config.json, never a stored
 // flag. Call with status:true (or just no name) to list every project this
 // install manages and what each still needs.
+// Cold-start QUERY supply, SHARED by both setup paths (product project_config
+// AND personal-brand engagement_mode). Fans the agent-supplied search_queries
+// into project_search_queries so the deterministic Phase 1 bank
+// (qualified_query_bank.py) has a real bank on day one; without it the cycle
+// falls back to ONE crude topic-as-query. The model may pass queries as a real
+// array, a stringified JSON array, or a comma list (normalizeStringList handles
+// all three — the Array.isArray-only gate silently dropped stringified arrays,
+// leaving Karol's personal-brand bank empty, 2026-06-30). CLAUDE-FREE: seeds
+// directly via --queries-json, never shells out to `claude -p`. Returns a human
+// note for the setup summary plus the seeded query rows. Only call this once the
+// project's TOPICS are seeded (the persona/product topic seed must succeed
+// first), matching the product path's `seed.code === 0` guard.
+type SeededQuery = { query: string; topic?: string };
+async function seedSearchQueriesForProject(
+  project: string,
+  rawQueries: string[] | string | undefined
+): Promise<{ note: string; queries: SeededQuery[] }> {
+  const agentQueries = normalizeStringList(rawQueries) ?? [];
+  let queries: SeededQuery[] = [];
+  if (!agentQueries.length) {
+    return {
+      note:
+        " (No search_queries supplied, so the cycle will run off the seeded topics one at a time. " +
+        "To fan out, re-run with a search_queries array of ~30 X search strings you expand from these " +
+        "topics — it seeds them directly, no claude CLI.)",
+      queries,
+    };
+  }
+  try {
+    const qfile = path.join(os.tmpdir(), `saps-queries-${project}-${Date.now()}.json`);
+    fs.writeFileSync(
+      qfile,
+      JSON.stringify({ queries: agentQueries.map((q) => ({ query: q, topic: "" })) })
+    );
+    const qseed = await runPython(
+      "scripts/seed_search_queries.py",
+      ["--project", project, "--queries-json", qfile, "--supply-test", "auto", "--emit-json"],
+      { timeoutMs: 600_000 }
+    );
+    try {
+      fs.unlinkSync(qfile);
+    } catch {
+      /* best-effort cleanup */
+    }
+    const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
+    const qjson = qseed.stdout.split("===QUERIES_JSON===")[1];
+    if (qjson) {
+      try {
+        queries = (JSON.parse(qjson.trim()).queries ?? []) as SeededQuery[];
+      } catch {
+        /* leave empty; count note still informs the user */
+      }
+    }
+    if (qseed.code === 0 && qm) {
+      const n = queries.length || Number(qm[1]);
+      return {
+        note: ` Seeded ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`,
+        queries,
+      };
+    }
+    if (qseed.code !== 0) {
+      const qtail =
+        (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+      return {
+        note: ` (Search queries not seeded yet — ${qtail}. The cycle still runs off the seeded topics.)`,
+        queries,
+      };
+    }
+    return { note: "", queries };
+  } catch (e) {
+    return { note: ` (Search-query seeding skipped — ${(e as Error).message}.)`, queries };
+  }
+}
+
 // ---- engagement_mode: choose personal-brand vs product (setup-time) --------
 // Part of onboarding: AFTER X connect + profile_scan, BEFORE product config, the
 // agent asks the user which mode they want and calls this. It persists the mode
