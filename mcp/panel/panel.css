@@ -235,6 +235,20 @@ button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
 .install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
 .install-err[hidden] { display: none; }
 
+/* Menu-bar-down banner: same card shell as the installer, one primary action. */
+.menubar-banner {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.menubar-banner[hidden] { display: none; }
+.menubar-banner-text { font-size: 13px; color: var(--fg); }
+
 /* Shared step list (runtime installer + onboarding milestones). Status carried by
  * glyph + weight, never color. */
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
