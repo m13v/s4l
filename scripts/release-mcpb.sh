@@ -22,6 +22,15 @@
 # releases/latest, pulls the new .mcpb, and on next server boot
 # ensurePipelineCurrent() re-extracts pipeline.tgz. No manual box step needed.
 #
+# WHERE THE "⬆ Update available" BANNER COMES FROM (read this before touching the
+# release/detection path): the menu-bar banner is driven by versionStatus() in
+# mcp/src/version.ts, which resolves "latest" from GitHub releases/latest (via
+# curl), NOT from npm. .mcpb boxes have no npm/npx on PATH, so an npm-based probe
+# is permanently blind there. Consequence for releasing: the banner fires only
+# after the GitHub release step (7) lands and releases/latest serves the new tag,
+# NOT after npm publish (6). Step 8 below verifies that so a release can't
+# "succeed" while every box stays silent on the old version.
+#
 # Usage:
 #   bash scripts/release-mcpb.sh                 # patch bump, npm + .mcpb + GitHub
 #   bash scripts/release-mcpb.sh --bump minor
@@ -279,3 +288,31 @@ URL=$(gh release view "$TAG" -R "$GH_REPO" --json url -q .url 2>/dev/null || ech
 say "Released $TAG"
 echo "  asset: social-autoposter.mcpb (${MB}MB)"
 [[ -n "$URL" ]] && echo "  $URL"
+
+# ---- 8. Verify the update banner will fire ---------------------------------
+# The menu-bar "⬆ Update available" banner (mcp/src/version.ts::versionStatus)
+# resolves "latest" from GitHub releases/latest, which is what .mcpb boxes (no
+# npm) can actually read. A draft release is deliberately excluded by GitHub's
+# releases/latest, so it also won't (and shouldn't) trigger the banner — skip
+# the check then. For a normal release, poll releases/latest until it serves the
+# new tag so we don't declare success while every box stays silent on the old
+# version (the 1.6.177-vs-1.6.181 blind-banner bug this guards against).
+if [[ -z "$DRAFT_FLAG" ]]; then
+  say "Verifying releases/latest serves $TAG (drives the menu-bar update banner)"
+  LATEST_SEEN=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    LATEST_SEEN="$(curl -fsSL -m 15 "https://api.github.com/repos/$GH_REPO/releases/latest" \
+      | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).tag_name || ''" 2>/dev/null || echo "")"
+    [[ "$LATEST_SEEN" == "$TAG" ]] && break
+    sleep 6
+  done
+  if [[ "$LATEST_SEEN" == "$TAG" ]]; then
+    echo "  releases/latest -> $LATEST_SEEN — boxes will detect the update within version.ts's 10-min TTL"
+  else
+    echo "  WARNING: releases/latest still reports '${LATEST_SEEN:-<none>}', not $TAG." >&2
+    echo "  The menu-bar update banner will NOT fire until this resolves. If it stays" >&2
+    echo "  wrong, the release is likely a draft/prerelease or GitHub hasn't propagated." >&2
+  fi
+else
+  say "Draft release — skipping banner verification (releases/latest excludes drafts by design)"
+fi
