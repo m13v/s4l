@@ -968,13 +968,13 @@ export async function ensureMenubar(): Promise<{
   skipped?: boolean;
 }> {
   if (process.platform !== "darwin") return { ok: true, skipped: true, detail: "non-macOS" };
-  if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
-  // The user clicked Quit in the tray: stay stopped across Claude restarts.
-  // Explicit start paths (restart_menubar tool, queue_setup) clear the flag
-  // before calling this.
+  // The user clicked Quit in the tray: stay stopped across Claude restarts,
+  // regardless of runtime state. Explicit start paths (restart_menubar tool,
+  // queue_setup) clear the flag before calling this.
   if (menubarStopped()) {
     return { ok: true, skipped: true, detail: "user stopped the menu bar (stopped.flag)" };
   }
+  if (!runtimeReady()) return { ok: false, skipped: true, detail: "runtime not ready" };
   if (
     fs.existsSync(MENUBAR_ENTRY) &&
     fs.existsSync(MENUBAR_PLIST) &&
