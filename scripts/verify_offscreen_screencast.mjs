@@ -49,7 +49,7 @@ async function countFrames(withFlags) {
     await sleep(500);
     const list = await fetchJson(`http://127.0.0.1:${PORT}/json`);
     if (Array.isArray(list)) {
-      const pages = list.filter((t) => t.type === "page" && t.webSocketDebuggerUrl && /^https?:/.test(t.url || ""));
+      const pages = list.filter((t) => t.type === "page" && t.webSocketDebuggerUrl && !String(t.url || "").startsWith("devtools://"));
       if (pages.length) target = pages[0];
     }
   }
