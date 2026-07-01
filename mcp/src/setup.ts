@@ -401,6 +401,11 @@ export interface PersonaGrounding {
   content_angle?: string;
   voice?: unknown;
   search_topics?: string[] | string;
+  // Raw voice-memo transcript from the onboarding dictation interview, kept
+  // VERBATIM (never paraphrased). Persisted to the persona_corpus.txt sidecar,
+  // NOT config.json, so the multi-KB block never bloats ALL_PROJECTS_JSON. The
+  // persona lane reads it only when it drafts, to quote real specifics.
+  content_corpus?: string;
 }
 
 // The persona project entry (the one with persona:true), or null if none yet.
@@ -455,6 +460,20 @@ export function ensurePersonaProject(
   }
   fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+
+  // Raw dictation transcript -> persona_corpus.txt sidecar (NOT config.json).
+  // Mirrors scripts/build_persona.py cmd_apply: config.json is inlined into many
+  // prompts (ALL_PROJECTS_JSON), so a multi-KB corpus there would bloat every
+  // cycle's token bill. The persona lane reads this file only when it drafts.
+  // Best-effort; a write failure must never block persona provisioning.
+  if (grounding && typeof grounding.content_corpus === "string" && grounding.content_corpus.trim()) {
+    try {
+      const corpusPath = path.join(path.dirname(cfgPath), "persona_corpus.txt");
+      fs.writeFileSync(corpusPath, grounding.content_corpus.trim().slice(0, 8000) + "\n", "utf-8");
+    } catch {
+      // ignore: corpus is grounding fuel, not required for a working persona.
+    }
+  }
   return { name, created };
 }
 
