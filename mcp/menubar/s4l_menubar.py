@@ -118,6 +118,19 @@ def _activate_front():
 CLAUDE_APP = "Claude"
 POLL_SECONDS = 5
 
+# Our own LaunchAgent. Quit boots it out and deletes the plist so the tray is
+# genuinely gone (KeepAlive can't respawn it, RunAtLoad can't resurrect it at
+# next login). Keep the label in sync with MENUBAR_LABEL in mcp/src/runtime.ts.
+MENUBAR_LABEL = "com.m13v.social-autoposter.menubar"
+MENUBAR_PLIST = os.path.join(
+    os.path.expanduser("~"), "Library", "LaunchAgents", f"{MENUBAR_LABEL}.plist"
+)
+# Stop sentinel read by the MCP server's ensureMenubar()/provision paths: while
+# present, no auto-start path may reinstall the tray. Cleared only by explicit
+# start actions (restart_menubar tool, queue_setup re-arm). Keep the filename in
+# sync with MENUBAR_STOP_FLAG in mcp/src/runtime.ts.
+STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
+
 # Autopilot scheduled tasks. The two queue workers must RUN in a dedicated folder
 # (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
 # interactive Claude Code history (Claude buckets sessions by cwd). The single
