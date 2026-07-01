@@ -400,6 +400,27 @@ def main() -> int:
     # never at risk.
     max_group = _env_int("SAPS_REAPER_MAX_GROUP", 2)
 
+    # (3) Claim grace — the PRIMARY brake (2026-07-01, per Matthew). A worker checks
+    # the queue EXACTLY ONCE per fire: claude_job.py::cmd_next is single-shot — it
+    # claims one pending job (stamping claim_pid) or prints {} and returns; it never
+    # polls again. So within one cron tick of spawning, a session either CLAIMS a job
+    # (=> it has a "type", is actively drafting, and is spared outright via
+    # running_claim_pids()) or finds the queue empty and becomes a PERMANENT typeless
+    # husk that will NEVER claim again. Those husks are exactly what we want to kill.
+    #
+    # The ONLY reason to spare a claimless session is that it may not have run its one
+    # cmd_next yet (cold agent-mode boot: skill load + MCP init before the first tool
+    # call). claim_grace bounds that boot+claim window. Measured on the box:
+    # enqueue->claim was ALWAYS < 60s (3-55s across 85 claims); 120s is a generous
+    # margin. Past claim_grace a claimless session is a proven husk -> reap it now,
+    # regardless of the 35-min age ceiling and regardless of group size. This is the
+    # type-driven rule: spare drafters + spare boot-window newborns, reap all the rest.
+    # Worst case of an over-tight grace is a job delayed one tick (it stays in pending
+    # for the next worker), never a lost draft. A DRAFTING session is protected by
+    # claim_pids, not by grace, so no grace value can kill a real draft (this is what
+    # makes the old "~120s code-143 mid-draft kill" impossible now).
+    claim_grace = _env_int("SAPS_REAPER_CLAIM_GRACE_SEC", 120)
+
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
 
@@ -417,26 +438,34 @@ def main() -> int:
         members.sort(key=lambda p: p["age"])  # ascending: newest first
 
         if inflight is not None:
-            # (1) Spare any session that HOLDS a live claim (it's actively drafting),
-            # plus the (inflight + margin) newest as a fallback for sessions that
-            # claimed before this build stamped claim_pid. Reap the rest past max_age.
-            spare_n = max(1, inflight + keep_margin)
-            for p in members[spare_n:]:
+            # (1) TYPE-DRIVEN reaping — the primary rule. A session is spared iff it
+            # (a) holds a live claim (actively drafting — never reap, at any age), OR
+            # (b) is younger than claim_grace (may not have run its one-shot cmd_next
+            # yet — the cold-boot window). EVERY other session in a leaked group is a
+            # claimless husk that already ran its single queue check and found nothing,
+            # so it will never claim again: reap it now, no age ceiling needed.
+            for p in members:
                 if p["pid"] in claim_pids:
-                    continue  # actively holds a claim — never reap, no matter its age
-                if p["age"] >= max_age:  # single 35-min ceiling, same as the fallback
-                    targets_by_pid[p["pid"]] = p
+                    continue  # holds a live claim -> actively drafting, never reap
+                if p["age"] < claim_grace:
+                    continue  # newborn: may still run its one-shot claim
+                targets_by_pid[p["pid"]] = p  # claimless past grace = proven husk
         else:
-            # Fallback: queue unreadable -> legacy age gate, keep only the newest.
+            # Fallback: queue unreadable -> can't tell claimed from husk, so drop back
+            # to the conservative age gate (keep newest, reap only past the 35-min
+            # ceiling). A missing/renamed queue must never turn the reaper aggressive.
             for p in members[1:]:
                 if p["pid"] in claim_pids:
                     continue
                 if p["age"] >= max_age:
                     targets_by_pid[p["pid"]] = p
 
-        # (2) Count-cap backstop. Never caps BELOW the queue-spared busy set, and
-        # never reaps a live claim-holder, so it can only ever add provably-idle
-        # workers — no false positives.
+        # (2) Count-cap backstop. With rule (1) already sweeping every claimless husk
+        # past grace, this is now REDUNDANT in steady state and kept only as a
+        # pathological guard (e.g. a spawn storm of sessions all still inside their
+        # grace window). It never caps below the busy set, never reaps a live
+        # claim-holder, and — matching rule (1) — never reaps a newborn inside its
+        # claim window, so it can only ever add provably-idle husks.
         if max_group > 0:
             keep = max_group
             if inflight is not None:
@@ -444,6 +473,8 @@ def main() -> int:
             for p in members[keep:]:
                 if p["pid"] in claim_pids:
                     continue
+                if p["age"] < claim_grace:
+                    continue  # never reap a session still inside its boot+claim window
                 targets_by_pid[p["pid"]] = p
 
     targets = list(targets_by_pid.values())[:MAX_KILL_PER_RUN]
@@ -516,6 +547,7 @@ def main() -> int:
         "inflight": inflight,
         "ceiling_sec": max_age,
         "max_group": max_group,
+        "claim_grace_sec": claim_grace,
         "leaked_groups": leaked_groups,
         "claude_killed": killed,
         "disclaimer_killed": disclaimers,
@@ -539,7 +571,7 @@ def main() -> int:
         f" mcp_seen={stats['macos_mcp_seen']} killed={killed}"
         f" disclaimer_killed={disclaimers} mcp_killed={macos_killed}"
         f" ps_timeout={int(stats['ps_timed_out'])} empty={int(stats['snapshot_empty'])}"
-        f" max_group={max_group}",
+        f" max_group={max_group} claim_grace={claim_grace}s",
         file=sys.stderr,
     )
     return 0
