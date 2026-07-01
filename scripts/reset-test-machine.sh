@@ -27,11 +27,15 @@
 #   scripts/reset-test-machine.sh --yes --deep   # full nuke incl. shared browser layer + toolchain
 #   scripts/reset-test-machine.sh --yes --keep-claude  # don't quit Claude (run from inside a live session)
 #
-# IMPORTANT: by default --yes QUITS Claude Desktop before wiping. The .mcpb
-# registry ([1b]) and scheduled-task ([1c]) edits only STICK if Claude is not
-# running, because the host rewrites those files on quit. If you invoke this from
-# INSIDE a live Claude session and don't want the app taken down, pass
-# --keep-claude (the registry/task edits then won't persist until you quit Claude).
+# IMPORTANT: by default --yes QUITS Claude Desktop before wiping AND leaves it
+# down. The .mcpb registry ([1b]), scheduled-task ([1c]) and mcpServers ([3])
+# edits only STICK if Claude is not running, because the host rewrites those
+# files on quit and re-materializes the state dir on launch. A final settle step
+# ([7]) re-quits Claude and re-wipes if it auto-relaunches (e.g. an auto-update),
+# so the box is genuinely first-run. Relaunch Claude by hand for the fresh
+# install. If you invoke this from INSIDE a live Claude session and don't want the
+# app taken down, pass --keep-claude (the registry/task/mcp edits then won't
+# persist, and the settle step is skipped, until you quit Claude yourself).
 #
 set -u
 
@@ -531,8 +535,45 @@ fi
 fi
 echo
 
+# ---- 7. settle & verify (defeat Claude auto-relaunch resurrection) ---------
+# Claude Desktop can RELAUNCH after step [0] — on auto-update (ShipIt), a macOS
+# re-open, or a login item — and a relaunched host re-materializes a skeleton
+# ~/.social-autoposter-mcp/repo within seconds of the wipe, so the box is NOT
+# truly first-run. Unless --keep-claude, settle it: keep Claude down and re-remove
+# the state dir until it stops coming back (cap 3 rounds), then report. Leaves
+# Claude Desktop DOWN on purpose — relaunch it by hand to do the fresh install.
+STATE_DIR="$HOME_DIR/.social-autoposter-mcp"
+if [ "$DRY" -eq 0 ] && [ "$KEEP_CLAUDE" -eq 0 ]; then
+  echo "[7] settle & verify (guard against Claude auto-relaunch resurrection)"
+  for round in 1 2 3; do
+    if pgrep -x "Claude" >/dev/null 2>&1; then
+      echo "  round $round: Claude Desktop is up (relaunched) — quitting again"
+      osascript -e 'tell application "Claude" to quit' >/dev/null 2>&1 || true
+      for _ in 1 2 3 4 5; do pgrep -x "Claude" >/dev/null 2>&1 || break; sleep 1; done
+      pgrep -x "Claude" >/dev/null 2>&1 && pkill -9 -x "Claude" 2>/dev/null || true
+      sleep 1
+    fi
+    if [ -e "$STATE_DIR" ]; then
+      echo "  round $round: removing recreated $STATE_DIR"
+      rm -rf "$STATE_DIR"
+    fi
+    sleep 3
+    if [ ! -e "$STATE_DIR" ] && ! pgrep -x "Claude" >/dev/null 2>&1; then
+      echo "  ok      state dir gone and Claude Desktop down (settled on round $round)"
+      break
+    fi
+  done
+  if [ -e "$STATE_DIR" ]; then
+    echo "  WARN    $STATE_DIR keeps reappearing after 3 rounds — something beyond"
+    echo "          Claude is recreating it; investigate before treating as first-run."
+  fi
+  echo
+fi
+
 if [ "$DRY" -eq 1 ]; then
   echo "=== DRY RUN complete. Re-run with --yes to actually remove. ==="
 else
-  echo "=== Reset complete. Machine is ready for a clean first-install test. ==="
+  echo "=== Reset complete. Machine is ready for a clean first-install test."
+  echo "=== Claude Desktop was left DOWN so the wipe sticks — relaunch it, then"
+  echo "=== re-download the .mcpb for a genuine first-run install. ==="
 fi
