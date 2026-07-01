@@ -717,22 +717,26 @@ class S4LMenuBar(rumps.App):
 
     def _quit_app(self, _=None):
         """The single Quit path. Quitting stops the autopilot completely: the
-        draft/query scheduled tasks are removed so they no longer fire. Claude
-        Desktop OWNS the live schedule and caches the registry in memory,
-        clobbering any live edit on the next fire — so the only reliable way to
-        disable them is to quit Claude, strip the tasks while it's down, then
-        relaunch. We warn the user with a modal FIRST that Claude Desktop will
-        restart, since the app window will close and reopen under them."""
+        draft/query scheduled tasks are removed so they no longer fire, AND the
+        tray itself goes away for good (stop flag + plist removal + self
+        bootout — see _quit_work). Claude Desktop OWNS the live schedule and
+        caches the registry in memory, clobbering any live edit on the next
+        fire — so the only reliable way to disable them is to quit Claude,
+        strip the tasks while it's down, then relaunch. We warn the user with a
+        modal FIRST that Claude Desktop will restart, since the app window will
+        close and reopen under them."""
         _activate_front()
         choice = rumps.alert(
             title="Quit the S4L autoposter?",
             message=(
                 "Quitting stops the autoposter completely: the draft + query "
-                "scheduled tasks are removed so nothing fires anymore.\n\n"
+                "scheduled tasks are removed so nothing fires anymore, and this "
+                "menu bar icon goes away and stays away.\n\n"
                 "Claude Desktop will quit and restart to apply this — its window "
                 "will close and reopen in a moment. Your X login, browser layer, "
-                "and config all stay; you can re-arm the schedule any time from "
-                "this menu."
+                "and config all stay.\n\n"
+                "To start S4L again later, open Claude and say \"start S4L\" "
+                "(or re-run setup)."
             ),
             ok="Quit & restart Claude", cancel="Cancel",
         )
@@ -781,10 +785,23 @@ class S4LMenuBar(rumps.App):
             pass
 
     def _quit_work(self):
-        """Quit/kill Claude, strip the scheduled tasks while it's down, relaunch.
-        Mirror of _relocate_restart_work's restart block. The menu bar is a separate
-        launchd process, so killing Claude does not kill us."""
+        """Quit/kill Claude, strip the scheduled tasks while it's down, relaunch
+        Claude, then take THIS tray down for good. Mirror of
+        _relocate_restart_work's restart block. The menu bar is a separate
+        launchd process, so killing Claude does not kill us.
+
+        The stop flag is written FIRST: the relaunched Claude boots the MCP
+        server, whose ensureMenubar() would otherwise reinstall the tray
+        unconditionally (the reappearing-icon bug). The plist is deleted so
+        RunAtLoad can't resurrect us at next login, and the final bootout
+        removes the KeepAlive job — which kills this process, so it must be
+        the last thing we do."""
         try:
+            try:
+                with open(STOP_FLAG, "w") as fh:
+                    fh.write(f"user quit via menu bar at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+            except Exception as e:
+                _capture(e, action="quit_stop_flag")
             subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
                            capture_output=True, timeout=20)
             time.sleep(4)
@@ -793,11 +810,30 @@ class S4LMenuBar(rumps.App):
             subprocess.run(["killall", "-9", "Claude"], capture_output=True)
             time.sleep(1)
             self._remove_scheduled_tasks()
+            try:
+                os.remove(MENUBAR_PLIST)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                _capture(e, action="quit_remove_plist")
             subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
-            self._notify("S4L", "Autoposter stopped. Claude restarted.")
+            self._notify("S4L", "Autoposter stopped. Say \"start S4L\" in Claude to bring it back.")
         except Exception as e:
             _capture(e, action="quit_app")
             self._notify("S4L", "Couldn't fully stop the autoposter — see logs.")
+        finally:
+            # Boot out our own KeepAlive agent. launchd kills this process as
+            # part of the bootout, so nothing after this line is guaranteed to
+            # run. Runs even if the Claude restart above failed: the user asked
+            # for the tray to be gone.
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{MENUBAR_LABEL}"],
+                capture_output=True, timeout=15,
+            )
+            # Only reached if bootout didn't kill us (e.g. dev run outside
+            # launchd). Exit 0: KeepAlive {SuccessfulExit: false} treats a clean
+            # exit as final. os._exit because we're on a background thread.
+            os._exit(0)
 
     def _update(self, _=None):
         self._send_to_claude(UPDATE_PROMPT)
