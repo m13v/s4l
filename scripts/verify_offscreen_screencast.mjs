@@ -83,9 +83,10 @@ async function run(withFlags) {
   // Now COVER it with a full-screen opaque window (mimics Claude Desktop on top).
   const cover = launch(COVER_PORT, p2, ["--disable-features=ChromeWhatsNewUI"], "<body style=background:black></body>", "0,0", "3456,2234");
   await firstPage(COVER_PORT);
-  frames = 0;                 // reset: count only frames AFTER the cover lands
-  await sleep(3000);
-  const framesWhileCovered = frames;
+  await sleep(9000);          // let macOS occlusion debounce (~8s) fully engage
+  frames = 0;                 // then count steady-state frames while covered
+  await sleep(4000);
+  const framesWhileCovered = frames + " (per 4s, steady-state occluded)";
 
   try { ws.close(); } catch {}
   kill(anim); kill(cover);
