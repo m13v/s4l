@@ -33,7 +33,8 @@ interface CdpTarget {
 }
 
 // Ports we manage a Chrome on, most-likely-active first. TWITTER_CDP_URL (the
-// twitter harness) wins if set; the rest cover reddit / browser-harness / assrt.
+// twitter harness) wins if set; the rest cover linkedin (9556) / reddit (9557) /
+// browser-harness / assrt.
 function candidatePorts(): number[] {
   const ports: number[] = [];
   const env = process.env.TWITTER_CDP_URL || "";
