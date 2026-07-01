@@ -146,25 +146,50 @@ fi
 rm_path "$MENUBAR_PLIST" "menubar-plist"
 echo
 
-# ---- 0c. autopilot LaunchAgents (twitter-cycle kicker + daily updater) ------
-# The queue-backed draft autopilot kicks the pipeline from a launchd job
-# (com.m13v.social-twitter-cycle) and a daily self-updater. Both plists live in
-# ~/Library/LaunchAgents, OUTSIDE the state dir removed in [1], so a reset that
-# skips them leaves a loaded job that keeps firing cycles against a half-wiped
-# install. Bootout + remove them (and any .disabled-* variant left by a manual
-# stop). KEEP these labels in sync with src/index.ts.
-echo "[0c] autopilot LaunchAgents (twitter-cycle kicker + daily updater)"
-for LBL in com.m13v.social-twitter-cycle com.m13v.social-autoposter-update; do
-  PL="$HOME_DIR/Library/LaunchAgents/$LBL.plist"
-  if [ "$DRY" -eq 0 ]; then
-    launchctl bootout "gui/$(id -u)/$LBL" 2>/dev/null \
-      || launchctl unload "$PL" 2>/dev/null || true
-  else
-    echo "  (would bootout $LBL)"
-  fi
-  rm_path "$PL" "launchagent"
-  for d in "$PL".disabled*; do [ -e "$d" ] && rm_path "$d" "launchagent-disabled"; done
+# ---- 0c. ALL other social-autoposter LaunchAgents (dynamic sweep) ----------
+# Beyond the menu bar ([0b]), the install has dropped a GROWING set of
+# com.m13v.social-* LaunchAgents into ~/Library/LaunchAgents: the twitter-cycle
+# kicker, the daily updater, plus autopilot-stall-watch, claude-reaper,
+# memory-snapshot, and overlay-watch. All live OUTSIDE the state dir removed in
+# [1], so any we miss keep firing against a half-wiped install (or resurrect it).
+# Hardcoding the list meant every NEW agent survived the next reset (that bug bit
+# us twice). So sweep DYNAMICALLY: the union of every com.m13v.social-* plist on
+# disk and every com.m13v.social-* label loaded in launchd, minus the menu bar
+# already handled in [0b]. Bootout + remove each (and any .disabled-* variant).
+echo "[0c] social-autoposter LaunchAgents (dynamic sweep of all com.m13v.social-*)"
+LA_DIR="$HOME_DIR/Library/LaunchAgents"
+AGENT_LABELS=()
+# labels from plist files on disk
+for pl in "$LA_DIR"/com.m13v.social-*.plist; do
+  [ -e "$pl" ] || continue
+  AGENT_LABELS+=("$(basename "$pl" .plist)")
 done
+# labels currently loaded in launchd (catches loaded-but-plist-already-gone)
+while IFS= read -r lbl; do
+  [ -n "$lbl" ] && AGENT_LABELS+=("$lbl")
+done < <(launchctl list 2>/dev/null | awk '/com\.m13v\.social-/ {print $3}')
+# dedupe + drop the menu bar (handled in [0b]); keep set -u safe with an empty set
+FILTERED=()
+if [ "${#AGENT_LABELS[@]}" -gt 0 ]; then
+  while IFS= read -r lbl; do
+    [ -n "$lbl" ] && FILTERED+=("$lbl")
+  done < <(printf '%s\n' "${AGENT_LABELS[@]}" | awk -v mb="$MENUBAR_LABEL" 'NF && $0!=mb && !seen[$0]++')
+fi
+if [ "${#FILTERED[@]}" -eq 0 ]; then
+  echo "  (no other com.m13v.social-* LaunchAgents found)"
+else
+  for LBL in "${FILTERED[@]}"; do
+    PL="$LA_DIR/$LBL.plist"
+    if [ "$DRY" -eq 0 ]; then
+      launchctl bootout "gui/$(id -u)/$LBL" 2>/dev/null \
+        || launchctl unload "$PL" 2>/dev/null || true
+    else
+      echo "  (would bootout $LBL)"
+    fi
+    rm_path "$PL" "launchagent"
+    for d in "$PL".disabled*; do [ -e "$d" ] && rm_path "$d" "launchagent-disabled"; done
+  done
+fi
 echo
 
 # ---- 1. MCP state dir (owned python + venv + materialized repo) ------------
@@ -401,14 +426,52 @@ if command -v claude >/dev/null 2>&1; then
 else
   echo "  (claude CLI not on PATH — scrub config files manually if needed)"
 fi
-# Surface (but do NOT auto-edit) the config files that may still carry a stanza.
-for cfg in \
-  "$HOME_DIR/.claude.json" \
-  "$HOME_DIR/Library/Application Support/Claude/claude_desktop_config.json"; do
-  if [ -f "$cfg" ] && grep -q 'social-autoposter\|twitter-harness' "$cfg" 2>/dev/null; then
-    echo "  NOTE    $cfg still references the MCP — review/remove the stanza by hand"
-  fi
-done
+# Surgically remove ONLY the in-scope MCP stanzas from the config files. The
+# claude CLI (above) isn't on PATH on the box, and even when it is it leaves the
+# raw mcpServers stanza in ~/.claude.json — which the Cowork/Code boot self-heal
+# (ensureCoworkMcpRegistered) reads back and RE-materializes the state dir on the
+# next Claude launch. So drop the keys ourselves (backup first). Plugin reset
+# removes only social-autoposter; --deep also removes the shared browser MCPs.
+if command -v python3 >/dev/null 2>&1; then
+  for cfg in \
+    "$HOME_DIR/.claude.json" \
+    "$HOME_DIR/Library/Application Support/Claude/claude_desktop_config.json"; do
+    [ -f "$cfg" ] || continue
+    if python3 - "$cfg" $MCP_NAMES <<'PY' >/dev/null 2>&1; then
+import json, sys
+p, names = sys.argv[1], set(sys.argv[2:])
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(1)
+srv = d.get("mcpServers") or {}
+sys.exit(0 if names.intersection(srv.keys()) else 1)
+PY
+      json_edit "remove MCP stanza(s) [$MCP_NAMES] from $cfg" \
+        sh -c 'cp "$1" "$1.bak" 2>/dev/null || true; shift; python3 - "$@"' sh "$cfg" "$cfg" $MCP_NAMES <<'PY'
+import json, sys
+p, names = sys.argv[1], set(sys.argv[2:])
+d = json.load(open(p))
+srv = d.get("mcpServers") or {}
+for n in names:
+    srv.pop(n, None)
+d["mcpServers"] = srv
+json.dump(d, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+    else
+      [ -f "$cfg" ] && echo "  (no in-scope MCP stanza in $cfg)"
+    fi
+  done
+else
+  for cfg in \
+    "$HOME_DIR/.claude.json" \
+    "$HOME_DIR/Library/Application Support/Claude/claude_desktop_config.json"; do
+    if [ -f "$cfg" ] && grep -q 'social-autoposter\|twitter-harness' "$cfg" 2>/dev/null; then
+      echo "  NOTE    python3 not on PATH — remove the MCP stanza from $cfg by hand"
+    fi
+  done
+fi
 echo
 
 # ---- 4. packaged Chrome profiles + imported cookies ------------------------
