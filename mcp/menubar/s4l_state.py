@@ -524,11 +524,13 @@ def review_drafts(plan, batch="review-queue"):
             continue
         if (i + 1) in approved_ns:
             continue
-        # Personal-brand (persona) drafts post link-free; never show a tail link
-        # for them (it would be the user's own profile URL, which is wrong).
-        link_url = c.get("link_url")
-        if persona_projects and c.get("matched_project") in persona_projects:
-            link_url = None
+        # Personal-brand (persona) drafts post link-free. Never show a tail link
+        # for them (it would be the user's own profile URL, which is wrong), AND
+        # mark them link_free so the card forces drop_link on approval — otherwise
+        # the poster (forced TWITTER_TAIL_LINK_RATE=1.0 on the manual path) revives
+        # the plan's link_url and appends it to the live reply.
+        link_free = bool(persona_projects and c.get("matched_project") in persona_projects)
+        link_url = None if link_free else c.get("link_url")
         out.append(
             {
                 "n": i + 1,  # 1-based, matches post_drafts numbering
@@ -536,6 +538,7 @@ def review_drafts(plan, batch="review-queue"):
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
                 "link_url": link_url,
+                "link_free": link_free,
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
