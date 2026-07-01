@@ -73,6 +73,9 @@ interface Snapshot {
   mode?: "promotion" | "personal_brand";
   flags?: { personal_brand?: boolean; promotion?: boolean };
   onboarding?: OnboardingSnapshot;
+  // False only when the always-on tray app was quit while the runtime is ready
+  // (macOS only). Drives the "Restart menu bar" banner.
+  menubar_running?: boolean;
 }
 
 // ---- result parsing -------------------------------------------------------
@@ -113,6 +116,8 @@ const statsCard = $("stats-card");
 const installSteps = $("install-steps");
 const installErr = $("install-err");
 const btnInstall = $("btn-install") as HTMLButtonElement;
+const menubarBanner = $("menubar-banner");
+const btnMenubarRestart = $("btn-menubar-restart") as HTMLButtonElement;
 const btnLive = $("btn-live") as HTMLButtonElement;
 const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
@@ -252,6 +257,11 @@ function render() {
   const needsRuntime = !state.runtime_ready;
   installCard.hidden = !needsRuntime;
 
+  // "Menu bar not running" banner: only once the runtime exists (before that the
+  // tray isn't installed and the install card owns the view) and only when the
+  // snapshot explicitly reports it down (undefined = unknown = don't nag).
+  menubarBanner.hidden = needsRuntime || state.menubar_running !== false;
+
   // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
   // exists, at least one project is fully configured, and the X session is
   // connected. Until all three hold, the panel is intentionally minimal — just
@@ -376,6 +386,7 @@ async function refresh() {
     applyState({
       ...fromSetupStatus(setupStatus),
       ...(typeof rt.runtime_ready === "boolean" ? { runtime_ready: rt.runtime_ready } : {}),
+      ...(typeof rt.menubar_running === "boolean" ? { menubar_running: rt.menubar_running } : {}),
       onboarding: rt.onboarding || setupStatus.onboarding || state?.onboarding,
     });
     if (state && !state.runtime_ready && rt.provisioning) pollInstall();
@@ -630,6 +641,26 @@ btnInstall.addEventListener("click", async () => {
     installErr.hidden = false;
   }
 });
+
+// Restart the always-on tray app after a Quit. Calls the restart_menubar tool
+// (re-loads its LaunchAgent server-side) and applies the fresh running state it
+// returns, so the banner drops without waiting for the next refresh.
+btnMenubarRestart.addEventListener("click", () =>
+  busy(btnMenubarRestart, "Restarting\u2026", async () => {
+    log("Restarting the S4L menu bar\u2026");
+    try {
+      const r = await call("restart_menubar");
+      if (typeof r.menubar_running === "boolean") applyState({ menubar_running: r.menubar_running });
+      log(
+        r.menubar_running
+          ? "Menu bar restarted."
+          : "Couldn\u2019t confirm the menu bar came back" + (r.detail ? ": " + r.detail : ".")
+      );
+    } catch (e: any) {
+      log("Couldn\u2019t restart the menu bar: " + (e?.message || e));
+    }
+  })
+);
 
 // ---- config view / edit ---------------------------------------------------
 // Removed: raw config.json view/edit. All project changes now go through the
