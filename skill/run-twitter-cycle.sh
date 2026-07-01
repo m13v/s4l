@@ -1730,7 +1730,28 @@ done <<< "$CANDIDATES"
 ALL_PROJECTS_JSON=$(python3 -c "
 import json, os
 config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
-print(json.dumps({p['name']: p for p in config.get('projects', [])}, indent=2))
+projects = config.get('projects', [])
+lane = os.environ.get('SAPS_ACTIVE_LANE', '')
+if lane == 'personal_brand':
+    # Personal-brand lane is pure organic growth: the drafter must NOT see any
+    # product config at all (no website, links, booking_link, get_started_link,
+    # features, pricing, CTAs). We emit ONLY the persona project, and ONLY the
+    # drafting-relevant fields, so there is literally no product context in the
+    # prompt to accidentally pitch, quote, or link. This also kills cross-routing
+    # (no 'other project' exists to route a candidate to). Whitelist, not
+    # denylist: any field added to the persona entry later stays out unless
+    # explicitly allowed here.
+    ALLOWED = {
+        'name', 'description', 'content_angle', 'voice',
+        'voice_relationship', 'content_guardrails',
+    }
+    persona = next((p for p in projects if p.get('persona') is True), None)
+    out = {}
+    if persona:
+        out[persona['name']] = {k: v for k, v in persona.items() if k in ALLOWED}
+    print(json.dumps(out, indent=2))
+else:
+    print(json.dumps({p['name']: p for p in projects}, indent=2))
 " 2>/dev/null || echo "{}")
 
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
@@ -1802,7 +1823,7 @@ fi
 # the persona's first-hand material (the PERSONA CORPUS block + the persona voice
 # block), not concede-and-agree filler. Overrides both A/B arms above.
 if [ "${SAPS_ACTIVE_LANE:-}" = "personal_brand" ]; then
-    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is'). This is a PERSONAL account: NO product mention, NO pitch, NO CTA, NO link, NO feature list. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is'). This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
 fi
 
 if [ -n "$PICKED_STYLE" ]; then
