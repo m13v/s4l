@@ -237,7 +237,8 @@ ensure_twitter_browser_for_backend() {
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness" \
             --no-first-run --no-default-browser-check \
             --password-store=basic --use-mock-keychain \
-            --disable-features=ChromeWhatsNewUI \
+            --disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion \
+            --disable-backgrounding-occluded-windows \
             "${_extra[@]}" \
             "${BH_LAUNCH_URL:-https://x.com}" >/dev/null 2>&1 &
         disown
