@@ -28,11 +28,16 @@ agent-mode session is its OWN uuid with a single live process. So we:
      from the bundled claude-code, NOT the Desktop app, the MCP node server, or ssh).
   2. Group by session uuid.
   3. In any group with >1 live process (the leak signature — a healthy session is
-     exactly one process), keep the single NEWEST process (it may be mid-draft) and
-     kill the rest that are older than the age threshold.
+     exactly one process), apply the TYPE-DRIVEN rule: a worker checks the queue
+     exactly once per fire (claude_job.py::cmd_next is single-shot), so it either
+     CLAIMS a job (stamps claim_pid -> actively drafting) or is a permanent typeless
+     husk. Spare (a) claim-holders and (b) newborns still inside their boot+claim
+     window (age < claim_grace); reap every other claimless session immediately.
   4. Never touch a group of size 1 → a real interactive session is always spared.
 
-This is allow-by-exclusion: when there is no leak, the script kills nothing.
+This is allow-by-exclusion: when there is no leak, the script kills nothing. The old
+"keep the single newest by count" heuristic (max_group) is retained only as a
+pathological backstop; the claim/grace rule is the primary brake.
 
 Run under SYSTEM python (`/usr/bin/python3`, always present, zero deps) so it works
 even before the owned runtime is provisioned.
