@@ -34,6 +34,15 @@
         <div class="onboarding-blocker" id="onboarding-blocker" hidden></div>
       </section>
 
+      <!-- Shown only when the always-on tray app was quit (menubar_running:false).
+           Restart re-loads its LaunchAgent via the restart_menubar tool. -->
+      <section class="menubar-banner" id="menubar-banner" hidden>
+        <div class="menubar-banner-text">
+          The S4L menu bar app isn't running. Restart it to bring the tray icon back.
+        </div>
+        <button id="btn-menubar-restart" class="primary">Restart menu bar</button>
+      </section>
+
       <section class="install" id="install-card" hidden>
         <div class="install-head">Runtime not installed yet</div>
         <div class="install-desc" id="install-desc">
