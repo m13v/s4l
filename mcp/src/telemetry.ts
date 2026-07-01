@@ -88,16 +88,26 @@ export async function sendHeartbeat(reason: string): Promise<void> {
     // session pile-up that can balloon RAM to tens of GB) is visible centrally
     // without us SSHing in. Best-effort: any failure falls back to "{}" so the
     // heartbeat itself never depends on the sampler succeeding.
-    let body = "{}";
+    const bodyObj: Record<string, unknown> = {};
     try {
       const mem = await runPython("scripts/memory_snapshot.py", ["--summary"], { timeoutMs: 12_000 });
       const out = (mem.stdout || "").trim();
-      if (mem.code === 0 && out) {
-        body = JSON.stringify({ resource: JSON.parse(out) });
-      }
+      if (mem.code === 0 && out) bodyObj.resource = JSON.parse(out);
     } catch {
-      /* keep body = "{}" */
+      /* omit resource */
     }
+    // Also attach the S4L autopilot scheduled-task folder state so the server can
+    // tell, per install, whether the queue-worker tasks relocated to ~/.s4l-worker
+    // or are still mislocated (the menubar cwd-rewrite self-heal used to fire
+    // silently — no fleet-wide signal). Best-effort; independent of resource.
+    try {
+      const st = await runPython("scripts/scheduled_tasks_snapshot.py", ["--summary"], { timeoutMs: 10_000 });
+      const out = (st.stdout || "").trim();
+      if (st.code === 0 && out) bodyObj.scheduled_tasks = JSON.parse(out);
+    } catch {
+      /* omit scheduled_tasks */
+    }
+    const body = Object.keys(bodyObj).length ? JSON.stringify(bodyObj) : "{}";
     const resp = await fetch(`${base}/api/v1/installations/heartbeat`, {
       method: "POST",
       headers: { "X-Installation": header, "content-type": "application/json" },
