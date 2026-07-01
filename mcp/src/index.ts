@@ -55,6 +55,7 @@ import {
   resolvePython,
   resolveChrome,
   ensureMenubar,
+  menubarRunning,
   ensurePipelineCurrent,
   ensureRuntimeProvisioned,
 } from "./runtime.js";
@@ -2319,7 +2320,40 @@ tool(
         { outcome: "failed" }
       );
     }
-    return jsonContent({ ...snapshot, onboarding: onboardingSnapshot() });
+    return jsonContent({
+      ...snapshot,
+      menubar_running: await menubarRunning(),
+      onboarding: onboardingSnapshot(),
+    });
+  }
+);
+
+// ---- restart_menubar: relaunch the always-on tray app ----------------------
+// The menu bar app is a KeepAlive LaunchAgent that a full Quit boots out. This
+// re-runs the same ensureMenubar() the boot path uses (install if missing, load
+// the LaunchAgent), so the panel can offer a one-click "restart menu bar" when
+// the snapshot reports menubar_running:false. Returns the fresh running state so
+// the panel can drop the banner without a round-trip.
+tool(
+  "restart_menubar",
+  {
+    title: "Restart the S4L menu bar app",
+    description:
+      "Relaunch the always-on S4L menu bar (tray) app after it was quit. Re-loads its " +
+      "LaunchAgent (installing the menu bar first if needed). Use when the dashboard reports the menu " +
+      "bar is not running, or the user asks to bring the S4L tray icon back. Does NOT touch the draft " +
+      "schedule, X connection, or any posting — it only restarts the tray UI.",
+    inputSchema: {},
+  },
+  async () => {
+    const res = await ensureMenubar();
+    const running = await menubarRunning();
+    return jsonContent({
+      ok: res.ok,
+      skipped: res.skipped ?? false,
+      detail: res.detail,
+      menubar_running: running,
+    });
   }
 );
 
@@ -3272,6 +3306,10 @@ async function buildSnapshot() {
   // MCP-only side effects (snapshot.py is a pure reader and does none of these):
   // the onboarding LEDGER writes here are telemetry/history; the live DISPLAY
   // statuses already come from snapshot.py's overlay.
+  // Is the always-on menu bar app actually loaded? snapshot.py can't answer this
+  // (it's a launchctl check the Node side owns), so layer it on here. The panel
+  // uses it to offer a one-click "restart menu bar" when the tray was quit.
+  snap.menubar_running = await menubarRunning();
   await ensureDoctorPhase(snap.x_connected ? "full" : "pre_connect");
   if (snap.runtime_ready) completeOnboardingMilestone("runtime_ready");
   if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
