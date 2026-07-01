@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -595,6 +596,8 @@ def build_snapshot(top_n: int) -> dict[str, Any]:
         "ts": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
         "hostname": socket.gethostname(),
         "repo_dir": str(REPO_DIR),
+        "claude_desktop_version": claude_desktop_version(),
+        "reaper": reaper_status(),
         "memory": parse_vm_stat(),
         "process_count": len(rows),
         "top_rss": [
@@ -685,6 +688,8 @@ def build_summary() -> dict[str, Any]:
         "ts": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
         "hostname": socket.gethostname(),
         "app_version": _app_version(),
+        "claude_desktop_version": claude_desktop_version(),
+        "reaper": reaper_status(),
         "process_count": len(rows),
         "mem": {
             "total_mb": total,
@@ -722,6 +727,76 @@ def _app_version() -> str | None:
         if v:
             return str(v).strip() or None
     return None
+
+
+def claude_desktop_version() -> str | None:
+    """CFBundleShortVersionString of the Claude Desktop app, or None if not found.
+
+    This is the ONE variable we could not answer for Karol: the reaper's blind spot
+    (a newer Claude Code changed the session-path shape so UUID_RE stopped matching)
+    is version-correlated, so we now stamp the Desktop version on every heartbeat +
+    snapshot. Reading Info.plist via plistlib is more robust than shelling `defaults`
+    (works headless, no user-defaults cache). Checks both the system-wide and the
+    per-user install locations. Best-effort: never raises."""
+    candidates = [
+        Path("/Applications/Claude.app/Contents/Info.plist"),
+        Path.home() / "Applications" / "Claude.app" / "Contents" / "Info.plist",
+    ]
+    for plist in candidates:
+        try:
+            if not plist.exists():
+                continue
+            import plistlib
+
+            with plist.open("rb") as f:
+                data = plistlib.load(f)
+            v = data.get("CFBundleShortVersionString") or data.get("CFBundleVersion")
+            if v:
+                return str(v).strip() or None
+        except Exception:
+            continue
+    return None
+
+
+def reaper_status() -> dict[str, Any] | None:
+    """Last cycle written by reap_stale_claude_sessions.py::write_status(), or None.
+
+    The reaper is a SEPARATE launchd job (com.m13v.social-claude-reaper) whose stderr
+    only lands in a local file, so its outcome was invisible centrally. It now drops a
+    reaper-status.json each cycle; we carry it on the heartbeat so a stuck/blind reaper
+    (e.g. ps_timed_out, or unparsed_worker_procs climbing while it kills nothing — the
+    Karol failure mode) is visible in installation_resource_samples. Also surfaces
+    staleness: if the file has not been touched recently the reaper itself may be dead."""
+    path = (
+        Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
+        / "claude-queue"
+        / "reaper-status.json"
+    )
+    try:
+        if not path.exists():
+            return None
+        ds = json.loads(path.read_text())
+        age = None
+        try:
+            age = round(time.time() - path.stat().st_mtime, 1)
+        except OSError:
+            pass
+        return {
+            "ts": ds.get("ts"),
+            "age_sec": age,  # seconds since the reaper last wrote — >120s hints it is dead
+            "mode": ds.get("mode"),
+            "claude_killed": ds.get("claude_killed"),
+            "macos_mcp_killed": ds.get("macos_mcp_killed"),
+            "worker_probe_seen": ds.get("worker_probe_seen"),
+            "reapable_workers": ds.get("reapable_workers"),
+            "unparsed_worker_procs": ds.get("unparsed_worker_procs"),
+            "macos_mcp_seen": ds.get("macos_mcp_seen"),
+            "leaked_groups": ds.get("leaked_groups"),
+            "ps_timed_out": ds.get("ps_timed_out"),
+            "snapshot_empty": ds.get("snapshot_empty"),
+        }
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def main() -> int:
