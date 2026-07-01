@@ -2088,14 +2088,12 @@ echo "$PREP_OUTPUT" >> "$LOG_FILE"
 # volume (the May-June ~10x ramp that collapsed per-post reach ~15x) while
 # keeping the strongest thread. Deferred picks are dropped from the plan so they
 # stay status='pending' (NOT 'skipped'); Phase 0 salvage re-judges them next
-# cycle and reuses their fresh drafts. DRAFT_ONLY (manual MCP review) keeps every
-# draft so the human sees the full set. Override with SAPS_TWITTER_POST_TOP_N
-# (default 1; 0 = no cap).
-if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    POST_TOP_N=0
-else
-    POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
-fi
+# cycle and reuses their fresh drafts. (2026-06-30) The cap is now the SINGLE
+# standard for BOTH lanes: autopilot direct-post AND DRAFT_ONLY manual MCP review.
+# The old DRAFT_ONLY=1 -> POST_TOP_N=0 special-case was removed on purpose, so the
+# human reviews the exact same one highest-Virality draft the autopilot would post.
+# Override with SAPS_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
+POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
 
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
@@ -2118,7 +2116,8 @@ rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
 # TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
 # Build candidate_id -> virality_score from the pre-scored CANDIDATES block
 # (pipe cols: id|url|author|text|virality|delta|...), sort the model's picks by
-# it, and truncate. SAPS_POST_TOP_N=0 disables the cap (manual DRAFT_ONLY review).
+# it, and truncate. SAPS_POST_TOP_N=0 disables the cap (env opt-out only; the cap
+# applies to both autopilot and DRAFT_ONLY lanes as of 2026-06-30).
 # Truncated picks are simply dropped from the plan, so they stay status='pending'
 # (NOT added to 'rejected'); no thread is blacklisted and Phase 0 salvages them.
 _top_n = int(os.environ.get('SAPS_POST_TOP_N', '1') or '1')
