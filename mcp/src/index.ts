@@ -1987,6 +1987,26 @@ tool(
           searchQueries = qr.queries as typeof searchQueries;
         }
       }
+      // Install/refresh the launchd kicker NOW, the moment a product project is
+      // ready — identical to the persona path (engagement_mode). Before this, a
+      // promotion-only setup never installed the kicker at setup time (the persona
+      // path explicitly skips promotion-only, and project_config didn't pick it
+      // up), so drafting didn't start until a later Claude/queue-worker boot ran
+      // the boot-time install. ensureQueueKickerInstalled is idempotent + product/
+      // persona-aware, so calling it from both setup paths is safe. Best-effort:
+      // a kicker hiccup never fails setup. (2026-06-30)
+      let kickerInstall: { ok: boolean; detail: string } | null = null;
+      if (result.ready) {
+        try {
+          kickerInstall = await ensureQueueKickerInstalled();
+          console.error(
+            `[project_config] launchd kicker: ${kickerInstall.ok ? "ok" : "skip"} (${kickerInstall.detail})`
+          );
+        } catch (e: any) {
+          kickerInstall = { ok: false, detail: e?.message || String(e) };
+          console.error("[project_config] kicker install failed:", e?.message || e);
+        }
+      }
       // Surface any advanced (escape-hatch) field edits in the note so the
       // agent can confirm exactly what changed to the user.
       let advancedNote = "";
@@ -2005,6 +2025,8 @@ tool(
         topics_seeded: topicsSeeded,
         topic_count: topicCount,
         search_queries: searchQueries,
+        kicker_installed: kickerInstall ? kickerInstall.ok : null,
+        kicker_detail: kickerInstall ? kickerInstall.detail : null,
         fields_set: result.fields_set,
         fields_removed: result.fields_removed,
         config_path: configPath(),
