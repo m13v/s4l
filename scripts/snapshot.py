@@ -272,23 +272,48 @@ def _x_status():
 # /usr/bin/curl on every macOS PATH. GitHub releases/latest is also the SAME
 # source the box updater installs from (s4l_box_update.sh / _mcpb_update_work),
 # so "update available" and "what an update installs" cannot disagree.
+#
+# TTL is ~1 minute: a new release must surface in the menu bar within a minute.
+# That cadence is only safe because the PRIMARY probe is the plain website
+# redirect (github.com/.../releases/latest 302s to /releases/tag/vX.Y.Z), which
+# is NOT API-rate-limited. The api.github.com fallback allows 60 unauthenticated
+# requests/hour per IP — a 1-min poll would consume that entire quota, so the
+# API is only consulted when the redirect probe fails.
 _ver_cache = {"at": 0.0, "latest": None, "checked": False}
-_VER_TTL = 600.0
+_VER_TTL = 55.0
 
+_RELEASES_LATEST_URL = "https://github.com/m13v/social-autoposter/releases/latest"
 _RELEASES_LATEST_API = "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
 
 
-def _latest_from_github():
+def _parse_semverish(v):
+    return v if v and v[0].isdigit() and v.count(".") >= 2 else None
+
+
+def _latest_from_github_redirect():
+    # releases/latest already excludes drafts and prereleases. No -L: read the
+    # first response's Location via %{redirect_url} and stop.
     try:
-        # -f: fail on HTTP error, -sSL: quiet + follow redirects, -m: hard timeout.
-        # releases/latest already excludes drafts and prereleases.
+        res = subprocess.run(
+            ["/usr/bin/curl", "-fsS", "-m", "10", "-o", "/dev/null",
+             "-w", "%{redirect_url}", _RELEASES_LATEST_URL],
+            capture_output=True, text=True, timeout=12)
+        loc = (res.stdout or "").strip()
+        if "/releases/tag/" not in loc:
+            return None
+        return _parse_semverish(loc.rsplit("/", 1)[-1].lstrip("v").strip())
+    except Exception:
+        return None
+
+
+def _latest_from_github_api():
+    try:
         res = subprocess.run(
             ["/usr/bin/curl", "-fsSL", "-m", "10",
              "-H", "Accept: application/vnd.github+json", _RELEASES_LATEST_API],
             capture_output=True, text=True, timeout=12)
         tag = (json.loads(res.stdout) or {}).get("tag_name")
-        v = tag.lstrip("v").strip() if isinstance(tag, str) else ""
-        return v if v and v[0].isdigit() and v.count(".") >= 2 else None
+        return _parse_semverish(tag.lstrip("v").strip()) if isinstance(tag, str) else None
     except Exception:
         return None
 
@@ -322,7 +347,9 @@ def _latest_published():
     # the unauthenticated API quota (60/h per IP) and lock itself out for good.
     if _ver_cache["checked"] and now - _ver_cache["at"] < _VER_TTL:
         return _ver_cache["latest"]
-    latest = _latest_from_github()
+    latest = _latest_from_github_redirect()
+    if latest is None:
+        latest = _latest_from_github_api()
     if latest is None:
         latest = _latest_from_npm()
     _ver_cache.update(at=now, latest=latest, checked=True)
