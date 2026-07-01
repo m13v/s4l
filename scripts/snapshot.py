@@ -3,8 +3,8 @@
 
 Produces the SAME dict as the MCP's buildSnapshot() (mcp/src/index.ts), but in
 Python, reading directly from the stateful files plus two existing Python helpers
-(setup_twitter_auth.py for X, schedule_state.py for the draft schedule) and npm
-for the latest version.
+(setup_twitter_auth.py for X, schedule_state.py for the draft schedule) and
+GitHub releases/latest (npm fallback) for the latest version.
 
 WHY this exists: the menu bar must render with Claude / the MCP fully closed. The
 MCP is a Node process tied to Claude Desktop's lifecycle, and it was the ONLY
@@ -17,8 +17,8 @@ to the whole snapshot. The source of truth is the FILES; this is just the reader
 
 PURE READ/COMPUTE: never writes (no onboarding-milestone telemetry, no
 persistence) — the MCP keeps those side effects around this. Slow fields (X
-session, npm latest) are cached per-process with a TTL so a 5s menu-bar tick that
-imports this module stays cheap.
+session, latest version) are cached per-process with a TTL so a 5s menu-bar tick
+that imports this module stays cheap.
 """
 from __future__ import annotations
 
@@ -259,9 +259,48 @@ def _x_status():
     return val
 
 
-# ---- version (resolveVersion + npm latest + semver), cached ----------------
-_ver_cache = {"at": 0.0, "latest": None}
+# ---- version (resolveVersion + latest release + semver), cached ------------
+# Latest-version SOURCE = GitHub releases/latest first, npm only as a fallback.
+# This mirrors mcp/src/version.ts::latestPublishedVersion and is load-bearing:
+# the .mcpb boxes that render the menu bar have NO npm on PATH (PATH is just
+# /usr/bin:/bin:/usr/sbin:/sbin), so an npm-only probe always yields latest=None
+# there, update_available is always False, and the "S4L ⬆" banner can never
+# fire on a box — even with a new release live. The 2026-07-01 v1.6.182 fix
+# closed this in version.ts only; the menu bar computes its snapshot through
+# THIS module (mcp/menubar/s4l_state.py tier 1, the loopback tier was removed
+# to fix a UI freeze), so the same probe must live here too. curl is at
+# /usr/bin/curl on every macOS PATH. GitHub releases/latest is also the SAME
+# source the box updater installs from (s4l_box_update.sh / _mcpb_update_work),
+# so "update available" and "what an update installs" cannot disagree.
+_ver_cache = {"at": 0.0, "latest": None, "checked": False}
 _VER_TTL = 600.0
+
+_RELEASES_LATEST_API = "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
+
+
+def _latest_from_github():
+    try:
+        # -f: fail on HTTP error, -sSL: quiet + follow redirects, -m: hard timeout.
+        # releases/latest already excludes drafts and prereleases.
+        res = subprocess.run(
+            ["/usr/bin/curl", "-fsSL", "-m", "10",
+             "-H", "Accept: application/vnd.github+json", _RELEASES_LATEST_API],
+            capture_output=True, text=True, timeout=12)
+        tag = (json.loads(res.stdout) or {}).get("tag_name")
+        v = tag.lstrip("v").strip() if isinstance(tag, str) else ""
+        return v if v and v[0].isdigit() and v.count(".") >= 2 else None
+    except Exception:
+        return None
+
+
+def _latest_from_npm():
+    try:
+        res = subprocess.run(["npm", "view", "social-autoposter", "version"],
+                             capture_output=True, text=True, timeout=8)
+        line = (res.stdout.strip().splitlines() or [""])[-1].strip()
+        return line if line and line[0].isdigit() else None
+    except Exception:
+        return None
 
 
 def _resolve_version() -> str:
@@ -278,18 +317,15 @@ def _resolve_version() -> str:
 
 def _latest_published():
     now = time.time()
-    if _ver_cache["latest"] is not None and now - _ver_cache["at"] < _VER_TTL:
+    # Cache failures (latest=None) too, like version.ts: a menu-bar tick loop
+    # re-probing an unreachable/rate-limited GitHub every few seconds would burn
+    # the unauthenticated API quota (60/h per IP) and lock itself out for good.
+    if _ver_cache["checked"] and now - _ver_cache["at"] < _VER_TTL:
         return _ver_cache["latest"]
-    latest = None
-    try:
-        res = subprocess.run(["npm", "view", "social-autoposter", "version"],
-                             capture_output=True, text=True, timeout=8)
-        line = (res.stdout.strip().splitlines() or [""])[-1].strip()
-        if line and line[0].isdigit():
-            latest = line
-    except Exception:
-        latest = None
-    _ver_cache.update(at=now, latest=latest)
+    latest = _latest_from_github()
+    if latest is None:
+        latest = _latest_from_npm()
+    _ver_cache.update(at=now, latest=latest, checked=True)
     return latest
 
 
