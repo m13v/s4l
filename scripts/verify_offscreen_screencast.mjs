@@ -1,9 +1,13 @@
 // Throwaway validation for the "Connecting…" screencast fix.
-// Launches Chrome OFF-SCREEN (like the plugin's twitter-backend.sh default
-// window-position 3042,-1032) on a throwaway port + temp profile, attaches a
-// CDP screencast exactly like mcp/src/screencast.ts, and counts frames over a
-// short window — once WITHOUT the occlusion flags, once WITH. Does NOT touch
-// port 9555, the real profile, or the pipeline.
+// Reproduces the real plugin scenario: the harness Chrome window is COVERED by
+// another opaque window (the Claude Desktop panel). macOS native-window
+// occlusion then pauses Chrome's compositing, so Page.startScreencast stops
+// emitting frames and the panel is stranded on "Connecting…".
+//
+// Test: launch an ANIMATED Chrome ON-screen, cover it with a second full-screen
+// opaque Chrome window, and count screencast frames over ~3.5s — once WITHOUT
+// the occlusion flags, once WITH. Throwaway ports (9591/9592) + temp profiles;
+// never touches 9555, the real profile, or the pipeline.
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -12,56 +16,60 @@ import { join } from "node:path";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 9591;
+const COVER_PORT = 9592;
 const WS = globalThis.WebSocket;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchJson(url) {
   try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch { return null; }
 }
 
-async function countFrames(withFlags) {
-  const profile = mkdtempSync(join(tmpdir(), "saps-scast-"));
+const ANIM = "<body style=margin:0;background:white><div id=b style='width:100px;height:100px;background:red;position:absolute'></div><script>let x=0;function f(){x=(x+7)%700;const b=document.getElementById('b');b.style.left=x+'px';b.style.background='hsl('+x+',90%,50%)';requestAnimationFrame(f)}requestAnimationFrame(f)</script></body>";
+
+function launch(port, profile, extraArgs, url, pos, size) {
   const args = [
-    `--remote-debugging-port=${PORT}`,
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--no-first-run", "--no-default-browser-check",
     "--password-store=basic", "--use-mock-keychain",
-    "--window-position=3042,-1032",     // off-screen, mirrors the pipeline
-    "--window-size=1024,1013",
+    `--window-position=${pos}`, `--window-size=${size}`,
+    ...extraArgs,
+    "data:text/html," + encodeURIComponent(url),
   ];
-  if (withFlags) {
-    args.push("--disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion");
-    args.push("--disable-backgrounding-occluded-windows");
-  } else {
-    args.push("--disable-features=ChromeWhatsNewUI");
-  }
-  // Animated page: a rAF loop that repaints every frame. rAF + compositing are
-  // both throttled to ~zero when Chrome considers the window occluded, so the
-  // ongoing frame count is a direct readout of "is this window composited?".
-  const html = "<body style=margin:0><div id=b style='width:100px;height:100px;background:red;position:absolute'></div><script>let x=0;function f(){x=(x+7)%900;const b=document.getElementById('b');b.style.left=x+'px';b.style.background='hsl('+x+',90%,50%)';requestAnimationFrame(f)}requestAnimationFrame(f)</script></body>";
-  args.push("data:text/html," + encodeURIComponent(html));
-  const proc = spawn(CHROME, args, { stdio: "ignore", detached: true });
+  return spawn(CHROME, args, { stdio: "ignore", detached: true });
+}
 
-  // wait for CDP
-  let target = null;
-  for (let i = 0; i < 20 && !target; i++) {
+async function firstPage(port) {
+  for (let i = 0; i < 20; i++) {
     await sleep(500);
-    const list = await fetchJson(`http://127.0.0.1:${PORT}/json`);
+    const list = await fetchJson(`http://127.0.0.1:${port}/json`);
     if (Array.isArray(list)) {
       const pages = list.filter((t) => t.type === "page" && t.webSocketDebuggerUrl && !String(t.url || "").startsWith("devtools://"));
-      if (pages.length) target = pages[0];
+      if (pages.length) return pages[0];
     }
   }
-  if (!target) { try { process.kill(-proc.pid, "SIGKILL"); } catch {} rmSync(profile, { recursive: true, force: true }); return "no_target"; }
+  return null;
+}
 
-  let frames = 0;
+async function run(withFlags) {
+  const p1 = mkdtempSync(join(tmpdir(), "saps-anim-"));
+  const p2 = mkdtempSync(join(tmpdir(), "saps-cover-"));
+  const flags = withFlags
+    ? ["--disable-features=ChromeWhatsNewUI,CalculateNativeWinOcclusion", "--disable-backgrounding-occluded-windows"]
+    : ["--disable-features=ChromeWhatsNewUI"];
+  // Animated window, small, top-left.
+  const anim = launch(PORT, p1, flags, ANIM, "100,100", "700,500");
+  const target = await firstPage(PORT);
+  if (!target) { kill(anim); rmSync(p1, { recursive: true, force: true }); rmSync(p2, { recursive: true, force: true }); return "no_target"; }
+
+  // Attach screencast BEFORE covering, so we know frames were flowing.
+  let frames = 0, framesBeforeCover = 0;
   const ws = new WS(target.webSocketDebuggerUrl);
   let id = 1;
-  const send = (method, params) => ws.send(JSON.stringify({ id: id++, method, params: params || {} }));
+  const send = (m, p) => ws.send(JSON.stringify({ id: id++, method: m, params: p || {} }));
   await new Promise((res) => { ws.onopen = res; });
   send("Page.enable");
-  if (withFlags) send("Page.bringToFront");   // the screencast.ts companion fix
+  if (withFlags) send("Page.bringToFront");
   send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 });
   ws.onmessage = (ev) => {
     const msg = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
@@ -70,15 +78,27 @@ async function countFrames(withFlags) {
       if (msg.params?.sessionId != null) send("Page.screencastFrameAck", { sessionId: msg.params.sessionId });
     }
   };
-  await sleep(3500);
+  await sleep(1500);
+  framesBeforeCover = frames;
+  // Now COVER it with a full-screen opaque window (mimics Claude Desktop on top).
+  const cover = launch(COVER_PORT, p2, ["--disable-features=ChromeWhatsNewUI"], "<body style=background:black></body>", "0,0", "3456,2234");
+  await firstPage(COVER_PORT);
+  frames = 0;                 // reset: count only frames AFTER the cover lands
+  await sleep(3000);
+  const framesWhileCovered = frames;
+
   try { ws.close(); } catch {}
-  try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+  kill(anim); kill(cover);
   await sleep(400);
-  rmSync(profile, { recursive: true, force: true });
-  return frames;
+  rmSync(p1, { recursive: true, force: true });
+  rmSync(p2, { recursive: true, force: true });
+  return { framesBeforeCover, framesWhileCovered };
 }
 
-const without = await countFrames(false);
-console.log(`OFF-SCREEN, no occlusion flags  -> frames: ${without}`);
-const withF = await countFrames(true);
-console.log(`OFF-SCREEN, WITH occlusion flags -> frames: ${withF}`);
+function kill(proc) { try { process.kill(-proc.pid, "SIGKILL"); } catch {} }
+
+const a = await run(false);
+console.log("NO occlusion flags  :", JSON.stringify(a));
+await sleep(1000);
+const b = await run(true);
+console.log("WITH occlusion flags:", JSON.stringify(b));
