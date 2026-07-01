@@ -615,7 +615,7 @@ class S4LMenuBar(rumps.App):
         repo = os.environ.get("SAPS_REPO_DIR") or ""
         script = os.path.join(repo, "scripts", "reset-test-machine.sh")
         if not repo or not os.path.exists(script):
-            self._alert("Reset unavailable",
+            self._alert("Uninstall unavailable",
                         "Couldn't find reset-test-machine.sh. SAPS_REPO_DIR isn't "
                         "pointing at a pipeline source on this machine.")
             return
@@ -623,15 +623,16 @@ class S4LMenuBar(rumps.App):
         # cancel=0. See rumps.alert: default=1, alternate=0, other=-1.
         _activate_front()
         choice = rumps.alert(
-            title="Reset test machine?",
+            title="Uninstall S4L?",
             message=(
                 "This quits Claude Desktop, removes the S4L extension + its "
                 "scheduled tasks, and wipes the state dir so the next launch is a "
-                "fresh first-run. The menu bar will disappear during the reset.\n\n"
-                "Reset: keep your X login + browser layer (quick test reset).\n"
+                "fresh first-run. This does NOT delete Claude Desktop itself. The "
+                "menu bar will disappear during the uninstall.\n\n"
+                "Uninstall: keep your X login + browser layer (quick uninstall).\n"
                 "Deep wipe: also remove the shared browser profiles + toolchain."
             ),
-            ok="Reset", cancel="Cancel", other="Deep wipe",
+            ok="Uninstall", cancel="Cancel", other="Deep wipe",
         )
         if choice == 0:  # cancel
             return
@@ -651,12 +652,12 @@ class S4LMenuBar(rumps.App):
             )
         except Exception as e:
             _capture(e, action="reset_machine")
-            self._alert("Reset failed to start", str(e)[:200])
+            self._alert("Uninstall failed to start", str(e)[:200])
             return
         # Best-effort heads-up before the menubar gets pkilled by the script.
         self._notify(
-            "S4L reset started",
-            "Resetting" + (" (deep)" if deep else "") +
+            "S4L uninstall started",
+            "Uninstalling" + (" (deep)" if deep else "") +
             "… the menu bar will vanish; log at " + log_path,
         )
 
@@ -1699,7 +1700,7 @@ class S4LMenuBar(rumps.App):
             items.append(rumps.separator)
             items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
         items.append(rumps.separator)
-        items.append(rumps.MenuItem("Reset test machine…", callback=self._reset_machine))
+        items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
 
         for it in items:
