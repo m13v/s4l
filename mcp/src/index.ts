@@ -1305,11 +1305,13 @@ tool(
       "Set or read the engagement LANES the autopilot drafts in. There are TWO independent lanes that " +
       "can BOTH be on (the cycle then splits 50/50): PERSONAL BRAND (organic, link-free engagement in " +
       "the user's own voice — ON by default) and PRODUCT PROMOTION (the marketing pipeline, link " +
-      "replies — OFF by default, opt-in). This is a SETUP step: AFTER X is connected and the profile " +
-      "is scanned, personal-brand is already the default, so ASK the user the ONE question: do they " +
+      "replies — OFF by default, opt-in). This is a SETUP step: AFTER X is connected, the profile " +
+      "is scanned (for VOICE), and the user has answered the DICTATION interview (for TOPICS + corpus), " +
+      "personal-brand is already the default, so ASK the user the ONE question: do they " +
       "ALSO want to promote a product? Then call action:'set' with personal_brand:true and " +
-      "promotion:true|false. Pass the voice/description/topics you extracted from the profile scan so " +
-      "the persona is grounded in who they actually are, AND expand those topics into a search_queries " +
+      "promotion:true|false. Pass the voice/description you captured from the scan, the search_topics " +
+      "you extracted PRIMARILY from the dictation, and the raw dictation transcript as content_corpus, " +
+      "so the persona is grounded in who they actually are, AND expand those topics into a search_queries " +
       "array of ~30 concrete X advanced-search strings in the SAME call (identical to project_config) " +
       "so the personal-brand cycle has a real query bank on day one instead of running one crude " +
       "topic-as-query. If they want promotion too, continue to configure the product project with " +
@@ -1345,15 +1347,24 @@ tool(
       content_angle: z
         .string()
         .optional()
-        .describe("Persona grounding: a paragraph of concrete first-hand experience the persona speaks from."),
+        .describe("Persona grounding: a paragraph of concrete first-hand experience the persona speaks from, synthesized from the DICTATION interview (contrarian takes, earned expertise) with the scan as backup."),
+      content_corpus: z
+        .string()
+        .optional()
+        .describe(
+          "The RAW voice-memo transcript from the onboarding dictation interview, VERBATIM (do NOT " +
+            "paraphrase or summarize). Persisted to the persona_corpus.txt sidecar (never config.json), " +
+            "capped ~8000 chars. This is the grounding pool the drafter quotes real specifics from " +
+            "(actual projects, numbers, opinions, phrasing), so keep it dense and first-hand."
+        ),
       voice: z
         .any()
         .optional()
-        .describe("Persona voice object {tone, never:[...]} captured from how they actually write."),
+        .describe("Persona voice object {tone, never:[...]} captured from how they actually write (the profile scan) and calibrated by the dictation (who they like/hate reading, phrases they overuse, off-limits)."),
       search_topics: z
         .union([z.array(z.string()), z.string()])
         .optional()
-        .describe("~15 topics the persona has genuine experience with, drawn from the scan."),
+        .describe("~15 topics the persona has genuine experience with. Sourced PRIMARILY from the DICTATION interview (the 'subjects you could talk about for an hour' answer), with recurring themes from the profile scan as reinforcement. This is the ONLY field that changes what gets SCANNED on X, so it must reflect what the user WANTS to be in conversations about, not just what they already posted."),
       search_queries: z
         .union([z.array(z.string()), z.string()])
         .optional()
@@ -1445,6 +1456,7 @@ tool(
         content_angle: args.content_angle,
         voice: args.voice,
         search_topics: args.search_topics,
+        content_corpus: args.content_corpus,
       });
       personaName = r.name;
       personaCreated = r.created;
@@ -1829,17 +1841,43 @@ tool(
         website_research_instructions: WEBSITE_RESEARCH_INSTRUCTIONS,
         onboarding: onboardingSnapshot(),
         next_step:
-          "THREE steps, in order. FIRST (voice, from this scan): read the bio, posts, and comments " +
+          "FOUR steps, in order. FIRST (VOICE, from this scan): read the bio, posts, and comments " +
           "as GROUND TRUTH and, per grounding_instructions, extract their profession/identity, " +
           "voice & vibe (tone, phrasing, casing, tics), 2-4 verbatim golden-rule example replies, " +
-          "a phrase bank + things they avoid, their icp, and recurring themes -> search_topics. " +
-          "SECOND (engagement lanes — ASK THE USER, do not infer): the PERSONAL BRAND lane (organic, " +
+          "a phrase bank + things they avoid, and their icp. The scan is BACKWARD-LOOKING (only what " +
+          "they already posted) so it is the source for VOICE, not the primary source for topics. " +
+          "SECOND (the DICTATION interview — this is where TOPICS + grounding corpus come from, do NOT " +
+          "skip it and do NOT infer topics from the scan alone): tell the user to answer ALL of the " +
+          "following in ONE spoken dictation (the Claude input box already supports dictation, so they " +
+          "just talk once and you split the answers into fields). Ask verbatim, as a single numbered " +
+          "list:\n" +
+          "  1. Who are you, and what do you want to be known for? (-> description)\n" +
+          "  2. What subjects could you talk about for an hour, work and non-work? (-> search_topics: " +
+          "this is the LOAD-BEARING answer, it is the ONLY thing that decides what gets scanned on X, " +
+          "so it must capture what they WANT to be in conversations about)\n" +
+          "  3. Your most contrarian takes — what does everyone in your field get wrong, and what did " +
+          "you used to believe that you have reversed on? (-> content_angle + corpus)\n" +
+          "  4. What can you explain in 5 minutes that took you years, and what mistake do you watch " +
+          "beginners make over and over? (-> content_angle + corpus)\n" +
+          "  5. Best or worst thing that happened to you recently, and a failure you learned the most " +
+          "from? (-> corpus, keeps drafts current)\n" +
+          "  6. Who do you love or hate reading online, and any lines or phrases you say a lot? " +
+          "(-> voice calibration)\n" +
+          "  7. Anything off-limits (topics, companies, people), and how spicy can we get — safe, " +
+          "opinionated, or provocative? (-> content_guardrails + voice.never)\n" +
+          "Then SYNTHESIZE the fields from their dictation: search_topics comes PRIMARILY from answer 2 " +
+          "(fold in recurring scan themes only as reinforcement); description/content_angle/voice from " +
+          "the rest. Keep their RAW transcript VERBATIM as content_corpus (do NOT paraphrase; their " +
+          "actual numbers, opinions, and phrasing are what make drafts sound like them). If the user " +
+          "declines or gives nothing usable, fall back to scan-derived topics. " +
+          "THIRD (engagement lanes — ASK THE USER, do not infer): the PERSONAL BRAND lane (organic, " +
           "link-free engagement in their own voice) is ON by default, so ask the ONE question — do they " +
           "ALSO want to PROMOTE a PRODUCT (the marketing lane, link replies)? Both lanes can run (the " +
           "cycle splits 50/50). Call the `engagement_mode` tool action:'set' with personal_brand:true, " +
-          "promotion:true|false AND the voice/description/topics you just extracted (this provisions a " +
-          "persona grounded in this scan). " +
-          "THIRD (product, ONLY if they wanted promotion): follow " +
+          "promotion:true|false AND the voice/description/search_topics you synthesized PLUS the raw " +
+          "dictation transcript as content_corpus (this provisions the persona and seeds topics). Only " +
+          "NOW are topics seeded — postponed until the dictation is in. " +
+          "FOURTH (product, ONLY if they wanted promotion): follow " +
           "website_research_instructions — discover the product URL from config, context, profile " +
           "links/posts, or public research and read 5+ of its pages to fill description, " +
           "differentiator, icp, get_started_link, and content_guardrails, written in the voice you " +
