@@ -11,6 +11,7 @@
 // for Keychain-decrypt + CDP inject). Reusing them keeps this MCP a thin client.
 
 import { runPython } from "./repo.js";
+import { captureError } from "./telemetry.js";
 
 export interface XAuthResult {
   ok: boolean;
@@ -116,7 +117,15 @@ export async function xScanProfile(opts?: {
   const res = await runPython("scripts/scan_x_profile.py", args, { timeoutMs: 180_000 });
   try {
     return JSON.parse(res.stdout.trim().split("\n").slice(-1).join("\n")) as XProfileScan;
-  } catch {
+  } catch (e) {
+    // The X profile scan feeds handle detection + grounding for the draft lane; a
+    // silent no-JSON failure here means we scrape the wrong handle (or none) and
+    // never know. Surface it so we can see fleet-wide how often the scan breaks.
+    captureError(e, {
+      component: "twitter_auth",
+      phase: "scan_x_profile",
+      exit: String(res.code),
+    });
     return {
       ok: false,
       state: "error",
@@ -151,7 +160,14 @@ export async function xDetectSources(): Promise<XSourcesResult> {
   });
   try {
     return JSON.parse(res.stdout.trim().split("\n").slice(-200).join("\n")) as XSourcesResult;
-  } catch {
+  } catch (e) {
+    // detect-sources populates the panel's "import from" dropdown; a no-JSON failure
+    // leaves the user unable to connect X during setup with no server-side trace.
+    captureError(e, {
+      component: "twitter_auth",
+      phase: "detect_sources",
+      exit: String(res.code),
+    });
     return {
       ok: false,
       sources: [],
