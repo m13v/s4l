@@ -274,11 +274,16 @@ def _x_status():
 # so "update available" and "what an update installs" cannot disagree.
 #
 # TTL is ~1 minute: a new release must surface in the menu bar within a minute.
-# That cadence is only safe because the PRIMARY probe is the plain website
-# redirect (github.com/.../releases/latest 302s to /releases/tag/vX.Y.Z), which
-# is NOT API-rate-limited. The api.github.com fallback allows 60 unauthenticated
-# requests/hour per IP — a 1-min poll would consume that entire quota, so the
-# API is only consulted when the redirect probe fails.
+# Probe order (measured 2026-07-01 releasing v1.6.188):
+#   1. api.github.com releases/latest with a CONDITIONAL request (If-None-Match).
+#      The API reflects a new release near-instantly, and GitHub does NOT count
+#      304 responses against the unauthenticated 60/h-per-IP quota, so a 1-min
+#      cadence is quota-free between releases (each new release costs one 200).
+#      A plain (unconditional) 1-min API poll would burn the whole quota.
+#   2. The website redirect (github.com/.../releases/latest 302s to
+#      /releases/tag/vX.Y.Z): un-rate-limited fallback, but GitHub's web tier
+#      lagged the API by ~2 minutes after the release, so it is not primary.
+#   3. npm (dev machines only; boxes have no npm).
 _ver_cache = {"at": 0.0, "latest": None, "checked": False}
 _VER_TTL = 55.0
 
@@ -306,14 +311,38 @@ def _latest_from_github_redirect():
         return None
 
 
+# In-process conditional-request state. Long-lived processes (the menu bar) send
+# If-None-Match on every probe and get free 304s; short-lived shell-outs pay one
+# 200 per process, which is rare enough to stay far under quota.
+_api_state = {"etag": None, "latest": None}
+
+
 def _latest_from_github_api():
     try:
-        res = subprocess.run(
-            ["/usr/bin/curl", "-fsSL", "-m", "10",
-             "-H", "Accept: application/vnd.github+json", _RELEASES_LATEST_API],
-            capture_output=True, text=True, timeout=12)
-        tag = (json.loads(res.stdout) or {}).get("tag_name")
-        return _parse_semverish(tag.lstrip("v").strip()) if isinstance(tag, str) else None
+        args = ["/usr/bin/curl", "-sS", "-m", "10",
+                "-H", "Accept: application/vnd.github+json"]
+        if _api_state["etag"]:
+            args += ["-H", "If-None-Match: %s" % _api_state["etag"]]
+        args += ["-w", "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}",
+                 _RELEASES_LATEST_API]
+        res = subprocess.run(args, capture_output=True, text=True, timeout=12)
+        status, etag, body = 0, None, []
+        for line in (res.stdout or "").splitlines():
+            if line.startswith("__CURL_STATUS__:"):
+                status = int(line.split(":", 1)[1].strip() or 0)
+            elif line.startswith("__CURL_ETAG__:"):
+                etag = line.split(":", 1)[1].strip() or None
+            else:
+                body.append(line)
+        if status == 304:
+            return _api_state["latest"]
+        if status != 200:
+            return None
+        tag = (json.loads("\n".join(body)) or {}).get("tag_name")
+        v = _parse_semverish(tag.lstrip("v").strip()) if isinstance(tag, str) else None
+        if v:
+            _api_state.update(etag=etag, latest=v)
+        return v
     except Exception:
         return None
 
@@ -347,9 +376,9 @@ def _latest_published():
     # the unauthenticated API quota (60/h per IP) and lock itself out for good.
     if _ver_cache["checked"] and now - _ver_cache["at"] < _VER_TTL:
         return _ver_cache["latest"]
-    latest = _latest_from_github_redirect()
+    latest = _latest_from_github_api()
     if latest is None:
-        latest = _latest_from_github_api()
+        latest = _latest_from_github_redirect()
     if latest is None:
         latest = _latest_from_npm()
     _ver_cache.update(at=now, latest=latest, checked=True)
