@@ -41,6 +41,20 @@ export const REQUIRED_FIELDS = [
   // project is NOT ready until it has at least one topic to seed. (2026-06-02)
   "search_topics",
 ] as const;
+// Required fields for a personal-brand PERSONA project (persona:true). A persona
+// is a person's voice, NOT a product: it has no `website` and no target `icp` by
+// design. Validating a persona against the product REQUIRED_FIELDS therefore ALWAYS
+// reports it "missing website + icp" -> personaReady() could never be true, which
+// silently defeated the persona-aware kicker gate (a personal-brand-only setup then
+// never scheduled the autopilot and drafted nothing). So a persona is "ready" once
+// it has the fields the cycle actually consumes: a name, a voice, and at least one
+// seedable search topic. (2026-06-30, completing the 1.6.173 persona path)
+export const PERSONA_REQUIRED_FIELDS = [
+  "name",
+  "description",
+  "voice",
+  "search_topics",
+] as const;
 export const RECOMMENDED_FIELDS = [
   "differentiator",
   "get_started_link",
@@ -495,12 +509,15 @@ export function ensureShortLinksDefault(): { healed: string[] } {
 
 // Which required fields are missing on the persisted project in config.json.
 // Returns null when the named project can't be found/read.
-export function missingForProject(name: string | undefined): string[] | null {
+export function missingForProject(
+  name: string | undefined,
+  fields: readonly string[] = REQUIRED_FIELDS
+): string[] | null {
   if (!name) return null;
   try {
     const proj = (readConfig().projects || []).find((p) => p.name === name);
     if (!proj) return null;
-    return REQUIRED_FIELDS.filter((f) => {
+    return fields.filter((f) => {
       const v = proj[f];
       if (v == null) return true;
       if (typeof v === "string") return v.trim() === "";
@@ -547,7 +564,9 @@ export function hasReadyProject(): boolean {
 export function personaReady(): boolean {
   const persona = findPersonaProject();
   if (!persona) return false;
-  const missing = missingForProject(persona.name);
+  // Validate against PERSONA_REQUIRED_FIELDS, NOT the product REQUIRED_FIELDS: a
+  // persona has no website/icp by design, so the product set would never pass.
+  const missing = missingForProject(persona.name, PERSONA_REQUIRED_FIELDS);
   return missing !== null && missing.length === 0;
 }
 
