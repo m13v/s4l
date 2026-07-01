@@ -40,6 +40,19 @@ WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 # false "not scheduled".
 FIRING_WINDOW = 420
 
+# Grace for a JUST-scheduled task that hasn't fired yet. When the user runs
+# "Set up draft schedule", create_scheduled_task registers both worker tasks
+# (cron "* * * * *", enabled) but lastRunAt is null until the host fires them the
+# first time — up to a minute or two later, longer if the launchd kicker is still
+# installing. Without this grace, compute() saw newest_epoch=None and returned
+# "missing", so the menu bar kept flashing ⚠ right after the user successfully
+# scheduled. If a freshly-created, enabled task hasn't fired yet but was created
+# within this window, treat it as "ok" (waiting for first fire, not orphaned).
+# 15 min comfortably covers a slow first fire; a genuinely dead schedule still
+# flips to ⚠ once the grace lapses. Orphaned tasks from an old account carry a
+# stale createdAt, so they never fall inside this window.
+CREATED_GRACE = 900
+
 SCHED_REGISTRY_GLOB = os.path.join(
     os.path.expanduser("~"), "Library", "Application Support", "Claude",
     "claude-code-sessions", "*", "*", "scheduled-tasks.json",
@@ -58,9 +71,21 @@ def _iso_to_epoch(s):
         return None
 
 
+def _ms_to_epoch(ms):
+    """createdAt is epoch MILLISECONDS in the registry; return epoch seconds."""
+    try:
+        return float(ms) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
 def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
     """Return 'ok' | 'disabled' | 'missing' for the live account's draft schedule."""
     newest_epoch, newest_enabled = None, False
+    # Track the freshest just-created, enabled, never-yet-fired task so a schedule
+    # the user only moments ago set up doesn't read as "missing" before its first
+    # fire lands (see CREATED_GRACE).
+    newest_fresh_created = None
     any_present, any_enabled = False, False
     for f in glob.glob(glob_pattern):
         try:
@@ -79,9 +104,19 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
         e = max([x for x in epochs if x is not None], default=None)
         if e is not None and (newest_epoch is None or e > newest_epoch):
             newest_epoch, newest_enabled = e, enabled
+        # Freshly scheduled + enabled + not yet fired anywhere in this registry.
+        if enabled and e is None:
+            created = [_ms_to_epoch(r.get("createdAt")) for r in recs]
+            c = min([x for x in created if x is not None], default=None)
+            if c is not None and (newest_fresh_created is None or c > newest_fresh_created):
+                newest_fresh_created = c
     # Firing recently => the live account's schedule is active and healthy.
     if newest_epoch is not None and (time.time() - newest_epoch) <= FIRING_WINDOW:
         return "ok" if newest_enabled else "disabled"
+    # Just scheduled, enabled, waiting for its first fire => "ok" (not orphaned).
+    # Suppresses the false ⚠ right after the user sets up the draft schedule.
+    if newest_fresh_created is not None and (time.time() - newest_fresh_created) <= CREATED_GRACE:
+        return "ok"
     # Not firing anywhere. Registered-but-disabled => disabled; else missing.
     if any_present and not any_enabled:
         return "disabled"
