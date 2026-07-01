@@ -1796,6 +1796,14 @@ if [ "$SAPS_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
 fi
+# Personal-brand lane (SAPS_ACTIVE_LANE=personal_brand, set by saps_mode.py):
+# replace the product-framed directive entirely. This lane is pure organic
+# growth: no product, no link, no CTA. The reply must add real value grounded in
+# the persona's first-hand material (the PERSONA CORPUS block + the persona voice
+# block), not concede-and-agree filler. Overrides both A/B arms above.
+if [ "${SAPS_ACTIVE_LANE:-}" = "personal_brand" ]; then
+    DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is'). This is a PERSONAL account: NO product mention, NO pitch, NO CTA, NO link, NO feature list. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
+fi
 
 if [ -n "$PICKED_STYLE" ]; then
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform twitter --style "$PICKED_STYLE" 2>/dev/null || echo "(top performers report unavailable)")
@@ -1903,6 +1911,21 @@ else
 fi
 rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 
+# --- PERSONA CORPUS injection (personal_brand lane only) --------------------
+# build_persona.py apply writes a raw first-hand corpus sidecar next to
+# config.json. In the personal_brand lane we inline it so the drafter grounds
+# replies in real specifics (projects, numbers, opinions) instead of the single
+# synthesized content_angle paragraph. Empty string in the promotion lane, so
+# promotion prompts stay lean and config.json is never bloated with the corpus.
+CORPUS_BLOCK=""
+if [ "${SAPS_ACTIVE_LANE:-}" = "personal_brand" ] && [ -f "$REPO_DIR/persona_corpus.txt" ]; then
+    CORPUS_BLOCK="## PERSONA CORPUS (raw first-hand material — ground your reply in THIS)
+This is the persona's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the persona voice block. Use it to make the reply concrete and unmistakably human.
+$(cat "$REPO_DIR/persona_corpus.txt")
+"
+    log "Phase 2b-prep: injected persona corpus ($(wc -c < "$REPO_DIR/persona_corpus.txt" | tr -d ' ') bytes)."
+fi
+
 log "Phase 2b-prep: Claude reading threads and drafting replies (no post cap)..."
 
 # Pre-assign the prep session UUID in the parent shell so it survives the
@@ -1926,7 +1949,7 @@ PREP_SCHEMA='{"type":"object","properties":{"candidates":{"type":"array","items"
 PREP_PROMPT="${TW_ENGINE_PREFIX}You are the Social Autoposter prep step.
 
 Your ONLY job in THIS session:
-  1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have NO browser and NO tools this session — draft ONLY from the context inlined in this prompt; do not attempt to fetch, navigate, or open any URL.
+  1. Read each candidate's thread context from the PRE-SCORED CANDIDATES block below (each entry's 'Text:' field is the parent tweet). You have WebSearch and WebFetch available: use them ONLY when a thread hinges on a current fact, a name, a release, or a claim you are not sure about, so your reply is specific and correct instead of vague. You do NOT have the Twitter/X browser this session — never fetch, navigate, or open a tweet/x.com URL, and never try to load the thread itself; the thread text you need is already inlined below. Most replies need no search at all; reach for it only when it materially improves the reply.
   2. Draft a reply for each.
   3. Persist each fresh draft via log_draft.py.
   4. Emit a structured plan describing the chosen candidates, the reply text, and (when applicable) the SEO link keyword + slug.
@@ -1940,6 +1963,7 @@ Read $REPO_DIR/config.json for project metadata.
 Virality is a composite predictor of how big this thread will get AFTER you reply: it combines engagement velocity (eng/hour), author reach (follower tier), age decay (6h half-life), retweet ratio, reply count, and discussion quality (reply:like ratio). On historical posted data the highest-Virality cohort (score >= 10000) received ~36x the median reply views of the lowest cohort (score < 10), so prioritize on-brand candidates with HIGH Virality. Rule of thumb: Virality >= 100 = strong thread on a real growth curve, your reply is likely to land 10-100x more eyeballs than a low-Virality thread. Delta (5min) is the raw T1-T0 engagement count and is shown for context only; do not re-rank on Delta.
 $CANDIDATE_BLOCK
 $MEDIA_BLOCK
+$CORPUS_BLOCK
 
 ## PROJECT ROUTING (per-candidate)
 Each candidate has a 'Project match' field. Use that project unless the thread content clearly better fits another project.
@@ -1955,7 +1979,7 @@ There is NO cap on how many candidates you may pick this cycle. Pick EVERY candi
 
 For each chosen candidate:
 1. Read the candidate's parent tweet from its 'Text:' field in the PRE-SCORED CANDIDATES block above.
-2. Understand the context from that inlined text (you have no browser; everything you need to draft is already in this prompt).
+2. Understand the context from that inlined text (the thread text is already in this prompt; you do NOT have the Twitter browser, but you MAY use WebSearch/WebFetch for external facts when a thread needs them to be answered well).
 3. DRAFT HANDLING (existing vs fresh):
    - If the candidate block shows an EXISTING DRAFT line AND draft age < 30 minutes, REUSE the draft text verbatim. Set engagement_style to the existing style. Do NOT call log_draft.py; do NOT redraft. Reason: prior cycle paid the LLM cost.
    - $DRAFT_DIRECTIVE
@@ -2017,7 +2041,7 @@ CRITICAL:
 - DO NOT call twitter_browser.py.
 - DO NOT call generate_page.py (the shell runs it AFTER your session, outside the lock).
 - DO NOT call log_post.py or campaign_bump.py.
-- You have NO browser and NO tools this session; draft only from the inlined candidate context above. Do not navigate, fetch, or open any URL.
+- You do NOT have the Twitter/X browser this session: never navigate, fetch, or open a tweet/x.com URL, and never try to reload the thread. WebSearch/WebFetch ARE available for external fact-checking only; use them sparingly and never to open the tweet itself.
 - NEVER use em dashes. Use commas, periods, or regular dashes (-).
 - Reply in the SAME LANGUAGE as the parent tweet."
 
