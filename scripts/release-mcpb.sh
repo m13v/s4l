@@ -7,14 +7,19 @@
 #   1. Bump the repo-root package.json (the SINGLE source of truth) and lockfile.
 #      Default: patch bump. --bump minor|major, or pin with --version / --tag,
 #      or --no-bump to re-release the current version as-is.
-#   2. Build the MCP bundle: vite (panel) + tsc (server) + bundle-pipeline. The
-#      embedded pipeline.tgz is `npm pack` of the (now-bumped) repo, so the shell
-#      and the bundled Python pipeline CANNOT diverge.
-#   3. Stamp dist/version.json + manifest.json + mcp/package.json(+lock) to match.
+#   2. Stamp EVERY version satellite from that one source, THEN build, so the
+#      embedded pipeline.tgz (an `npm pack` of the repo) captures an all-current
+#      mcp/ subtree. Order is load-bearing: satellites (manifest.json,
+#      mcp/package.json+lock, dist/version.json) are stamped BEFORE the pack, not
+#      after, or the tarball ships a stale mcp/ subtree (the 1.6.181-menu bug).
+#      Sub-steps: 2a stamp source satellites -> 2b build panel+server -> 2c stamp
+#      dist/version.json -> 2d pack pipeline.tgz.
+#   3. (Regenerate manifest.json `tools` from the server's registrations.)
 #   4. Pack mcp/ into mcp/social-autoposter.mcpb via the mcpb CLI.
 #   5. Verify: size cap, embedded pipeline.tgz present, version.json + manifest +
-#      the pipeline.tgz's OWN internal version all == VERSION (the guard that was
-#      missing when 1.6.84 shipped a 1.6.83 pipeline), install tools present.
+#      the pipeline.tgz's OWN internal version AND its mcp/ subtree (dist/version.json,
+#      mcp/package.json) all == VERSION (guards the 1.6.84 stale-pipeline and the
+#      1.6.181 stale-menu bugs), install tools present.
 #   6. npm publish social-autoposter@VERSION (idempotent; skipped if already live).
 #   7. Create/update GitHub release vX.Y.Z and upload the .mcpb (--clobber).
 #
@@ -130,23 +135,25 @@ else
   say "Releasing $TAG (repo-root package.json already $VERSION)"
 fi
 
-# ---- 2. Build the bundle ----------------------------------------------------
-say "Building MCP bundle (panel + server + embedded pipeline.tgz)"
-( cd "$MCP_DIR" && npm run build:bundle )
+# ---- 2. Stamp EVERY version satellite BEFORE packing, then build ------------
+# ONE source of truth (repo-root package.json, bumped in step 1); every other
+# file that carries a version is a SATELLITE stamped from it here. The ordering
+# is load-bearing: the embedded pipeline.tgz is `npm pack` of the repo root
+# (bundle-pipeline.mjs), so it captures mcp/package.json AND mcp/dist/version.json
+# AS THEY ARE ON DISK at pack time. If a satellite is stamped AFTER the pack, the
+# tarball ships a stale mcp/ subtree while its top-level package.json is current.
+# The menu bar resolves its version from mcp/dist/version.json FIRST
+# (scripts/snapshot.py::_resolve_version), so a late stamp shows the OLD version
+# in the menu bar even though the install is current (the 1.6.181-menu-on-a-
+# 1.6.182-box bug, 2026-07-01). So: stamp source-tree satellites (2a) -> build
+# panel + server (2b) -> stamp dist/version.json now that tsc emitted dist/ (2c)
+# -> pack pipeline.tgz, now capturing an all-$VERSION mcp/ subtree (2d).
 
-# ---- 3. Stamp version.json --------------------------------------------------
-say "Stamping mcp/dist/version.json -> $VERSION"
-node -e "
-const fs=require('fs'),p='$MCP_DIR/dist/version.json';
-fs.writeFileSync(p, JSON.stringify({version:'$VERSION',installedAt:new Date().toISOString()},null,2)+'\n');
-console.log('  '+fs.readFileSync(p,'utf8').trim());
-"
-
-# ---- 3b. Stamp manifest.json + mcp/package.json + lockfile version ----------
-# Claude Desktop's extension "Details" panel reads version from manifest.json,
-# so it must track the release version too (not the frozen 0.0.1 placeholder).
-# mcp/package.json and its lockfile are stamped in lockstep so the three stay
-# consistent (npm errors if package.json and package-lock.json disagree).
+# ---- 2a. Stamp manifest.json + mcp/package.json + lockfile (PRE-pack) --------
+# manifest.json feeds Claude Desktop's extension "Details" panel; mcp/package.json
+# + its lockfile are stamped in lockstep (npm errors if they disagree). All three
+# are inside the repo `files` allowlist, so they land in pipeline.tgz — they MUST
+# be current before 2d packs them.
 say "Stamping mcp/manifest.json + mcp/package.json + mcp/package-lock.json -> $VERSION"
 node -e "
 const fs=require('fs');
@@ -166,6 +173,25 @@ if (fs.existsSync(lp)) {
   console.log('  mcp/package-lock.json -> '+l.version);
 }
 "
+
+# ---- 2b. Build panel + server (emits dist/) ---------------------------------
+# Split out of `build:bundle` so we can stamp dist/version.json (2c) AFTER tsc
+# emits dist/ but BEFORE the pipeline pack (2d). tsc does not touch dist/version.json
+# (it is JSON we author, not a TS output), so a 2c stamp survives to the pack.
+say "Building MCP panel + server"
+( cd "$MCP_DIR" && npm run build:panel && npm run build:server )
+
+# ---- 2c. Stamp mcp/dist/version.json (after tsc, before the pipeline pack) ---
+say "Stamping mcp/dist/version.json -> $VERSION"
+node -e "
+const fs=require('fs'),p='$MCP_DIR/dist/version.json';
+fs.writeFileSync(p, JSON.stringify({version:'$VERSION',installedAt:new Date().toISOString()},null,2)+'\n');
+console.log('  '+fs.readFileSync(p,'utf8').trim());
+"
+
+# ---- 2d. Pack embedded pipeline.tgz (now captures an all-$VERSION mcp/) ------
+say "Packing embedded pipeline.tgz"
+( cd "$MCP_DIR" && npm run bundle:pipeline )
 
 # ---- 3c. Regenerate manifest.json `tools` from the SERVER's registrations ---
 # Claude Desktop exposes a .mcpb extension's tools to agent chats from the
@@ -225,6 +251,18 @@ echo "  manifest.json: $MANIFEST_VER ok"
 PIPELINE_VER=$(unzip -p "$BUNDLE" dist/pipeline.tgz 2>/dev/null | tar -xzO package/package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
 [[ "$PIPELINE_VER" == "$VERSION" ]] || die "embedded pipeline.tgz version=$PIPELINE_VER != $VERSION (box would materialize a STALE pipeline; bump repo-root package.json BEFORE build)"
 echo "  pipeline.tgz internal version: $PIPELINE_VER ok"
+
+# The menu bar reads package/mcp/dist/version.json FIRST, then package/mcp/package.json
+# (scripts/snapshot.py::_resolve_version), both from the SAME pipeline.tgz the box
+# extracts into SAPS_REPO_DIR. Assert the whole mcp/ subtree matches so a satellite
+# stamped after the pack can't ship a menu that shows the wrong version on an
+# otherwise-current box (the 1.6.181-menu-on-a-1.6.182-box bug). Empty/missing =
+# fail: _resolve_version would fall through and could read a stale file.
+for sub in mcp/dist/version.json mcp/package.json; do
+  SUBV=$(unzip -p "$BUNDLE" dist/pipeline.tgz 2>/dev/null | tar -xzO "package/$sub" 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
+  [[ "$SUBV" == "$VERSION" ]] || die "embedded pipeline.tgz package/$sub=$SUBV != $VERSION (menu bar would show the wrong version; stamp satellites BEFORE the pipeline pack)"
+  echo "  pipeline.tgz $sub: $SUBV ok"
+done
 
 for f in "dist/index.js" "dist/runtime.js" "manifest.json"; do
   # grep -c reads all input (no SIGPIPE); anchor on the time column + 3-space
