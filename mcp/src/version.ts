@@ -65,11 +65,15 @@ export const VERSION = resolveVersion();
 //
 // TTL is ~1 minute (a new release must surface within a minute — mirrored in
 // scripts/snapshot.py, the copy the menu bar actually renders from; keep the two
-// in lockstep). A 1-min cadence is only safe because the PRIMARY probe is the
-// plain website redirect (github.com/.../releases/latest 302s to
-// /releases/tag/vX.Y.Z), which is NOT API-rate-limited. The api.github.com
-// fallback allows 60 unauthenticated requests/hour per IP — a 1-min poll would
-// consume that whole quota, so the API is only consulted when the redirect fails.
+// in lockstep). Probe order (measured 2026-07-01 releasing v1.6.188):
+//   1. api.github.com releases/latest with a CONDITIONAL request (If-None-Match).
+//      The API reflects a new release near-instantly, and GitHub does NOT count
+//      304 responses against the unauthenticated 60/h-per-IP quota, so a 1-min
+//      cadence is quota-free between releases (each release costs one 200). A
+//      plain (unconditional) 1-min API poll would burn the whole quota.
+//   2. The website redirect (302 to /releases/tag/vX.Y.Z): un-rate-limited
+//      fallback, but GitHub's web tier lagged the API by ~2 minutes, so not primary.
+//   3. npm (dev machines only; boxes have no npm).
 let cache: { at: number; latest: string | null } | null = null;
 const TTL_MS = 55 * 1000;
 
@@ -99,15 +103,37 @@ async function latestFromGithubRedirect(): Promise<string | null> {
   }
 }
 
+// In-process conditional-request state: long-lived processes send If-None-Match
+// on every probe and get free 304s; each new release costs a single 200.
+const apiState: { etag: string | null; latest: string | null } = { etag: null, latest: null };
+
 async function latestFromGithubApi(): Promise<string | null> {
   try {
-    const res = await run(
-      "curl",
-      ["-fsSL", "-m", "10", "-H", "Accept: application/vnd.github+json", RELEASES_LATEST_API],
-      { timeoutMs: 12000, noTee: true }
+    const args = ["-sS", "-m", "10", "-H", "Accept: application/vnd.github+json"];
+    if (apiState.etag) args.push("-H", `If-None-Match: ${apiState.etag}`);
+    args.push(
+      "-w",
+      "\n__CURL_STATUS__:%{http_code}\n__CURL_ETAG__:%header{etag}",
+      RELEASES_LATEST_API
     );
-    const tag = (JSON.parse(res.stdout) as { tag_name?: unknown }).tag_name;
-    return typeof tag === "string" ? parseSemverish(tag.replace(/^v/, "").trim()) : null;
+    const res = await run("curl", args, { timeoutMs: 12000, noTee: true });
+    let status = 0;
+    let etag: string | null = null;
+    const body: string[] = [];
+    for (const line of (res.stdout || "").split("\n")) {
+      if (line.startsWith("__CURL_STATUS__:")) status = parseInt(line.slice(16).trim(), 10) || 0;
+      else if (line.startsWith("__CURL_ETAG__:")) etag = line.slice(14).trim() || null;
+      else body.push(line);
+    }
+    if (status === 304) return apiState.latest;
+    if (status !== 200) return null;
+    const tag = (JSON.parse(body.join("\n")) as { tag_name?: unknown }).tag_name;
+    const v = typeof tag === "string" ? parseSemverish(tag.replace(/^v/, "").trim()) : null;
+    if (v) {
+      apiState.etag = etag;
+      apiState.latest = v;
+    }
+    return v;
   } catch {
     return null;
   }
@@ -127,8 +153,8 @@ export async function latestPublishedVersion(): Promise<string | null> {
   const now = Date.now();
   if (cache && now - cache.at < TTL_MS) return cache.latest;
   // GitHub first (works on boxes, matches the updater), npm only as a fallback.
-  let latest = await latestFromGithubRedirect();
-  if (latest == null) latest = await latestFromGithubApi();
+  let latest = await latestFromGithubApi();
+  if (latest == null) latest = await latestFromGithubRedirect();
   if (latest == null) latest = await latestFromNpm();
   cache = { at: now, latest };
   return latest;
