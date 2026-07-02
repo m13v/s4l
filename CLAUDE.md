@@ -250,26 +250,9 @@ All posting and engagement scripts use `scripts/engagement_styles.py` to generat
 - **NEVER remove or simplify style definitions** in `scripts/engagement_styles.py`
 - **NEVER inline style definitions** back into individual scripts; the shared module is the single source of truth
 
-## Account signups: phone numbers via textverified.com (never the user's real phones)
+## Account signups: SMS verification
 
-When signing up new agent accounts on any platform that requires phone/SMS verification (X/Twitter, Reddit, LinkedIn, etc.), **always use a fresh phone number from textverified.com**. Never default to the user's real phones.
-
-User's real phones (DO NOT use for new-account signups):
-- +1 (650) 796-1489 (AT&T, canonical US, on this Mac via iMessage forwarding)
-- +30 694 158 2524 (Vodafone Greece side SIM)
-
-Why: real phones are already tied to the user's primary accounts (e.g. @m13v_ on X is registered to the canonical 650 number). Adding the same phone to a second account makes the platform internally link them via phone fingerprint. Consequences:
-- Anti-spam suspensions cascade (suspension on one account can take out the other).
-- Recovery flows leak signal across accounts.
-- Audience-overlap / "same-user" heuristics treat the accounts as one entity, which collapses the value of running multiple personas.
-
-textverified.com burners keep each agent identity on its own isolated phone footprint.
-
-Workflow:
-- Before triggering an SMS-verification step in an automated signup, ask the user to mint a textverified.com number for that account (one number per account, do not reuse across accounts).
-- Use that number for the signup. The OTP arrives in textverified.com's web inbox; the user reads the code and provides it to Claude.
-- Record the burner number alongside the account in the `social_accounts` tracking row (see the accounts/subscriptions tracking schema) so future Claude sessions know which number is tied to which agent identity.
-
-If you see a non-canonical US number (e.g. an unfamiliar area code like 508, 781, etc.) entered for an automated signup, **do not assume it is a typo and "correct" it back to the canonical 650 number**. It is almost certainly a textverified burner that the user intentionally provided. Confirm with the user before changing it.
-
-Example (2026-05-15): @matt_diak X Premium signup used textverified burner +1 (508) 369-9005. The @matt_diak bio publicly states "ai clone of @m13v_", so the relationship is intentionally open at the content layer, but the platform-level phone link is deliberately kept separate.
+Operator-specific signup guidance (real phone numbers, per-account verification
+policy, persona/identity notes) lives in the gitignored `CLAUDE.local.md`, not
+in this public file. Read that file for the signup workflow before minting or
+verifying any new agent account.
