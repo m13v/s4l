@@ -2095,10 +2095,49 @@ echo "$PREP_OUTPUT" >> "$LOG_FILE"
 # Override with SAPS_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
 POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
 
+# --- ROLLING VIRALITY BAR (2026-07-02) --------------------------------------
+# Fetch THIS install's trailing-24h virality percentile so the parse step posts
+# the top-1 ONLY if it clears the bar. This holds the post rate near the target
+# (~20-30 / 8h) with NO hard cap: the bar is the Nth percentile of the install's
+# OWN recent candidate pool (via /api/v1/twitter-candidates/virality-threshold),
+# so it self-calibrates to cadence and niche instead of being a fixed number.
+# The bar is OFF (empty threshold) when:
+#   - DRAFT_ONLY: new users / manual review see every draft (we don't even fetch).
+#   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
+#   - Fetch failure: fail-open, never silence posting on a transient API blip.
+# Tunables: SAPS_TWITTER_VIRALITY_PCTILE (default 0.97),
+#           SAPS_TWITTER_VIRALITY_MIN_SAMPLE (default 200).
+VIRALITY_THRESHOLD=""
+if [ "${DRAFT_ONLY:-0}" != "1" ]; then
+    VIRALITY_THRESHOLD=$(SAPS_VPCTILE="${SAPS_TWITTER_VIRALITY_PCTILE:-0.97}" \
+        SAPS_VMIN="${SAPS_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+        python3 -c "
+import os, sys
+sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+from http_api import api_get
+try:
+    r = api_get('/api/v1/twitter-candidates/virality-threshold',
+                {'pctile': os.environ['SAPS_VPCTILE'], 'hours': 24})
+    d = (r or {}).get('data') or {}
+    thr = d.get('threshold')
+    n = int(d.get('sample_count') or 0)
+    mn = int(os.environ['SAPS_VMIN'])
+    if thr is not None and n >= mn:
+        print(f'{float(thr):.4f}')
+except BaseException as e:
+    sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
+" 2>>"$LOG_FILE" || echo "")
+    if [ -n "$VIRALITY_THRESHOLD" ]; then
+        log "Virality bar ACTIVE: p${SAPS_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 posts only if it clears the bar."
+    else
+        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 posts ungated."
+    fi
+fi
+
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
 # reason against every twitter_candidates row Claude reviewed but didn't pick.
-SAPS_CAND_VIR="$CANDIDATES" SAPS_POST_TOP_N="$POST_TOP_N" python3 -c "
+SAPS_CAND_VIR="$CANDIDATES" SAPS_POST_TOP_N="$POST_TOP_N" VIRALITY_THRESHOLD="$VIRALITY_THRESHOLD" python3 -c "
 import json, sys, os
 text = sys.stdin.read().strip()
 try:
@@ -2113,25 +2152,40 @@ if isinstance(so, str):
     except Exception: pass
 candidates = so.get('candidates', []) if isinstance(so, dict) else []
 rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
-# TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
 # Build candidate_id -> virality_score from the pre-scored CANDIDATES block
-# (pipe cols: id|url|author|text|virality|delta|...), sort the model's picks by
-# it, and truncate. SAPS_POST_TOP_N=0 disables the cap (env opt-out only; the cap
-# applies to both autopilot and DRAFT_ONLY lanes as of 2026-06-30).
-# Truncated picks are simply dropped from the plan, so they stay status='pending'
-# (NOT added to 'rejected'); no thread is blacklisted and Phase 0 salvages them.
+# (pipe cols: id|url|author|text|virality|delta|...). Shared by the top-N cap
+# and the rolling virality bar below.
+_vir = {}
+for _ln in (os.environ.get('SAPS_CAND_VIR', '') or '').splitlines():
+    _p = _ln.split('|')
+    if len(_p) >= 5 and _p[0].isdigit():
+        try: _vir[int(_p[0])] = float(_p[4] or 0)
+        except Exception: pass
+# TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
+# SAPS_POST_TOP_N=0 disables the cap (env opt-out only; the cap applies to both
+# autopilot and DRAFT_ONLY lanes as of 2026-06-30). Truncated picks are dropped
+# from the plan, so they stay status='pending' (NOT 'rejected'); Phase 0 salvages.
 _top_n = int(os.environ.get('SAPS_POST_TOP_N', '1') or '1')
 _deferred = 0
 if _top_n > 0 and len(candidates) > _top_n:
-    _vir = {}
-    for _ln in (os.environ.get('SAPS_CAND_VIR', '') or '').splitlines():
-        _p = _ln.split('|')
-        if len(_p) >= 5 and _p[0].isdigit():
-            try: _vir[int(_p[0])] = float(_p[4] or 0)
-            except Exception: pass
     candidates.sort(key=lambda c: _vir.get(c.get('candidate_id'), 0.0), reverse=True)
     _deferred = len(candidates) - _top_n
     candidates = candidates[:_top_n]
+# ROLLING VIRALITY BAR (2026-07-02): drop kept pick(s) below the trailing-24h
+# percentile of THIS install's candidate pool (VIRALITY_THRESHOLD, from /api/v1).
+# Empty env = bar OFF: DRAFT_ONLY (new users see every draft), cold start (thin
+# pool), or fetch failure. Below-bar picks are dropped like deferrals -> stay
+# 'pending', never 'rejected', so Phase 0 re-judges them next cycle.
+_bar = (os.environ.get('VIRALITY_THRESHOLD', '') or '').strip()
+_below_bar = 0
+if _bar and candidates:
+    try:
+        _thr = float(_bar)
+        _kept = [c for c in candidates if _vir.get(c.get('candidate_id'), 0.0) >= _thr]
+        _below_bar = len(candidates) - len(_kept)
+        candidates = _kept
+    except Exception:
+        pass
 # The picker assignment travels through the plan envelope so
 # twitter_post_plan.py can call validate_or_register(...) with the
 # original (assigned_style, assigned_mode) and coerce USE-mode drift
@@ -2145,7 +2199,7 @@ json.dump({'candidates': candidates,
            'assigned_style': '$PICKED_STYLE' or None,
            'assigned_mode': '$PICKED_MODE' or 'use'}, open('$PLAN_FILE', 'w'), indent=2)
 json.dump({'skips': rejected}, open('$SKIP_FILE', 'w'), indent=2)
-print(f'prep: wrote {len(candidates)} candidate(s) (deferred {_deferred} lower-virality on-brand pick(s)) and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
+print(f'prep: wrote {len(candidates)} candidate(s) (deferred {_deferred} lower-virality, {_below_bar} below bar) and {len(rejected)} skips to $PLAN_FILE / $SKIP_FILE', file=sys.stderr)
 " <<< "$PREP_OUTPUT" 2>&1 | tee -a "$LOG_FILE"
 
 PREP_PARSE_EXIT=${PIPESTATUS[0]:-1}
