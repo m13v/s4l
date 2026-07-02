@@ -907,8 +907,10 @@ function installRuntime() {
 // autoposter-mcp), packaged Chrome profiles + imported cookies, the browser-
 // harness clone/CLI/server.py, the global npm package, and the MCP registration.
 // DEFAULT IS A DRY RUN (prints what WOULD be removed); pass --yes to apply, and
-// --deep to also remove the shared uv toolchain + Chromium cache. Forwarding to
-// the shell script keeps npm and .mcpb installs behaving identically.
+// --deep to also remove the shared uv toolchain + Chromium cache. The script's
+// one standard path quits Claude Desktop, wipes, settles, then relaunches
+// Claude Desktop fresh. Forwarding to the shell script keeps npm and .mcpb
+// installs behaving identically.
 function reset() {
   const script = path.join(PKG_ROOT, 'scripts', 'reset-test-machine.sh');
   if (!fs.existsSync(script)) {
