@@ -276,10 +276,11 @@ class _ReviewController(NSObject):
         content.addSubview_(reject)
 
         # "Replying to @author" row: the handle is a live link to the author's
-        # profile. Right side: thread age (muted, minutes) and an eye icon whose
-        # hover tooltip carries the discovery-time stats (followers + thread
-        # engagement) — stats are never inline on the card. All from data the
-        # pipeline already carries; no scraping happens here.
+        # profile, with the follower count muted inline right after it. Right
+        # side: thread age (muted, minutes) and an eye icon whose hover/click
+        # popover carries the thread's engagement counts — those are never
+        # inline on the card. All from data the pipeline already carries; no
+        # scraping happens here.
         self._link_targets = {}
         handle = (d.get("thread_author") or "").lstrip("@").strip()
         stats = d.get("stats") or {}
@@ -290,7 +291,7 @@ class _ReviewController(NSObject):
         right_x = W - M
         self._close_stats_popover()
         self._eye_btn = None
-        if _stats_lines(stats):
+        if _engagement_line(stats):
             eye = NSButton.alloc().initWithFrame_(NSMakeRect(right_x - 20, H - 70, 20, 18))
             eye.setBordered_(False)
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
@@ -329,13 +330,31 @@ class _ReviewController(NSObject):
             right_x -= 48
         handle_w = right_x - (M + 78) - 4
         if handle:
+            # Size the link to its text so the follower count can sit right
+            # after the handle instead of at a fixed column.
+            text = f"@{handle}"
+            measured = NSAttributedString.alloc().initWithString_attributes_(
+                text, {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12)}
+            ).size().width
+            link_w = min(int(measured) + 8, handle_w)
             self._add_link(
                 content,
-                NSMakeRect(M + 78, H - 70, handle_w, 18),
-                f"@{handle}",
+                NSMakeRect(M + 78, H - 70, link_w, 18),
+                text,
                 f"https://x.com/{handle}",
                 bold=True,
             )
+            followers = _followers_str(stats)
+            fol_w = handle_w - link_w
+            if followers and fol_w > 20:
+                content.addSubview_(
+                    _label(
+                        NSMakeRect(M + 78 + link_w, H - 70, fol_w, 18),
+                        f"· {followers}",
+                        size=11,
+                        muted=True,
+                    )
+                )
         else:
             content.addSubview_(
                 _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True)
@@ -641,7 +660,8 @@ def present_review(drafts, on_decision=None, on_complete=None):
     where stats is the discovery-time candidate snapshot
     {author_followers, likes, retweets, replies, views, tweet_posted_at, ...}
     (optional). thread_url renders as a trailing ↗ link on the thread text;
-    stats surface only in the eye icon's hover/click popover plus the muted age.
+    followers show inline next to the handle, age muted at the right, and the
+    thread engagement counts live only in the eye icon's hover/click popover.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
