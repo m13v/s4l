@@ -53,6 +53,12 @@ from AppKit import (
     NSTextAlignmentLeft,
     NSTextAlignmentRight,
     NSImage,
+    NSPopover,
+    NSPopoverBehaviorTransient,
+    NSViewController,
+    NSTrackingArea,
+    NSTrackingMouseEnteredAndExited,
+    NSTrackingActiveAlways,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
@@ -95,16 +101,18 @@ def _fmt_count(n):
     return str(n)
 
 
-def _stats_line(stats):
-    """One line from the discovery-time candidate stats: author followers
-    (profile stat) then the thread's engagement counts. Shown in the eye icon's
-    hover tooltip, never inline on the card. Fields the pipeline didn't capture
-    are simply omitted; returns '' when nothing is known."""
+def _stats_lines(stats):
+    """Discovery-time candidate stats as display lines: author followers
+    (profile stat) first, then the thread's engagement counts. Shown only in
+    the eye icon's hover/click popover, never inline on the card. Fields the
+    pipeline didn't capture are simply omitted; returns [] when nothing is
+    known (the eye icon is skipped entirely then)."""
     stats = stats or {}
-    parts = []
+    lines = []
     followers = _fmt_count(stats.get("author_followers"))
     if followers is not None:
-        parts.append(f"{followers} followers")
+        lines.append(f"{followers} followers")
+    parts = []
     for key, label in (
         ("likes", "likes"),
         ("retweets", "reposts"),
@@ -114,7 +122,9 @@ def _stats_line(stats):
         v = _fmt_count(stats.get(key))
         if v is not None:
             parts.append(f"{v} {label}")
-    return " · ".join(parts)
+    if parts:
+        lines.append(" · ".join(parts))
+    return lines
 
 
 def _age_str(iso):
@@ -174,6 +184,8 @@ class _ReviewController(NSObject):
         self._panel = None
         self._textview = None
         self._link_targets = {}
+        self._eye_btn = None
+        self._stats_popover = None
         self._build()
         return self
 
@@ -269,8 +281,9 @@ class _ReviewController(NSObject):
             _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True)
         )
         right_x = W - M
-        tip = _stats_line(stats)
-        if tip:
+        self._close_stats_popover()
+        self._eye_btn = None
+        if _stats_lines(stats):
             eye = NSButton.alloc().initWithFrame_(NSMakeRect(right_x - 20, H - 70, 20, 18))
             eye.setBordered_(False)
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
@@ -281,8 +294,23 @@ class _ReviewController(NSObject):
                 eye.setTitle_("")
             else:  # pre-Big Sur fallback: no SF Symbols
                 eye.setTitle_("👁")
-            eye.setToolTip_(tip)
+            # Stats surface in an NSPopover on hover OR click. A plain toolTip
+            # was tried first and never fired: this panel belongs to a
+            # non-activating accessory (status bar) app, where AppKit's tooltip
+            # machinery is unreliable. The tracking area drives hover; the
+            # button action covers click and any hover-tracking edge case.
+            eye.setTarget_(self)
+            eye.setAction_("statsToggle:")
+            eye.addTrackingArea_(
+                NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                    eye.bounds(),
+                    NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                    self,
+                    None,
+                )
+            )
             content.addSubview_(eye)
+            self._eye_btn = eye
             right_x -= 24
         age = _age_str(stats.get("tweet_posted_at"))
         if age:
