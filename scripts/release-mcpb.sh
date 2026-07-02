@@ -345,7 +345,7 @@ if [[ -z "$DRAFT_FLAG" ]]; then
     sleep 6
   done
   if [[ "$LATEST_SEEN" == "$TAG" ]]; then
-    echo "  releases/latest -> $LATEST_SEEN — boxes will detect the update within version.ts's 10-min TTL"
+    echo "  releases/latest -> $LATEST_SEEN; boxes detect within version.ts's ~1-min TTL (55s, ETag-conditional; boxes older than 1.6.188 poll every 10 min)"
   else
     echo "  WARNING: releases/latest still reports '${LATEST_SEEN:-<none>}', not $TAG." >&2
     echo "  The menu-bar update banner will NOT fire until this resolves. If it stays" >&2
