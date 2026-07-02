@@ -81,6 +81,14 @@ class _ReviewPanel(NSPanel):
         return True
 
 
+def _log(msg):
+    """Stderr breadcrumb in the menubar.err.log style; card interactions are
+    otherwise invisible when debugging a remote box."""
+    import sys
+
+    print(f"[s4l-card] {msg}", file=sys.stderr, flush=True)
+
+
 def _truncate(s, n=320):
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 1] + "…"
@@ -407,6 +415,7 @@ class _ReviewController(NSObject):
         try:
             if self._stats_popover is not None and self._stats_popover.isShown():
                 self._stats_popover.close()
+                _log("stats popover closed")
         except Exception:
             pass
         self._stats_popover = None
@@ -453,18 +462,23 @@ class _ReviewController(NSObject):
         # NSRectEdge 1 = NSMinYEdge: pop out below the icon.
         pop.showRelativeToRect_ofView_preferredEdge_(self._eye_btn.bounds(), self._eye_btn, 1)
         self._stats_popover = pop
+        _log(f"stats popover shown ({pw}x{ph})")
 
+    # Click on the eye SHOWS the popover, never toggles it closed: a click is
+    # physically preceded by hover (mouseEntered already opened it), so a
+    # toggle would close what the hover just opened and the user sees nothing.
+    # Closing is owned by hover-out, card advance, and window close.
     def statsToggle_(self, sender):
-        if self._stats_popover is not None and self._stats_popover.isShown():
-            self._close_stats_popover()
-        else:
-            self._show_stats_popover()
+        _log("eye clicked")
+        self._show_stats_popover()
 
     # NSTrackingArea owner callbacks (hover over the eye icon).
     def mouseEntered_(self, event):
+        _log("eye hover enter")
         self._show_stats_popover()
 
     def mouseExited_(self, event):
+        _log("eye hover exit")
         self._close_stats_popover()
 
     @objc.python_method
