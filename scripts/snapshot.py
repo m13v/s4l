@@ -284,11 +284,35 @@ def _x_status():
 #      /releases/tag/vX.Y.Z): un-rate-limited fallback, but GitHub's web tier
 #      lagged the API by ~2 minutes after the release, so it is not primary.
 #   3. npm (dev machines only; boxes have no npm).
-_ver_cache = {"at": 0.0, "latest": None, "checked": False}
+#
+# CHANNEL (2026-07-02): a box on the `staging` channel tracks the newest release
+# OVERALL (prereleases included), resolved from the releases LIST endpoint,
+# instead of releases/latest (which excludes prereleases). The `stable` path is
+# byte-for-byte the historical behavior. Keep resolution + the rc-aware compare
+# in lockstep with mcp/src/version.ts.
+_ver_cache = {"at": 0.0, "latest": None, "tag": None, "channel": None, "checked": False}
 _VER_TTL = 55.0
 
 _RELEASES_LATEST_URL = "https://github.com/m13v/social-autoposter/releases/latest"
 _RELEASES_LATEST_API = "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
+# Staging resolves the newest release OVERALL from the releases LIST, since
+# releases/latest deliberately excludes prereleases.
+_RELEASES_LIST_API = (
+    "https://api.github.com/repos/m13v/social-autoposter/releases?per_page=30"
+)
+
+
+def _channel():
+    """Release channel for this box (stable|staging). Prefer the sibling
+    s4l_channel module; fall back to reading the marker directly so snapshot has
+    no hard import-order dependency. Unknown/absent = stable (fail-safe)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import s4l_channel  # noqa: E402
+        return s4l_channel.read_channel()
+    except Exception:
+        v = (_read_json(os.path.join(_state_dir(), "channel.json")) or {}).get("channel")
+        return v if v in ("stable", "staging") else "stable"
 
 
 def _parse_semverish(v):
@@ -347,6 +371,38 @@ def _latest_from_github_api():
         return None
 
 
+def _latest_from_github_list_staging():
+    """Staging channel: newest release OVERALL (prereleases included) from the
+    releases LIST endpoint. Returns (version, tag) or (None, None). Drafts are
+    skipped. 'Newest' is by the rc-aware key so 1.6.193 outranks 1.6.193-rc.N and
+    rc.2 outranks rc.1."""
+    try:
+        res = subprocess.run(
+            ["/usr/bin/curl", "-sS", "-m", "10",
+             "-H", "Accept: application/vnd.github+json",
+             _RELEASES_LIST_API],
+            capture_output=True, text=True, timeout=12)
+        rels = json.loads(res.stdout or "[]")
+        if not isinstance(rels, list):
+            return None, None
+        best_v, best_tag, best_key = None, None, None
+        for r in rels:
+            if not isinstance(r, dict) or r.get("draft"):
+                continue
+            tag = r.get("tag_name")
+            if not isinstance(tag, str):
+                continue
+            v = _parse_semverish(tag.lstrip("v").strip())
+            if not v:
+                continue
+            k = _ver_key(v)
+            if best_key is None or k > best_key:
+                best_v, best_tag, best_key = v, tag, k
+        return best_v, best_tag
+    except Exception:
+        return None, None
+
+
 def _latest_from_npm():
     try:
         res = subprocess.run(["npm", "view", "social-autoposter", "version"],
@@ -369,32 +425,59 @@ def _resolve_version() -> str:
     return "0.0.0-unknown"
 
 
-def _latest_published():
+def _latest_published(channel=None):
+    """(version, tag) for the newest release on this box's channel. The tag is
+    what the staging download URL is built from; stable callers can ignore it and
+    use releases/latest/download. Cached with the channel so a mid-process
+    channel flip re-probes instead of serving the other channel's cached value."""
+    if channel is None:
+        channel = _channel()
     now = time.time()
     # Cache failures (latest=None) too, like version.ts: a menu-bar tick loop
     # re-probing an unreachable/rate-limited GitHub every few seconds would burn
     # the unauthenticated API quota (60/h per IP) and lock itself out for good.
-    if _ver_cache["checked"] and now - _ver_cache["at"] < _VER_TTL:
-        return _ver_cache["latest"]
-    latest = _latest_from_github_api()
-    if latest is None:
-        latest = _latest_from_github_redirect()
-    if latest is None:
-        latest = _latest_from_npm()
-    _ver_cache.update(at=now, latest=latest, checked=True)
-    return latest
+    if (_ver_cache["checked"] and _ver_cache["channel"] == channel
+            and now - _ver_cache["at"] < _VER_TTL):
+        return _ver_cache["latest"], _ver_cache["tag"]
+    if channel == "staging":
+        latest, tag = _latest_from_github_list_staging()
+        # Fallback to the stable probes if the list endpoint fails, so a staging
+        # box degrades to "at least track stable" rather than going blind.
+        if latest is None:
+            latest = _latest_from_github_api() or _latest_from_github_redirect()
+            tag = ("v" + latest) if latest else None
+    else:
+        latest = _latest_from_github_api()
+        if latest is None:
+            latest = _latest_from_github_redirect()
+        if latest is None:
+            latest = _latest_from_npm()
+        tag = ("v" + latest) if latest else None
+    _ver_cache.update(at=now, latest=latest, tag=tag, channel=channel, checked=True)
+    return latest, tag
+
+
+# Precedence key for an rc-aware semver compare, matching mcp/src/version.ts::
+# verKey. A full release outranks any prerelease of the SAME core version
+# (1.6.193 > 1.6.193-rc.2 > 1.6.193-rc.1). For stable (no prereleases ever
+# compared) this reduces to a plain numeric core compare, so behavior there is
+# unchanged.
+def _ver_key(v):
+    import re
+    s = str(v).strip().lstrip("v")
+    core, _, pre = s.partition("-")
+    core = core.split("+", 1)[0]
+    nums = [int(x) if x.isdigit() else 0 for x in core.split(".")]
+    while len(nums) < 3:
+        nums.append(0)
+    if not pre:
+        return (nums[0], nums[1], nums[2], 1, 0)
+    m = re.findall(r"\d+", pre)
+    return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
 
 
 def _is_newer(latest, current) -> bool:
-    def norm(v):
-        return [int(x) if x.isdigit() else 0 for x in str(v).split("-")[0].split("+")[0].split(".")]
-    a, b = norm(latest), norm(current)
-    for i in range(max(len(a), len(b))):
-        x = a[i] if i < len(a) else 0
-        y = b[i] if i < len(b) else 0
-        if x != y:
-            return x > y
-    return False
+    return _ver_key(latest) > _ver_key(current)
 
 
 # ---- onboarding ledger + live overlay --------------------------------------
@@ -444,7 +527,8 @@ def compute() -> dict:
     setup_complete = rt_ready and any_ready and bool(x["connected"])
 
     installed = _resolve_version()
-    latest = _latest_published()
+    channel = _channel()
+    latest, latest_tag = _latest_published(channel)
     update_available = bool(latest) and _is_newer(latest, installed)
 
     live_status = {
@@ -468,6 +552,8 @@ def compute() -> dict:
         "auto_update_on": _auto_update_on(),
         "version": installed,
         "latest_version": latest,
+        "latest_tag": latest_tag,
+        "channel": channel,
         "update_available": update_available,
         "runtime_ready": rt_ready,
         "runtime_provisioning": _runtime_provisioning(),
