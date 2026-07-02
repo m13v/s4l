@@ -143,6 +143,39 @@ function looksLikeRepo(dir: string | undefined): boolean {
   );
 }
 
+// ---- Stray git-checkout detection -------------------------------------------
+// A pipeline repo that is a git checkout is legitimate ONLY when it is the
+// working tree the running server itself was built in (dev registration:
+// `node <checkout>/mcp/dist/index.js`). Any other .git-bearing repo on a
+// shipped install is a "stray" clone (someone git-cloned the public repo during
+// troubleshooting): every self-update lane deliberately refuses to touch a
+// checkout, so the box silently freezes at the clone's version forever while
+// the menu bar keeps re-showing the update banner (Nhat's box, 2026-07-01,
+// stuck on 1.6.175 with 1.6.189 out). We only reject a checkout when there is
+// something to serve instead (a materialized repo, or the embedded tarball to
+// make one); otherwise legacy behavior is preserved.
+function hasGit(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+function isDevCheckout(dir: string): boolean {
+  try {
+    return path.resolve(__dirname, "..", "..") === path.resolve(dir);
+  } catch {
+    return false;
+  }
+}
+
+function isStrayCheckout(dir: string | undefined | null): boolean {
+  if (!dir) return false;
+  if (!hasGit(dir) || isDevCheckout(dir)) return false;
+  return looksLikeRepo(MATERIALIZED_REPO) || fs.existsSync(EMBEDDED_TARBALL);
+}
+
 // Resolve the pipeline repo the server shells out to, preferring (in order):
 //   1. SAPS_REPO_DIR when it's a real clone (npm/git install, Story A); never
 //      overwritten, power users keep their working tree.
@@ -151,11 +184,15 @@ function looksLikeRepo(dir: string | undefined): boolean {
 //   4. SAPS_REPO_DIR as-is, then the two-levels-up dev default.
 // Dynamic (not a load-time const) so a first-run materialize is picked up
 // without a server restart (same property resolvePython() relies on).
+// Stray git checkouts (see isStrayCheckout) are skipped at every step: a clone
+// the running server does NOT live in can never be the pipeline repo on a
+// shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
   const env = process.env.SAPS_REPO_DIR;
-  if (looksLikeRepo(env)) return env as string;
+  if (looksLikeRepo(env) && !isStrayCheckout(env)) return env as string;
   const rt = readRuntime();
-  if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir)) return rt.repo_dir;
+  if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir) && !isStrayCheckout(rt.repo_dir))
+    return rt.repo_dir;
   if (looksLikeRepo(MATERIALIZED_REPO)) return MATERIALIZED_REPO;
   if (env) return env;
   return path.resolve(__dirname, "..", "..");
@@ -252,8 +289,12 @@ function bundledVersion(): string | null {
 // startup BEFORE any tool shells out to the pipeline; never throws.
 export function ensurePipelineCurrent(): void {
   try {
-    // A real clone (npm/git install) is the user's working tree — never touch it.
-    if (looksLikeRepo(process.env.SAPS_REPO_DIR)) return;
+    // A real clone (npm/git install) is the user's working tree — never touch
+    // it. A STRAY checkout (git clone nobody opted into, see isStrayCheckout)
+    // does not qualify: fall through so healStrayCheckout() can reclaim.
+    const env = process.env.SAPS_REPO_DIR;
+    if (looksLikeRepo(env) && !isStrayCheckout(env)) return;
+    healStrayCheckout();
     // Nothing materialized yet, or no tarball to extract from: provision() owns
     // the first materialize; this only refreshes an existing one.
     if (!looksLikeRepo(MATERIALIZED_REPO)) return;
@@ -290,6 +331,65 @@ export function ensurePipelineCurrent(): void {
     console.error(`[runtime] re-materialized pipeline -> ${bundled} (was ${prevVer})`);
   } catch (e: any) {
     console.error(`[runtime] ensurePipelineCurrent error: ${e?.message || e}`);
+  }
+}
+
+// Reclaim a box whose pipeline repo resolution landed on a stray git checkout
+// (either SAPS_REPO_DIR baked into an old registration/plist, or runtime.json's
+// repo_dir). Non-destructive: the checkout stays on disk untouched; we simply
+// stop using it. Steps: materialize the bundled pipeline if it isn't on disk
+// yet, migrate the user state the checkout accumulated while it was live
+// (config.json, .env — the project setup lives there), and re-point
+// runtime.json so every later resolveRepoDir()/plist rewrite agrees. Runs at
+// server boot from ensurePipelineCurrent(); best-effort, never throws.
+function healStrayCheckout(): void {
+  try {
+    const env = process.env.SAPS_REPO_DIR;
+    const rt = readRuntime();
+    const stray =
+      (looksLikeRepo(env) && isStrayCheckout(env) && (env as string)) ||
+      (rt?.repo_dir && looksLikeRepo(rt.repo_dir) && isStrayCheckout(rt.repo_dir) && rt.repo_dir) ||
+      null;
+    if (!stray) return;
+    if (!looksLikeRepo(MATERIALIZED_REPO)) {
+      if (!fs.existsSync(EMBEDDED_TARBALL)) return; // nothing to serve instead
+      fs.mkdirSync(REPO_MATERIALIZE_DIR, { recursive: true });
+      const r = spawnSync("tar", ["xzf", EMBEDDED_TARBALL, "-C", REPO_MATERIALIZE_DIR], {
+        timeout: 120000,
+      });
+      if (r.status !== 0 || !looksLikeRepo(MATERIALIZED_REPO)) {
+        console.error(
+          `[runtime] stray-checkout heal: materialize failed (exit ${r.status}); keeping ${stray}`
+        );
+        return;
+      }
+    }
+    for (const f of ["config.json", ".env"]) {
+      try {
+        const src = path.join(stray, f);
+        const dst = path.join(MATERIALIZED_REPO, f);
+        if (!fs.existsSync(src)) continue;
+        if (!fs.existsSync(dst) || fs.statSync(src).mtimeMs > fs.statSync(dst).mtimeMs) {
+          fs.copyFileSync(src, dst);
+        }
+      } catch {
+        /* per-file best effort */
+      }
+    }
+    if (rt && rt.repo_dir !== MATERIALIZED_REPO) {
+      rt.repo_dir = MATERIALIZED_REPO;
+      try {
+        fs.writeFileSync(RUNTIME_JSON, JSON.stringify(rt, null, 2) + "\n", "utf-8");
+      } catch {
+        /* best effort — resolveRepoDir falls back to MATERIALIZED_REPO anyway */
+      }
+    }
+    console.error(
+      `[runtime] pipeline repo was a stray git checkout (${stray}); re-pointed to ` +
+        `${MATERIALIZED_REPO}. The checkout was left on disk but is no longer used.`
+    );
+  } catch (e: any) {
+    console.error(`[runtime] healStrayCheckout error: ${e?.message || e}`);
   }
 }
 
@@ -518,7 +618,10 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // repo path. requirements.txt MUST exist after this for the deps step.
   setStep("repo", "running");
   let resolvedRepo: string;
-  if (looksLikeRepo(process.env.SAPS_REPO_DIR)) {
+  if (
+    looksLikeRepo(process.env.SAPS_REPO_DIR) &&
+    !isStrayCheckout(process.env.SAPS_REPO_DIR)
+  ) {
     resolvedRepo = process.env.SAPS_REPO_DIR as string;
     setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
   } else {
