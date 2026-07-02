@@ -24,9 +24,13 @@ export SAPS_PIPELINE_NAME="linkedin-presence"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
-if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+DRY_RUN="${LINKEDIN_PRESENCE_DRY_RUN:-0}"
+
+if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ] && [ "$DRY_RUN" != "1" ]; then
     log "LINKEDIN_KILLSWITCH active. Skipping LinkedIn presence pass."
     exit 0
+elif [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
+    log "DRY_RUN: ignoring active LINKEDIN_KILLSWITCH for validation."
 fi
 
 # Optional local kill switch for operators who want the plist loaded but dormant.
@@ -34,8 +38,6 @@ if [ "${LINKEDIN_PRESENCE_ENABLED:-1}" = "0" ]; then
     log "LINKEDIN_PRESENCE_ENABLED=0. Skipping."
     exit 0
 fi
-
-DRY_RUN="${LINKEDIN_PRESENCE_DRY_RUN:-0}"
 
 # The launchd timer is fixed; vary each actual pass inside the script. Skipped
 # passes do not write run_monitor rows, so the dashboard history only shows real
@@ -83,6 +85,9 @@ PROMPT_FILE="$(mktemp -t saps-linkedin-presence.XXXXXX)"
 cleanup() {
     rm -f "$PROMPT_FILE" 2>/dev/null || true
     rm -f "$HOME/.claude/linkedin-agent-lock.json" 2>/dev/null || true
+    if declare -f _sa_release_locks >/dev/null 2>&1; then
+        _sa_release_locks || true
+    fi
 }
 trap cleanup EXIT INT TERM HUP
 
