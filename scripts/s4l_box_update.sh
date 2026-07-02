@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Programmatic equivalent of the menu-bar "Please update now" button
+# Programmatic equivalent of the menu-bar "Update now & restart Claude Desktop" button
 # (mcp/menubar/s4l_menubar.py::_mcpb_update_work). Pulls the latest .mcpb from
 # GitHub releases, unzips it over the Claude Desktop extension dir in place, and
 # restarts Claude so the new MCP server loads. Designed to be run over SSH on a
