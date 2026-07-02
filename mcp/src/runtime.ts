@@ -339,7 +339,7 @@ export function ensurePipelineCurrent(): void {
 // repo_dir). Non-destructive: the checkout stays on disk untouched; we simply
 // stop using it. Steps: materialize the bundled pipeline if it isn't on disk
 // yet, migrate the user state the checkout accumulated while it was live
-// (config.json, .env — the project setup lives there), and re-point
+// (config.json, .env; the project setup lives there), and re-point
 // runtime.json so every later resolveRepoDir()/plist rewrite agrees. Runs at
 // server boot from ensurePipelineCurrent(); best-effort, never throws.
 function healStrayCheckout(): void {
@@ -381,7 +381,7 @@ function healStrayCheckout(): void {
       try {
         fs.writeFileSync(RUNTIME_JSON, JSON.stringify(rt, null, 2) + "\n", "utf-8");
       } catch {
-        /* best effort — resolveRepoDir falls back to MATERIALIZED_REPO anyway */
+        /* best effort; resolveRepoDir falls back to MATERIALIZED_REPO anyway */
       }
     }
     console.error(
@@ -1121,8 +1121,42 @@ async function refreshMenubarIfStale(): Promise<{ ok: boolean; detail: string; s
   } catch (e: any) {
     return { ok: true, skipped: true, detail: `menu bar refresh check failed: ${e?.message || e}` };
   }
-  if (!changed) return { ok: true, skipped: true, detail: "menu bar already current" };
+  // The plist bakes SAPS_REPO_DIR/SAPS_PYTHON at write time and was historically
+  // never rewritten, so a box whose repo resolution changed (e.g. a stray git
+  // checkout healed at boot) kept feeding the menu bar (and every snapshot.py
+  // it spawns) the stale repo, which is what pins the displayed version and the
+  // update banner. Regenerate and compare; a drifted plist needs a full
+  // bootout/bootstrap (env changes don't apply on kickstart).
+  let plistChanged = false;
+  try {
+    const want = menubarPlistXml(resolvePython());
+    let have = "";
+    try {
+      have = fs.readFileSync(MENUBAR_PLIST, "utf-8");
+    } catch {
+      have = "";
+    }
+    if (want !== have) {
+      fs.mkdirSync(path.dirname(MENUBAR_PLIST), { recursive: true });
+      fs.writeFileSync(MENUBAR_PLIST, want, "utf-8");
+      plistChanged = true;
+    }
+  } catch {
+    /* best effort; a failed plist refresh must not block the .py refresh */
+  }
+  if (!changed && !plistChanged)
+    return { ok: true, skipped: true, detail: "menu bar already current" };
   const uid = process.getuid ? process.getuid() : 0;
+  if (plistChanged) {
+    await sh("launchctl", ["bootout", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
+    const lr = await sh("launchctl", ["bootstrap", `gui/${uid}`, MENUBAR_PLIST], {
+      timeoutMs: 15_000,
+    });
+    if (lr.code !== 0) {
+      await sh("launchctl", ["load", MENUBAR_PLIST], { timeoutMs: 15_000 });
+    }
+    return { ok: true, detail: "menu bar plist refreshed + agent reloaded" };
+  }
   await sh("launchctl", ["kickstart", "-k", `gui/${uid}/${MENUBAR_LABEL}`], { timeoutMs: 15_000 });
   return { ok: true, detail: "menu bar refreshed + restarted to bundled version" };
 }
