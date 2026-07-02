@@ -54,7 +54,7 @@ from AppKit import (
     NSTextAlignmentRight,
     NSImage,
     NSPopover,
-    NSPopoverBehaviorTransient,
+    NSPopoverBehaviorApplicationDefined,
     NSViewController,
     NSTrackingArea,
     NSTrackingMouseEnteredAndExited,
@@ -438,9 +438,18 @@ class _ReviewController(NSObject):
         vc = NSViewController.alloc().init()
         vc.setView_(view)
         pop = NSPopover.alloc().init()
-        pop.setBehavior_(NSPopoverBehaviorTransient)
+        # ApplicationDefined, NOT Transient: a transient popover auto-closes
+        # whenever the owning app is inactive, and this accessory (status bar)
+        # app usually is — on the box the popover opened and dismissed within
+        # the same click. We own every close path instead (hover-out, click
+        # toggle, card advance, window close).
+        pop.setBehavior_(NSPopoverBehaviorApplicationDefined)
         pop.setContentViewController_(vc)
         pop.setContentSize_((pw, ph))
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
         # NSRectEdge 1 = NSMinYEdge: pop out below the icon.
         pop.showRelativeToRect_ofView_preferredEdge_(self._eye_btn.bounds(), self._eye_btn, 1)
         self._stats_popover = pop
