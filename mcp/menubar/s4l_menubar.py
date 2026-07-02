@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -327,6 +328,11 @@ class S4LMenuBar(rumps.App):
         # "update to an OLDER version" because it polled a different registry).
         self._update_available = False
         self._latest_version = None
+        # Release channel + resolved release tag for this box (from the snapshot;
+        # stable = releases/latest, staging = newest release overall). The tag is
+        # what a staging update downloads from. See scripts/s4l_channel.py.
+        self._channel = "stable"
+        self._latest_tag = None
         # Self-heal (modal-first): if the autopilot scheduled tasks are running in
         # the wrong folder (or the deprecated single autopilot task still exists),
         # OFFER to relocate them to ~/.s4l-worker so their once-a-minute runs stop
@@ -894,6 +900,18 @@ class S4LMenuBar(rumps.App):
         "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
     )
 
+    def _mcpb_url(self):
+        """Download URL for THIS box's channel. Stable uses releases/latest
+        (server-resolved); staging pulls the specific resolved tag, since
+        releases/latest excludes the prerelease a staging box wants. Falls back to
+        releases/latest whenever the tag is unknown."""
+        if self._channel == "staging" and self._latest_tag:
+            return (
+                "https://github.com/m13v/social-autoposter/releases/download/"
+                "%s/social-autoposter.mcpb" % self._latest_tag
+            )
+        return self.MCPB_URL
+
 
     def _do_mcpb_update(self, _=None):
         """User clicked 'Update now & restart Claude Desktop'. Pull the latest .mcpb, unpack it over
@@ -944,7 +962,7 @@ class S4LMenuBar(rumps.App):
         try:
             # Capture while Claude is still alive; unreadable after the kill.
             user_data_dir = self._claude_user_data_dir()
-            r = subprocess.run(["curl", "-fLs", "-m", "300", self.MCPB_URL, "-o", mcpb],
+            r = subprocess.run(["curl", "-fLs", "-m", "300", self._mcpb_url(), "-o", mcpb],
                                capture_output=True, timeout=320)
             if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
                 self._notify("S4L update failed", "Couldn't download the update — check your connection.")
@@ -1618,6 +1636,8 @@ class S4LMenuBar(rumps.App):
         # surfaced as update_available/latest_version). No separate poll here.
         self._update_available = bool(snap.get("update_available"))
         self._latest_version = snap.get("latest_version")
+        self._channel = snap.get("channel") or "stable"
+        self._latest_tag = snap.get("latest_tag")
 
         # Only rebuild the menu when something user-visible changed, so an open
         # menu isn't torn down under the user's cursor every poll.
@@ -2021,6 +2041,16 @@ class S4LMenuBar(rumps.App):
         if self._reloc_needed and not self._relocating:
             items.append(rumps.separator)
             items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
+        items.append(rumps.separator)
+        # Release channel toggle. Stable tracks releases/latest; staging tracks the
+        # newest release overall (prerelease RCs first) so this box can dogfood a
+        # build before it ships to everyone. Labels state the action so each reads
+        # as a button, not a status line.
+        if self._channel == "staging":
+            items.append(self._label("Channel: staging (pre-release)"))
+            items.append(rumps.MenuItem("Switch to stable channel", callback=self._toggle_channel))
+        else:
+            items.append(rumps.MenuItem("Switch to staging (pre-release) channel", callback=self._toggle_channel))
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
