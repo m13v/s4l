@@ -36,14 +36,25 @@
 # NOT after npm publish (6). Step 8 below verifies that so a release can't
 # "succeed" while every box stays silent on the old version.
 #
+# CHANNELS (2026-07-02): a box can opt into pre-release builds by setting its
+# channel to `staging` (scripts/s4l_channel.py). Staging releases are GitHub
+# PRE-releases with an -rc.N version, so releases/latest and npm `latest` do NOT
+# move — only staging boxes pull them (they resolve the newest release from the
+# releases LIST endpoint). `--promote <tag>` flips a tested pre-release to stable
+# IN PLACE (no rebuild): it clears the prerelease flag + moves npm `latest`, so
+# the EXACT tested artifact ships to everyone. Nothing can drift between test and
+# ship because there is no repack.
+#
 # Usage:
-#   bash scripts/release-mcpb.sh                 # patch bump, npm + .mcpb + GitHub
+#   bash scripts/release-mcpb.sh                 # patch bump, npm + .mcpb + GitHub (STABLE)
 #   bash scripts/release-mcpb.sh --bump minor
 #   bash scripts/release-mcpb.sh --version 1.7.0 # pin an exact version
 #   bash scripts/release-mcpb.sh --no-bump       # re-release current package.json version
 #   bash scripts/release-mcpb.sh --no-npm        # skip npm publish (only .mcpb + GitHub)
 #   bash scripts/release-mcpb.sh --no-release    # build + pack + verify only (no npm, no GitHub)
 #   bash scripts/release-mcpb.sh --draft         # GitHub release as a draft
+#   bash scripts/release-mcpb.sh --staging       # PRE-release -rc.N (staging channel only)
+#   bash scripts/release-mcpb.sh --promote v1.6.193-rc.2   # ship a tested pre-release to stable
 
 set -euo pipefail
 
@@ -388,12 +399,12 @@ if gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
   say "Release $TAG exists -> uploading asset (clobber)"
   gh release upload "$TAG" "$BUNDLE" -R "$GH_REPO" --clobber
 else
-  say "Creating release $TAG"
+  say "Creating release $TAG${GH_PRERELEASE_FLAG:+ (pre-release)}"
   gh release create "$TAG" "$BUNDLE" \
     -R "$GH_REPO" \
     --title "social-autoposter $TAG" \
     --notes "$NOTES" \
-    $DRAFT_FLAG
+    $DRAFT_FLAG $GH_PRERELEASE_FLAG
 fi
 
 URL=$(gh release view "$TAG" -R "$GH_REPO" --json url -q .url 2>/dev/null || echo "")
@@ -409,7 +420,13 @@ echo "  asset: social-autoposter.mcpb (${MB}MB)"
 # the check then. For a normal release, poll releases/latest until it serves the
 # new tag so we don't declare success while every box stays silent on the old
 # version (the 1.6.177-vs-1.6.181 blind-banner bug this guards against).
-if [[ -z "$DRAFT_FLAG" ]]; then
+if [[ -n "$DRAFT_FLAG" ]]; then
+  say "Draft release — skipping banner verification (releases/latest excludes drafts by design)"
+elif [[ "$DO_STAGING" == "1" ]]; then
+  say "Staging pre-release — releases/latest deliberately EXCLUDES it, so stable boxes stay put."
+  echo "  Only boxes on the staging channel pull $TAG (via the releases LIST endpoint)."
+  echo "  To ship it to everyone once tested:  bash scripts/release-mcpb.sh --promote $TAG"
+else
   say "Verifying releases/latest serves $TAG (drives the menu-bar update banner)"
   LATEST_SEEN=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -425,6 +442,4 @@ if [[ -z "$DRAFT_FLAG" ]]; then
     echo "  The menu-bar update banner will NOT fire until this resolves. If it stays" >&2
     echo "  wrong, the release is likely a draft/prerelease or GitHub hasn't propagated." >&2
   fi
-else
-  say "Draft release — skipping banner verification (releases/latest excludes drafts by design)"
 fi
