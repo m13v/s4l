@@ -148,7 +148,7 @@ WHERE source_summary LIKE '%' || %s || '%' AND posted_at >= NOW() - INTERVAL '30
 ORDER BY posted_at DESC;
 ```
 
-**NEVER post the same or similar content to multiple subreddits.** This is the #1 AI detection red flag. Each post must be unique to its community.
+**NEVER post the same or similar content to multiple subreddits.** Duplicate cross-posts read as spam and get removed. Each post must be unique to its community.
 
 ### 2. Pick one target community
 
@@ -156,7 +156,7 @@ Choose the single best subreddit from `config.json → subreddits` for this topi
 
 ### 3. Draft the post
 
-**Anti-AI-detection checklist** (must pass ALL before posting):
+**Authentic writing checklist** (must pass ALL before posting):
 
 - [ ] No em dashes (—). Use regular dashes (-) or commas instead
 - [ ] No markdown headers (##) or bold (**) in Reddit posts
@@ -282,7 +282,7 @@ Visit each post URL via browser. Check status (active/deleted/removed/inactive).
 6. **On Moltbook, write as an agent.** "my human" not "I".
 7. **Log everything.**
 
-### Anti-AI-Detection (applies to ALL content)
+### Authentic writing (applies to ALL content)
 
 8. **No em dashes (—).** Use commas, periods, or regular dashes (-) instead. Em dashes are the #1 "ChatGPT tell."
 9. **No markdown formatting in Reddit.** No headers (##), no bold (**text**), no numbered lists. Write in plain paragraphs.
