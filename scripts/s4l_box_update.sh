@@ -21,16 +21,20 @@ set -euo pipefail
 # reported "no .mcpb install" for exactly this reason). Glob for any
 # `*social-autoposter` extension dir that actually has a manifest.json, newest
 # first, so this keeps working across future renames.
-EXT_ROOT="$HOME/Library/Application Support/Claude/Claude Extensions"
+# Scan EVERY "Claude*/Claude Extensions" root, not just plain "Claude/": a box
+# whose Desktop build is renamed (e.g. the account-rotator's "Claude-mediar" /
+# "Claude-m13vduck" variants) keeps its extension under that suffixed dir, and a
+# plain-"Claude/" glob misses it entirely (the "no .mcpb install" exit-4 bug on
+# those boxes). Mirrors the menu bar's _ext_dir glob. Pick the newest matching
+# `*social-autoposter` dir that actually carries a manifest.json.
+APP_SUPPORT="$HOME/Library/Application Support"
 EXT_DIR=""
-if [ -d "$EXT_ROOT" ]; then
-  for d in "$EXT_ROOT"/*social-autoposter; do
-    [ -f "$d/manifest.json" ] || continue
-    if [ -z "$EXT_DIR" ] || [ "$d" -nt "$EXT_DIR" ]; then EXT_DIR="$d"; fi
-  done
-fi
-# Last-resort fallback to the historical id so behavior is unchanged on old boxes.
-[ -n "$EXT_DIR" ] || EXT_DIR="$EXT_ROOT/local.mcpb.m13v.social-autoposter"
+for d in "$APP_SUPPORT"/Claude*/"Claude Extensions"/*social-autoposter; do
+  [ -f "$d/manifest.json" ] || continue
+  if [ -z "$EXT_DIR" ] || [ "$d" -nt "$EXT_DIR" ]; then EXT_DIR="$d"; fi
+done
+# Last-resort fallback to the historical path so behavior is unchanged on old boxes.
+[ -n "$EXT_DIR" ] || EXT_DIR="$APP_SUPPORT/Claude/Claude Extensions/local.mcpb.m13v.social-autoposter"
 PY="/usr/bin/python3"
 
 mode="run"
