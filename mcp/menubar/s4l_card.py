@@ -14,10 +14,17 @@ Must be driven on the main thread (the menu bar's rumps timer is on the main
 run loop, so that holds).
 """
 
+import datetime
 import re
 
 import objc
-from Foundation import NSObject, NSMakeRect, NSAttributedString, NSURL
+from Foundation import (
+    NSObject,
+    NSMakeRect,
+    NSAttributedString,
+    NSMutableAttributedString,
+    NSURL,
+)
 from AppKit import (
     NSApp,
     NSPanel,
@@ -42,8 +49,10 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
+    NSLinkAttributeName,
     NSTextAlignmentLeft,
     NSTextAlignmentRight,
+    NSImage,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
@@ -51,7 +60,7 @@ from AppKit import (
 _active = None
 
 W = 380
-H = 336
+H = 300
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
 
@@ -87,9 +96,10 @@ def _fmt_count(n):
 
 
 def _stats_line(stats):
-    """One muted line from the discovery-time candidate stats: author followers
-    (profile stat) then the thread's engagement counts. Fields the pipeline
-    didn't capture are simply omitted; returns '' when nothing is known."""
+    """One line from the discovery-time candidate stats: author followers
+    (profile stat) then the thread's engagement counts. Shown in the eye icon's
+    hover tooltip, never inline on the card. Fields the pipeline didn't capture
+    are simply omitted; returns '' when nothing is known."""
     stats = stats or {}
     parts = []
     followers = _fmt_count(stats.get("author_followers"))
@@ -105,6 +115,29 @@ def _stats_line(stats):
         if v is not None:
             parts.append(f"{v} {label}")
     return " · ".join(parts)
+
+
+def _age_str(iso):
+    """Thread age since tweet_posted_at, minute-granular for fresh threads
+    ('38m'); rolls to hours/days only when minutes would be absurd."""
+    if not iso:
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        mins = int(
+            (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60
+        )
+    except Exception:
+        return None
+    mins = max(mins, 0)
+    if mins < 100:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def _label(frame, text, *, size=12, bold=False, muted=False):
@@ -224,55 +257,87 @@ class _ReviewController(NSObject):
         content.addSubview_(reject)
 
         # "Replying to @author" row: the handle is a live link to the author's
-        # profile, and "View thread" (right) opens the thread being replied to.
-        # Both use data the pipeline already carries; no scraping happens here.
+        # profile. Right side: thread age (muted, minutes) and an eye icon whose
+        # hover tooltip carries the discovery-time stats (followers + thread
+        # engagement) — stats are never inline on the card. All from data the
+        # pipeline already carries; no scraping happens here.
         self._link_targets = {}
         handle = (d.get("thread_author") or "").lstrip("@").strip()
+        stats = d.get("stats") or {}
+        thread_url = d.get("thread_url")
         content.addSubview_(
             _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True)
         )
+        right_x = W - M
+        tip = _stats_line(stats)
+        if tip:
+            eye = NSButton.alloc().initWithFrame_(NSMakeRect(right_x - 20, H - 70, 20, 18))
+            eye.setBordered_(False)
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "eye", "thread stats"
+            )
+            if img is not None:
+                eye.setImage_(img)
+                eye.setTitle_("")
+            else:  # pre-Big Sur fallback: no SF Symbols
+                eye.setTitle_("👁")
+            eye.setToolTip_(tip)
+            content.addSubview_(eye)
+            right_x -= 24
+        age = _age_str(stats.get("tweet_posted_at"))
+        if age:
+            age_label = _label(
+                NSMakeRect(right_x - 44, H - 70, 44, 18), age, size=11, muted=True
+            )
+            age_label.setAlignment_(NSTextAlignmentRight)
+            content.addSubview_(age_label)
+            right_x -= 48
+        handle_w = right_x - (M + 78) - 4
         if handle:
             self._add_link(
                 content,
-                NSMakeRect(M + 78, H - 70, W - 2 * M - 78 - 88, 18),
+                NSMakeRect(M + 78, H - 70, handle_w, 18),
                 f"@{handle}",
                 f"https://x.com/{handle}",
                 bold=True,
             )
         else:
             content.addSubview_(
-                _label(NSMakeRect(M + 78, H - 70, W - 2 * M - 78 - 88, 18), "thread", size=12, bold=True)
+                _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True)
             )
-        thread_url = d.get("thread_url")
+        # Thread text — black, with a small trailing ↗ link that opens the
+        # thread (an NSTextView because NSTextField can't do clickable links).
+        thread_tv = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(M, H - 150, W - 2 * M, 74)
+        )
+        thread_tv.setEditable_(False)
+        thread_tv.setSelectable_(True)  # links only respond when selectable
+        thread_tv.setDrawsBackground_(False)
+        body = NSMutableAttributedString.alloc().initWithString_attributes_(
+            _truncate(d.get("thread_text")),
+            {
+                NSFontAttributeName: NSFont.systemFontOfSize_(12),
+                NSForegroundColorAttributeName: NSColor.labelColor(),
+            },
+        )
         if thread_url:
-            self._add_link(
-                content,
-                NSMakeRect(W - M - 88, H - 70, 88, 18),
-                "View thread",
-                thread_url,
-                right=True,
+            body.appendAttributedString_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    " ↗",
+                    {
+                        NSFontAttributeName: NSFont.systemFontOfSize_(12),
+                        # NSTextView's default clickedOnLink handler opens the
+                        # URL via NSWorkspace; no delegate needed.
+                        NSLinkAttributeName: NSURL.URLWithString_(thread_url),
+                    },
+                )
             )
-        # Discovery-time stats: author followers + thread engagement — muted.
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 88, W - 2 * M, 14),
-                _stats_line(d.get("stats")),
-                size=11,
-                muted=True,
-            )
-        )
-        # Thread text — black.
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 168, W - 2 * M, 74),
-                _truncate(d.get("thread_text")),
-                size=12,
-            )
-        )
+        thread_tv.textStorage().setAttributedString_(body)
+        content.addSubview_(thread_tv)
         # Reply heading — black.
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 190, W - 2 * M, 16),
+                NSMakeRect(M, H - 172, W - 2 * M, 16),
                 "Reply (editable):",
                 size=12,
                 bold=True,
@@ -286,7 +351,7 @@ class _ReviewController(NSObject):
         link = d.get("link_url")
         composed = f"{reply} {link}" if link else reply
         scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(M, M, W - 2 * M, H - 190 - M - 6)
+            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6)
         )
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(NS_BEZEL_BORDER)
@@ -473,7 +538,9 @@ def present_review(drafts, on_decision=None, on_complete=None):
     """Show the review cards (main thread only). drafts: list of
     {n, thread_author, thread_text, reply_text, link_url, thread_url?, stats?}
     where stats is the discovery-time candidate snapshot
-    {author_followers, likes, retweets, replies, views, ...} (optional).
+    {author_followers, likes, retweets, replies, views, tweet_posted_at, ...}
+    (optional). thread_url renders as a trailing ↗ link on the thread text;
+    stats surface only in the eye icon's hover tooltip plus the muted age.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
