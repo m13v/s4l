@@ -857,24 +857,34 @@ class S4LMenuBar(rumps.App):
         never advances and fixes never land). Pick the newest `*social-autoposter`
         extension dir that actually has a manifest.json; fall back to the
         historical id so old boxes are unaffected.
+
+        Scans "Claude*" app-support roots, not just "Claude": the host app can
+        run with a custom --user-data-dir (per-account dirs like
+        "Claude-mediar"), and the live extension lives under THAT dir while
+        plain "Claude/" may have no Claude Extensions at all. Same blind spot
+        family as scripts/schedule_state.py::SCHED_REGISTRY_GLOB (fixed
+        2026-07-02); here it made the update button unzip into a void and fail
+        verification on such machines.
         """
-        root = os.path.expanduser(
-            "~/Library/Application Support/Claude/Claude Extensions"
-        )
+        app_support = os.path.expanduser("~/Library/Application Support")
         best, best_mtime = None, -1.0
-        try:
-            for name in os.listdir(root):
-                if not name.endswith("social-autoposter"):
-                    continue
-                d = os.path.join(root, name)
-                if not os.path.exists(os.path.join(d, "manifest.json")):
-                    continue
-                m = os.path.getmtime(d)
-                if m > best_mtime:
-                    best, best_mtime = d, m
-        except OSError:
-            pass
-        return best or os.path.join(root, "local.mcpb.m13v.social-autoposter")
+        for root in glob.glob(os.path.join(app_support, "Claude*", "Claude Extensions")):
+            try:
+                for name in os.listdir(root):
+                    if not name.endswith("social-autoposter"):
+                        continue
+                    d = os.path.join(root, name)
+                    if not os.path.exists(os.path.join(d, "manifest.json")):
+                        continue
+                    m = os.path.getmtime(d)
+                    if m > best_mtime:
+                        best, best_mtime = d, m
+            except OSError:
+                continue
+        return best or os.path.join(
+            app_support, "Claude", "Claude Extensions",
+            "local.mcpb.m13v.social-autoposter",
+        )
 
     MCPB_URL = (
         "https://github.com/m13v/social-autoposter/releases/latest/download/"
@@ -893,10 +903,47 @@ class S4LMenuBar(rumps.App):
         self._notify("S4L", "Updating… Claude will restart in a moment.")
         threading.Thread(target=self._mcpb_update_work, daemon=True).start()
 
+    @staticmethod
+    def _claude_user_data_dir():
+        """The --user-data-dir the RUNNING Claude was launched with, or None.
+
+        Must be captured BEFORE quitting Claude: a bare `open -a Claude`
+        relaunch drops the flag and boots the DEFAULT-profile instance,
+        stranding users who run Claude with a per-account data dir (found
+        2026-07-02: the update restart landed in the wrong profile). The value
+        can contain spaces (…/Application Support/…), so parse the ps line
+        with a regex up to the next ` --` flag, not by token split.
+        """
+        try:
+            out = subprocess.run(["ps", "-axo", "command"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            for line in out.splitlines():
+                if "/Claude.app/Contents/MacOS/Claude" not in line:
+                    continue
+                m = re.search(r"--user-data-dir=(.+?)(?= --|$)", line)
+                if m:
+                    return m.group(1).strip()
+        except Exception:
+            pass
+        return None
+
+    def _relaunch_claude(self, user_data_dir=None):
+        """Reopen Claude, preserving a custom --user-data-dir when one was
+        captured before the kill. Keep in sync with the other relaunch sites."""
+        if user_data_dir:
+            subprocess.run(
+                ["open", "-a", CLAUDE_APP, "--args",
+                 f"--user-data-dir={user_data_dir}"],
+                capture_output=True, timeout=20)
+        else:
+            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+
     def _mcpb_update_work(self):
         tmpd = tempfile.mkdtemp(prefix="s4l-update-")
         mcpb = os.path.join(tmpd, "social-autoposter.mcpb")
         try:
+            # Capture while Claude is still alive; unreadable after the kill.
+            user_data_dir = self._claude_user_data_dir()
             r = subprocess.run(["curl", "-fLs", "-m", "300", self.MCPB_URL, "-o", mcpb],
                                capture_output=True, timeout=320)
             if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
@@ -938,7 +985,7 @@ class S4LMenuBar(rumps.App):
             # the registry in memory and clobbers live edits). See queueWorkerCwd()
             # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
             self._rewrite_scheduled_task_cwd()
-            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._relaunch_claude(user_data_dir)
             self._update_available = False
             self._sig = None
             if target:
