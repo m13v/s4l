@@ -883,7 +883,7 @@ class S4LMenuBar(rumps.App):
 
 
     def _do_mcpb_update(self, _=None):
-        """User clicked 'Please update now'. Pull the latest .mcpb, unpack it over
+        """User clicked 'Update now & restart Claude Desktop'. Pull the latest .mcpb, unpack it over
         the Desktop extension dir in place, and restart Claude so the new server
         loads. The menu bar is a launchd process (not a Claude child), so the
         restart is clean. Heavy work runs on a background thread."""
@@ -1431,7 +1431,7 @@ class S4LMenuBar(rumps.App):
                 sys.stderr.flush()
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
         # 0.12s), but the menu + update indicator must still refresh mid-run —
-        # otherwise the "Please update now" item never appears on a box that's always
+        # otherwise the "Update now & restart Claude Desktop" item never appears on a box that's always
         # busy (continuous autopilot). So we no longer bail out wholesale when busy;
         # we only skip the title repaint and the review pop-up.
         busy = self._spinner is not None
@@ -1571,7 +1571,7 @@ class S4LMenuBar(rumps.App):
             else 0
         )
         # _update_available / _latest_version are in the signature so a freshly
-        # detected update rebuilds the menu (adding "Please update now") even mid-run.
+        # detected update rebuilds the menu (adding "Update now & restart Claude Desktop") even mid-run.
         sig = (
             runtime_ready,
             setup_complete,
@@ -1918,7 +1918,10 @@ class S4LMenuBar(rumps.App):
             items.append(rumps.separator)
             items.append(self._label(f"⬆ Update available · v{self._latest_version}"))
             items.append(
-                rumps.MenuItem("Please update now", callback=self._do_mcpb_update)
+                rumps.MenuItem(
+                    "Update now & restart Claude Desktop",
+                    callback=self._do_mcpb_update,
+                )
             )
         if self._reloc_needed and not self._relocating:
             items.append(rumps.separator)
