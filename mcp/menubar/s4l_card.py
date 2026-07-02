@@ -218,8 +218,35 @@ class _ReviewController(NSObject):
         self._link_targets = {}
         self._eye_btn = None
         self._stats_popover = None
+        # Per-card telemetry, reset when a NEW card renders (not on the
+        # card <-> reason-picker swap, which is the same card).
+        self._rendered_idx = -1
+        self._interactions = []
+        self._card_shown_at = None
+        self._reason_field = None
         self._build()
         return self
+
+    @objc.python_method
+    def _track(self, kind):
+        """Append one interaction breadcrumb for the CURRENT card. Rides on the
+        decision dict so the feedback loop can correlate behavior (opened the
+        author profile, read the thread) with the eventual approve/reject."""
+        if len(self._interactions) >= MAX_INTERACTIONS:
+            return
+        self._interactions.append(
+            {
+                "type": kind,
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        )
+        _log(f"interaction {kind} (card {self._idx + 1})")
+
+    @objc.python_method
+    def _dwell_ms(self):
+        if not self._card_shown_at:
+            return None
+        return int((time.time() - self._card_shown_at) * 1000)
 
     @objc.python_method
     def _build(self):
@@ -283,6 +310,12 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _render(self):
         d = self._drafts[self._idx]
+        # Fresh card (not a card <-> reason-picker swap): reset telemetry.
+        if self._rendered_idx != self._idx:
+            self._rendered_idx = self._idx
+            self._interactions = []
+            self._card_shown_at = time.time()
+        self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
         # Buttons at the TOP: Approve (left), Reject (right).
@@ -373,6 +406,7 @@ class _ReviewController(NSObject):
                 text,
                 f"https://x.com/{handle}",
                 bold=True,
+                kind="profile_click",
             )
             followers = _followers_str(stats)
             fol_w = handle_w - link_w
@@ -416,12 +450,14 @@ class _ReviewController(NSObject):
                     " ↗",
                     {
                         NSFontAttributeName: NSFont.systemFontOfSize_(12),
-                        # NSTextView's default clickedOnLink handler opens the
-                        # URL via NSWorkspace; no delegate needed.
+                        # Delegate (textView:clickedOnLink:atIndex:) tracks the
+                        # click as a thread_click interaction, then opens the
+                        # URL itself via NSWorkspace.
                         NSLinkAttributeName: NSURL.URLWithString_(thread_url),
                     },
                 )
             )
+            thread_tv.setDelegate_(self)
         thread_tv.textStorage().setAttributedString_(body)
         content.addSubview_(thread_tv)
         # Reply heading — black.
@@ -524,6 +560,7 @@ class _ReviewController(NSObject):
     # Closing is owned by hover-out, card advance, and window close.
     def statsToggle_(self, sender):
         _log("eye clicked")
+        self._track("stats_open")
         self._show_stats_popover()
 
     # NSTrackingArea owner callbacks (hover over the eye icon).
@@ -536,10 +573,10 @@ class _ReviewController(NSObject):
         self._close_stats_popover()
 
     @objc.python_method
-    def _add_link(self, content, frame, text, url, *, size=12, bold=False, right=False):
+    def _add_link(self, content, frame, text, url, *, size=12, bold=False, right=False, kind="link_click"):
         """Borderless button styled as a link (system link color, underlined).
-        The URL rides on the button's integer tag via _link_targets so one
-        openLink: selector serves every link on the card."""
+        The URL and interaction kind ride on the button's integer tag via
+        _link_targets so one openLink: selector serves every link on the card."""
         btn = NSButton.alloc().initWithFrame_(frame)
         btn.setBordered_(False)
         font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
@@ -554,7 +591,7 @@ class _ReviewController(NSObject):
         btn.setAlignment_(NSTextAlignmentRight if right else NSTextAlignmentLeft)
         tag = len(self._link_targets) + 1
         btn.setTag_(tag)
-        self._link_targets[tag] = str(url)
+        self._link_targets[tag] = (str(url), kind)
         btn.setTarget_(self)
         btn.setAction_("openLink:")
         content.addSubview_(btn)
@@ -562,11 +599,24 @@ class _ReviewController(NSObject):
 
     def openLink_(self, sender):
         try:
-            url = self._link_targets.get(sender.tag())
-            if url:
+            target = self._link_targets.get(sender.tag())
+            if target:
+                url, kind = target
+                self._track(kind)
                 NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
         except Exception:
             pass
+
+    # NSTextView delegate: the thread ↗ link. Track, then open ourselves
+    # (returning True suppresses the default handler).
+    def textView_clickedOnLink_atIndex_(self, textview, link, charIndex):
+        self._track("thread_click")
+        try:
+            url = link if hasattr(link, "absoluteString") else NSURL.URLWithString_(str(link))
+            NSWorkspace.sharedWorkspace().openURL_(url)
+        except Exception:
+            pass
+        return True
 
     @objc.python_method
     def _current_text(self):
@@ -576,7 +626,7 @@ class _ReviewController(NSObject):
             return self._drafts[self._idx].get("reply_text") or ""
 
     @objc.python_method
-    def _record(self, approved):
+    def _record(self, approved, reject_category=None, reject_note=None):
         d = self._drafts[self._idx]
         orig = (d.get("reply_text") or "").strip()
         link = d.get("link_url") or ""
@@ -610,6 +660,10 @@ class _ReviewController(NSObject):
                 "text": body,
                 "edited": bool(approved and body != orig),
                 "drop_link": bool(approved and drop_link),
+                "reject_category": reject_category,
+                "reject_note": (reject_note or "").strip() or None,
+                "interactions": list(self._interactions),
+                "dwell_ms": self._dwell_ms(),
             }
         )
 
