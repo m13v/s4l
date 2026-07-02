@@ -70,9 +70,13 @@ DEFAULT_INSTRUCTION = (
 
 
 def config_path() -> str:
-    return os.environ.get("SAPS_CONFIG_PATH") or os.path.expanduser(
-        "~/social-autoposter/config.json"
-    )
+    explicit = os.environ.get("SAPS_CONFIG_PATH")
+    if explicit:
+        return explicit
+    repo = os.environ.get("SAPS_REPO_DIR")
+    if repo:
+        return os.path.join(repo, "config.json")
+    return os.path.expanduser("~/social-autoposter/config.json")
 
 
 def _now_iso() -> str:
