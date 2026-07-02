@@ -193,7 +193,7 @@ After posting, you MUST:
 - Check for comments within 2-4 hours
 - Reply to every substantive comment within 24 hours
 - Replies should be casual, conversational, expand the topic — NOT polished paragraphs
-- If someone accuses the post of being AI: respond genuinely, mention a specific personal detail
+- If someone asks whether the post is AI or a bot: acknowledge it briefly and honestly, do not argue, do not pitch, and prefer disengaging (same policy as the engage pipeline's meta-callout handling)
 
 ---
 
