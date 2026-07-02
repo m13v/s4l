@@ -109,17 +109,18 @@ def _fmt_count(n):
     return str(n)
 
 
-def _stats_lines(stats):
-    """Discovery-time candidate stats as display lines: author followers
-    (profile stat) first, then the thread's engagement counts. Shown only in
-    the eye icon's hover/click popover, never inline on the card. Fields the
-    pipeline didn't capture are simply omitted; returns [] when nothing is
-    known (the eye icon is skipped entirely then)."""
+def _followers_str(stats):
+    """Author followers (profile stat), shown INLINE next to the handle in the
+    author row. None when the pipeline didn't capture it."""
+    followers = _fmt_count((stats or {}).get("author_followers"))
+    return None if followers is None else f"{followers} followers"
+
+
+def _engagement_line(stats):
+    """The thread's engagement counts, shown ONLY in the eye icon's hover/click
+    popover, never inline on the card. Fields the pipeline didn't capture are
+    omitted; returns '' when nothing is known (the eye icon is skipped then)."""
     stats = stats or {}
-    lines = []
-    followers = _fmt_count(stats.get("author_followers"))
-    if followers is not None:
-        lines.append(f"{followers} followers")
     parts = []
     for key, label in (
         ("likes", "likes"),
@@ -130,9 +131,7 @@ def _stats_lines(stats):
         v = _fmt_count(stats.get(key))
         if v is not None:
             parts.append(f"{v} {label}")
-    if parts:
-        lines.append(" · ".join(parts))
-    return lines
+    return " · ".join(parts)
 
 
 def _age_str(iso):
@@ -426,24 +425,18 @@ class _ReviewController(NSObject):
             return
         if self._stats_popover is not None and self._stats_popover.isShown():
             return
-        lines = _stats_lines(self._drafts[self._idx].get("stats"))
-        if not lines:
+        line = _engagement_line(self._drafts[self._idx].get("stats"))
+        if not line:
             return
         font = NSFont.systemFontOfSize_(12)
-        wmax = 0
-        for ln in lines:
-            s = NSAttributedString.alloc().initWithString_attributes_(
-                ln, {NSFontAttributeName: font}
-            )
-            wmax = max(wmax, s.size().width)
+        s = NSAttributedString.alloc().initWithString_attributes_(
+            line, {NSFontAttributeName: font}
+        )
         # +34: 13px side insets plus NSTextField's own ~4px internal padding,
-        # which otherwise clips the last word of the widest line.
-        pw, ph = int(wmax) + 34, 18 * len(lines) + 16
+        # which otherwise clips the last word.
+        pw, ph = int(s.size().width) + 34, 34
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
-        for i, ln in enumerate(lines):
-            view.addSubview_(
-                _label(NSMakeRect(13, ph - 26 - 18 * i, pw - 26, 18), ln, size=12)
-            )
+        view.addSubview_(_label(NSMakeRect(13, ph - 26, pw - 26, 18), line, size=12))
         vc = NSViewController.alloc().init()
         vc.setView_(view)
         pop = NSPopover.alloc().init()
