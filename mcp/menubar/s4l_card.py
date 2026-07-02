@@ -720,9 +720,90 @@ class _ReviewController(NSObject):
         self._advance()
 
     def reject_(self, sender):
-        self._record(False)
+        # Two-step reject: swap the card body for the reason picker. The
+        # decision is recorded when a reason chip (or Skip) is clicked. Any
+        # in-progress edit of the reply is preserved for Back.
+        self._pending_reply_text = self._current_text()
+        self._render_reason()
+
+    @objc.python_method
+    def _render_reason(self):
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+        content.addSubview_(
+            _label(NSMakeRect(M, H - 46, W - 2 * M, 20), "Why reject this draft?", size=13, bold=True)
+        )
+        y = H - 82
+        for i, (_, title) in enumerate(REJECT_REASONS):
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(M, y, W - 2 * M, 28))
+            btn.setTitle_(title)
+            btn.setBezelStyle_(NSBezelStyleRounded)
+            btn.setTag_(i + 1)
+            btn.setTarget_(self)
+            btn.setAction_("rejectReason:")
+            content.addSubview_(btn)
+            y -= 32
+        note = NSTextField.alloc().initWithFrame_(NSMakeRect(M, 56, W - 2 * M, 48))
+        note.setEditable_(True)
+        note.setBezeled_(True)
+        note.setFont_(NSFont.systemFontOfSize_(12))
+        try:
+            note.setPlaceholderString_("Optional note (sent with whichever reason you pick)")
+            note.cell().setWraps_(True)
+        except Exception:
+            pass
+        content.addSubview_(note)
+        self._reason_field = note
+
+        back = NSButton.alloc().initWithFrame_(NSMakeRect(M, 14, 90, 30))
+        back.setTitle_("Back")
+        back.setBezelStyle_(NSBezelStyleRounded)
+        back.setTarget_(self)
+        back.setAction_("rejectBack:")
+        content.addSubview_(back)
+
+        skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 150, 14, 150, 30))
+        skip.setTitle_("Reject (no reason)")
+        skip.setBezelStyle_(NSBezelStyleRounded)
+        skip.setTarget_(self)
+        skip.setAction_("rejectSkip:")
+        content.addSubview_(skip)
+
+        self._textview = None
+        self._panel.setContentView_(content)
+        self._panel.makeFirstResponder_(note)
+
+    @objc.python_method
+    def _reason_note(self):
+        try:
+            return str(self._reason_field.stringValue()) if self._reason_field is not None else ""
+        except Exception:
+            return ""
+
+    def rejectReason_(self, sender):
+        try:
+            category = REJECT_REASONS[int(sender.tag()) - 1][0]
+        except Exception:
+            category = "other"
+        _log(f"reject reason: {category}")
+        self._record(False, reject_category=category, reject_note=self._reason_note())
         self._fire_decision()
         self._advance()
+
+    def rejectSkip_(self, sender):
+        _log("reject reason: skipped")
+        self._record(False, reject_note=self._reason_note())
+        self._fire_decision()
+        self._advance()
+
+    def rejectBack_(self, sender):
+        # Re-render the card and restore any reply edit made before Reject.
+        pending = getattr(self, "_pending_reply_text", None)
+        self._render()
+        if pending is not None and self._textview is not None:
+            try:
+                self._textview.setString_(pending)
+            except Exception:
+                pass
 
     def windowShouldClose_(self, sender):
         # Closing the window stops review; remaining cards are left undecided
