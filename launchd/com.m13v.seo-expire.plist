@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.m13v.seo-expire</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/matthewdi/social-autoposter/seo/cron_seo_expire.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/matthewdi/social-autoposter/seo/logs/expire/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/matthewdi/social-autoposter/seo/logs/expire/launchd_stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/matthewdi</string>
+        <key>DAILY_MAX</key>
+        <string>50</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
