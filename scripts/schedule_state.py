@@ -53,8 +53,15 @@ FIRING_WINDOW = 420
 # stale createdAt, so they never fall inside this window.
 CREATED_GRACE = 900
 
+# "Claude*" (not "Claude"): the host app can run with a custom --user-data-dir
+# (per-account dirs like "Claude-mediar" on multi-account machines), and the
+# registry lands under THAT dir while plain "Claude/" has no claude-code-sessions
+# at all. The freshest-lastRunAt selection in compute() already picks the live
+# registry among however many dirs match, so widening the glob is safe; the
+# plain-"Claude" glob read a hard "missing" forever on such machines even while
+# both worker tasks fired every minute (found 2026-07-02 during onboarding).
 SCHED_REGISTRY_GLOB = os.path.join(
-    os.path.expanduser("~"), "Library", "Application Support", "Claude",
+    os.path.expanduser("~"), "Library", "Application Support", "Claude*",
     "claude-code-sessions", "*", "*", "scheduled-tasks.json",
 )
 
@@ -123,12 +130,45 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
     return "missing"
 
 
+def _detail(glob_pattern: str = SCHED_REGISTRY_GLOB) -> dict:
+    """Cheap diagnostics for the JSON output: which registries the glob saw and
+    which contain both worker tasks, with each one's freshest lastRunAt age.
+    This is what makes a 'missing' verdict debuggable from a log line instead of
+    requiring filesystem forensics (the 2026-07-02 rotated-dir bug hid here)."""
+    regs = []
+    for f in glob.glob(glob_pattern):
+        entry = {"path": f, "has_workers": False, "last_run_age_s": None}
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+            by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
+            recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
+            if all(r is not None for r in recs):
+                entry["has_workers"] = True
+                epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
+                e = max([x for x in epochs if x is not None], default=None)
+                if e is not None:
+                    entry["last_run_age_s"] = int(time.time() - e)
+        except Exception as exc:
+            entry["error"] = str(exc)
+        regs.append(entry)
+    return {"glob": glob_pattern, "registries": regs}
+
+
 def main() -> int:
+    out = {}
     try:
-        state = compute()
+        out["state"] = compute()
+    except Exception as exc:
+        out["state"] = "missing"
+        out["error"] = str(exc)
+    # Extra keys are ignored by the Node caller (it reads .state only) but give
+    # menubar Sentry captures and hand-runs the WHY behind a 'missing'.
+    try:
+        out["detail"] = _detail()
     except Exception:
-        state = "missing"
-    print(json.dumps({"state": state}))
+        pass
+    print(json.dumps(out))
     return 0
 
 

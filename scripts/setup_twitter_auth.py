@@ -314,19 +314,47 @@ _HANDLE_PLACEHOLDERS = {"", "your-twitter-handle", "@your-twitter-handle"}
 
 
 def _resolve_live_handle(send) -> "str | None":
-    """Read the logged-in @handle from the LIVE x.com session via CDP DOM.
+    """Read the logged-in @handle from the LIVE x.com session.
 
     resolve_handle() only reads config.json (which on a fresh install is the
     template placeholder), so it can't discover the real account. This reads the
-    actual logged-in handle from the page so connect_x can persist it. Best
-    effort: returns None on any failure and never raises into the connect flow.
+    actual logged-in handle from the SAME authenticated session connect_x just
+    validated, so connect_x / cmd_resolve_handle can persist ground truth instead
+    of falling back to a hardcoded handle (which would silently mis-attribute
+    every post). Two methods, most reliable first:
+
+      1. X's own account/settings.json (canonical `screen_name`). The web client
+         calls this on every load; it is stable across DOM redesigns, unlike the
+         selector-only scrape that kept failing ("handle missing again" during
+         onboarding). One GET on the already-open session: csrf via the
+         non-httpOnly ct0 cookie, auth_token rides along with credentials.
+      2. DOM fallback: the left-nav Profile link href / account-switcher chip.
+
+    Best effort: returns None on any failure and never raises into the connect
+    flow.
     """
-    js = r"""(function(){
-      function fromHref(sel){var a=document.querySelector(sel);if(a){var h=a.getAttribute('href')||'';var m=h.match(/^\/([A-Za-z0-9_]{1,15})$/);if(m)return m[1];}return '';}
-      var h=fromHref('a[data-testid="AppTabBar_Profile_Link"]');
-      if(h)return h;
-      var b=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
-      if(b){var m=(b.textContent||'').match(/@([A-Za-z0-9_]{1,15})/);if(m)return m[1];}
+    js = r"""(async function(){
+      function ck(n){var m=document.cookie.match(new RegExp('(?:^|; )'+n+'=([^;]*)'));return m?decodeURIComponent(m[1]):'';}
+      try{
+        var ct0=ck('ct0');
+        if(ct0){
+          var BEARER='Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+          var urls=['https://api.x.com/1.1/account/settings.json','https://api.twitter.com/1.1/account/settings.json'];
+          for(var i=0;i<urls.length;i++){
+            try{
+              var resp=await fetch(urls[i],{method:'GET',credentials:'include',headers:{'authorization':BEARER,'x-csrf-token':ct0}});
+              if(resp&&resp.ok){var j=await resp.json();if(j&&j.screen_name)return String(j.screen_name);}
+            }catch(e){}
+          }
+        }
+      }catch(e){}
+      try{
+        function fromHref(sel){var a=document.querySelector(sel);if(a){var h=a.getAttribute('href')||'';var m=h.match(/^\/([A-Za-z0-9_]{1,15})$/);if(m)return m[1];}return '';}
+        var h=fromHref('a[data-testid="AppTabBar_Profile_Link"]');
+        if(h)return h;
+        var b=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+        if(b){var m=(b.textContent||'').match(/@([A-Za-z0-9_]{1,15})/);if(m)return m[1];}
+      }catch(e){}
       return '';
     })()"""
     try:
@@ -336,7 +364,8 @@ def _resolve_live_handle(send) -> "str | None":
             send("Page.navigate", {"url": "https://x.com/home"})
             time.sleep(3)
         for _ in range(8):
-            r = send("Runtime.evaluate", {"expression": js, "returnByValue": True})
+            r = send("Runtime.evaluate",
+                     {"expression": js, "returnByValue": True, "awaitPromise": True})
             v = (r.get("result", {}).get("result", {}) or {}).get("value", "") or ""
             v = v.strip().lstrip("@")
             if v:

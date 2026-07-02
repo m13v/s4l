@@ -1,0 +1,74 @@
+#!/bin/bash
+# Shared pre-commit hook for social-autoposter (a PUBLIC repo).
+#
+# This file is TRACKED so every clone gets the same protections. Activate it
+# once per clone with:  bash scripts/git-hooks/install.sh
+# (that just sets `git config core.hooksPath scripts/git-hooks`).
+#
+# Guards, in order:
+#   1. Repo hygiene scan (PII / secrets / images / absolute home paths).
+#   2. No posting/rate limits re-added to SKILL.md.
+#   3. No wholesale gutting of protected data-driven pipeline files.
+#   4. PEP 604 union annotations require `from __future__ import annotations`.
+#
+# Override a single commit with `git commit --no-verify` (fix the finding first).
+
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Repo hygiene scan on the staged diff.
+if ! /usr/bin/python3 "$ROOT/scripts/scan_pii.py" --staged; then
+    echo "REJECTED: repo hygiene scan (scripts/scan_pii.py) found PII/secrets/images."
+    exit 1
+fi
+
+# 2. Reject commits that add rate/posting limits to SKILL.md.
+if git diff --cached --name-only | grep -q "^SKILL.md$"; then
+    added_lines=$(git diff --cached -- SKILL.md | grep '^+' | grep -v '^+++' || true)
+    if echo "$added_lines" | grep -qiE '(rate limit check|Max [0-9]+ posts per|Stop if at limit|posts per 24 hours|Max [0-9]+ replies per run|Max [0-9]+ per run|Max [0-9]+ (original )?post[s]? per (day|week|hour|30 min))'; then
+        echo "REJECTED: Commit adds posting limits to SKILL.md."
+        echo "The owner has explicitly disabled all posting limits. See CLAUDE.md."
+        echo "If you need to override this, use: git commit --no-verify"
+        exit 1
+    fi
+fi
+
+# 3. Protect data-driven pipeline files from wholesale "simplification".
+PROTECTED_FILES=(
+    "scripts/top_performers.py"
+    "scripts/engagement_styles.py"
+    "scripts/post_reddit.py"
+    "scripts/top_twitter_queries.py"
+    "scripts/fetch_twitter_t1.py"
+    "scripts/score_twitter_candidates.py"
+    "skill/run-reddit-search.sh"
+    "skill/run-twitter-cycle.sh"
+    "skill/link-edit-reddit.sh"
+    "skill/link-edit-moltbook.sh"
+    "skill/link-edit-linkedin.sh"
+    "skill/link-edit-github.sh"
+    "skill/link-edit-twitter.sh"
+    "skill/dm-outreach-reddit.sh"
+    "skill/dm-outreach-linkedin.sh"
+    "skill/dm-outreach-twitter.sh"
+)
+for pfile in "${PROTECTED_FILES[@]}"; do
+    if git diff --cached --name-only | grep -q "^${pfile}$"; then
+        removed=$(git diff --cached -- "$pfile" | grep '^-' | grep -v '^---' | wc -l | tr -d ' ')
+        added=$(git diff --cached -- "$pfile" | grep '^+' | grep -v '^+++' | wc -l | tr -d ' ')
+        net_removed=$(( removed - added ))
+        if [ "$net_removed" -gt 50 ]; then
+            echo "REJECTED: Commit removes $net_removed more lines than it adds in $pfile ($removed removed, $added added)."
+            echo "This file is protected from wholesale simplification."
+            echo "If this is intentional, use: git commit --no-verify"
+            exit 1
+        fi
+    fi
+done
+
+# 4. PEP 604 union guard (launchd plists run /usr/bin/python3 3.9.6).
+if ! /usr/bin/python3 "$ROOT/scripts/check_pep604_annotations.py"; then
+    exit 1
+fi
+
+exit 0
