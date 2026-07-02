@@ -629,7 +629,7 @@ class S4LMenuBar(rumps.App):
     # ---- factory reset (menu-bar driven) ----------------------------------
     def _reset_machine(self, _=None):
         """One-click 'reset this test machine to factory-fresh'. Runs the repo's
-        scripts/reset-test-machine.sh (with --relaunch), which quits Claude
+        scripts/reset-test-machine.sh, whose one standard path quits Claude
         Desktop, removes the Desktop extension + scheduled tasks, wipes the
         state dir, then restarts Claude Desktop fresh.
 
@@ -666,7 +666,7 @@ class S4LMenuBar(rumps.App):
         if choice == 0:  # cancel
             return
         deep = (choice == -1)
-        args = ["bash", script, "--yes", "--relaunch"] + (["--deep"] if deep else [])
+        args = ["bash", script, "--yes"] + (["--deep"] if deep else [])
         log_path = "/tmp/s4l-reset.log"
         try:
             log = open(log_path, "ab", buffering=0)
