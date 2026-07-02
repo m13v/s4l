@@ -629,8 +629,9 @@ class S4LMenuBar(rumps.App):
     # ---- factory reset (menu-bar driven) ----------------------------------
     def _reset_machine(self, _=None):
         """One-click 'reset this test machine to factory-fresh'. Runs the repo's
-        scripts/reset-test-machine.sh, which quits Claude Desktop, removes the
-        Desktop extension + scheduled tasks, and wipes the state dir.
+        scripts/reset-test-machine.sh (with --relaunch), which quits Claude
+        Desktop, removes the Desktop extension + scheduled tasks, wipes the
+        state dir, then restarts Claude Desktop fresh.
 
         CRITICAL self-kill avoidance: that script does `pkill -f s4l_menubar.py`
         and boots out the menubar LaunchAgent (steps near line 124/141). If we ran
@@ -654,18 +655,18 @@ class S4LMenuBar(rumps.App):
             title="Uninstall S4L?",
             message=(
                 "This quits Claude Desktop, removes the S4L extension + its "
-                "scheduled tasks, and wipes the state dir so the next launch is a "
-                "fresh first-run. This does NOT delete Claude Desktop itself. The "
-                "menu bar will disappear during the uninstall.\n\n"
+                "scheduled tasks, and wipes the state dir, then restarts Claude "
+                "Desktop fresh (without S4L). This does NOT delete Claude Desktop "
+                "itself. The menu bar will disappear during the uninstall.\n\n"
                 "Uninstall: keep your X login + browser layer (quick uninstall).\n"
                 "Deep wipe: also remove the shared browser profiles + toolchain."
             ),
-            ok="Uninstall", cancel="Cancel", other="Deep wipe",
+            ok="Uninstall & Restart Claude", cancel="Cancel", other="Deep wipe",
         )
         if choice == 0:  # cancel
             return
         deep = (choice == -1)
-        args = ["bash", script, "--yes"] + (["--deep"] if deep else [])
+        args = ["bash", script, "--yes", "--relaunch"] + (["--deep"] if deep else [])
         log_path = "/tmp/s4l-reset.log"
         try:
             log = open(log_path, "ab", buffering=0)
@@ -686,7 +687,8 @@ class S4LMenuBar(rumps.App):
         self._notify(
             "S4L uninstall started",
             "Uninstalling" + (" (deep)" if deep else "") +
-            "… the menu bar will vanish; log at " + log_path,
+            "… the menu bar will vanish and Claude Desktop will restart when "
+            "done; log at " + log_path,
         )
 
     def _alert(self, title, message):
