@@ -510,6 +510,15 @@ def review_drafts(plan, batch="review-queue"):
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
                 "link_url": c.get("link_url"),
+                # Thread permalink + discovery-time stats (author followers,
+                # thread engagement), stamped by merge_review_queue.py from data
+                # the pipeline already captured. The card renders these as
+                # profile/thread links and a stats line; both may be absent on
+                # plans written before the enrichment shipped.
+                "thread_url": c.get("candidate_url")
+                or c.get("tweet_url")
+                or c.get("thread_url"),
+                "stats": c.get("stats") or {},
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
