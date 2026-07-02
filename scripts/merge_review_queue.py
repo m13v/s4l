@@ -69,6 +69,62 @@ def _dedup_key(c: dict) -> str:
     return (c.get("reply_text") or "")[:120]
 
 
+def _thread_url(c: dict) -> str:
+    for k in ("candidate_url", "tweet_url", "thread_url"):
+        v = c.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+# Discovery-time author/engagement fields stamped onto each plan candidate so the
+# approval card can show them. All already captured on the twitter_candidates row
+# by the discovery pipeline (and refreshed at T1); no scrape happens here.
+STATS_KEYS = (
+    "author_handle",
+    "author_followers",
+    "likes",
+    "retweets",
+    "replies",
+    "views",
+    "virality_score",
+    "tweet_posted_at",
+)
+
+
+def _enrich_with_stats(cands: list) -> int:
+    """Stamp a `stats` sidecar onto plan candidates that lack one, from the
+    twitter_candidates rows the discovery pipeline already wrote. ONE listing
+    call (/api/v1/twitter-candidates?tweet_urls=...) covers the whole queue.
+    Best-effort: any failure (offline box, missing identity, API error) leaves
+    candidates unstamped and NEVER blocks card delivery. Returns count stamped."""
+    want = [c for c in cands if not c.get("stats") and not c.get("posted") and _thread_url(c)]
+    if not want:
+        return 0
+    urls = sorted({_thread_url(c) for c in want})[:500]
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from http_api import api_get
+
+        resp = api_get(
+            "/api/v1/twitter-candidates",
+            query={"tweet_urls": ",".join(urls), "limit": 500},
+        )
+        rows = (resp.get("data") or {}).get("candidates") or []
+    except BaseException as e:  # http_api raises SystemExit on terminal failure
+        print(f"[merge_review_queue] stats enrichment skipped: {e}", file=sys.stderr)
+        return 0
+    by_url = {str(r.get("tweet_url")): r for r in rows if r.get("tweet_url")}
+    stamped = 0
+    for c in want:
+        row = by_url.get(_thread_url(c))
+        if not row:
+            continue
+        c["stats"] = {k: row.get(k) for k in STATS_KEYS}
+        stamped += 1
+    return stamped
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Merge a DRAFT_ONLY plan into the review-queue cards")
     ap.add_argument("--plan", help="path to the per-batch DRAFT_ONLY plan file")
@@ -122,6 +178,10 @@ def main() -> int:
         seen.add(k)
         merged.append(c)
         added += 1
+
+    stamped = _enrich_with_stats(merged)
+    if stamped:
+        print(f"[merge_review_queue] stamped stats on {stamped} candidate(s)", file=sys.stderr)
 
     _atomic_write(dst, {"candidates": merged})
 
