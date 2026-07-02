@@ -163,8 +163,6 @@ scripts/db_direct.py
 *_backup_*.json
 scripts/neon-retirement-backup/
 
-# Operator-only local notes (personal PII, personas, burner accounts) — never commit
-CLAUDE.local.md
 
 # Real client roster for dashboard seeding (customer PII) — never commit
 scripts/dashboard_users_seed.local.json
