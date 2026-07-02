@@ -3174,6 +3174,27 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
       // does NOT re-fire on every later Claude launch or on a drift-rewrite; the
       // cur === null gate restricts the kick to true first-time onboarding only.
       if (cur === null) {
+        // First-run boost marker: run-draft-and-publish.sh reads this and widens
+        // the first draft cycle(s) to a 48h discovery window with the top-1 card
+        // cap lifted (top 5), so a brand-new user's first review batch shows
+        // SEVERAL real drafts instead of one (or none). The wrapper deletes the
+        // marker as soon as a merge delivers cards, or after 24h without any, so
+        // every later cycle runs the standard 24h + top-1 logic. Best-effort: a
+        // failed write just means a standard first cycle.
+        try {
+          const stateDir = sapsStateDir();
+          fs.mkdirSync(stateDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(stateDir, "first-run-boost.json"),
+            JSON.stringify({ created_at: new Date().toISOString() }) + "\n",
+            "utf-8"
+          );
+        } catch (e: any) {
+          console.error(
+            "[social-autoposter-mcp] first-run boost marker write failed:",
+            e?.message || e
+          );
+        }
         const kick = await run(
           "launchctl",
           ["kickstart", `gui/${uid}/${TWITTER_AUTOPILOT_LABEL}`],
