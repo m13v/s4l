@@ -30,8 +30,11 @@ import sys
 WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
 WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
+# "Claude*": the host app can run with a custom --user-data-dir (per-account
+# dirs like "Claude-mediar"), putting the live registry outside plain "Claude/".
+# Keep in sync with scripts/schedule_state.py::SCHED_REGISTRY_GLOB.
 SCHED_REGISTRY_GLOB = os.path.join(
-    os.path.expanduser("~"), "Library", "Application Support", "Claude",
+    os.path.expanduser("~"), "Library", "Application Support", "Claude*",
     "claude-code-sessions", "*", "*", "scheduled-tasks.json",
 )
 
