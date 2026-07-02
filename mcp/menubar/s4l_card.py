@@ -403,6 +403,60 @@ class _ReviewController(NSObject):
         self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     @objc.python_method
+    def _close_stats_popover(self):
+        try:
+            if self._stats_popover is not None and self._stats_popover.isShown():
+                self._stats_popover.close()
+        except Exception:
+            pass
+        self._stats_popover = None
+
+    @objc.python_method
+    def _show_stats_popover(self):
+        if self._eye_btn is None:
+            return
+        if self._stats_popover is not None and self._stats_popover.isShown():
+            return
+        lines = _stats_lines(self._drafts[self._idx].get("stats"))
+        if not lines:
+            return
+        font = NSFont.systemFontOfSize_(12)
+        wmax = 0
+        for ln in lines:
+            s = NSAttributedString.alloc().initWithString_attributes_(
+                ln, {NSFontAttributeName: font}
+            )
+            wmax = max(wmax, s.size().width)
+        pw, ph = int(wmax) + 26, 18 * len(lines) + 16
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
+        for i, ln in enumerate(lines):
+            view.addSubview_(
+                _label(NSMakeRect(13, ph - 26 - 18 * i, pw - 26, 18), ln, size=12)
+            )
+        vc = NSViewController.alloc().init()
+        vc.setView_(view)
+        pop = NSPopover.alloc().init()
+        pop.setBehavior_(NSPopoverBehaviorTransient)
+        pop.setContentViewController_(vc)
+        pop.setContentSize_((pw, ph))
+        # NSRectEdge 1 = NSMinYEdge: pop out below the icon.
+        pop.showRelativeToRect_ofView_preferredEdge_(self._eye_btn.bounds(), self._eye_btn, 1)
+        self._stats_popover = pop
+
+    def statsToggle_(self, sender):
+        if self._stats_popover is not None and self._stats_popover.isShown():
+            self._close_stats_popover()
+        else:
+            self._show_stats_popover()
+
+    # NSTrackingArea owner callbacks (hover over the eye icon).
+    def mouseEntered_(self, event):
+        self._show_stats_popover()
+
+    def mouseExited_(self, event):
+        self._close_stats_popover()
+
+    @objc.python_method
     def _add_link(self, content, frame, text, url, *, size=12, bold=False, right=False):
         """Borderless button styled as a link (system link color, underlined).
         The URL rides on the button's integer tag via _link_targets so one
@@ -546,6 +600,7 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _finish(self):
         global _active
+        self._close_stats_popover()
         try:
             if self._panel is not None:
                 self._panel.setDelegate_(None)
@@ -568,7 +623,7 @@ def present_review(drafts, on_decision=None, on_complete=None):
     where stats is the discovery-time candidate snapshot
     {author_followers, likes, retweets, replies, views, tweet_posted_at, ...}
     (optional). thread_url renders as a trailing ↗ link on the thread text;
-    stats surface only in the eye icon's hover tooltip plus the muted age.
+    stats surface only in the eye icon's hover/click popover plus the muted age.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
