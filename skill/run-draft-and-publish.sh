@@ -67,6 +67,27 @@ if [ -n "${SAPS_FORCE_PROJECT:-}" ]; then
     echo "[run-draft-and-publish] personal_brand mode: forcing project '$SAPS_FORCE_PROJECT' (link-free)" >&2
 fi
 
+# First-run onboarding boost (2026-07-02). The MCP server drops
+# first-run-boost.json into the state dir when it installs the kicker for the
+# very first time. While the marker is live, widen the draft discovery window
+# to 48h (vs the standard 24h draft window) and lift the top-1 card cap so the
+# user's FIRST review batch surfaces several REAL drafts instead of one (or
+# none). The marker is deleted the moment a merge actually delivers cards, or
+# after 24h without any, so every later cycle runs the standard logic.
+BOOST_MARKER="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
+BOOST_ACTIVE=0
+if [ -f "$BOOST_MARKER" ]; then
+    if [ -n "$(find "$BOOST_MARKER" -mmin +1440 2>/dev/null)" ]; then
+        rm -f "$BOOST_MARKER"
+        echo "[run-draft-and-publish] first-run boost expired (>24h, no cards produced); removed" >&2
+    else
+        BOOST_ACTIVE=1
+        export SAPS_DRAFT_FRESHNESS_HOURS="${SAPS_FIRST_RUN_FRESHNESS_HOURS:-48}"
+        export SAPS_TWITTER_POST_TOP_N="${SAPS_FIRST_RUN_TOP_N:-5}"
+        echo "[run-draft-and-publish] first-run boost active: freshness=${SAPS_DRAFT_FRESHNESS_HOURS}h top_n=${SAPS_TWITTER_POST_TOP_N}" >&2
+    fi
+fi
+
 # Run the cycle; tee stdout so we can scan it for the DRAFT_ONLY_PLAN marker.
 # Phase 2b blocks on the queue until the worker drafts it, so this can take a
 # few minutes — that is expected.
@@ -76,7 +97,17 @@ RC=${PIPESTATUS[0]}
 # Deliver the cycle's drafts into the cards.
 MARKER="$(grep -oE 'DRAFT_ONLY_PLAN=\S+\.json' "$OUT" | tail -1)"
 if [ -n "$MARKER" ]; then
-    "$PY" "$REPO_DIR/scripts/merge_review_queue.py" --plan-from-marker "$MARKER" || true
+    # merge_review_queue prints ONLY to stderr; capture and re-emit verbatim on
+    # stderr (those [merge_review_queue] marker lines are load-bearing) so the
+    # first-run boost can read the merged count.
+    MERGE_OUT="$("$PY" "$REPO_DIR/scripts/merge_review_queue.py" --plan-from-marker "$MARKER" 2>&1 || true)"
+    [ -n "$MERGE_OUT" ] && printf '%s\n' "$MERGE_OUT" >&2
+    # Consume the first-run boost the moment a merge actually delivers cards, so
+    # the widened window applies to exactly one successful first batch.
+    if [ "$BOOST_ACTIVE" = "1" ] && printf '%s' "$MERGE_OUT" | grep -qE 'merged [1-9][0-9]* new draft'; then
+        rm -f "$BOOST_MARKER"
+        echo "[run-draft-and-publish] first-run boost consumed (cards delivered)" >&2
+    fi
 else
     echo "[run-draft-and-publish] no DRAFT_ONLY_PLAN marker (cycle rc=$RC); nothing to merge" >&2
 fi
