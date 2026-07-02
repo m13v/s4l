@@ -129,6 +129,19 @@ const REAPER_PLIST = path.join(
   `${REAPER_LABEL}.plist`
 );
 
+// Feedback digest: distills the user's card approve/reject decisions
+// (review_events, shipped by the menubar with reason chips + link clicks)
+// into the project's learned_preferences block in config.json, which the
+// prep prompt then reads via ALL_PROJECTS_JSON. Hourly; exits immediately
+// when there are no unprocessed events for this install.
+const FEEDBACK_DIGEST_LABEL = "com.m13v.social-feedback-digest";
+const FEEDBACK_DIGEST_PLIST = path.join(
+  os.homedir(),
+  "Library",
+  "LaunchAgents",
+  `${FEEDBACK_DIGEST_LABEL}.plist`
+);
+
 // Periodic host-resource sampler. Appends one redacted memory/process snapshot
 // per minute to skill/logs/memory-snapshots.jsonl (rotated) so we have local
 // history when SSHing into a box, and so the heartbeat's --summary path has a
