@@ -310,6 +310,39 @@ class _ReviewController(NSObject):
         self.performSelector_withObject_afterDelay_("focusReply:", None, 0.05)
 
     @objc.python_method
+    def _add_link(self, content, frame, text, url, *, size=12, bold=False, right=False):
+        """Borderless button styled as a link (system link color, underlined).
+        The URL rides on the button's integer tag via _link_targets so one
+        openLink: selector serves every link on the card."""
+        btn = NSButton.alloc().initWithFrame_(frame)
+        btn.setBordered_(False)
+        font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+        attrs = {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: NSColor.linkColor(),
+            NSUnderlineStyleAttributeName: NSUnderlineStyleSingle,
+        }
+        btn.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        )
+        btn.setAlignment_(NSTextAlignmentRight if right else NSTextAlignmentLeft)
+        tag = len(self._link_targets) + 1
+        btn.setTag_(tag)
+        self._link_targets[tag] = str(url)
+        btn.setTarget_(self)
+        btn.setAction_("openLink:")
+        content.addSubview_(btn)
+        return btn
+
+    def openLink_(self, sender):
+        try:
+            url = self._link_targets.get(sender.tag())
+            if url:
+                NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
+        except Exception:
+            pass
+
+    @objc.python_method
     def _current_text(self):
         try:
             return str(self._textview.string())
@@ -438,7 +471,9 @@ class _ReviewController(NSObject):
 
 def present_review(drafts, on_decision=None, on_complete=None):
     """Show the review cards (main thread only). drafts: list of
-    {n, thread_author, thread_text, reply_text, link_url}.
+    {n, thread_author, thread_text, reply_text, link_url, thread_url?, stats?}
+    where stats is the discovery-time candidate snapshot
+    {author_followers, likes, retweets, replies, views, ...} (optional).
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
