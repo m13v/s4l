@@ -605,6 +605,18 @@ function generatePlists() {
       stdoutLog: `${DEST}/skill/logs/launchd-overlay-watch-stdout.log`,
       stderrLog: `${DEST}/skill/logs/launchd-overlay-watch-stderr.log`,
     },
+    {
+      // Read-only LinkedIn presence lane. Uses the same linkedin-harness Chrome
+      // and browser locks as the main LinkedIn pipelines, but only views first-
+      // party surfaces and performs bounded scroll passes.
+      file: 'com.m13v.social-linkedin-presence.plist',
+      label: 'com.m13v.social-linkedin-presence',
+      script: `${DEST}/skill/linkedin-presence.sh`,
+      interval: 7200,
+      runAtLoad: false,
+      stdoutLog: `${DEST}/skill/logs/launchd-linkedin-presence-stdout.log`,
+      stderrLog: `${DEST}/skill/logs/launchd-linkedin-presence-stderr.log`,
+    },
   ];
 
   const driver = scheduler.driverFor();
