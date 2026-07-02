@@ -8,7 +8,18 @@ fires once the last card is decided or the window is closed. The whole AppKit
 surface is isolated behind that one function so the menu bar wiring doesn't
 depend on the windowing details.
 
-Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool, "drop_link": bool}
+Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool,
+"drop_link": bool, "reject_category": str|None, "reject_note": str|None,
+"interactions": [{"type": str, "ts": str}], "dwell_ms": int}
+
+Rejecting is a two-step flow: the Reject button swaps the card body for a
+reason picker (three one-tap categories plus Other, with an optional free-text
+note). The category feeds the feedback-digest loop that distills human
+rejections into each project's learned_preferences config block; "Skip" keeps
+the old zero-friction reject (no reason recorded). Link clicks (author profile,
+thread ↗) and per-card dwell time ride along on the decision so the digest can
+infer intent (e.g. profile-checked-then-rejected = author-quality signal) even
+when the reason is skipped.
 
 Must be driven on the main thread (the menu bar's rumps timer is on the main
 run loop, so that holds).
@@ -16,6 +27,7 @@ run loop, so that holds).
 
 import datetime
 import re
+import time
 
 import objc
 from Foundation import (
@@ -69,6 +81,19 @@ W = 380
 H = 300
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
+
+# Reject-reason categories, in display order. Tags are 1-based button tags on
+# the reason picker; values must match the review_events.reject_category CHECK
+# constraint server-side (wrong_author | off_topic | bad_draft | other).
+REJECT_REASONS = (
+    ("wrong_author", "Wrong author / audience"),
+    ("off_topic", "Off-topic thread"),
+    ("bad_draft", "Draft doesn't sound right"),
+    ("other", "Other"),
+)
+
+# Client-side cap on tracked interactions per card (server clips at 50 too).
+MAX_INTERACTIONS = 50
 
 
 class _ReviewPanel(NSPanel):
