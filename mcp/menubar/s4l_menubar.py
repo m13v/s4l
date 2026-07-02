@@ -902,6 +902,23 @@ class S4LMenuBar(rumps.App):
             if r.returncode != 0:
                 self._notify("S4L update failed", "Couldn't unpack the update.")
                 return
+            # Record what we just installed so the tick loop can verify the
+            # EFFECTIVE version actually advanced after the restart. The old
+            # flow claimed success unconditionally, which lied on boxes whose
+            # pipeline repo was pinned (e.g. by a stray git checkout): the
+            # extension dir updated but the running install stayed old.
+            target = ""
+            try:
+                with open(os.path.join(self._ext_dir(), "manifest.json")) as f:
+                    target = str((json.load(f) or {}).get("version") or "")
+            except Exception:
+                target = ""
+            if target:
+                try:
+                    with open(self._update_verify_path(), "w") as f:
+                        json.dump({"target": target, "started_at": time.time()}, f)
+                except Exception:
+                    pass
             # Restart Claude so the refreshed server loads (we're decoupled from it).
             subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
                            capture_output=True, timeout=20)
@@ -919,7 +936,12 @@ class S4LMenuBar(rumps.App):
             subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
             self._update_available = False
             self._sig = None
-            self._notify("S4L updated", "Claude restarted on the latest version.")
+            if target:
+                # Honest phrasing: the verdict (success OR the real blocker)
+                # comes from _check_update_verdict once the new server settles.
+                self._notify("S4L update", f"v{target} installed; Claude is restarting. I'll confirm once it's live.")
+            else:
+                self._notify("S4L updated", "Claude restarted on the latest version.")
         except Exception as e:
             self._notify("S4L update failed", str(e)[:140])
         finally:
@@ -928,6 +950,102 @@ class S4LMenuBar(rumps.App):
                 shutil.rmtree(tmpd, ignore_errors=True)
             except Exception:
                 pass
+
+    # ---- post-update verification (marker + tick-driven verdict) ----------
+    # _mcpb_update_work writes a marker with the version it unpacked; the tick
+    # loop (which survives the Claude restart, and also runs in the REPLACEMENT
+    # menu bar process if the server reloads this agent) compares it against the
+    # version the pipeline actually resolves to. Success notifies honestly;
+    # failure names the real blocker (a stray git checkout pinning the repo)
+    # instead of the old unconditional "restarted on the latest version" toast.
+    UPDATE_VERIFY_GRACE_SEC = 240
+
+    @staticmethod
+    def _update_verify_path():
+        return os.path.join(st.state_dir(), "update-verify.json")
+
+    @staticmethod
+    def _effective_version():
+        """Return (version, repo_dir) the install actually runs, reading the
+        same sources snapshot.py uses. runtime.json's repo_dir is authoritative
+        (it is what the server re-points after healing a stray checkout); the
+        env / ~/social-autoposter fallbacks mirror the legacy resolution."""
+        repo = None
+        try:
+            with open(os.path.join(st.state_dir(), "runtime.json")) as f:
+                rd = (json.load(f) or {}).get("repo_dir")
+            if rd and os.path.isdir(os.path.join(rd, "scripts")):
+                repo = rd
+        except Exception:
+            pass
+        if not repo:
+            repo = os.environ.get("SAPS_REPO_DIR") or os.path.expanduser(
+                "~/social-autoposter"
+            )
+        for rel in (("mcp", "dist", "version.json"), ("package.json",)):
+            try:
+                with open(os.path.join(repo, *rel)) as f:
+                    v = (json.load(f) or {}).get("version")
+                if v:
+                    return str(v), repo
+            except Exception:
+                continue
+        return None, repo
+
+    @staticmethod
+    def _ver_tuple(v):
+        out = []
+        for part in str(v).split("-")[0].split("+")[0].split("."):
+            try:
+                out.append(int(part))
+            except ValueError:
+                out.append(0)
+        return tuple(out)
+
+    def _check_update_verdict(self):
+        p = self._update_verify_path()
+        if not os.path.exists(p):
+            return
+        try:
+            with open(p) as f:
+                marker = json.load(f) or {}
+        except Exception:
+            marker = {}
+        target = str(marker.get("target") or "")
+        try:
+            started = float(marker.get("started_at") or 0)
+        except (TypeError, ValueError):
+            started = 0.0
+        if not target:
+            self._drop_update_marker(p)
+            return
+        effective, repo = self._effective_version()
+        if effective and self._ver_tuple(effective) >= self._ver_tuple(target):
+            self._drop_update_marker(p)
+            self._notify("S4L updated", f"Now on v{effective}.")
+            return
+        if time.time() - started < self.UPDATE_VERIFY_GRACE_SEC:
+            return  # Claude restart + server boot + pipeline refresh still settling
+        self._drop_update_marker(p)
+        if repo and os.path.isdir(os.path.join(repo, ".git")):
+            self._notify(
+                "S4L update did not take effect",
+                f"Still v{effective or 'unknown'}: the install is pinned by a git "
+                f"checkout at {repo}. Remove or rename that folder, then update again.",
+            )
+        else:
+            self._notify(
+                "S4L update did not take effect",
+                f"Still v{effective or 'unknown'} (target v{target}). "
+                "Try updating again from the menu.",
+            )
+
+    @staticmethod
+    def _drop_update_marker(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
     @staticmethod
     def _scheduled_task_cwd_needs_fix():
@@ -1294,6 +1412,11 @@ class S4LMenuBar(rumps.App):
 
     # ---- tick: read state, set title, (re)build menu ----------------------
     def _tick(self, _):
+        # Post-update verdict: cheap (a single stat when no update is pending).
+        try:
+            self._check_update_verdict()
+        except Exception:
+            pass
         # Restart recovery (one-shot, once the loopback is up so posting can reach
         # the server): resume any approved-but-unposted drafts the durable queue
         # recorded, instead of stranding them and re-presenting the cards.
