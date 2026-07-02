@@ -3273,6 +3273,57 @@ async function ensureClaudeReaperInstalled(): Promise<{ ok: boolean; detail: str
   }
 }
 
+// ---- launchd feedback digest: card decisions -> learned_preferences ---------
+// Hourly, stdlib-only under SYSTEM python (http_api + learned_preferences use
+// urllib/json only; run_claude.sh resolves the claude CLI itself). A run with
+// no unprocessed review_events for this install is a cheap no-op, so the job
+// is installed unconditionally like the reaper. Content-aware install so an
+// already-installed box picks up changed args on the next Claude boot.
+const FEEDBACK_DIGEST_INTERVAL_SECS = 3600;
+
+async function ensureFeedbackDigestInstalled(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
+    const logDir = path.join(repoDir(), "skill", "logs");
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+    const xml = plistXml({
+      label: FEEDBACK_DIGEST_LABEL,
+      programArgs: ["/usr/bin/python3", path.join(repoDir(), "scripts", "feedback_digest.py")],
+      intervalSecs: FEEDBACK_DIGEST_INTERVAL_SECS,
+      runAtLoad: false, // no boot-time Claude runs; the hourly tick is enough
+      stdoutLog: path.join(logDir, "launchd-feedback-digest-stdout.log"),
+      stderrLog: path.join(logDir, "launchd-feedback-digest-stderr.log"),
+    });
+    const uid = process.getuid ? process.getuid() : 0;
+    let cur: string | null = null;
+    try {
+      cur = fs.readFileSync(FEEDBACK_DIGEST_PLIST, "utf-8");
+    } catch {
+      cur = null;
+    }
+    let detail: string;
+    if (cur === xml) {
+      const res = await loadPlist(FEEDBACK_DIGEST_LABEL, FEEDBACK_DIGEST_PLIST, uid);
+      detail = `current (load rc=${res.code})`;
+    } else {
+      if (cur !== null) {
+        await unloadPlist(FEEDBACK_DIGEST_LABEL, FEEDBACK_DIGEST_PLIST, uid);
+      }
+      fs.mkdirSync(path.dirname(FEEDBACK_DIGEST_PLIST), { recursive: true });
+      fs.writeFileSync(FEEDBACK_DIGEST_PLIST, xml, "utf-8");
+      const res = await loadPlist(FEEDBACK_DIGEST_LABEL, FEEDBACK_DIGEST_PLIST, uid);
+      detail = cur === null ? "installed + loaded" : `rewritten + reloaded (rc=${res.code})`;
+    }
+    return { ok: true, detail };
+  } catch (e: any) {
+    return { ok: false, detail: e?.message || String(e) };
+  }
+}
+
 // Install/refresh the autopilot stall watchdog launchd job. Runs off the owned
 // venv python so scripts/autopilot_stall_watch.py can import sentry_init +
 // sentry-sdk. RunAtLoad so a box that boots already-stalled reports promptly.
@@ -4396,6 +4447,12 @@ async function main() {
   void ensureClaudeReaperInstalled()
     .then((r) => console.error(`[claude-reaper] launchd reaper: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[claude-reaper] reaper install failed:", e?.message || e));
+  // Feedback digest: hourly distillation of the user's card approve/reject
+  // decisions into learned_preferences (see scripts/feedback_digest.py).
+  // Best-effort; a box with no review events runs a no-op.
+  void ensureFeedbackDigestInstalled()
+    .then((r) => console.error(`[feedback-digest] launchd digest: ${r.ok ? "ok" : "skip"} (${r.detail})`))
+    .catch((e) => console.error("[feedback-digest] digest install failed:", e?.message || e));
   // Autopilot stall watchdog: fleet-side Sentry alert when the draft routines stop
   // draining (most often an account switch orphaning them). The menu bar shows the
   // user the Re-arm action; this is the part we see. Best-effort; never blocks boot.
