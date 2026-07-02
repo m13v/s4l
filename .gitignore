@@ -166,3 +166,26 @@ scripts/neon-retirement-backup/
 
 # Real client roster for dashboard seeding (customer PII) — never commit
 scripts/dashboard_users_seed.local.json
+
+# Screenshots / images: this is a code repo, not an asset store. No images are
+# tracked; keep it that way. Put scratch captures under scratch/ (also ignored).
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.heic
+.playwright-mcp-verify/
+**/*-qa/
+**/jungleai/
+cta-verify/
+scratch/
+
+# Operational data dumps (target lists, shortlink exports, worklists) — PII/bulk,
+# never commit; keep them local or in the DB.
+*_worklist.json
+*shortlinks*.csv
+scripts/*.csv
+
+# Operator-only PII denylist consumed by the pre-commit scanner (see scripts/git-hooks/)
+pii_denylist.local.txt
