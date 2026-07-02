@@ -23,23 +23,22 @@
 #
 # Usage:
 #   scripts/reset-test-machine.sh            # dry run: print what the plugin reset WOULD remove
-#   scripts/reset-test-machine.sh --yes      # plugin reset (light) — quits Claude Desktop first
+#   scripts/reset-test-machine.sh --yes      # plugin reset (light) — quits Claude, wipes, relaunches Claude fresh
 #   scripts/reset-test-machine.sh --yes --deep   # full nuke incl. shared browser layer + toolchain
 #   scripts/reset-test-machine.sh --yes --keep-claude  # don't quit Claude (run from inside a live session)
-#   scripts/reset-test-machine.sh --yes --relaunch # relaunch Claude Desktop after the wipe settles (menubar uninstall path)
 #
-# IMPORTANT: by default --yes QUITS Claude Desktop before wiping AND leaves it
-# down. The .mcpb registry ([1b]), scheduled-task ([1c]) and mcpServers ([3])
-# edits only STICK if Claude is not running, because the host rewrites those
-# files on quit and re-materializes the state dir on launch. A final settle step
-# ([7]) re-quits Claude and re-wipes if it auto-relaunches (e.g. an auto-update),
-# so the box is genuinely first-run. Relaunch Claude by hand for the fresh
-# install, or pass --relaunch to have the script reopen Claude Desktop itself
-# once the settle step confirms the wipe stuck (this is what the menubar's
-# "Uninstall & Restart Claude" button uses). If you invoke this from INSIDE a
-# live Claude session and don't want the app taken down, pass --keep-claude
-# (the registry/task/mcp edits then won't persist, the settle step is skipped,
-# and --relaunch is ignored, until you quit Claude yourself).
+# THE ONE STANDARD PATH: --yes QUITS Claude Desktop, wipes, settles, then
+# RELAUNCHES Claude Desktop fresh. No flag skips or adds the relaunch; every
+# caller (menubar Uninstall, `npx social-autoposter uninstall`, manual SSH runs)
+# gets the same sequence. The .mcpb registry ([1b]), scheduled-task ([1c]) and
+# mcpServers ([3]) edits only STICK if Claude is not running, because the host
+# rewrites those files on quit and re-materializes the state dir on launch. A
+# settle step ([7]) re-quits Claude and re-wipes if it auto-relaunches mid-wipe
+# (e.g. an auto-update), so the box is genuinely first-run, and only then does
+# [8] bring Claude Desktop back up (fresh, without S4L). If you invoke this from
+# INSIDE a live Claude session and don't want the app taken down, pass
+# --keep-claude (the registry/task/mcp edits then won't persist, and the
+# settle + relaunch steps are skipped, until you quit Claude yourself).
 #
 set -u
 
@@ -47,17 +46,16 @@ HOME_DIR="${HOME}"
 DRY=1
 DEEP=0
 KEEP_CLAUDE=0
-RELAUNCH=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) DRY=0 ;;
     --deep)   DEEP=1 ;;
     --keep-claude) KEEP_CLAUDE=1 ;;
-    --relaunch) RELAUNCH=1 ;;
+    --relaunch) ;;  # legacy no-op: relaunch is part of the standard path now
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed '/^!/d'
       exit 0 ;;
-    *) echo "unknown arg: $a (use --yes, --deep, --keep-claude, --relaunch, --help)"; exit 2 ;;
+    *) echo "unknown arg: $a (use --yes, --deep, --keep-claude, --help)"; exit 2 ;;
   esac
 done
 
@@ -576,13 +574,13 @@ if [ "$DRY" -eq 0 ] && [ "$KEEP_CLAUDE" -eq 0 ]; then
   echo
 fi
 
-# ---- 8. relaunch Claude Desktop (--relaunch) --------------------------------
-# Only after the settle step confirmed the wipe stuck: the extension registry
-# entry is gone by now, so a fresh Claude launch comes up WITHOUT S4L and does
-# not re-materialize the state dir. Skipped with --keep-claude (Claude never
-# went down) and on dry runs.
-if [ "$DRY" -eq 0 ] && [ "$RELAUNCH" -eq 1 ] && [ "$KEEP_CLAUDE" -eq 0 ]; then
-  echo "[8] relaunch Claude Desktop (--relaunch)"
+# ---- 8. relaunch Claude Desktop (standard path) -----------------------------
+# The standard path always ends here: only after the settle step confirmed the
+# wipe stuck. The extension registry entry is gone by now, so the fresh Claude
+# launch comes up WITHOUT S4L and does not re-materialize the state dir.
+# Skipped only with --keep-claude (Claude never went down) and on dry runs.
+if [ "$DRY" -eq 0 ] && [ "$KEEP_CLAUDE" -eq 0 ]; then
+  echo "[8] relaunch Claude Desktop"
   if open -a "Claude" >/dev/null 2>&1; then
     echo "  ok      Claude Desktop relaunched (fresh, S4L removed)"
   else
@@ -593,12 +591,12 @@ fi
 
 if [ "$DRY" -eq 1 ]; then
   echo "=== DRY RUN complete. Re-run with --yes to actually remove. ==="
-elif [ "$RELAUNCH" -eq 1 ] && [ "$KEEP_CLAUDE" -eq 0 ]; then
-  echo "=== Reset complete. Machine is ready for a clean first-install test."
-  echo "=== Claude Desktop was relaunched (fresh, no S4L). Re-download the"
-  echo "=== .mcpb for a genuine first-run install. ==="
+elif [ "$KEEP_CLAUDE" -eq 1 ]; then
+  echo "=== Reset complete. --keep-claude: Claude Desktop was left running, so"
+  echo "=== the registry/task/mcp edits will NOT persist until you quit it"
+  echo "=== yourself. ==="
 else
   echo "=== Reset complete. Machine is ready for a clean first-install test."
-  echo "=== Claude Desktop was left DOWN so the wipe sticks — relaunch it, then"
-  echo "=== re-download the .mcpb for a genuine first-run install. ==="
+  echo "=== Claude Desktop was relaunched fresh (no S4L). Re-download the"
+  echo "=== .mcpb for a genuine first-run install. ==="
 fi
