@@ -63,6 +63,14 @@ DO_NPM=1
 DO_BUMP=1
 BUMP_LEVEL="patch"
 DRAFT_FLAG=""
+# CHANNEL (2026-07-02): staging releases are GitHub PRE-releases carrying an
+# -rc.N version, so they are invisible to releases/latest (stable boxes) and to
+# npm's `latest` dist-tag — only a box on the `staging` channel pulls them. See
+# scripts/s4l_channel.py. `--promote <tag>` flips a tested pre-release to stable
+# IN PLACE (no rebuild, the exact tested artifact) by clearing its prerelease
+# flag + moving npm `latest`.
+DO_STAGING=0
+PROMOTE_TAG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -76,7 +84,10 @@ while [[ $# -gt 0 ]]; do
     --no-npm) DO_NPM=0; shift ;;
     --no-release) DO_RELEASE=0; shift ;;
     --draft) DRAFT_FLAG="--draft"; shift ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    --staging) DO_STAGING=1; shift ;;
+    --promote) PROMOTE_TAG="$2"; shift 2 ;;
+    --promote=*) PROMOTE_TAG="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -90,6 +101,42 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v node >/dev/null || die "node not found on PATH"
+
+# ---- 0. Promote a tested pre-release to stable (no rebuild) ------------------
+# Flip the SAME artifact the staging box tested: clear GitHub's prerelease flag
+# and mark it latest (so releases/latest + the stable boxes pick it up), and move
+# npm's `latest` dist-tag onto it. Byte-for-byte identical to what was tested;
+# there is no repack, so nothing can drift between test and ship. The version
+# keeps its -rc.N label on purpose (that IS the tested build); cut a fresh stable
+# patch later if you want a clean number.
+if [[ -n "$PROMOTE_TAG" ]]; then
+  command -v gh >/dev/null || die "gh CLI not found"
+  gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
+  PTAG="$PROMOTE_TAG"; [[ "$PTAG" == v* ]] || PTAG="v$PTAG"
+  PVER="${PTAG#v}"
+  gh release view "$PTAG" -R "$GH_REPO" >/dev/null 2>&1 || die "no release $PTAG to promote"
+  say "Promoting $PTAG to stable (in place; same tested artifact, no rebuild)"
+  gh release edit "$PTAG" -R "$GH_REPO" --prerelease=false --latest
+  if [[ "$DO_NPM" == "1" ]]; then
+    command -v npm >/dev/null || die "npm not found on PATH"
+    say "Moving npm 'latest' dist-tag -> $PVER"
+    npm dist-tag add "social-autoposter@$PVER" latest || die "npm dist-tag add failed"
+  fi
+  say "Verifying releases/latest serves $PTAG (drives stable boxes' update banner)"
+  LATEST_SEEN=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    LATEST_SEEN="$(curl -fsSL -m 15 "https://api.github.com/repos/$GH_REPO/releases/latest" \
+      | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).tag_name || ''" 2>/dev/null || echo "")"
+    [[ "$LATEST_SEEN" == "$PTAG" ]] && break
+    sleep 6
+  done
+  [[ "$LATEST_SEEN" == "$PTAG" ]] \
+    && echo "  releases/latest -> $LATEST_SEEN; stable boxes detect within ~1 min" \
+    || echo "  WARNING: releases/latest still reports '${LATEST_SEEN:-<none>}', not $PTAG (GitHub may still be propagating)." >&2
+  say "Promoted $PTAG"
+  exit 0
+fi
+
 command -v mcpb >/dev/null || die "mcpb CLI not found (npm i -g @anthropic-ai/mcpb)"
 
 # ---- 1. Resolve + WRITE version into the repo-root package.json -------------
@@ -103,6 +150,21 @@ if [[ -n "$VERSION_OVERRIDE" ]]; then
   VERSION="${VERSION_OVERRIDE#v}"
 elif [[ -n "$TAG_OVERRIDE" ]]; then
   VERSION="${TAG_OVERRIDE#v}"
+elif [[ "$DO_STAGING" == "1" ]]; then
+  # Staging = the next -rc.N. If package.json already carries an -rc.N for an
+  # unreleased patch, bump the rc; otherwise start rc.1 on the next patch of the
+  # current full release. The -rc.N rides through EVERY satellite (manifest,
+  # pipeline.tgz, dist/version.json) so a staging box's installed version string
+  # distinguishes rc.1 from rc.2 (the rc-aware compare in version.ts/snapshot.py
+  # depends on that).
+  VERSION="$(node -e "
+    const v='$PKG_VERSION';
+    const m=v.match(/^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?/);
+    let [_,a,b,c,rc]=m.map((x)=>x);
+    a=+a;b=+b;c=+c;
+    if(rc!==undefined){ rc=+rc+1; } else { c=c+1; rc=1; }
+    console.log(a+'.'+b+'.'+c+'-rc.'+rc);
+  ")"
 elif [[ "$DO_BUMP" == "1" ]]; then
   # Compute the next version without writing a git tag; we own the write below.
   VERSION="$(node -e "
@@ -115,6 +177,16 @@ else
   VERSION="$PKG_VERSION"
 fi
 TAG="v$VERSION"
+
+# Staging publishes as a GitHub pre-release + npm `next` dist-tag, so neither
+# releases/latest nor npm `latest` moves — only staging-channel boxes see it.
+GH_PRERELEASE_FLAG=""
+NPM_TAG_ARGS=()
+if [[ "$DO_STAGING" == "1" ]]; then
+  GH_PRERELEASE_FLAG="--prerelease"
+  NPM_TAG_ARGS=(--tag next)
+  say "STAGING pre-release $TAG (invisible to stable boxes; promote later with --promote $TAG)"
+fi
 
 # Write the resolved version into the repo-root package.json + lockfile so the
 # pipeline tarball, npm publish, and all satellites share one number.
@@ -287,8 +359,10 @@ if [[ "$DO_NPM" == "1" ]]; then
   if [[ "$NPM_HTTP" == "200" ]]; then
     say "npm: social-autoposter@$VERSION already published — skipping"
   else
-    say "Publishing social-autoposter@$VERSION to npm"
-    ( cd "$REPO_ROOT" && npm publish ) || die "npm publish failed"
+    say "Publishing social-autoposter@$VERSION to npm${NPM_TAG_ARGS:+ (tag: ${NPM_TAG_ARGS[*]})}"
+    # Guarded array expansion: an EMPTY array under `set -u` trips "unbound
+    # variable" on macOS bash 3.2, so expand to nothing when no --tag is set.
+    ( cd "$REPO_ROOT" && npm publish ${NPM_TAG_ARGS[@]+"${NPM_TAG_ARGS[@]}"} ) || die "npm publish failed"
     # Confirm it actually landed (granular-token whoami lies; a version fetch doesn't).
     for _ in 1 2 3 4 5; do
       sleep 2
