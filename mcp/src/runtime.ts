@@ -150,8 +150,7 @@ function looksLikeRepo(dir: string | undefined): boolean {
 // shipped install is a "stray" clone (someone git-cloned the public repo during
 // troubleshooting): every self-update lane deliberately refuses to touch a
 // checkout, so the box silently freezes at the clone's version forever while
-// the menu bar keeps re-showing the update banner (Nhat's box, 2026-07-01,
-// stuck on 1.6.175 with 1.6.189 out). We only reject a checkout when there is
+// the menu bar keeps re-showing the update banner. We only reject a checkout when there is
 // something to serve instead (a materialized repo, or the embedded tarball to
 // make one); otherwise legacy behavior is preserved.
 function hasGit(dir: string): boolean {
