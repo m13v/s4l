@@ -105,8 +105,13 @@ TW_ENGINE_PREFIX=""
 # older) candidates. Autopilot is untouched: it keeps the experiment-concluded
 # 2h expire ceiling + 1h discovery window (variant D). The branch is on
 # DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
+# 2026-07-02 (first-run onboarding boost, per user request): the draft-mode
+# value accepts an env override, SAPS_DRAFT_FRESHNESS_HOURS, so the kicker
+# wrapper (run-draft-and-publish.sh) can widen a brand-new user's FIRST draft
+# cycle to 48h and surface multiple review cards. Unset = the standard 24h
+# draft window. Autopilot (DRAFT_ONLY=0) ignores the override entirely.
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS=24
+    FRESHNESS_HOURS="${SAPS_DRAFT_FRESHNESS_HOURS:-24}"
 else
     FRESHNESS_HOURS=2
 fi
@@ -126,12 +131,13 @@ fi
 # other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
-# DRAFT mode widens discovery to 24h (the twitter-search-since-rewrite.py hook
-# clamps the override to a 1-24h range, so 24 is the accepted max); autopilot
-# keeps the winning D setting of 1h. See the DRAFT_ONLY branch on
-# FRESHNESS_HOURS above (2026-06-17, per user request).
+# DRAFT mode widens discovery to 24h by default; autopilot keeps the winning D
+# setting of 1h. SAPS_DRAFT_FRESHNESS_HOURS (first-run onboarding boost, see the
+# FRESHNESS_HOURS branch above) can widen the draft-mode value further (48h on a
+# brand-new install's first cycle). The lean Phase 1 CDP scraper reads
+# FRESHNESS_HOURS_DISCOVER directly and honors any value.
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS_DISCOVER=24
+    FRESHNESS_HOURS_DISCOVER="${SAPS_DRAFT_FRESHNESS_HOURS:-24}"
 else
     FRESHNESS_HOURS_DISCOVER=1
 fi
@@ -139,8 +145,16 @@ fi
 # drives the expire-stale gate from the same knob (was hardcoded 18h there).
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
 # Hook env: ~/.claude/hooks/twitter-search-since-rewrite.py reads this and
-# uses it in place of its hardcoded 6h default when present.
-export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
+# uses it in place of its hardcoded 6h default when present. The hook accepts
+# only a 1-24h range and silently falls back to its 6h default on anything
+# bigger, so cap the exported value at 24: during the 48h first-run boost the
+# CDP scraper still gets the full window via FRESHNESS_HOURS_DISCOVER, while
+# any hook-rewritten query keeps the widest value the hook can honor.
+if [ "$FRESHNESS_HOURS_DISCOVER" -gt 24 ] 2>/dev/null; then
+    export FRESHNESS_HOURS_OVERRIDE=24
+else
+    export FRESHNESS_HOURS_OVERRIDE=$FRESHNESS_HOURS_DISCOVER
+fi
 
 # `set -a` auto-exports every variable assigned by `source .env`, so DATABASE_URL
 # and friends propagate to subprocess env (python3 scripts use os.environ at
