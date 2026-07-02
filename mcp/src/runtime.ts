@@ -1101,7 +1101,7 @@ export async function ensureMenubar(): Promise<{
 // what's installed, and kickstart the launchd job so the running menu bar picks
 // up the new code. Content-compare keeps this a no-op on an unchanged boot, so
 // it's cheap to call on every ensureMenubar(). This is what makes menu bar
-// changes (e.g. the "Please update now" button) actually ship on an .mcpb update.
+// changes (e.g. the "Update now & restart Claude Desktop" button) actually ship on an .mcpb update.
 async function refreshMenubarIfStale(): Promise<{ ok: boolean; detail: string; skipped?: boolean }> {
   const src = menubarSourceDir();
   if (!src) return { ok: true, skipped: true, detail: "no bundle source to refresh from" };
