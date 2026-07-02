@@ -510,6 +510,12 @@ def review_drafts(plan, batch="review-queue"):
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
                 "link_url": c.get("link_url"),
+                # Ride-along context for the review-events feedback rail: the
+                # card copies these onto each decision so the shipped event can
+                # be joined back to the twitter_candidates row and scoped to a
+                # project without re-reading the plan.
+                "candidate_id": c.get("candidate_id"),
+                "project": c.get("matched_project") or c.get("project"),
                 # Thread permalink + discovery-time stats (author followers,
                 # thread engagement), stamped by merge_review_queue.py from data
                 # the pipeline already captured. The card renders these as
@@ -747,3 +753,118 @@ def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, t
     if activity_label:
         args["__saps_activity_label"] = activity_label
     return loopback_tool("post_drafts", args, timeout=timeout)
+
+
+# ---- review-events outbox (2026-07-02) --------------------------------------
+# Every card decision (approve/reject, with reason chips, link-click
+# interactions, and dwell time) ships to POST /api/v1/review-events so the
+# feedback-digest job can distill human rejections into each project's
+# learned_preferences config block. The outbox JSONL is the durability layer:
+# append locally first, flush to the API in the background with retry. Events
+# carry a client-generated event_uuid and the server upserts ON CONFLICT DO
+# NOTHING, so a crash between POST and truncate only produces duplicates the
+# server drops — never lost events, never double rows.
+REVIEW_EVENTS_OUTBOX = "review-events-outbox.jsonl"
+_outbox_lock = threading.Lock()
+_outbox_flush_lock = threading.Lock()
+
+
+def _outbox_path():
+    return Path(state_dir()) / REVIEW_EVENTS_OUTBOX
+
+
+def review_event_add(event):
+    """Append one decision event to the durable outbox and kick an async flush.
+    Never raises — a telemetry failure must not break the card flow."""
+    import uuid
+
+    ev = dict(event or {})
+    ev.setdefault("event_uuid", str(uuid.uuid4()))
+    ev.setdefault("client_ts", time_iso())
+    try:
+        with _outbox_lock:
+            p = _outbox_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a") as f:
+                f.write(json.dumps(ev) + "\n")
+    except Exception:
+        pass
+    flush_review_events_async()
+
+
+def flush_review_events_async():
+    threading.Thread(target=flush_review_events, daemon=True).start()
+
+
+def flush_review_events():
+    """Flush the outbox to /api/v1/review-events in batches. Failed batches stay
+    in the outbox for the next kick (next decision, review close, or menubar
+    start). Serialized: a second concurrent flush returns immediately."""
+    if not _outbox_flush_lock.acquire(blocking=False):
+        return
+    try:
+        try:
+            with _outbox_lock:
+                p = _outbox_path()
+                if not p.exists():
+                    return
+                lines = [ln for ln in p.read_text().splitlines() if ln.strip()]
+        except Exception:
+            return
+        events = []
+        for ln in lines:
+            try:
+                ev = json.loads(ln)
+                if isinstance(ev, dict) and ev.get("event_uuid"):
+                    events.append(ev)
+            except Exception:
+                continue  # corrupt line: dropped on the next rewrite
+        if not events:
+            if lines:  # only corrupt lines left — clear the file
+                _outbox_remove(set())
+            return
+        # scripts/ is on sys.path (SAPS_REPO_DIR insertion at menubar boot);
+        # import lazily so a missing pipeline repo degrades to buffer-only.
+        try:
+            from http_api import api_post
+        except Exception:
+            return
+        shipped = set()
+        for i in range(0, len(events), 100):
+            batch = events[i : i + 100]
+            try:
+                api_post("/api/v1/review-events", {"events": batch})
+                shipped.update(e["event_uuid"] for e in batch)
+            except Exception:
+                break  # network/API down: keep the rest for the next kick
+        _outbox_remove(shipped, keep_only_valid=True)
+    finally:
+        _outbox_flush_lock.release()
+
+
+def _outbox_remove(shipped_uuids, keep_only_valid=False):
+    """Rewrite the outbox dropping shipped (and, optionally, corrupt) lines.
+    Runs under _outbox_lock so appends that landed mid-flush are preserved."""
+    try:
+        with _outbox_lock:
+            p = _outbox_path()
+            if not p.exists():
+                return
+            remaining = []
+            for ln in p.read_text().splitlines():
+                if not ln.strip():
+                    continue
+                try:
+                    ev = json.loads(ln)
+                except Exception:
+                    if not keep_only_valid:
+                        remaining.append(ln)
+                    continue
+                if not isinstance(ev, dict) or ev.get("event_uuid") in shipped_uuids:
+                    continue
+                remaining.append(json.dumps(ev))
+            tmp = p.with_suffix(".jsonl.tmp")
+            tmp.write_text("\n".join(remaining) + ("\n" if remaining else ""))
+            os.replace(str(tmp), str(p))
+    except Exception:
+        pass
