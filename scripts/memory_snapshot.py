@@ -535,10 +535,16 @@ def scheduled_tasks_summary() -> dict[str, Any]:
         for path in sorted(scheduled_root.glob("*/SKILL.md")):
             summary["skill_files"].append({"id": path.parent.name, "path": str(path)})
 
-    sessions_root = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
-    if not sessions_root.exists():
+    # "Claude*": the host app can run with a custom --user-data-dir (per-account
+    # dirs like "Claude-mediar"), putting registries outside plain "Claude/".
+    # Keep in sync with scripts/schedule_state.py::SCHED_REGISTRY_GLOB.
+    app_support = Path.home() / "Library" / "Application Support"
+    registries = sorted(
+        app_support.glob("Claude*/claude-code-sessions/**/scheduled-tasks.json")
+    )
+    if not registries:
         return summary
-    for registry in sorted(sessions_root.glob("**/scheduled-tasks.json"))[:50]:
+    for registry in registries[:50]:
         reg: dict[str, Any] = {"path": str(registry), "tasks": []}
         try:
             data = json.loads(registry.read_text())
