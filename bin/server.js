@@ -48,7 +48,7 @@ function agentPath(job) {
 // Matrix: rows = job types, columns = platforms
 // Each cell is a job (or null if that combo doesn't exist)
 const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
-const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
+const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Presence', 'Stats', 'Post Audit', 'Octolens'];
 
 const JOBS = [
   // Post Threads row (original threads/posts)
@@ -97,6 +97,8 @@ const JOBS = [
   // backfill-post) and engage-linkedin.sh, exactly like the Twitter rail.
   { label: 'com.m13v.social-link-edit-moltbook', name: 'Link Edit MoltBook', type: 'Link Edit', platform: 'MoltBook', script: 'link-edit-moltbook.sh', logPrefix: 'link-edit-moltbook-', plist: 'com.m13v.social-link-edit-moltbook.plist' },
   { label: 'com.m13v.social-link-edit-github', name: 'Link Edit GitHub', type: 'Link Edit', platform: 'GitHub', script: 'link-edit-github.sh', logPrefix: 'link-edit-github-', plist: 'com.m13v.social-link-edit-github.plist' },
+  // Presence row (read-only session maintenance)
+  { label: 'com.m13v.social-linkedin-presence', name: 'LinkedIn Presence', type: 'Presence', platform: 'LinkedIn', script: 'linkedin-presence.sh', logPrefix: 'linkedin-presence-', plist: 'com.m13v.social-linkedin-presence.plist' },
   // Stats row
   { label: 'com.m13v.social-stats-reddit', name: 'Stats Reddit', type: 'Stats', platform: 'Reddit', script: 'stats-reddit.sh', logPrefix: 'stats-reddit-', plist: 'com.m13v.social-stats-reddit.plist' },
   { label: 'com.m13v.social-stats-twitter', name: 'Stats Twitter', type: 'Stats', platform: 'Twitter', script: 'stats-twitter.sh', logPrefix: 'stats-twitter-', plist: 'com.m13v.social-stats-twitter.plist' },
@@ -878,6 +880,7 @@ function classifyScript(script) {
     match(/^engage_(\w+)$/, 'engage', 'Engage') ||
     match(/^dm_outreach_(\w+)$/, 'dm-outreach', 'DM Outreach') ||
     match(/^dm_replies_(\w+)$/, 'dm-replies', 'DM Replies') ||
+    match(/^presence_(\w+)$/, 'presence', 'Presence') ||
     match(/^scan_(\w+?)_(?:replies|followups|mentions)$/, 'check-replies', 'Check Replies') ||
     match(/^octolens_(\w+)$/, 'octolens', 'Octolens') ||
     match(/^stats_(\w+)$/, 'stats', 'Stats') ||
@@ -11164,6 +11167,42 @@ function renderResult(run) {
       pill('touched', r.total, 'var(--text)') +
       pill('success', r.success, '#9b9b9b') +
       pill('skipped', r.skipped, '#b2b2b2')
+    );
+  }
+  if (run.job_type === 'presence') {
+    const scanned = r.scanned || 0;
+    const checked = r.checked || 0;
+    const scan = (r.scan && typeof r.scan === 'object') ? r.scan : {};
+    const pages = scan.pages || scanned || 0;
+    const scrolls = scan.scrolls || 0;
+    const failed = r.failed || 0;
+    const reasons = Array.isArray(r.failure_reasons) ? r.failure_reasons : [];
+    const PNL = String.fromCharCode(10);
+    const tooltip =
+      '**Read-only presence pass**' + PNL +
+      PNL +
+      '• **pages:** ' + pages + PNL +
+      '• **scrolls:** ' + scrolls + PNL +
+      '• **checked:** ' + checked + PNL +
+      '• **failed:** ' + failed;
+    const renderFailedPill = () => {
+      if (!failed && !reasons.length) return '';
+      const top = reasons[0];
+      const tt = reasons.length
+        ? '**Failure reasons**' + PNL +
+          reasons.map(function (x) { return '• ' + x.reason + ' x **' + x.count + '**'; }).join(PNL)
+        : 'failed (no reason logged)';
+      const label = top ? ('failed: ' + top.reason) : 'failed';
+      return '<span title="' + tt.replace(/"/g, '&quot;') + '" ' +
+        'style="display:inline-block;margin-right:10px;font-size:12px;color: var(--muted);">' +
+        label + ' <span style="color: #686868;font-weight:600;">' + (failed || 1) + '</span></span>';
+    };
+    return (
+      '<span title="' + tooltip.replace(/"/g, '&quot;') + '" style="display:inline-block;">' +
+        pill('pages', pages, pages > 0 ? 'var(--text)' : 'var(--muted)') +
+        pill('scrolls', scrolls, scrolls > 0 ? '#9b9b9b' : 'var(--muted)') +
+        renderFailedPill() +
+      '</span>'
     );
   }
   if (r.type === 'check-replies') {
