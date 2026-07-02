@@ -7,7 +7,7 @@ invite, and sends via Gmail API from i@m13v.com.
 
 Usage:
     python3 send_dashboard_invite.py <email> [<email> ...]
-    python3 send_dashboard_invite.py --dry-run kent@runner.now
+    python3 send_dashboard_invite.py --dry-run client@example.com
 """
 
 import argparse
