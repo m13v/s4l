@@ -17,7 +17,7 @@ run loop, so that holds).
 import re
 
 import objc
-from Foundation import NSObject, NSMakeRect
+from Foundation import NSObject, NSMakeRect, NSAttributedString, NSURL
 from AppKit import (
     NSApp,
     NSPanel,
@@ -29,6 +29,7 @@ from AppKit import (
     NSColor,
     NSFont,
     NSView,
+    NSWorkspace,
     NSBackingStoreBuffered,
     NSFloatingWindowLevel,
     NSApplicationActivationPolicyAccessory,
@@ -37,6 +38,12 @@ from AppKit import (
     NSWindowStyleMaskUtilityWindow,
     NSLineBreakByWordWrapping,
     NSBezelStyleRounded,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSUnderlineStyleAttributeName,
+    NSUnderlineStyleSingle,
+    NSTextAlignmentLeft,
+    NSTextAlignmentRight,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
@@ -44,7 +51,7 @@ from AppKit import (
 _active = None
 
 W = 380
-H = 300
+H = 336
 M = 16
 NS_BEZEL_BORDER = 2  # NSBezelBorder
 
@@ -62,6 +69,42 @@ class _ReviewPanel(NSPanel):
 def _truncate(s, n=320):
     s = (s or "").strip()
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _fmt_count(n):
+    """1234 -> '1.2k', 3400000 -> '3.4M'; None/garbage -> None (omit the stat)."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return None
+    if n >= 1_000_000:
+        s = f"{n / 1_000_000:.1f}M"
+        return s.replace(".0M", "M")
+    if n >= 1_000:
+        s = f"{n / 1_000:.1f}k"
+        return s.replace(".0k", "k")
+    return str(n)
+
+
+def _stats_line(stats):
+    """One muted line from the discovery-time candidate stats: author followers
+    (profile stat) then the thread's engagement counts. Fields the pipeline
+    didn't capture are simply omitted; returns '' when nothing is known."""
+    stats = stats or {}
+    parts = []
+    followers = _fmt_count(stats.get("author_followers"))
+    if followers is not None:
+        parts.append(f"{followers} followers")
+    for key, label in (
+        ("likes", "likes"),
+        ("retweets", "reposts"),
+        ("replies", "replies"),
+        ("views", "views"),
+    ):
+        v = _fmt_count(stats.get(key))
+        if v is not None:
+            parts.append(f"{v} {label}")
+    return " · ".join(parts)
 
 
 def _label(frame, text, *, size=12, bold=False, muted=False):
@@ -97,6 +140,7 @@ class _ReviewController(NSObject):
         self._decisions = []
         self._panel = None
         self._textview = None
+        self._link_targets = {}
         self._build()
         return self
 
@@ -179,20 +223,48 @@ class _ReviewController(NSObject):
         reject.setAction_("reject:")
         content.addSubview_(reject)
 
-        # "Replying to @author:" — bold, black.
-        author = d.get("thread_author") or "thread"
+        # "Replying to @author" row: the handle is a live link to the author's
+        # profile, and "View thread" (right) opens the thread being replied to.
+        # Both use data the pipeline already carries; no scraping happens here.
+        self._link_targets = {}
+        handle = (d.get("thread_author") or "").lstrip("@").strip()
+        content.addSubview_(
+            _label(NSMakeRect(M, H - 70, 78, 18), "Replying to", size=12, bold=True)
+        )
+        if handle:
+            self._add_link(
+                content,
+                NSMakeRect(M + 78, H - 70, W - 2 * M - 78 - 88, 18),
+                f"@{handle}",
+                f"https://x.com/{handle}",
+                bold=True,
+            )
+        else:
+            content.addSubview_(
+                _label(NSMakeRect(M + 78, H - 70, W - 2 * M - 78 - 88, 18), "thread", size=12, bold=True)
+            )
+        thread_url = d.get("thread_url")
+        if thread_url:
+            self._add_link(
+                content,
+                NSMakeRect(W - M - 88, H - 70, 88, 18),
+                "View thread",
+                thread_url,
+                right=True,
+            )
+        # Discovery-time stats: author followers + thread engagement — muted.
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 70, W - 2 * M, 18),
-                f"Replying to {author}:",
-                size=12,
-                bold=True,
+                NSMakeRect(M, H - 88, W - 2 * M, 14),
+                _stats_line(d.get("stats")),
+                size=11,
+                muted=True,
             )
         )
         # Thread text — black.
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 150, W - 2 * M, 74),
+                NSMakeRect(M, H - 168, W - 2 * M, 74),
                 _truncate(d.get("thread_text")),
                 size=12,
             )
@@ -200,7 +272,7 @@ class _ReviewController(NSObject):
         # Reply heading — black.
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 172, W - 2 * M, 16),
+                NSMakeRect(M, H - 190, W - 2 * M, 16),
                 "Reply (editable):",
                 size=12,
                 bold=True,
@@ -214,7 +286,7 @@ class _ReviewController(NSObject):
         link = d.get("link_url")
         composed = f"{reply} {link}" if link else reply
         scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6)
+            NSMakeRect(M, M, W - 2 * M, H - 190 - M - 6)
         )
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(NS_BEZEL_BORDER)
