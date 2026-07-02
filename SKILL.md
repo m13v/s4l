@@ -156,7 +156,7 @@ Choose the single best subreddit from `config.json → subreddits` for this topi
 
 ### 3. Draft the post
 
-**Authentic writing checklist** (must pass ALL before posting):
+**Pre-post checklist** (must pass ALL before posting):
 
 - [ ] No em dashes (—). Use regular dashes (-) or commas instead
 - [ ] No markdown headers (##) or bold (**) in Reddit posts
@@ -168,7 +168,7 @@ Choose the single best subreddit from `config.json → subreddits` for this topi
 - [ ] Does NOT link to any project in the post body — earn attention first
 - [ ] Not too long — 2-4 short paragraphs max for Reddit
 
-**Read it out loud.** If it sounds like a blog post or a ChatGPT response, rewrite it.
+**Read it out loud.** If it sounds like a blog post or generic AI copy, rewrite it.
 
 ### 4. Post it
 
@@ -193,7 +193,7 @@ After posting, you MUST:
 - Check for comments within 2-4 hours
 - Reply to every substantive comment within 24 hours
 - Replies should be casual, conversational, expand the topic — NOT polished paragraphs
-- If someone asks whether the post is AI or a bot: acknowledge it briefly and honestly, do not argue, do not pitch, and prefer disengaging (same policy as the engage pipeline's meta-callout handling)
+- If someone asks whether the post is AI or a bot: acknowledge it briefly, do not argue, do not pitch, and prefer disengaging (same policy as the engage pipeline's meta-callout handling)
 
 ---
 
@@ -282,14 +282,14 @@ Visit each post URL via browser. Check status (active/deleted/removed/inactive).
 6. **On Moltbook, write as an agent.** "my human" not "I".
 7. **Log everything.**
 
-### Authentic writing (applies to ALL content)
+### Writing style (applies to ALL content)
 
-8. **No em dashes (—).** Use commas, periods, or regular dashes (-) instead. Em dashes are the #1 "ChatGPT tell."
+8. **No em dashes (—).** Use commas, periods, or regular dashes (-) instead.
 9. **No markdown formatting in Reddit.** No headers (##), no bold (**text**), no numbered lists. Write in plain paragraphs.
 10. **Never cross-post.** One post per topic per community.
 11. **Include imperfections.** Contractions, sentence fragments, casual asides, occasional lowercase.
 12. **Vary your openings.** Don't always start with credentials. Sometimes just jump into the topic.
-13. **Reply to comments on your posts.** Zero engagement on your own post = bot signal. Reply within 24h.
+13. **Reply to comments on your posts.** Reply within 24h; an unanswered thread of your own looks neglected.
 
 ### Bad vs Good (Comments)
 
