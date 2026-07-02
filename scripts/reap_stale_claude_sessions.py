@@ -19,25 +19,25 @@ every minute and kills the leaked sessions, capping memory at a small steady sta
 
 SAFETY — never kill a real interactive session
 ----------------------------------------------
-The leaked workers share a tiny number of `local-agent-mode-sessions/<uuid>`
-session ids (the scheduled-task lane reuses ONE persistent agent-mode session per
-task and piles every fired turn onto it). A human's interactive Claude Desktop
-agent-mode session is its OWN uuid with a single live process. So we:
+Process command lines are NOT precise enough: normal interactive Claude Desktop
+agent-mode sessions and the S4L scheduled-task workers share the same bundled
+claude-code binary, stream-json mode, and local-agent-mode-sessions paths. So we:
 
-  1. Only consider processes matching the worker signature (agent-mode `claude`
-     from the bundled claude-code, NOT the Desktop app, the MCP node server, or ssh).
-  2. Group by session uuid.
-  3. In any group with >1 live process (the leak signature — a healthy session is
-     exactly one process), apply the TYPE-DRIVEN rule: a worker checks the queue
-     exactly once per fire (claude_job.py::cmd_next is single-shot), so it either
-     CLAIMS a job (stamps claim_pid -> actively drafting) or is a permanent typeless
-     husk. Spare (a) claim-holders and (b) newborns still inside their boot+claim
-     window (age < claim_grace); reap every other claimless session immediately.
-  4. Never touch a group of size 1 → a real interactive session is always spared.
+  1. Use the process signature only as a broad probe for Claude agent-mode children.
+  2. Parse `--resume <cliSessionId>` from the command and join it to Claude's local
+     `local_*.json` session record.
+  3. Only admit a process into the reapable set if that session record has
+     `scheduledTaskId` equal to `saps-phase1-query` or `saps-phase2b-draft`.
+     Missing, ambiguous, or non-worker metadata is spared by default.
+  4. Within that metadata-confirmed worker set, apply the queue/claim rules:
+     claim-holders are actively drafting and spared; newborns inside claim_grace
+     may not have checked the queue yet; old claimless workers are leaked husks.
+  5. When a confirmed worker is reaped, archive its `local_*.json` session by
+     flipping `isArchived` to true so it does not pollute the user's history.
 
-This is allow-by-exclusion: when there is no leak, the script kills nothing. The old
-"keep the single newest by count" heuristic (max_group) is retained only as a
-pathological backstop; the claim/grace rule is the primary brake.
+This is allow-by-confirmed-metadata: when the local session record does not prove
+"S4L scheduled worker", the script kills nothing. The count cap is retained only
+inside the confirmed worker set.
 
 Run under SYSTEM python (`/usr/bin/python3`, always present, zero deps) so it works
 even before the owned runtime is provisioned.
@@ -46,12 +46,14 @@ even before the owned runtime is provisioned.
 from __future__ import annotations
 
 import datetime as dt
+import glob
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 # Age (seconds) past which a leaked worker session is reaped. The threshold MUST
@@ -90,10 +92,11 @@ DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S + _REAPER_AGE_MARGIN_S  # 2100s (35 min) 
 # Hard cap on kills per run, so a pathological ps parse can never SIGKILL the world.
 MAX_KILL_PER_RUN = 500
 
-# The worker signature: the bundled claude-code agent-mode CLI driven by a
-# scheduled task. ALL of these must be present in the command line. This excludes
-# the Desktop app (`Claude.app/Contents/MacOS/Claude`, no claude-code path), the
-# MCP node server, ssh, and any non-agent-mode `claude`.
+# Broad Claude agent-mode child signature. ALL of these must be present in the
+# command line, but this is NOT enough to prove "S4L scheduled worker"; snapshot()
+# still joins --resume to Claude's local session metadata before a process becomes
+# reapable. This signature excludes the Desktop app (`Claude.app/Contents/MacOS/Claude`,
+# no claude-code path), the MCP node server, ssh, and any non-agent-mode `claude`.
 SIG_REQUIRED = (
     "claude-code/",
     "/Contents/MacOS/claude ",
@@ -119,6 +122,15 @@ SIG_EXCLUDED = (DISCLAIMER_HINT,)
 WORKER_PROBE = ("claude-code/", "--input-format stream-json")
 
 UUID_RE = re.compile(r"local-agent-mode-sessions/([0-9a-fA-F-]{36})")
+RESUME_RE = re.compile(r"(?:^|\s)--resume\s+([0-9a-fA-F-]{36})(?:\s|$)")
+
+# Process command lines are not precise enough: normal interactive Desktop agent
+# sessions and the scheduled-task workers share the same claude-code binary,
+# stream-json mode, local-agent-mode-sessions paths, and sometimes the same
+# local-agent-mode session uuid. Claude's own session record is the durable local
+# boundary. A process is eligible for reaping only when its `--resume` id maps to a
+# local_*.json whose scheduledTaskId is one of these two S4L worker tasks.
+WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 
 # The paired leak: every leaked `claude` worker spawns a `mcp-server-macos-use`
 # node child (the remote-macos-use MCP). When the reaper SIGKILLs the worker, that
@@ -170,18 +182,110 @@ def parse_etime(etime: str) -> int:
     return ((days * 24 + h) * 60 + m) * 60 + s
 
 
+def load_session_index() -> dict[str, list[dict]]:
+    """Map Claude CLI session ids to their local Desktop session records.
+
+    The reaper runs outside Claude Desktop, so the only reliable process->session
+    join is:
+
+      ps command line `--resume <cliSessionId>` ->
+      ~/Library/Application Support/Claude*/claude-code-sessions/*/*/local_*.json
+
+    Multiple Claude account folders can exist on Matthew's boxes. If a resume id
+    maps ambiguously, the caller fails closed and spares the process.
+    """
+    pattern = os.path.join(
+        os.path.expanduser("~"),
+        "Library", "Application Support", "Claude*",
+        "claude-code-sessions", "*", "*", "local_*.json",
+    )
+    out: dict[str, list[dict]] = {}
+    for path in glob.glob(pattern):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        cli_id = data.get("cliSessionId")
+        if not isinstance(cli_id, str) or not cli_id:
+            continue
+        out.setdefault(cli_id, []).append({
+            "path": path,
+            "scheduledTaskId": data.get("scheduledTaskId"),
+            "sessionId": data.get("sessionId"),
+        })
+    return out
+
+
+def worker_session_meta(cmd: str, session_index: dict[str, list[dict]]):
+    """Return worker metadata for a process command, or (None, reason).
+
+    Fail closed. If the command has no resume id, has no session record, or maps
+    to anything other than the known SAPS scheduled tasks, it is not reapable.
+    """
+    m = RESUME_RE.search(cmd)
+    if not m:
+        return None, "missing_resume"
+    resume_id = m.group(1)
+    records = session_index.get(resume_id) or []
+    if not records:
+        return None, "missing_session_record"
+    wanted = set(WORKER_TASK_IDS)
+    worker_records = [r for r in records if r.get("scheduledTaskId") in wanted]
+    if not worker_records:
+        return None, "non_worker_session"
+    if len(worker_records) != len(records):
+        return None, "ambiguous_session_record"
+    return {
+        "resume_id": resume_id,
+        "session_paths": sorted({r["path"] for r in worker_records if r.get("path")}),
+        "scheduled_task_ids": sorted({r["scheduledTaskId"] for r in worker_records}),
+    }, "ok"
+
+
+def archive_session_records(paths: list[str]) -> int:
+    """Archive confirmed SAPS worker session records by flipping isArchived=true."""
+    archived = 0
+    for path in sorted(set(paths)):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if data.get("scheduledTaskId") not in set(WORKER_TASK_IDS):
+            continue  # belt and suspenders: never archive a normal session here
+        if data.get("isArchived") is True:
+            continue
+        data["isArchived"] = True
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, separators=(",", ":"))
+            os.replace(tmp, path)
+            archived += 1
+        except Exception:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+    return archived
+
+
 def snapshot():
     """Snapshot the process table once.
 
     Returns (procs, by_pid, macos_mcp, meta, stats):
-      * procs     — claude agent-mode worker-signature processes (the primary target).
+      * procs     — metadata-confirmed S4L scheduled-task worker processes.
       * by_pid    — {pid: cmd} for every process (used to pair the disclaimer stub).
       * macos_mcp — {pid, ppid, age, cmd} for every `mcp-server-macos-use` node server
                     (the paired leak, reaped in main()).
       * meta      — {pid: {ppid, age}} for every process, so main() can tell whether an
                     MCP server's parent is still alive (orphan detection).
       * stats     — {ps_timed_out, snapshot_empty, worker_probe_seen, reapable_workers,
-                    unparsed_worker_procs, macos_mcp_seen, total_procs}. Pure telemetry
+                    unparsed_worker_procs, metadata_spared_nonworkers,
+                    metadata_unknown, macos_mcp_seen, total_procs}. Pure telemetry
                     so a future regression (e.g. UUID_RE stops matching a newer Claude
                     Code, the exact blind spot on Karol's box) is VISIBLE centrally
                     instead of silently piling up.
@@ -190,8 +294,10 @@ def snapshot():
         "ps_timed_out": False,
         "snapshot_empty": False,
         "worker_probe_seen": 0,     # procs that look like a claude-code agent worker
-        "reapable_workers": 0,      # of those, ones that satisfy SIG + UUID (=len(procs))
+        "reapable_workers": 0,      # metadata-confirmed SAPS worker procs (=len(procs))
         "unparsed_worker_procs": 0, # probe-positive but NOT reapable (regex/sig miss)
+        "metadata_spared_nonworkers": 0,
+        "metadata_unknown": 0,
         "macos_mcp_seen": 0,
         "total_procs": 0,
     }
@@ -211,6 +317,7 @@ def snapshot():
     macos_mcp = []
     by_pid = {}
     meta = {}
+    session_index = load_session_index()
     for line in out.splitlines():
         m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
         if not m:
@@ -254,7 +361,21 @@ def snapshot():
             if is_probe:
                 stats["unparsed_worker_procs"] += 1
             continue
-        procs.append({"pid": pid, "ppid": ppid, "age": age, "uuid": u.group(1), "cmd": cmd})
+        worker_meta, reason = worker_session_meta(cmd, session_index)
+        if not worker_meta:
+            if reason == "non_worker_session":
+                stats["metadata_spared_nonworkers"] += 1
+            else:
+                stats["metadata_unknown"] += 1
+            continue
+        procs.append({
+            "pid": pid,
+            "ppid": ppid,
+            "age": age,
+            "uuid": u.group(1),
+            "cmd": cmd,
+            **worker_meta,
+        })
     stats["reapable_workers"] = len(procs)
     return procs, by_pid, macos_mcp, meta, stats
 
@@ -509,6 +630,7 @@ def main() -> int:
 
     killed = 0
     disclaimers = 0
+    archived_sessions = 0
     killed_pids: set[int] = set()
     for p in targets:
         ok = dry or kill(p["pid"])
@@ -516,6 +638,8 @@ def main() -> int:
             continue
         killed += 1
         killed_pids.add(p["pid"])
+        if not dry:
+            archived_sessions += archive_session_records(p.get("session_paths", []))
         # Reap the paired `disclaimer` launcher stub (the claude proc's parent) too.
         parent_cmd = by_pid.get(p["ppid"], "")
         if DISCLAIMER_HINT in parent_cmd:
@@ -564,10 +688,13 @@ def main() -> int:
         "claude_killed": killed,
         "disclaimer_killed": disclaimers,
         "macos_mcp_killed": macos_killed,
+        "archived_sessions": archived_sessions,
         "spared_claim_pids": sorted(claim_pids),
         "worker_probe_seen": stats["worker_probe_seen"],
         "reapable_workers": stats["reapable_workers"],
         "unparsed_worker_procs": stats["unparsed_worker_procs"],
+        "metadata_spared_nonworkers": stats["metadata_spared_nonworkers"],
+        "metadata_unknown": stats["metadata_unknown"],
         "macos_mcp_seen": stats["macos_mcp_seen"],
         "total_procs": stats["total_procs"],
         "ps_timed_out": stats["ps_timed_out"],
@@ -580,8 +707,11 @@ def main() -> int:
         f"{prefix} cycle mode={mode} inflight={inflight} ceiling={max_age}s"
         f" worker_seen={stats['worker_probe_seen']} reapable={stats['reapable_workers']}"
         f" unparsed={stats['unparsed_worker_procs']} leaked_groups={leaked_groups}"
+        f" metadata_spared={stats['metadata_spared_nonworkers']}"
+        f" metadata_unknown={stats['metadata_unknown']}"
         f" mcp_seen={stats['macos_mcp_seen']} killed={killed}"
         f" disclaimer_killed={disclaimers} mcp_killed={macos_killed}"
+        f" archived_sessions={archived_sessions}"
         f" ps_timeout={int(stats['ps_timed_out'])} empty={int(stats['snapshot_empty'])}"
         f" max_group={max_group} claim_grace={claim_grace}s",
         file=sys.stderr,
