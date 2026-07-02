@@ -1429,6 +1429,12 @@ class S4LMenuBar(rumps.App):
             except Exception as e:
                 sys.stderr.write(f"[s4l-menubar] resume approved queue failed: {e}\n")
                 sys.stderr.flush()
+            # Drain any review-events the outbox buffered while offline / before
+            # the last restart. Async + idempotent (server dedups event_uuid).
+            try:
+                st.flush_review_events_async()
+            except Exception:
+                pass
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
         # 0.12s), but the menu + update indicator must still refresh mid-run —
         # otherwise the "Update now & restart Claude Desktop" item never appears on a box that's always
@@ -1693,12 +1699,45 @@ class S4LMenuBar(rumps.App):
             sys.stderr.flush()
             _capture(e, phase="review_cards")
 
+    def _ship_review_event(self, batch, decision):
+        """Queue the decision (with reason, link clicks, dwell) for the
+        review-events feedback rail. Outbox append + async flush; never raises
+        and never blocks the card UI."""
+        try:
+            cid = decision.get("candidate_id")
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                cid = None
+            st.review_event_add(
+                {
+                    "platform": "twitter",
+                    "project": decision.get("project"),
+                    "candidate_id": cid,
+                    "batch_id": batch,
+                    "card_n": decision.get("n"),
+                    "decision": "approved" if decision.get("approved") else "rejected",
+                    "edited": bool(decision.get("edited")),
+                    "drop_link": bool(decision.get("drop_link")),
+                    "reject_category": decision.get("reject_category"),
+                    "reject_note": decision.get("reject_note"),
+                    "interactions": decision.get("interactions") or [],
+                    "dwell_ms": decision.get("dwell_ms"),
+                    "thread_url": decision.get("thread_url"),
+                    "thread_author": decision.get("thread_author"),
+                    "draft_text": decision.get("text"),
+                }
+            )
+        except Exception:
+            pass
+
     def _on_card_decision(self, batch, decision):
         # Runs on the main thread the INSTANT a card is approved/rejected. An
         # approved card is enqueued for immediate posting; a REJECTED card is
         # persisted (marked done so it's never re-shown for review) on a quick
         # background thread. We never block inline here — posting can take minutes
         # and would freeze the card UI while the user reviews the rest of the stack.
+        self._ship_review_event(batch, decision)
         if not decision.get("approved"):
             n = decision.get("n")
             # Durable local record FIRST, mirroring approved_queue_add for approvals.
@@ -1767,6 +1806,12 @@ class S4LMenuBar(rumps.App):
         # Drop the dedup signature so whatever is left is presented fresh (not
         # suppressed as "already shown") once posting finishes draining.
         self._last_review_sig = None
+        # Retry any review-events a per-decision flush left behind (e.g. the
+        # API was briefly unreachable mid-review).
+        try:
+            st.flush_review_events_async()
+        except Exception:
+            pass
         if not any(d.get("approved") for d in decisions):
             self._notify("S4L", "No drafts approved — nothing posted.")
 
