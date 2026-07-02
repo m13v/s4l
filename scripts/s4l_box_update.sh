@@ -31,8 +31,6 @@ if [ -d "$EXT_ROOT" ]; then
 fi
 # Last-resort fallback to the historical id so behavior is unchanged on old boxes.
 [ -n "$EXT_DIR" ] || EXT_DIR="$EXT_ROOT/local.mcpb.m13v.social-autoposter"
-MCPB_URL="https://github.com/m13v/social-autoposter/releases/latest/download/social-autoposter.mcpb"
-RELEASE_API="https://api.github.com/repos/m13v/social-autoposter/releases/latest"
 PY="/usr/bin/python3"
 
 mode="run"
@@ -45,10 +43,85 @@ esac
 
 [ -f "$EXT_DIR/manifest.json" ] || { echo "no .mcpb install at $EXT_DIR" >&2; exit 4; }
 
+# CHANNEL (2026-07-02): a box on the `staging` channel tracks the newest release
+# OVERALL (prereleases included), resolved from the releases LIST endpoint;
+# `stable` keeps the exact historical releases/latest behavior. This script is
+# often piped over SSH (`ssh box 'bash -s' < s4l_box_update.sh`) with no repo on
+# PATH, so channel + latest resolution is a self-contained python block reading
+# the same <state dir>/channel.json marker every other surface uses. It prints
+# four space-separated tokens: "<channel> <tag> <version> <mcpb_url>".
+STATE_DIR="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+RESOLVED="$(SAPS_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
+import json, os, re, subprocess
+
+state = os.environ.get("SAPS_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
+try:
+    ch = (json.load(open(os.path.join(state, "channel.json"))) or {}).get("channel")
+except Exception:
+    ch = None
+channel = ch if ch in ("stable", "staging") else "stable"
+
+REPO = "m13v/social-autoposter"
+LATEST_DL = "https://github.com/%s/releases/latest/download/social-autoposter.mcpb" % REPO
+TAG_DL = "https://github.com/%s/releases/download/%s/social-autoposter.mcpb"
+
+def curl(url):
+    r = subprocess.run(["/usr/bin/curl", "-fsSL", "-m", "15",
+                        "-H", "Accept: application/vnd.github+json", url],
+                       capture_output=True, text=True, timeout=20)
+    return r.stdout
+
+def ver_key(v):
+    s = str(v).strip().lstrip("v")
+    core, _, pre = s.partition("-")
+    nums = [int(x) if x.isdigit() else 0 for x in core.split("+")[0].split(".")]
+    while len(nums) < 3:
+        nums.append(0)
+    if not pre:
+        return (nums[0], nums[1], nums[2], 1, 0)
+    m = re.findall(r"\d+", pre)
+    return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
+
+tag = ""
+if channel == "staging":
+    try:
+        rels = json.loads(curl("https://api.github.com/repos/%s/releases?per_page=30" % REPO) or "[]")
+        best = None
+        for r in (rels if isinstance(rels, list) else []):
+            if not isinstance(r, dict) or r.get("draft"):
+                continue
+            t = r.get("tag_name")
+            if not isinstance(t, str) or not t.lstrip("v")[:1].isdigit():
+                continue
+            k = ver_key(t)
+            if best is None or k > best[0]:
+                best = (k, t)
+        if best:
+            tag = best[1]
+    except Exception:
+        tag = ""
+if not tag:
+    # stable, or staging fallback when the list endpoint failed -> track stable
+    try:
+        tag = (json.loads(curl("https://api.github.com/repos/%s/releases/latest" % REPO) or "{}") or {}).get("tag_name") or ""
+    except Exception:
+        tag = ""
+    if channel == "staging":
+        channel = "stable"
+
+version = tag.lstrip("v")
+url = LATEST_DL if channel == "stable" else (TAG_DL % (REPO, tag))
+print("%s %s %s %s" % (channel, tag, version, url))
+PYEOF
+)"
+CHANNEL="$(printf '%s' "$RESOLVED" | awk '{print $1}')"; [ -n "$CHANNEL" ] || CHANNEL="stable"
+latest_tag="$(printf '%s' "$RESOLVED" | awk '{print $2}')"
+latest="$(printf '%s' "$RESOLVED" | awk '{print $3}')"
+MCPB_URL="$(printf '%s' "$RESOLVED" | awk '{print $4}')"
+[ -n "$MCPB_URL" ] || MCPB_URL="https://github.com/m13v/social-autoposter/releases/latest/download/social-autoposter.mcpb"
+
 installed="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('version',''))" "$EXT_DIR/manifest.json" 2>/dev/null || true)"
-latest_tag="$(curl -fsSL -m 15 "$RELEASE_API" | "$PY" -c "import sys,json;print((json.load(sys.stdin) or {}).get('tag_name',''))" 2>/dev/null || true)"
-latest="${latest_tag#v}"
-echo "installed=$installed latest=$latest"
+echo "channel=$CHANNEL installed=$installed latest=$latest"
 
 if [ "$mode" = "check" ]; then
   [ -n "$latest" ] && [ "$installed" != "$latest" ] && echo "update_available=true" || echo "update_available=false"
