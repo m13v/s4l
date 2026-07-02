@@ -322,12 +322,17 @@ class _ReviewController(NSObject):
             right_x -= 24
         age = _age_str(stats.get("tweet_posted_at"))
         if age:
+            age_w = int(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    age, {NSFontAttributeName: NSFont.systemFontOfSize_(11)}
+                ).size().width
+            ) + 8
             age_label = _label(
-                NSMakeRect(right_x - 44, H - 70, 44, 18), age, size=11, muted=True
+                NSMakeRect(right_x - age_w, H - 70, age_w, 18), age, size=11, muted=True
             )
             age_label.setAlignment_(NSTextAlignmentRight)
             content.addSubview_(age_label)
-            right_x -= 48
+            right_x -= age_w + 4
         handle_w = right_x - (M + 78) - 4
         if handle:
             # Size the link to its text so the follower count can sit right
@@ -471,8 +476,14 @@ class _ReviewController(NSObject):
             NSApp.activateIgnoringOtherApps_(True)
         except Exception:
             pass
-        # NSRectEdge 1 = NSMinYEdge: pop out below the icon.
-        pop.showRelativeToRect_ofView_preferredEdge_(self._eye_btn.bounds(), self._eye_btn, 1)
+        # Anchor to the eye's frame in the (non-flipped) content view, where
+        # NSRectEdge 1 = NSMinYEdge is unambiguously the BOTTOM edge, so the
+        # popover reliably opens below the icon. Anchoring to the button's own
+        # bounds flips the edge meaning (NSButton is a flipped view) and the
+        # popover appeared above the card's title bar.
+        pop.showRelativeToRect_ofView_preferredEdge_(
+            self._eye_btn.frame(), self._eye_btn.superview(), 1
+        )
         self._stats_popover = pop
         _log(f"stats popover shown ({pw}x{ph})")
 
