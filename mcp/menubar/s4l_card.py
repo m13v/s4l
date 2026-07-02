@@ -664,6 +664,13 @@ class _ReviewController(NSObject):
                 "reject_note": (reject_note or "").strip() or None,
                 "interactions": list(self._interactions),
                 "dwell_ms": self._dwell_ms(),
+                # Ride-along candidate context (from review_drafts) so the
+                # decision can be shipped to /api/v1/review-events without
+                # re-reading the plan.
+                "candidate_id": d.get("candidate_id"),
+                "project": d.get("project"),
+                "thread_url": d.get("thread_url"),
+                "thread_author": d.get("thread_author"),
             }
         )
 
