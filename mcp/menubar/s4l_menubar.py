@@ -809,6 +809,9 @@ class S4LMenuBar(rumps.App):
         removes the KeepAlive job — which kills this process, so it must be
         the last thing we do."""
         try:
+            # Capture while Claude is still alive (see _claude_user_data_dir):
+            # the post-quit relaunch must preserve a custom --user-data-dir.
+            user_data_dir = self._claude_user_data_dir()
             try:
                 with open(STOP_FLAG, "w") as fh:
                     fh.write(f"user quit via menu bar at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
@@ -828,7 +831,7 @@ class S4LMenuBar(rumps.App):
                 pass
             except Exception as e:
                 _capture(e, action="quit_remove_plist")
-            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._relaunch_claude(user_data_dir)
             self._notify("S4L", "Autoposter stopped. Say \"start S4L\" in Claude to bring it back.")
         except Exception as e:
             _capture(e, action="quit_app")
@@ -1288,6 +1291,10 @@ class S4LMenuBar(rumps.App):
         relaunch. The menu bar is a separate launchd process, so killing Claude does
         not kill us."""
         try:
+            # Capture while Claude is still alive (see _claude_user_data_dir):
+            # a bare relaunch drops a custom --user-data-dir and boots the
+            # wrong profile, which orphans these very tasks from the registry.
+            user_data_dir = self._claude_user_data_dir()
             subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
                            capture_output=True, timeout=20)
             time.sleep(4)
@@ -1296,7 +1303,7 @@ class S4LMenuBar(rumps.App):
             subprocess.run(["killall", "-9", "Claude"], capture_output=True)
             time.sleep(1)
             self._rewrite_scheduled_task_cwd()
-            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+            self._relaunch_claude(user_data_dir)
             time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
                 self._cwd_healed = True
