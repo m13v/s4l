@@ -427,7 +427,9 @@ class _ReviewController(NSObject):
                 ln, {NSFontAttributeName: font}
             )
             wmax = max(wmax, s.size().width)
-        pw, ph = int(wmax) + 26, 18 * len(lines) + 16
+        # +34: 13px side insets plus NSTextField's own ~4px internal padding,
+        # which otherwise clips the last word of the widest line.
+        pw, ph = int(wmax) + 34, 18 * len(lines) + 16
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
         for i, ln in enumerate(lines):
             view.addSubview_(
