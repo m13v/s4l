@@ -372,8 +372,14 @@ class _ReviewController(NSObject):
         thread_tv.setEditable_(False)
         thread_tv.setSelectable_(True)  # links only respond when selectable
         thread_tv.setDrawsBackground_(False)
+        # An NSTextView grows vertically by default; long threads inflated the
+        # frame over the author row above (non-flipped superview: growth goes
+        # UP) and pushed the trailing ↗ out of the box. Pin the frame and
+        # truncate to what 4 lines actually fit so the arrow stays visible.
+        thread_tv.setVerticallyResizable_(False)
+        thread_tv.setHorizontallyResizable_(False)
         body = NSMutableAttributedString.alloc().initWithString_attributes_(
-            _truncate(d.get("thread_text")),
+            _truncate(d.get("thread_text"), 200),
             {
                 NSFontAttributeName: NSFont.systemFontOfSize_(12),
                 NSForegroundColorAttributeName: NSColor.labelColor(),
