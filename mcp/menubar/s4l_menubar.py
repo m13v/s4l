@@ -943,11 +943,11 @@ class S4LMenuBar(rumps.App):
         )
 
     MCPB_URL = (
-        "https://github.com/m13v/social-autoposter/releases/latest/download/"
+        "https://github.com/m13v/s4l/releases/latest/download/"
         "social-autoposter.mcpb"
     )
     RELEASE_API = (
-        "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
+        "https://api.github.com/repos/m13v/s4l/releases/latest"
     )
 
     def _mcpb_url(self):
@@ -957,7 +957,7 @@ class S4LMenuBar(rumps.App):
         releases/latest whenever the tag is unknown."""
         if self._channel == "staging" and self._latest_tag:
             return (
-                "https://github.com/m13v/social-autoposter/releases/download/"
+                "https://github.com/m13v/s4l/releases/download/"
                 "%s/social-autoposter.mcpb" % self._latest_tag
             )
         return self.MCPB_URL
