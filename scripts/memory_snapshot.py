@@ -696,6 +696,7 @@ def build_summary() -> dict[str, Any]:
         "app_version": _app_version(),
         "claude_desktop_version": claude_desktop_version(),
         "reaper": reaper_status(),
+        "twitter_cycle": twitter_cycle_status(),
         "process_count": len(rows),
         "mem": {
             "total_mb": total,
@@ -796,12 +797,42 @@ def reaper_status() -> dict[str, Any] | None:
             "worker_probe_seen": ds.get("worker_probe_seen"),
             "reapable_workers": ds.get("reapable_workers"),
             "unparsed_worker_procs": ds.get("unparsed_worker_procs"),
+            "unparsed_samples": ds.get("unparsed_samples"),
+            "cwd_fallback_admitted": ds.get("cwd_fallback_admitted"),
+            "s4l_worker_cwd_seen": ds.get("s4l_worker_cwd_seen"),
             "macos_mcp_seen": ds.get("macos_mcp_seen"),
             "leaked_groups": ds.get("leaked_groups"),
             "ps_timed_out": ds.get("ps_timed_out"),
             "snapshot_empty": ds.get("snapshot_empty"),
         }
     except (OSError, ValueError, TypeError):
+        return None
+
+
+def twitter_cycle_status() -> dict[str, Any] | None:
+    """Tail of the newest twitter-cycle log, carried on the heartbeat.
+
+    The launchd-driven run-twitter-cycle.sh logs ONLY to a local file, so the
+    cycle's phase progress was invisible centrally: the 2026-07-03 Karol
+    first-draft investigation had a 27-minute blind window (cycle start 22:30 ->
+    cards 22:57) with no way to see which phase the time went to. This block
+    makes "where is the cycle right now" a one-query answer. Best-effort."""
+    try:
+        logs = sorted(
+            (REPO_DIR / "skill" / "logs").glob("twitter-cycle-20*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not logs:
+            return None
+        p = logs[0]
+        lines = [ln.strip() for ln in _tail_lines(p, 8) if ln.strip()]
+        return {
+            "log": p.name,
+            "age_sec": round(time.time() - p.stat().st_mtime, 1),
+            "last_lines": [ln[:200] for ln in lines[-3:]],
+        }
+    except Exception:
         return None
 
 
