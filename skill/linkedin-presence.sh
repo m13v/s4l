@@ -20,7 +20,7 @@ LOG_FILE="$LOG_DIR/linkedin-presence-$(date +%Y-%m-%d_%H%M%S).log"
 RUN_START=$(date +%s)
 BATCH_ID="lipres-$(date +%Y%m%d_%H%M%S)-$$"
 export SA_CYCLE_ID="$BATCH_ID"
-export SAPS_PIPELINE_NAME="linkedin-presence"
+export S4L_PIPELINE_NAME="linkedin-presence"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_FILE"; }
 
