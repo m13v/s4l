@@ -257,6 +257,7 @@ def main() -> int:
     if plan_created_at:
         plan_obj["created_at"] = plan_created_at
     _atomic_write(dst, plan_obj)
+    ensure_store_symlink()
 
     # Refresh the review-request marker the menu bar polls (count = pending, not posted).
     pending = len([c for c in merged if not c.get("posted")])
