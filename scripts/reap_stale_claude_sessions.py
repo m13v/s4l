@@ -407,6 +407,8 @@ def snapshot():
         "worker_probe_seen": 0,     # procs that look like a claude-code agent worker
         "reapable_workers": 0,      # metadata-confirmed SAPS worker procs (=len(procs))
         "unparsed_worker_procs": 0, # probe-positive but NOT reapable (regex/sig miss)
+        "unparsed_samples": [],     # up to 3 truncated cmdlines of unparsed procs
+        "cwd_fallback_admitted": 0, # unparsed procs rescued via the ~/.s4l-worker cwd proof
         "metadata_spared_nonworkers": 0,
         "metadata_unknown": 0,
         "cwd_confirmed_workers": 0,
@@ -465,18 +467,42 @@ def snapshot():
         if is_probe:
             stats["worker_probe_seen"] += 1
         # (b) claude agent-mode worker sessions — the REAPABLE set.
-        if not all(tok in cmd for tok in SIG_REQUIRED):
-            if is_probe:
-                stats["unparsed_worker_procs"] += 1  # looks like a worker, sig miss
-            continue
-        if any(tok in cmd for tok in SIG_EXCLUDED):
-            continue
-        u = UUID_RE.search(cmd)
-        if not u:
-            # Full signature but the session path shape defeated UUID_RE — THE Karol
-            # blind spot. Count it so the leak is never invisible again.
+        sig_ok = all(tok in cmd for tok in SIG_REQUIRED) and not any(
+            tok in cmd for tok in SIG_EXCLUDED
+        )
+        u = UUID_RE.search(cmd) if sig_ok else None
+        if not sig_ok or not u:
+            # Probe-positive but the full signature / UUID path shape missed — the
+            # signature-drift blind spot. Karol leak #2 (2026-07-03): a newer Claude
+            # Desktop shipped a cmdline shape that defeated SIG_REQUIRED/UUID_RE, all
+            # 46+ workers counted as "unparsed", the reaper killed nothing, and the box
+            # climbed to 98 claude procs / 13.7 GB in under 2 hours. Two responses:
+            #   1. VISIBILITY: keep a few truncated sample cmdlines so the central
+            #      telemetry shows the NEW shape and the signature can be fixed blind.
+            #   2. CWD-PROOF FALLBACK: a probe-positive process whose cwd is the
+            #      dedicated ~/.s4l-worker dir is OURS regardless of cmdline shape
+            #      (interactive sessions never run there). Admit it to the reapable
+            #      set under a synthetic uuid group; the type-driven rule downstream
+            #      still spares claim-holders and newborns, so this can only remove
+            #      provably-idle husks.
             if is_probe:
                 stats["unparsed_worker_procs"] += 1
+                if len(stats["unparsed_samples"]) < 3:
+                    stats["unparsed_samples"].append(cmd[:240])
+                cwd = cwd_index.get(pid) or ""
+                if cwd == S4L_WORKER_CWD or cwd.startswith(S4L_WORKER_CWD + os.sep):
+                    procs.append({
+                        "pid": pid,
+                        "ppid": ppid,
+                        "age": age,
+                        "uuid": "cwd-fallback",
+                        "cmd": cmd,
+                        "resume_id": None,
+                        "session_paths": [],
+                        "scheduled_task_ids": ["probe-cwd-fallback"],
+                        "metadata_source": "probe_cwd_fallback",
+                    })
+                    stats["cwd_fallback_admitted"] += 1
             continue
         worker_meta, reason = worker_session_meta(cmd, session_index)
         if not worker_meta:
@@ -821,6 +847,8 @@ def main() -> int:
         "worker_probe_seen": stats["worker_probe_seen"],
         "reapable_workers": stats["reapable_workers"],
         "unparsed_worker_procs": stats["unparsed_worker_procs"],
+        "unparsed_samples": stats["unparsed_samples"],
+        "cwd_fallback_admitted": stats["cwd_fallback_admitted"],
         "metadata_spared_nonworkers": stats["metadata_spared_nonworkers"],
         "metadata_unknown": stats["metadata_unknown"],
         "cwd_confirmed_workers": stats["cwd_confirmed_workers"],
