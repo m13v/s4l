@@ -1121,8 +1121,30 @@ def heal_active():
     if c is None or c._panel is None:
         return False
     try:
-        c._panel.setFrame_display_(_corner_frame(_mouse_screen()), True)
-        c._panel.orderFrontRegardless()
+        # setFrame_ takes a WINDOW frame (content + title bar), but
+        # _corner_frame is a CONTENT-sized rect. Passing it directly shrank
+        # the window by the title-bar height on every heal, and since content
+        # anchors at the bottom, the top ~19px of the card (the button row)
+        # got clipped under the title bar. Convert to a window frame first
+        # and place THAT in the corner.
+        panel = c._panel
+        scr = _mouse_screen()
+        vf = (
+            scr.visibleFrame()
+            if scr is not None
+            else NSMakeRect(0, 0, 1440, 900)
+        )
+        wf = panel.frameRectForContentRect_(NSMakeRect(0, 0, W, H))
+        panel.setFrame_display_(
+            NSMakeRect(
+                vf.origin.x + vf.size.width - wf.size.width - M,
+                vf.origin.y + vf.size.height - wf.size.height - M,
+                wf.size.width,
+                wf.size.height,
+            ),
+            True,
+        )
+        panel.orderFrontRegardless()
         c._log_surface("healed")
         return True
     except Exception:
