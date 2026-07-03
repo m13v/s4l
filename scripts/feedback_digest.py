@@ -139,9 +139,35 @@ OUTPUT: a single JSON object, nothing else. Schema:
 "remove" values must match existing entries EXACTLY. Omit empty keys if you like; an all-empty plan means "no changes"."""
 
 
+def _provider_env() -> dict:
+    """Route the Claude turn through the local job queue (drained by the
+    saps-worker Claude Desktop scheduled task) whenever that worker is actually
+    firing; otherwise leave the provider unset so run_claude.sh execs the
+    claude CLI directly (operator Macs). An explicit SAPS_CLAUDE_PROVIDER in
+    the environment always wins. This is the same queue lane the drafting
+    pipeline uses — the digest is just one more job type on it."""
+    env = dict(os.environ)
+    if env.get("SAPS_CLAUDE_PROVIDER"):
+        return env
+    try:
+        import schedule_state
+
+        if schedule_state.compute() == "ok":
+            env["SAPS_CLAUDE_PROVIDER"] = "queue"
+    except Exception:
+        pass
+    return env
+
+
 def call_claude(prompt: str) -> tuple[bool, str, str]:
-    """Headless claude -p, cost-tracked via run_claude.sh (script_tag
-    feedback-digest). Mirrors scripts/link_tail.py call_claude()."""
+    """Headless Claude turn, cost-tracked via run_claude.sh (script_tag
+    feedback-digest). Queue-routed when a worker is firing (see _provider_env);
+    otherwise mirrors scripts/link_tail.py call_claude()."""
+    env = _provider_env()
+    queued = env.get("SAPS_CLAUDE_PROVIDER") == "queue"
+    # Queue lane waits for the every-minute worker to claim + draft; give it
+    # the same generous budget the pipeline's queued calls get.
+    timeout_sec = 900 if queued else CLAUDE_TIMEOUT_SEC
     if os.path.exists(RUN_CLAUDE_SH):
         cmd = ["bash", RUN_CLAUDE_SH, "feedback-digest", "-p", prompt,
                "--max-turns", "1", "--disallowed-tools", DISALLOWED_TOOLS]
@@ -157,7 +183,7 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
         pass
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=CLAUDE_TIMEOUT_SEC, cwd=REPO_DIR)
+                           timeout=timeout_sec, cwd=REPO_DIR, env=env)
         out = (r.stdout or "").strip()
         if r.returncode != 0:
             return False, out, f"rc={r.returncode}: {(r.stderr or '')[:300]}"
@@ -165,7 +191,7 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
             return False, "", "empty_stdout"
         return True, out, ""
     except subprocess.TimeoutExpired:
-        return False, "", f"timeout_{CLAUDE_TIMEOUT_SEC}s"
+        return False, "", f"timeout_{timeout_sec}s"
     except FileNotFoundError as e:
         return False, "", f"claude_cli_missing: {e}"
 
