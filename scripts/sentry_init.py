@@ -28,7 +28,7 @@ def init() -> None:
     # Set early so a failure below never re-attempts on every http_api import.
     _initialized = True
 
-    dsn = os.environ.get("SAPS_SENTRY_DSN") or _EMBEDDED_DSN
+    dsn = os.environ.get("S4L_SENTRY_DSN") or _EMBEDDED_DSN
     if not dsn:
         return
     try:
@@ -36,11 +36,11 @@ def init() -> None:
     except Exception:
         return  # sentry-sdk not installed in this runtime; stay silent
     try:
-        env = "development" if os.environ.get("SAPS_ENV") == "development" else "production"
+        env = "development" if os.environ.get("S4L_ENV") == "development" else "production"
         sentry_sdk.init(
             dsn=dsn,
             environment=env,
-            release=os.environ.get("SAPS_VERSION") or None,
+            release=os.environ.get("S4L_VERSION") or None,
             traces_sample_rate=0.0,  # errors only, no performance tracing
             send_default_pii=False,
         )
