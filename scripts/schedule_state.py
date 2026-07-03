@@ -8,7 +8,8 @@ schedule state from HERE so the two surfaces can never drift. Previously the sam
 
 The data source is the host's scheduled-task registries on disk:
   ~/Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json
-A complete worker set must be present: the universal saps-worker task, or the
+A complete worker set must be present: the universal s4l-worker task (or its short-lived
+staging predecessor saps-worker), or the
 legacy pair (saps-phase1-query + saps-phase2b-draft) on pre-universal installs.
 The LIVE account is the registry whose tasks have the freshest lastRunAt (only
 the active account's scheduler advances it, so this is robust across the
@@ -38,11 +39,12 @@ import time
 # universal type-blind worker (2026-07-02, single task drains every job type)
 # or the legacy per-type pair from pre-universal installs.
 WORKER_TASK_SETS = (
-    ("saps-worker",),
+    ("s4l-worker",),
+    ("saps-worker",),  # transitional: staging rc.2/rc.3 only, pre brand rename
     ("saps-phase1-query", "saps-phase2b-draft"),
 )
 # Flat legacy alias; s4l_menubar imports this for its relocation sweep.
-WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
 
 
 def _registry_worker_recs(by_id):
