@@ -504,6 +504,56 @@ def review_queue_posted_count():
     return sum(1 for c in cands if c.get("posted") is True)
 
 
+def _plan_generation(batch):
+    """created_at of the CURRENT review plan for this batch (stamped by
+    merge_review_queue.py when it starts a fresh plan), or None for plans
+    written before generation stamping existed.
+
+    Why this matters: the plan lives in /tmp and dies on every reboot or tmp
+    sweep, and its candidate numbering restarts at 1, while approved-queue.json
+    lives in the state dir forever. Without a generation marker, ledger entries
+    from a dead plan match the new plan's low indices and every fresh draft is
+    treated as already-decided: the 2026-07-03 "unapproved cards never show up"
+    bug (30 stale entries silently swallowed a whole day of drafts)."""
+    try:
+        base = os.environ.get("S4L_TMP_DIR") or "/tmp"
+        p = Path(base) / f"twitter_cycle_plan_{batch}.json"
+        return json.loads(p.read_text()).get("created_at") or None
+    except Exception:
+        return None
+
+
+def _ts_before(a, b):
+    """True when iso timestamp a is strictly before b. Tolerates the two stamp
+    shapes in play ('...Z' from merge_review_queue, '+00:00' from time_iso)."""
+    try:
+        import datetime
+
+        def parse(s):
+            return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+        return parse(a) < parse(b)
+    except Exception:
+        return False
+
+
+def _stale_for_plan(it, gen):
+    """A ledger item that predates the current plan generation refers to a DEAD
+    plan's numbering; its `n` must never match against the live plan."""
+    return bool(gen) and bool(it.get("ts")) and _ts_before(it.get("ts"), gen)
+
+
+def _ledger_items_for_plan(batch, gen):
+    """Decided ledger items that belong to the CURRENT plan generation."""
+    return [
+        it
+        for it in read_approved_queue()["items"]
+        if it.get("batch") == batch
+        and it.get("status") in ("queued", "posting", "posted", "failed", "rejected")
+        and not _stale_for_plan(it, gen)
+    ]
+
+
 def review_drafts(plan, batch="review-queue"):
     """Flatten a plan into the card model: only UNDECIDED candidates. A card that's
     posted, terminal (rejected/dead), or already approved is a settled decision and
@@ -517,10 +567,18 @@ def review_drafts(plan, batch="review-queue"):
     `approved`/`terminal`/`posted` flags are only stamped once the loopback write
     lands, so without this a card the user just decided would re-present (the exact
     "I already decided these" bug)."""
-    settled_ns = review_settled_ns(batch)
+    gen = (plan or {}).get("created_at") or _plan_generation(batch)
+    items = _ledger_items_for_plan(batch, gen)
+    settled_ids = {
+        it.get("candidate_id") for it in items if it.get("candidate_id") is not None
+    }
+    settled_ns = {it.get("n") for it in items if it.get("candidate_id") is None}
     out = []
     for i, c in enumerate(((plan or {}).get("candidates") or [])):
         if c.get("posted") is True or c.get("terminal") is True or c.get("approved") is True:
+            continue
+        cid = c.get("candidate_id")
+        if cid is not None and cid in settled_ids:
             continue
         if (i + 1) in settled_ns:
             continue
