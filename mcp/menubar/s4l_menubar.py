@@ -1204,28 +1204,6 @@ class S4LMenuBar(rumps.App):
                 continue
         return None, repo
 
-    @staticmethod
-    def _ver_tuple(v):
-        """rc-aware precedence key, kept in lockstep with scripts/snapshot.py::
-        _ver_key and mcp/src/version.ts::verKey. The old key stripped the
-        prerelease part, so on the staging channel an rc.N -> rc.N+1 update
-        compared as equal and the verdict claimed success even when the
-        install never advanced (2026-07-03, rc.12 -> rc.13)."""
-        s = str(v).strip().lstrip("v")
-        core, _, pre = s.partition("-")
-        nums = []
-        for part in core.split("+", 1)[0].split("."):
-            try:
-                nums.append(int(part))
-            except ValueError:
-                nums.append(0)
-        while len(nums) < 3:
-            nums.append(0)
-        if not pre:
-            return (nums[0], nums[1], nums[2], 1, 0)
-        m = re.findall(r"\d+", pre)
-        return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
-
     def _check_update_verdict(self):
         p = self._update_verify_path()
         if not os.path.exists(p):
@@ -1244,7 +1222,14 @@ class S4LMenuBar(rumps.App):
             self._drop_update_marker(p)
             return
         effective, repo = self._effective_version()
-        if effective and self._ver_tuple(effective) >= self._ver_tuple(target):
+        # ONE comparator: st.ver_key delegates to scripts/snapshot.py::_ver_key
+        # (rc-aware). If the snapshot module can't load this tick, skip the
+        # verdict; the grace window below still resolves the marker either way.
+        try:
+            settled = bool(effective) and st.ver_key(effective) >= st.ver_key(target)
+        except Exception:
+            settled = False
+        if settled:
             self._drop_update_marker(p)
             self._notify("S4L updated", f"Now on v{effective}.")
             return
