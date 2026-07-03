@@ -36,6 +36,7 @@ import {
   hasReadyProject,
   personaReady,
   listManagedProjectStatus,
+  listProjectSettings,
   ensureShortLinksDefault,
   ensurePersonaProject,
   findPersonaProject,
@@ -1650,10 +1651,15 @@ tool(
     inputSchema: {
       status: z.boolean().optional(),
       action: z
-        .enum(["connect_x", "detect_x_sources", "profile_scan"])
+        .enum(["get", "connect_x", "detect_x_sources", "profile_scan"])
         .optional()
         .describe(
-          "connect_x = import/validate your X session in the autoposter's managed browser. " +
+          "get = read the CURRENT SAVED VALUES of every project's editable fields (website, " +
+            "description, icp, voice, differentiator, search_topics, get_started_link, " +
+            "content_guardrails, content_angle) plus readiness — the read companion to editing. " +
+            "Use it before tweaking part of a nested value; the panel's Project settings section " +
+            "is built on it. " +
+            "connect_x = import/validate your X session in the autoposter's managed browser. " +
             "With an explicit setup/connect request, warn about possible keychain prompts and call " +
             "with confirm:true without waiting for another yes/no reply. Without confirm:true it " +
             "only previews the operation for users who asked to inspect it rather than run it. " +
@@ -1731,7 +1737,7 @@ tool(
             "weight, platform, voice_relationship, booking_link, qualification, subreddit_bans, " +
             "short_links_host, short_links_live, content_angle, messaging, landing_pages, posthog. " +
             "Pass {name:'<project>', fields:{<key>:<value>, ...}}; each key SHALLOW-merges onto the " +
-            "project, REPLACING that key's whole value (read the current value via status:true first if " +
+            "project, REPLACING that key's whole value (read the current value via action:'get' first if " +
             "you only want to tweak part of a nested object, then pass the full new value). A value of " +
             "null DELETES the key. 'name' is ignored here (can't rename through this path). This is how " +
             "you edit advanced config without any raw whole-file overwrite."
@@ -1739,6 +1745,21 @@ tool(
     },
   },
   async (args) => {
+    // ---- Read current saved values (the panel's Project settings source) ---
+    // Whitelisted field values + readiness for every managed project and the
+    // persona. Read-only; the write path stays the validated merge below.
+    if (args.action === "get") {
+      return jsonContent({
+        action: "get",
+        projects: listProjectSettings(),
+        config_path: configPath(),
+        note:
+          "Current saved values of each project's editable fields. To change one, call project_config " +
+          "with {name, <field>: <new value>} — it merges onto what's saved and re-seeds topics. " +
+          "extra_keys lists advanced keys editable only via the `fields` escape hatch.",
+      });
+    }
+
     // ---- List import sources (for the panel dropdown) ---------------------
     // Read-only browser/profile detection. Never reads the keychain or decrypts
     // a cookie, so it shows no macOS Safe Storage prompt. Lets the user pick the
@@ -2007,11 +2028,19 @@ tool(
     // Apply mode (incremental): merge whatever fields were supplied onto the
     // named project, then report whether it's now ready or still missing fields.
     try {
-      recordOnboardingAttempt("project_ready", {
-        missing_count: 0,
-      });
+      // Editing the persona project must not touch the PRODUCT onboarding
+      // milestone (a persona is never "project_ready" in the product sense; it
+      // validates against PERSONA_REQUIRED_FIELDS inside applySetup).
+      const editingPersona = findPersonaProject()?.name === args.name;
+      if (!editingPersona) {
+        recordOnboardingAttempt("project_ready", {
+          missing_count: 0,
+        });
+      }
       const result = applySetup(args as ProjectInput);
-      if (result.ready) {
+      if (result.persona) {
+        // no-op on the onboarding ledger; readiness is reported below as usual.
+      } else if (result.ready) {
         completeOnboardingMilestone("project_ready", { missing_count: 0 });
       } else {
         blockOnboardingMilestone(
