@@ -199,6 +199,12 @@ TAG="v$VERSION"
 GH_PRERELEASE_FLAG=""
 NPM_TAG_ARGS=()
 if [[ "$DO_STAGING" == "1" ]]; then
+  # Symmetric guard: --staging with a stable-shaped version would publish a
+  # "pre-release" that staging boxes rank ABOVE the real stable line while npm
+  # `next` points at a non-rc build. Always an operator mistake; refuse.
+  if [[ "$VERSION" != *-* ]]; then
+    die "--staging requires an -rc.N version but resolved $VERSION (stable-shaped). Drop --staging, or pin one with --version ${VERSION}-rc.1"
+  fi
   GH_PRERELEASE_FLAG="--prerelease"
   NPM_TAG_ARGS=(--tag next)
   say "STAGING pre-release $TAG (invisible to stable boxes; promote later with --promote $TAG)"
