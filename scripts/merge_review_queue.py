@@ -47,6 +47,43 @@ def plan_path(batch_id: str) -> str:
     return os.path.join(tmp_dir(), f"twitter_cycle_plan_{batch_id}.json")
 
 
+def store_path() -> str:
+    """Canonical, DURABLE home of the review-queue store: the state dir, not
+    /tmp. The review queue is not a scratch artifact — it holds drafts awaiting
+    a human decision plus their decision state, and /tmp dies on every reboot
+    and periodic sweep (which both lost pending drafts outright and reset
+    candidate numbering, letting stale ledger entries swallow new cards)."""
+    return os.path.join(state_dir(), "review-queue.json")
+
+
+def ensure_store_symlink() -> None:
+    """Keep /tmp/twitter_cycle_plan_review-queue.json as a SYMLINK to the
+    canonical store. The MCP server (repo.ts planPath/readPlan/writePlan) and
+    the locked pipeline scripts resolve the /tmp path; fs.writeFileSync and
+    Path.write_text both follow symlinks, so the link is a permanent
+    compatibility bridge that needs no changes on their side. Recreated here on
+    every merge (and by the menu bar at boot) so a reboot's tmp sweep only ever
+    removes the LINK, never the data.
+
+    Migration: a REAL file at the /tmp path (pre-upgrade layout, or written by
+    an old merge after a reboot) is absorbed into the canonical store by the
+    caller before this runs; here it is replaced by the link."""
+    link = plan_path(REVIEW_QUEUE_ID)
+    store = store_path()
+    try:
+        if os.path.islink(link):
+            if os.readlink(link) == store:
+                return
+            os.unlink(link)
+        elif os.path.exists(link):
+            os.unlink(link)  # caller already absorbed its content
+        tmp_link = f"{link}.lnk.{os.getpid()}"
+        os.symlink(store, tmp_link)
+        os.replace(tmp_link, link)
+    except Exception as e:
+        print(f"[merge_review_queue] symlink maintenance failed: {e}", file=sys.stderr)
+
+
 def review_request_path() -> str:
     return os.path.join(state_dir(), "review-request.json")
 
@@ -159,7 +196,7 @@ def main() -> int:
         print("[merge_review_queue] source plan has 0 candidates; nothing to merge", file=sys.stderr)
         return 0
 
-    dst = plan_path(REVIEW_QUEUE_ID)
+    dst = store_path()
     existing = []
     plan_created_at = None
     if os.path.exists(dst):
@@ -171,6 +208,27 @@ def main() -> int:
         except Exception:
             existing = []
             plan_created_at = None
+    # Absorb a REAL file at the legacy /tmp location (pre-upgrade store, or one
+    # written by old code after a reboot) so no pending draft or decision flag
+    # is lost, then ensure_store_symlink() below replaces it with the link.
+    legacy = plan_path(REVIEW_QUEUE_ID)
+    if os.path.exists(legacy) and not os.path.islink(legacy):
+        try:
+            with open(legacy) as f:
+                lp = json.load(f)
+            lc = lp.get("candidates") or []
+            have = {_dedup_key(c) for c in existing}
+            absorbed = [c for c in lc if _dedup_key(c) not in have]
+            existing.extend(absorbed)
+            plan_created_at = plan_created_at or lp.get("created_at")
+            if absorbed:
+                print(
+                    f"[merge_review_queue] absorbed {len(absorbed)} candidate(s) "
+                    "from legacy /tmp plan into the durable store",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"[merge_review_queue] legacy plan absorb failed: {e}", file=sys.stderr)
     # Generation stamp: set ONLY when starting a fresh plan (the /tmp plan dies
     # on reboot/tmp-sweep and numbering restarts at 1). The menu bar's durable
     # approved-queue ledger uses this to ignore decisions that belong to a dead
