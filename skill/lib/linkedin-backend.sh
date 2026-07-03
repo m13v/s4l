@@ -191,7 +191,7 @@ _acquire_linkedin_pipeline_lock() {
     if [ "${_LI_PIPELINE_LOCK_HELD:-0}" = "1" ]; then
         return 0
     fi
-    local _who="${SAPS_PIPELINE_NAME:-$(basename "${0:-linkedin-pipeline}")}"
+    local _who="${S4L_PIPELINE_NAME:-$(basename "${0:-linkedin-pipeline}")}"
     # BAIL, don't wait. Reverted 2026-06-05 to the original behavior: if another
     # LinkedIn pipeline already drives the 9556 Chrome, this fire exits 0 and
     # launchd re-fires on its next cadence. The 2026-06-04/05 "wait + drop/retake
