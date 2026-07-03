@@ -71,6 +71,9 @@ from AppKit import (
     NSTrackingArea,
     NSTrackingMouseEnteredAndExited,
     NSTrackingActiveAlways,
+    NSEventModifierFlagCommand,
+    NSEventModifierFlagShift,
+    NSEventModifierFlagDeviceIndependentFlagsMask,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
@@ -104,6 +107,27 @@ class _ReviewPanel(NSPanel):
 
     def canBecomeMainWindow(self):
         return True
+
+    def performKeyEquivalent_(self, event):
+        # A rumps (status-bar) app has no Edit menu, so Cmd+V/C/X/A/Z have no
+        # menu item to dispatch to and AppKit silently drops them; every text
+        # field in this panel (reply editor, reject-reason note) was therefore
+        # un-pasteable. Route the standard editing actions down the responder
+        # chain ourselves.
+        flags = event.modifierFlags() & NSEventModifierFlagDeviceIndependentFlagsMask
+        if flags & NSEventModifierFlagCommand:
+            key = (event.charactersIgnoringModifiers() or "").lower()
+            shift = bool(flags & NSEventModifierFlagShift)
+            sel = {
+                "v": "paste:",
+                "c": "copy:",
+                "x": "cut:",
+                "a": "selectAll:",
+                "z": "redo:" if shift else "undo:",
+            }.get(key)
+            if sel is not None and NSApp.sendAction_to_from_(sel, None, self):
+                return True
+        return objc.super(_ReviewPanel, self).performKeyEquivalent_(event)
 
 
 def _log(msg):
