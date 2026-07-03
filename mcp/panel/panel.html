@@ -101,6 +101,24 @@
         </div>
       </section>
 
+      <!-- Collapsible view of what's saved for each project (the config the
+           pipeline reads), rendered as an editable form. Saves go through the
+           project_config tool's validated merge — never a raw file overwrite. -->
+      <section class="section" id="settings-card" hidden>
+        <button
+          class="section-row section-row-toggle"
+          id="settings-toggle"
+          type="button"
+          aria-expanded="false"
+        >
+          <span class="section-label">Project settings</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
+        <div class="settings-body" id="settings-body" hidden>
+          <div class="muted">&mdash;</div>
+        </div>
+      </section>
+
       <div class="log" id="log"></div>
     </div>
 
