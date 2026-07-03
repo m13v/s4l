@@ -69,7 +69,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Everything we own lives under one state dir (next to setup-state.json).
 const STATE_DIR =
-  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const RUNTIME_DIR = path.join(STATE_DIR, "runtime");
 const VENV_DIR = path.join(RUNTIME_DIR, ".venv");
 const RUNTIME_JSON = path.join(STATE_DIR, "runtime.json");
@@ -187,7 +187,7 @@ function isStrayCheckout(dir: string | undefined | null): boolean {
 // the running server does NOT live in can never be the pipeline repo on a
 // shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
-  const env = process.env.S4L_REPO_DIR;
+  const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
   if (looksLikeRepo(env) && !isStrayCheckout(env)) return env as string;
   const rt = readRuntime();
   if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir) && !isStrayCheckout(rt.repo_dir))
@@ -291,7 +291,7 @@ export function ensurePipelineCurrent(): void {
     // A real clone (npm/git install) is the user's working tree — never touch
     // it. A STRAY checkout (git clone nobody opted into, see isStrayCheckout)
     // does not qualify: fall through so healStrayCheckout() can reclaim.
-    const env = process.env.S4L_REPO_DIR;
+    const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
     if (looksLikeRepo(env) && !isStrayCheckout(env)) return;
     healStrayCheckout();
     // Nothing materialized yet, or no tarball to extract from: provision() owns
@@ -343,7 +343,7 @@ export function ensurePipelineCurrent(): void {
 // server boot from ensurePipelineCurrent(); best-effort, never throws.
 function healStrayCheckout(): void {
   try {
-    const env = process.env.S4L_REPO_DIR;
+    const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
     const rt = readRuntime();
     const stray =
       (looksLikeRepo(env) && isStrayCheckout(env) && (env as string)) ||
@@ -412,7 +412,7 @@ export function runtimeReady(): boolean {
 export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
-  return process.env.S4L_PYTHON || "python3";
+  return process.env.S4L_PYTHON || process.env.SAPS_PYTHON || "python3";
 }
 
 // First Chrome/Chromium binary that exists AND is executable, from the same
@@ -618,10 +618,10 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   setStep("repo", "running");
   let resolvedRepo: string;
   if (
-    looksLikeRepo(process.env.S4L_REPO_DIR) &&
-    !isStrayCheckout(process.env.S4L_REPO_DIR)
+    looksLikeRepo((process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR)) &&
+    !isStrayCheckout((process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR))
   ) {
-    resolvedRepo = process.env.S4L_REPO_DIR as string;
+    resolvedRepo = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR) as string;
     setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
   } else {
     if (!fs.existsSync(EMBEDDED_TARBALL)) {
@@ -983,9 +983,15 @@ function menubarPlistXml(python: string): string {
 \t\t<string>${os.homedir()}</string>
 \t\t<key>S4L_STATE_DIR</key>
 \t\t<string>${STATE_DIR}</string>
+\t\t<key>SAPS_STATE_DIR</key>
+\t\t<string>${STATE_DIR}</string>
 \t\t<key>S4L_PYTHON</key>
 \t\t<string>${python}</string>
+\t\t<key>SAPS_PYTHON</key>
+\t\t<string>${python}</string>
 \t\t<key>S4L_REPO_DIR</key>
+\t\t<string>${resolveRepoDir()}</string>
+\t\t<key>SAPS_REPO_DIR</key>
 \t\t<string>${resolveRepoDir()}</string>
 \t</dict>
 </dict>
