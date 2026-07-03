@@ -132,12 +132,15 @@ MENUBAR_PLIST = os.path.join(
 # sync with MENUBAR_STOP_FLAG in mcp/src/runtime.ts.
 STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
 
-# Autopilot scheduled tasks. The two queue workers must RUN in a dedicated folder
+# Autopilot scheduled tasks. Queue workers must RUN in a dedicated folder
 # (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
-# interactive Claude Code history (Claude buckets sessions by cwd). The single
-# pre-queue autopilot task is deprecated and removed outright. Keep this in sync
-# with queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts and scripts/s4l_box_update.sh.
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# interactive Claude Code history (Claude buckets sessions by cwd). saps-worker
+# is the universal type-blind worker (2026-07-02, one task drains every job
+# type); the phase1/phase2b pair are legacy per-type workers kept for installs
+# that predate it. The single pre-queue autopilot task is deprecated and removed
+# outright. Keep this in sync with queueWorkerCwd()/QUEUE_WORKERS/
+# LEGACY_QUEUE_WORKER_TASK_IDS in mcp/src/index.ts and scripts/s4l_box_update.sh.
+WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
 DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
 WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
 # "Claude*": the host app can run with a custom --user-data-dir (per-account
@@ -172,11 +175,11 @@ UPDATE_PROMPT = "Update social-autoposter to the latest version."
 # account, which is exactly the bug it caused.
 REARM_PROMPT = (
     "Set up the social-autoposter draft autopilot schedule for this Claude account. "
-    "If queue_setup is available, call it; then for EACH of saps-phase1-query and "
-    "saps-phase2b-draft call the host tool create_scheduled_task with taskId, "
-    "cronExpression \"* * * * *\", and the prompt — read it from "
-    "~/.claude/scheduled-tasks/<taskId>/SKILL.md (already on disk). Do not redo my X "
-    "connection or project setup — only register the scheduled tasks. Keep replies short."
+    "If queue_setup is available, call it; then for saps-worker call the host tool "
+    "create_scheduled_task with taskId, cronExpression \"* * * * *\", and the prompt "
+    "— read it from ~/.claude/scheduled-tasks/saps-worker/SKILL.md (already on disk). "
+    "Do not redo my X connection or project setup — only register the scheduled task. "
+    "Keep replies short."
 )
 
 # A pending draft job older than this (seconds) with nothing claiming it means no
@@ -505,6 +508,12 @@ class S4LMenuBar(rumps.App):
         try:
             oldest = None
             for sub in glob.glob(os.path.join(qroot, "pending", "*")):
+                # feedback-digest jobs are latency-insensitive (hourly kicker,
+                # retried forever) and may wait behind a long draft job; their
+                # age is not an autopilot stall. Mirrors autopilotStalled() in
+                # mcp/src/index.ts.
+                if os.path.basename(sub) == "feedback-digest":
+                    continue
                 for jf in glob.glob(os.path.join(sub, "*.json")):
                     if jf.endswith(".tmp"):
                         continue
