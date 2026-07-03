@@ -60,7 +60,7 @@ AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle"
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or str(
+    return os.environ.get("S4L_STATE_DIR") or str(
         Path.home() / ".social-autoposter-mcp"
     )
 
@@ -206,7 +206,7 @@ _snap_refreshing = [False]
 
 
 def _compute_snapshot_full():
-    repo = os.environ.get("SAPS_REPO_DIR") or str(Path.home() / "social-autoposter")
+    repo = os.environ.get("S4L_REPO_DIR") or str(Path.home() / "social-autoposter")
     scripts = os.path.join(repo, "scripts")
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
@@ -377,7 +377,7 @@ def request_accessibility() -> bool:
 # Live work keeps `since` fresh well under this window (the queue provider's poll
 # loop heartbeats every ~10s, the kicker re-stamps "scanning" every ~30s, and the
 # poster writes per post), so a signal older than this can only be a stuck stamp.
-ACTIVITY_TTL_SECONDS = float(os.environ.get("SAPS_ACTIVITY_TTL_S", "120"))
+ACTIVITY_TTL_SECONDS = float(os.environ.get("S4L_ACTIVITY_TTL_S", "120"))
 
 
 def _activity_is_stale(act) -> bool:
@@ -823,7 +823,7 @@ def flush_review_events():
             if lines:  # only corrupt lines left — clear the file
                 _outbox_remove(set())
             return
-        # scripts/ is on sys.path (SAPS_REPO_DIR insertion at menubar boot);
+        # scripts/ is on sys.path (S4L_REPO_DIR insertion at menubar boot);
         # import lazily so a missing pipeline repo degrades to buffer-only.
         try:
             from http_api import api_post
