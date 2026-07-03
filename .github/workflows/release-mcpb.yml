@@ -1,10 +1,20 @@
 name: release-mcpb
 
-# Build and publish the social-autoposter .mcpb (Story B double-click install)
-# to a GitHub Release. Mirrors scripts/release-mcpb.sh so local and CI produce
-# the same artifact.
+# Build the social-autoposter .mcpb and CLOBBER-UPLOAD it onto an EXISTING
+# GitHub Release. CI is an asset re-builder ONLY; it never creates releases
+# and never publishes npm:
+#   - it has no npm auth, so half-running the release script here leaves the
+#     npm and GitHub lanes diverged (the rc.6 incident, 2026-07-03);
+#   - creating a release here for an rc tag would (before the script's create
+#     guard) have cut it STABLE, moving releases/latest onto a prerelease for
+#     the whole fleet.
+# The ONLY way to cut a release is locally:
+#   bash scripts/release-mcpb.sh            # stable
+#   bash scripts/release-mcpb.sh --staging  # rc pre-release (staging channel)
+#   bash scripts/release-mcpb.sh --promote vX.Y.Z-rc.N
 #
-# Trigger: push a tag like v1.6.56, or run manually from the Actions tab.
+# Trigger: push a tag like v1.6.56 (after the local release created it), or
+# run manually from the Actions tab.
 
 on:
   push:
@@ -13,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.6.56). Defaults to package.json version."
+        description: "Existing release tag (e.g. v1.6.56). Defaults to the pushed tag."
         required: false
 
 permissions:
@@ -24,6 +34,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve tag + guard (CI never CREATES releases)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::No GitHub release exists for $TAG. CI only clobber-uploads the .mcpb onto an EXISTING release (no npm auth here, and creating one from CI risks cutting an rc as stable). Cut the release locally: bash scripts/release-mcpb.sh [--staging]."
+            exit 1
+          fi
+          echo "release $TAG exists; proceeding with asset build + clobber upload"
 
       - uses: actions/setup-node@v4
         with:
@@ -36,14 +62,8 @@ jobs:
         working-directory: mcp
         run: npm ci || npm install
 
-      - name: Build, pack, verify, release
+      - name: Build, pack, verify, upload asset (no npm, no release creation)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ARGS=()
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
-            ARGS+=(--tag "${{ github.event.inputs.tag }}")
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            ARGS+=(--tag "${GITHUB_REF_NAME}")
-          fi
-          bash scripts/release-mcpb.sh "${ARGS[@]}"
+          bash scripts/release-mcpb.sh --tag "$TAG" --no-npm
