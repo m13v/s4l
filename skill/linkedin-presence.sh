@@ -2,10 +2,13 @@
 # linkedin-presence.sh - read-only LinkedIn session presence pass.
 #
 # Purpose:
-#   Run a bounded, auditable browser pass in the real linkedin-harness Chrome.
-#   It only views first-party LinkedIn surfaces and performs small scroll passes.
-#   It does not like, follow, connect, message, comment, expand comments, or open
-#   post permalinks.
+#   Run a bounded, auditable browsing session in the real linkedin-harness
+#   Chrome. It random-walks first-party LinkedIn surfaces like a person:
+#   scrolls, dwells, clicks read-only links (top nav tabs, profiles from the
+#   feed, company pages, LinkedIn News stories), and navigates back. Clicks
+#   are restricted to an href allowlist of read-only linkedin.com pages.
+#   It does not like, follow, connect, message, comment, or touch any action
+#   button.
 #
 # The shell wrapper is the pipeline: scheduling, killswitch, locks, harness
 # bootstrap, and run_monitor logging. The browser action itself is deterministic
@@ -57,23 +60,9 @@ if [ "$DRY_RUN" != "1" ]; then
     fi
 fi
 
-MODE_ROLL=$(( RANDOM % 4 ))
-case "$MODE_ROLL" in
-    0) MODE="feed"; TARGET_URL="https://www.linkedin.com/feed/" ;;
-    1) MODE="notifications"; TARGET_URL="https://www.linkedin.com/notifications/" ;;
-    2) MODE="messaging"; TARGET_URL="https://www.linkedin.com/messaging/" ;;
-    *) MODE="profile"; TARGET_URL="https://www.linkedin.com/in/me/" ;;
-esac
-
-SCROLLS=$(( 1 + (RANDOM % 3) ))
-DWELL_A=$(( 2 + (RANDOM % 4) ))
-DWELL_B=$(( 2 + (RANDOM % 4) ))
-DWELL_C=$(( 2 + (RANDOM % 4) ))
-SCROLL_A=$(( 420 + (RANDOM % 260) ))
-SCROLL_B=$(( 420 + (RANDOM % 260) ))
-SCROLL_C=$(( 420 + (RANDOM % 260) ))
-
-log "=== LinkedIn Presence Run: $(date) (batch=$BATCH_ID mode=$MODE scrolls=$SCROLLS) ==="
+# The browse session itself (start surface, action mix, scrolls, clicks,
+# dwells) is randomized inside scripts/linkedin_presence.py.
+log "=== LinkedIn Presence Run: $(date) (batch=$BATCH_ID) ==="
 
 # shellcheck source=/dev/null
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
@@ -90,12 +79,24 @@ log_presence_run() {
     cost=$(python3 "$REPO_DIR/scripts/get_run_cost.py" \
         --since "$RUN_START" --scripts "linkedin-presence" 2>/dev/null || echo "0.0000")
 
+    # Pull the real session shape from the python summary line if present.
+    local scan="pages=1,scrolls=0,clicks=0"
+    local summary
+    summary=$(grep -o "LINKEDIN_PRESENCE_SUMMARY: .*" "$LOG_FILE" 2>/dev/null | tail -1)
+    if [ -n "$summary" ]; then
+        local pages scrolls clicks
+        pages=$(echo "$summary" | sed -n 's/.*pages=\([0-9]*\).*/\1/p')
+        scrolls=$(echo "$summary" | sed -n 's/.*scrolls=\([0-9]*\).*/\1/p')
+        clicks=$(echo "$summary" | sed -n 's/.*clicks=\([0-9]*\).*/\1/p')
+        scan="pages=${pages:-1},scrolls=${scrolls:-0},clicks=${clicks:-0}"
+    fi
+
     local args=(
         "$REPO_DIR/scripts/log_run.py" --script "presence_linkedin"
         --posted 0 --skipped 0 --failed "$failed"
         --cost "$cost" --elapsed "$elapsed"
         --scanned 1 --checked 1
-        --scan "pages=1,scrolls=$SCROLLS"
+        --scan "$scan"
     )
     if [ -n "$failure_reasons" ]; then
         args+=(--failure-reasons "$failure_reasons")
@@ -115,7 +116,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 if [ "$DRY_RUN" = "1" ]; then
-    log "DRY_RUN: would run mode=$MODE url=$TARGET_URL scrolls=$SCROLLS"
+    log "DRY_RUN: would run a randomized read-only browse session"
     exit 0
 fi
 
@@ -138,17 +139,14 @@ fi
 PRESENCE_RC=0
 PYTHON_BIN="${LINKEDIN_DISCOVER_PYTHON:-python3}"
 TIMEOUT_BIN="$(command -v gtimeout || command -v timeout || true)"
+PRESENCE_STEPS="${LINKEDIN_PRESENCE_STEPS:-0}"
 set +e
 if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" 180 "$PYTHON_BIN" "$REPO_DIR/scripts/linkedin_presence.py" \
-        --mode "$MODE" --url "$TARGET_URL" --scrolls "$SCROLLS" \
-        --amounts "$SCROLL_A,$SCROLL_B,$SCROLL_C" \
-        --dwells "$DWELL_A,$DWELL_B,$DWELL_C" 2>&1 | tee -a "$LOG_FILE"
+    "$TIMEOUT_BIN" 300 "$PYTHON_BIN" "$REPO_DIR/scripts/linkedin_presence.py" \
+        --steps "$PRESENCE_STEPS" --max-seconds 200 2>&1 | tee -a "$LOG_FILE"
 else
     "$PYTHON_BIN" "$REPO_DIR/scripts/linkedin_presence.py" \
-        --mode "$MODE" --url "$TARGET_URL" --scrolls "$SCROLLS" \
-        --amounts "$SCROLL_A,$SCROLL_B,$SCROLL_C" \
-        --dwells "$DWELL_A,$DWELL_B,$DWELL_C" 2>&1 | tee -a "$LOG_FILE"
+        --steps "$PRESENCE_STEPS" --max-seconds 200 2>&1 | tee -a "$LOG_FILE"
 fi
 PRESENCE_RC=${PIPESTATUS[0]}
 set -e
