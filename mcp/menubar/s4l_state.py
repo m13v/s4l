@@ -26,6 +26,23 @@ import time
 import urllib.request
 from pathlib import Path
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists still
+# export SAPS_*; this module reads S4L_* (STATE_DIR / REPO_DIR / ACTIVITY_TTL).
+# The repo dir must be read tolerantly INLINE (old name included) because the
+# mirror module itself lives in $REPO/scripts and isn't importable before the
+# sys.path insertion below. Best-effort: failure degrades to defaults.
+_repo_for_env = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
+if _repo_for_env:
+    _scripts_for_env = os.path.join(_repo_for_env, "scripts")
+    if _scripts_for_env not in sys.path:
+        sys.path.insert(0, _scripts_for_env)
+try:
+    import s4l_env  # noqa: E402
+
+    s4l_env.mirror()
+except Exception:
+    pass
+
 # Serializes read-modify-write on approved-queue.json. The menu bar's main thread
 # (approve click / restart resume) and the post-worker thread (status updates)
 # both mutate it; without this a concurrent interleave would drop an approval.
@@ -206,7 +223,11 @@ _snap_refreshing = [False]
 
 
 def _compute_snapshot_full():
-    repo = os.environ.get("S4L_REPO_DIR") or str(Path.home() / "social-autoposter")
+    repo = (
+        os.environ.get("S4L_REPO_DIR")
+        or os.environ.get("SAPS_REPO_DIR")  # pre-rename plists (2026-07-03)
+        or str(Path.home() / "social-autoposter")
+    )
     scripts = os.path.join(repo, "scripts")
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
