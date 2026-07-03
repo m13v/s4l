@@ -150,10 +150,10 @@ def _app_version():
 
     On a .mcpb box the extension dir has manifest.json + package.json at its
     root (one level above scripts/); read whichever resolves first. Honors
-    SAPS_REPO_DIR / REPO_DIR when the pipeline sets it (launchd plists do).
+    S4L_REPO_DIR / REPO_DIR when the pipeline sets it (launchd plists do).
     """
     root = Path(
-        os.environ.get("SAPS_REPO_DIR")
+        os.environ.get("S4L_REPO_DIR")
         or os.environ.get("REPO_DIR")
         or Path(__file__).resolve().parents[1]
     )
