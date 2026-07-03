@@ -141,6 +141,13 @@ STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
 # outright. Keep this in sync with queueWorkerCwd()/QUEUE_WORKERS/
 # LEGACY_QUEUE_WORKER_TASK_IDS in mcp/src/index.ts and scripts/s4l_box_update.sh.
 WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+# The universal worker every install converges on. The legacy per-type pair is
+# CONSOLIDATED into it by the same one-restart self-heal that fixes task
+# folders: the registry rewrite (while Claude is down) replaces both legacy
+# entries with one saps-worker entry. Until a box walks that path, the legacy
+# tasks still work (their SKILL.md is refreshed to the universal body on boot).
+WORKER_TASK_ID = "saps-worker"
+LEGACY_WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
 WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
 # "Claude*": the host app can run with a custom --user-data-dir (per-account
@@ -1153,8 +1160,10 @@ class S4LMenuBar(rumps.App):
 
     @staticmethod
     def _scheduled_task_cwd_needs_fix():
-        """Read-only: True if any worker task runs in the wrong folder OR the
-        deprecated autopilot task still exists. Drives the one-shot self-heal."""
+        """Read-only: True if any worker task runs in the wrong folder, the
+        deprecated autopilot task still exists, OR a legacy per-type worker
+        registration remains (to be consolidated into the single saps-worker).
+        Drives the one-shot self-heal."""
         try:
             for f in glob.glob(SCHED_REGISTRY_GLOB):
                 try:
@@ -1165,6 +1174,8 @@ class S4LMenuBar(rumps.App):
                 for t in d.get("scheduledTasks", []):
                     tid = t.get("id")
                     if tid in DEPRECATED_TASK_IDS:
+                        return True
+                    if tid in LEGACY_WORKER_TASK_IDS:
                         return True
                     if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
                         return True
