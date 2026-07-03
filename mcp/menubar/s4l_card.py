@@ -26,6 +26,7 @@ run loop, so that holds).
 """
 
 import datetime
+import json
 import re
 import time
 
@@ -45,6 +46,8 @@ from AppKit import (
     NSTextView,
     NSScrollView,
     NSScreen,
+    NSEvent,
+    NSWindowOcclusionStateVisible,
     NSColor,
     NSFont,
     NSView,
@@ -97,6 +100,67 @@ REJECT_REASONS = (
 
 # Client-side cap on tracked interactions per card (server clips at 50 too).
 MAX_INTERACTIONS = 50
+
+# Review-surface state mirrored to the state dir for out-of-process observers
+# (the menu bar watchdog, the dashboard, a debugging session). In the 2026-07-02
+# incident a card sat unseen for 3 hours and NOTHING on disk could distinguish
+# "cards shown and ignored" from "cards never shown"; this file is that record.
+REVIEW_STATE_FILE = "review-state.json"
+
+
+def _write_review_state(controller=None, last_event=None):
+    """Best-effort snapshot of the review surface to review-state.json. Passing
+    the controller explicitly matters during _build, when the module-level
+    _active has not been assigned yet."""
+    try:
+        from pathlib import Path
+
+        import s4l_state
+
+        c = controller if controller is not None else _active
+        state = {"open": False}
+        if c is not None and c._panel is not None:
+            state = c.status_dict()
+        if last_event:
+            state["last_event"] = last_event
+        state["updated_at"] = datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+        p = Path(s4l_state.state_dir()) / REVIEW_STATE_FILE
+        p.write_text(json.dumps(state) + "\n")
+    except Exception:
+        pass
+
+
+def _mouse_screen():
+    """The screen the pointer is on right now, i.e. where the user is actually
+    looking. Spawning on mainScreen() placed cards on whichever display last
+    held key focus, which on a multi-monitor Mac can be a corner the user never
+    checks. Falls back to mainScreen when the pointer is between screens."""
+    try:
+        loc = NSEvent.mouseLocation()
+        for s in NSScreen.screens():
+            f = s.frame()
+            if (
+                f.origin.x <= loc.x <= f.origin.x + f.size.width
+                and f.origin.y <= loc.y <= f.origin.y + f.size.height
+            ):
+                return s
+    except Exception:
+        pass
+    return NSScreen.mainScreen()
+
+
+def _corner_frame(screen):
+    """Top-right corner frame for the card on the given screen."""
+    vf = (
+        screen.visibleFrame()
+        if screen is not None
+        else NSMakeRect(0, 0, 1440, 900)
+    )
+    x = vf.origin.x + vf.size.width - W - M
+    y = vf.origin.y + vf.size.height - H - M
+    return NSMakeRect(x, y, W, H)
 
 
 class _ReviewPanel(NSPanel):
