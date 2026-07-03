@@ -169,13 +169,13 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # SETUP_PROMPT mirrors the in-chat panel's Setup button (panel.ts) verbatim so
 # both entry points kick off the same end-to-end flow.
 SETUP_PROMPT = (
-    "Set up the S4L plugin (social-autoposter) end to end now. Inspect and repair the runtime, "
+    "Set up the S4L plugin end to end now. Inspect and repair the runtime, "
     "auto-detect and connect my X session, scan my profile, discover and research "
     "my product, then infer and save a complete project with seeded search topics. "
     "Keep going without asking me to approve each safe setup step. Ask only if I "
     "must interactively sign in or no product can be identified."
 )
-UPDATE_PROMPT = "Update S4L (the social-autoposter plugin) to the latest version."
+UPDATE_PROMPT = "Update the S4L plugin to the latest version."
 # Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
 # uses) — it registers the routines under whatever account is logged in and shows
 # up in Routines. The host tool only runs inside an agent chat, so the menu bar
@@ -866,10 +866,10 @@ class S4LMenuBar(rumps.App):
             except Exception as e:
                 _capture(e, action="quit_remove_plist")
             self._relaunch_claude(user_data_dirs)
-            self._notify("S4L", "Autoposter stopped. Say \"start S4L\" in Claude to bring it back.")
+            self._notify("S4L", "S4L stopped. Say \"start S4L\" in Claude to bring it back.")
         except Exception as e:
             _capture(e, action="quit_app")
-            self._notify("S4L", "Couldn't fully stop the autoposter — see logs.")
+            self._notify("S4L", "Couldn't fully stop S4L — see logs.")
         finally:
             # Boot out our own KeepAlive agent. launchd kills this process as
             # part of the bootout, so nothing after this line is guaranteed to
