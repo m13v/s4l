@@ -8,9 +8,23 @@ fires once the last card is decided or the window is closed. The whole AppKit
 surface is isolated behind that one function so the menu bar wiring doesn't
 depend on the windowing details.
 
-Decision shape: {"n": int, "approved": bool, "text": str, "edited": bool,
-"drop_link": bool, "reject_category": str|None, "reject_note": str|None,
-"interactions": [{"type": str, "ts": str}], "dwell_ms": int}
+Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
+"edited": bool, "drop_link": bool, "reject_category": str|None,
+"reject_note": str|None, "interactions": [{"type": str, "ts": str}],
+"dwell_ms": int}
+
+Approving comes in two strengths: the plain Approve button, and the 😄 button
+right next to it, which approves AND stamps loved=True — the user's "this one
+was a really good pick" signal, which the feedback digest treats as strong
+positive evidence (a plain approve is merely counter-evidence against avoid
+entries).
+
+`present_feedback(on_submit)` is the OVERALL-feedback composer: a small
+floating panel with one free-text field, reachable from the card's 💬 button
+and from the menu bar's "Send feedback…" item. It carries guidance not tied to
+any single thread; the menu bar registers a default submit handler via
+`set_feedback_handler` (shipping decision='feedback' review events) so both
+entry points behave identically.
 
 Rejecting is a two-step flow: the Reject button swaps the card body for a
 reason picker (three one-tap categories plus Other, with an optional free-text
@@ -487,15 +501,43 @@ class _ReviewController(NSObject):
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
-        # Buttons at the TOP: Approve (left), Reject (right).
-        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 110, 30))
+        # Buttons at the TOP, one line: Approve, 😄 (approve + loved), then a
+        # small 💬 (overall feedback, decides nothing), Reject at the right.
+        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 96, 30))
         approve.setTitle_("Approve")
         approve.setBezelStyle_(NSBezelStyleRounded)
         approve.setTarget_(self)
         approve.setAction_("approve:")
         content.addSubview_(approve)
 
-        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 110, H - 42, 110, 30))
+        # 😄 = approve with the "really good one" signal (loved=True on the
+        # decision). Same posting path as Approve; only the feedback rail sees
+        # the difference.
+        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 100, H - 42, 44, 30))
+        smile.setTitle_("😄")
+        smile.setBezelStyle_(NSBezelStyleRounded)
+        smile.setTarget_(self)
+        smile.setAction_("approveLoved:")
+        try:
+            smile.setToolTip_("Approve and mark as a really good pick")
+        except Exception:
+            pass
+        content.addSubview_(smile)
+
+        # 💬 = overall feedback (about the pipeline, not this draft). Opens the
+        # composer panel next to the card; the card itself stays undecided.
+        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 184, H - 41, 30, 28))
+        fb.setTitle_("💬")
+        fb.setBordered_(False)
+        fb.setTarget_(self)
+        fb.setAction_("feedbackOpen:")
+        try:
+            fb.setToolTip_("Send overall feedback (not about this draft)")
+        except Exception:
+            pass
+        content.addSubview_(fb)
+
+        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 96, H - 42, 96, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
         reject.setTarget_(self)
@@ -795,7 +837,7 @@ class _ReviewController(NSObject):
             return self._drafts[self._idx].get("reply_text") or ""
 
     @objc.python_method
-    def _record(self, approved, reject_category=None, reject_note=None):
+    def _record(self, approved, reject_category=None, reject_note=None, loved=False):
         d = self._drafts[self._idx]
         orig = (d.get("reply_text") or "").strip()
         link = d.get("link_url") or ""
@@ -826,6 +868,7 @@ class _ReviewController(NSObject):
             {
                 "n": d["n"],
                 "approved": bool(approved),
+                "loved": bool(approved and loved),
                 "text": body,
                 "edited": bool(approved and body != orig),
                 "drop_link": bool(approved and drop_link),
@@ -897,6 +940,18 @@ class _ReviewController(NSObject):
         self._record(True)
         self._fire_decision()
         self._advance()
+
+    def approveLoved_(self, sender):
+        _log("approved with love")
+        self._record(True, loved=True)
+        self._fire_decision()
+        self._advance()
+
+    def feedbackOpen_(self, sender):
+        # Overall feedback is orthogonal to the card decision: the composer
+        # opens alongside, the card stays as-is (including in-progress edits).
+        self._track("feedback_open")
+        present_feedback()
 
     def reject_(self, sender):
         # Two-step reject: swap the card body for the reason picker. The
