@@ -64,7 +64,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MCP_DIR="$REPO_ROOT/mcp"
 BUNDLE="$MCP_DIR/social-autoposter.mcpb"
-GH_REPO="m13v/social-autoposter"
+GH_REPO="m13v/s4l"
 SIZE_CAP_MB=180
 
 TAG_OVERRIDE=""
