@@ -49,6 +49,7 @@ import objc
 from Foundation import (
     NSObject,
     NSMakeRect,
+    NSMakeSize,
     NSAttributedString,
     NSMutableAttributedString,
     NSURL,
@@ -92,6 +93,7 @@ from AppKit import (
     NSEventModifierFlagCommand,
     NSEventModifierFlagShift,
     NSEventModifierFlagDeviceIndependentFlagsMask,
+    NSViewWidthSizable,
 )
 
 # Strong reference to the live controller so pyobjc doesn't GC it mid-review
@@ -306,6 +308,35 @@ def _label(frame, text, *, size=12, bold=False, muted=False):
     return f
 
 
+def _editable_scroll(frame, text=""):
+    """Bezel-bordered scrollable text editor. The document view must be sized
+    to the scroll view's contentSize (NOT the outer frame) and track its width;
+    sized to the outer frame the text runs underneath the scroller. The
+    scroller itself auto-hides so it only appears when the text overflows.
+    Returns (scroll, textview)."""
+    scroll = NSScrollView.alloc().initWithFrame_(frame)
+    scroll.setHasVerticalScroller_(True)
+    scroll.setAutohidesScrollers_(True)
+    scroll.setBorderType_(NS_BEZEL_BORDER)
+    cs = scroll.contentSize()
+    tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, cs.width, cs.height))
+    tv.setFont_(NSFont.systemFontOfSize_(12))
+    tv.setRichText_(False)
+    tv.setEditable_(True)
+    tv.setSelectable_(True)
+    tv.setVerticallyResizable_(True)
+    tv.setHorizontallyResizable_(False)
+    tv.setMinSize_(NSMakeSize(0, cs.height))
+    tv.setMaxSize_(NSMakeSize(1e7, 1e7))
+    tv.setAutoresizingMask_(NSViewWidthSizable)
+    tv.textContainer().setWidthTracksTextView_(True)
+    tv.textContainer().setContainerSize_(NSMakeSize(cs.width, 1e7))
+    if text:
+        tv.setString_(text)
+    scroll.setDocumentView_(tv)
+    return scroll, tv
+
+
 class _ReviewController(NSObject):
     def initWithDrafts_onDecision_onComplete_(self, drafts, on_decision, on_complete):
         self = objc.super(_ReviewController, self).init()
@@ -504,9 +535,10 @@ class _ReviewController(NSObject):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
         # Buttons at the TOP, one line: Approve, Approve 😄 (approve + loved),
-        # a small feedback-bubble icon (overall feedback, decides nothing),
-        # Reject at the right.
-        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 84, 30))
+        # Feedback (overall feedback, decides nothing), Reject at the right.
+        # Widths are hand-fit so all four bezeled buttons share the 348pt row
+        # without truncating their titles.
+        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 78, 30))
         approve.setTitle_("Approve")
         approve.setBezelStyle_(NSBezelStyleRounded)
         approve.setTarget_(self)
@@ -518,7 +550,7 @@ class _ReviewController(NSObject):
         # rail sees the difference. Labeled as an approve variant, not a bare
         # emoji: a lone 😄 read as decoration and users doubted the click
         # registered (2026-07-03 feedback).
-        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 88, H - 42, 116, 30))
+        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 84, H - 42, 100, 30))
         smile.setTitle_("Approve 😄")
         smile.setBezelStyle_(NSBezelStyleRounded)
         smile.setTarget_(self)
@@ -529,22 +561,16 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(smile)
 
-        # Feedback bubble = overall feedback (about the pipeline, not this
-        # draft). Swaps the card body for the composer IN THIS WINDOW; a
-        # separate floating panel was tried first and opened somewhere the
-        # user never saw on a multi-monitor setup (2026-07-03: 7 clicks,
-        # zero sightings). SF Symbol, like the stats eye; emoji 💬 rendered
-        # as a grey three-dots glyph nobody could identify.
-        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 212, H - 40, 28, 26))
-        fb.setBordered_(False)
-        fb_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "bubble.left", "overall feedback"
-        )
-        if fb_img is not None:
-            fb.setImage_(fb_img)
-            fb.setTitle_("")
-        else:  # pre-Big Sur fallback: no SF Symbols
-            fb.setTitle_("💬")
+        # Feedback = overall feedback (about the pipeline, not this draft).
+        # Swaps the card body for the composer IN THIS WINDOW; a separate
+        # floating panel was tried first and opened somewhere the user never
+        # saw on a multi-monitor setup (2026-07-03: 7 clicks, zero sightings).
+        # A borderless bubble.left icon was tried next and read as decoration,
+        # not a button; a labeled bezel button matching its row mates won
+        # (2026-07-03 feedback).
+        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 190, H - 42, 80, 30))
+        fb.setTitle_("Feedback")
+        fb.setBezelStyle_(NSBezelStyleRounded)
         fb.setTarget_(self)
         fb.setAction_("feedbackOpen:")
         try:
@@ -553,7 +579,7 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(fb)
 
-        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 84, H - 42, 84, 30))
+        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 70, H - 42, 70, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
         reject.setTarget_(self)
@@ -703,18 +729,9 @@ class _ReviewController(NSObject):
         reply = d.get("reply_text") or ""
         link = d.get("link_url")
         composed = f"{reply} {link}" if link else reply
-        scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6)
+        scroll, tv = _editable_scroll(
+            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6), composed
         )
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(NS_BEZEL_BORDER)
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * M, 100))
-        tv.setFont_(NSFont.systemFontOfSize_(12))
-        tv.setRichText_(False)
-        tv.setEditable_(True)
-        tv.setSelectable_(True)
-        tv.setString_(composed)
-        scroll.setDocumentView_(tv)
         content.addSubview_(scroll)
         self._textview = tv
 
@@ -988,17 +1005,7 @@ class _ReviewController(NSObject):
                 muted=True,
             )
         )
-        scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(M, 54, W - 2 * M, H - 86 - 54)
-        )
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(NS_BEZEL_BORDER)
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * M, 100))
-        tv.setFont_(NSFont.systemFontOfSize_(12))
-        tv.setRichText_(False)
-        tv.setEditable_(True)
-        tv.setSelectable_(True)
-        scroll.setDocumentView_(tv)
+        scroll, tv = _editable_scroll(NSMakeRect(M, 54, W - 2 * M, H - 86 - 54))
         content.addSubview_(scroll)
         self._feedback_tv = tv
 
