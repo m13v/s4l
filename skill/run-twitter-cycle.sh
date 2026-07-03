@@ -30,6 +30,14 @@
 
 set -uo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 # 2026-05-28: launchd inherits a default open-files limit of 256 on macOS,
 # which is below the threshold the claude binary needs when it loads MCP
 # servers from ~/.claude.json (50+ servers, each opening a stdio pipe pair).
@@ -41,13 +49,13 @@ set -uo pipefail
 # if the kernel/account caps below this.
 ulimit -n 4096 2>/dev/null || true
 
-# Honor SAPS_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
+# Honor S4L_REPO_DIR (set by the MCP wrapper + launchd plists) so a .mcpb
 # install that materializes the repo under ~/.social-autoposter-mcp/repo/package
 # resolves correctly. Falls back to the legacy ~/social-autoposter path for
 # npm/git installs and direct invocations. Cascades to every $REPO_DIR/... ref
 # below (sourced libs + child scripts inherit it), so this one line fixes the
 # whole cycle's repo resolution on a bare .mcpb install.
-REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 SKILL_FILE="$REPO_DIR/SKILL.md"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
@@ -106,12 +114,12 @@ TW_ENGINE_PREFIX=""
 # 2h expire ceiling + 1h discovery window (variant D). The branch is on
 # DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
 # 2026-07-02 (first-run onboarding boost, per user request): the draft-mode
-# value accepts an env override, SAPS_DRAFT_FRESHNESS_HOURS, so the kicker
+# value accepts an env override, S4L_DRAFT_FRESHNESS_HOURS, so the kicker
 # wrapper (run-draft-and-publish.sh) can widen a brand-new user's FIRST draft
 # cycle to 48h and surface multiple review cards. Unset = the standard 24h
 # draft window. Autopilot (DRAFT_ONLY=0) ignores the override entirely.
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS="${SAPS_DRAFT_FRESHNESS_HOURS:-24}"
+    FRESHNESS_HOURS="${S4L_DRAFT_FRESHNESS_HOURS:-24}"
 else
     FRESHNESS_HOURS=2
 fi
@@ -132,12 +140,12 @@ fi
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
 # DRAFT mode widens discovery to 24h by default; autopilot keeps the winning D
-# setting of 1h. SAPS_DRAFT_FRESHNESS_HOURS (first-run onboarding boost, see the
+# setting of 1h. S4L_DRAFT_FRESHNESS_HOURS (first-run onboarding boost, see the
 # FRESHNESS_HOURS branch above) can widen the draft-mode value further (48h on a
 # brand-new install's first cycle). The lean Phase 1 CDP scraper reads
 # FRESHNESS_HOURS_DISCOVER directly and honors any value.
 if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS_DISCOVER="${SAPS_DRAFT_FRESHNESS_HOURS:-24}"
+    FRESHNESS_HOURS_DISCOVER="${S4L_DRAFT_FRESHNESS_HOURS:-24}"
 else
     FRESHNESS_HOURS_DISCOVER=1
 fi
@@ -502,10 +510,10 @@ import project_excludes as pe
 
 _pp_args = ['python3', os.path.join(REPO, 'scripts', 'pick_project.py'),
             '--platform', 'twitter', '--count', '1', '--json']
-# Manual-mode (MCP draft_cycle) single-project scoping: when SAPS_FORCE_PROJECT
+# Manual-mode (MCP draft_cycle) single-project scoping: when S4L_FORCE_PROJECT
 # is set, force that exact project instead of the weighted-random autopilot
 # pick, so a customer's interactive cycle only ever touches their own project.
-_force_project = os.environ.get('SAPS_FORCE_PROJECT')
+_force_project = os.environ.get('S4L_FORCE_PROJECT')
 if _force_project:
     _pp_args += ['--project', _force_project]
 res = subprocess.run(
@@ -828,8 +836,8 @@ fi
 # cooldown is live we skip the cycle WITHOUT navigating (no flagged traffic);
 # once it elapses we re-probe; an 'ok' probe clears the marker and resumes. Only
 # gated:true ever writes the marker, so fail-open is preserved.
-_SAPS_STATE_DIR="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}"
-_GATE_FILE="$_SAPS_STATE_DIR/x-access-gate.json"
+_S4L_STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+_GATE_FILE="$_S4L_STATE_DIR/x-access-gate.json"
 _NOW=$(date +%s)
 
 # Backoff short-circuit: still inside a cooldown window -> skip without probing.
@@ -1653,7 +1661,7 @@ if [ "${SCAN_ONLY:-0}" = "1" ]; then
     # documented in twitter_cycle_helper.py:cmd_candidates; tweet_text/draft fields
     # are pipe+newline sanitized there, so a field split is safe). Batch id + out
     # path travel via env so the single-quoted python needs no shell interpolation.
-    printf '%s\n' "$CANDIDATES" | SAPS_SCAN_FILE="$SCAN_FILE" SAPS_SCAN_BATCH="$BATCH_ID" python3 -c '
+    printf '%s\n' "$CANDIDATES" | S4L_SCAN_FILE="$SCAN_FILE" S4L_SCAN_BATCH="$BATCH_ID" python3 -c '
 import json, os, sys
 def _i(x):
     try:
@@ -1680,7 +1688,7 @@ for line in sys.stdin:
         "views": _i(p[11]), "author_followers": _i(p[12]), "age_hours": _f(p[13]),
         "existing_draft": p[14] if len(p) > 14 else "", "existing_draft_style": p[15] if len(p) > 15 else "",
     })
-json.dump({"batch_id": os.environ["SAPS_SCAN_BATCH"], "candidates": out}, open(os.environ["SAPS_SCAN_FILE"], "w"))
+json.dump({"batch_id": os.environ["S4L_SCAN_BATCH"], "candidates": out}, open(os.environ["S4L_SCAN_FILE"], "w"))
 ' 2>/dev/null || printf '{"batch_id": "%s", "candidates": []}' "$BATCH_ID" > "$SCAN_FILE"
     SCAN_N=$(python3 -c "import json; print(len(json.load(open('$SCAN_FILE')).get('candidates') or []))" 2>/dev/null || echo 0)
     log "SCAN_ONLY=1: $SCAN_N candidate(s) scored and written to $SCAN_FILE. Stopping before drafting (agent drafts next)."
@@ -1704,7 +1712,7 @@ CANDIDATE_BLOCK=""
 # AFTER the browser lock is acquired, we can deterministically pre-fetch the
 # media (images/videos/GIFs/link-cards) of every thread the model is about to
 # draft against and feed it into the prep prompt. Gated by
-# SAPS_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
+# S4L_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
 # set_media action + thread_media column) deploys. Populated in the loop below.
 MEDIA_URLS_FILE=$(mktemp -t saps_twitter_media_urls_XXXXXX.tsv)
 while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clikes crts creplies cviews cfollowers cage cdraft cdraftstyle cdraftage; do
@@ -1745,7 +1753,7 @@ ALL_PROJECTS_JSON=$(python3 -c "
 import json, os
 config = json.load(open(os.path.expanduser('~/social-autoposter/config.json')))
 projects = config.get('projects', [])
-lane = os.environ.get('SAPS_ACTIVE_LANE', '')
+lane = os.environ.get('S4L_ACTIVE_LANE', '')
 if lane == 'personal_brand':
     # Personal-brand lane is pure organic growth: the drafter must NOT see any
     # product config at all (no website, links, booking_link, get_started_link,
@@ -1804,7 +1812,7 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 #   treatment = "decoupled" wording: the reply must stand on its own and NOT be
 #               built as a concede-the-obvious-then-pivot-to-the-product setup;
 #               product mentioned only when genuinely relevant.
-# The arm is stamped onto every post this cycle via SAPS_DRAFT_PROMPT_VARIANT
+# The arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
 # (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
 # mirroring the tail_link_variant plumbing. Split tunable via
 # TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment' (the
@@ -1815,7 +1823,7 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # decoupled vs the old behavior on our account. The dashboard reads the SAME var
 # with the SAME default (bin/server.js), so display and routing never diverge.
 DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-1}"
-SAPS_DRAFT_PROMPT_VARIANT=$(python3 -c "
+S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
     rate = float('$DRAFT_PROMPT_AB_RATE')
@@ -1824,19 +1832,19 @@ except Exception:
 rate = min(1.0, max(0.0, rate))
 print('treatment' if random.random() < rate else 'control')
 " 2>/dev/null || echo treatment)
-export SAPS_DRAFT_PROMPT_VARIANT
-log "Draft-prompt A/B arm: $SAPS_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
-if [ "$SAPS_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
+export S4L_DRAFT_PROMPT_VARIANT
+log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
+if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
     DRAFT_DIRECTIVE="Otherwise: draft a direct, natural reply that stands on its own as a useful contribution to the thread. Mention the matched project only when it is genuinely the most relevant thing to say, and state it plainly in one clause; most replies will not need it. Do NOT build the reply as a concede-the-obvious-then-pivot-to-the-product setup. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
 else
     DRAFT_DIRECTIVE="Otherwise: draft a reply using the best engagement style. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling, do not apply any other length rule here. NEVER em dashes. Apply the matched project's \`voice\` block from ALL_PROJECTS_JSON: follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
 fi
-# Personal-brand lane (SAPS_ACTIVE_LANE=personal_brand, set by saps_mode.py):
+# Personal-brand lane (S4L_ACTIVE_LANE=personal_brand, set by saps_mode.py):
 # replace the product-framed directive entirely. This lane is pure organic
 # growth: no product, no link, no CTA. The reply must add real value grounded in
 # the persona's first-hand material (the PERSONA CORPUS block + the persona voice
 # block), not concede-and-agree filler. Overrides both A/B arms above.
-if [ "${SAPS_ACTIVE_LANE:-}" = "personal_brand" ]; then
+if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ]; then
     DRAFT_DIRECTIVE="Otherwise: draft a reply that stands on its own as a genuinely useful contribution to THIS thread. Ground it in the persona's real, first-hand experience from the PERSONA CORPUS block below (specific projects, real numbers, sharp opinions, actual failures) and in the persona's \`voice\` block from ALL_PROJECTS_JSON. Add exactly ONE of: a concrete specific from that lived experience, a sharp non-obvious opinion, a useful pointer, or a question that genuinely moves the thread forward. NEVER generic agreement ('makes sense', 'this is spot on', 'great point', 'the nuance here is'). This is a personal account, not a brand: sound like a real person in the thread. If web search is available and the thread hinges on a current fact, verify it before drafting rather than guessing. Length is governed ENTIRELY by the per-style LENGTH LIMIT in the style block above; obey that target and ceiling. NEVER em dashes. Follow voice.tone, never violate voice.never, mirror voice.examples / voice.examples_good when present."
 fi
 
@@ -1878,10 +1886,10 @@ payload = {
 }
 print(json.dumps(payload))
 " "$TOP_REPORT" "$TOP_QUERIES_PER_PROJECT_JSON" "$SUPPLY_SIGNAL_JSON" "$DUD_QUERIES_JSON" "$PICKED_STYLE" "$PICKED_MODE" "$TOP_TOPICS_JSON" 2>/dev/null || echo '{}')
-SAPS_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
-export SAPS_TWITTER_GEN_TRACE_PATH
-if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
-    log "Generation trace: $SAPS_TWITTER_GEN_TRACE_PATH ($(wc -c < "$SAPS_TWITTER_GEN_TRACE_PATH") bytes)"
+S4L_TWITTER_GEN_TRACE_PATH=$(printf '%s' "$TRACE_INPUT" | python3 "$REPO_DIR/scripts/write_generation_trace.py" --prefix twitter_gen_trace_ 2>/dev/null || echo "")
+export S4L_TWITTER_GEN_TRACE_PATH
+if [ -n "$S4L_TWITTER_GEN_TRACE_PATH" ] && [ -f "$S4L_TWITTER_GEN_TRACE_PATH" ]; then
+    log "Generation trace: $S4L_TWITTER_GEN_TRACE_PATH ($(wc -c < "$S4L_TWITTER_GEN_TRACE_PATH") bytes)"
 else
     log "WARN: generation_trace build returned empty path; posts this cycle will have NULL trace"
 fi
@@ -1921,7 +1929,7 @@ log "twitter-browser lock held (pid=$$) Phase 2b-prep"
 # Drop stale singleton locks (see clean_stale_singleton.sh, also called in Phase 1).
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
-# Thread-media capture (2026-06-03, gated by SAPS_TWITTER_CAPTURE_MEDIA, default
+# Thread-media capture (2026-06-03, gated by S4L_TWITTER_CAPTURE_MEDIA, default
 # OFF). Now that the browser lock is held and the harness Chrome is up, do ONE
 # cheap deterministic pass over every candidate thread to pull its media
 # (images/videos/GIFs/link-cards), persist each into
@@ -1931,7 +1939,7 @@ ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 # the prep prompt forbids the model from calling twitter_browser.py. Entirely
 # best-effort: any failure leaves MEDIA_BLOCK empty and the cycle proceeds.
 MEDIA_BLOCK=""
-if [ "${SAPS_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${SAPS_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
+if [ "${S4L_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${S4L_TWITTER_CAPTURE_MEDIA:-}" = "true" ]; then
     if [ -s "$MEDIA_URLS_FILE" ]; then
         log "Phase 2b-prep: capturing thread media for $(wc -l < "$MEDIA_URLS_FILE" | tr -d ' ') candidate(s)..."
         MEDIA_BLOCK=$(python3 "$REPO_DIR/scripts/capture_thread_media.py" --urls-file "$MEDIA_URLS_FILE" --scroll 1 2>>"$LOG_FILE" || true)
@@ -1942,7 +1950,7 @@ if [ "${SAPS_TWITTER_CAPTURE_MEDIA:-0}" = "1" ] || [ "${SAPS_TWITTER_CAPTURE_MED
         fi
     fi
 else
-    log "Phase 2b-prep: thread-media capture disabled (SAPS_TWITTER_CAPTURE_MEDIA not set)."
+    log "Phase 2b-prep: thread-media capture disabled (S4L_TWITTER_CAPTURE_MEDIA not set)."
 fi
 rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 
@@ -1953,7 +1961,7 @@ rm -f "$MEDIA_URLS_FILE" 2>/dev/null || true
 # synthesized content_angle paragraph. Empty string in the promotion lane, so
 # promotion prompts stay lean and config.json is never bloated with the corpus.
 CORPUS_BLOCK=""
-if [ "${SAPS_ACTIVE_LANE:-}" = "personal_brand" ] && [ -f "$REPO_DIR/persona_corpus.txt" ]; then
+if [ "${S4L_ACTIVE_LANE:-}" = "personal_brand" ] && [ -f "$REPO_DIR/persona_corpus.txt" ]; then
     CORPUS_BLOCK="## PERSONA CORPUS (raw first-hand material — ground your reply in THIS)
 This is the persona's own public writing and work, verbatim. Quote and draw real specifics from it: actual projects, real numbers, sharp opinions, real failures. Do NOT invent anything not supported here or in the persona voice block. Use it to make the reply concrete and unmistakably human.
 $(cat "$REPO_DIR/persona_corpus.txt")
@@ -2106,8 +2114,8 @@ echo "$PREP_OUTPUT" >> "$LOG_FILE"
 # standard for BOTH lanes: autopilot direct-post AND DRAFT_ONLY manual MCP review.
 # The old DRAFT_ONLY=1 -> POST_TOP_N=0 special-case was removed on purpose, so the
 # human reviews the exact same one highest-Virality draft the autopilot would post.
-# Override with SAPS_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
-POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
+# Override with S4L_TWITTER_POST_TOP_N (default 1; 0 = no cap, env opt-out only).
+POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 
 # --- ROLLING VIRALITY BAR (2026-07-02) --------------------------------------
 # Fetch THIS install's trailing-24h virality percentile so the parse step posts
@@ -2119,30 +2127,30 @@ POST_TOP_N="${SAPS_TWITTER_POST_TOP_N:-1}"
 #   - DRAFT_ONLY: new users / manual review see every draft (we don't even fetch).
 #   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
 #   - Fetch failure: fail-open, never silence posting on a transient API blip.
-# Tunables: SAPS_TWITTER_VIRALITY_PCTILE (default 0.97),
-#           SAPS_TWITTER_VIRALITY_MIN_SAMPLE (default 200).
+# Tunables: S4L_TWITTER_VIRALITY_PCTILE (default 0.97),
+#           S4L_TWITTER_VIRALITY_MIN_SAMPLE (default 200).
 VIRALITY_THRESHOLD=""
 if [ "${DRAFT_ONLY:-0}" != "1" ]; then
-    VIRALITY_THRESHOLD=$(SAPS_VPCTILE="${SAPS_TWITTER_VIRALITY_PCTILE:-0.97}" \
-        SAPS_VMIN="${SAPS_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+    VIRALITY_THRESHOLD=$(S4L_VPCTILE="${S4L_TWITTER_VIRALITY_PCTILE:-0.97}" \
+        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
         python3 -c "
 import os, sys
 sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
 from http_api import api_get
 try:
     r = api_get('/api/v1/twitter-candidates/virality-threshold',
-                {'pctile': os.environ['SAPS_VPCTILE'], 'hours': 24})
+                {'pctile': os.environ['S4L_VPCTILE'], 'hours': 24})
     d = (r or {}).get('data') or {}
     thr = d.get('threshold')
     n = int(d.get('sample_count') or 0)
-    mn = int(os.environ['SAPS_VMIN'])
+    mn = int(os.environ['S4L_VMIN'])
     if thr is not None and n >= mn:
         print(f'{float(thr):.4f}')
 except BaseException as e:
     sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
 " 2>>"$LOG_FILE" || echo "")
     if [ -n "$VIRALITY_THRESHOLD" ]; then
-        log "Virality bar ACTIVE: p${SAPS_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 posts only if it clears the bar."
+        log "Virality bar ACTIVE: p${S4L_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 posts only if it clears the bar."
     else
         log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 posts ungated."
     fi
@@ -2151,7 +2159,7 @@ fi
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
 # 'rejected' array into \$SKIP_FILE so log_twitter_skips.py can persist a
 # reason against every twitter_candidates row Claude reviewed but didn't pick.
-SAPS_CAND_VIR="$CANDIDATES" SAPS_POST_TOP_N="$POST_TOP_N" VIRALITY_THRESHOLD="$VIRALITY_THRESHOLD" python3 -c "
+S4L_CAND_VIR="$CANDIDATES" S4L_POST_TOP_N="$POST_TOP_N" VIRALITY_THRESHOLD="$VIRALITY_THRESHOLD" python3 -c "
 import json, sys, os
 text = sys.stdin.read().strip()
 try:
@@ -2170,16 +2178,16 @@ rejected   = so.get('rejected',   []) if isinstance(so, dict) else []
 # (pipe cols: id|url|author|text|virality|delta|...). Shared by the top-N cap
 # and the rolling virality bar below.
 _vir = {}
-for _ln in (os.environ.get('SAPS_CAND_VIR', '') or '').splitlines():
+for _ln in (os.environ.get('S4L_CAND_VIR', '') or '').splitlines():
     _p = _ln.split('|')
     if len(_p) >= 5 and _p[0].isdigit():
         try: _vir[int(_p[0])] = float(_p[4] or 0)
         except Exception: pass
 # TOP-N POST CAP (2026-06-29): keep only the highest-Virality on-brand pick(s).
-# SAPS_POST_TOP_N=0 disables the cap (env opt-out only; the cap applies to both
+# S4L_POST_TOP_N=0 disables the cap (env opt-out only; the cap applies to both
 # autopilot and DRAFT_ONLY lanes as of 2026-06-30). Truncated picks are dropped
 # from the plan, so they stay status='pending' (NOT 'rejected'); Phase 0 salvages.
-_top_n = int(os.environ.get('SAPS_POST_TOP_N', '1') or '1')
+_top_n = int(os.environ.get('S4L_POST_TOP_N', '1') or '1')
 _deferred = 0
 if _top_n > 0 and len(candidates) > _top_n:
     candidates.sort(key=lambda c: _vir.get(c.get('candidate_id'), 0.0), reverse=True)
@@ -2355,7 +2363,7 @@ log "twitter-browser lock held (pid=$$) Phase 2b-post"
 ensure_twitter_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 
 log "Phase 2b-post: posting $PLAN_COUNT candidate(s)..."
-POST_OUTPUT=$("${SAPS_PYTHON:-python3}" "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
+POST_OUTPUT=$("${S4L_PYTHON:-python3}" "$REPO_DIR/scripts/twitter_post_plan.py" --plan "$PLAN_FILE" 2>&1)
 echo "$POST_OUTPUT" >> "$LOG_FILE"
 
 # The post helper prints a JSON summary on its last stdout line.
@@ -2372,8 +2380,8 @@ rm -f "$PLAN_FILE"
 # Generation trace tempfile cleanup. By now every post in this cycle that
 # made it to log_post.py has the trace persisted to posts.generation_trace
 # JSONB, so the on-disk JSON is redundant. Best-effort delete.
-if [ -n "$SAPS_TWITTER_GEN_TRACE_PATH" ] && [ -f "$SAPS_TWITTER_GEN_TRACE_PATH" ]; then
-    rm -f "$SAPS_TWITTER_GEN_TRACE_PATH"
+if [ -n "$S4L_TWITTER_GEN_TRACE_PATH" ] && [ -f "$S4L_TWITTER_GEN_TRACE_PATH" ]; then
+    rm -f "$S4L_TWITTER_GEN_TRACE_PATH"
 fi
 
 # --- No end-of-cycle expire ------------------------------------------------
