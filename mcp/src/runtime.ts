@@ -175,6 +175,32 @@ function isStrayCheckout(dir: string | undefined | null): boolean {
   return looksLikeRepo(MATERIALIZED_REPO) || fs.existsSync(EMBEDDED_TARBALL);
 }
 
+// S4L_REPO_DIR frequently points AT the materialized repo itself rather than a
+// user clone: the menubar's launchd plist exports it so snapshot.py resolves
+// the pipeline, and macOS `open` propagates the caller's environment, so a
+// menubar-driven Claude relaunch leaks it into Desktop and every MCP server
+// child. Treating that value as a "real clone, never touch" froze every
+// self-update lane (the bundle advanced while repo/package stayed stale and
+// the update banner re-fired forever, 2026-07-03).
+function isMaterializedPath(dir: string | undefined | null): boolean {
+  if (!dir) return false;
+  try {
+    return path.resolve(dir) === path.resolve(MATERIALIZED_REPO);
+  } catch {
+    return false;
+  }
+}
+
+// The env repo override, but ONLY when it names a genuine external clone the
+// user owns (npm/git install). The materialized repo and stray checkouts do
+// not qualify — self-update lanes must stay in charge of those.
+function envRepoClone(): string | null {
+  const env = process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR;
+  if (!env || isMaterializedPath(env)) return null;
+  if (!looksLikeRepo(env) || isStrayCheckout(env)) return null;
+  return env;
+}
+
 // Resolve the pipeline repo the server shells out to, preferring (in order):
 //   1. S4L_REPO_DIR when it's a real clone (npm/git install, Story A); never
 //      overwritten, power users keep their working tree.
@@ -188,7 +214,8 @@ function isStrayCheckout(dir: string | undefined | null): boolean {
 // shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
   const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
-  if (looksLikeRepo(env) && !isStrayCheckout(env)) return env as string;
+  const clone = envRepoClone();
+  if (clone) return clone;
   const rt = readRuntime();
   if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir) && !isStrayCheckout(rt.repo_dir))
     return rt.repo_dir;
@@ -290,9 +317,10 @@ export function ensurePipelineCurrent(): void {
   try {
     // A real clone (npm/git install) is the user's working tree — never touch
     // it. A STRAY checkout (git clone nobody opted into, see isStrayCheckout)
-    // does not qualify: fall through so healStrayCheckout() can reclaim.
-    const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
-    if (looksLikeRepo(env) && !isStrayCheckout(env)) return;
+    // does not qualify: fall through so healStrayCheckout() can reclaim. Nor
+    // does S4L_REPO_DIR pointing at the materialized repo itself (leaked env,
+    // see envRepoClone): that repo is exactly what this refresh maintains.
+    if (envRepoClone()) return;
     healStrayCheckout();
     // Nothing materialized yet, or no tarball to extract from: provision() owns
     // the first materialize; this only refreshes an existing one.
@@ -617,11 +645,9 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // repo path. requirements.txt MUST exist after this for the deps step.
   setStep("repo", "running");
   let resolvedRepo: string;
-  if (
-    looksLikeRepo((process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR)) &&
-    !isStrayCheckout((process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR))
-  ) {
-    resolvedRepo = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR) as string;
+  const envClone = envRepoClone();
+  if (envClone) {
+    resolvedRepo = envClone;
     setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
   } else {
     if (!fs.existsSync(EMBEDDED_TARBALL)) {
