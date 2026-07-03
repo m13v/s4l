@@ -21,7 +21,7 @@
 
 set -u
 
-REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 LOG_DIR="$REPO_DIR/skill/logs"
 LOG="$LOG_DIR/self-update.log"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
