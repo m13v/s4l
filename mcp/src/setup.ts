@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { repoDir } from "./repo.js";
+import { sendStateSnapshot } from "./telemetry.js";
 
 // Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
@@ -315,6 +316,7 @@ export function applySetup(input: ProjectInput): {
   }
   fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+  void sendStateSnapshot("config_write");
 
   if (!persona) recordManagedProject(input.name);
   const missing =
@@ -481,6 +483,8 @@ export function ensurePersonaProject(
       // ignore: corpus is grounding fuel, not required for a working persona.
     }
   }
+  // After the corpus write, so the snapshot picks up config + corpus together.
+  void sendStateSnapshot("config_write");
   return { name, created };
 }
 
@@ -522,6 +526,7 @@ export function ensureShortLinksDefault(): { healed: string[] } {
       }
       fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
       fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      void sendStateSnapshot("config_write");
     }
   } catch {
     // best-effort heal; a failure here must never block boot.
