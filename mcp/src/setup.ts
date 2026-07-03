@@ -16,7 +16,7 @@ import { repoDir } from "./repo.js";
 
 // Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
-  process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 
 // The pipeline reads projects[] from config.json. Override for tests / custom
@@ -24,7 +24,7 @@ const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 // per call, not a load-time const, because a bare .mcpb install materializes the
 // repo after boot and setup must write config.json into THAT repo.
 export function configPath(): string {
-  return process.env.SAPS_CONFIG_PATH || path.join(repoDir(), "config.json");
+  return process.env.S4L_CONFIG_PATH || path.join(repoDir(), "config.json");
 }
 
 // Fields the X drafting prompts genuinely consume. Required ones must all be
@@ -332,7 +332,7 @@ export function applySetup(input: ProjectInput): {
 // products scope list (no recordManagedProject) — that keeps it off the product-
 // readiness counts and the "all projects ready" gate. It is identified by
 // `persona: true`, runs with `enabled: false` (so the normal weighted pick never
-// touches it) and is force-selected via SAPS_FORCE_PROJECT only when the mode
+// touches it) and is force-selected via S4L_FORCE_PROJECT only when the mode
 // toggle is on. Keep these defaults in lockstep with scripts/saps_mode.py and the
 // hand-authored PersonalBrand entry in config.json.
 export const PERSONA_DEFAULT_NAME = "PersonalBrand";
@@ -576,7 +576,7 @@ export function hasReadyProject(): boolean {
 // The personal-brand persona project (persona:true) is intentionally kept OUT of
 // the managed-products scope, so listManagedProjectStatus()/hasReadyProject() never
 // count it. But in personal_brand mode the cycle DOES draft for it (force-selected
-// via SAPS_FORCE_PROJECT). Without this helper a personal-brand-only ("self promo")
+// via S4L_FORCE_PROJECT). Without this helper a personal-brand-only ("self promo")
 // setup looks like "no project configured" everywhere — the autopilot kicker never
 // installs and the doctor can't see it. Reports whether the persona exists AND is
 // fully configured (has every required field, incl. seeded topics). (2026-06-30)
