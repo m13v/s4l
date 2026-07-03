@@ -853,12 +853,12 @@ def _cmd_detect_gate(args):
         print("detect-gate: inconclusive ({}), proceeding".format(detail), file=sys.stderr)
         sys.exit(0)
     # Conclusively logged out. Trip the killswitch for the whole fleet.
-    run_log_path = os.environ.get("SAPS_RUN_LOG_PATH", "")
+    run_log_path = os.environ.get("S4L_RUN_LOG_PATH", "")
     engage(
         signal="login_redirect",
         detail="detect-gate: {}".format(detail),
         run_log_path=run_log_path,
-        extra={"detected_by": os.environ.get("SAPS_PIPELINE_NAME", "?"), "probe": "feed_only"},
+        extra={"detected_by": os.environ.get("S4L_PIPELINE_NAME", "?"), "probe": "feed_only"},
         send_email=not args.no_email,
     )
     print(
