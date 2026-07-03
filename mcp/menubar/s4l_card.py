@@ -550,7 +550,7 @@ class _ReviewController(NSObject):
         # rail sees the difference. Labeled as an approve variant, not a bare
         # emoji: a lone 😄 read as decoration and users doubted the click
         # registered (2026-07-03 feedback).
-        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 84, H - 42, 100, 30))
+        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 82, H - 42, 100, 30))
         smile.setTitle_("Approve 😄")
         smile.setBezelStyle_(NSBezelStyleRounded)
         smile.setTarget_(self)
@@ -568,7 +568,7 @@ class _ReviewController(NSObject):
         # A borderless bubble.left icon was tried next and read as decoration,
         # not a button; a labeled bezel button matching its row mates won
         # (2026-07-03 feedback).
-        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 190, H - 42, 80, 30))
+        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 186, H - 42, 90, 30))
         fb.setTitle_("Feedback")
         fb.setBezelStyle_(NSBezelStyleRounded)
         fb.setTarget_(self)
@@ -579,7 +579,7 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(fb)
 
-        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 70, H - 42, 70, 30))
+        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
         reject.setTarget_(self)
