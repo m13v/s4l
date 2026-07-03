@@ -2066,7 +2066,7 @@ class S4LMenuBar(rumps.App):
                     "reject_note": body,
                 }
             )
-            self._notify("S4L", "Feedback sent — it will steer future drafts.")
+            self._notify("S4L", "Feedback sent. It will steer future drafts.")
         except Exception:
             pass
 
