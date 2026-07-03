@@ -56,16 +56,21 @@ MAX_HISTORY = 50
 
 # Travels inside the JSON the prep prompt embeds (ALL_PROJECTS_JSON is the
 # full project entry), so the drafting model reads its own operating manual
-# for the block. Soft steering by design: judgment, not a hard ban.
+# for the block. Split semantics (2026-07-03, after the persona lane kept
+# recycling a rejected draft structure): candidate JUDGING signals stay soft
+# (judgment, not a hard ban), but draft_style_notes is MANDATORY when
+# writing; if it doesn't beat the engagement style's structural template,
+# user corrections never stick.
 DEFAULT_INSTRUCTION = (
     "Human review feedback for this project, distilled from the user's "
-    "approve/reject decisions on draft cards. When judging candidates and "
-    "drafting replies: treat audience_avoid and thread_avoid as strong "
-    "negative signals (prefer rejecting matching candidates, citing "
-    "'learned_preference' in the reason), treat audience_prefer as a "
-    "positive signal, and follow draft_style_notes when writing. These are "
+    "approve/reject decisions on draft cards. When judging candidates: "
+    "treat audience_avoid and thread_avoid as strong negative signals "
+    "(prefer rejecting matching candidates, citing 'learned_preference' in "
+    "the reason) and audience_prefer as a positive signal; those are "
     "preferences, not hard bans; use judgment when a candidate is "
-    "exceptionally on-topic despite a match."
+    "exceptionally on-topic despite a match. When WRITING a draft, "
+    "draft_style_notes is MANDATORY, not advisory: follow every entry, and "
+    "on conflict it overrides the engagement style's structural template."
 )
 
 
@@ -87,7 +92,10 @@ def normalized(block) -> dict:
     """Coerce whatever is in config into the canonical block shape."""
     b = block if isinstance(block, dict) else {}
     out = {
-        "_instruction": str(b.get("_instruction") or DEFAULT_INSTRUCTION),
+        # Always stamp the code-owned instruction so semantics updates reach
+        # every config on the digest's next write (the old text otherwise
+        # persists forever; nothing legitimately customizes this per project).
+        "_instruction": DEFAULT_INSTRUCTION,
         "enabled": b.get("enabled", True) is not False,
     }
     for key in MANAGED_LISTS:
