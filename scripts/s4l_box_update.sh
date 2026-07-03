@@ -262,5 +262,9 @@ for f in glob.glob(pat):
 for tid in DEPRECATED:
     shutil.rmtree(os.path.join(home, ".claude", "scheduled-tasks", tid), ignore_errors=True)
 PYCWD
-open -a Claude 2>/dev/null || true
+# env -u: never let S4L_*/SAPS_* leak into Claude Desktop (macOS `open`
+# propagates the caller's env; a leaked S4L_REPO_DIR disables pipeline
+# self-update — see envRepoClone() in mcp/src/runtime.ts).
+env -u S4L_REPO_DIR -u SAPS_REPO_DIR -u S4L_STATE_DIR -u SAPS_STATE_DIR \
+    -u S4L_PYTHON -u SAPS_PYTHON open -a Claude 2>/dev/null || true
 echo "done; Claude restarting on v$new_ver."
