@@ -38,11 +38,21 @@ import time
 # best-effort: a missing repo path or SDK degrades to a silent no-op.
 _sentry = None
 try:
-    _repo = os.environ.get("S4L_REPO_DIR")
+    # Tolerate the pre-rename plist name (SAPS_REPO_DIR) inline: this read runs
+    # BEFORE scripts/ is on sys.path, so the s4l_env mirror can't help yet.
+    _repo = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
     if _repo:
         _scripts = os.path.join(_repo, "scripts")
         if _scripts not in sys.path:
             sys.path.insert(0, _scripts)
+    # SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists still
+    # export SAPS_*; everything below (and every subprocess) reads S4L_*.
+    try:
+        import s4l_env  # noqa: E402
+
+        s4l_env.mirror()
+    except Exception:
+        pass
     import sentry_init as _sentry  # noqa: E402
 
     _sentry.init()
