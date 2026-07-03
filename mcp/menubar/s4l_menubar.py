@@ -134,20 +134,22 @@ STOP_FLAG = os.path.join(st.state_dir(), "stopped.flag")
 
 # Autopilot scheduled tasks. Queue workers must RUN in a dedicated folder
 # (~/.s4l-worker) so their once-a-minute sessions don't flood the user's
-# interactive Claude Code history (Claude buckets sessions by cwd). saps-worker
+# interactive Claude Code history (Claude buckets sessions by cwd). s4l-worker
 # is the universal type-blind worker (2026-07-02, one task drains every job
-# type); the phase1/phase2b pair are legacy per-type workers kept for installs
-# that predate it. The single pre-queue autopilot task is deprecated and removed
-# outright. Keep this in sync with queueWorkerCwd()/QUEUE_WORKERS/
-# LEGACY_QUEUE_WORKER_TASK_IDS in mcp/src/index.ts and scripts/s4l_box_update.sh.
-WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
-# The universal worker every install converges on. The legacy per-type pair is
+# type); task ids are USER-VISIBLE in the Routines UI, so the canonical id
+# carries the S4L brand, never the internal "saps" prefix. The phase1/phase2b
+# pair (and the short-lived staging "saps-worker" from rc.2/rc.3) are legacy.
+# The single pre-queue autopilot task is deprecated and removed outright. Keep
+# this in sync with queueWorkerCwd()/QUEUE_WORKERS/LEGACY_QUEUE_WORKER_TASK_IDS
+# in mcp/src/index.ts and scripts/s4l_box_update.sh.
+WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+# The universal worker every install converges on. Every legacy id is
 # CONSOLIDATED into it by the same one-restart self-heal that fixes task
-# folders: the registry rewrite (while Claude is down) replaces both legacy
-# entries with one saps-worker entry. Until a box walks that path, the legacy
+# folders: the registry rewrite (while Claude is down) replaces all legacy
+# entries with one s4l-worker entry. Until a box walks that path, the legacy
 # tasks still work (their SKILL.md is refreshed to the universal body on boot).
-WORKER_TASK_ID = "saps-worker"
-LEGACY_WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+WORKER_TASK_ID = "s4l-worker"
+LEGACY_WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
 DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
 WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
 # "Claude*": the host app can run with a custom --user-data-dir (per-account
@@ -182,9 +184,9 @@ UPDATE_PROMPT = "Update social-autoposter to the latest version."
 # account, which is exactly the bug it caused.
 REARM_PROMPT = (
     "Set up the social-autoposter draft autopilot schedule for this Claude account. "
-    "If queue_setup is available, call it; then for saps-worker call the host tool "
+    "If queue_setup is available, call it; then for s4l-worker call the host tool "
     "create_scheduled_task with taskId, cronExpression \"* * * * *\", and the prompt "
-    "— read it from ~/.claude/scheduled-tasks/saps-worker/SKILL.md (already on disk). "
+    "— read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on disk). "
     "Do not redo my X connection or project setup — only register the scheduled task. "
     "Keep replies short."
 )
@@ -1226,7 +1228,7 @@ class S4LMenuBar(rumps.App):
     def _scheduled_task_cwd_needs_fix():
         """Read-only: True if any worker task runs in the wrong folder, the
         deprecated autopilot task still exists, OR a legacy per-type worker
-        registration remains (to be consolidated into the single saps-worker).
+        registration remains (to be consolidated into the single s4l-worker).
         Drives the one-shot self-heal."""
         try:
             for f in glob.glob(SCHED_REGISTRY_GLOB):
@@ -1249,7 +1251,7 @@ class S4LMenuBar(rumps.App):
 
     @staticmethod
     def _ensure_worker_skill_md():
-        """Make sure ~/.claude/scheduled-tasks/saps-worker/SKILL.md exists before
+        """Make sure ~/.claude/scheduled-tasks/s4l-worker/SKILL.md exists before
         we register a task that points at it. The MCP writes it on every boot
         (create-if-missing), so normally this is a no-op; as a belt-and-suspenders
         fallback we clone a legacy worker's file (same universal body since
@@ -1280,9 +1282,9 @@ class S4LMenuBar(rumps.App):
         fire). Three fixes in one pass, across every scheduled-tasks.json:
           1. Point worker tasks' cwd at ~/.s4l-worker.
           2. REMOVE the deprecated single autopilot task.
-          3. CONSOLIDATE the legacy per-type pair into ONE saps-worker entry
+          3. CONSOLIDATE every legacy worker entry into ONE s4l-worker entry
              (the universal type-blind worker): drop the legacy entries and,
-             if no saps-worker is registered there yet, add one inheriting the
+             if no s4l-worker is registered there yet, add one inheriting the
              legacy cron/enabled state. This is the migration path for installs
              that predate the universal queue.
         Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
@@ -1310,7 +1312,7 @@ class S4LMenuBar(rumps.App):
                         dirty = True          # drop it
                         continue
                     if tid in LEGACY_WORKER_TASK_IDS and worker_skill_ok:
-                        dirty = True          # consolidated into saps-worker below
+                        dirty = True          # consolidated into s4l-worker below
                         continue
                     if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
                         t["cwd"] = WORKER_CWD
@@ -1399,7 +1401,7 @@ class S4LMenuBar(rumps.App):
             title="Tidy the S4L background tasks?",
             message=(
                 "S4L can tidy its background tasks: merge the old draft + query "
-                "tasks into ONE universal worker (saps-worker) and make sure "
+                "tasks into ONE universal worker (s4l-worker) and make sure "
                 "their once-a-minute runs stay in a dedicated folder instead of "
                 "cluttering your `claude --resume` history.\n\n"
                 "Claude Desktop will restart once to apply — its window will "
