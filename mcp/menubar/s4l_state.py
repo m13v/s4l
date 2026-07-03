@@ -222,7 +222,7 @@ _snap_lock = threading.Lock()
 _snap_refreshing = [False]
 
 
-def _compute_snapshot_full():
+def _snapshot_module():
     repo = (
         os.environ.get("S4L_REPO_DIR")
         or os.environ.get("SAPS_REPO_DIR")  # pre-rename plists (2026-07-03)
@@ -232,7 +232,19 @@ def _compute_snapshot_full():
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
     import snapshot as _snapshot_mod  # scripts/snapshot.py
-    return _snapshot_mod.compute()
+    return _snapshot_mod
+
+
+def _compute_snapshot_full():
+    return _snapshot_module().compute()
+
+
+def ver_key(v):
+    """rc-aware version precedence key, delegated to scripts/snapshot.py::
+    _ver_key so there is exactly ONE Python implementation (kept in lockstep
+    with mcp/src/version.ts::verKey). The update verifier used to carry its
+    own third copy, which drifted rc-blind (2026-07-03); do not re-add one."""
+    return _snapshot_module()._ver_key(v)
 
 
 def _refresh_snapshot_bg():
