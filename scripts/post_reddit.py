@@ -41,12 +41,12 @@ REDDIT_TOOLS = os.path.join(REPO_DIR, "scripts", "reddit_tools.py")
 # to the user's system python, which lacks the pipeline deps (Playwright and
 # friends) that live only in the owned uv runtime — so on a fresh box every
 # reddit_browser.py reply died (the same class as the Karol/Twitter bug,
-# 2026-06-22). Honor the authoritative SAPS_PYTHON pin (set by the launchd
+# 2026-06-22). Honor the authoritative S4L_PYTHON pin (set by the launchd
 # plist), else sys.executable (the owned interpreter the MCP launches us under).
 # Never the literal PYTHON: that re-rolls the PATH dice. Re-exported so
 # grandchildren inherit it.
-PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
-os.environ["SAPS_PYTHON"] = PYTHON
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 RATELIMIT_FILE = "/tmp/reddit_ratelimit.json"
 PREFLIGHT_WAIT_BUDGET_SECONDS = 180
 
@@ -84,8 +84,8 @@ DRAFT_TTL_MIN = 60
 # in build_discover_prompt; bumped to 10 (2026-05-08) so each cycle gets a
 # wider top-of-funnel and the new draft-gate-omit feedback report can steer
 # rephrasings without starving the next attempt of fresh angles. Override via
-# SAPS_REDDIT_MAX_SEARCHES env var without code change.
-MAX_DISCOVER_SEARCHES = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "3"))
+# S4L_REDDIT_MAX_SEARCHES env var without code change.
+MAX_DISCOVER_SEARCHES = int(os.environ.get("S4L_REDDIT_MAX_SEARCHES", "3"))
 
 # CDP-error → permanence map. Permanent failures mark status='failed' and are
 # never re-evaluated. Transient failures stay status='pending' with
@@ -1830,7 +1830,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # 2026-05-11: surface the per-project sub denylist for visibility in run
     # logs (twitter cycle does the equivalent at run-twitter-cycle.sh:410).
     # The actual *enforcement* happens server-side in reddit_tools._load_
-    # comment_blocked_subs via the SAPS_REDDIT_PROJECT env var set below.
+    # comment_blocked_subs via the S4L_REDDIT_PROJECT env var set below.
     # mark_used stamps last_used_at on every active term so decay (60d
     # unused → prune) only fires on terms that truly stopped contributing.
     try:
@@ -1879,7 +1879,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # search_topic IS the raw query string) ranked clicks-first, then appends
     # config.json seeds for cold-start coverage, deduped by normalized core.
     import reddit_query_bank as _rqb
-    max_searches = int(os.environ.get("SAPS_REDDIT_MAX_SEARCHES", "6") or "6")
+    max_searches = int(os.environ.get("S4L_REDDIT_MAX_SEARCHES", "6") or "6")
     bank = _rqb.build_bank(project_name, limit=max_searches)
     queries = [(b.get("query") or "").strip() for b in bank if (b.get("query") or "").strip()]
     n_proven = sum(1 for b in bank if b.get("source") == "proven")
@@ -1901,8 +1901,8 @@ def _discover_iteration(args, config, reddit_username, already_picked):
                 "error": "no_queries"}
 
     plan_batch_id = f"reddit-discover-{project_name}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    os.environ["SAPS_REDDIT_PROJECT"] = project_name
-    os.environ["SAPS_REDDIT_BATCH_ID"] = plan_batch_id
+    os.environ["S4L_REDDIT_PROJECT"] = project_name
+    os.environ["S4L_REDDIT_BATCH_ID"] = plan_batch_id
 
     # Opaque-results discover (post 2026-05-07 refactor): create a private
     # dump dir and tell reddit_tools.py via env var to write thread JSON
@@ -1914,7 +1914,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     import shutil as _shutil
     import glob as _glob
     dump_dir = _tempfile.mkdtemp(prefix=f"reddit-discover-{project_name}-")
-    os.environ["SAPS_REDDIT_DUMP_DIR"] = dump_dir
+    os.environ["S4L_REDDIT_DUMP_DIR"] = dump_dir
 
     print(f"[post_reddit] Starting programmatic discover "
           f"(queries={len(queries)}, limit={args.limit}, dump_dir={dump_dir})")
@@ -1948,7 +1948,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     finally:
         # Always unset so a subsequent (non-discover) reddit_tools call in
         # this process doesn't accidentally inherit dump mode.
-        os.environ.pop("SAPS_REDDIT_DUMP_DIR", None)
+        os.environ.pop("S4L_REDDIT_DUMP_DIR", None)
     elapsed = time.time() - start
     print(f"[post_reddit] Discover ran {searches_ok}/{len(queries)} searches "
           f"in {elapsed:.0f}s ($0.0000)")
@@ -2017,7 +2017,7 @@ def _discover_iteration(args, config, reddit_username, already_picked):
     # harvested candidate is still persisted to the queue for analytics + salvage;
     # the cap is a soft prioritization only (conservative per user directive —
     # isolate + surface the garbage in logs rather than silently filtering it).
-    DISCOVER_CAP = int(os.environ.get("SAPS_REDDIT_DISCOVER_CAP", "25") or "25")
+    DISCOVER_CAP = int(os.environ.get("S4L_REDDIT_DISCOVER_CAP", "25") or "25")
     for c in candidates:
         ov = _topical_overlap(c.get("search_topic"), c.get("thread_title"), c.get("selftext"))
         # velocity proxy: comments weighted 4x upvotes, echoing the old ripen
