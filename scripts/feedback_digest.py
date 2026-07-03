@@ -82,6 +82,14 @@ def _event_line(e: dict) -> str:
         parts.append(f"category={e['reject_category']}")
     if e.get("thread_author"):
         parts.append(f"author=@{e['thread_author']}")
+    # Candidate-join context (author_followers, search_topic, tweet_text come
+    # from the LEFT JOIN in GET /api/v1/review-events): without it the model
+    # sees a bare handle and can never characterize the author TYPE behind a
+    # wrong_author reject. Older server deploys just omit the keys.
+    if e.get("author_followers") is not None:
+        parts.append(f"author_followers={e['author_followers']}")
+    if e.get("search_topic"):
+        parts.append(f"found_via_topic={e['search_topic']}")
     inter = e.get("interactions") or []
     kinds = sorted({str(i.get("type")) for i in inter if isinstance(i, dict) and i.get("type")})
     if kinds:
@@ -94,9 +102,12 @@ def _event_line(e: dict) -> str:
     note = (e.get("reject_note") or "").strip()
     if note:
         line += f"\n  user note: {note[:300]}"
+    tweet = (e.get("tweet_text") or "").strip()
+    if tweet:
+        line += f"\n  their post was: {tweet[:200]}"
     draft = (e.get("draft_text") or "").strip()
     if draft:
-        line += f"\n  draft was: {draft[:200]}"
+        line += f"\n  our draft was: {draft[:200]}"
     url = (e.get("thread_url") or "").strip()
     if url:
         line += f"\n  thread: {url}"
@@ -125,9 +136,11 @@ NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved
 
 Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note).
 
+Note on wrong_author: the SPECIFIC handle is already hard-blocked automatically server-side (author_blocklist) the moment the reject lands; that individual will never be drafted again. Your job here is only the generalizable author TYPE, using the author_followers / their-post / found_via_topic context on the event.
+
 Propose changes to the block. RULES, in priority order:
 1. Be conservative. Prefer NO changes over speculative ones. An empty plan is a good plan when the evidence is thin.
-2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note or interactions make the reason explicit.
+2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note, interactions, or author context (follower count, their post, discovery topic) makes the reason explicit.
 3. Describe author/audience TYPES, never individual handles. "crypto/web3-native accounts shilling tokens" is right; "@someguy" is wrong. Preferences must generalize.
 4. Approvals are counter-evidence. If approvals contradict an existing entry, propose removing or narrowing it. Also propose removing entries that events show are stale.
 5. bad_draft events feed draft_style_notes (or, ONLY for a clearly recurring phrasing complaint, voice_never_add / guardrails_do_not_add; use those sparingly, they touch curated fields).
