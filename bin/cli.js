@@ -83,7 +83,7 @@ function findUvBin() {
   return found && fs.existsSync(found) ? found : '';
 }
 
-// Locate the Python the MCP server is actually configured to run (SAPS_PYTHON).
+// Locate the Python the MCP server is actually configured to run (S4L_PYTHON).
 // mcp/install.mjs picks /opt/homebrew/bin/python3 (or /usr/local/bin/python3)
 // and stamps it into the MCP config, so Python deps MUST be installed into that
 // SAME interpreter. Bare `pip3`/`python3` on macOS usually resolves to the
@@ -486,7 +486,7 @@ function installBrowserHarness() {
 
   // Step 4: ensure mcp Python package available (server.py uses `from mcp.server.fastmcp ...`).
   // server.py is shebanged through `uv run --with mcp ...` so this is belt-and-suspenders;
-  // we install it into the SAPS_PYTHON interpreter (the same Homebrew python the MCP
+  // we install it into the S4L_PYTHON interpreter (the same Homebrew python the MCP
   // server is configured to use), NOT bare pip3 which targets the Xcode CLT system python.
   const harnessPython = findPythonBin();
   console.log(`    ensuring mcp>=1.0.0 Python package is importable (${harnessPython})...`);
@@ -771,7 +771,7 @@ function installPythonDeps() {
   const args = fs.existsSync(reqPath)
     ? ['-r', reqPath, '-q']
     : ['-q', 'playwright'];
-  // Install into the SAME interpreter the MCP server runs (SAPS_PYTHON =
+  // Install into the SAME interpreter the MCP server runs (S4L_PYTHON =
   // Homebrew python), NOT bare pip3 which on macOS targets the Xcode CLT system
   // python — deps installed there are invisible to the scripts at runtime.
   // pipInstall() also gates --break-system-packages on pip>=23 so it doesn't
