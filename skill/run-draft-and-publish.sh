@@ -4,14 +4,22 @@
 # customer box: there is no host-draft scenario.
 #
 # Runs the REAL pipeline in DRAFT_ONLY mode (inheriting the kicker plist's
-# DRAFT_ONLY=1 / SAPS_CLAUDE_PROVIDER=queue env, so Phase 2b drafting routes
+# DRAFT_ONLY=1 / S4L_CLAUDE_PROVIDER=queue env, so Phase 2b drafting routes
 # through the job queue and is drafted by the scheduled-task worker), then MERGES
 # the drafts it produced into the review-queue cards the menu bar shows. Without
 # this merge the cycle's plan would sit in a /tmp batch file nobody reads.
 set -uo pipefail
 
-REPO_DIR="${SAPS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-PY="${SAPS_PYTHON:-python3}"
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
+REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+PY="${S4L_PYTHON:-python3}"
 
 OUT="$(mktemp -t saps_draft_publish.XXXXXX)"
 HB_PID=""  # scan-phase heartbeat (started below); torn down by the EXIT trap
@@ -55,7 +63,7 @@ SCAN_T0=$(date +%s)
 HB_PID=$!
 
 # Engagement mode (2026-06-26). The menu-bar toggle writes mode.json; this reads
-# it and, in personal_brand mode, exports SAPS_FORCE_PROJECT=<persona project> and
+# it and, in personal_brand mode, exports S4L_FORCE_PROJECT=<persona project> and
 # TWITTER_TAIL_LINK_RATE=0 so the (locked) cycle below drafts link-free organic
 # replies for the persona instead of the normal weighted product pick. In the
 # default promotion mode it exports nothing and the cycle runs exactly as before.
@@ -63,8 +71,8 @@ HB_PID=$!
 # effect on the very next cycle with no launchd reload. Best-effort: any failure
 # leaves the env untouched and the promotion pipeline runs.
 eval "$("$PY" "$REPO_DIR/scripts/saps_mode.py" env 2>/dev/null || true)"
-if [ -n "${SAPS_FORCE_PROJECT:-}" ]; then
-    echo "[run-draft-and-publish] personal_brand mode: forcing project '$SAPS_FORCE_PROJECT' (link-free)" >&2
+if [ -n "${S4L_FORCE_PROJECT:-}" ]; then
+    echo "[run-draft-and-publish] personal_brand mode: forcing project '$S4L_FORCE_PROJECT' (link-free)" >&2
 fi
 
 # First-run onboarding boost (2026-07-02). The MCP server drops
@@ -74,7 +82,7 @@ fi
 # user's FIRST review batch surfaces several REAL drafts instead of one (or
 # none). The marker is deleted the moment a merge actually delivers cards, or
 # after 24h without any, so every later cycle runs the standard logic.
-BOOST_MARKER="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
+BOOST_MARKER="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
 BOOST_ACTIVE=0
 if [ -f "$BOOST_MARKER" ]; then
     if [ -n "$(find "$BOOST_MARKER" -mmin +1440 2>/dev/null)" ]; then
@@ -82,9 +90,9 @@ if [ -f "$BOOST_MARKER" ]; then
         echo "[run-draft-and-publish] first-run boost expired (>24h, no cards produced); removed" >&2
     else
         BOOST_ACTIVE=1
-        export SAPS_DRAFT_FRESHNESS_HOURS="${SAPS_FIRST_RUN_FRESHNESS_HOURS:-48}"
-        export SAPS_TWITTER_POST_TOP_N="${SAPS_FIRST_RUN_TOP_N:-5}"
-        echo "[run-draft-and-publish] first-run boost active: freshness=${SAPS_DRAFT_FRESHNESS_HOURS}h top_n=${SAPS_TWITTER_POST_TOP_N}" >&2
+        export S4L_DRAFT_FRESHNESS_HOURS="${S4L_FIRST_RUN_FRESHNESS_HOURS:-48}"
+        export S4L_TWITTER_POST_TOP_N="${S4L_FIRST_RUN_TOP_N:-5}"
+        echo "[run-draft-and-publish] first-run boost active: freshness=${S4L_DRAFT_FRESHNESS_HOURS}h top_n=${S4L_TWITTER_POST_TOP_N}" >&2
     fi
 fi
 
