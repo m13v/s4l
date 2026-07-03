@@ -163,7 +163,7 @@ Note on wrong_author: the SPECIFIC handle is already hard-blocked automatically 
 
 Propose changes to the block. RULES, in priority order:
 1. Be conservative. Prefer NO changes over speculative ones. An empty plan is a good plan when the evidence is thin.
-2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note, interactions, or author context (follower count, their post, discovery topic) makes the reason explicit. Exceptions: a single loved approval can justify one audience_prefer/thread entry when the pattern it shows is clear, and OVERALL FEEDBACK lines are explicit user instructions that outrank inferred signals — reflect each one in the most fitting list even from a single line, rewritten as a standing preference.
+2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note, interactions, or author context (follower count, their post, discovery topic) makes the reason explicit. Exceptions: a single loved approval can justify one audience_prefer/thread entry when the pattern it shows is clear, and OVERALL FEEDBACK lines are explicit user instructions that outrank inferred signals; reflect each one in the most fitting list even from a single line, rewritten as a standing preference.
 3. Describe author/audience TYPES, never individual handles. "crypto/web3-native accounts shilling tokens" is right; "@someguy" is wrong. Preferences must generalize.
 4. Approvals are counter-evidence. If approvals contradict an existing entry, propose removing or narrowing it. Also propose removing entries that events show are stale.
 5. bad_draft events feed draft_style_notes (or, ONLY for a clearly recurring phrasing complaint, voice_never_add / guardrails_do_not_add; use those sparingly, they touch curated fields).
@@ -330,7 +330,7 @@ def main() -> int:
     resp = api_get("/api/v1/review-events", {"counts": "true"})
     counts = ((resp or {}).get("data") or {}).get("counts") or []
 
-    # Overall feedback (decision='feedback', project IS NULL — the card's 💬
+    # Overall feedback (decision='feedback', project IS NULL; the card's 💬
     # button / menu bar "Send feedback…"): fetched once, folded into EVERY
     # configured project's prompt, and marked processed only after all
     # attempted digests succeed (apply_mutations dedups any re-digest).
