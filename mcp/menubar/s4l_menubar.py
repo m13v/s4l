@@ -847,21 +847,15 @@ class S4LMenuBar(rumps.App):
         removes the KeepAlive job — which kills this process, so it must be
         the last thing we do."""
         try:
-            # Capture while Claude is still alive (see _claude_user_data_dir):
-            # the post-quit relaunch must preserve a custom --user-data-dir.
-            user_data_dir = self._claude_user_data_dir()
+            # Capture while Claude is still alive (see _claude_user_data_dirs):
+            # the post-quit relaunch must preserve custom --user-data-dirs.
+            user_data_dirs = self._claude_user_data_dirs()
             try:
                 with open(STOP_FLAG, "w") as fh:
                     fh.write(f"user quit via menu bar at {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
             except Exception as e:
                 _capture(e, action="quit_stop_flag")
-            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
-                           capture_output=True, timeout=20)
-            time.sleep(4)
-            subprocess.run(["killall", "Claude"], capture_output=True)       # if quit was blocked
-            time.sleep(2)
-            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
-            time.sleep(1)
+            self._quit_claude_and_wait()
             self._remove_scheduled_tasks()
             try:
                 os.remove(MENUBAR_PLIST)
@@ -869,7 +863,7 @@ class S4LMenuBar(rumps.App):
                 pass
             except Exception as e:
                 _capture(e, action="quit_remove_plist")
-            self._relaunch_claude(user_data_dir)
+            self._relaunch_claude(user_data_dirs)
             self._notify("S4L", "Autoposter stopped. Say \"start S4L\" in Claude to bring it back.")
         except Exception as e:
             _capture(e, action="quit_app")
@@ -963,16 +957,21 @@ class S4LMenuBar(rumps.App):
         threading.Thread(target=self._mcpb_update_work, daemon=True).start()
 
     @staticmethod
-    def _claude_user_data_dir():
-        """The --user-data-dir the RUNNING Claude was launched with, or None.
+    def _claude_user_data_dirs():
+        """The --user-data-dir of every RUNNING Claude instance, in ps order;
+        a default-profile instance (no flag) is recorded as None. Empty when
+        no Claude is running.
 
         Must be captured BEFORE quitting Claude: a bare `open -a Claude`
         relaunch drops the flag and boots the DEFAULT-profile instance,
         stranding users who run Claude with a per-account data dir (found
-        2026-07-02: the update restart landed in the wrong profile). The value
-        can contain spaces (…/Application Support/…), so parse the ps line
-        with a regex up to the next ` --` flag, not by token split.
+        2026-07-02: the update restart landed in the wrong profile). killall
+        takes down EVERY profile's instance, so all of them must be captured
+        and relaunched, not just the first ps match. The value can contain
+        spaces (…/Application Support/…), so parse the ps line with a regex
+        up to the next ` --` flag, not by token split.
         """
+        dirs = []
         try:
             out = subprocess.run(["ps", "-axo", "command"], capture_output=True,
                                  text=True, timeout=10).stdout
@@ -980,29 +979,91 @@ class S4LMenuBar(rumps.App):
                 if "/Claude.app/Contents/MacOS/Claude" not in line:
                     continue
                 m = re.search(r"--user-data-dir=(.+?)(?= --|$)", line)
-                if m:
-                    return m.group(1).strip()
+                d = m.group(1).strip() if m else None
+                if d not in dirs:
+                    dirs.append(d)
         except Exception:
             pass
-        return None
+        return dirs
 
-    def _relaunch_claude(self, user_data_dir=None):
-        """Reopen Claude, preserving a custom --user-data-dir when one was
-        captured before the kill. Keep in sync with the other relaunch sites."""
-        if user_data_dir:
-            subprocess.run(
-                ["open", "-a", CLAUDE_APP, "--args",
-                 f"--user-data-dir={user_data_dir}"],
-                capture_output=True, timeout=20)
-        else:
-            subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True, timeout=20)
+    @classmethod
+    def _claude_user_data_dir(cls):
+        """First custom --user-data-dir among running instances, or None.
+        Prefer _claude_user_data_dirs when relaunching after a kill — the
+        kill takes every profile down, not just this one."""
+        return next((d for d in cls._claude_user_data_dirs() if d), None)
+
+    @staticmethod
+    def _claude_running():
+        """True while a Claude Desktop main process is alive. pgrep -x matches
+        the binary name exactly, so 'Claude Helper …' renderers and claude-code
+        CLI children don't count."""
+        try:
+            return subprocess.run(["pgrep", "-x", "Claude"],
+                                  capture_output=True, timeout=10).returncode == 0
+        except Exception:
+            return False
+
+    def _quit_claude_and_wait(self, grace_sec=300):
+        """Ask Claude to quit and return only once every instance is gone,
+        escalating to killall if the graceful quit stalls.
+
+        The quit Apple event doesn't get its reply until the app finishes
+        tearing down, which can take minutes with claude-code sessions open.
+        2026-07-02: teardown outlived the old inline block's 20s subprocess
+        timeout, the TimeoutExpired flew past the caller's relaunch step, and
+        Claude finished quitting on its own with nothing left to restart it.
+        A timeout on the osascript call is expected and harmless; process
+        polling is the real completion signal."""
+        try:
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           capture_output=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+        deadline = time.time() + grace_sec
+        while self._claude_running() and time.time() < deadline:
+            time.sleep(3)
+        if self._claude_running():
+            subprocess.run(["killall", "Claude"], capture_output=True)  # quit stalled
+            time.sleep(2)
+        if self._claude_running():
+            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
+            time.sleep(1)
+
+    def _relaunch_claude(self, user_data_dirs=None):
+        """Reopen Claude, preserving each custom --user-data-dir captured
+        before the kill (accepts a single dir or a list). `open -n` forces a
+        fresh instance per profile — without it LaunchServices focuses the
+        first instance and drops the args, so only one profile would return.
+        Retries once if no process appears: right after a kill, `open` can
+        no-op while LaunchServices still thinks the app is running. Keep in
+        sync with the other relaunch sites."""
+        if isinstance(user_data_dirs, str):
+            user_data_dirs = [user_data_dirs]
+
+        def _open_all():
+            for d in (user_data_dirs or [None]):
+                if d:
+                    subprocess.run(
+                        ["open", "-n", "-a", CLAUDE_APP, "--args",
+                         f"--user-data-dir={d}"],
+                        capture_output=True, timeout=20)
+                else:
+                    subprocess.run(["open", "-a", CLAUDE_APP],
+                                   capture_output=True, timeout=20)
+
+        _open_all()
+        time.sleep(5)
+        if not self._claude_running():
+            time.sleep(5)
+            _open_all()
 
     def _mcpb_update_work(self):
         tmpd = tempfile.mkdtemp(prefix="s4l-update-")
         mcpb = os.path.join(tmpd, "social-autoposter.mcpb")
         try:
             # Capture while Claude is still alive; unreadable after the kill.
-            user_data_dir = self._claude_user_data_dir()
+            user_data_dirs = self._claude_user_data_dirs()
             r = subprocess.run(["curl", "-fLs", "-m", "300", self._mcpb_url(), "-o", mcpb],
                                capture_output=True, timeout=320)
             if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
@@ -1031,20 +1092,23 @@ class S4LMenuBar(rumps.App):
                 except Exception:
                     pass
             # Restart Claude so the refreshed server loads (we're decoupled from it).
-            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
-                           capture_output=True, timeout=20)
-            time.sleep(4)
-            subprocess.run(["killall", "Claude"], capture_output=True)      # if quit was blocked
-            time.sleep(2)
-            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
-            time.sleep(1)
+            self._quit_claude_and_wait()
             # Claude is fully down now — relocate the autopilot scheduled tasks'
             # cwd so their once-a-minute runs stop flooding the user's interactive
             # `claude --resume` history. MUST happen while Claude is down (it caches
             # the registry in memory and clobbers live edits). See queueWorkerCwd()
             # in mcp/src/index.ts and the same routine in scripts/s4l_box_update.sh.
             self._rewrite_scheduled_task_cwd()
-            self._relaunch_claude(user_data_dir)
+            if target:
+                # The graceful quit can eat minutes; restart the verify clock
+                # now that Claude is actually down so UPDATE_VERIFY_GRACE_SEC
+                # measures server boot, not app teardown.
+                try:
+                    with open(self._update_verify_path(), "w") as f:
+                        json.dump({"target": target, "started_at": time.time()}, f)
+                except Exception:
+                    pass
+            self._relaunch_claude(user_data_dirs)
             self._update_available = False
             self._sig = None
             if target:
@@ -1356,19 +1420,13 @@ class S4LMenuBar(rumps.App):
         relaunch. The menu bar is a separate launchd process, so killing Claude does
         not kill us."""
         try:
-            # Capture while Claude is still alive (see _claude_user_data_dir):
+            # Capture while Claude is still alive (see _claude_user_data_dirs):
             # a bare relaunch drops a custom --user-data-dir and boots the
             # wrong profile, which orphans these very tasks from the registry.
-            user_data_dir = self._claude_user_data_dir()
-            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
-                           capture_output=True, timeout=20)
-            time.sleep(4)
-            subprocess.run(["killall", "Claude"], capture_output=True)
-            time.sleep(2)
-            subprocess.run(["killall", "-9", "Claude"], capture_output=True)
-            time.sleep(1)
+            user_data_dirs = self._claude_user_data_dirs()
+            self._quit_claude_and_wait()
             self._rewrite_scheduled_task_cwd()
-            self._relaunch_claude(user_data_dir)
+            self._relaunch_claude(user_data_dirs)
             time.sleep(8)  # let Claude reload the registry before we re-check
             if not self._scheduled_task_cwd_needs_fix():
                 self._cwd_healed = True
