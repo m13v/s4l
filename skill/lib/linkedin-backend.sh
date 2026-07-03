@@ -300,11 +300,17 @@ ensure_linkedin_browser_for_backend() {
             [ -n "$_stale_pids" ] && { kill -9 $_stale_pids 2>/dev/null || true; sleep 1; }
             rm -f "$_prof_dir/SingletonLock" "$_prof_dir/SingletonSocket" "$_prof_dir/SingletonCookie" 2>/dev/null || true
         fi
+        # The occlusion/backgrounding flags matter: the window sits offscreen,
+        # and without them Chrome stops laying out SPA-rendered content, so
+        # every element measures 0x0 and clicks become impossible (2026-07-03).
         "$_chrome_bin" \
             --remote-debugging-port=9556 \
             --user-data-dir="$HOME/.claude/browser-profiles/browser-harness-linkedin" \
             --no-first-run --no-default-browser-check \
             --disable-features=ChromeWhatsNewUI \
+            --disable-backgrounding-occluded-windows \
+            --disable-renderer-backgrounding \
+            --disable-background-timer-throttling \
             "${_extra[@]}" \
             about:blank >/dev/null 2>&1 &
         disown
