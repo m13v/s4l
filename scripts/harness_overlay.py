@@ -56,7 +56,7 @@ def _ensure_playwright_interpreter() -> None:
         return
     except Exception:
         pass
-    if os.environ.get("_SAPS_OVERLAY_REEXEC") == "1":
+    if os.environ.get("_S4L_OVERLAY_REEXEC") == "1":
         return  # already tried; fall through and let the import error surface
     for cand in (
         "/opt/homebrew/bin/python3.11",
@@ -64,7 +64,7 @@ def _ensure_playwright_interpreter() -> None:
         "/opt/homebrew/bin/python3",
     ):
         if Path(cand).exists() and os.path.realpath(cand) != os.path.realpath(sys.executable):
-            env = dict(os.environ, _SAPS_OVERLAY_REEXEC="1")
+            env = dict(os.environ, _S4L_OVERLAY_REEXEC="1")
             os.execve(cand, [cand, os.path.abspath(__file__), *sys.argv[1:]], env)
 
 
@@ -73,9 +73,9 @@ _ensure_playwright_interpreter()
 # --- config -----------------------------------------------------------------
 
 CDP_URL = os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555").strip()
-LOG_DIR = Path(os.environ.get("SAPS_LOG_DIR", str(Path.home() / "social-autoposter" / "skill" / "logs")))
+LOG_DIR = Path(os.environ.get("S4L_LOG_DIR", str(Path.home() / "social-autoposter" / "skill" / "logs")))
 # How stale a cycle log can be (seconds) before we treat the harness as idle.
-IDLE_AFTER_SEC = int(os.environ.get("SAPS_OVERLAY_IDLE_SEC", "240"))
+IDLE_AFTER_SEC = int(os.environ.get("S4L_OVERLAY_IDLE_SEC", "240"))
 
 TITLE = "S4L"
 REASSURE = (
