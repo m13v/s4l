@@ -22,8 +22,8 @@ bar reads one consistent signal regardless of who produced the work.
 Purely cosmetic and fully best-effort: a failure here MUST never affect the work
 it narrates. Every public call swallows its own exceptions.
 
-State-dir resolution matches everything else: ``$SAPS_STATE_DIR`` or
-``~/.social-autoposter-mcp``. The scheduled-task worker sets ``SAPS_STATE_DIR``
+State-dir resolution matches everything else: ``$S4L_STATE_DIR`` or
+``~/.social-autoposter-mcp``. The scheduled-task worker sets ``S4L_STATE_DIR``
 in the env before calling in (see ``claude_job.py::_apply_state_dir_override``),
 so the worker lane lands in the same dir the launchd kicker and menu bar use.
 """
@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
