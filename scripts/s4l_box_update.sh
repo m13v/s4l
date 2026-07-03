@@ -56,7 +56,7 @@ esac
 # four space-separated tokens: "<channel> <tag> <version> <mcpb_url>".
 STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
 RESOLVED="$(S4L_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
-import json, os, re, subprocess
+import json, os, re, shutil, subprocess
 
 state = os.environ.get("S4L_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
 try:
@@ -69,11 +69,29 @@ REPO = "m13v/s4l"
 LATEST_DL = "https://github.com/%s/releases/latest/download/social-autoposter.mcpb" % REPO
 TAG_DL = "https://github.com/%s/releases/download/%s/social-autoposter.mcpb"
 
-def curl(url):
-    r = subprocess.run(["/usr/bin/curl", "-fsSL", "-m", "15",
-                        "-H", "Accept: application/vnd.github+json", url],
-                       capture_output=True, text=True, timeout=20)
-    return r.stdout
+def _run(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+def fetch_api(path):
+    """GitHub API GET, two lanes: unauthenticated curl first (works on fresh
+    boxes with no gh), then `gh api` when installed (authenticated, immune to
+    the per-IP rate limit). The 60/hr anonymous limit 403'd the curl lane on
+    2026-07-03 and the old staging->stable fallback then DOWNGRADED an rc box
+    to 1.6.196; the gh lane makes that failure mode rare, and the fail-closed
+    handling below makes it harmless."""
+    out = _run(["/usr/bin/curl", "-fsSL", "-m", "15",
+                "-H", "Accept: application/vnd.github+json",
+                "https://api.github.com/" + path.lstrip("/")])
+    if out:
+        return out
+    gh = shutil.which("gh") or "/opt/homebrew/bin/gh"
+    if os.path.exists(gh):
+        return _run([gh, "api", path.lstrip("/")])
+    return ""
 
 def ver_key(v):
     s = str(v).strip().lstrip("v")
@@ -89,7 +107,7 @@ def ver_key(v):
 tag = ""
 if channel == "staging":
     try:
-        rels = json.loads(curl("https://api.github.com/repos/%s/releases?per_page=30" % REPO) or "[]")
+        rels = json.loads(fetch_api("repos/%s/releases?per_page=30" % REPO) or "[]")
         best = None
         for r in (rels if isinstance(rels, list) else []):
             if not isinstance(r, dict) or r.get("draft"):
@@ -104,14 +122,19 @@ if channel == "staging":
             tag = best[1]
     except Exception:
         tag = ""
-if not tag:
-    # stable, or staging fallback when the list endpoint failed -> track stable
+    if not tag:
+        # FAIL CLOSED. The old fallback ("list endpoint failed -> track
+        # stable") downgraded a staging box from 1.6.197-rc.9 to 1.6.196 when
+        # the anonymous API lane was rate-limited (2026-07-03). A staging box
+        # that cannot see the release list must NOT act; the caller retries
+        # later.
+        print("staging-unresolved")
+        raise SystemExit(0)
+else:
     try:
-        tag = (json.loads(curl("https://api.github.com/repos/%s/releases/latest" % REPO) or "{}") or {}).get("tag_name") or ""
+        tag = (json.loads(fetch_api("repos/%s/releases/latest" % REPO) or "{}") or {}).get("tag_name") or ""
     except Exception:
         tag = ""
-    if channel == "staging":
-        channel = "stable"
 
 version = tag.lstrip("v")
 url = LATEST_DL if channel == "stable" else (TAG_DL % (REPO, tag))
@@ -122,6 +145,19 @@ CHANNEL="$(printf '%s' "$RESOLVED" | awk '{print $1}')"; [ -n "$CHANNEL" ] || CH
 latest_tag="$(printf '%s' "$RESOLVED" | awk '{print $2}')"
 latest="$(printf '%s' "$RESOLVED" | awk '{print $3}')"
 MCPB_URL="$(printf '%s' "$RESOLVED" | awk '{print $4}')"
+
+# Fail-closed guards for the staging channel. Two failure shapes both used to
+# collapse into "quietly track stable", which DOWNGRADES an rc box (bit this
+# box on 2026-07-03: rc.9 -> 1.6.196 after an anonymous-API 403):
+#   1. the resolver ran but couldn't list releases -> "staging-unresolved"
+#   2. the resolver itself died (python missing, syntax, kill) -> RESOLVED=""
+# In both cases, if channel.json says staging, stop here instead of guessing.
+WANT_CHANNEL="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('channel',''))" "$STATE_DIR/channel.json" 2>/dev/null || true)"
+if [ "$CHANNEL" = "staging-unresolved" ] || { [ "$WANT_CHANNEL" = "staging" ] && [ "$CHANNEL" != "staging" ]; }; then
+  echo "staging channel: could not resolve the newest release (GitHub API unavailable or rate-limited)." >&2
+  echo "refusing to fall back to stable — that would downgrade this rc box. Retry later." >&2
+  exit 5
+fi
 [ -n "$MCPB_URL" ] || MCPB_URL="https://github.com/m13v/s4l/releases/latest/download/social-autoposter.mcpb"
 
 installed="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('version',''))" "$EXT_DIR/manifest.json" 2>/dev/null || true)"
@@ -136,6 +172,30 @@ if [ -n "$latest" ] && [ "$installed" = "$latest" ]; then
   echo "already on latest ($installed); re-applying anyway would just restart Claude. skipping."
   # Comment the next line out if you want a forced re-unpack even when current.
   exit 0
+fi
+
+# Never downgrade silently: whatever the channels say, refuse to unpack an
+# OLDER version over a newer install unless explicitly forced. Same ver_key
+# ordering as the resolver (prerelease < its own release, rc.N ordered by N).
+if [ -n "$latest" ] && [ -n "$installed" ] && [ "${S4L_ALLOW_DOWNGRADE:-0}" != "1" ]; then
+  if ! "$PY" -c '
+import re, sys
+def key(v):
+    s = str(v).strip().lstrip("v")
+    core, _, pre = s.partition("-")
+    n = [int(x) if x.isdigit() else 0 for x in core.split("+")[0].split(".")]
+    while len(n) < 3:
+        n.append(0)
+    if not pre:
+        return (n[0], n[1], n[2], 1, 0)
+    m = re.findall(r"\d+", pre)
+    return (n[0], n[1], n[2], 0, int(m[-1]) if m else 0)
+sys.exit(0 if key(sys.argv[2]) >= key(sys.argv[1]) else 1)
+' "$installed" "$latest"; then
+    echo "resolved $latest is OLDER than installed $installed; refusing downgrade." >&2
+    echo "set S4L_ALLOW_DOWNGRADE=1 to force a rollback on purpose." >&2
+    exit 6
+  fi
 fi
 
 tmpd="$(mktemp -d -t s4l-update-XXXXXX)"
