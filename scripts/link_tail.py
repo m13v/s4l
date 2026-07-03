@@ -461,7 +461,7 @@ def main() -> int:
         print(json.dumps(out), flush=True)
         return 0
 
-    # Plugin (MCP post_drafts) flow sets SAPS_SKIP_LINK_TAIL=1. The bridge only
+    # Plugin (MCP post_drafts) flow sets S4L_SKIP_LINK_TAIL=1. The bridge only
     # rewords prose around the URL — the minted short link is produced by a
     # separate deterministic wrap step in twitter_post_plan.py — so the Claude
     # call buys nothing there, and on .mcpb customer boxes (no `claude` binary)
@@ -469,7 +469,7 @@ def main() -> int:
     # to this exact mechanical concat. Short-circuit straight to the concat.
     # The local cron/plist autopilot leaves this env unset and still generates
     # the bridge sentence.
-    if os.environ.get("SAPS_SKIP_LINK_TAIL") == "1":
+    if os.environ.get("S4L_SKIP_LINK_TAIL") == "1":
         limit = TWEET_LIMIT if args.platform == "twitter" else None
         fb_text, fb_trim = enforce_budget(
             mechanical_fallback(reply_text, link_url), link_url,
