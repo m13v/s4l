@@ -18,6 +18,14 @@
 
 set -uo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 if [ $# -lt 2 ]; then
     echo "Usage: run_claude.sh <script_tag> <claude args...>" >&2
     exit 2
@@ -35,7 +43,7 @@ export CLAUDE_SESSION_ID="$SESSION_ID"
 # Queue provider seam (added 2026-06-23) — customer boxes have no `claude` CLI.
 #
 # On a .mcpb install the runtime provisions Python only; there is no `claude`
-# binary to exec. When SAPS_CLAUDE_PROVIDER=queue, route this call through the
+# binary to exec. When S4L_CLAUDE_PROVIDER=queue, route this call through the
 # job queue instead: scripts/claude_job.py enqueues the prompt + --json-schema,
 # BLOCKS until a Claude Desktop scheduled task ("saps-phase1-query" /
 # "saps-phase2b-draft") processes it, and prints a claude `--output-format json`
@@ -51,10 +59,10 @@ export CLAUDE_SESSION_ID="$SESSION_ID"
 # stdin so the piped form passes through, and propagates the helper's exit code
 # (0 = result, 79 = timed-out/blocked like a quota skip, 1 = not queue-eligible).
 # ---------------------------------------------------------------------------
-if [ "${SAPS_CLAUDE_PROVIDER:-}" = "queue" ]; then
-    SAPS_QUEUE_REPO="${SAPS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-    SAPS_QUEUE_PY="${SAPS_PYTHON:-python3}"
-    exec "$SAPS_QUEUE_PY" "$SAPS_QUEUE_REPO/scripts/claude_job.py" \
+if [ "${S4L_CLAUDE_PROVIDER:-}" = "queue" ]; then
+    S4L_QUEUE_REPO="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+    S4L_QUEUE_PY="${S4L_PYTHON:-python3}"
+    exec "$S4L_QUEUE_PY" "$S4L_QUEUE_REPO/scripts/claude_job.py" \
         provider --tag "$SCRIPT_TAG" -- "$@"
 fi
 
