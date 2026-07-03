@@ -51,11 +51,11 @@ from pathlib import Path
 
 # This pipeline ONLY posts (never scans), so mark every twitter_browser.py reply
 # subprocess it spawns as the high-priority "post" lock role. run_subprocess
-# inherits this process env, so the child twitter_browser.py reads SAPS_LOCK_ROLE
+# inherits this process env, so the child twitter_browser.py reads S4L_LOCK_ROLE
 # at import and will PREEMPT a live scan holding the browser lock instead of
 # losing the 45s wait. Covers BOTH the MCP approve path and the cron post path,
 # since both shell out to this script. Set before any child is spawned.
-os.environ["SAPS_LOCK_ROLE"] = "post"
+os.environ["S4L_LOCK_ROLE"] = "post"
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 TWITTER_BROWSER = os.path.join(REPO_DIR, "scripts", "twitter_browser.py")
@@ -68,12 +68,12 @@ LINK_TAIL = os.path.join(REPO_DIR, "scripts", "link_tail.py")
 # Playwright importer in the pipeline, so a bare "python3" here silently
 # resolved to the user's system python (no Playwright) and every post died
 # with no_reply_json (Karol, 2026-06-22). Honor the authoritative pin the rest
-# of the runtime uses — SAPS_PYTHON (set by the launchd plist) — then fall back
+# of the runtime uses — S4L_PYTHON (set by the launchd plist) — then fall back
 # to sys.executable (the interpreter THIS process already runs under, which the
 # MCP's runPython resolves to the owned uv runtime). Never the literal
 # "python3": that re-rolls the PATH dice. Re-exported so grandchildren inherit.
-PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
-os.environ["SAPS_PYTHON"] = PYTHON
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 
 # DATABASE_URL was previously used to issue ad-hoc `psql -c "..."` calls for
 # the pre-post dedup probe and the candidate status updates. As of the
@@ -728,10 +728,10 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
     # Draft-prompt A/B arm: assigned ONCE per cycle in run-twitter-cycle.sh and
-    # exported as SAPS_DRAFT_PROMPT_VARIANT, so every post this cycle inherits the
+    # exported as S4L_DRAFT_PROMPT_VARIANT, so every post this cycle inherits the
     # same arm (the whole prep batch shared one draft directive). Stamp it onto
     # posts.draft_prompt_variant, mirroring tail_link_variant.
-    draft_prompt_variant = os.environ.get("SAPS_DRAFT_PROMPT_VARIANT") or None
+    draft_prompt_variant = os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or None
     if draft_prompt_variant:
         log_args += ["--draft-prompt-variant", draft_prompt_variant]
     # LENGTH A/B concluded 2026-06-04; future production posts are no longer
@@ -740,13 +740,13 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     # Generation trace: run-twitter-cycle.sh writes a snapshot of the
     # cycle's few-shot context (top_performers, top_queries, supply
     # signal, dud queries) to a tempfile and exports the path via
-    # SAPS_TWITTER_GEN_TRACE_PATH. Forward to log_post.py so every
+    # S4L_TWITTER_GEN_TRACE_PATH. Forward to log_post.py so every
     # post landed this cycle gets posts.generation_trace JSONB pointing
     # to the same snapshot. Same trace for every post in this run
     # because they all saw the same Phase 2b-prep context. The env var
     # is missing/empty when run-twitter-cycle.sh's trace step failed —
     # in that case we just skip the flag and the row gets NULL trace.
-    trace_path = os.environ.get("SAPS_TWITTER_GEN_TRACE_PATH") or ""
+    trace_path = os.environ.get("S4L_TWITTER_GEN_TRACE_PATH") or ""
     if trace_path and os.path.isfile(trace_path):
         log_args += ["--generation-trace", trace_path]
 
@@ -889,7 +889,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
 
 
 def _saps_state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp")
 
 
@@ -1035,7 +1035,7 @@ def main() -> int:
     # and the autopilot scan fires every 60s, so a scan kept slipping into that gap
     # and seizing the browser mid-batch -- the exact "posting gets cut off" symptom
     # on the remote box. Acquiring ONCE here PREEMPTS any live scan (role:"post"
-    # priority) and, by exporting our session id as SAPS_LOCK_OWNER, makes every
+    # priority) and, by exporting our session id as S4L_LOCK_OWNER, makes every
     # child twitter_browser.py reply INHERIT this hold rather than contend for it,
     # closing the gap. The hold is bounded by the posting-specific POST_LOCK_EXPIRY
     # failsafe in twitter_browser (a hung poster self-clears in <=180s; a crashed
@@ -1047,9 +1047,9 @@ def main() -> int:
     _batch_lock_held = False
     if candidates:
         try:
-            import twitter_browser as _tb  # SAPS_LOCK_ROLE=post already set above
+            import twitter_browser as _tb  # S4L_LOCK_ROLE=post already set above
             _tb._acquire_browser_lock()    # preempts a live scan; sys.exit(1) if contended
-            os.environ["SAPS_LOCK_OWNER"] = _tb._LOCK_SESSION_ID
+            os.environ["S4L_LOCK_OWNER"] = _tb._LOCK_SESSION_ID
             _batch_lock_held = True
             print(f"[post] batch lock held by {_tb._LOCK_SESSION_ID} (role=post); "
                   f"{_total} candidate(s) inherit it", flush=True)
@@ -1111,14 +1111,14 @@ def main() -> int:
         _clear_activity()
         # Release the batch hold so the next scan/post can take the browser
         # immediately (don't make peers wait out POST_LOCK_EXPIRY). _tb's atexit
-        # is a backstop if we somehow skip this; clearing SAPS_LOCK_OWNER stops a
+        # is a backstop if we somehow skip this; clearing S4L_LOCK_OWNER stops a
         # late child from re-inheriting a lock we just dropped.
         if _batch_lock_held and _tb is not None:
             try:
                 _tb._release_browser_lock()
             except Exception:
                 pass
-            os.environ.pop("SAPS_LOCK_OWNER", None)
+            os.environ.pop("S4L_LOCK_OWNER", None)
             print("[post] batch lock released", flush=True)
 
     summary = {
