@@ -49,6 +49,19 @@ try:
 except Exception:
     _sentry = None
 
+# Ship this process's stderr to the Cloud Run log relay (same endpoint the
+# .mcpb server uses for pipeline subprocess output). Without this, every
+# [s4l-card] / [s4l-menubar] line only ever existed in the local
+# menubar.err.log and the review-surface incidents were invisible centrally.
+# Installed after the SAPS_REPO_DIR sys.path insertion above (the relay needs
+# scripts/http_api.py for the X-Installation identity). Best-effort.
+try:
+    import s4l_log_relay  # noqa: E402
+
+    s4l_log_relay.install()
+except Exception:
+    pass
+
 
 def _capture(err, **tags):
     """Report a handled menu-bar error to Sentry (component=menubar) without ever
