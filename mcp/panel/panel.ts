@@ -670,10 +670,241 @@ btnMenubarRestart.addEventListener("click", () =>
   })
 );
 
-// ---- config view / edit ---------------------------------------------------
-// Removed: raw config.json view/edit. All project changes now go through the
-// `project_config` tool (validates, merges, re-seeds topics) — there is no
-// raw-overwrite surface in the panel anymore.
+// ---- project settings (collapsible, editable) ------------------------------
+// A formatted view of what's saved for each project (the config the pipeline
+// reads), fetched via project_config action:'get' and edited per FIELD. Saves
+// go through project_config's validated merge (which re-seeds topics), so this
+// deliberately is NOT a raw config.json editor — that surface was removed on
+// purpose and must not come back.
+interface ProjectSettings {
+  name: string;
+  persona: boolean;
+  ready: boolean;
+  missing_required: string[];
+  fields: Record<string, unknown>;
+  extra_keys: string[];
+}
+
+// Field order + labels per project type. Personas have no website/icp/CTA by
+// design, so they get the grounding fields instead.
+const PRODUCT_FIELDS = [
+  "website", "description", "icp", "voice", "differentiator",
+  "search_topics", "get_started_link", "content_guardrails",
+] as const;
+const PERSONA_FIELDS = [
+  "description", "voice", "search_topics", "content_angle", "content_guardrails",
+] as const;
+const FIELD_LABELS: Record<string, string> = {
+  website: "Website",
+  description: "What it does",
+  icp: "Target audience",
+  voice: "Voice",
+  differentiator: "Differentiator",
+  search_topics: "Search topics (one per line)",
+  get_started_link: "Get-started link",
+  content_guardrails: "Content guardrails",
+  content_angle: "Content angle",
+};
+// Fields project_config models as named props (strings / topic list); anything
+// else — and any non-string value — rides the `fields` escape hatch instead.
+const NAMED_PROPS = new Set<string>([
+  "website", "description", "icp", "voice", "differentiator",
+  "search_topics", "get_started_link", "content_guardrails",
+]);
+const SINGLE_LINE = new Set<string>(["website", "get_started_link"]);
+
+type EditorKind = "text" | "list" | "json";
+interface FieldEditor { key: string; kind: EditorKind; el: HTMLInputElement | HTMLTextAreaElement; orig: string }
+
+function editorSeed(key: string, v: unknown): { kind: EditorKind; text: string } {
+  if (key === "search_topics") {
+    return { kind: "list", text: Array.isArray(v) ? v.map(String).join("\n") : String(v ?? "") };
+  }
+  if (v == null || typeof v === "string") return { kind: "text", text: String(v ?? "") };
+  // Structured value (e.g. the persona's voice object): edit as pretty JSON and
+  // send the parsed value back through the `fields` escape hatch.
+  return { kind: "json", text: JSON.stringify(v, null, 2) };
+}
+
+function buildProjectEditor(p: ProjectSettings): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "settings-project";
+
+  const head = document.createElement("div");
+  head.className = "settings-project-head";
+  const name = document.createElement("span");
+  name.className = "settings-project-name";
+  name.textContent = p.name;
+  head.appendChild(name);
+  if (p.persona) {
+    const tag = document.createElement("span");
+    tag.className = "settings-project-tag";
+    tag.textContent = "personal brand";
+    head.appendChild(tag);
+  }
+  const stateEl = document.createElement("span");
+  stateEl.className = "settings-project-state";
+  stateEl.textContent = p.ready
+    ? "ready"
+    : "missing: " + p.missing_required.join(", ");
+  head.appendChild(stateEl);
+  box.appendChild(head);
+
+  const editors: FieldEditor[] = [];
+  const keys = p.persona ? PERSONA_FIELDS : PRODUCT_FIELDS;
+  for (const key of keys) {
+    const seed = editorSeed(key, p.fields[key]);
+    const wrap = document.createElement("div");
+    wrap.className = "settings-field";
+    const label = document.createElement("label");
+    label.textContent = FIELD_LABELS[key] || key;
+    wrap.appendChild(label);
+    let el: HTMLInputElement | HTMLTextAreaElement;
+    if (seed.kind === "text" && SINGLE_LINE.has(key)) {
+      el = document.createElement("input");
+      el.type = "text";
+      el.className = "settings-input";
+    } else {
+      const ta = document.createElement("textarea");
+      const lines = seed.text ? seed.text.split("\n").length : 1;
+      ta.rows = Math.min(8, Math.max(2, lines));
+      ta.className = "settings-textarea" + (seed.kind === "json" ? " mono" : "");
+      el = ta;
+    }
+    el.value = seed.text;
+    el.dataset.orig = seed.text; // mirror of FieldEditor.orig, readable across renders
+    wrap.appendChild(el);
+    box.appendChild(wrap);
+    editors.push({ key, kind: seed.kind, el, orig: seed.text });
+  }
+
+  if (p.extra_keys.length) {
+    const extra = document.createElement("div");
+    extra.className = "settings-extra";
+    extra.textContent =
+      "Advanced (edit via chat): " + p.extra_keys.join(", ");
+    box.appendChild(extra);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "settings-actions";
+  const btnSave = document.createElement("button");
+  btnSave.textContent = "Save changes";
+  btnSave.disabled = true;
+  const status = document.createElement("span");
+  status.className = "settings-status";
+  actions.appendChild(btnSave);
+  actions.appendChild(status);
+  box.appendChild(actions);
+
+  const updateDirty = () => {
+    btnSave.disabled = !editors.some((e) => e.el.value !== e.orig);
+  };
+  for (const e of editors) e.el.addEventListener("input", updateDirty);
+
+  btnSave.addEventListener("click", () => void saveProjectSettings(p, editors, btnSave, status));
+  return box;
+}
+
+async function saveProjectSettings(
+  p: ProjectSettings,
+  editors: FieldEditor[],
+  btnSave: HTMLButtonElement,
+  status: HTMLElement
+) {
+  const dirty = editors.filter((e) => e.el.value !== e.orig);
+  if (!dirty.length) return;
+  const args: Record<string, unknown> = { name: p.name };
+  const extra: Record<string, unknown> = {};
+  for (const e of dirty) {
+    const raw = e.el.value;
+    if (e.kind === "list") {
+      const items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (items.length) args[e.key] = items;
+      else extra[e.key] = null; // cleared -> delete the key
+    } else if (e.kind === "json") {
+      try {
+        extra[e.key] = JSON.parse(raw);
+      } catch {
+        status.textContent = `${FIELD_LABELS[e.key] || e.key}: invalid JSON, nothing saved.`;
+        return;
+      }
+    } else if (!raw.trim()) {
+      extra[e.key] = null; // cleared -> delete the key
+    } else if (NAMED_PROPS.has(e.key)) {
+      args[e.key] = raw;
+    } else {
+      extra[e.key] = raw;
+    }
+  }
+  if (Object.keys(extra).length) args.fields = extra;
+
+  btnSave.disabled = true;
+  const prev = btnSave.textContent;
+  btnSave.textContent = "Saving…";
+  status.textContent = "";
+  try {
+    const res = await call("project_config", args);
+    if (res && res.ok) {
+      // Adopt the saved values as the new baseline so the dirty tracking (and
+      // the Save button) reset without a full re-render under the user's cursor.
+      for (const e of dirty) { e.orig = e.el.value; e.el.dataset.orig = e.el.value; }
+      status.textContent = res.ready
+        ? "Saved."
+        : `Saved. Still missing: ${(res.missing_required || []).join(", ")}.`;
+      void refresh();
+    } else {
+      status.textContent = "Save failed: " + (res?.note || res?._raw || "unknown error");
+    }
+  } catch (e: any) {
+    status.textContent = "Save failed: " + (e?.message || e);
+  } finally {
+    btnSave.textContent = prev;
+    btnSave.disabled = !editors.some((e) => e.el.value !== e.orig);
+  }
+}
+
+// Fetch fresh values on every expand (a cheap local read), so the section
+// always shows what's actually on disk — including edits made from the chat.
+async function loadSettings() {
+  if (settingsLoading) return;
+  // Never clobber unsaved edits: if any editor differs from its saved baseline,
+  // keep the current form instead of re-rendering over the user's changes.
+  const editing = Array.from(
+    settingsBody.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")
+  ).some((el) => el.value !== (el.dataset.orig ?? el.value));
+  if (editing) return;
+  settingsLoading = true;
+  if (!settingsBody.querySelector(".settings-project")) {
+    settingsBody.innerHTML = `<div class="muted">Loading…</div>`;
+  }
+  try {
+    const res = await call("project_config", { action: "get" });
+    const projects: ProjectSettings[] = Array.isArray(res?.projects) ? res.projects : [];
+    settingsBody.textContent = "";
+    if (!projects.length) {
+      settingsBody.innerHTML = `<div class="muted">No projects configured yet — run Set up first.</div>`;
+      return;
+    }
+    for (const p of projects) settingsBody.appendChild(buildProjectEditor(p));
+  } catch (e: any) {
+    settingsBody.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "muted";
+    err.textContent = "Couldn’t load settings: " + (e?.message || e);
+    settingsBody.appendChild(err);
+  } finally {
+    settingsLoading = false;
+  }
+}
+
+settingsToggle.addEventListener("click", () => {
+  settingsOpen = !settingsOpen;
+  settingsBody.hidden = !settingsOpen;
+  settingsToggle.setAttribute("aria-expanded", String(settingsOpen));
+  settingsToggle.classList.toggle("expanded", settingsOpen);
+  if (settingsOpen) void loadSettings();
+});
 
 // ---- live browser view ----------------------------------------------------
 // Polls the show_browser_to_user tool, which keeps a CDP screencast of the
