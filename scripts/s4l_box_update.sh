@@ -54,11 +54,11 @@ esac
 # PATH, so channel + latest resolution is a self-contained python block reading
 # the same <state dir>/channel.json marker every other surface uses. It prints
 # four space-separated tokens: "<channel> <tag> <version> <mcpb_url>".
-STATE_DIR="${SAPS_STATE_DIR:-$HOME/.social-autoposter-mcp}"
-RESOLVED="$(SAPS_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
+STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
+RESOLVED="$(S4L_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
 import json, os, re, subprocess
 
-state = os.environ.get("SAPS_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
+state = os.environ.get("S4L_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
 try:
     ch = (json.load(open(os.path.join(state, "channel.json"))) or {}).get("channel")
 except Exception:
