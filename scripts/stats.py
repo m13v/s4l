@@ -1753,10 +1753,10 @@ def refresh_twitter(db, config=None, quiet=False, audit_mode=False):
     ttr_total = ttr_updated = ttr_changed = ttr_deleted = ttr_errors = 0
     if not audit_mode:
         # Freshness override for ad-hoc reruns. Cron uses the 5h default;
-        # setting SAPS_TTR_STALE_HOURS=0 forces every active row through this
+        # setting S4L_TTR_STALE_HOURS=0 forces every active row through this
         # cycle (useful right after a capture cycle to watch the refresh loop).
         try:
-            _ttr_stale = float(os.environ.get("SAPS_TTR_STALE_HOURS", "5"))
+            _ttr_stale = float(os.environ.get("S4L_TTR_STALE_HOURS", "5"))
         except ValueError:
             _ttr_stale = 5.0
         ttr_rows = _http_list_twitter_top_replies_to_refresh(stale_hours=_ttr_stale)
