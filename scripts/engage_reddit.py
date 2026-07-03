@@ -37,12 +37,12 @@ REDDIT_BROWSER_LOCK = os.path.join(REPO_DIR, "scripts", "reddit_browser_lock.py"
 # to the user's system python, which lacks the pipeline deps (Playwright and
 # friends) that live only in the owned uv runtime — so on a fresh box every
 # reddit_browser.py reply died (the same class as the Karol/Twitter bug,
-# 2026-06-22). Honor the authoritative SAPS_PYTHON pin (set by the launchd
+# 2026-06-22). Honor the authoritative S4L_PYTHON pin (set by the launchd
 # plist), else sys.executable (the owned interpreter the MCP launches us under).
 # Never the literal PYTHON: that re-rolls the PATH dice. Re-exported so
 # grandchildren inherit it.
-PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
-os.environ["SAPS_PYTHON"] = PYTHON
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 
 from engagement_styles import (
     REPLY_STYLES as VALID_STYLES,
