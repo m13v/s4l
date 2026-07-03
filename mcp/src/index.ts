@@ -103,8 +103,17 @@ const REVIEW_QUEUE_ID = "review-queue";
 // back, unblocking the cycle. This reuses the entire pipeline (styles, voice,
 // top-performers, em-dash rules). See scripts/claude_job.py + run_claude.sh's
 // provider seam.
-const PHASE1_TASK_ID = "saps-phase1-query"; // drains "twitter-query" jobs
-const PHASE2B_TASK_ID = "saps-phase2b-draft"; // drains "twitter-prep" jobs
+// Universal type-blind queue worker (2026-07-02): ONE scheduled task drains
+// EVERY job type (`claude_job.py next --type any`). Per-type execution notes
+// ride in the job's prompt sidecar (claude_job.py TYPE_TO_WORKER_NOTES), so
+// the worker prompt never mentions types.
+const WORKER_TASK_ID = "saps-worker";
+// Legacy per-type workers from pre-universal installs. Not created anymore;
+// their SKILL.md is refreshed to the same universal body on boot, so old boxes
+// keep draining (two interchangeable workers racing the same claim is safe —
+// the claim is an atomic rename).
+const PHASE1_TASK_ID = "saps-phase1-query"; // legacy (was: "twitter-query" only)
+const PHASE2B_TASK_ID = "saps-phase2b-draft"; // legacy (was: "twitter-prep" only)
 
 const TWITTER_AUTOPILOT_LABEL = "com.m13v.social-twitter-cycle";
 const TWITTER_AUTOPILOT_PLIST = path.join(
@@ -376,9 +385,9 @@ const server = new McpServer(
       "menu-bar approval cards. Drafting is the queue + worker path, fired automatically by a launchd " +
       "kicker this server installs (every few minutes) — it runs on its own once the tasks exist; " +
       "onboarding does NOT need to wait for or verify a draft. Steps, in order: " +
-      "(1) call `queue_setup` — it pre-writes the worker task prompts and returns two task specs " +
-      "(saps-phase1-query, saps-phase2b-draft); " +
-      "(2) for EACH spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
+      "(1) call `queue_setup` — it pre-writes the worker task prompt and returns the task spec " +
+      "(saps-worker, the universal queue worker); " +
+      "(2) for EACH returned spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
       "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
       "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — call the `dashboard` " +
       "tool to confirm the schedule is firing (schedule_state 'ok'), then summarize. Do NOT create the " +
