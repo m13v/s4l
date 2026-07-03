@@ -924,43 +924,6 @@ class S4LMenuBar(rumps.App):
         self._notify("S4L", "Updating… Claude will restart in a moment.")
         threading.Thread(target=self._mcpb_update_work, daemon=True).start()
 
-    def _toggle_channel(self, _=None):
-        """Flip this box between the stable and staging release channels. Writes the
-        shared <state dir>/channel.json marker via s4l_channel (the same one the
-        MCP server, snapshot, and SSH updater read), then forces an immediate
-        version re-probe so the next menu build reflects the new channel's latest
-        without waiting for the ~1-min TTL. Does NOT auto-update: the user still
-        clicks 'Update now' if the new channel has a newer build."""
-        target = "stable" if self._channel == "staging" else "staging"
-        try:
-            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
-            import s4l_channel
-            s4l_channel.set_channel(target)
-        except Exception as e:
-            # Fallback: write the marker directly so a missing import never blocks
-            # the toggle (keep the schema identical to s4l_channel).
-            try:
-                d = os.environ.get("SAPS_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
-                os.makedirs(d, exist_ok=True)
-                with open(os.path.join(d, "channel.json"), "w") as f:
-                    json.dump({"channel": target}, f)
-            except Exception:
-                self._notify("S4L", "Couldn't switch channel: %s" % e)
-                return
-        # Optimistically reflect the flip; the next tick reconfirms from the
-        # snapshot (which reads channel.json fresh and re-probes the new channel's
-        # latest, since snapshot's version cache is keyed by channel). Force a menu
-        # rebuild on the next tick by clearing the change signature so the toggle's
-        # new label + the new channel's update state appear promptly.
-        self._channel = target
-        self._sig = None
-        self._notify(
-            "S4L channel: %s" % target,
-            "Now tracking %s builds." % (
-                "pre-release (staging)" if target == "staging" else "stable"
-            ),
-        )
-
     @staticmethod
     def _claude_user_data_dir():
         """The --user-data-dir the RUNNING Claude was launched with, or None.
@@ -1702,7 +1665,6 @@ class S4LMenuBar(rumps.App):
             snap.get("update_available"),
             self._update_available,
             self._latest_version,
-            self._channel,
             snap.get("x_handle"),
             snap.get("projects_ready"),
             snap.get("projects_total"),
@@ -2086,16 +2048,6 @@ class S4LMenuBar(rumps.App):
         if self._reloc_needed and not self._relocating:
             items.append(rumps.separator)
             items.append(rumps.MenuItem("Tidy autopilot history…", callback=self._prompt_relocate_tasks))
-        items.append(rumps.separator)
-        # Release channel toggle. Stable tracks releases/latest; staging tracks the
-        # newest release overall (prerelease RCs first) so this box can dogfood a
-        # build before it ships to everyone. Labels state the action so each reads
-        # as a button, not a status line.
-        if self._channel == "staging":
-            items.append(self._label("Channel: staging (pre-release)"))
-            items.append(rumps.MenuItem("Switch to stable channel", callback=self._toggle_channel))
-        else:
-            items.append(rumps.MenuItem("Switch to staging (pre-release) channel", callback=self._toggle_channel))
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
