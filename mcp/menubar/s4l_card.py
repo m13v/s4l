@@ -1043,3 +1043,32 @@ def extend_active(drafts):
         return _active.extend_drafts(drafts)
     except Exception:
         return 0
+
+
+def active_status():
+    """Live review-surface snapshot for the menu bar's unattended-review
+    watchdog, or None when no card is open. Main thread only."""
+    c = _active
+    if c is None or c._panel is None:
+        return None
+    try:
+        return c.status_dict()
+    except Exception:
+        return None
+
+
+def heal_active():
+    """Self-heal an unattended card: move it to the top-right of the screen the
+    pointer is on and raise it, WITHOUT stealing keyboard focus (the user is
+    mid-something elsewhere by definition). Main thread only. Returns True if a
+    card was moved."""
+    c = _active
+    if c is None or c._panel is None:
+        return False
+    try:
+        c._panel.setFrame_display_(_corner_frame(_mouse_screen()), True)
+        c._panel.orderFrontRegardless()
+        c._log_surface("healed")
+        return True
+    except Exception:
+        return False
