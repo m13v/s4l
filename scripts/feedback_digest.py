@@ -293,6 +293,35 @@ def digest_project(project: dict, platform: str, dry_run: bool,
     if not result.get("ok"):
         log(f"project={name} platform={platform} events={len(events)} apply_failed={result.get('error')} (events left unprocessed)")
         return False
+
+    # Author blocks the digest agent decided on (its judgment call, never
+    # automatic; see the prompt). Applied via the blocklist API so the
+    # discovery and reply gates enforce them. Best-effort per handle: a
+    # failed POST is logged and skipped, never fails the digest.
+    blocked = []
+    for entry in block_authors[:10]:  # runaway-plan cap
+        if not isinstance(entry, dict):
+            continue
+        handle = str(entry.get("handle") or "").strip().lstrip("@").lower()
+        if not handle:
+            continue
+        reason = str(entry.get("reason") or "").strip()[:500] or "feedback digest judgment call"
+        try:
+            api_post("/api/v1/blocklist", {
+                "platform": platform,
+                "handle": handle,
+                "classification": "manual_block",
+                "severity": "hard",
+                "reason": f"feedback digest: {reason}",
+                "added_by": "feedback_digest",
+                "project": name,
+            }, ok_on_conflict=True)
+            blocked.append(handle)
+        except Exception as e:
+            log(f"project={name} block_author_failed handle={handle}: {e}")
+    if blocked:
+        log(f"project={name} blocked_authors: {', '.join(blocked)}")
+
     marked = 0
     if event_ids:
         try:
