@@ -14,7 +14,7 @@ Mirrors telemetry.ts semantics: batch flushes on a short cadence, blank and
 base64-blob noise filtering (the X-Installation echo loop guard), bounded
 buffer with drop-oldest overflow, and strictly best-effort: nothing in here may
 ever raise into the menu bar or write to stderr itself (that would loop).
-Disable with SAPS_LOG_STREAM=0, point elsewhere with AUTOPOSTER_LOG_BASE.
+Disable with S4L_LOG_STREAM=0, point elsewhere with AUTOPOSTER_LOG_BASE.
 """
 
 import json
@@ -26,7 +26,7 @@ import time
 import urllib.request
 
 LOG_BASE = (os.environ.get("AUTOPOSTER_LOG_BASE") or "https://app.s4l.ai").rstrip("/")
-ENABLED = os.environ.get("SAPS_LOG_STREAM", "1") != "0"
+ENABLED = os.environ.get("S4L_LOG_STREAM", "1") != "0"
 MAX_LINE_LEN = 8192  # relay cap
 MAX_BUFFER = 1000  # drop oldest beyond this
 MAX_PER_POST = 200  # relay accepts 1-200 lines per request
@@ -47,7 +47,7 @@ def _install_header():
         return _header
     # Lane 1: the shared helper, present in current repos.
     try:
-        # scripts/ is on sys.path (SAPS_REPO_DIR insertion at menubar boot).
+        # scripts/ is on sys.path (S4L_REPO_DIR insertion at menubar boot).
         from http_api import get_identity_header
 
         _header = (get_identity_header() or "").strip() or None
@@ -61,7 +61,7 @@ def _install_header():
         import subprocess
 
         script = os.path.join(
-            os.environ.get("SAPS_REPO_DIR") or "", "scripts", "identity.py"
+            os.environ.get("S4L_REPO_DIR") or "", "scripts", "identity.py"
         )
         if os.path.isfile(script):
             out = subprocess.run(
@@ -167,7 +167,7 @@ def _loop():
 
 def install():
     """Wrap sys.stderr with the relay tee and start the background flusher.
-    Call once at menubar boot, after the SAPS_REPO_DIR sys.path insertion."""
+    Call once at menubar boot, after the S4L_REPO_DIR sys.path insertion."""
     if not ENABLED:
         return
     try:
