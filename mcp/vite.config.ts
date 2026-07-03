@@ -9,7 +9,7 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //   S4L_PANEL_ENTRY=panel        -> dist/panel.html        (dashboard, default)
 //   S4L_PANEL_ENTRY=product-link -> dist/product-link.html ("add your product")
 // emptyOutDir is false so this never wipes the tsc-built server JS in dist/.
-const ENTRY = process.env.S4L_PANEL_ENTRY || "panel";
+const ENTRY = process.env.S4L_PANEL_ENTRY || process.env.SAPS_PANEL_ENTRY || "panel";
 
 export default defineConfig({
   root: "panel",
