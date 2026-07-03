@@ -72,7 +72,7 @@ import {
   type DoctorPhase,
 } from "./onboarding.js";
 import { VERSION, versionStatus, latestPublishedVersion } from "./version.js";
-import { initSentry, sendHeartbeat, captureError, flushSentry, startLogStreaming, flushLogs } from "./telemetry.js";
+import { initSentry, sendHeartbeat, sendStateSnapshot, captureError, flushSentry, startLogStreaming, flushLogs, logLine } from "./telemetry.js";
 import {
   registerAppTool,
   registerAppResource,
@@ -497,8 +497,53 @@ function withActivity(name: string, cb: ToolHandler): ToolHandler {
   };
 }
 
+// Tool-call telemetry: one structured relay line at the start and end of every
+// tool invocation (context "tool-call" in Cloud Logging). This is the record
+// that was missing on 2026-07-03, when reconstructing WHAT the setup agent
+// actually called (and which calls the client abandoned at its hard 60s
+// timeout) required inference from subprocess side effects. Start+end pairs
+// make abandoned/long calls visible: a start line with no end line inside the
+// expected window means the handler is still running or died. Argument VALUES
+// are never logged (they can carry persona/voice text); only the action field
+// and the argument key names.
+function withToolLog(name: string, cb: ToolHandler): ToolHandler {
+  return async (args: any, extra: any) => {
+    const action = typeof args?.action === "string" ? args.action : undefined;
+    const argKeys = args && typeof args === "object" ? Object.keys(args).slice(0, 30) : [];
+    const startedAt = Date.now();
+    logLine(
+      "stdout",
+      JSON.stringify({ ev: "start", tool: name, action, arg_keys: argKeys }),
+      "tool-call"
+    );
+    try {
+      const result = await cb(args, extra);
+      logLine(
+        "stdout",
+        JSON.stringify({ ev: "end", tool: name, action, ok: true, ms: Date.now() - startedAt }),
+        "tool-call"
+      );
+      return result;
+    } catch (e: any) {
+      logLine(
+        "stderr",
+        JSON.stringify({
+          ev: "end",
+          tool: name,
+          action,
+          ok: false,
+          ms: Date.now() - startedAt,
+          error: String(e?.message || e).slice(0, 500),
+        }),
+        "tool-call"
+      );
+      throw e;
+    }
+  };
+}
+
 const tool: typeof server.registerTool = ((name: string, config: any, cb: ToolHandler) => {
-  const h = withActivity(name, cb);
+  const h = withToolLog(name, withActivity(name, cb));
   TOOL_HANDLERS[name] = h;
   return (baseRegisterTool as any)(name, config, h);
 }) as any;
@@ -515,7 +560,7 @@ const appTool = ((name: string, config: any, cb: ToolHandler) => {
       throw e;
     }
   }) as ToolHandler;
-  const h = withActivity(name, wrapped);
+  const h = withToolLog(name, withActivity(name, wrapped));
   TOOL_HANDLERS[name] = h;
   return registerAppTool(server as any, name, config as any, h as any);
 }) as any;
@@ -4662,6 +4707,13 @@ async function main() {
   void sendHeartbeat("startup");
   const hb = setInterval(() => void sendHeartbeat("interval"), 15 * 60_000);
   hb.unref();
+  // Sync the install's configuration state (config.json, persona corpus, mode,
+  // queues, onboarding ledger) to the backend. Hash-gated on the interval, so
+  // the recurring tick only POSTs when something actually changed; setup.ts
+  // additionally fires it right after every config write.
+  void sendStateSnapshot("startup");
+  const ss = setInterval(() => void sendStateSnapshot("interval"), 15 * 60_000);
+  ss.unref();
 }
 
 main().catch(async (err) => {
