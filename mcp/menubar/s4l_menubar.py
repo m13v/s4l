@@ -342,6 +342,18 @@ class S4LMenuBar(rumps.App):
         self._review_heal_at = 0.0
         self._review_unattended_notified = False
         self._review_unattended_captured = False
+        # This session's card decisions, for store reconciliation: the MCP
+        # server's post_drafts rewrites the whole review store from a copy read
+        # before a minutes-long posting run, so a decision stamped mid-drain can
+        # be clobbered; the tick re-stamps anything missing (_reconcile_store).
+        self._session_decisions = []
+        self._reconciled_at = 0.0
+        # The /tmp plan path is a compatibility symlink into the durable store;
+        # recreate it if a reboot swept it (merge_review_queue also does this).
+        try:
+            st.ensure_store_symlink()
+        except Exception:
+            pass
         self._posts_outstanding = 0
         self._posting_batch_total = 0
         self._posting_batch_done = 0
@@ -1631,13 +1643,22 @@ class S4LMenuBar(rumps.App):
         never confirmed posted (the in-memory _post_q died with the old process).
         Skip any the plan already shows as posted, so a card that landed on X just
         before the kill — but whose status update was lost — isn't posted twice."""
-        pending = st.approved_queue_pending()
+        # Store lane (canonical): approved-but-unposted rows in the review store.
+        # Legacy lane: pre-store approved-queue.json entries (read-only now; the
+        # ledger is no longer written). Union, store first, dedup by (batch, n).
+        pending = list(st.store_pending_posts())
+        seen = {(it.get("batch"), it.get("n")) for it in pending}
+        legacy = [
+            it for it in st.approved_queue_pending()
+            if (it.get("batch"), it.get("n")) not in seen
+        ]
+        pending.extend(legacy)
         if not pending:
             return
         posted_ns = set()
         try:
             req = st.read_review_request()
-            plan_path = (req or {}).get("plan_path") or "/tmp/twitter_cycle_plan_review-queue.json"
+            plan_path = (req or {}).get("plan_path") or st.store_path()
             plan = st.read_plan(plan_path)
             for i, c in enumerate(((plan or {}).get("candidates") or [])):
                 if c.get("posted") is True:
@@ -1653,6 +1674,7 @@ class S4LMenuBar(rumps.App):
             decision = {
                 "n": n,
                 "approved": True,
+                "candidate_id": it.get("candidate_id"),
                 "text": it.get("text") or "",
                 "edited": bool(it.get("edited")),
                 "drop_link": bool(it.get("drop_link")),
@@ -1869,6 +1891,21 @@ class S4LMenuBar(rumps.App):
         # Self-heal an open-but-ignored card (runs even while busy: it only
         # touches an existing window, never starts a review).
         self._maybe_heal_review()
+        # Store reconciliation: re-stamp any of this session's decisions that
+        # the server's whole-file plan rewrite clobbered mid-drain. Throttled;
+        # cheap when the session has no decisions.
+        now_rc = time.time()
+        if self._session_decisions and now_rc - self._reconciled_at >= 15:
+            self._reconciled_at = now_rc
+            try:
+                fixed = st.store_reconcile_decisions("review-queue", self._session_decisions)
+                if fixed:
+                    sys.stderr.write(
+                        f"[s4l-menubar] re-stamped {fixed} decision(s) clobbered by a plan rewrite\n"
+                    )
+                    sys.stderr.flush()
+            except Exception:
+                pass
 
     # ---- draft review pop-ups ---------------------------------------------
     def _posting_activity_label_locked(self):
@@ -2119,7 +2156,8 @@ class S4LMenuBar(rumps.App):
             # fire-and-forget loopback call with a swallowed exception, so rejects
             # silently vanished and the card "came back" — unlike durable approvals.
             try:
-                st.review_reject_add(batch, n, candidate_id=decision.get("candidate_id"))
+                st.store_stamp_decision(batch, decision)
+                self._session_decisions.append(dict(decision))
             except Exception:
                 pass
 
@@ -2136,14 +2174,8 @@ class S4LMenuBar(rumps.App):
         # restart resumes the drain instead of stranding it and re-presenting the
         # card. The in-memory _post_q below is just the fast path; this file is the
         # source of truth review_drafts() consults to avoid re-showing it.
-        st.approved_queue_add(
-            batch,
-            n,
-            text=decision.get("text") or "",
-            edited=bool(decision.get("edited")),
-            drop_link=bool(decision.get("drop_link")),
-            candidate_id=decision.get("candidate_id"),
-        )
+        st.store_stamp_decision(batch, decision)
+        self._session_decisions.append(dict(decision))
         with self._review_lock:
             self._posts_outstanding += 1
             self._posting_batch_total += 1
@@ -2225,6 +2257,7 @@ class S4LMenuBar(rumps.App):
                     # Loopback unreachable (Claude closed). Mark failed so the card
                     # falls back to manual review rather than silently vanishing.
                     st.approved_queue_set_status(batch, n, "failed", error="loopback_unreachable")
+                    st.store_mark_post_failed(batch, n, decision.get("candidate_id"), "loopback_unreachable")
                     self._notify(
                         "S4L", "Couldn't post — open Claude Desktop and try the draft again."
                     )
@@ -2232,13 +2265,17 @@ class S4LMenuBar(rumps.App):
                     posted = res.get("posted") if isinstance(res, dict) else None
                     if posted == 0:
                         st.approved_queue_set_status(batch, n, "failed", error="posted_0")
+                        st.store_mark_post_failed(batch, n, decision.get("candidate_id"), "posted_0")
                         self._notify("S4L", f"Draft {n} didn't post — see the dashboard for why.")
                     else:
                         # Success is silent: the spinner + dashboard already reflect
-                        # it. No per-card "Posted draft N." banner.
+                        # it. No per-card "Posted draft N." banner. The server
+                        # stamps posted/our_url into the store itself; the legacy
+                        # set_status only settles pre-store ledger entries.
                         st.approved_queue_set_status(batch, n, "posted")
             except Exception as e:
                 st.approved_queue_set_status(batch, n, "failed", error=str(e)[:200])
+                st.store_mark_post_failed(batch, n, decision.get("candidate_id"), str(e)[:200])
                 sys.stderr.write(f"[s4l-menubar] post draft {n} failed: {e}\n")
                 sys.stderr.flush()
                 _capture(e, phase="post_card")
