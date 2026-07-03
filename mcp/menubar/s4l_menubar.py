@@ -169,13 +169,13 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # SETUP_PROMPT mirrors the in-chat panel's Setup button (panel.ts) verbatim so
 # both entry points kick off the same end-to-end flow.
 SETUP_PROMPT = (
-    "Set up social autoposter plugin end to end now. Inspect and repair the runtime, "
+    "Set up the S4L plugin (social-autoposter) end to end now. Inspect and repair the runtime, "
     "auto-detect and connect my X session, scan my profile, discover and research "
     "my product, then infer and save a complete project with seeded search topics. "
     "Keep going without asking me to approve each safe setup step. Ask only if I "
     "must interactively sign in or no product can be identified."
 )
-UPDATE_PROMPT = "Update social-autoposter to the latest version."
+UPDATE_PROMPT = "Update S4L (the social-autoposter plugin) to the latest version."
 # Re-arm goes through the HOST create_scheduled_task path (the same one onboarding
 # uses) — it registers the routines under whatever account is logged in and shows
 # up in Routines. The host tool only runs inside an agent chat, so the menu bar
@@ -183,7 +183,7 @@ UPDATE_PROMPT = "Update social-autoposter to the latest version."
 # scheduled-tasks.json directly — that can't reliably target a just-switched-into
 # account, which is exactly the bug it caused.
 REARM_PROMPT = (
-    "Set up the social-autoposter draft autopilot schedule for this Claude account. "
+    "Set up the S4L draft autopilot schedule for this Claude account. "
     "If queue_setup is available, call it; then for s4l-worker call the host tool "
     "create_scheduled_task with taskId, cronExpression \"* * * * *\", and the prompt "
     "— read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on disk). "
