@@ -359,7 +359,7 @@ const server = new McpServer(
     // Host injects this into the agent's system prompt, so be proactive about
     // WHEN this tool earns its keep, not just what it does.
     instructions:
-      "social-autoposter drafts, reviews, and posts X/Twitter replies for the user's product, and " +
+      "S4L (the social-autoposter server) drafts, reviews, and posts X/Twitter replies for the user's product, and " +
       "can run them hands-free on autopilot.\n\n" +
       "ONBOARDING IS A TERMINAL GOAL. When the user asks to set up, install, configure, or onboard " +
       "social-autoposter, keep taking the next safe action until the owned runtime is ready, a " +
