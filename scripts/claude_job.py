@@ -154,7 +154,13 @@ def _act_write_progress(
         pass
 
 # claude flags that consume the following argv token as their value, so the
-# value is never mistaken for the positional prompt.
+# value is never mistaken for the positional prompt. The CLI accepts BOTH
+# camelCase and kebab-case spellings for the tool filters; list both. Missing
+# kebab spellings bit on 2026-07-03: feedback_digest.py passes
+# "--disallowed-tools <list>", the parser treated it as boolean, the tools
+# list became the last positional, and _parse_claude_args returned it as the
+# prompt; every queue-routed digest job enqueued a tools list instead of the
+# real prompt and the worker rejected it (claude_failed=rc=1 hourly).
 VALUE_FLAGS = {
     "--mcp-config",
     "--json-schema",
@@ -167,6 +173,9 @@ VALUE_FLAGS = {
     "--permission-mode",
     "--allowedTools",
     "--disallowedTools",
+    "--allowed-tools",
+    "--disallowed-tools",
+    "--max-turns",
     "--add-dir",
     "--session-id",
     "--settings",
