@@ -209,6 +209,24 @@ AUTOPILOT_RUNNING_STALL_SECONDS = 900
 # healthy single drain (the worker itself dies at ~2 min today).
 DRAFT_STUCK_SECONDS = 300
 
+# Unattended-review watchdog. A card stack is open with pending drafts and the
+# user has not decided or clicked anything on it for REVIEW_UNATTENDED_SECONDS:
+# treat that as "the user is not seeing this window" regardless of what AppKit
+# reports (a card can be fully drawn yet parked on a display corner nobody
+# looks at, which hid 12 drafts for 3 hours on 2026-07-02). The response is
+# SELF-HEALING, not a prompt: move the card to the pointer's screen and raise
+# it, then keep re-healing every REVIEW_HEAL_EVERY_SECONDS while the drought
+# lasts. One notification per episode; one Sentry event after
+# REVIEW_UNATTENDED_SENTRY_SECONDS so silently-ignored review surfaces are
+# visible fleet-wide.
+REVIEW_UNATTENDED_SECONDS = float(
+    os.environ.get("SAPS_REVIEW_UNATTENDED_S", "1200")
+)
+REVIEW_HEAL_EVERY_SECONDS = float(
+    os.environ.get("SAPS_REVIEW_HEAL_EVERY_S", "600")
+)
+REVIEW_UNATTENDED_SENTRY_SECONDS = 3600.0
+
 
 def _label_elapsed_secs(label):
     """Parse the trailing duration the producer encodes in a drafting activity
@@ -288,6 +306,10 @@ class S4LMenuBar(rumps.App):
         self._post_worker = None
         self._review_lock = threading.Lock()
         self._panel_open = False
+        # Unattended-review watchdog state (_maybe_heal_review).
+        self._review_heal_at = 0.0
+        self._review_unattended_notified = False
+        self._review_unattended_captured = False
         self._posts_outstanding = 0
         self._posting_batch_total = 0
         self._posting_batch_done = 0
@@ -1690,6 +1712,9 @@ class S4LMenuBar(rumps.App):
         # cards. Don't start a review mid-run (the spinner means a tool is active).
         if not busy:
             self._maybe_start_review()
+        # Self-heal an open-but-ignored card (runs even while busy: it only
+        # touches an existing window, never starts a review).
+        self._maybe_heal_review()
 
     # ---- draft review pop-ups ---------------------------------------------
     def _posting_activity_label_locked(self):
@@ -1777,6 +1802,14 @@ class S4LMenuBar(rumps.App):
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
             self._last_review_sig = sig
+            # A silent pop-up is missable; pair every fresh card stack with a
+            # notification. Extends of an already-open stack stay quiet (the
+            # unattended watchdog owns the ignored-card case).
+            n = len(drafts)
+            self._notify(
+                "S4L drafts ready",
+                f"{n} draft{'s' if n != 1 else ''} ready for review",
+            )
         except Exception as e:
             # Card UI unavailable — don't strand the batch; chat review still works.
             self._review_active = False
@@ -1784,6 +1817,69 @@ class S4LMenuBar(rumps.App):
             sys.stderr.write(f"[s4l-menubar] review cards failed: {e}\n")
             sys.stderr.flush()
             _capture(e, phase="review_cards")
+
+    def _maybe_heal_review(self):
+        """Self-heal an unattended review card. A card can be fully drawn yet
+        outside the user's attention (wrong display, buried corner) and AppKit
+        cannot see attention, so measure the outcome instead: drafts pending
+        with no decision or interaction for REVIEW_UNATTENDED_SECONDS. Heal
+        automatically (move to the pointer's screen, raise, no user action
+        required), re-healing on a throttle while the drought lasts. Notify
+        once per episode; after REVIEW_UNATTENDED_SENTRY_SECONDS emit one
+        Sentry event so ignored review surfaces are visible fleet-wide."""
+        try:
+            import s4l_card
+
+            status = s4l_card.active_status()
+        except Exception:
+            return
+        if not status or not status.get("pending"):
+            self._review_unattended_notified = False
+            self._review_unattended_captured = False
+            return
+        anchor = max(
+            status.get("presented_at") or 0,
+            status.get("last_decision_at") or 0,
+            status.get("last_interaction_at") or 0,
+        )
+        if not anchor:
+            return
+        now = time.time()
+        idle = now - anchor
+        if idle < REVIEW_UNATTENDED_SECONDS:
+            self._review_unattended_notified = False
+            self._review_unattended_captured = False
+            return
+        if now - self._review_heal_at >= REVIEW_HEAL_EVERY_SECONDS:
+            self._review_heal_at = now
+            healed = False
+            try:
+                healed = s4l_card.heal_active()
+            except Exception as e:
+                sys.stderr.write(f"[s4l-menubar] review heal failed: {e}\n")
+                sys.stderr.flush()
+            if healed and not self._review_unattended_notified:
+                self._review_unattended_notified = True
+                self._notify(
+                    "S4L drafts waiting",
+                    f"{status.get('pending')} drafts have been waiting "
+                    f"{int(idle // 60)} min. Moved the review card to your "
+                    "screen.",
+                )
+        if (
+            idle >= REVIEW_UNATTENDED_SENTRY_SECONDS
+            and not self._review_unattended_captured
+        ):
+            self._review_unattended_captured = True
+            _capture_msg(
+                "S4L review card unattended",
+                level="warning",
+                phase="review_unattended",
+                pending=str(status.get("pending")),
+                idle_min=str(int(idle // 60)),
+                visible=str(status.get("occlusion_visible")),
+                screen=str(status.get("screen")),
+            )
 
     def _ship_review_event(self, batch, decision):
         """Queue the decision (with reason, link clicks, dwell) for the
