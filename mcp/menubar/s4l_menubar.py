@@ -1183,17 +1183,51 @@ class S4LMenuBar(rumps.App):
             pass
         return False
 
+    @staticmethod
+    def _ensure_worker_skill_md():
+        """Make sure ~/.claude/scheduled-tasks/saps-worker/SKILL.md exists before
+        we register a task that points at it. The MCP writes it on every boot
+        (create-if-missing), so normally this is a no-op; as a belt-and-suspenders
+        fallback we clone a legacy worker's file (same universal body since
+        prompt v7) and fix the frontmatter name."""
+        base = os.path.join(os.path.expanduser("~"), ".claude", "scheduled-tasks")
+        dst = os.path.join(base, WORKER_TASK_ID, "SKILL.md")
+        if os.path.exists(dst):
+            return True
+        for tid in LEGACY_WORKER_TASK_IDS:
+            src = os.path.join(base, tid, "SKILL.md")
+            try:
+                with open(src) as fh:
+                    body = fh.read()
+            except Exception:
+                continue
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                with open(dst, "w") as fh:
+                    fh.write(body.replace(f"name: {tid}", f"name: {WORKER_TASK_ID}", 1))
+                return True
+            except Exception:
+                continue
+        return False
+
     def _rewrite_scheduled_task_cwd(self):
-        """Point the queue-worker tasks' cwd at ~/.s4l-worker and REMOVE the
-        deprecated single autopilot task, across every scheduled-tasks.json
-        registry. Caller MUST invoke this only while Claude is DOWN — the running
-        app caches the registry in memory and clobbers a live edit on the next
-        fire. Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
+        """Registry self-heal, run ONLY while Claude is DOWN (the running app
+        caches the registry in memory and clobbers a live edit on the next
+        fire). Three fixes in one pass, across every scheduled-tasks.json:
+          1. Point worker tasks' cwd at ~/.s4l-worker.
+          2. REMOVE the deprecated single autopilot task.
+          3. CONSOLIDATE the legacy per-type pair into ONE saps-worker entry
+             (the universal type-blind worker): drop the legacy entries and,
+             if no saps-worker is registered there yet, add one inheriting the
+             legacy cron/enabled state. This is the migration path for installs
+             that predate the universal queue.
+        Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
         and queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts."""
         try:
             os.makedirs(WORKER_CWD, exist_ok=True)
         except Exception:
             pass
+        worker_skill_ok = self._ensure_worker_skill_md()
         try:
             for f in glob.glob(SCHED_REGISTRY_GLOB):
                 try:
@@ -1202,6 +1236,8 @@ class S4LMenuBar(rumps.App):
                 except Exception:
                     continue
                 tasks = d.get("scheduledTasks") or []
+                legacy = [t for t in tasks if t.get("id") in LEGACY_WORKER_TASK_IDS]
+                has_worker = any(t.get("id") == WORKER_TASK_ID for t in tasks)
                 new_tasks = []
                 dirty = False
                 for t in tasks:
@@ -1209,10 +1245,30 @@ class S4LMenuBar(rumps.App):
                     if tid in DEPRECATED_TASK_IDS:
                         dirty = True          # drop it
                         continue
+                    if tid in LEGACY_WORKER_TASK_IDS and worker_skill_ok:
+                        dirty = True          # consolidated into saps-worker below
+                        continue
                     if tid in WORKER_TASK_IDS and t.get("cwd") != WORKER_CWD:
                         t["cwd"] = WORKER_CWD
                         dirty = True
                     new_tasks.append(t)
+                if legacy and not has_worker and worker_skill_ok:
+                    tmpl = legacy[0]
+                    new_tasks.append({
+                        "id": WORKER_TASK_ID,
+                        "cronExpression": tmpl.get("cronExpression") or "* * * * *",
+                        "enabled": bool(tmpl.get("enabled", True)),
+                        "filePath": os.path.join(
+                            os.path.expanduser("~"), ".claude",
+                            "scheduled-tasks", WORKER_TASK_ID, "SKILL.md",
+                        ),
+                        # Fresh createdAt keeps schedule_state's CREATED_GRACE
+                        # treating the never-yet-fired task as "ok" until its
+                        # first fire lands (no ⚠ flap during the restart).
+                        "createdAt": int(time.time() * 1000),
+                        "cwd": WORKER_CWD,
+                    })
+                    dirty = True
                 if not dirty:
                     continue
                 d["scheduledTasks"] = new_tasks
@@ -1225,11 +1281,15 @@ class S4LMenuBar(rumps.App):
                     pass
         except Exception:
             pass
-        # Remove the deprecated task's on-disk SKILL.md dir too, so it can't be
-        # re-registered from a stale prompt file.
+        # Remove retired tasks' on-disk SKILL.md dirs too, so they can't be
+        # re-registered from a stale prompt file (and the MCP's boot refresh
+        # stops resurrecting the legacy prompts).
         try:
-            for tid in DEPRECATED_TASK_IDS:
-                import shutil
+            import shutil
+            retired = list(DEPRECATED_TASK_IDS)
+            if worker_skill_ok:
+                retired += list(LEGACY_WORKER_TASK_IDS)
+            for tid in retired:
                 shutil.rmtree(os.path.join(os.path.expanduser("~"), ".claude",
                                            "scheduled-tasks", tid), ignore_errors=True)
         except Exception:
@@ -1272,15 +1332,15 @@ class S4LMenuBar(rumps.App):
             return
         _activate_front()
         choice = rumps.alert(
-            title="Tidy the autopilot history?",
+            title="Tidy the S4L background tasks?",
             message=(
-                "The autopilot's draft + query tasks are writing their "
-                "once-a-minute runs into this project's Claude history, which "
-                "clutters your `claude --resume` list.\n\n"
-                "S4L can move them into a dedicated folder so your history stays "
-                "clean. Claude Desktop will restart once to apply — its window "
-                "will close and reopen in a moment. Your X login, drafts, and "
-                "config all stay."
+                "S4L can tidy its background tasks: merge the old draft + query "
+                "tasks into ONE universal worker (saps-worker) and make sure "
+                "their once-a-minute runs stay in a dedicated folder instead of "
+                "cluttering your `claude --resume` history.\n\n"
+                "Claude Desktop will restart once to apply — its window will "
+                "close and reopen in a moment. Your X login, drafts, and config "
+                "all stay."
             ),
             ok="Tidy & restart Claude", cancel="Later",
         )
