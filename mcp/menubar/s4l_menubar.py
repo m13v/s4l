@@ -140,6 +140,20 @@ def _activate_front():
 
 
 CLAUDE_APP = "Claude"
+
+
+def _claude_launch_env():
+    """Environment for launching Claude via `open`, with every S4L_*/SAPS_* key
+    stripped. This menubar runs under a launchd plist that exports S4L_REPO_DIR
+    (and friends) pointing at the MATERIALIZED pipeline repo, and macOS `open`
+    propagates the caller's environment into the launched app. A relaunch from
+    here therefore poisoned Claude Desktop (and every MCP server child) with
+    S4L_REPO_DIR=<materialized repo>, which ensurePipelineCurrent() read as
+    "user's own clone, never touch" — so pipeline updates silently never
+    applied and the update banner re-fired forever (2026-07-03). Claude needs
+    none of these vars; anything that does gets them from its own plist."""
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(("S4L_", "SAPS_"))}
 POLL_SECONDS = 5
 
 # Our own LaunchAgent. Quit boots it out and deletes the plist so the tray is
@@ -432,7 +446,8 @@ class S4LMenuBar(rumps.App):
 
     # ---- side effects -----------------------------------------------------
     def _open_claude(self, _=None):
-        subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True)
+        subprocess.run(["open", "-a", CLAUDE_APP], capture_output=True,
+                       env=_claude_launch_env())
 
     def _copy_to_clipboard(self, text):
         """Put text on the clipboard via pbcopy. Unlike the AppleScript keystroke
@@ -1079,15 +1094,16 @@ class S4LMenuBar(rumps.App):
             user_data_dirs = [user_data_dirs]
 
         def _open_all():
+            env = _claude_launch_env()
             for d in (user_data_dirs or [None]):
                 if d:
                     subprocess.run(
                         ["open", "-n", "-a", CLAUDE_APP, "--args",
                          f"--user-data-dir={d}"],
-                        capture_output=True, timeout=20)
+                        capture_output=True, timeout=20, env=env)
                 else:
                     subprocess.run(["open", "-a", CLAUDE_APP],
-                                   capture_output=True, timeout=20)
+                                   capture_output=True, timeout=20, env=env)
 
         _open_all()
         time.sleep(5)
