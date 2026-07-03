@@ -106,12 +106,16 @@ const REVIEW_QUEUE_ID = "review-queue";
 // Universal type-blind queue worker (2026-07-02): ONE scheduled task drains
 // EVERY job type (`claude_job.py next --type any`). Per-type execution notes
 // ride in the job's prompt sidecar (claude_job.py TYPE_TO_WORKER_NOTES), so
-// the worker prompt never mentions types.
-const WORKER_TASK_ID = "saps-worker";
-// Legacy per-type workers from pre-universal installs. Not created anymore;
-// their SKILL.md is refreshed to the same universal body on boot, so old boxes
-// keep draining (two interchangeable workers racing the same claim is safe —
-// the claim is an atomic rename).
+// the worker prompt never mentions types. Task ids are USER-VISIBLE (Routines
+// UI), so they carry the S4L brand — never the internal "saps" prefix.
+const WORKER_TASK_ID = "s4l-worker";
+// Legacy workers from earlier installs. Not created anymore; their SKILL.md is
+// refreshed to the same universal body on boot (so old boxes keep draining —
+// interchangeable workers racing the same claim is safe, the claim is an
+// atomic rename) until the menubar's one-restart self-heal consolidates them
+// into s4l-worker. "saps-worker" existed only on staging (rc.2/rc.3) before
+// the brand rename.
+const LEGACY_UNIVERSAL_TASK_ID = "saps-worker";
 const PHASE1_TASK_ID = "saps-phase1-query"; // legacy (was: "twitter-query" only)
 const PHASE2B_TASK_ID = "saps-phase2b-draft"; // legacy (was: "twitter-prep" only)
 
@@ -386,7 +390,7 @@ const server = new McpServer(
       "kicker this server installs (every few minutes) — it runs on its own once the tasks exist; " +
       "onboarding does NOT need to wait for or verify a draft. Steps, in order: " +
       "(1) call `queue_setup` — it pre-writes the worker task prompt and returns the task spec " +
-      "(saps-worker, the universal queue worker); " +
+      "(s4l-worker, the universal queue worker); " +
       "(2) for EACH returned spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
       "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
       "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — call the `dashboard` " +
@@ -2541,7 +2545,7 @@ tool(
     title: "Get autopilot scheduled-task specs",
     description:
       "Returns the scheduled task that runs the hands-free draft autopilot on this machine " +
-      "(saps-worker, the universal queue worker). For EACH returned task, call the host tool " +
+      "(s4l-worker, the universal queue worker). For EACH returned task, call the host tool " +
       "create_scheduled_task with its taskId, cronExpression, and prompt VERBATIM (do not edit the " +
       "prompt — it contains exact local paths). The task drains the local job queue that the " +
       "real pipeline feeds (all job types); the pipeline itself is kicked by launchd jobs this server " +
@@ -2600,7 +2604,7 @@ tool(
         "- About every 5 minutes a background draft cycle scans X for posts that match your search topics and drafts replies in your voice.",
         "- Drafts show up as review cards. The first one usually lands within a few minutes when there is matching supply on X; quiet topics mean fewer or no cards until something relevant is posted.",
         "- Nothing is posted automatically. You approve each draft yourself (from the dashboard or the menu bar); posting autopilot stays OFF until you explicitly turn it on. Today it only drafts.",
-        "- One helper job (saps-worker) runs every minute to drain the background work queue. Leave it enabled; it only drafts, it never posts.",
+        "- One helper job (s4l-worker) runs every minute to drain the background work queue. Leave it enabled; it only drafts, it never posts.",
         "- You can edit your voice, topics, or the drafts themselves at any time, and check status on the dashboard.",
       ],
       next_step:
@@ -2651,12 +2655,14 @@ tool(
 async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
   let autopilot_on = false;
   try {
-    // Autopilot is "on" once a worker that services the pipeline's queued
-    // `claude -p` calls has its SKILL.md on disk: the universal saps-worker,
-    // or (legacy installs) both per-type workers.
+    // Autopilot is "on" once a COMPLETE worker set that services the pipeline's
+    // queued `claude -p` calls has its SKILL.md on disk: the universal
+    // s4l-worker, the transitional saps-worker (staging rc.2/rc.3), or (legacy
+    // installs) both per-type workers.
     autopilot_on =
       QUEUE_WORKERS.every((spec) => fs.existsSync(scheduledTaskSkillPath(spec.taskId))) ||
-      LEGACY_QUEUE_WORKER_TASK_IDS.every((id) => fs.existsSync(scheduledTaskSkillPath(id)));
+      fs.existsSync(scheduledTaskSkillPath(LEGACY_UNIVERSAL_TASK_ID)) ||
+      [PHASE1_TASK_ID, PHASE2B_TASK_ID].every((id) => fs.existsSync(scheduledTaskSkillPath(id)));
   } catch {
     /* leave false */
   }
@@ -2691,10 +2697,11 @@ const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
   { taskId: WORKER_TASK_ID, queueType: "any", human: "universal queue" },
 ];
-// Pre-universal installs created these instead. Never created anymore; their
+// Earlier installs created these instead. Never created anymore; their
 // SKILL.md is refreshed to the universal body on boot (see
-// ensureQueueWorkerPromptsCurrent) so they keep draining every job type.
-const LEGACY_QUEUE_WORKER_TASK_IDS = [PHASE1_TASK_ID, PHASE2B_TASK_ID];
+// ensureQueueWorkerPromptsCurrent) so they keep draining every job type until
+// the menubar self-heal consolidates them into s4l-worker.
+const LEGACY_QUEUE_WORKER_TASK_IDS = [LEGACY_UNIVERSAL_TASK_ID, PHASE1_TASK_ID, PHASE2B_TASK_ID];
 
 function scheduledTaskSkillPath(taskId: string): string {
   const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
