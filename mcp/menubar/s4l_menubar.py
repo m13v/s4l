@@ -1925,6 +1925,9 @@ class S4LMenuBar(rumps.App):
         try:
             import s4l_card
 
+            # The card's 💬 (overall feedback) button opens the composer via the
+            # module-level default handler; register ours before any card shows.
+            s4l_card.set_feedback_handler(self._on_feedback_text)
             s4l_card.present_review(
                 drafts,
                 on_decision=lambda d: self._on_card_decision(batch, d),
