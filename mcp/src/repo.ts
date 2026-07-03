@@ -34,7 +34,7 @@ export function repoDir(): string {
 // which silently stranded every draft and made draft_cycle always report
 // "No drafts in batch ...". Default to /tmp to match the script; allow an explicit
 // override for non-standard installs.
-export const TMP_DIR = process.env.S4L_TMP_DIR || "/tmp";
+export const TMP_DIR = process.env.S4L_TMP_DIR || process.env.SAPS_TMP_DIR || "/tmp";
 
 export interface RunResult {
   code: number;
