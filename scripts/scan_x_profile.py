@@ -47,7 +47,7 @@ except Exception:  # pragma: no cover
     create_connection = None  # type: ignore[assignment]
 
 CDP = os.environ.get(
-    "SAPS_TWITTER_CDP_URL",
+    "S4L_TWITTER_CDP_URL",
     os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555"),
 ).rstrip("/")
 
