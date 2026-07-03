@@ -10,6 +10,8 @@
 import * as Sentry from "@sentry/node";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
+import crypto from "node:crypto";
 import { repoDir, runPython, setLineSink } from "./repo.js";
 import { VERSION } from "./version.js";
 
