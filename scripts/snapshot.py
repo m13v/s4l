@@ -28,15 +28,21 @@ import subprocess
 import sys
 import time
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+
+s4l_env.mirror()
+
 HOME = os.path.expanduser("~")
 
 
 def _state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(HOME, ".social-autoposter-mcp")
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(HOME, ".social-autoposter-mcp")
 
 
 def _repo_dir() -> str:
-    return os.environ.get("SAPS_REPO_DIR") or os.path.join(HOME, "social-autoposter")
+    return os.environ.get("S4L_REPO_DIR") or os.path.join(HOME, "social-autoposter")
 
 
 def _claude_cfg_dir() -> str:
@@ -44,7 +50,7 @@ def _claude_cfg_dir() -> str:
 
 
 def _config_path() -> str:
-    return os.environ.get("SAPS_CONFIG_PATH") or os.path.join(_repo_dir(), "config.json")
+    return os.environ.get("S4L_CONFIG_PATH") or os.path.join(_repo_dir(), "config.json")
 
 
 # Keep in sync with REQUIRED_FIELDS (mcp/src/setup.ts), QUEUE_WORKERS / UPDATER_LABEL
@@ -239,7 +245,7 @@ def _x_status():
     val = {"connected": False, "state": "", "handle": None}
     if _runtime_ready():
         try:
-            py = os.environ.get("SAPS_PYTHON") or sys.executable or "python3"
+            py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
             res = subprocess.run(
                 [py, os.path.join(_repo_dir(), "scripts", "setup_twitter_auth.py"), "status"],
                 capture_output=True, text=True, timeout=90,
