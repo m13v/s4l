@@ -12,6 +12,14 @@
 
 set -euo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 REPO_DIR="${REPO_DIR:-$HOME/social-autoposter}"
 BASE_URL="${AUTOPOSTER_API_BASE:-https://s4l.ai}"
 LOG_DIR="$REPO_DIR/skill/logs"
