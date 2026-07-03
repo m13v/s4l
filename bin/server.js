@@ -3246,6 +3246,7 @@ const _PHASE_FAMILY = {
   engage_linkedin:      ['engage-linkedin-phaseA', 'engage-linkedin-phaseB'],
   dm_replies_linkedin:  ['engage-dm-replies'],
   dm_outreach_linkedin: ['dm-outreach-linkedin'],
+  presence_linkedin:    ['linkedin-presence'],
   // link_edit_linkedin retired + removed 2026-05-29 (link embedded at composition like Twitter).
   // GitHub
   post_github:          ['post_github'],
@@ -10889,7 +10890,7 @@ function fmtInterval(secs) {
 
 let _initialized = false;
 const PLATFORMS = ['Reddit', 'Twitter', 'LinkedIn', 'MoltBook', 'GitHub', 'Instagram'];
-const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Stats', 'Post Audit', 'Octolens'];
+const JOB_TYPES = ['Post Threads', 'Post Comments', 'Engage', 'DM Outreach', 'DM Replies', 'Link Edit', 'Presence', 'Stats', 'Post Audit', 'Octolens'];
 
 function renderToggle(label, loaded) {
   return '<label class="toggle-switch" data-field="toggle" title="' + (loaded ? 'On — click to disable' : 'Off — click to enable') + '">' +
