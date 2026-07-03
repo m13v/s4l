@@ -77,7 +77,7 @@ def load_config():
 
 def _event_line(e: dict) -> str:
     """One compact evidence line per event for the prompt."""
-    parts = [f"[{e.get('decision')}]"]
+    parts = [f"[{e.get('decision')}{'+loved' if e.get('loved') else ''}]"]
     if e.get("reject_category"):
         parts.append(f"category={e['reject_category']}")
     if e.get("thread_author"):
@@ -114,14 +114,30 @@ def _event_line(e: dict) -> str:
     return line
 
 
-def build_prompt(project: dict, events: list[dict]) -> str:
+def build_prompt(project: dict, events: list[dict], overall_events: list[dict] | None = None) -> str:
     block = lp.get_block(project)
+    overall_events = overall_events or []
     rejected = [e for e in events if e.get("decision") == "rejected"]
     approved = [e for e in events if e.get("decision") == "approved"]
+    loved = [e for e in approved if e.get("loved")]
     voice_never = ((project.get("voice") or {}).get("never")) or []
     guard_do_not = ((project.get("content_guardrails") or {}).get("do_not")) or []
 
-    ev_lines = "\n".join(f"{i + 1}. {_event_line(e)}" for i, e in enumerate(events))
+    ev_lines = "\n".join(
+        f"{i + 1}. {_event_line(e)}" for i, e in enumerate(events)
+    ) or "(none this digest)"
+    overall_block = ""
+    if overall_events:
+        notes = "\n".join(
+            f"{i + 1}. {(e.get('reject_note') or '').strip()[:500]}"
+            for i, e in enumerate(overall_events)
+        )
+        overall_block = (
+            f"\n\nOVERALL FEEDBACK from the user ({len(overall_events)} "
+            f"note{'s' if len(overall_events) != 1 else ''}, typed into the feedback box; "
+            "explicit standing guidance about the whole pipeline, NOT about any single thread):\n"
+            f"{notes}"
+        )
 
     return f"""You maintain the learned_preferences block for the project "{project.get('name')}" in a social-posting pipeline. The block distills the user's own approve/reject decisions on draft cards into short standing preferences that steer future thread selection and drafting. It is SOFT guidance read by the drafting model, not a filter.
 
@@ -131,16 +147,16 @@ CURRENT learned_preferences:
 CURRENT voice.never: {json.dumps(voice_never)}
 CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
 
-NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved)} approved):
-{ev_lines}
+NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved)} approved, {len(loved)} of the approvals loved):
+{ev_lines}{overall_block}
 
-Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note).
+Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user pressed the emphatic-approve button ("this was a really good one"): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
 Note on wrong_author: the SPECIFIC handle is already hard-blocked automatically server-side (author_blocklist) the moment the reject lands; that individual will never be drafted again. Your job here is only the generalizable author TYPE, using the author_followers / their-post / found_via_topic context on the event.
 
 Propose changes to the block. RULES, in priority order:
 1. Be conservative. Prefer NO changes over speculative ones. An empty plan is a good plan when the evidence is thin.
-2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note, interactions, or author context (follower count, their post, discovery topic) makes the reason explicit.
+2. Generalize only what the evidence supports: 2+ events agreeing justify a general entry; a single reject justifies at most one narrowly-scoped entry, and only when its note, interactions, or author context (follower count, their post, discovery topic) makes the reason explicit. Exceptions: a single loved approval can justify one audience_prefer/thread entry when the pattern it shows is clear, and OVERALL FEEDBACK lines are explicit user instructions that outrank inferred signals — reflect each one in the most fitting list even from a single line, rewritten as a standing preference.
 3. Describe author/audience TYPES, never individual handles. "crypto/web3-native accounts shilling tokens" is right; "@someguy" is wrong. Preferences must generalize.
 4. Approvals are counter-evidence. If approvals contradict an existing entry, propose removing or narrowing it. Also propose removing entries that events show are stale.
 5. bad_draft events feed draft_style_notes (or, ONLY for a clearly recurring phrasing complaint, voice_never_add / guardrails_do_not_add; use those sparingly, they touch curated fields).
@@ -230,50 +246,58 @@ def parse_plan(text: str):
     return None
 
 
-def digest_project(project: dict, platform: str, dry_run: bool) -> None:
+def digest_project(project: dict, platform: str, dry_run: bool,
+                   overall_events: list[dict] | None = None) -> bool:
+    """Digest one project's pending events (plus any overall-feedback notes,
+    which ride along in every project's prompt but are marked processed by
+    main(), not here). Returns True when the digest completed (or there was
+    nothing to do); False leaves the events unprocessed for the next run."""
     name = project.get("name")
+    overall_events = overall_events or []
     resp = api_get("/api/v1/review-events",
                    {"project": name, "platform": platform, "unprocessed": "true",
                     "limit": str(MAX_EVENTS_PER_RUN)})
     events = ((resp or {}).get("data") or {}).get("events") or []
-    if not events:
-        return
-    prompt = build_prompt(project, events)
+    if not events and not overall_events:
+        return True
+    prompt = build_prompt(project, events, overall_events)
     if dry_run:
-        log(f"project={name} platform={platform} events={len(events)} DRY RUN prompt below")
+        log(f"project={name} platform={platform} events={len(events)} overall={len(overall_events)} DRY RUN prompt below")
         print(prompt)
     ok, out, err = call_claude(prompt)
     if not ok:
         log(f"project={name} platform={platform} events={len(events)} claude_failed={err} (events left unprocessed)")
-        return
+        return False
     plan = parse_plan(out)
     if plan is None:
         log(f"project={name} platform={platform} events={len(events)} plan_unparseable (events left unprocessed): {out[:200]}")
-        return
+        return False
     if dry_run:
         print(json.dumps(plan, indent=2))
         log(f"project={name} platform={platform} events={len(events)} DRY RUN (nothing applied/marked)")
-        return
+        return True
 
     event_ids = [int(e["id"]) for e in events if str(e.get("id", "")).isdigit() or isinstance(e.get("id"), int)]
     result = lp.apply_mutations(name, plan, source_event_ids=event_ids)
     if not result.get("ok"):
         log(f"project={name} platform={platform} events={len(events)} apply_failed={result.get('error')} (events left unprocessed)")
-        return
+        return False
     marked = 0
-    try:
-        presp = api_patch("/api/v1/review-events",
-                          {"ids": event_ids, "action": "mark_processed",
-                           "processed_batch": f"digest-{_now_stamp()}"})
-        marked = ((presp or {}).get("data") or {}).get("updated") or 0
-    except Exception as e:
-        log(f"project={name} mark_processed_failed={e} (idempotent: next run re-digests, apply dedups)")
+    if event_ids:
+        try:
+            presp = api_patch("/api/v1/review-events",
+                              {"ids": event_ids, "action": "mark_processed",
+                               "processed_batch": f"digest-{_now_stamp()}"})
+            marked = ((presp or {}).get("data") or {}).get("updated") or 0
+        except Exception as e:
+            log(f"project={name} mark_processed_failed={e} (idempotent: next run re-digests, apply dedups)")
     log(
         f"project={name} platform={platform} events={len(events)} "
         f"applied={len(result.get('applied') or [])} dropped={len(result.get('dropped') or [])} marked={marked}"
     )
     for change in result.get("applied") or []:
         log(f"  {change}")
+    return True
 
 
 def main() -> int:
@@ -298,27 +322,79 @@ def main() -> int:
 
     resp = api_get("/api/v1/review-events", {"counts": "true"})
     counts = ((resp or {}).get("data") or {}).get("counts") or []
-    if not counts:
+
+    # Overall feedback (decision='feedback', project IS NULL — the card's 💬
+    # button / menu bar "Send feedback…"): fetched once, folded into EVERY
+    # configured project's prompt, and marked processed only after all
+    # attempted digests succeed (apply_mutations dedups any re-digest).
+    overall_events: list[dict] = []
+    try:
+        oresp = api_get("/api/v1/review-events",
+                        {"unprocessed": "true", "limit": "100"})
+        overall_events = [
+            e for e in (((oresp or {}).get("data") or {}).get("events") or [])
+            if e.get("decision") == "feedback" and not e.get("project")
+        ]
+    except Exception as e:
+        log(f"overall_feedback_fetch_error={e}")
+    if overall_events:
+        log(f"overall feedback notes pending: {len(overall_events)}")
+
+    if not counts and not overall_events:
         log("no unprocessed review events")
         return 0
 
+    todo: dict[tuple[str, str], int] = {}
     for row in counts:
         name = row.get("project")
+        if not name:
+            continue  # project-less rows are the overall feedback handled above
         platform = row.get("platform") or "twitter"
         n = int(row.get("unprocessed") or 0)
         if args.project and name != args.project:
             continue
-        if n < args.min_events:
+        # Explicit overall feedback shouldn't wait on the card-event threshold.
+        if n < args.min_events and not overall_events:
             log(f"project={name} platform={platform} events={n} below_min={args.min_events}, waiting")
             continue
+        todo[(name, platform)] = n
+    if overall_events:
+        for name in by_name:
+            if args.project and name != args.project:
+                continue
+            todo.setdefault((name, "twitter"), 0)
+
+    attempted = 0
+    failures = 0
+    for (name, platform), _n in todo.items():
         proj = by_name.get(name)
         if proj is None:
             log(f"project={name} not in local config, skipping (events left for the owning install)")
             continue
+        attempted += 1
         try:
-            digest_project(proj, platform, args.dry_run)
+            if not digest_project(proj, platform, args.dry_run, overall_events):
+                failures += 1
         except Exception as e:
+            failures += 1
             log(f"project={name} digest_error={e}")
+
+    if overall_events and not args.dry_run:
+        if attempted and not failures:
+            ids = [int(e["id"]) for e in overall_events
+                   if str(e.get("id", "")).isdigit() or isinstance(e.get("id"), int)]
+            try:
+                presp = api_patch("/api/v1/review-events",
+                                  {"ids": ids, "action": "mark_processed",
+                                   "processed_batch": f"digest-overall-{_now_stamp()}"})
+                marked = ((presp or {}).get("data") or {}).get("updated") or 0
+                log(f"overall feedback marked processed: {marked}")
+            except Exception as e:
+                log(f"overall mark_processed_failed={e} (re-digested next run; apply dedups)")
+        elif attempted:
+            log("overall feedback left unprocessed (a project digest failed; next run retries)")
+        else:
+            log("overall feedback pending but no configured project to digest into; left unprocessed")
     return 0
 
 
