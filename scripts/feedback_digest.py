@@ -50,6 +50,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402
+
+s4l_env.mirror()
+
 from http_api import api_get, api_patch, api_post  # noqa: E402
 import learned_preferences as lp  # noqa: E402
 
@@ -179,17 +185,17 @@ def _provider_env() -> dict:
     """Route the Claude turn through the local job queue (drained by the
     saps-worker Claude Desktop scheduled task) whenever that worker is actually
     firing; otherwise leave the provider unset so run_claude.sh execs the
-    claude CLI directly (operator Macs). An explicit SAPS_CLAUDE_PROVIDER in
+    claude CLI directly (operator Macs). An explicit S4L_CLAUDE_PROVIDER in
     the environment always wins. This is the same queue lane the drafting
     pipeline uses — the digest is just one more job type on it."""
     env = dict(os.environ)
-    if env.get("SAPS_CLAUDE_PROVIDER"):
+    if env.get("S4L_CLAUDE_PROVIDER"):
         return env
     try:
         import schedule_state
 
         if schedule_state.compute() == "ok":
-            env["SAPS_CLAUDE_PROVIDER"] = "queue"
+            env["S4L_CLAUDE_PROVIDER"] = "queue"
     except Exception:
         pass
     return env
@@ -200,7 +206,7 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
     feedback-digest). Queue-routed when a worker is firing (see _provider_env);
     otherwise mirrors scripts/link_tail.py call_claude()."""
     env = _provider_env()
-    queued = env.get("SAPS_CLAUDE_PROVIDER") == "queue"
+    queued = env.get("S4L_CLAUDE_PROVIDER") == "queue"
     # Queue lane waits for the every-minute worker to claim + draft; give it
     # the same generous budget the pipeline's queued calls get.
     timeout_sec = 900 if queued else CLAUDE_TIMEOUT_SEC
@@ -345,7 +351,7 @@ def main() -> int:
     ap.add_argument("--project", help="digest only this project")
     ap.add_argument("--dry-run", action="store_true", help="print prompt+plan, change nothing")
     ap.add_argument("--min-events", type=int,
-                    default=int(os.environ.get("SAPS_FEEDBACK_MIN_EVENTS", "1")),
+                    default=int(os.environ.get("S4L_FEEDBACK_MIN_EVENTS", "1")),
                     help="skip a project until it has this many unprocessed events")
     args = ap.parse_args()
 
