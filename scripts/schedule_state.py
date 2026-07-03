@@ -8,14 +8,15 @@ schedule state from HERE so the two surfaces can never drift. Previously the sam
 
 The data source is the host's scheduled-task registries on disk:
   ~/Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json
-Both worker tasks (saps-phase1-query, saps-phase2b-draft) must be present; the
-LIVE account is the registry whose tasks have the freshest lastRunAt (only the
-active account's scheduler advances it, so this is robust across the session-id
-churn that Claude restarts cause).
+A complete worker set must be present: the universal saps-worker task, or the
+legacy pair (saps-phase1-query + saps-phase2b-draft) on pre-universal installs.
+The LIVE account is the registry whose tasks have the freshest lastRunAt (only
+the active account's scheduler advances it, so this is robust across the
+session-id churn that Claude restarts cause).
 
 States:
-  'ok'       — both worker tasks present, enabled, and FIRING (lastRunAt within
-               FIRING_WINDOW seconds).
+  'ok'       — a complete worker set present, enabled, and FIRING (lastRunAt
+               within FIRING_WINDOW seconds).
   'disabled' — present but a worker task is disabled.
   'missing'  — not firing anywhere (orphaned / not registered for the live
                account) -> the dashboard offers "Set up draft schedule".
@@ -31,9 +32,26 @@ import os
 import sys
 import time
 
-# Keep in sync with QUEUE_WORKERS in mcp/src/index.ts and WORKER_TASK_IDS in
-# mcp/menubar/s4l_menubar.py.
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# Keep in sync with QUEUE_WORKERS / LEGACY_QUEUE_WORKER_TASK_IDS in
+# mcp/src/index.ts and WORKER_TASK_IDS in mcp/menubar/s4l_menubar.py.
+# A registry counts as scheduled when ANY complete set is present: the
+# universal type-blind worker (2026-07-02, single task drains every job type)
+# or the legacy per-type pair from pre-universal installs.
+WORKER_TASK_SETS = (
+    ("saps-worker",),
+    ("saps-phase1-query", "saps-phase2b-draft"),
+)
+# Flat legacy alias; s4l_menubar imports this for its relocation sweep.
+WORKER_TASK_IDS = ("saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+
+
+def _registry_worker_recs(by_id):
+    """Records for the first COMPLETE worker set in this registry, or None."""
+    for task_ids in WORKER_TASK_SETS:
+        recs = [by_id.get(tid) for tid in task_ids]
+        if all(r is not None for r in recs):
+            return recs
+    return None
 
 # A worker task whose lastRunAt is within this many seconds counts as "firing".
 # 7 min tolerates the host's per-task throttle + Claude restart gaps without a
@@ -101,8 +119,8 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
         except Exception:
             continue
         by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-        recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
-        if any(r is None for r in recs):
+        recs = _registry_worker_recs(by_id)
+        if recs is None:
             continue
         any_present = True
         enabled = all(r.get("enabled") for r in recs)
@@ -142,8 +160,8 @@ def _detail(glob_pattern: str = SCHED_REGISTRY_GLOB) -> dict:
             with open(f) as fh:
                 d = json.load(fh)
             by_id = {t.get("id"): t for t in (d.get("scheduledTasks") or [])}
-            recs = [by_id.get(tid) for tid in WORKER_TASK_IDS]
-            if all(r is not None for r in recs):
+            recs = _registry_worker_recs(by_id)
+            if recs is not None:
                 entry["has_workers"] = True
                 epochs = [_iso_to_epoch(r.get("lastRunAt")) for r in recs]
                 e = max([x for x in epochs if x is not None], default=None)
