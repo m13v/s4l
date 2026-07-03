@@ -81,7 +81,7 @@ SCRAPER_PYTHON_BIN="/usr/bin/python3"
 
 # Tunables.
 MAX_SCROLLS=400           # 2026-05-28 set to 400 per user direction; natural stagnant>=8 bail should fire well before this (~tick 150). Safety ceiling, not target. Previous: 300 (auto-commit) <- 1000 (runaway 2026-05-27).
-SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via SAPS_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
+SCRAPER_TIMEOUT_SEC=900   # 15min outer gtimeout. Inner JS deadline now defaults to 10min via S4L_SCRAPER_DEADLINE_MS; the 15min outer is a 5min margin for cdp_attach + page.goto + the JS deadline + finalize().
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/stats-linkedin-$(date +%Y-%m-%d_%H%M%S).log"
