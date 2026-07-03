@@ -544,7 +544,7 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
       content: [{
         type: "text",
         text:
-          "Set up the social-autoposter draft autopilot schedule for this Claude account. " +
+          "Set up the S4L draft autopilot schedule for this Claude account. " +
           "If queue_setup is available, call it; then for s4l-worker call the host tool " +
           "create_scheduled_task with taskId, cronExpression \"* * * * *\", and the prompt " +
           "\u2014 read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on " +
