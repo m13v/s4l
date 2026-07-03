@@ -18,12 +18,12 @@
 
 set -u
 
-REPO_DIR="${SAPS_REPO_DIR:-$HOME/social-autoposter}"
+REPO_DIR="${S4L_REPO_DIR:-$HOME/social-autoposter}"
 GUARD_DIR="$REPO_DIR/skill"
 UPDATER="$GUARD_DIR/social-autoposter-update.sh"
 SINGLETON="$GUARD_DIR/run-twitter-cycle-singleton.sh"
 STAMP="$REPO_DIR/skill/logs/.last-update-check"
-CHECK_INTERVAL_SECS="${SAPS_UPDATE_CHECK_INTERVAL_SECS:-21600}"  # 6h
+CHECK_INTERVAL_SECS="${S4L_UPDATE_CHECK_INTERVAL_SECS:-21600}"  # 6h
 
 now="$(date +%s)"
 last=0
