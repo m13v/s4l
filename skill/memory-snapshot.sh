@@ -7,6 +7,14 @@
 
 set -uo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 REPO_DIR="${REPO_DIR:-$HOME/social-autoposter}"
 LOG_DIR="$REPO_DIR/skill/logs"
 mkdir -p "$LOG_DIR"
@@ -24,8 +32,8 @@ fi
 echo "$$" > "$PID_FILE"
 trap 'rm -f "$PID_FILE"' EXIT INT TERM
 
-PYTHON_BIN="${SAPS_PYTHON:-python3}"
+PYTHON_BIN="${S4L_PYTHON:-python3}"
 "$PYTHON_BIN" "$REPO_DIR/scripts/memory_snapshot.py" \
-  --output "${SAPS_MEMORY_SNAPSHOT_LOG:-$LOG_DIR/memory-snapshots.jsonl}" \
-  --top "${SAPS_MEMORY_TOP_N:-30}" \
-  --max-bytes "${SAPS_MEMORY_MAX_BYTES:-104857600}"
+  --output "${S4L_MEMORY_SNAPSHOT_LOG:-$LOG_DIR/memory-snapshots.jsonl}" \
+  --top "${S4L_MEMORY_TOP_N:-30}" \
+  --max-bytes "${S4L_MEMORY_MAX_BYTES:-104857600}"
