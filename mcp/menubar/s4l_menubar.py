@@ -2120,7 +2120,7 @@ class S4LMenuBar(rumps.App):
             # fire-and-forget loopback call with a swallowed exception, so rejects
             # silently vanished and the card "came back" — unlike durable approvals.
             try:
-                st.review_reject_add(batch, n)
+                st.review_reject_add(batch, n, candidate_id=decision.get("candidate_id"))
             except Exception:
                 pass
 
@@ -2143,6 +2143,7 @@ class S4LMenuBar(rumps.App):
             text=decision.get("text") or "",
             edited=bool(decision.get("edited")),
             drop_link=bool(decision.get("drop_link")),
+            candidate_id=decision.get("candidate_id"),
         )
         with self._review_lock:
             self._posts_outstanding += 1
