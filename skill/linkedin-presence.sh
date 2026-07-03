@@ -7,9 +7,9 @@
 #   It does not like, follow, connect, message, comment, expand comments, or open
 #   post permalinks.
 #
-# This is intentionally a Claude/harness pipeline, not a Python CDP action
-# helper, so it stays inside the same LinkedIn browser-action boundary as the
-# rest of the repo.
+# The shell wrapper is the pipeline: scheduling, killswitch, locks, harness
+# bootstrap, and run_monitor logging. The browser action itself is deterministic
+# Python CDP so a presence pass does not spend a Claude session just to scroll.
 
 set -euo pipefail
 
@@ -81,7 +81,6 @@ log "=== LinkedIn Presence Run: $(date) (batch=$BATCH_ID mode=$MODE scrolls=$SCR
 source "$REPO_DIR/skill/lock.sh"
 source "$REPO_DIR/skill/lib/linkedin-backend.sh"
 
-PROMPT_FILE="$(mktemp -t saps-linkedin-presence.XXXXXX)"
 log_presence_run() {
     local failed="$1"
     local failure_reasons="$2"
@@ -108,76 +107,12 @@ log_presence_run() {
 }
 
 cleanup() {
-    rm -f "$PROMPT_FILE" 2>/dev/null || true
     rm -f "$HOME/.claude/linkedin-agent-lock.json" 2>/dev/null || true
     if declare -f _sa_release_locks >/dev/null 2>&1; then
         _sa_release_locks || true
     fi
 }
 trap cleanup EXIT INT TERM HUP
-
-cat > "$PROMPT_FILE" <<PROMPT_EOF
-You are running a read-only LinkedIn presence pass for Social Autoposter.
-
-$BROWSER_INSTRUCTIONS
-
-Task:
-- Mode: $MODE
-- URL: $TARGET_URL
-- Scroll passes: $SCROLLS
-- Scroll amounts, in order: $SCROLL_A, $SCROLL_B, $SCROLL_C
-- Dwell seconds, in order: $DWELL_A, $DWELL_B, $DWELL_C
-
-Hard rules:
-- Use only mcp__linkedin-harness__bh_run.
-- Do not post, comment, react, like, repost, follow, connect, send messages, or submit forms.
-- Do not open individual post permalinks.
-- Do not click "Show more comments", "Load earlier replies", "See more", or any comment-expansion control.
-- Do not call /voyager/api/*, fetch(), XHR, or any internal LinkedIn endpoint.
-- If a login, checkpoint, captcha, authwall, or verify-you-are-human page appears, print exactly SESSION_INVALID and stop. Do not try to log in.
-- In messaging mode, stay on the messaging sidebar/list. Do not open a conversation and do not read private thread contents.
-
-Workflow:
-1. Perform the whole pass with one bh_run call using this exact Python shape. It reuses the existing tab with goto_url(), checks URL/text for login or checkpoint surfaces, scrolls with the real scroll(x, y, dy=...) helper, and prints the summary. Do not capture screenshots unless the URL/text check is ambiguous:
-   bh_run(r'''
-   import time
-
-   goto_url("$TARGET_URL")
-   wait_for_load()
-   url = js("return location.href")
-   title = js("return document.title")
-   text = js("return document.body.innerText.slice(0, 1200)")
-   url_l = str(url or "").lower()
-   title_l = str(title or "").lower()
-   text_l = str(text or "").lower()
-   bad_url = any(s in url_l for s in ["login", "checkpoint", "authwall"])
-   bad_text = any(s in text_l for s in [
-       "security verification",
-       "verify you are human",
-       "captcha",
-       "sign in to linkedin",
-       "join linkedin",
-   ])
-   if bad_url or bad_text:
-       print("SESSION_INVALID")
-   else:
-       dims = js("return {w: window.innerWidth || 1180, h: window.innerHeight || 900}")
-       if not isinstance(dims, dict):
-           dims = {"w": 1180, "h": 900}
-       x = int((dims.get("w") or 1180) * 0.50)
-       y = int((dims.get("h") or 900) * 0.56)
-       amounts = [$SCROLL_A, $SCROLL_B, $SCROLL_C][:$SCROLLS]
-       dwells = [$DWELL_A, $DWELL_B, $DWELL_C][:$SCROLLS]
-       for amount, dwell in zip(amounts, dwells):
-           scroll(x, y, dy=amount)
-           time.sleep(dwell)
-       print("LINKEDIN_PRESENCE_SUMMARY: mode=$MODE pages=1 scrolls=$SCROLLS session=ok")
-   ''')
-2. Print exactly one summary line if the script did not already print it:
-   LINKEDIN_PRESENCE_SUMMARY: mode=$MODE pages=1 scrolls=$SCROLLS session=ok
-
-Keep the run short and quiet. This is a read-only session maintenance pass, not discovery, scraping, or engagement.
-PROMPT_EOF
 
 if [ "$DRY_RUN" = "1" ]; then
     log "DRY_RUN: would run mode=$MODE url=$TARGET_URL scrolls=$SCROLLS"
@@ -200,23 +135,20 @@ if [ "$BOOTSTRAP_RC" -ne 0 ]; then
     exit 0
 fi
 
-TIMEOUT_BIN="$(command -v gtimeout || command -v timeout || true)"
 PRESENCE_RC=0
-# The generic wrapper cannot currently infer linkedin-harness-mcp.json because
-# it is immutable on this machine; export the same trust marker directly.
-export SA_PIPELINE_PLATFORM="linkedin"
-export SA_PIPELINE_LOCKED=1
+PYTHON_BIN="${LINKEDIN_DISCOVER_PYTHON:-python3}"
+TIMEOUT_BIN="$(command -v gtimeout || command -v timeout || true)"
 set +e
 if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" 900 "$REPO_DIR/scripts/run_claude.sh" "linkedin-presence" \
-        --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" \
-        --output-format stream-json --verbose \
-        -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE"
+    "$TIMEOUT_BIN" 180 "$PYTHON_BIN" "$REPO_DIR/scripts/linkedin_presence.py" \
+        --mode "$MODE" --url "$TARGET_URL" --scrolls "$SCROLLS" \
+        --amounts "$SCROLL_A,$SCROLL_B,$SCROLL_C" \
+        --dwells "$DWELL_A,$DWELL_B,$DWELL_C" 2>&1 | tee -a "$LOG_FILE"
 else
-    "$REPO_DIR/scripts/run_claude.sh" "linkedin-presence" \
-        --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" \
-        --output-format stream-json --verbose \
-        -p "$(cat "$PROMPT_FILE")" 2>&1 | tee -a "$LOG_FILE"
+    "$PYTHON_BIN" "$REPO_DIR/scripts/linkedin_presence.py" \
+        --mode "$MODE" --url "$TARGET_URL" --scrolls "$SCROLLS" \
+        --amounts "$SCROLL_A,$SCROLL_B,$SCROLL_C" \
+        --dwells "$DWELL_A,$DWELL_B,$DWELL_C" 2>&1 | tee -a "$LOG_FILE"
 fi
 PRESENCE_RC=${PIPESTATUS[0]}
 set -e
@@ -225,7 +157,7 @@ release_lock "linkedin-browser"
 
 FAILED=0
 FAILURE_REASONS=""
-if grep -q "SESSION_INVALID" "$LOG_FILE" 2>/dev/null; then
+if [ "$PRESENCE_RC" -eq 2 ]; then
     FAILED=1
     FAILURE_REASONS="session_invalid:1"
 elif [ "$PRESENCE_RC" -ne 0 ]; then
@@ -233,8 +165,11 @@ elif [ "$PRESENCE_RC" -ne 0 ]; then
     if [ "$PRESENCE_RC" = "124" ]; then
         FAILURE_REASONS="timeout:1"
     else
-        FAILURE_REASONS="claude_or_browser_error:1"
+        FAILURE_REASONS="python_cdp_error:1"
     fi
+elif ! grep -q "LINKEDIN_PRESENCE_SUMMARY: .* session=ok" "$LOG_FILE" 2>/dev/null; then
+    FAILED=1
+    FAILURE_REASONS="missing_summary:1"
 fi
 
 log_presence_run "$FAILED" "$FAILURE_REASONS" "$PRESENCE_RC"
