@@ -18,6 +18,13 @@ scripts/learned_preferences.py for the full loop). Per run:
      never digested twice. Events are marked processed even when the plan is
      "no changes" — a considered no-op is a completed digestion, not a retry.
 
+Overall feedback (decision='feedback', project IS NULL; typed into the card's
+💬 composer or the menu bar's "Send feedback…" item) is fetched once per run,
+folded into EVERY configured project's prompt as explicit standing guidance,
+and marked processed only after all attempted project digests succeed.
+Loved approvals (the card's 😄 button) arrive as loved=true on approved
+events and are surfaced to the model as strong positive evidence.
+
 Failure handling: a Claude failure or unparseable plan leaves the events
 unprocessed for the next run. A run-level flock prevents concurrent digests.
 
