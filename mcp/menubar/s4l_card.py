@@ -312,6 +312,14 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
+        # Attention anchors for the unattended-review watchdog: the stack counts
+        # as "touched" on present, on any tracked interaction, and on any
+        # decision. No touch past the watchdog threshold = the user is not
+        # seeing this window, wherever AppKit thinks it is.
+        self._presented_at = time.time()
+        self._last_decision_at = None
+        self._last_interaction_at = None
+        self._last_move_log = 0.0
         self._build()
         return self
 
@@ -320,6 +328,7 @@ class _ReviewController(NSObject):
         """Append one interaction breadcrumb for the CURRENT card. Rides on the
         decision dict so the feedback loop can correlate behavior (opened the
         author profile, read the thread) with the eventual approve/reject."""
+        self._last_interaction_at = time.time()
         if len(self._interactions) >= MAX_INTERACTIONS:
             return
         self._interactions.append(
@@ -337,18 +346,89 @@ class _ReviewController(NSObject):
         return int((time.time() - self._card_shown_at) * 1000)
 
     @objc.python_method
+    def _occlusion_visible(self):
+        """True when macOS is drawing at least one pixel of the card (not fully
+        covered, not on an inactive Space, not minimized). None if unknowable."""
+        try:
+            return bool(
+                self._panel.occlusionState() & NSWindowOcclusionStateVisible
+            )
+        except Exception:
+            return None
+
+    @objc.python_method
+    def status_dict(self):
+        """Snapshot for the watchdog and review-state.json: is a card open, how
+        many drafts are undecided, when it was last touched, where it is, and
+        whether the user could physically see it."""
+        frame = None
+        try:
+            fr = self._panel.frame()
+            frame = [
+                int(fr.origin.x),
+                int(fr.origin.y),
+                int(fr.size.width),
+                int(fr.size.height),
+            ]
+        except Exception:
+            pass
+        screen_name = None
+        try:
+            scr = self._panel.screen()
+            if scr is not None:
+                screen_name = str(scr.localizedName())
+        except Exception:
+            pass
+        return {
+            "open": self._panel is not None,
+            "total": len(self._drafts),
+            "pending": max(0, len(self._drafts) - self._idx),
+            "decided": len(self._decisions),
+            "presented_at": self._presented_at,
+            "last_decision_at": self._last_decision_at,
+            "last_interaction_at": self._last_interaction_at,
+            "occlusion_visible": self._occlusion_visible(),
+            "frame": frame,
+            "screen": screen_name,
+        }
+
+    @objc.python_method
+    def _log_surface(self, event):
+        """One stderr line + a review-state.json refresh per surface event
+        (presented / moved / occlusion_changed / extended / decision / healed).
+        This is the positive confirmation layer: silence in the log used to be
+        ambiguous between "being reviewed" and "invisible for hours"."""
+        s = self.status_dict()
+        _log(
+            f"{event}: {s['pending']} pending of {s['total']}, "
+            f"frame={s['frame']} screen={s['screen']} "
+            f"visible={s['occlusion_visible']}"
+        )
+        _write_review_state(controller=self, last_event=event)
+
+    def windowDidMove_(self, notification):
+        # Timestamped move history. The unanswerable question of the 2026-07-02
+        # incident (how did the card end up at the bottom edge of a side
+        # display) becomes greppable. Drags fire this repeatedly; throttle.
+        now = time.time()
+        if now - self._last_move_log < 1.0:
+            return
+        self._last_move_log = now
+        self._log_surface("moved")
+
+    def windowDidChangeOcclusionState_(self, notification):
+        self._log_surface("occlusion_changed")
+
+    @objc.python_method
     def _build(self):
-        screen = NSScreen.mainScreen()
-        vf = screen.visibleFrame() if screen is not None else NSMakeRect(0, 0, 1440, 900)
-        x = vf.origin.x + vf.size.width - W - M
-        y = vf.origin.y + vf.size.height - H - M
+        frame = _corner_frame(_mouse_screen())
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
             | NSWindowStyleMaskUtilityWindow
         )
         panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, W, H), style, NSBackingStoreBuffered, False
+            frame, style, NSBackingStoreBuffered, False
         )
         panel.setLevel_(NSFloatingWindowLevel)
         panel.setFloatingPanel_(True)
@@ -360,6 +440,7 @@ class _ReviewController(NSObject):
         self._render()
         panel.makeKeyAndOrderFront_(None)
         panel.orderFrontRegardless()
+        self._log_surface("presented")
         self.focusReply_(None)
         # App activation/key-window promotion lands on the run loop; do one
         # deferred pass so the first card is editable even when opened from the
@@ -761,6 +842,8 @@ class _ReviewController(NSObject):
                 "thread_author": d.get("thread_author"),
             }
         )
+        self._last_decision_at = time.time()
+        self._log_surface("decision")
 
     @objc.python_method
     def _advance(self):
@@ -792,6 +875,7 @@ class _ReviewController(NSObject):
             )
         except Exception:
             pass
+        self._log_surface(f"extended +{len(added)}")
         return len(added)
 
     @objc.python_method
@@ -924,6 +1008,8 @@ class _ReviewController(NSObject):
             except Exception:
                 pass
         _active = None
+        _log(f"closed: {len(self._decisions)} decided of {len(self._drafts)}")
+        _write_review_state(last_event="closed")
 
 
 def present_review(drafts, on_decision=None, on_complete=None):
