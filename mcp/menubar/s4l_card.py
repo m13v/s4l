@@ -22,7 +22,7 @@ entries).
 Overall feedback (guidance not tied to any single thread) has two entry
 points that share one submit handler, registered by the menu bar via
 `set_feedback_handler` (it ships decision='feedback' review events): the
-card's bubble button swaps the card body for an in-window composer (a
+card's Feedback button swaps the card body for an in-window composer (a
 separate floating panel was tried and opened where the user never saw it on
 a multi-monitor setup), and the menu bar's "Send feedback…" item opens the
 standalone `present_feedback(on_submit)` panel (no card window need exist).
@@ -1263,7 +1263,7 @@ def heal_active():
 # ---- overall-feedback composer ----------------------------------------------
 # One small floating panel with a free-text field, for guidance that is about
 # the PIPELINE rather than any single draft ("less shilling", "more dev
-# threads", ...). Reachable from the card's 💬 button and the menu bar's
+# threads", ...). Reachable from the card's Feedback button and the menu bar's
 # "Send feedback…" item; both call present_feedback(), which falls back to the
 # handler the menu bar registered at boot via set_feedback_handler() (that
 # handler ships a decision='feedback' review event down the same outbox rail
@@ -1272,7 +1272,7 @@ def heal_active():
 FB_W = 380
 FB_H = 200
 
-# Default submit handler (menu bar's shipper). Module-level so the card's 💬
+# Default submit handler (menu bar's shipper). Module-level so the card's
 # button can open the composer without threading a callback through
 # present_review's signature.
 _feedback_handler = None
@@ -1348,19 +1348,9 @@ class _FeedbackController(NSObject):
                 muted=True,
             )
         )
-        scroll = NSScrollView.alloc().initWithFrame_(
+        scroll, tv = _editable_scroll(
             NSMakeRect(M, 54, FB_W - 2 * M, FB_H - 48 - 8 - 54)
         )
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(NS_BEZEL_BORDER)
-        tv = NSTextView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, FB_W - 2 * M, 80)
-        )
-        tv.setFont_(NSFont.systemFontOfSize_(12))
-        tv.setRichText_(False)
-        tv.setEditable_(True)
-        tv.setSelectable_(True)
-        scroll.setDocumentView_(tv)
         content.addSubview_(scroll)
         self._tv = tv
 
