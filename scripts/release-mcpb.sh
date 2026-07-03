@@ -337,7 +337,7 @@ echo "  pipeline.tgz internal version: $PIPELINE_VER ok"
 
 # The menu bar reads package/mcp/dist/version.json FIRST, then package/mcp/package.json
 # (scripts/snapshot.py::_resolve_version), both from the SAME pipeline.tgz the box
-# extracts into SAPS_REPO_DIR. Assert the whole mcp/ subtree matches so a satellite
+# extracts into S4L_REPO_DIR. Assert the whole mcp/ subtree matches so a satellite
 # stamped after the pack can't ship a menu that shows the wrong version on an
 # otherwise-current box (the 1.6.181-menu-on-a-1.6.182-box bug). Empty/missing =
 # fail: _resolve_version would fall through and could read a stale file.
