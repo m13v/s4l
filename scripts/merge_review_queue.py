@@ -161,12 +161,24 @@ def main() -> int:
 
     dst = plan_path(REVIEW_QUEUE_ID)
     existing = []
+    plan_created_at = None
     if os.path.exists(dst):
         try:
             with open(dst) as f:
-                existing = json.load(f).get("candidates") or []
+                prev = json.load(f)
+            existing = prev.get("candidates") or []
+            plan_created_at = prev.get("created_at")
         except Exception:
             existing = []
+            plan_created_at = None
+    # Generation stamp: set ONLY when starting a fresh plan (the /tmp plan dies
+    # on reboot/tmp-sweep and numbering restarts at 1). The menu bar's durable
+    # approved-queue ledger uses this to ignore decisions that belong to a dead
+    # plan generation; without it, stale (batch, n) entries silently swallow
+    # every new draft after a reset. An existing unstamped plan is left
+    # unstamped: back-stamping it "now" would invalidate live decisions.
+    if not existing and not plan_created_at:
+        plan_created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     seen = {_dedup_key(c) for c in existing}
     added = 0
@@ -183,7 +195,10 @@ def main() -> int:
     if stamped:
         print(f"[merge_review_queue] stamped stats on {stamped} candidate(s)", file=sys.stderr)
 
-    _atomic_write(dst, {"candidates": merged})
+    plan_obj = {"candidates": merged}
+    if plan_created_at:
+        plan_obj["created_at"] = plan_created_at
+    _atomic_write(dst, plan_obj)
 
     # Refresh the review-request marker the menu bar polls (count = pending, not posted).
     pending = len([c for c in merged if not c.get("posted")])
