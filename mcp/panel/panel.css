@@ -182,27 +182,52 @@ button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
 .stat .n { font-size: 17px; font-weight: 650; }
 .stat .l { font-size: 11px; color: var(--muted); margin-top: 1px; }
 
-/* ---- configuration body --------------------------------------------------- */
-.config-desc { font-size: 12px; color: var(--muted); }
-.config-desc[hidden] { display: none; }
-.config-editor {
-  width: 100%;
-  min-height: 260px;
-  resize: vertical;
+/* ---- project settings (revealed under the settings section row) ----------- */
+.settings-body { display: flex; flex-direction: column; gap: 12px; }
+.settings-body[hidden] { display: none; }
+.settings-project {
   background: var(--bg);
-  color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
-  line-height: 1.45;
-  tab-size: 2;
-  white-space: pre;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.config-editor[hidden] { display: none; }
-.config-status { font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+.settings-project-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.settings-project-name { font-size: 13px; font-weight: 650; }
+.settings-project-tag {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.settings-project-state { font-size: 11px; color: var(--muted); margin-left: auto; }
+.settings-field { display: flex; flex-direction: column; gap: 3px; }
+.settings-field > label { font-size: 11px; font-weight: 600; color: var(--muted); }
+.settings-input,
+.settings-textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.settings-textarea { resize: vertical; min-height: 34px; }
+.settings-textarea.mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  white-space: pre;
+  overflow-x: auto;
+  tab-size: 2;
+}
+.settings-extra { font-size: 11px; color: var(--muted); }
+.settings-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-status { font-size: 11px; color: var(--muted); }
 
 /* ---- live browser body ---------------------------------------------------- */
 .live-status { font-size: 11px; color: var(--muted); min-height: 14px; }
