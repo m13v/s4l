@@ -293,12 +293,12 @@ def _x_status():
 _ver_cache = {"at": 0.0, "latest": None, "tag": None, "channel": None, "checked": False}
 _VER_TTL = 55.0
 
-_RELEASES_LATEST_URL = "https://github.com/m13v/social-autoposter/releases/latest"
-_RELEASES_LATEST_API = "https://api.github.com/repos/m13v/social-autoposter/releases/latest"
+_RELEASES_LATEST_URL = "https://github.com/m13v/s4l/releases/latest"
+_RELEASES_LATEST_API = "https://api.github.com/repos/m13v/s4l/releases/latest"
 # Staging resolves the newest release OVERALL from the releases LIST, since
 # releases/latest deliberately excludes prereleases.
 _RELEASES_LIST_API = (
-    "https://api.github.com/repos/m13v/social-autoposter/releases?per_page=30"
+    "https://api.github.com/repos/m13v/s4l/releases?per_page=30"
 )
 
 
