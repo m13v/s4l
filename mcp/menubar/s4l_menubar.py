@@ -33,12 +33,12 @@ import time
 # (most often rumps missing/broken in the venv -> "menu bar didn't start") only
 # ever landed in the local menubar.err.log. Wire it in BEFORE importing rumps so
 # even an import-time failure of the menu bar's heaviest dependency is reported.
-# sentry_init lives in the pipeline's scripts/ dir (SAPS_REPO_DIR is exported by
+# sentry_init lives in the pipeline's scripts/ dir (S4L_REPO_DIR is exported by
 # the launchd plist) and sentry-sdk is in the owned venv (requirements.txt). All
 # best-effort: a missing repo path or SDK degrades to a silent no-op.
 _sentry = None
 try:
-    _repo = os.environ.get("SAPS_REPO_DIR")
+    _repo = os.environ.get("S4L_REPO_DIR")
     if _repo:
         _scripts = os.path.join(_repo, "scripts")
         if _scripts not in sys.path:
@@ -53,7 +53,7 @@ except Exception:
 # .mcpb server uses for pipeline subprocess output). Without this, every
 # [s4l-card] / [s4l-menubar] line only ever existed in the local
 # menubar.err.log and the review-surface incidents were invisible centrally.
-# Installed after the SAPS_REPO_DIR sys.path insertion above (the relay needs
+# Installed after the S4L_REPO_DIR sys.path insertion above (the relay needs
 # scripts/http_api.py for the X-Installation identity). Best-effort.
 try:
     import s4l_log_relay  # noqa: E402
@@ -242,10 +242,10 @@ DRAFT_STUCK_SECONDS = 300
 # REVIEW_UNATTENDED_SENTRY_SECONDS so silently-ignored review surfaces are
 # visible fleet-wide.
 REVIEW_UNATTENDED_SECONDS = float(
-    os.environ.get("SAPS_REVIEW_UNATTENDED_S", "1200")
+    os.environ.get("S4L_REVIEW_UNATTENDED_S", "1200")
 )
 REVIEW_HEAL_EVERY_SECONDS = float(
-    os.environ.get("SAPS_REVIEW_HEAL_EVERY_S", "600")
+    os.environ.get("S4L_REVIEW_HEAL_EVERY_S", "600")
 )
 REVIEW_UNATTENDED_SENTRY_SECONDS = 3600.0
 
@@ -503,7 +503,7 @@ class S4LMenuBar(rumps.App):
         truth, scripts/schedule_state.py (shared with the Node MCP server, which
         shells out to the same script), so the firing-detection algorithm lives in
         exactly one place and the menu bar + dashboard can never drift. The script
-        is on sys.path via the SAPS_REPO_DIR/scripts insertion near the top of this
+        is on sys.path via the S4L_REPO_DIR/scripts insertion near the top of this
         file. Any failure -> 'missing' (safe: never a false 'ok')."""
         try:
             import schedule_state
@@ -703,11 +703,11 @@ class S4LMenuBar(rumps.App):
         launchd process (NOT a Claude child), so it's the right place to drive a
         reset that has to outlive Claude Desktop. Output streams to a log the user
         can inspect after the menubar disappears."""
-        repo = os.environ.get("SAPS_REPO_DIR") or ""
+        repo = os.environ.get("S4L_REPO_DIR") or ""
         script = os.path.join(repo, "scripts", "reset-test-machine.sh")
         if not repo or not os.path.exists(script):
             self._alert("Uninstall unavailable",
-                        "Couldn't find reset-test-machine.sh. SAPS_REPO_DIR isn't "
+                        "Couldn't find reset-test-machine.sh. S4L_REPO_DIR isn't "
                         "pointing at a pipeline source on this machine.")
             return
         # ok=1 (plugin reset, keeps X login + browser layer), other=-1 (deep wipe),
@@ -1169,7 +1169,7 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         if not repo:
-            repo = os.environ.get("SAPS_REPO_DIR") or os.path.expanduser(
+            repo = os.environ.get("S4L_REPO_DIR") or os.path.expanduser(
                 "~/social-autoposter"
             )
         for rel in (("mcp", "dist", "version.json"), ("package.json",)):
@@ -1461,7 +1461,7 @@ class S4LMenuBar(rumps.App):
         raises; a missing repo/script or network hiccup is silently ignored (the
         MCP's own ~15-min heartbeat is the durable channel)."""
         try:
-            repo = os.environ.get("SAPS_REPO_DIR") or ""
+            repo = os.environ.get("S4L_REPO_DIR") or ""
             hb = os.path.join(repo, "scripts", "heartbeat.sh")
             if not (repo and os.path.exists(hb)):
                 return
