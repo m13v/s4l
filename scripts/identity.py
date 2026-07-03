@@ -228,29 +228,70 @@ def _build_fresh_identity():
     }
 
 
+IDENTITY_BACKUP = IDENTITY_DIR / "identity.json.bak"
+
+
+def _atomic_write(path: Path, data: dict) -> None:
+    """Write via tmp + os.replace so concurrent writers can never leave a
+    torn/half-written file. The 2026-07-03 install_id loss was exactly this:
+    several pipelines rewriting identity.json with plain write_text() after a
+    hostname change, one reader hit the torn file, and the corrupt-rebuild
+    path silently minted a new install_id, orphaning all server-side data."""
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2))
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+
+
+def _read_valid(path: Path):
+    """Return the parsed identity dict if path holds one with an install_id."""
+    try:
+        d = json.loads(path.read_text())
+        if isinstance(d, dict) and d.get("install_id"):
+            return d
+    except Exception:
+        pass
+    return None
+
+
 def get_identity(refresh: bool = False) -> dict:
     """Read identity.json, creating it on first call.
 
     refresh=True re-snapshots the volatile fields (versions, hostname,
     git_email, tz) while preserving install_id and first_seen_at.
+
+    install_id is PERSISTENT: a corrupt or missing primary file recovers from
+    identity.json.bak before ever minting a new id, and every successful
+    write refreshes the backup. Minting a brand-new id is a loud last resort.
     """
     IDENTITY_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not IDENTITY_FILE.exists():
-        ident = _build_fresh_identity()
-        IDENTITY_FILE.write_text(json.dumps(ident, indent=2))
+    ident = _read_valid(IDENTITY_FILE)
+
+    if ident is None:
+        # Primary missing or corrupt: recover the stable id from the backup
+        # rather than orphaning the install's server-side history.
+        backup = _read_valid(IDENTITY_BACKUP)
+        if backup is not None:
+            ident = _build_fresh_identity()
+            ident["install_id"] = backup["install_id"]
+            ident["first_seen_at"] = backup.get("first_seen_at") or ident["first_seen_at"]
+            print(f"[identity] primary missing/corrupt; recovered install_id from {IDENTITY_BACKUP}",
+                  file=sys.stderr)
+        else:
+            ident = _build_fresh_identity()
+            print(f"[identity] minted NEW install_id {ident['install_id']} "
+                  "(no valid identity.json or backup found); server-side data "
+                  "keyed to a previous id will not be visible to this client",
+                  file=sys.stderr)
         try:
-            os.chmod(IDENTITY_FILE, 0o600)
+            _atomic_write(IDENTITY_FILE, ident)
+            _atomic_write(IDENTITY_BACKUP, ident)
         except Exception:
             pass
-        return ident
-
-    try:
-        ident = json.loads(IDENTITY_FILE.read_text())
-    except Exception:
-        # Corrupt file; rebuild rather than crashing the pipeline.
-        ident = _build_fresh_identity()
-        IDENTITY_FILE.write_text(json.dumps(ident, indent=2))
         return ident
 
     if refresh:
@@ -260,10 +301,19 @@ def get_identity(refresh: bool = False) -> dict:
         snap["first_seen_at"] = ident.get("first_seen_at") or snap["first_seen_at"]
         if snap != ident:
             try:
-                IDENTITY_FILE.write_text(json.dumps(snap, indent=2))
+                _atomic_write(IDENTITY_FILE, snap)
             except Exception:
                 pass
-        return snap
+        ident = snap
+
+    # Keep the backup carrying the current install_id (cheap: only rewrite
+    # when the id it holds differs or it is missing/corrupt).
+    backup = _read_valid(IDENTITY_BACKUP)
+    if backup is None or backup.get("install_id") != ident.get("install_id"):
+        try:
+            _atomic_write(IDENTITY_BACKUP, ident)
+        except Exception:
+            pass
     return ident
 
 
@@ -285,11 +335,14 @@ def main():
     elif cmd == "header":
         print(get_identity_header(refresh=True))
     elif cmd == "reset":
-        if IDENTITY_FILE.exists():
-            IDENTITY_FILE.unlink()
-            print(f"deleted {IDENTITY_FILE}")
-        else:
-            print(f"no identity at {IDENTITY_FILE}")
+        # Explicit reset removes the backup too; otherwise the next call
+        # would just recover the old install_id from it.
+        deleted = []
+        for p in (IDENTITY_FILE, IDENTITY_BACKUP):
+            if p.exists():
+                p.unlink()
+                deleted.append(str(p))
+        print("deleted " + ", ".join(deleted) if deleted else f"no identity at {IDENTITY_FILE}")
     elif cmd == "path":
         print(str(IDENTITY_FILE))
     else:
