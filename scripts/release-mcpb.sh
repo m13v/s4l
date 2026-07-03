@@ -132,6 +132,11 @@ if [[ -n "$PROMOTE_TAG" ]]; then
     command -v npm >/dev/null || die "npm not found on PATH"
     say "Moving npm 'latest' dist-tag -> $PVER"
     npm dist-tag add "social-autoposter@$PVER" latest || die "npm dist-tag add failed"
+    # Keep the dual-published "s4l" package's dist-tag in lockstep. Best-effort:
+    # releases cut before the 2026-07-03 dual-publish have no s4l@$PVER, so a
+    # miss here warns instead of failing the promote.
+    npm dist-tag add "@m13v/s4l@$PVER" latest \
+      || echo "  WARNING: npm dist-tag add @m13v/s4l@$PVER latest failed (version may predate the dual-publish)" >&2
   fi
   say "Verifying releases/latest serves $PTAG (drives stable boxes' update banner)"
   LATEST_SEEN=""
@@ -380,6 +385,53 @@ if [[ "$DO_NPM" == "1" ]]; then
       [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/social-autoposter/$VERSION")" == "200" ]] && break
     done
     echo "  npm: social-autoposter@$VERSION live"
+  fi
+
+  # ---- 6b. Dual-publish the SAME content as "@m13v/s4l" (brand rename) -------
+  # `npx @m13v/s4l init` == `npx social-autoposter init`. Same version, same
+  # dist-tag logic (stable -> default `latest`; --staging -> `next`).
+  # npm REJECTS the bare name "s4l" (403: too similar to st/swr/sax/...), so the
+  # alias lives under the m13v scope, published --access=public.
+  # The repo package.json is NEVER mutated: we `npm pack` the repo root (the
+  # exact content step 6 shipped), extract into a temp dir, rewrite ONLY the
+  # temp copy's name field, and publish that copy. Idempotent like step 6.
+  # BEST-EFFORT BY DESIGN: every failure in 6b warns and falls through — it must
+  # NEVER die. On 2026-07-03 a die here aborted the run between the npm publish
+  # (step 6, done) and the GitHub release (step 7, never ran), leaving npm `next`
+  # on rc.6 with no matching GH release: exactly the diverged-lanes state this
+  # script exists to prevent. The alias package is a convenience; the
+  # social-autoposter npm lane + GH release lockstep is the contract.
+  S4L_ALIAS_PKG="@m13v/s4l"
+  S4L_ALIAS_URL="https://registry.npmjs.org/@m13v%2fs4l/$VERSION"
+  S4L_NPM_HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$S4L_ALIAS_URL" || echo "000")
+  if [[ "$S4L_NPM_HTTP" == "200" ]]; then
+    say "npm: $S4L_ALIAS_PKG@$VERSION already published — skipping dual-publish"
+  else
+    say "Dual-publishing $S4L_ALIAS_PKG@$VERSION to npm${NPM_TAG_ARGS:+ (tag: ${NPM_TAG_ARGS[*]})}"
+    S4L_PUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/s4l-dual-publish.XXXXXX")"
+    if ( cd "$REPO_ROOT" && npm pack --pack-destination "$S4L_PUB_DIR" >/dev/null ) \
+       && S4L_TGZ="$(ls "$S4L_PUB_DIR"/social-autoposter-*.tgz 2>/dev/null | head -1)" \
+       && [[ -n "$S4L_TGZ" ]] \
+       && tar -xzf "$S4L_TGZ" -C "$S4L_PUB_DIR" \
+       && node -e "
+         const fs=require('fs');
+         const p='$S4L_PUB_DIR/package/package.json';
+         const j=JSON.parse(fs.readFileSync(p,'utf8'));
+         if (j.version!=='$VERSION') { console.error('  temp copy version '+j.version+' != $VERSION'); process.exit(1); }
+         j.name='$S4L_ALIAS_PKG';
+         fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+         console.log('  temp copy renamed to $S4L_ALIAS_PKG@'+j.version+' (repo package.json untouched)');
+       " \
+       && ( cd "$S4L_PUB_DIR/package" && npm publish --access=public ${NPM_TAG_ARGS[@]+"${NPM_TAG_ARGS[@]}"} ); then
+      for _ in 1 2 3 4 5; do
+        sleep 2
+        [[ "$(curl -s -o /dev/null -w '%{http_code}' "$S4L_ALIAS_URL")" == "200" ]] && break
+      done
+      echo "  npm: $S4L_ALIAS_PKG@$VERSION live"
+    else
+      echo "  WARNING: $S4L_ALIAS_PKG dual-publish failed (alias lane only; social-autoposter + GH release proceed)" >&2
+    fi
+    rm -rf "$S4L_PUB_DIR"
   fi
 else
   say "npm publish skipped (--no-npm)"
