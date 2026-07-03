@@ -1127,3 +1127,188 @@ def heal_active():
         return True
     except Exception:
         return False
+
+
+# ---- overall-feedback composer ----------------------------------------------
+# One small floating panel with a free-text field, for guidance that is about
+# the PIPELINE rather than any single draft ("less shilling", "more dev
+# threads", ...). Reachable from the card's 💬 button and the menu bar's
+# "Send feedback…" item; both call present_feedback(), which falls back to the
+# handler the menu bar registered at boot via set_feedback_handler() (that
+# handler ships a decision='feedback' review event down the same outbox rail
+# as card decisions, so the digest processes it the same way).
+
+FB_W = 380
+FB_H = 200
+
+# Default submit handler (menu bar's shipper). Module-level so the card's 💬
+# button can open the composer without threading a callback through
+# present_review's signature.
+_feedback_handler = None
+# Strong ref to the live composer, same pyobjc-GC footgun as _active.
+_feedback_active = None
+
+
+def set_feedback_handler(cb):
+    """Register the default on_submit for present_feedback(). The menu bar
+    calls this once at boot with its review-event shipper."""
+    global _feedback_handler
+    _feedback_handler = cb
+
+
+def _feedback_frame():
+    """Just below the open review card when there is one (so it never covers
+    the card being reviewed), else the top-right corner of the pointer's
+    screen."""
+    scr = _mouse_screen()
+    vf = (
+        scr.visibleFrame()
+        if scr is not None
+        else NSMakeRect(0, 0, 1440, 900)
+    )
+    x = vf.origin.x + vf.size.width - FB_W - M
+    y = vf.origin.y + vf.size.height - FB_H - M
+    if _active is not None and _active._panel is not None:
+        try:
+            fr = _active._panel.frame()
+            x = fr.origin.x
+            y = max(fr.origin.y - FB_H - 10, vf.origin.y + M)
+        except Exception:
+            pass
+    return NSMakeRect(x, y, FB_W, FB_H)
+
+
+class _FeedbackController(NSObject):
+    def initWithOnSubmit_(self, on_submit):
+        self = objc.super(_FeedbackController, self).init()
+        if self is None:
+            return None
+        self._on_submit = on_submit
+        self._panel = None
+        self._tv = None
+        self._build()
+        return self
+
+    @objc.python_method
+    def _build(self):
+        style = (
+            NSWindowStyleMaskTitled
+            | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskUtilityWindow
+        )
+        panel = _ReviewPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            _feedback_frame(), style, NSBackingStoreBuffered, False
+        )
+        panel.setLevel_(NSFloatingWindowLevel)
+        panel.setFloatingPanel_(True)
+        panel.setBecomesKeyOnlyIfNeeded_(False)
+        panel.setHidesOnDeactivate_(False)
+        panel.setReleasedWhenClosed_(False)
+        panel.setDelegate_(self)
+        panel.setTitle_("Overall feedback")
+
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, FB_W, FB_H))
+        content.addSubview_(
+            _label(
+                NSMakeRect(M, FB_H - 48, FB_W - 2 * M, 32),
+                "Standing guidance for the drafting loop (thread choice, tone, "
+                "audience) — not about any single draft.",
+                size=11,
+                muted=True,
+            )
+        )
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(M, 54, FB_W - 2 * M, FB_H - 48 - 8 - 54)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(NS_BEZEL_BORDER)
+        tv = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, FB_W - 2 * M, 80)
+        )
+        tv.setFont_(NSFont.systemFontOfSize_(12))
+        tv.setRichText_(False)
+        tv.setEditable_(True)
+        tv.setSelectable_(True)
+        scroll.setDocumentView_(tv)
+        content.addSubview_(scroll)
+        self._tv = tv
+
+        cancel = NSButton.alloc().initWithFrame_(NSMakeRect(M, 14, 90, 30))
+        cancel.setTitle_("Cancel")
+        cancel.setBezelStyle_(NSBezelStyleRounded)
+        cancel.setTarget_(self)
+        cancel.setAction_("feedbackCancel:")
+        content.addSubview_(cancel)
+
+        send = NSButton.alloc().initWithFrame_(NSMakeRect(FB_W - M - 90, 14, 90, 30))
+        send.setTitle_("Send")
+        send.setBezelStyle_(NSBezelStyleRounded)
+        send.setTarget_(self)
+        send.setAction_("feedbackSend:")
+        content.addSubview_(send)
+
+        panel.setContentView_(content)
+        self._panel = panel
+        panel.makeKeyAndOrderFront_(None)
+        panel.orderFrontRegardless()
+        try:
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        panel.makeFirstResponder_(tv)
+        _log("feedback composer opened")
+
+    @objc.python_method
+    def _close(self):
+        global _feedback_active
+        try:
+            if self._panel is not None:
+                self._panel.setDelegate_(None)
+                self._panel.close()
+        except Exception:
+            pass
+        self._panel = None
+        _feedback_active = None
+
+    def feedbackSend_(self, sender):
+        text = ""
+        try:
+            text = str(self._tv.string()).strip()
+        except Exception:
+            pass
+        cb = self._on_submit
+        self._close()
+        if not text:
+            _log("feedback composer sent empty — dropped")
+            return
+        _log(f"feedback submitted ({len(text)} chars)")
+        if cb is not None:
+            try:
+                cb(text)
+            except Exception:
+                pass
+
+    def feedbackCancel_(self, sender):
+        _log("feedback composer cancelled")
+        self._close()
+
+    def windowShouldClose_(self, sender):
+        self._close()
+        return True
+
+
+def present_feedback(on_submit=None):
+    """Open (or raise) the overall-feedback composer. Main thread only.
+    on_submit(text) fires only when the user sends non-empty text; defaults to
+    the handler registered via set_feedback_handler()."""
+    global _feedback_active
+    cb = on_submit if on_submit is not None else _feedback_handler
+    if _feedback_active is not None and _feedback_active._panel is not None:
+        try:
+            _feedback_active._panel.makeKeyAndOrderFront_(None)
+            _feedback_active._panel.orderFrontRegardless()
+            return
+        except Exception:
+            pass
+    _feedback_active = _FeedbackController.alloc().initWithOnSubmit_(cb)
