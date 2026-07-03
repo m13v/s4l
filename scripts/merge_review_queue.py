@@ -17,8 +17,8 @@ Usage:
   merge_review_queue.py --plan /tmp/twitter_cycle_plan_<batch>.json [--project NAME]
   merge_review_queue.py --plan-from-marker '<stdout containing DRAFT_ONLY_PLAN=...>'
 
-State dir (for review-request.json) honors $SAPS_STATE_DIR; the review-queue plan
-lives in $SAPS_TMP_DIR or /tmp (matching the MCP's planPath()).
+State dir (for review-request.json) honors $S4L_STATE_DIR; the review-queue plan
+lives in $S4L_TMP_DIR or /tmp (matching the MCP's planPath()).
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ REVIEW_QUEUE_ID = "review-queue"
 
 
 def tmp_dir() -> str:
-    return os.environ.get("SAPS_TMP_DIR") or "/tmp"
+    return os.environ.get("S4L_TMP_DIR") or "/tmp"
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
