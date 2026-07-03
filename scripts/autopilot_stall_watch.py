@@ -26,7 +26,7 @@ restart doesn't page). State lives in <queue>/stall-watch.json; reset when the
 stall clears.
 
 Runs as launchd com.m13v.social-autopilot-stall-watch (StartInterval 120) off the
-owned venv (needs sentry-sdk + scripts/ on sys.path via SAPS_REPO_DIR). Stdlib
+owned venv (needs sentry-sdk + scripts/ on sys.path via S4L_REPO_DIR). Stdlib
 otherwise. Best-effort: never raises into launchd.
 """
 
@@ -37,6 +37,12 @@ import json
 import os
 import sys
 import time
+
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+
+s4l_env.mirror()
 
 # Keep in sync with AUTOPILOT_STALL_SECONDS (menubar) / AUTOPILOT_STALL_MS (index.ts).
 STALL_SECONDS = 180
@@ -55,7 +61,7 @@ WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 
 
 def _state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
@@ -186,8 +192,8 @@ def _write_state(obj: dict) -> None:
 
 
 def _sentry():
-    """Import the pipeline's Sentry helper (SAPS_REPO_DIR/scripts on path)."""
-    repo = os.environ.get("SAPS_REPO_DIR")
+    """Import the pipeline's Sentry helper (S4L_REPO_DIR/scripts on path)."""
+    repo = os.environ.get("S4L_REPO_DIR")
     if repo:
         scripts = os.path.join(repo, "scripts")
         if scripts not in sys.path:
