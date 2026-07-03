@@ -126,6 +126,9 @@ const liveImg = $("live-img") as HTMLImageElement;
 const btnMode = $("btn-mode") as HTMLButtonElement;
 const modeCurrent = $("mode-current");
 const modeSub = $("mode-sub");
+const settingsCard = $("settings-card");
+const settingsToggle = $("settings-toggle") as HTMLButtonElement;
+const settingsBody = $("settings-body");
 
 let state: Snapshot | null = null;
 let installPolling = false; // guard against overlapping poll loops
@@ -133,6 +136,8 @@ let setupPolling = false; // guard the live setup-progress poll started by Set u
 let updating = false; // guard against double-firing the in-header update button
 let setupDetailsOpen = false; // header setup dropdown expanded state
 let statsOpen = false; // "Last 7 days stats" dropdown expanded state
+let settingsOpen = false; // "Project settings" dropdown expanded state
+let settingsLoading = false; // guard against overlapping settings fetches
 
 function log(msg: string) { logEl.textContent = msg; }
 
@@ -314,6 +319,10 @@ function render() {
   // (gated above) is the only thing shown while the runtime is still installing.
   liveCard.hidden = !setupComplete;
   statsCard.hidden = !setupComplete;
+
+  // Project settings is available as soon as the runtime exists: it's how the
+  // user inspects (and fixes) what's saved, including a half-finished project.
+  settingsCard.hidden = needsRuntime;
 }
 
 function applyState(snap: Partial<Snapshot>) {
