@@ -907,7 +907,7 @@ class _DebugRecorder:
             url = page.url if page is not None else ""
         except Exception:
             url = ""
-        run_log_path = os.environ.get("SAPS_RUN_LOG_PATH", "")
+        run_log_path = os.environ.get("S4L_RUN_LOG_PATH", "")
         try:
             linkedin_killswitch.engage(
                 signal=signal_name,
@@ -1533,7 +1533,7 @@ def scrape(
                         "dy_max": SCROLL_DY_MAX,
                         "settle_ms": HARVEST_SETTLE_MS,
                         # Self-imposed JS deadline (Bug B fix, 2026-05-27).
-                        # Picks up SAPS_SCRAPER_DEADLINE_MS if set by the
+                        # Picks up S4L_SCRAPER_DEADLINE_MS if set by the
                         # shell caller; defaults to 10min after the
                         # 2026-05-27 killswitch ship. 35min was the
                         # runaway envelope that gave LinkedIn 25 minutes
@@ -1543,7 +1543,7 @@ def scrape(
                         # below any plausible "we're just slow" tail.
                         "deadline_ms": int(
                             os.environ.get(
-                                "SAPS_SCRAPER_DEADLINE_MS", "600000"
+                                "S4L_SCRAPER_DEADLINE_MS", "600000"
                             )
                         ),
                     },
