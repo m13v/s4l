@@ -441,7 +441,7 @@ def main():
                              "(decoupled draft directive; reply stands on its own, "
                              "no forced concede->pivot to product) or 'control' "
                              "(current directive). Assigned per cycle in "
-                             "run-twitter-cycle.sh and read from SAPS_DRAFT_PROMPT_VARIANT "
+                             "run-twitter-cycle.sh and read from S4L_DRAFT_PROMPT_VARIANT "
                              "by twitter_post_plan.py. NULL for non-Twitter rows and "
                              "rows pre-dating the experiment. Stored in "
                              "posts.draft_prompt_variant.")
