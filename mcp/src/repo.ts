@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 // The pipeline repo the wrapper shells out to. Resolved DYNAMICALLY per call (a
 // getter, not a load-time const) because a bare .mcpb double-click materializes
 // the repo AFTER the server boots; the very next shell-out must pick it up
-// without a restart. resolveRepoDir() prefers a real SAPS_REPO_DIR clone, then
+// without a restart. resolveRepoDir() prefers a real S4L_REPO_DIR clone, then
 // the materialized repo recorded in runtime.json, then a dev fallback.
 export function repoDir(): string {
   return resolveRepoDir();
@@ -24,7 +24,7 @@ export function repoDir(): string {
 // const) because the owned uv runtime can be provisioned AFTER the server boots
 // — the first-run installer writes runtime.json and the very next runPython
 // call must pick up the owned interpreter without a server restart.
-// resolvePython() prefers the owned runtime, then SAPS_PYTHON, then python3.
+// resolvePython() prefers the owned runtime, then S4L_PYTHON, then python3.
 
 // The locked pipeline script (run-twitter-cycle.sh) writes the draft plan to a
 // HARDCODED /tmp path (`PLAN_FILE="/tmp/twitter_cycle_plan_<batch>.json"`), and the
@@ -34,7 +34,7 @@ export function repoDir(): string {
 // which silently stranded every draft and made draft_cycle always report
 // "No drafts in batch ...". Default to /tmp to match the script; allow an explicit
 // override for non-standard installs.
-export const TMP_DIR = process.env.SAPS_TMP_DIR || "/tmp";
+export const TMP_DIR = process.env.S4L_TMP_DIR || "/tmp";
 
 export interface RunResult {
   code: number;
@@ -46,7 +46,7 @@ export interface RunResult {
 // Every subprocess (locked pipeline scripts included) flows through run(), so
 // this is the ONE boundary where we can tee the verbatim stdout/stderr stream
 // off-box for troubleshooting. telemetry.ts registers a sink here at boot; when
-// none is registered (default, dev, or SAPS_LOG_STREAM=0) the tee is a no-op.
+// none is registered (default, dev, or S4L_LOG_STREAM=0) the tee is a no-op.
 // The sink must never throw and must never block the child's I/O — it only
 // buffers a line in memory.
 export type LineSink = (
