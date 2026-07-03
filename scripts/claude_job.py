@@ -54,6 +54,7 @@ except Exception:  # pragma: no cover - cosmetic only
 TAG_TO_TYPE = {
     "run-twitter-cycle-queries": "twitter-query",
     "run-twitter-cycle-prep": "twitter-prep",
+    "feedback-digest": "feedback-digest",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -63,6 +64,29 @@ TAG_TO_TYPE = {
 TYPE_TO_ACTIVITY = {
     "twitter-query": ("scanning", "queries"),
     "twitter-prep": ("drafting", "draft"),
+    "feedback-digest": ("learning", "feedback"),
+}
+
+# queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
+# This keeps the scheduled-task worker fully type-blind: its SKILL.md is one
+# generic claim -> follow -> submit loop, and anything a specific job type
+# needs the executor to know (pacing, persist cadence) travels WITH the job.
+# The twitter-prep note exists because the host kills an unattended session
+# ~90s after its LAST tool call; drafting a whole batch in one silent turn
+# starves that clock (the v6 worker-prompt lesson, moved under the hood).
+TYPE_TO_WORKER_NOTES = {
+    "twitter-prep": (
+        "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
+        "prompt below): this unattended session is terminated ~90 seconds after "
+        "your LAST tool call. The prompt asks you to draft replies for SEVERAL "
+        "candidates. Do NOT draft them all silently in one turn. Work ONE "
+        "candidate at a time: draft its reply, then IMMEDIATELY run that "
+        "candidate's log_draft.py persist command exactly as the prompt's "
+        "persist step specifies (a quick Bash call), THEN move to the next. "
+        "Those per-candidate Bash calls keep the session alive. Begin the first "
+        "candidate promptly. Only after EVERY candidate is drafted and logged "
+        "do you assemble and submit the single result JSON."
+    ),
 }
 
 
@@ -715,13 +739,33 @@ def _agent_session_pid():
 def cmd_next(ns) -> int:
     _apply_state_dir_override(ns)
     qtype = ns.type
-    _ensure_dirs(qtype)
-    pend = pending_dir(qtype)
-    try:
-        names = sorted(os.listdir(pend))
-    except FileNotFoundError:
-        names = []
-    for name in names:
+    # "any" (the universal type-blind worker) scans EVERY pending type dir;
+    # a comma list scans those types; a single type keeps legacy behavior.
+    # Job filenames start with a zero-padded nanosecond timestamp, so one
+    # global lexicographic sort is oldest-first across types.
+    if qtype == "any":
+        _ensure_dirs()
+        root = os.path.join(queue_root(), "pending")
+        try:
+            scan_types = sorted(
+                d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))
+            )
+        except FileNotFoundError:
+            scan_types = []
+    else:
+        scan_types = [t.strip() for t in qtype.split(",") if t.strip()]
+        for t in scan_types:
+            _ensure_dirs(t)
+    entries = []
+    for t in scan_types:
+        pend = pending_dir(t)
+        try:
+            for name in os.listdir(pend):
+                entries.append((name, pend))
+        except FileNotFoundError:
+            continue
+    entries.sort(key=lambda e: e[0])
+    for name, pend in entries:
         if not name.endswith(".json") or name.endswith(".tmp"):
             continue
         src = os.path.join(pend, name)
@@ -745,7 +789,13 @@ def cmd_next(ns) -> int:
         schema_file = None
         if ns.prompt_file:
             prompt_file = os.path.join(queue_root(), f"prompt-{job['job_id']}.md")
-            _atomic_write_text(prompt_file, job.get("prompt") or "")
+            prompt_body = job.get("prompt") or ""
+            # Per-type execution notes ride in the sidecar, not the worker
+            # prompt, so the worker stays type-blind (see TYPE_TO_WORKER_NOTES).
+            notes = TYPE_TO_WORKER_NOTES.get(job.get("type") or "")
+            if notes:
+                prompt_body = f"{notes}\n\n---\n\n{prompt_body}"
+            _atomic_write_text(prompt_file, prompt_body)
             job["prompt_file"] = prompt_file
             schema = job.get("schema")
             if schema:
