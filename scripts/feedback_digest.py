@@ -50,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from http_api import api_get, api_patch  # noqa: E402
+from http_api import api_get, api_patch, api_post  # noqa: E402
 import learned_preferences as lp  # noqa: E402
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -159,7 +159,7 @@ NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved
 
 Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user pressed the emphatic-approve button ("this was a really good one"): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
-Note on wrong_author: the SPECIFIC handle is already hard-blocked automatically server-side (author_blocklist) the moment the reject lands; that individual will never be drafted again. Your job here is only the generalizable author TYPE, using the author_followers / their-post / found_via_topic context on the event.
+You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
 Propose changes to the block. RULES, in priority order:
 1. Be conservative. Prefer NO changes over speculative ones. An empty plan is a good plan when the evidence is thin.
@@ -171,7 +171,7 @@ Propose changes to the block. RULES, in priority order:
 7. Respect the cap: at most {lp.MAX_ENTRIES_PER_LIST} entries per list. If a list is full, fold the new signal into an existing entry via remove+add.
 
 OUTPUT: a single JSON object, nothing else. Schema:
-{{"changes": {{"audience_avoid": {{"add": [], "remove": []}}, "audience_prefer": {{"add": [], "remove": []}}, "thread_avoid": {{"add": [], "remove": []}}, "draft_style_notes": {{"add": [], "remove": []}}}}, "voice_never_add": [], "guardrails_do_not_add": [], "rationale": "one short sentence"}}
+{{"changes": {{"audience_avoid": {{"add": [], "remove": []}}, "audience_prefer": {{"add": [], "remove": []}}, "thread_avoid": {{"add": [], "remove": []}}, "draft_style_notes": {{"add": [], "remove": []}}}}, "voice_never_add": [], "guardrails_do_not_add": [], "block_authors": [{{"handle": "somehandle", "reason": "one short sentence citing the evidence"}}], "rationale": "one short sentence"}}
 "remove" values must match existing entries EXACTLY. Omit empty keys if you like; an all-empty plan means "no changes"."""
 
 
@@ -283,6 +283,10 @@ def digest_project(project: dict, platform: str, dry_run: bool,
         print(json.dumps(plan, indent=2))
         log(f"project={name} platform={platform} events={len(events)} DRY RUN (nothing applied/marked)")
         return True
+
+    # block_authors is applied through the blocklist API, not through
+    # learned_preferences: pop it before apply_mutations sees the plan.
+    block_authors = plan.pop("block_authors", None) or []
 
     event_ids = [int(e["id"]) for e in events if str(e.get("id", "")).isdigit() or isinstance(e.get("id"), int)]
     result = lp.apply_mutations(name, plan, source_event_ids=event_ids)
