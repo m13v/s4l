@@ -1,9 +1,10 @@
 {
   "name": "social-autoposter",
-  "version": "1.6.197-rc.5",
+  "version": "1.6.197-rc.7",
   "description": "Automated social posting pipeline for Reddit, X/Twitter, LinkedIn, and Moltbook. Install as a Claude Code agent skill.",
   "bin": {
-    "social-autoposter": "bin/cli.js"
+    "social-autoposter": "bin/cli.js",
+    "s4l": "bin/cli.js"
   },
   "scripts": {
     "start": "node bin/server.js",
