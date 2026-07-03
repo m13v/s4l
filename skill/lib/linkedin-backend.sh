@@ -95,7 +95,7 @@ these helpers pre-imported:
   js(expression),                           # page.evaluate-style; returns the result
   type_text(text),                          # types into currently-focused element
   press_key(key),                           # e.g. "Enter", "Tab", "Escape"
-  scroll(direction, amount), cdp(method, **params)
+  scroll(x, y, dy=-300, dx=0), cdp(method, **params)
 
 TAB HYGIENE (IMPORTANT): A placeholder tab ALWAYS already exists when you start
 (pre-flight leaves exactly one tab open). REUSE IT: use goto_url() for your VERY FIRST
@@ -128,6 +128,7 @@ following with bh_run instead:
   browser_type(ref=..., text=...) ->  Click the textbox first (click_at_xy), then bh_run('type_text("TEXT")')
   browser_take_screenshot         ->  bh_run('print(capture_screenshot())') then Read the path
   browser_press_key("Enter")      ->  bh_run('press_key("Enter")')
+  browser_scroll(down)            ->  bh_run('scroll(590, 450, dy=600)')
 
 EXAMPLE - read recent activity comment count:
   bh_run('''
