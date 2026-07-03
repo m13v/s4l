@@ -451,6 +451,16 @@ if gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
   say "Release $TAG exists -> uploading asset (clobber)"
   gh release upload "$TAG" "$BUNDLE" -R "$GH_REPO" --clobber
 else
+  # HARD GUARD (2026-07-03): never CREATE a release for a prerelease-suffixed
+  # version through the stable path. Without --prerelease, gh marks it latest,
+  # releases/latest moves onto the rc, and every STABLE box updates to a
+  # prerelease. CI (release-mcpb.yml) used to run this script on any v* tag
+  # push with no --staging — an rc tag push was one npm-auth accident away from
+  # exactly that. The clobber branch above is deliberately unguarded: uploading
+  # assets onto an EXISTING (correctly-flagged) release is always safe.
+  if [[ "$VERSION" == *-* && "$DO_STAGING" != "1" ]]; then
+    die "refusing to CREATE a stable release for prerelease version $VERSION. Use --staging (new rc), --promote <tag> (ship a tested rc), or create the release locally first so this run only uploads assets."
+  fi
   say "Creating release $TAG${GH_PRERELEASE_FLAG:+ (pre-release)}"
   gh release create "$TAG" "$BUNDLE" \
     -R "$GH_REPO" \
