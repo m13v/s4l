@@ -64,8 +64,8 @@ PREEMPT_KILL_WAIT = 5  # secs to wait for a preempted scan holder to die before 
 # preemptScanForPost only killed the plugin's own scan, never a scan spawned by a
 # separate autopilot agent / launchd cron, so an approved post kept losing the
 # 45s race to a live scan that held the browser. Default "scan" so any unmarked
-# browser op is preemptable; only the poster path sets SAPS_LOCK_ROLE=post.
-LOCK_ROLE = (os.environ.get("SAPS_LOCK_ROLE") or "scan").strip() or "scan"
+# browser op is preemptable; only the poster path sets S4L_LOCK_ROLE=post.
+LOCK_ROLE = (os.environ.get("S4L_LOCK_ROLE") or "scan").strip() or "scan"
 VIEWPORT = {"width": 911, "height": 1016}
 
 # Posting handle. Resolved at call time from AUTOPOSTER_TWITTER_HANDLE env
@@ -445,7 +445,7 @@ def _acquire_browser_lock():
 
         # 1b. Batch-owner inherit (posting). The poster (twitter_post_plan.py)
         # acquires this lock ONCE and holds it across the WHOLE approved batch,
-        # exporting its own session id as SAPS_LOCK_OWNER for the child
+        # exporting its own session id as S4L_LOCK_OWNER for the child
         # twitter_browser.py reply subprocesses it spawns. Each child INHERITS the
         # parent's hold instead of contending for it -- two role:"post" peers would
         # otherwise both fall to the case-6 peer-wait and give up after
@@ -457,7 +457,7 @@ def _acquire_browser_lock():
         # to the dead_python reclaim below, so a crashed batch can't wedge the
         # browser. This is what closes the inter-candidate gap (the link_tail
         # claude -p call, ~5-20s) the every-60s autopilot scan used to slip into.
-        _batch_owner = os.environ.get("SAPS_LOCK_OWNER") or ""
+        _batch_owner = os.environ.get("S4L_LOCK_OWNER") or ""
         if holder and holder == _batch_owner and _is_python_holder_alive(holder):
             _LOCK_SESSION_ID = holder
             _LOCK_INHERITED = True
@@ -2629,13 +2629,13 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        # SAPS_SKIP_CAMPAIGN_SUFFIX=1 opts this reply out of active-campaign
+        # S4L_SKIP_CAMPAIGN_SUFFIX=1 opts this reply out of active-campaign
         # suffixes (e.g. " written with ai"). Set ONLY by the MCP draft_cycle
         # post path (mcp/src/index.ts::postApproved) so manual/reviewed posts
         # land clean; the cron pipeline never sets it, so the A/B experiment
         # keeps running there and on Reddit. Reuses the existing apply_campaigns
         # plumbing (same flag the self-reply path uses below).
-        _skip_camp = os.environ.get("SAPS_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
+        _skip_camp = os.environ.get("S4L_SKIP_CAMPAIGN_SUFFIX", "").strip().lower() in ("1", "true", "yes")
         result = reply_to_tweet(sys.argv[2], sys.argv[3], apply_campaigns=not _skip_camp)
         print(json.dumps(result, indent=2))
 
