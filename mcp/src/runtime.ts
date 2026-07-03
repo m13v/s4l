@@ -12,7 +12,7 @@
 //   5. the Playwright Chromium binary
 //
 // The absolute interpreter path is written to runtime.json; the server reads it
-// for SAPS_PYTHON. No PATH lookup, no venv activation, no system python — so the
+// for S4L_PYTHON. No PATH lookup, no venv activation, no system python — so the
 // whole "Python environment + paths" class of bug disappears.
 //
 // Progress is written to install-progress.json as a JSON object the panel polls
@@ -69,7 +69,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Everything we own lives under one state dir (next to setup-state.json).
 const STATE_DIR =
-  process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const RUNTIME_DIR = path.join(STATE_DIR, "runtime");
 const VENV_DIR = path.join(RUNTIME_DIR, ".venv");
 const RUNTIME_JSON = path.join(STATE_DIR, "runtime.json");
@@ -176,18 +176,18 @@ function isStrayCheckout(dir: string | undefined | null): boolean {
 }
 
 // Resolve the pipeline repo the server shells out to, preferring (in order):
-//   1. SAPS_REPO_DIR when it's a real clone (npm/git install, Story A); never
+//   1. S4L_REPO_DIR when it's a real clone (npm/git install, Story A); never
 //      overwritten, power users keep their working tree.
 //   2. runtime.json's repo_dir (the materialized repo from a .mcpb install).
 //   3. the materialized path on disk even if runtime.json is missing.
-//   4. SAPS_REPO_DIR as-is, then the two-levels-up dev default.
+//   4. S4L_REPO_DIR as-is, then the two-levels-up dev default.
 // Dynamic (not a load-time const) so a first-run materialize is picked up
 // without a server restart (same property resolvePython() relies on).
 // Stray git checkouts (see isStrayCheckout) are skipped at every step: a clone
 // the running server does NOT live in can never be the pipeline repo on a
 // shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
-  const env = process.env.SAPS_REPO_DIR;
+  const env = process.env.S4L_REPO_DIR;
   if (looksLikeRepo(env) && !isStrayCheckout(env)) return env as string;
   const rt = readRuntime();
   if (rt && rt.repo_dir && looksLikeRepo(rt.repo_dir) && !isStrayCheckout(rt.repo_dir))
@@ -202,7 +202,7 @@ export interface RuntimeInfo {
   uv: string;
   python_version: string;
   // Absolute path to the pipeline repo the server shells out to. For a npm /
-  // git install this is the user's clone (SAPS_REPO_DIR); for a bare .mcpb
+  // git install this is the user's clone (S4L_REPO_DIR); for a bare .mcpb
   // double-click it's the repo we materialize from the embedded tarball under
   // the state dir. Persisted so resolveRepoDir() finds it on later boots.
   repo_dir?: string;
@@ -251,7 +251,7 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
 ];
 
 // ---------------------------------------------------------------------------
-// runtime.json (the durable result the server reads for SAPS_PYTHON).
+// runtime.json (the durable result the server reads for S4L_PYTHON).
 // ---------------------------------------------------------------------------
 export function readRuntime(): RuntimeInfo | null {
   try {
@@ -291,7 +291,7 @@ export function ensurePipelineCurrent(): void {
     // A real clone (npm/git install) is the user's working tree — never touch
     // it. A STRAY checkout (git clone nobody opted into, see isStrayCheckout)
     // does not qualify: fall through so healStrayCheckout() can reclaim.
-    const env = process.env.SAPS_REPO_DIR;
+    const env = process.env.S4L_REPO_DIR;
     if (looksLikeRepo(env) && !isStrayCheckout(env)) return;
     healStrayCheckout();
     // Nothing materialized yet, or no tarball to extract from: provision() owns
@@ -334,7 +334,7 @@ export function ensurePipelineCurrent(): void {
 }
 
 // Reclaim a box whose pipeline repo resolution landed on a stray git checkout
-// (either SAPS_REPO_DIR baked into an old registration/plist, or runtime.json's
+// (either S4L_REPO_DIR baked into an old registration/plist, or runtime.json's
 // repo_dir). Non-destructive: the checkout stays on disk untouched; we simply
 // stop using it. Steps: materialize the bundled pipeline if it isn't on disk
 // yet, migrate the user state the checkout accumulated while it was live
@@ -343,7 +343,7 @@ export function ensurePipelineCurrent(): void {
 // server boot from ensurePipelineCurrent(); best-effort, never throws.
 function healStrayCheckout(): void {
   try {
-    const env = process.env.SAPS_REPO_DIR;
+    const env = process.env.S4L_REPO_DIR;
     const rt = readRuntime();
     const stray =
       (looksLikeRepo(env) && isStrayCheckout(env) && (env as string)) ||
@@ -407,12 +407,12 @@ export function runtimeReady(): boolean {
 }
 
 // Resolve the interpreter the pipeline should run under, preferring the owned
-// uv runtime, then the install-pinned SAPS_PYTHON, then bare python3. This is
+// uv runtime, then the install-pinned S4L_PYTHON, then bare python3. This is
 // the single seam that moves the pipeline off the user's system Python.
 export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
-  return process.env.SAPS_PYTHON || "python3";
+  return process.env.S4L_PYTHON || "python3";
 }
 
 // First Chrome/Chromium binary that exists AND is executable, from the same
@@ -611,24 +611,24 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
 
   // --- Step 0: materialize the pipeline repo --------------------------------
-  // If SAPS_REPO_DIR is already a real clone (npm/git install), use it untouched.
+  // If S4L_REPO_DIR is already a real clone (npm/git install), use it untouched.
   // Otherwise (bare .mcpb double-click) unpack the embedded npm tarball so the
   // pipeline source lands on disk and every later step + the server agree on one
   // repo path. requirements.txt MUST exist after this for the deps step.
   setStep("repo", "running");
   let resolvedRepo: string;
   if (
-    looksLikeRepo(process.env.SAPS_REPO_DIR) &&
-    !isStrayCheckout(process.env.SAPS_REPO_DIR)
+    looksLikeRepo(process.env.S4L_REPO_DIR) &&
+    !isStrayCheckout(process.env.S4L_REPO_DIR)
   ) {
-    resolvedRepo = process.env.SAPS_REPO_DIR as string;
+    resolvedRepo = process.env.S4L_REPO_DIR as string;
     setStep("repo", "done", `using existing clone: ${resolvedRepo}`);
   } else {
     if (!fs.existsSync(EMBEDDED_TARBALL)) {
       return fail(
-        `no pipeline source: SAPS_REPO_DIR is not a clone and the embedded ` +
+        `no pipeline source: S4L_REPO_DIR is not a clone and the embedded ` +
           `tarball is missing (${EMBEDDED_TARBALL}). Reinstall the extension or ` +
-          `set SAPS_REPO_DIR to a social-autoposter clone.`
+          `set S4L_REPO_DIR to a social-autoposter clone.`
       );
     }
     // Clean any half-unpacked previous attempt, then extract fresh (idempotent).
@@ -662,7 +662,7 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       }
       if (!occupied) fs.symlinkSync(MATERIALIZED_REPO, compat);
     } catch {
-      /* best effort; SAPS_REPO_DIR + the run-*.sh fallback also resolve the repo */
+      /* best effort; S4L_REPO_DIR + the run-*.sh fallback also resolve the repo */
     }
     setStep("repo", "done", `unpacked to ${resolvedRepo}`);
   }
@@ -895,7 +895,7 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     provisioned_at: new Date().toISOString(),
     // Stamp the just-materialized pipeline version so ensurePipelineCurrent()
     // can detect a later update without re-extracting on every boot. Only
-    // meaningful for the materialized (.mcpb) repo, not a SAPS_REPO_DIR clone.
+    // meaningful for the materialized (.mcpb) repo, not a S4L_REPO_DIR clone.
     pipeline_version:
       resolvedRepo === MATERIALIZED_REPO ? bundledVersion() ?? undefined : undefined,
   };
@@ -981,11 +981,11 @@ function menubarPlistXml(python: string): string {
 \t\t<string>${menubarPath}</string>
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
-\t\t<key>SAPS_STATE_DIR</key>
+\t\t<key>S4L_STATE_DIR</key>
 \t\t<string>${STATE_DIR}</string>
-\t\t<key>SAPS_PYTHON</key>
+\t\t<key>S4L_PYTHON</key>
 \t\t<string>${python}</string>
-\t\t<key>SAPS_REPO_DIR</key>
+\t\t<key>S4L_REPO_DIR</key>
 \t\t<string>${resolveRepoDir()}</string>
 \t</dict>
 </dict>
@@ -1120,7 +1120,7 @@ async function refreshMenubarIfStale(): Promise<{ ok: boolean; detail: string; s
   } catch (e: any) {
     return { ok: true, skipped: true, detail: `menu bar refresh check failed: ${e?.message || e}` };
   }
-  // The plist bakes SAPS_REPO_DIR/SAPS_PYTHON at write time and was historically
+  // The plist bakes S4L_REPO_DIR/S4L_PYTHON at write time and was historically
   // never rewritten, so a box whose repo resolution changed (e.g. a stray git
   // checkout healed at boot) kept feeding the menu bar (and every snapshot.py
   // it spawns) the stale repo, which is what pins the displayed version and the
