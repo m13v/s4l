@@ -18,11 +18,25 @@
  */
 
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 
 // Untyped indirection: Node ships a global WebSocket at runtime (>=21) but
 // @types/node doesn't always declare it as a value, and MessageEvent isn't typed
 // without the DOM lib. Reach for it dynamically and keep the event handlers `any`.
-const WS: any = (globalThis as any).WebSocket;
+//
+// Claude Desktop launches this server with whatever `node` is on the user's
+// PATH, which can be 18/20 with no global WebSocket. Fall back to the bundled
+// `ws` package, whose browser-style API (onopen/onmessage/send/close/readyState)
+// matches how this module drives the socket.
+const WS: any =
+  (globalThis as any).WebSocket ??
+  (() => {
+    try {
+      return createRequire(import.meta.url)("ws").WebSocket;
+    } catch {
+      return undefined;
+    }
+  })();
 
 interface CdpTarget {
   id: string;
