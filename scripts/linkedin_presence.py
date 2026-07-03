@@ -81,15 +81,16 @@ ANCHOR_SCAN_JS = """
   const seen = new Set();
   for (const a of document.querySelectorAll('a[href]')) {
     const href = a.href || '';
+    const attr = a.getAttribute('href') || '';
     if (!href.startsWith('https://www.linkedin.com/')) continue;
-    if (href.includes('"')) continue;
+    if (href.includes('"') || attr.includes('"')) continue;
     const r = a.getBoundingClientRect();
     if (r.width < 24 || r.height < 10) continue;
-    if (r.bottom < 60 || r.top > vh - 20 || r.right < 40 || r.left > vw - 40) continue;
+    if (r.bottom < 0 || r.top > vh || r.right < 20 || r.left > vw - 20) continue;
     const key = href.split('?')[0];
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({href: href, text: (a.innerText || '').trim().slice(0, 60)});
+    out.push({href: href, attr: attr, text: (a.innerText || '').trim().slice(0, 60)});
     if (out.length >= 150) break;
   }
   return out;
@@ -186,29 +187,30 @@ def _scroll(page: Any, up: bool = False) -> None:
     time.sleep(random.uniform(1.2, 4.5))
 
 
-def _candidate_links(page: Any, category: str, visited: set[str]) -> list[str]:
+def _candidate_links(page: Any, category: str, visited: set[str]) -> list[dict]:
     anchors = _safe_eval(page, ANCHOR_SCAN_JS, []) or []
     rx = CLICK_ALLOWLIST[category]
     current = (page.url or "").split("?")[0].rstrip("/")
     out = []
     for a in anchors:
         href = str(a.get("href") or "")
+        attr = str(a.get("attr") or "")
         base = href.split("?")[0]
-        if not rx.match(base):
+        if not attr or not rx.match(base):
             continue
         if base.rstrip("/") == current:
             continue
         if base in visited and category != "nav":
             continue
-        out.append(href)
+        out.append({"href": href, "attr": attr})
     return out
 
 
-def _click_link(context: Any, page: Any, href: str) -> tuple[Any, bool]:
-    """Click the anchor with this exact href. Returns (page, navigated)."""
+def _click_link(context: Any, page: Any, link: dict) -> tuple[Any, bool]:
+    """Click the anchor with this exact href attribute. Returns (page, navigated)."""
     before_url = page.url
     before_pages = len(context.pages)
-    loc = page.locator(f'a[href="{href}"]').first
+    loc = page.locator(f'a[href="{link["attr"]}"]').first
     try:
         loc.scroll_into_view_if_needed(timeout=4000)
         page.wait_for_timeout(random.randint(300, 900))
@@ -295,8 +297,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     trail.append(f"no_{category}")
                     steps_done += 1
                     continue
-                href = random.choice(links)
-                page, navigated = _click_link(context, page, href)
+                link = random.choice(links)
+                page, navigated = _click_link(context, page, link)
                 if navigated:
                     counters["clicks"] += 1
                     counters["navs"] += 1
