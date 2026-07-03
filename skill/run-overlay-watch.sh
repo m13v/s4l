@@ -12,7 +12,7 @@
 #     60 + RunAtLoad) re-invokes this script every minute; the pgrep guard makes
 #     re-invocation a no-op while the watcher is already up.
 #   - Lane B (.mcpb / pure MCP): the MCP calls this script on draft_cycle /
-#     autopilot-enable / show_browser_to_user, threading SAPS_PYTHON + SAPS_LOG_DIR.
+#     autopilot-enable / show_browser_to_user, threading S4L_PYTHON + S4L_LOG_DIR.
 #
 # IDEMPOTENT: safe to call on a 60s timer. If a watcher is already running it
 # exits 0 immediately. Otherwise it spawns one detached (nohup, own session) and
@@ -21,6 +21,14 @@
 # This script is intentionally NOT locked: the overlay UX is expected to evolve.
 
 set -u
+
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
 
 # --- resolve the repo this script lives in (works from launchd + MCP cwd) -----
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,11 +50,11 @@ fi
 # --- resolve a python interpreter --------------------------------------------
 # harness_overlay.py self-heals to a playwright-capable interpreter on its own
 # (see _ensure_playwright_interpreter), so any python3 that exists is fine to
-# launch with. Prefer the MCP-threaded SAPS_PYTHON (owned uv runtime), then the
+# launch with. Prefer the MCP-threaded S4L_PYTHON (owned uv runtime), then the
 # usual suspects.
 PYBIN=""
 for _cand in \
-  "${SAPS_PYTHON:-}" \
+  "${S4L_PYTHON:-}" \
   "/opt/homebrew/bin/python3.11" \
   "/usr/bin/python3" \
   "/opt/homebrew/bin/python3"
@@ -62,17 +70,17 @@ if [ -z "${PYBIN}" ]; then
 fi
 
 # --- env the watcher needs ---------------------------------------------------
-# SAPS_LOG_DIR: where harness_overlay.py reads cycle logs to decide busy/idle.
+# S4L_LOG_DIR: where harness_overlay.py reads cycle logs to decide busy/idle.
 # Default to this repo's skill/logs (MCP overrides it to the materialized repo).
-export SAPS_LOG_DIR="${SAPS_LOG_DIR:-${REPO_DIR}/skill/logs}"
+export S4L_LOG_DIR="${S4L_LOG_DIR:-${REPO_DIR}/skill/logs}"
 # CDP target for the twitter harness Chrome (honor BYO-Chrome installs).
 export TWITTER_CDP_URL="${TWITTER_CDP_URL:-http://127.0.0.1:9555}"
-mkdir -p "${SAPS_LOG_DIR}" 2>/dev/null || true
-WATCH_LOG="${SAPS_LOG_DIR}/overlay-watch.log"
+mkdir -p "${S4L_LOG_DIR}" 2>/dev/null || true
+WATCH_LOG="${S4L_LOG_DIR}/overlay-watch.log"
 
 # --- spawn detached ----------------------------------------------------------
 cd "${REPO_DIR}" || exit 0
-echo "[overlay-watch] $(date '+%Y-%m-%d %H:%M:%S') starting watcher py=${PYBIN} cdp=${TWITTER_CDP_URL} log=${SAPS_LOG_DIR}" >>"${WATCH_LOG}" 2>&1
+echo "[overlay-watch] $(date '+%Y-%m-%d %H:%M:%S') starting watcher py=${PYBIN} cdp=${TWITTER_CDP_URL} log=${S4L_LOG_DIR}" >>"${WATCH_LOG}" 2>&1
 # Spawn the watcher in a NEW SESSION so it outlives this supervisor.
 # When launchd fires this script (StartInterval 60), the script is the job's
 # main process; the moment it exits, launchd reaps the WHOLE job process group.
