@@ -230,7 +230,7 @@ def launchd_jobs(by_pid: dict[int, dict[str, Any]], children: dict[int, list[int
     return jobs
 
 
-SAPS_MCP_ENTRYPOINT = str(REPO_DIR / "mcp" / "dist" / "index.js")
+S4L_MCP_ENTRYPOINT = str(REPO_DIR / "mcp" / "dist" / "index.js")
 
 
 def _command(row: dict[str, Any]) -> str:
@@ -247,12 +247,12 @@ def _node_running_script(command: str, script_path: str) -> bool:
 
 
 def _is_social_autoposter_mcp_server(row: dict[str, Any]) -> bool:
-    return _node_running_script(_command(row), SAPS_MCP_ENTRYPOINT)
+    return _node_running_script(_command(row), S4L_MCP_ENTRYPOINT)
 
 
 def _is_configured_with_social_autoposter_mcp(row: dict[str, Any]) -> bool:
     command = _command(row)
-    return SAPS_MCP_ENTRYPOINT in command and not _is_social_autoposter_mcp_server(row)
+    return S4L_MCP_ENTRYPOINT in command and not _is_social_autoposter_mcp_server(row)
 
 
 def _is_dashboard_server(row: dict[str, Any]) -> bool:
@@ -400,7 +400,7 @@ def _json_file_metadata(path: Path) -> dict[str, Any]:
 
 
 def claude_queue_summary() -> dict[str, Any]:
-    root = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
+    root = Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
     summary: dict[str, Any] = {
         "path": str(root),
         "exists": root.exists(),
@@ -774,7 +774,7 @@ def reaper_status() -> dict[str, Any] | None:
     Karol failure mode) is visible in installation_resource_samples. Also surfaces
     staleness: if the file has not been touched recently the reaper itself may be dead."""
     path = (
-        Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
+        Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
         / "claude-queue"
         / "reaper-status.json"
     )
@@ -840,10 +840,10 @@ def _maybe_leak_alert(output: Path, current: dict[str, Any]) -> None:
     # 280 at peak, while remote_macos_mcp_servers (the standalone server procs)
     # stayed 0 the whole time. Watching the server group would have been blind.
     groups_to_watch = ("claude_cli", "sessions_configured_remote_macos_mcp")
-    samples = _env_int("SAPS_LEAK_ALERT_SAMPLES", 5)      # consecutive climbs required
-    floor = _env_int("SAPS_LEAK_ALERT_FLOOR", 20)          # ignore below this count
-    climb_min = _env_int("SAPS_LEAK_ALERT_CLIMB_MIN", 12)  # min first->last growth
-    cooldown_s = _env_int("SAPS_LEAK_ALERT_COOLDOWN", 1800)
+    samples = _env_int("S4L_LEAK_ALERT_SAMPLES", 5)      # consecutive climbs required
+    floor = _env_int("S4L_LEAK_ALERT_FLOOR", 20)          # ignore below this count
+    climb_min = _env_int("S4L_LEAK_ALERT_CLIMB_MIN", 12)  # min first->last growth
+    cooldown_s = _env_int("S4L_LEAK_ALERT_COOLDOWN", 1800)
     if samples < 3:
         samples = 3
 
@@ -879,7 +879,7 @@ def _maybe_leak_alert(output: Path, current: dict[str, Any]) -> None:
         return
 
     # Cooldown: one page per window even if the leak persists for hours.
-    state = Path(os.environ.get("SAPS_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
+    state = Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp"))) / "claude-queue"
     cooldown = state / "leak-alert.cooldown"
     now = time.time()
     try:
@@ -924,9 +924,9 @@ def _env_int(name: str, default: int) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default=os.environ.get("SAPS_MEMORY_SNAPSHOT_LOG", str(DEFAULT_OUTPUT)))
-    parser.add_argument("--top", type=int, default=int(os.environ.get("SAPS_MEMORY_TOP_N", "30")))
-    parser.add_argument("--max-bytes", type=int, default=int(os.environ.get("SAPS_MEMORY_MAX_BYTES", str(100 * 1024 * 1024))))
+    parser.add_argument("--output", default=os.environ.get("S4L_MEMORY_SNAPSHOT_LOG", str(DEFAULT_OUTPUT)))
+    parser.add_argument("--top", type=int, default=int(os.environ.get("S4L_MEMORY_TOP_N", "30")))
+    parser.add_argument("--max-bytes", type=int, default=int(os.environ.get("S4L_MEMORY_MAX_BYTES", str(100 * 1024 * 1024))))
     parser.add_argument(
         "--summary",
         action="store_true",
