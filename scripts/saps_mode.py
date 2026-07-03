@@ -17,7 +17,7 @@ invocation flips a coin and runs that one cycle as either a persona (link-free)
 cycle or a normal promotion cycle. The locked pipeline never changes — it just
 reads the env vars env_exports() prints.
 
-State lives in ONE small file, `$SAPS_STATE_DIR/mode.json`:
+State lives in ONE small file, `$S4L_STATE_DIR/mode.json`:
     {"personal_brand": true, "promotion": false, "mode": "personal_brand"}
 
 The `"mode"` field is a DERIVED legacy mirror (personal_brand if that lane is on,
@@ -32,7 +32,7 @@ The toggle takes effect WITHOUT touching any locked pipeline file: the unlocked
 wrapper `skill/run-draft-and-publish.sh` evals `saps_mode.py env` right before it
 invokes the locked `run-twitter-cycle.sh`, exporting the env vars the locked
 pipeline already honors:
-    SAPS_FORCE_PROJECT       -> pick_project.py forces this exact project
+    S4L_FORCE_PROJECT       -> pick_project.py forces this exact project
                                 (--project bypasses the enabled gate), so a
                                 disabled persona is still selectable.
     TWITTER_TAIL_LINK_RATE=0 -> twitter_post_plan.py ships every reply bare.
@@ -74,7 +74,7 @@ DEFAULT_MODE = PERSONAL_BRAND
 def state_dir() -> Path:
     # Mirrors mcp/src/index.ts sapsStateDir() and menubar/s4l_state.py state_dir().
     return Path(
-        os.environ.get("SAPS_STATE_DIR")
+        os.environ.get("S4L_STATE_DIR")
         or (Path.home() / ".social-autoposter-mcp")
     )
 
@@ -84,10 +84,10 @@ def mode_file() -> Path:
 
 
 def config_path() -> Path:
-    # Match the locked pipeline's resolution: SAPS_REPO_DIR/config.json when set,
+    # Match the locked pipeline's resolution: S4L_REPO_DIR/config.json when set,
     # else the canonical ~/social-autoposter/config.json (what pick_project.py /
     # project_topics.py read directly).
-    repo = os.environ.get("SAPS_REPO_DIR")
+    repo = os.environ.get("S4L_REPO_DIR")
     if repo:
         p = Path(repo) / "config.json"
         if p.exists():
@@ -215,13 +215,13 @@ def _persona_env_lines() -> str:
         return ""
     return "\n".join(
         [
-            f"export SAPS_FORCE_PROJECT={shlex.quote(name)}",
+            f"export S4L_FORCE_PROJECT={shlex.quote(name)}",
             "export TWITTER_TAIL_LINK_RATE=0",
             # Explicit lane signal so the (locked) cycle can branch the draft
             # directive + inject the persona corpus without re-deriving the lane
-            # from SAPS_FORCE_PROJECT (which is also set by manual single-project
+            # from S4L_FORCE_PROJECT (which is also set by manual single-project
             # MCP draft_cycle runs). Only the personal_brand lane sets this.
-            "export SAPS_ACTIVE_LANE=personal_brand",
+            "export S4L_ACTIVE_LANE=personal_brand",
         ]
     )
 
