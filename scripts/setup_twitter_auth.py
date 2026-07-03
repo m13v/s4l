@@ -89,7 +89,7 @@ except Exception:
 # --- Config -----------------------------------------------------------------
 
 # Same managed Chrome the twitter-harness pipeline uses (skill/lib/twitter-backend.sh).
-CDP = os.environ.get("SAPS_TWITTER_CDP_URL", os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555")).rstrip("/")
+CDP = os.environ.get("S4L_TWITTER_CDP_URL", os.environ.get("TWITTER_CDP_URL", "http://127.0.0.1:9555")).rstrip("/")
 PORT = int(CDP.rsplit(":", 1)[-1]) if CDP.rsplit(":", 1)[-1].isdigit() else 9555
 PROFILE_DIR = Path.home() / ".claude" / "browser-profiles" / "browser-harness"
 # Same PID file server.py (the twitter-harness MCP) writes, so a Chrome launched
@@ -681,8 +681,8 @@ def _import_from(source: str) -> dict:
     # or behind the autoposter's own Chrome window, so a human needs real time
     # to find and click it. A 60s cap killed it mid-prompt and dumped the user
     # into the manual-login fallback. Give the dialog room; override with
-    # SAPS_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
-    _raw_to = os.environ.get("SAPS_COOKIE_COPY_TIMEOUT", "600").strip()
+    # S4L_COOKIE_COPY_TIMEOUT (seconds), 0/empty = no timeout.
+    _raw_to = os.environ.get("S4L_COOKIE_COPY_TIMEOUT", "600").strip()
     try:
         copy_timeout = float(_raw_to) if _raw_to else None
     except ValueError:
