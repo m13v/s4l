@@ -33,6 +33,12 @@ import os
 import sys
 import time
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+
+s4l_env.mirror()
+
 # Keep in sync with QUEUE_WORKERS / LEGACY_QUEUE_WORKER_TASK_IDS in
 # mcp/src/index.ts and WORKER_TASK_IDS in mcp/menubar/s4l_menubar.py.
 # A registry counts as scheduled when ANY complete set is present: the
