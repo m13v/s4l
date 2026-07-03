@@ -2851,8 +2851,8 @@ function queueWorkerSkillMd(spec: { taskId: string; queueType: string; human: st
   return (
     `---\n` +
     `name: ${spec.taskId}\n` +
-    `description: S4L ${spec.human} queue worker — claims one ${spec.queueType} job ` +
-    `from the local pipeline queue, drafts it, writes the result back. Never posts.\n` +
+    `description: S4L queue worker — claims the next job from the local pipeline ` +
+    `queue, drafts it, writes the result back. Never posts.\n` +
     `---\n\n` +
     queueWorkerBody(spec) +
     `\n\n<!-- ${QUEUE_WORKER_PROMPT_MARKER}: ${QUEUE_WORKER_PROMPT_VERSION} -->\n`
