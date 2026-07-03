@@ -2052,7 +2052,17 @@ class S4LMenuBar(rumps.App):
         items.append(rumps.MenuItem("Uninstall S4L…", callback=self._reset_machine))
         items.append(rumps.MenuItem("Quit", callback=self._quit_app))
 
+        # Collapse consecutive/edge separators so an empty section (e.g. State C
+        # now renders no status labels) can't leave a doubled or dangling divider.
+        cleaned = []
         for it in items:
+            is_sep = it is rumps.separator
+            if is_sep and (not cleaned or cleaned[-1] is rumps.separator):
+                continue
+            cleaned.append(it)
+        while cleaned and cleaned[-1] is rumps.separator:
+            cleaned.pop()
+        for it in cleaned:
             self.menu.add(it)
 
     def _label(self, text):
@@ -2110,41 +2120,15 @@ class S4LMenuBar(rumps.App):
         out.append(rumps.MenuItem("Set up in Claude", callback=self._setup))
         return out
 
-    # State C — setup complete: the mini dashboard.
+    # State C — setup complete. The post-setup status readouts (X handle,
+    # projects-ready count, 7-day stats) were removed per user request: that
+    # gray informational text belongs on the dashboard, not the dropdown. The
+    # menu goes straight from the header to the engagement lanes + Open dashboard.
+    # The engagement-mode toggles live in _build_menu (shown in EVERY state), and
+    # there is deliberately no "Run draft cycle" / "Post approved drafts" item
+    # (the autopilot drafts on its own; approving a review card already posts it).
     def _state_c(self, snap):
-        out = []
-        handle = snap.get("x_handle")
-        out.append(
-            self._label(f"@{handle.lstrip('@')}" if handle else "X connected")
-        )
-        out.append(
-            self._label(
-                f"Ready · {snap.get('projects_ready', 0)}/"
-                f"{snap.get('projects_total', 0)} projects"
-            )
-        )
-        stats = st.stats_7d()
-        if stats:
-            out.append(
-                self._label(
-                    f"7d: {stats['posts']} posts · {stats['views']} views "
-                    f"· {stats['replies']} replies"
-                )
-            )
-        else:
-            out.append(self._label("7d stats — open dashboard"))
-
-        # (Engagement-mode toggle moved to _build_menu so it shows in EVERY state,
-        # not just post-setup — see the always-visible block there.)
-
-        # No "Run draft cycle" item: the autopilot drafts on its own (launchd
-        # kicker + queue worker), so a manual draft-now action is redundant.
-        # No "Post approved drafts" item: approving a review card already posts
-        # that card directly + programmatically (_on_card_decision -> queue ->
-        # _post_worker_loop -> st.post_drafts -> the CDP poster). A menu button
-        # that types a prompt into the chat to do the same thing was a redundant
-        # detour through the model, so it's gone.
-        return out
+        return []
 
 
 if __name__ == "__main__":
