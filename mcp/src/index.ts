@@ -96,7 +96,7 @@ const REVIEW_QUEUE_ID = "review-queue";
 // ---- Queue-backed drafting (2026-06-23) -----------------------------------
 // Customer .mcpb boxes have no `claude` CLI, so the deterministic pipeline can't
 // run its `claude -p` steps directly. Instead a launchd job kicks the REAL
-// pipeline (run-twitter-cycle.sh in DRAFT_ONLY mode with SAPS_CLAUDE_PROVIDER=
+// pipeline (run-twitter-cycle.sh in DRAFT_ONLY mode with S4L_CLAUDE_PROVIDER=
 // queue); each `claude -p` call enqueues onto scripts/claude_job.py's file queue
 // and blocks. Two Claude Desktop scheduled tasks — one per job type — drain that
 // queue, run the pipeline's own prompt as a Claude turn, and write the result
@@ -199,7 +199,7 @@ const STALL_WATCH_INTERVAL_SECS = 120;
 // watcher AS the job's main process makes launchd supervise it directly:
 // RunAtLoad starts it at boot, KeepAlive restarts it if it ever exits, and on
 // unload its SIGTERM handler clears the overlay cleanly. Disable with
-// SAPS_OVERLAY_WATCH=0.
+// S4L_OVERLAY_WATCH=0.
 const OVERLAY_WATCH_LABEL = "com.m13v.social-overlay-watch";
 const OVERLAY_WATCH_PLIST = path.join(
   os.homedir(),
@@ -281,8 +281,8 @@ function plistXml(opts: {
   const chromeEnv = chrome
     ? `\n\t\t<key>BH_CHROME_BIN</key>\n\t\t<string>${chrome}</string>`
     : "";
-  // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY / SAPS_CLAUDE_PROVIDER).
-  // Rendered after the baked-in vars so a caller can also override SAPS_STATE_DIR.
+  // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY / S4L_CLAUDE_PROVIDER).
+  // Rendered after the baked-in vars so a caller can also override S4L_STATE_DIR.
   const extraEnv = opts.extraEnv
     ? Object.entries(opts.extraEnv)
         .map(([k, v]) => `\n\t\t<key>${k}</key>\n\t\t<string>${v}</string>`)
@@ -309,9 +309,9 @@ ${schedule}
 \t\t<string>${launchdPath()}</string>
 \t\t<key>HOME</key>
 \t\t<string>${os.homedir()}</string>
-\t\t<key>SAPS_REPO_DIR</key>
+\t\t<key>S4L_REPO_DIR</key>
 \t\t<string>${repoDir()}</string>
-\t\t<key>SAPS_PYTHON</key>
+\t\t<key>S4L_PYTHON</key>
 \t\t<string>${resolvePython()}</string>${chromeEnv}${extraEnv}
 \t</dict>
 \t<key>RunAtLoad</key>
@@ -601,9 +601,9 @@ function cycleProgressMessage(line: string): string | null {
 // guard), so calling this on every draft_cycle / autopilot-enable / show-browser
 // is safe: it spawns at most one detached watcher and is a fast no-op otherwise.
 //
-// We thread SAPS_PYTHON (the owned uv runtime, so the watcher resolves a
+// We thread S4L_PYTHON (the owned uv runtime, so the watcher resolves a
 // playwright-capable interpreter on Lane B / .mcpb installs that have no system
-// python) and SAPS_LOG_DIR (the materialized repo's skill/logs, so the watcher
+// python) and S4L_LOG_DIR (the materialized repo's skill/logs, so the watcher
 // reads the SAME cycle logs this run writes to decide busy/idle). Fire-and-forget:
 // a failure here must never break the cycle it's decorating.
 async function ensureOverlayWatch(): Promise<void> {
@@ -611,8 +611,8 @@ async function ensureOverlayWatch(): Promise<void> {
     await run("bash", ["skill/run-overlay-watch.sh"], {
       timeoutMs: 20_000,
       env: {
-        SAPS_PYTHON: resolvePython(),
-        SAPS_LOG_DIR: path.join(repoDir(), "skill", "logs"),
+        S4L_PYTHON: resolvePython(),
+        S4L_LOG_DIR: path.join(repoDir(), "skill", "logs"),
         TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
       },
     });
@@ -627,16 +627,16 @@ async function produceDrafts(
 ): Promise<DraftResult> {
   // Run the real pipeline in DRAFT_ONLY mode: scan -> score -> draft -> link-gen,
   // then STOP before posting. The script prints `DRAFT_ONLY_PLAN=<path>` and
-  // leaves the plan on disk for us to review + post. SAPS_FORCE_PROJECT scopes
+  // leaves the plan on disk for us to review + post. S4L_FORCE_PROJECT scopes
   // the cycle to one project; TWITTER_PAGE_GEN_RATE=0 keeps link-gen sub-second.
   const env: NodeJS.ProcessEnv = {
     DRAFT_ONLY: "1",
     TWITTER_PAGE_GEN_RATE: "0",
     // Point the cycle at the resolved repo (a bare .mcpb materializes it under
     // the state dir, NOT ~/social-autoposter); run-twitter-cycle.sh honors
-    // SAPS_REPO_DIR for its REPO_DIR. And put the owned runtime + ~/.local/bin
+    // S4L_REPO_DIR for its REPO_DIR. And put the owned runtime + ~/.local/bin
     // first on PATH so the script's bare `python3` and `browser-harness` resolve.
-    SAPS_REPO_DIR: repoDir(),
+    S4L_REPO_DIR: repoDir(),
     PATH: pipelinePath(),
     // Interactive draft_cycle: launch the harness Chrome ON-SCREEN so the user
     // can watch the scan/scrape happen live. Cron/autopilot do NOT set these, so
@@ -646,7 +646,7 @@ async function produceDrafts(
     BH_WINDOW_POS: "60,60",
     BH_WINDOW_SIZE: "1280,900",
   };
-  if (project) env.SAPS_FORCE_PROJECT = project;
+  if (project) env.S4L_FORCE_PROJECT = project;
   // Point the harness at the Chrome the runtime detected/installed. The cycle's
   // own _resolve_chrome_bin doesn't scan ~/Applications (our no-sudo fallback
   // install target), so without this a non-admin .mcpb install would have Chrome
@@ -899,7 +899,7 @@ async function ensurePostingHandle(): Promise<void> {
   try {
     await runPython("scripts/setup_twitter_auth.py", ["resolve-handle"], {
       timeoutMs: 60_000,
-      env: { SAPS_REPO_DIR: repoDir(), PATH: pipelinePath() },
+      env: { S4L_REPO_DIR: repoDir(), PATH: pipelinePath() },
     });
   } catch {
     /* best effort */
@@ -909,8 +909,8 @@ async function ensurePostingHandle(): Promise<void> {
 async function ensureTwitterBrowserForPost() {
   const chrome = resolveChrome();
   const env: NodeJS.ProcessEnv = {
-    SAPS_REPO_DIR: repoDir(),
-    SAPS_PYTHON: resolvePython(),
+    S4L_REPO_DIR: repoDir(),
+    S4L_PYTHON: resolvePython(),
     PATH: pipelinePath(),
     TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
   };
@@ -974,7 +974,7 @@ async function postApproved(batchId: string, plan: Plan) {
   const heldShellLock = await acquireShellBrowserLock();
   const approvedBatch = `${batchId}_approved`;
   writePlan(approvedBatch, { ...plan, candidates: approved });
-  // SAPS_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
+  // S4L_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
   // never get the active-campaign suffix (e.g. " written with ai") appended.
   // twitter_browser.py's reply handler reads this env (inherited through
   // twitter_post_plan.py's subprocess). The cron pipeline doesn't set it, so the
@@ -1002,7 +1002,7 @@ async function postApproved(batchId: string, plan: Plan) {
         {
           timeoutMs: 900_000,
           env: {
-            SAPS_SKIP_CAMPAIGN_SUFFIX: "1",
+            S4L_SKIP_CAMPAIGN_SUFFIX: "1",
             // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
             // runs TWITTER_TAIL_LINK_RATE=0.9 (from .env) so ~10% of autopilot posts
             // ship link-less as an experiment arm. But when the user hand-reviews a
@@ -1021,7 +1021,7 @@ async function postApproved(batchId: string, plan: Plan) {
             // this and short-circuits to that concat instantly. The local
             // cron/plist autopilot never sets this, so it keeps generating the
             // bridge sentence.
-            SAPS_SKIP_LINK_TAIL: "1",
+            S4L_SKIP_LINK_TAIL: "1",
             // The poster attaches to the twitter-harness Chrome over CDP. The cron
             // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
             // must set it explicitly or twitter_browser.py fails with "No twitter-
@@ -2969,6 +2969,13 @@ function queueWorkerAllowedTools(): string[] {
     "mcp__S4L__project_config",
     "mcp__S4L__get_stats",
     "mcp__S4L__dashboard",
+    // Legacy "SAPS" protocol-name namespace (pre-2026-07 brand rename): old
+    // registrations still resolve tool ids under it, keep the allow-rules.
+    "mcp__SAPS__queue_setup",
+    "mcp__SAPS__post_drafts",
+    "mcp__SAPS__project_config",
+    "mcp__SAPS__get_stats",
+    "mcp__SAPS__dashboard",
   ];
 }
 
@@ -3090,10 +3097,10 @@ function ensureWorkerFolderTrusted(): void {
 // session reads this file; a torn write would brick Claude Code), never throws.
 // Runs on every boot, so a box whose ~/.claude.json didn't exist yet self-heals on
 // the next restart once a Code/Cowork session has created it. Kill switch:
-// SAPS_COWORK_MCP=0.
+// S4L_COWORK_MCP=0.
 function ensureCoworkMcpRegistered(): void {
   try {
-    if (process.env.SAPS_COWORK_MCP === "0") return;
+    if (process.env.S4L_COWORK_MCP === "0") return;
     const home = process.env.HOME || os.homedir();
     const cfgPath = path.join(home, ".claude.json");
     if (!fs.existsSync(cfgPath)) return; // Claude Code not initialised yet; retry next boot
@@ -3133,7 +3140,7 @@ function ensureCoworkMcpRegistered(): void {
 // run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen) but
 // STOPS before posting (DRAFT_ONLY=1), writing the plan to the review-queue the
 // approval cards read. Its `claude -p` steps route through the job queue
-// (SAPS_CLAUDE_PROVIDER=queue) for the scheduled-task workers to service.
+// (S4L_CLAUDE_PROVIDER=queue) for the scheduled-task workers to service.
 // link_tail is skipped for now (TWITTER_TAIL_LINK_RATE=0); the short link is
 // still baked by twitter_gen_links.py (pure Python).
 const QUEUE_KICKER_INTERVAL_SECS = 300; // a fresh draft cycle every 5 min
@@ -3141,8 +3148,8 @@ const QUEUE_KICKER_INTERVAL_SECS = 300; // a fresh draft cycle every 5 min
 function kickerEnv(): Record<string, string> {
   return {
     DRAFT_ONLY: "1",
-    SAPS_CLAUDE_PROVIDER: "queue",
-    SAPS_STATE_DIR: sapsStateDir(),
+    S4L_CLAUDE_PROVIDER: "queue",
+    S4L_STATE_DIR: sapsStateDir(),
     TWITTER_TAIL_LINK_RATE: "0",
     TWITTER_PAGE_GEN_RATE: "0",
   };
@@ -3361,7 +3368,7 @@ async function ensureFeedbackDigestInstalled(): Promise<{ ok: boolean; detail: s
 async function ensureStallWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.SAPS_STALL_WATCH === "0") return { ok: false, detail: "disabled (SAPS_STALL_WATCH=0)" };
+    if (process.env.S4L_STALL_WATCH === "0") return { ok: false, detail: "disabled (S4L_STALL_WATCH=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3405,7 +3412,7 @@ async function ensureStallWatchInstalled(): Promise<{ ok: boolean; detail: strin
 async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.SAPS_MEMORY_SNAPSHOT === "0") return { ok: false, detail: "disabled (SAPS_MEMORY_SNAPSHOT=0)" };
+    if (process.env.S4L_MEMORY_SNAPSHOT === "0") return { ok: false, detail: "disabled (S4L_MEMORY_SNAPSHOT=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3456,13 +3463,13 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
 // watcher before it can detach (verified on the box: the watcher caught the
 // group SIGTERM and cleared the overlay every cycle). harness_overlay.py holds a
 // singleton flock so the MCP's best-effort run-overlay-watch.sh lane can never
-// double-paint. SAPS_PYTHON is baked by plistXml; we add SAPS_LOG_DIR (so the
+// double-paint. S4L_PYTHON is baked by plistXml; we add S4L_LOG_DIR (so the
 // watcher reads the same cycle logs to decide busy/idle) and the harness CDP
-// URL. Disable with SAPS_OVERLAY_WATCH=0.
+// URL. Disable with S4L_OVERLAY_WATCH=0.
 async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.SAPS_OVERLAY_WATCH === "0") return { ok: false, detail: "disabled (SAPS_OVERLAY_WATCH=0)" };
+    if (process.env.S4L_OVERLAY_WATCH === "0") return { ok: false, detail: "disabled (S4L_OVERLAY_WATCH=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3478,7 +3485,7 @@ async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: str
       stdoutLog: path.join(logDir, "launchd-overlay-watch-stdout.log"),
       stderrLog: path.join(logDir, "launchd-overlay-watch-stderr.log"),
       extraEnv: {
-        SAPS_LOG_DIR: logDir,
+        S4L_LOG_DIR: logDir,
         TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
       },
     });
@@ -3685,9 +3692,9 @@ function startLocalPanel(): Promise<string> {
       }
     });
     srv.on("error", reject);
-    // Optional fixed port (SAPS_PANEL_PORT) for deterministic addressing; default
+    // Optional fixed port (S4L_PANEL_PORT) for deterministic addressing; default
     // is an OS-assigned ephemeral port.
-    const wantPort = Number(process.env.SAPS_PANEL_PORT) || 0;
+    const wantPort = Number(process.env.S4L_PANEL_PORT) || 0;
     srv.listen(wantPort, "127.0.0.1", () => {
       const addr = srv.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
@@ -3723,10 +3730,10 @@ function writePanelUrl(url: string): void {
   }
 }
 
-// The owned state dir, honoring SAPS_STATE_DIR (matches menubar/s4l_state.py).
+// The owned state dir, honoring S4L_STATE_DIR (matches menubar/s4l_state.py).
 function sapsStateDir(): string {
   return (
-    process.env.SAPS_STATE_DIR ||
+    process.env.S4L_STATE_DIR ||
     path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
   );
 }
@@ -3923,10 +3930,10 @@ function writeReviewRequest(req: {
 // by default we do NOT pop a browser tab. The dashboard already surfaces in-host
 // (MCP Apps inline) or via the Claude Code side panel / returned loopback URL, so
 // auto-opening the OS browser on every dashboard call is unwanted noise. Set
-// SAPS_PANEL_OPEN_BROWSER=1 to restore the old auto-open behavior. (The URL is
+// S4L_PANEL_OPEN_BROWSER=1 to restore the old auto-open behavior. (The URL is
 // always returned to the caller regardless, so nothing is lost when we don't open.)
 async function openInBrowser(url: string): Promise<void> {
-  if (!process.env.SAPS_PANEL_OPEN_BROWSER) return;
+  if (!process.env.S4L_PANEL_OPEN_BROWSER) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
@@ -4059,7 +4066,7 @@ function sigkillAllScans(): void {
 // BETWEEN every card that a parked scan stale-reclaimed (the hijack). Instead we
 // keep the lock and only release it after SHELL_LOCK_GRACE_MS of no posting, so the
 // hold EXPANDS as more cards get approved and there is never a gap between cards.
-const SHELL_LOCK_GRACE_MS = Number(process.env.SAPS_POST_LOCK_GRACE_MS) || 60_000;
+const SHELL_LOCK_GRACE_MS = Number(process.env.S4L_POST_LOCK_GRACE_MS) || 60_000;
 let shellLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 // True from the start of a post batch until SHELL_LOCK_GRACE_MS after the last
 // card. The draft-cycle scan checks this and DEFERS launching a scan while it's set —
@@ -4429,7 +4436,7 @@ async function main() {
   // Tee the verbatim stdout/stderr of every pipeline subprocess to the s4l
   // Cloud Run relay (-> Cloud Logging) so we can troubleshoot/rescue any user
   // scenario (silent stalls, partial onboarding) without asking them to ship a
-  // log file. Best-effort; disabled with SAPS_LOG_STREAM=0.
+  // log file. Best-effort; disabled with S4L_LOG_STREAM=0.
   startLogStreaming();
   // A plugin UPDATE refreshes this server (dist/) but not the materialized
   // pipeline. Re-extract the bundled pipeline.tgz when it's newer than what's on
@@ -4492,7 +4499,7 @@ async function main() {
     .catch((e) => console.error("[stall-watch] watchdog install failed:", e?.message || e));
   // Periodic host-resource sampler (memory/process snapshot -> local JSONL). Gives
   // us per-box resource history to diagnose RAM blowups (e.g. the agent-mode
-  // session leak). Best-effort; never blocks boot. Disable with SAPS_MEMORY_SNAPSHOT=0.
+  // session leak). Best-effort; never blocks boot. Disable with S4L_MEMORY_SNAPSHOT=0.
   void ensureMemorySnapshotInstalled()
     .then((r) => console.error(`[memory-snapshot] launchd sampler: ${r.ok ? "ok" : "skip"} (${r.detail})`))
     .catch((e) => console.error("[memory-snapshot] sampler install failed:", e?.message || e));
