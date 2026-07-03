@@ -45,11 +45,33 @@ def _install_header():
     global _header
     if _header:
         return _header
+    # Lane 1: the shared helper, present in current repos.
     try:
         # scripts/ is on sys.path (SAPS_REPO_DIR insertion at menubar boot).
         from http_api import get_identity_header
 
         _header = (get_identity_header() or "").strip() or None
+    except Exception:
+        _header = None
+    if _header:
+        return _header
+    # Lane 2: older deployed repos lack get_identity_header; mint the header
+    # the way telemetry.ts does, by shelling scripts/identity.py.
+    try:
+        import subprocess
+
+        script = os.path.join(
+            os.environ.get("SAPS_REPO_DIR") or "", "scripts", "identity.py"
+        )
+        if os.path.isfile(script):
+            out = subprocess.run(
+                [sys.executable, script, "header"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if out.returncode == 0:
+                _header = (out.stdout or "").strip() or None
     except Exception:
         _header = None
     return _header
