@@ -133,22 +133,13 @@ fi
 installed="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('version',''))" "$EXT_DIR/manifest.json" 2>/dev/null || true)"
 echo "channel=$CHANNEL installed=$installed latest=$latest"
 
-if [ "$mode" = "check" ]; then
-  [ -n "$latest" ] && [ "$installed" != "$latest" ] && echo "update_available=true" || echo "update_available=false"
-  exit 0
-fi
-
-if [ -n "$latest" ] && [ "$installed" = "$latest" ]; then
-  echo "already on latest ($installed); re-applying anyway would just restart Claude. skipping."
-  # Comment the next line out if you want a forced re-unpack even when current.
-  exit 0
-fi
-
-# Never downgrade silently: whatever the channels say, refuse to unpack an
-# OLDER version over a newer install unless explicitly forced. Same ver_key
-# ordering as the resolver (prerelease < its own release, rc.N ordered by N).
+# Never downgrade silently: whatever the channels say, an OLDER resolved
+# version never gets unpacked over a newer install unless explicitly forced.
+# Same ver_key ordering as the resolver (prerelease < its own release, rc.N
+# ordered by N). Computed before check mode so --check and a real run agree.
+DOWNGRADE_BLOCKED=0
 if [ -n "$latest" ] && [ -n "$installed" ] && [ "${S4L_ALLOW_DOWNGRADE:-0}" != "1" ]; then
-  if ! "$PY" -c '
+  "$PY" -c '
 import re, sys
 def key(v):
     s = str(v).strip().lstrip("v")
@@ -161,11 +152,30 @@ def key(v):
     m = re.findall(r"\d+", pre)
     return (n[0], n[1], n[2], 0, int(m[-1]) if m else 0)
 sys.exit(0 if key(sys.argv[2]) >= key(sys.argv[1]) else 1)
-' "$installed" "$latest"; then
-    echo "resolved $latest is OLDER than installed $installed; refusing downgrade." >&2
-    echo "set S4L_ALLOW_DOWNGRADE=1 to force a rollback on purpose." >&2
-    exit 6
+' "$installed" "$latest" || DOWNGRADE_BLOCKED=1
+fi
+
+if [ "$mode" = "check" ]; then
+  if [ "$DOWNGRADE_BLOCKED" = "1" ]; then
+    echo "update_available=false (resolved $latest is older than installed $installed; downgrade blocked)"
+  elif [ -n "$latest" ] && [ "$installed" != "$latest" ]; then
+    echo "update_available=true"
+  else
+    echo "update_available=false"
   fi
+  exit 0
+fi
+
+if [ -n "$latest" ] && [ "$installed" = "$latest" ]; then
+  echo "already on latest ($installed); re-applying anyway would just restart Claude. skipping."
+  # Comment the next line out if you want a forced re-unpack even when current.
+  exit 0
+fi
+
+if [ "$DOWNGRADE_BLOCKED" = "1" ]; then
+  echo "resolved $latest is OLDER than installed $installed; refusing downgrade." >&2
+  echo "set S4L_ALLOW_DOWNGRADE=1 to force a rollback on purpose." >&2
+  exit 6
 fi
 
 tmpd="$(mktemp -d -t s4l-update-XXXXXX)"
