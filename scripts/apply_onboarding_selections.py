@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import history_context as hc  # noqa: E402
 
-SAPS_MODE = Path(__file__).resolve().parent / "saps_mode.py"
+S4L_MODE = Path(__file__).resolve().parent / "saps_mode.py"
 
 
 def parse_from_prompt(text: str) -> dict:
@@ -55,9 +55,9 @@ def parse_from_prompt(text: str) -> dict:
 def apply_lanes(personal_brand: bool, product: bool, commit: bool) -> list[str]:
     """Return the saps_mode commands, running them only when commit=True."""
     plan = [
-        [sys.executable, str(SAPS_MODE),
+        [sys.executable, str(S4L_MODE),
          "enable" if personal_brand else "disable", "personal_brand"],
-        [sys.executable, str(SAPS_MODE),
+        [sys.executable, str(S4L_MODE),
          "enable" if product else "disable", "promotion"],
     ]
     rendered = [" ".join(c) for c in plan]
