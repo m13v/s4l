@@ -517,8 +517,8 @@ def cmd_search(args):
     # excludes (subreddit:<slug> rows in project_search_excludes) layer onto
     # the global denylist. The same env var is reused below for the feedback-
     # log side effect, so this reordering is free.
-    project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
-    batch_env = os.environ.get("SAPS_REDDIT_BATCH_ID") or None
+    project_env = os.environ.get("S4L_REDDIT_PROJECT") or None
+    batch_env = os.environ.get("S4L_REDDIT_BATCH_ID") or None
 
     # Compute global vs project-augmented denylist sizes so the stderr marker
     # below shows how much of the block bucket came from the per-project
@@ -557,14 +557,14 @@ def cmd_search(args):
     )
 
     # Opaque-results discover mode (post 2026-05-07 refactor): when
-    # SAPS_REDDIT_DUMP_DIR is set, write the full threads JSON to a unique
+    # S4L_REDDIT_DUMP_DIR is set, write the full threads JSON to a unique
     # file in that directory and print ONLY a one-line summary to stdout.
     # This prevents Claude (running this tool from the discover prompt) from
     # ever seeing thread content, which it would otherwise filter despite
     # explicit "emit every thread" instructions. The orchestrator
     # (_discover_iteration in post_reddit.py) globs the dump dir after Claude
     # exits and reads every dumped file directly into the candidate plan.
-    dump_dir = os.environ.get("SAPS_REDDIT_DUMP_DIR")
+    dump_dir = os.environ.get("S4L_REDDIT_DUMP_DIR")
     if dump_dir and os.path.isdir(dump_dir):
         import tempfile as _tempfile
         fd, dump_path = _tempfile.mkstemp(
@@ -642,13 +642,13 @@ def _html_postable_check(thread_url):
 def cmd_fetch(args):
     """Fetch a thread's comments via Reddit JSON API."""
     # Check if subreddit is blocked. Honors per-project excludes via the
-    # SAPS_REDDIT_PROJECT env var (same shape as cmd_search), so a sub on
+    # S4L_REDDIT_PROJECT env var (same shape as cmd_search), so a sub on
     # a project's private denylist (or in project_search_excludes) returns
     # the same `subreddit_blocked` error and the LLM stops fetching it.
     import re as _re
     sub_match = _re.search(r'/r/([^/]+)', args.url)
     if sub_match:
-        project_env = os.environ.get("SAPS_REDDIT_PROJECT") or None
+        project_env = os.environ.get("S4L_REDDIT_PROJECT") or None
         blocked = _load_comment_blocked_subs(project_name=project_env)
         if sub_match.group(1).lower() in blocked:
             print(json.dumps({"error": "subreddit_blocked", "subreddit": sub_match.group(1)}))
