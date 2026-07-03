@@ -83,14 +83,14 @@ let cache: {
 } | null = null;
 const TTL_MS = 55 * 1000;
 
-const RELEASES_LATEST_URL = "https://github.com/m13v/social-autoposter/releases/latest";
+const RELEASES_LATEST_URL = "https://github.com/m13v/s4l/releases/latest";
 const RELEASES_LATEST_API =
-  "https://api.github.com/repos/m13v/social-autoposter/releases/latest";
+  "https://api.github.com/repos/m13v/s4l/releases/latest";
 // Staging channel resolves the newest release OVERALL (prereleases included)
 // from the releases LIST, since releases/latest excludes prereleases. Keep this
 // and verKey/isNewer in lockstep with scripts/snapshot.py.
 const RELEASES_LIST_API =
-  "https://api.github.com/repos/m13v/social-autoposter/releases?per_page=30";
+  "https://api.github.com/repos/m13v/s4l/releases?per_page=30";
 
 // Per-box release channel. `staging` boxes track the newest release overall
 // (RCs first); everything else is `stable` (releases/latest, the historical
