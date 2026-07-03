@@ -28,6 +28,14 @@
 
 set -euo pipefail
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
+# export SAPS_*; new code reads S4L_*. Copy names, never values via eval.
+while IFS='=' read -r _k _; do
+  case "$_k" in SAPS_*) _n="S4L_${_k#SAPS_}"; eval "[ -n \"\${$_n+x}\" ] || export $_n=\"\${$_k}\"";; esac
+done <<EOF_ENV
+$(env | grep '^SAPS_' | cut -d= -f1 | sed 's/$/=/')
+EOF_ENV
+
 [ -f "$HOME/social-autoposter/.env" ] && source "$HOME/social-autoposter/.env"
 
 REPO_DIR="$HOME/social-autoposter"
@@ -370,7 +378,7 @@ fi
 # discover phase logs `[project_excludes] platform=reddit project=...
 # active_subs=N active_keywords=N subs=[...] keywords=[...]` for visibility.
 # Enforcement happens server-side inside reddit_tools._load_comment_blocked_
-# subs via the SAPS_REDDIT_PROJECT env var that post_reddit.py exports below.
+# subs via the S4L_REDDIT_PROJECT env var that post_reddit.py exports below.
 # Claude's draft prompt can propose new subreddit:<slug> excludes when it
 # rejects a thread; they accumulate in project_search_excludes and go live
 # after >=2 distinct batch_ids propose them (activation gate). See
@@ -419,8 +427,8 @@ esac
 # Ranking + capping now happens inside post_reddit.py --phase discover
 # (_discover_iteration): candidates are scored by topical overlap (query vs.
 # thread title+selftext) to fight the sort=relevance leak, then capped to the
-# top SAPS_REDDIT_DISCOVER_CAP (default 25). The final post cap is still
-# enforced by _post_iteration (SAPS_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
+# top S4L_REDDIT_DISCOVER_CAP (default 25). The final post cap is still
+# enforced by _post_iteration (S4L_REDDIT_MAX_POSTS_PER_CYCLE, default 10).
 # RIPEN_FILE is kept as a passthrough alias so the draft/cleanup paths below
 # stay unchanged.
 if [ "$HAS_DISCOVER" = "1" ]; then
