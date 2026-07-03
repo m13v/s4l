@@ -40,19 +40,19 @@ set -euo pipefail
 # together, both on 9556). The per-phase locks do NOT prevent this because
 # they release between phases. This guard makes the ENTIRE run a singleton:
 # if a prior run-linkedin.sh is still alive, this fire exits immediately.
-SAPS_LI_RUN_LOCK="/tmp/saps-run-linkedin.lock"
-if mkdir "$SAPS_LI_RUN_LOCK" 2>/dev/null; then
-  echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+S4L_LI_RUN_LOCK="/tmp/saps-run-linkedin.lock"
+if mkdir "$S4L_LI_RUN_LOCK" 2>/dev/null; then
+  echo $$ > "$S4L_LI_RUN_LOCK/pid"
 else
-  _li_holder="$(cat "$SAPS_LI_RUN_LOCK/pid" 2>/dev/null || echo "")"
+  _li_holder="$(cat "$S4L_LI_RUN_LOCK/pid" 2>/dev/null || echo "")"
   if [ -n "$_li_holder" ] && kill -0 "$_li_holder" 2>/dev/null; then
     echo "[run-linkedin] singleton guard: prior full run (pid $_li_holder) still alive; exiting this fire to avoid two drivers on the 9556 Chrome"
     exit 0
   fi
   # holder is dead -> stale lock; reclaim it
   echo "[run-linkedin] singleton guard: reclaiming stale run lock (dead pid ${_li_holder:-unknown})"
-  rm -rf "$SAPS_LI_RUN_LOCK"
-  mkdir "$SAPS_LI_RUN_LOCK" && echo $$ > "$SAPS_LI_RUN_LOCK/pid"
+  rm -rf "$S4L_LI_RUN_LOCK"
+  mkdir "$S4L_LI_RUN_LOCK" && echo $$ > "$S4L_LI_RUN_LOCK/pid"
 fi
 
 # Transport backend selector (2026-05-28). Two interchangeable paths for the
@@ -199,7 +199,7 @@ PY
 # Trap chain: lock.sh has already installed _sa_release_locks on
 # EXIT INT TERM HUP. Replace with a chained handler so summary fires first,
 # then locks release. _sa_release_locks remains in scope after sourcing.
-trap '_sa_emit_run_summary_oneshot; _sa_release_locks; rm -rf "$SAPS_LI_RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
+trap '_sa_emit_run_summary_oneshot; _sa_release_locks; rm -rf "$S4L_LI_RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
 
 # ===== Phase A: discovery + scoring =====
 python3 "$REPO_DIR/scripts/linkedin_search_topic_schema.py" 2>>"$LOG_FILE" || true
