@@ -1959,14 +1959,13 @@ class S4LMenuBar(rumps.App):
             # Record as shown only AFTER the cards are actually up, so a transient
             # card-UI failure never permanently suppresses this pending set.
             self._last_review_sig = sig
-            # A silent pop-up is missable; pair every fresh card stack with a
-            # notification. Extends of an already-open stack stay quiet (the
-            # unattended watchdog owns the ignored-card case).
+            # No macOS notification for fresh drafts, per explicit user
+            # request (2026-07-03): the card itself is the surface. A missed
+            # card is the unattended watchdog's job (it heals the window and
+            # notifies once per episode); a stderr line keeps fresh stacks
+            # greppable.
             n = len(drafts)
-            self._notify(
-                "S4L drafts ready",
-                f"{n} draft{'s' if n != 1 else ''} ready for review",
-            )
+            sys.stderr.write(f"[s4l-menubar] presented {n} draft card(s)\n")
         except Exception as e:
             # Card UI unavailable — don't strand the batch; chat review still works.
             self._review_active = False
