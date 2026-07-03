@@ -2739,6 +2739,10 @@ function autopilotStalled(): boolean {
     let oldest = Infinity;
     for (const sub of fs.readdirSync(pendRoot, { withFileTypes: true })) {
       if (!sub.isDirectory()) continue;
+      // feedback-digest jobs are latency-insensitive (hourly kicker, retried
+      // forever) and may legitimately queue behind a multi-minute draft job;
+      // aging past the draft threshold there is NOT an autopilot stall.
+      if (sub.name === "feedback-digest") continue;
       const subPath = path.join(pendRoot, sub.name);
       for (const f of fs.readdirSync(subPath)) {
         if (!f.endsWith(".json") || f.endsWith(".tmp")) continue;
@@ -2781,50 +2785,36 @@ function queueWorkerCwd(): string {
 
 // A single worker task's SKILL.md. Bash-only: claim -> follow the job's own
 // prompt -> write JSON -> submit. Paths are baked in at generation time because
-// the unattended Bash session can't resolve our env. The job's `prompt` field is
-// the pipeline's real Phase-1/Phase-2b prompt (full styles/voice/em-dash rules),
-// so drafting quality is identical to the legacy `claude -p` path.
+// the unattended Bash session can't resolve our env. TYPE-BLIND BY DESIGN: the
+// worker claims `--type any` and never knows what kinds of jobs exist. The
+// job's prompt sidecar is fully self-contained — the pipeline's real prompt
+// plus any per-type WORKER EXECUTION NOTES that claude_job.py prepends at
+// claim time (pacing, persist cadence). Adding a new job type touches ONLY
+// claude_job.py; this prompt and the scheduled task never change.
 function queueWorkerBody(spec: { taskId: string; queueType: string; human: string }): string {
   const py = resolvePython();
   const job = path.join(repoDir(), "scripts", "claude_job.py");
   const sd = sapsStateDir();
   const outDir = queueDir();
-  // The Phase-2b "twitter-prep" worker drafts replies for several candidates. The
-  // host kills an unattended scheduled session ~90s after its LAST tool call (an
-  // inactivity watchdog). Drafting everything in one silent turn starves that clock
-  // and the session is killed mid-draft having submitted nothing. So it MUST work
-  // incrementally — draft + run log_draft.py per candidate — which persists drafts
-  // (the pipeline already wants this) AND keeps the activity clock alive.
-  const isDraft = spec.queueType === "twitter-prep";
   return [
-    `You are the S4L "${spec.human}" queue worker. Run ONE iteration, then STOP.`,
+    `You are the S4L queue worker. Run ONE iteration, then STOP.`,
     ``,
-    `The deterministic posting pipeline runs on this Mac. When it needs a Claude ` +
-      `turn it drops a job on a local file queue. Your only job: pick up the next ` +
-      `"${spec.queueType}" job, do EXACTLY what its prompt says, hand the result back. ` +
-      `You do this with Bash and Write, and NOTHING else. This run is unattended — ` +
-      `reaching for any other tool, or trying to "investigate", STALLS it forever.`,
+    `The deterministic pipeline runs on this Mac. When it needs a Claude turn it ` +
+      `drops a job on a local file queue. Your only job: pick up the next job, do ` +
+      `EXACTLY what its prompt says, hand the result back. You do this with Bash, ` +
+      `Read, and Write, and NOTHING else. This run is unattended — reaching for any ` +
+      `other tool, or trying to "investigate", STALLS it forever.`,
     ``,
-    ...(isDraft
-      ? [
-          `PACING — CRITICAL: this unattended session is terminated ~90 seconds after ` +
-            `your LAST tool call (a host inactivity timeout). The prompt below asks ` +
-            `you to draft replies for SEVERAL candidates. Do NOT draft them all ` +
-            `silently in one turn — that emits no tool calls, the clock expires, and ` +
-            `you are KILLED mid-draft having submitted NOTHING. Work ONE candidate at ` +
-            `a time: draft its reply, then IMMEDIATELY run that candidate's ` +
-            `log_draft.py command exactly as the prompt's persist step (3a) specifies ` +
-            `(a quick Bash call), THEN move to the next. Those per-candidate Bash ` +
-            `calls are what keep the session alive. Begin the first candidate ` +
-            `promptly — do NOT spend a long silent stretch analysing before your ` +
-            `first tool call. Only after EVERY candidate is drafted and logged do you ` +
-            `do step 3.`,
-          ``,
-        ]
-      : []),
+    `PACING — CRITICAL: this unattended session is terminated ~90 seconds after ` +
+      `your LAST tool call (a host inactivity timeout). Make your first tool call ` +
+      `promptly, and if the job's prompt gives you per-item persist commands to run ` +
+      `(its own quick Bash calls), run them as you complete each item instead of ` +
+      `working silently — those calls are what keep the session alive. The prompt ` +
+      `file may begin with a WORKER EXECUTION NOTES header; follow it exactly.`,
+    ``,
     `Steps:`,
     `1. Claim the next job. Run this EXACT Bash command:`,
-    `     ${py} ${job} next --type ${spec.queueType} --prompt-file --state-dir ${sd}`,
+    `     ${py} ${job} next --type any --prompt-file --state-dir ${sd}`,
     `   It prints one line of JSON. If it prints "{}" (empty), there is NO work — ` +
       `report "no jobs" in one line and STOP. You are done.`,
     `2. Otherwise it prints {"job_id":"...","prompt_file":"...","schema_file":...}. ` +
@@ -2844,18 +2834,12 @@ function queueWorkerBody(spec: { taskId: string; queueType: string; human: strin
     `4. Report in ONE short line what you did, then STOP. Do NOT claim another job, ` +
       `do NOT loop, do NOT read other files, do NOT call any other tool.`,
     ``,
-    isDraft
-      ? `HARD RULES: use ONLY the Bash tool (to run claude_job.py AND the per-candidate ` +
-        `log_draft.py persist commands the prompt tells you to run), the Read tool (the ` +
-        `prompt/schema sidecar + the SKILL/config files the prompt names), and the Write ` +
-        `tool (the result file). NEVER post, reply, edit a draft, open a browser, or run ` +
-        `any command the prompt does not explicitly give you. An empty queue is the ` +
-        `NORMAL, expected case most minutes — it is success, not a problem to debug.`
-      : `HARD RULES: ONLY the Bash tool (to run claude_job.py), the Read tool (to read ` +
-        `the prompt/schema sidecar files), and the Write tool (to write the result ` +
-        `file). NEVER run any other shell command. NEVER edit, post, or touch anything ` +
-        `else. An empty queue is the NORMAL, expected case most minutes — it is success, ` +
-        `not a problem to debug.`,
+    `HARD RULES: use ONLY the Bash tool (to run claude_job.py AND any persist ` +
+      `commands the job's prompt explicitly gives you), the Read tool (the ` +
+      `prompt/schema sidecar + the SKILL/config files the prompt names), and the ` +
+      `Write tool (the result file). NEVER post, reply, open a browser, or run any ` +
+      `command the prompt does not explicitly give you. An empty queue is the ` +
+      `NORMAL, expected case most minutes — it is success, not a problem to debug.`,
   ].join("\n");
 }
 
@@ -2907,6 +2891,31 @@ function ensureQueueWorkerPromptsCurrent(): void {
       );
     } catch (e: any) {
       console.error(`[queue-worker] ensure ${spec.taskId} prompt error: ${e?.message || e}`);
+    }
+  }
+  // Legacy per-type workers (pre-universal installs): refresh their SKILL.md to
+  // the SAME universal body, but ONLY when the file already exists — we never
+  // create them anymore. This upgrades an old box's two tasks into two
+  // interchangeable universal workers with zero re-onboarding (the host task
+  // registration keeps firing; only the prompt file changes).
+  for (const taskId of LEGACY_QUEUE_WORKER_TASK_IDS) {
+    try {
+      const skillPath = scheduledTaskSkillPath(taskId);
+      if (!fs.existsSync(skillPath)) continue;
+      const cur = fs.readFileSync(skillPath, "utf-8");
+      const m = new RegExp(`${QUEUE_WORKER_PROMPT_MARKER}:\\s*(\\d+)`).exec(cur);
+      const curVer = m ? parseInt(m[1], 10) : 0;
+      if (curVer >= QUEUE_WORKER_PROMPT_VERSION) continue;
+      fs.writeFileSync(
+        skillPath,
+        queueWorkerSkillMd({ taskId, queueType: "any", human: "universal queue" }),
+        "utf-8"
+      );
+      console.error(
+        `[queue-worker] refreshed legacy ${taskId} prompt -> universal v${QUEUE_WORKER_PROMPT_VERSION} (was v${curVer})`
+      );
+    } catch (e: any) {
+      console.error(`[queue-worker] ensure legacy ${taskId} prompt error: ${e?.message || e}`);
     }
   }
 }
