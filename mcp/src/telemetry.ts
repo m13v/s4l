@@ -123,6 +123,173 @@ export async function sendHeartbeat(reason: string): Promise<void> {
   }
 }
 
+// ---- Install state snapshot -------------------------------------------------
+// Syncs the per-install configuration state (config.json, persona corpus,
+// engagement mode, setup scoping, release channel, runtime provisioning state,
+// draft queues, onboarding ledger) to the Vercel API so the backend holds a
+// queryable copy per install. POST /api/v1/installations/state-snapshot stores
+// the latest bundle on the installations row and appends changed bundles to
+// installation_state_snapshots (history).
+//
+// Hash-gated: on the 15-min interval the bundle is only POSTed when its sha256
+// differs from the last successfully-sent one (sha cached in
+// <stateDir>/state-snapshot.sha), so an idle box costs nothing. Startup and
+// config-write sends skip the client gate (the server dedups by sha and just
+// touches the timestamp) so a fresh backend converges without waiting for the
+// config to change.
+//
+// Deliberately NOT captured: status-summary.json / activity.json (per-minute
+// churn; live status is the heartbeat's job), claude-queue/ session transcripts
+// (heavy, privacy), identity.json (already rides the X-Installation header),
+// browser profiles/cookies, locks, panel-endpoint.json.
+
+// Mirrors setup.ts configPath(). Re-derived here (not imported) so setup.ts can
+// import sendStateSnapshot from this module without a cycle.
+function snapshotConfigPath(): string {
+  return (
+    process.env.S4L_CONFIG_PATH ||
+    process.env.SAPS_CONFIG_PATH ||
+    path.join(repoDir(), "config.json")
+  );
+}
+
+// Mirrors index.ts sapsStateDir().
+function snapshotStateDir(): string {
+  return (
+    process.env.S4L_STATE_DIR ||
+    process.env.SAPS_STATE_DIR ||
+    path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
+  );
+}
+
+// Read + JSON-parse a file, skipping it entirely when missing, oversized, or
+// unparseable. Oversized files are skipped (not truncated): truncated JSON
+// doesn't parse, and a runaway file is itself a bug better surfaced by absence.
+function readJsonCapped(file: string, capBytes: number): unknown {
+  try {
+    if (!fs.existsSync(file)) return undefined;
+    if (fs.statSync(file).size > capBytes) {
+      console.error(`[social-autoposter-mcp] state snapshot: ${path.basename(file)} exceeds ${capBytes}B cap, skipped`);
+      return undefined;
+    }
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function readTextCapped(file: string, capBytes: number): string | undefined {
+  try {
+    if (!fs.existsSync(file)) return undefined;
+    const text = fs.readFileSync(file, "utf-8");
+    return text.length > capBytes ? text.slice(0, capBytes) : text;
+  } catch {
+    return undefined;
+  }
+}
+
+// Bundle size ceiling. Vercel accepts bodies well past this; the cap exists so
+// a pathological queue/ledger can't turn every snapshot into megabytes. When
+// exceeded, the bulky optional pieces are dropped (recorded in `truncated`) and
+// the config itself always survives.
+const SNAPSHOT_MAX_BYTES = 1_500_000;
+const SNAPSHOT_DROP_ORDER = ["onboarding_progress", "approved_queue", "review_queue"] as const;
+
+function collectStateSnapshot(): { state: Record<string, unknown>; sha: string } | null {
+  const cfgPath = snapshotConfigPath();
+  const stateDir = snapshotStateDir();
+  const state: Record<string, unknown> = {};
+
+  const config = readJsonCapped(cfgPath, 512_000);
+  if (config !== undefined) state.config = config;
+
+  const corpus = readTextCapped(path.join(path.dirname(cfgPath), "persona_corpus.txt"), 16_000);
+  if (corpus !== undefined) state.persona_corpus = corpus;
+
+  const stateFiles: Array<[key: string, file: string, cap: number]> = [
+    ["mode", "mode.json", 64_000],
+    ["setup_state", "setup-state.json", 64_000],
+    ["channel", "channel.json", 64_000],
+    ["runtime", "runtime.json", 64_000],
+    ["install_progress", "install-progress.json", 64_000],
+    ["onboarding_progress", "onboarding-progress.json", 256_000],
+    ["review_queue", "review-queue.json", 256_000],
+    ["approved_queue", "approved-queue.json", 256_000],
+  ];
+  for (const [key, file, cap] of stateFiles) {
+    const val = readJsonCapped(path.join(stateDir, file), cap);
+    if (val !== undefined) state[key] = val;
+  }
+
+  // Nothing on disk yet (pre-onboarding boot): nothing to sync.
+  if (Object.keys(state).length === 0) return null;
+
+  const truncated: string[] = [];
+  for (const key of SNAPSHOT_DROP_ORDER) {
+    if (JSON.stringify(state).length <= SNAPSHOT_MAX_BYTES) break;
+    if (key in state) {
+      delete state[key];
+      truncated.push(key);
+    }
+  }
+  if (truncated.length) state.truncated = truncated;
+
+  const sha = crypto.createHash("sha256").update(JSON.stringify(state)).digest("hex");
+  return { state, sha };
+}
+
+function lastSnapshotShaPath(): string {
+  return path.join(snapshotStateDir(), "state-snapshot.sha");
+}
+
+let snapshotInFlight = false;
+
+export async function sendStateSnapshot(reason: string): Promise<void> {
+  if ((process.env.S4L_STATE_SNAPSHOT ?? process.env.SAPS_STATE_SNAPSHOT) === "0") return;
+  if (snapshotInFlight) return;
+  snapshotInFlight = true;
+  try {
+    const bundle = collectStateSnapshot();
+    if (!bundle) return;
+
+    // Client-side gate only for the periodic tick; startup/config-write sends
+    // always go out so a rebuilt/wiped backend re-converges (server dedups by
+    // sha, so a redundant send is one cheap UPDATE of a timestamp).
+    if (reason === "interval") {
+      try {
+        if (fs.readFileSync(lastSnapshotShaPath(), "utf-8").trim() === bundle.sha) return;
+      } catch {
+        /* no sha cached yet -> send */
+      }
+    }
+
+    const header = await installHeader();
+    if (!header) return; // runtime not unpacked yet
+    const base = (process.env.AUTOPOSTER_API_BASE || "https://s4l.ai").replace(/\/+$/, "");
+    const resp = await fetch(`${base}/api/v1/installations/state-snapshot`, {
+      method: "POST",
+      headers: { "X-Installation": header, "content-type": "application/json" },
+      body: JSON.stringify({ sha: bundle.sha, reason, state: bundle.state }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) {
+      console.error(`[social-autoposter-mcp] state snapshot http ${resp.status}`);
+      return;
+    }
+    try {
+      fs.mkdirSync(snapshotStateDir(), { recursive: true });
+      fs.writeFileSync(lastSnapshotShaPath(), bundle.sha + "\n", "utf-8");
+    } catch {
+      /* cache miss just means the next interval re-sends; harmless */
+    }
+  } catch (err: any) {
+    captureError(err, { component: "state_snapshot", reason });
+    console.error("[social-autoposter-mcp] state snapshot failed:", err?.message || err);
+  } finally {
+    snapshotInFlight = false;
+  }
+}
+
 // ---- Raw subprocess log streaming ------------------------------------------
 // Tees the verbatim stdout/stderr of every pipeline subprocess (via the
 // repo.ts run() boundary) to the s4l Cloud Run relay, which simply
