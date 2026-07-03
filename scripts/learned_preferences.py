@@ -70,10 +70,10 @@ DEFAULT_INSTRUCTION = (
 
 
 def config_path() -> str:
-    explicit = os.environ.get("SAPS_CONFIG_PATH")
+    explicit = os.environ.get("S4L_CONFIG_PATH")
     if explicit:
         return explicit
-    repo = os.environ.get("SAPS_REPO_DIR")
+    repo = os.environ.get("S4L_REPO_DIR")
     if repo:
         return os.path.join(repo, "config.json")
     return os.path.expanduser("~/social-autoposter/config.json")
