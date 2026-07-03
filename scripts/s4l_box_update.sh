@@ -65,7 +65,7 @@ except Exception:
     ch = None
 channel = ch if ch in ("stable", "staging") else "stable"
 
-REPO = "m13v/social-autoposter"
+REPO = "m13v/s4l"
 LATEST_DL = "https://github.com/%s/releases/latest/download/social-autoposter.mcpb" % REPO
 TAG_DL = "https://github.com/%s/releases/download/%s/social-autoposter.mcpb"
 
@@ -122,7 +122,7 @@ CHANNEL="$(printf '%s' "$RESOLVED" | awk '{print $1}')"; [ -n "$CHANNEL" ] || CH
 latest_tag="$(printf '%s' "$RESOLVED" | awk '{print $2}')"
 latest="$(printf '%s' "$RESOLVED" | awk '{print $3}')"
 MCPB_URL="$(printf '%s' "$RESOLVED" | awk '{print $4}')"
-[ -n "$MCPB_URL" ] || MCPB_URL="https://github.com/m13v/social-autoposter/releases/latest/download/social-autoposter.mcpb"
+[ -n "$MCPB_URL" ] || MCPB_URL="https://github.com/m13v/s4l/releases/latest/download/social-autoposter.mcpb"
 
 installed="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('version',''))" "$EXT_DIR/manifest.json" 2>/dev/null || true)"
 echo "channel=$CHANNEL installed=$installed latest=$latest"
