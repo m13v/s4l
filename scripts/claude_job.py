@@ -4,7 +4,7 @@ claude_job.py — queue-backed substitute for `claude -p` on boxes without the
 Claude CLI (customer .mcpb installs).
 
 The deterministic pipeline never calls `claude` directly; every invocation goes
-through scripts/run_claude.sh. When SAPS_CLAUDE_PROVIDER=queue is set (only on
+through scripts/run_claude.sh. When S4L_CLAUDE_PROVIDER=queue is set (only on
 customer boxes — your own machines leave it unset and keep calling claude -p
 directly), run_claude.sh delegates here instead of exec'ing the `claude` binary.
 The pipeline is otherwise untouched: it enqueues the same prompt + json-schema it
@@ -22,7 +22,7 @@ Three roles:
               unblock the waiting provider.
 
 Queue = plain files under <state_dir>/claude-queue/. No DB, no network.
-  state_dir = $SAPS_STATE_DIR or ~/.social-autoposter-mcp
+  state_dir = $S4L_STATE_DIR or ~/.social-autoposter-mcp
 
 Job-type mapping is by run_claude.sh script_tag. Only the PURE text->JSON calls
 are queue-eligible; anything else exits non-zero so the caller's own fallback
@@ -41,6 +41,12 @@ import subprocess
 import sys
 import time
 import uuid
+
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+
+s4l_env.mirror()
 
 # Best-effort menu-bar activity narration. Importable because this script's own
 # directory (scripts/) is on sys.path[0] when run as `python3 .../claude_job.py`.
@@ -178,15 +184,15 @@ POLL_INTERVAL_S = 2.0
 # engagement claude cap (engage-twitter Phase B gtimeout 1800), which removes the
 # drops while staying a bounded per-call value (not the whole-cycle budget).
 # COUPLING: reap_stale_claude_sessions.py reaps leaked workers at THIS value plus a
-# fixed margin (SAPS_REAPER_AGE_MARGIN_SEC, default 300s) and MUST stay > it (a lower
+# fixed margin (S4L_REAPER_AGE_MARGIN_SEC, default 300s) and MUST stay > it (a lower
 # reaper would SIGKILL a draft the producer is still waiting on). Both read
-# SAPS_CLAUDE_QUEUE_TIMEOUT and both default to 1800; keep them in lockstep if you
+# S4L_CLAUDE_QUEUE_TIMEOUT and both default to 1800; keep them in lockstep if you
 # change the base.
-DEFAULT_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
+DEFAULT_TIMEOUT_S = int(os.environ.get("S4L_CLAUDE_QUEUE_TIMEOUT", "1800"))
 # Jobs older than this (pending or running) are swept — a job nobody drained in
 # this long is a leftover from a timed-out producer or a dead worker, and keeping
 # it would feed a stale prompt to a worker much later. Default 2x the timeout.
-STALE_TTL_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_STALE_TTL", str(DEFAULT_TIMEOUT_S * 2)))
+STALE_TTL_S = int(os.environ.get("S4L_CLAUDE_QUEUE_STALE_TTL", str(DEFAULT_TIMEOUT_S * 2)))
 
 # ---------------------------------------------------------------------------
 # EXPERIMENT (2026-06-29, per user): hide the "Top Posts by Project" few-shot
@@ -206,10 +212,10 @@ STALE_TTL_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_STALE_TTL", str(DEFAULT_TIME
 # A loud marker is left in its place and a provider.log line is emitted, so it is
 # obvious the section was intentionally hidden, not lost.
 #
-# DEFAULT: ON (hidden). Set SAPS_HIDE_TOP_BY_PROJECT=0 (or false/no) to restore the
+# DEFAULT: ON (hidden). Set S4L_HIDE_TOP_BY_PROJECT=0 (or false/no) to restore the
 # full per-project example block.
 HIDE_TOP_BY_PROJECT = (
-    os.environ.get("SAPS_HIDE_TOP_BY_PROJECT", "1").strip().lower()
+    os.environ.get("S4L_HIDE_TOP_BY_PROJECT", "1").strip().lower()
     not in ("0", "false", "no", "off", "")
 )
 
@@ -219,7 +225,7 @@ def _strip_top_by_project(prompt: str) -> str:
 
     Returns the prompt with that one section replaced by a clearly-labelled
     HIDDEN marker (so anyone reading the prompt sees it was intentionally hidden
-    behind SAPS_HIDE_TOP_BY_PROJECT, not silently dropped). No-op if the block is
+    behind S4L_HIDE_TOP_BY_PROJECT, not silently dropped). No-op if the block is
     absent (e.g. query prompts, or a report that produced no per-project posts).
     The section runs from its '### Top Posts by Project' header to the next '##'/
     '###' header (normally '### Bottom N Posts').
@@ -233,9 +239,9 @@ def _strip_top_by_project(prompt: str) -> str:
     marker = (
         "### Top Posts by Project — HIDDEN\n"
         "[This per-project few-shot block (~16k tokens) was hidden at the delivery "
-        "layer by claude_job.py via SAPS_HIDE_TOP_BY_PROJECT (default ON, added "
+        "layer by claude_job.py via S4L_HIDE_TOP_BY_PROJECT (default ON, added "
         "2026-06-29) so the drafting worker fits Claude Desktop's ~120s "
-        "scheduled-session window. Set SAPS_HIDE_TOP_BY_PROJECT=0 to restore it. "
+        "scheduled-session window. Set S4L_HIDE_TOP_BY_PROJECT=0 to restore it. "
         "The 'Best Example Per Style' block above is kept.]\n\n"
     )
     return prompt[:i] + marker + prompt[j:]
@@ -246,16 +252,16 @@ def _strip_top_by_project(prompt: str) -> str:
 # Queue layout                                                                #
 # --------------------------------------------------------------------------- #
 def _apply_state_dir_override(ns) -> None:
-    """`--state-dir` wins over $SAPS_STATE_DIR. The scheduled-task worker passes
+    """`--state-dir` wins over $S4L_STATE_DIR. The scheduled-task worker passes
     it explicitly so it always reads the SAME queue the launchd kicker writes to,
     regardless of what env the task session inherits."""
     sd = getattr(ns, "state_dir", None)
     if sd:
-        os.environ["SAPS_STATE_DIR"] = sd
+        os.environ["S4L_STATE_DIR"] = sd
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
@@ -351,7 +357,7 @@ def _bump_drain_timeout() -> None:
 # (reap_stale_claude_sessions.py) is the GUARANTEE that bounds this. This opt-in
 # path is a faster, source-side trim: once THIS worker is provably done (no work
 # to do, or its result is already on disk), terminate OUR OWN session so it never
-# becomes part of the standing pool. Strictly off unless SAPS_WORKER_SELF_REAP is
+# becomes part of the standing pool. Strictly off unless S4L_WORKER_SELF_REAP is
 # set, so it ships dormant and cannot destabilize the default behaviour.
 #
 # Safety properties:
@@ -376,7 +382,7 @@ _SELF_REAP_UUID_RE = re.compile(r"local-agent-mode-sessions/[0-9a-fA-F-]{36}")
 
 
 def _self_reap_enabled() -> bool:
-    return os.environ.get("SAPS_WORKER_SELF_REAP", "").strip().lower() in (
+    return os.environ.get("S4L_WORKER_SELF_REAP", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -594,7 +600,7 @@ def cmd_provider(ns) -> int:
         if len(prompt) != _before_len:
             _plog(
                 "hid 'Top Posts by Project' block: -%d chars "
-                "(SAPS_HIDE_TOP_BY_PROJECT on; set =0 to restore)"
+                "(S4L_HIDE_TOP_BY_PROJECT on; set =0 to restore)"
                 % (_before_len - len(prompt))
             )
 
@@ -950,13 +956,13 @@ def main() -> int:
     pp = sub.add_parser("provider", help="enqueue + block-poll (run by run_claude.sh)")
     pp.add_argument("--tag", required=True)
     pp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
-    pp.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
+    pp.add_argument("--state-dir", default=None, help="override $S4L_STATE_DIR")
     pp.add_argument("claude_args", nargs=argparse.REMAINDER)
     pp.set_defaults(func=cmd_provider)
 
     pn = sub.add_parser("next", help="claim oldest pending job of a type")
     pn.add_argument("--type", required=True)
-    pn.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
+    pn.add_argument("--state-dir", default=None, help="override $S4L_STATE_DIR")
     pn.add_argument(
         "--prompt-file",
         action="store_true",
@@ -968,7 +974,7 @@ def main() -> int:
     pr.add_argument("--job", required=True)
     pr.add_argument("--result-file", default="-", help="path to JSON, or - for stdin")
     pr.add_argument("--error", action="store_true", help="record a failure")
-    pr.add_argument("--state-dir", default=None, help="override $SAPS_STATE_DIR")
+    pr.add_argument("--state-dir", default=None, help="override $S4L_STATE_DIR")
     pr.set_defaults(func=cmd_result)
 
     ns = p.parse_args()
