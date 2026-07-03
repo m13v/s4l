@@ -25,6 +25,8 @@
 		<string>0</string>
 		<key>SAPS_TWITTER_CAPTURE_MEDIA</key>
 		<string>1</string>
+		<key>S4L_TWITTER_CAPTURE_MEDIA</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
