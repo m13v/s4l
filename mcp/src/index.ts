@@ -2136,6 +2136,7 @@ tool(
         ok: true,
         project: result.project,
         action: result.created ? "created" : "updated",
+        persona: result.persona,
         ready: result.ready,
         missing_required: result.missing_required,
         topics_seeded: topicsSeeded,
@@ -2147,7 +2148,10 @@ tool(
         fields_removed: result.fields_removed,
         config_path: configPath(),
         onboarding: onboardingSnapshot(),
-        note: (result.ready
+        note: (result.persona
+          ? `Persona '${result.project}' updated.${seedNote}` +
+            (result.ready ? "" : ` Still needs: ${result.missing_required.join(", ")}.`)
+          : result.ready
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, schedule the autopilot ` +
