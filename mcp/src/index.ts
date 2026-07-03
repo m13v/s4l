@@ -4377,7 +4377,7 @@ tool(
         ensured.error === "no_browser"
           ? "No managed Chrome is running right now. Start a draft cycle or autopilot so there's a live browser session to show."
           : ensured.error === "no_websocket"
-            ? "This Node runtime has no WebSocket support (needs Node 21+), so a screencast can't be opened."
+            ? "This runtime has no WebSocket support, so a live screencast can't be opened. Use 'Bring to front' to see the browser window instead."
             : "Couldn't attach to the browser: " + String(ensured.error);
       return jsonContent({ ok: false, running: false, frame: null, message });
     }
