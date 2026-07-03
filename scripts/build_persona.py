@@ -114,7 +114,7 @@ def _gather_x(handle: str | None, posts: int, comments: int) -> dict:
     script = HERE / "scan_x_profile.py"
     if not script.exists():
         return {"ok": False, "error": "scan_x_profile.py not found"}
-    py = os.environ.get("SAPS_PYTHON") or sys.executable or "python3"
+    py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
     cmd = [py, str(script), "--posts", str(posts), "--comments", str(comments)]
     if handle:
         cmd += ["--handle", handle]
@@ -369,7 +369,7 @@ def cmd_apply(args) -> int:
     # path, so pick_search_topic has a live universe for the persona.
     if "search_topics" in changed:
         seed = HERE / "seed_search_topics.py"
-        py = os.environ.get("SAPS_PYTHON") or sys.executable or "python3"
+        py = os.environ.get("S4L_PYTHON") or sys.executable or "python3"
         try:
             r = subprocess.run([py, str(seed), "--project", name],
                                capture_output=True, text=True, timeout=120)
