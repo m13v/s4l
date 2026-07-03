@@ -1279,18 +1279,41 @@ const WEBSITE_RESEARCH_INSTRUCTIONS =
 // project's TOPICS are seeded (the persona/product topic seed must succeed
 // first), matching the product path's `seed.code === 0` guard.
 type SeededQuery = { query: string; topic?: string };
+// Background query-seeding state. The seed run (dedup + optional live
+// supply-test against the X browser) can take 3-10+ minutes when the
+// twitter-browser lock is contended, but Claude Desktop kills any MCP tool
+// call at a hard 60s. Awaiting the seed inside set therefore GUARANTEED a
+// client timeout, and each retry stacked another seed process on the browser
+// lock (Karol, 2026-07-03). So the seed now runs fire-and-forget: `set`
+// returns as soon as the durable writes land, and retries while a seed is
+// in flight are cheap no-ops.
+const seedInFlight = new Map<string, number>(); // project -> startedAt ms
 async function seedSearchQueriesForProject(
   project: string,
   rawQueries: string[] | string | undefined
 ): Promise<{ note: string; queries: SeededQuery[] }> {
   const agentQueries = normalizeStringList(rawQueries) ?? [];
-  let queries: SeededQuery[] = [];
   if (!agentQueries.length) {
     return {
       note:
         " (No search_queries supplied, so the cycle will run off the seeded topics one at a time. " +
         "To fan out, re-run with a search_queries array of ~30 X search strings you expand from these " +
         "topics — it seeds them directly, no claude CLI.)",
+      queries: [],
+    };
+  }
+  // Echo the supplied queries back so callers can show the user the bank
+  // without waiting for persistence.
+  const queries: SeededQuery[] = agentQueries.map((q) => ({ query: q }));
+  // A retry after a client-side timeout must NOT queue another seed process on
+  // the twitter-browser lock. 20 min covers the worst case (600s lock wait +
+  // the ~3 min live run); a stale entry past that is assumed dead.
+  const started = seedInFlight.get(project);
+  if (started && Date.now() - started < 20 * 60_000) {
+    return {
+      note:
+        ` Query seeding for '${project}' is already running in the background from a previous call; ` +
+        "this retry is a safe no-op. The bank will be live within a few minutes — do NOT re-run.",
       queries,
     };
   }
@@ -1300,42 +1323,51 @@ async function seedSearchQueriesForProject(
       qfile,
       JSON.stringify({ queries: agentQueries.map((q) => ({ query: q, topic: "" })) })
     );
-    const qseed = await runPython(
+    seedInFlight.set(project, Date.now());
+    // Fire-and-forget: runPython keeps the output on the repo.ts tee (so the
+    // whole run still lands in the Cloud Logging relay), but the tool response
+    // does not wait for it. The script is idempotent (dedup by normalized
+    // core), so even a duplicate run after the in-flight window is harmless.
+    void runPython(
       "scripts/seed_search_queries.py",
       ["--project", project, "--queries-json", qfile, "--supply-test", "auto", "--emit-json"],
-      { timeoutMs: 600_000 }
-    );
-    try {
-      fs.unlinkSync(qfile);
-    } catch {
-      /* best-effort cleanup */
-    }
-    const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
-    const qjson = qseed.stdout.split("===QUERIES_JSON===")[1];
-    if (qjson) {
-      try {
-        queries = (JSON.parse(qjson.trim()).queries ?? []) as SeededQuery[];
-      } catch {
-        /* leave empty; count note still informs the user */
-      }
-    }
-    if (qseed.code === 0 && qm) {
-      const n = queries.length || Number(qm[1]);
-      return {
-        note: ` Seeded ${n} search quer${n === 1 ? "y" : "ies"} so the cycle can fan out instead of running a single query.`,
-        queries,
-      };
-    }
-    if (qseed.code !== 0) {
-      const qtail =
-        (qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-      return {
-        note: ` (Search queries not seeded yet — ${qtail}. The cycle still runs off the seeded topics.)`,
-        queries,
-      };
-    }
-    return { note: "", queries };
+      { timeoutMs: 900_000 }
+    )
+      .then((qseed) => {
+        const qm = /seeded=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(qseed.stdout);
+        console.error(
+          `[seed_search_queries] background seed for '${project}' finished: ` +
+            (qseed.code === 0
+              ? qm
+                ? `seeded=${qm[1]} inserted=${qm[2]} updated=${qm[3]}`
+                : "ok"
+              : `exit ${qseed.code}: ${(qseed.stderr || qseed.stdout).trim().split("\n").slice(-1)[0] || "unknown error"}`)
+        );
+      })
+      .catch((e) => {
+        console.error(
+          `[seed_search_queries] background seed for '${project}' failed:`,
+          (e as Error)?.message || e
+        );
+        captureError(e, { component: "seed_search_queries", project });
+      })
+      .finally(() => {
+        seedInFlight.delete(project);
+        try {
+          fs.unlinkSync(qfile);
+        } catch {
+          /* best-effort cleanup */
+        }
+      });
+    return {
+      note:
+        ` Queued ${agentQueries.length} search quer${agentQueries.length === 1 ? "y" : "ies"} for ` +
+        "background seeding (dedup + live supply-test). They persist automatically within a few " +
+        "minutes and the cycle picks them up on its own — no need to wait, verify, or re-run this call.",
+      queries,
+    };
   } catch (e) {
+    seedInFlight.delete(project);
     return { note: ` (Search-query seeding skipped — ${(e as Error).message}.)`, queries };
   }
 }
