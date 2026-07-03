@@ -28,6 +28,8 @@
 		<string>/Users/matthewdi</string>
 		<key>SAPS_REDDIT_MAX_SEARCHES</key>
 		<string>15</string>
+		<key>S4L_REDDIT_MAX_SEARCHES</key>
+		<string>15</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>
