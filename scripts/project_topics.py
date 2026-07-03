@@ -121,8 +121,8 @@ def _bootstrap_from_config(name: str) -> int:
     install_id+project+topic), so a duplicate/concurrent run is harmless. Never
     raises: a seed failure is logged and treated as "no topics" so the read path
     is never worse than before, just loud instead of silent. Returns the number
-    of topics POSTed. Honors SAPS_NO_TOPIC_AUTOSEED=1 for read-only contexts."""
-    if os.environ.get("SAPS_NO_TOPIC_AUTOSEED") == "1":
+    of topics POSTed. Honors S4L_NO_TOPIC_AUTOSEED=1 for read-only contexts."""
+    if os.environ.get("S4L_NO_TOPIC_AUTOSEED") == "1":
         return 0
     topics = _config_topics_for(name)
     if not topics:
