@@ -256,6 +256,22 @@ function launchdPath(): string {
   return [...ownedBinDirs(), LAUNCHD_PATH].join(":");
 }
 
+// Brand rename 2026-07-03 (SAPS_ -> S4L_): duplicate every S4L_* key under its
+// legacy SAPS_* name when emitting env into child processes / plists, so an
+// old pipeline-script version still on disk during a partial update keeps
+// resolving its env. Never overwrites an explicitly-set legacy key. Remove
+// once no pre-rename scripts remain in the field.
+function withSapsEnvCompat<T extends Record<string, string>>(env: T): Record<string, string> {
+  const out: Record<string, string> = { ...env };
+  for (const [k, v] of Object.entries(env)) {
+    if (k.startsWith("S4L_")) {
+      const legacy = "SAPS_" + k.slice(4);
+      if (!(legacy in out)) out[legacy] = v;
+    }
+  }
+  return out;
+}
+
 function plistXml(opts: {
   label: string;
   programArgs: string[];
@@ -283,8 +299,10 @@ function plistXml(opts: {
     : "";
   // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY / S4L_CLAUDE_PROVIDER).
   // Rendered after the baked-in vars so a caller can also override S4L_STATE_DIR.
+  // Dual-named (S4L_* + legacy SAPS_*) so a freshly-written plist still works
+  // with any pre-rename script version on disk during a partial update.
   const extraEnv = opts.extraEnv
-    ? Object.entries(opts.extraEnv)
+    ? Object.entries(withSapsEnvCompat(opts.extraEnv))
         .map(([k, v]) => `\n\t\t<key>${k}</key>\n\t\t<string>${v}</string>`)
         .join("")
     : "";
@@ -311,7 +329,11 @@ ${schedule}
 \t\t<string>${os.homedir()}</string>
 \t\t<key>S4L_REPO_DIR</key>
 \t\t<string>${repoDir()}</string>
+\t\t<key>SAPS_REPO_DIR</key>
+\t\t<string>${repoDir()}</string>
 \t\t<key>S4L_PYTHON</key>
+\t\t<string>${resolvePython()}</string>
+\t\t<key>SAPS_PYTHON</key>
 \t\t<string>${resolvePython()}</string>${chromeEnv}${extraEnv}
 \t</dict>
 \t<key>RunAtLoad</key>
@@ -610,11 +632,11 @@ async function ensureOverlayWatch(): Promise<void> {
   try {
     await run("bash", ["skill/run-overlay-watch.sh"], {
       timeoutMs: 20_000,
-      env: {
+      env: withSapsEnvCompat({
         S4L_PYTHON: resolvePython(),
         S4L_LOG_DIR: path.join(repoDir(), "skill", "logs"),
         TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
-      },
+      }),
     });
   } catch {
     /* best-effort: the overlay is a nicety, never a blocker */
@@ -694,7 +716,7 @@ async function produceDrafts(
   // (switched in onLine below). Cleared before every return.
   writeActivity("scanning", "scanning X");
   const res = await run("bash", ["skill/run-twitter-cycle.sh"], {
-    env,
+    env: withSapsEnvCompat(env as Record<string, string>),
     timeoutMs: 900_000, // scan+draft can take several minutes
     // Fan every cycle line out to THREE sinks so progress is never a black box:
     //   1. draft_cycle-mcp.log  — the stable, documented, host-independent file.
@@ -899,7 +921,7 @@ async function ensurePostingHandle(): Promise<void> {
   try {
     await runPython("scripts/setup_twitter_auth.py", ["resolve-handle"], {
       timeoutMs: 60_000,
-      env: { S4L_REPO_DIR: repoDir(), PATH: pipelinePath() },
+      env: withSapsEnvCompat({ S4L_REPO_DIR: repoDir(), PATH: pipelinePath() }),
     });
   } catch {
     /* best effort */
@@ -920,7 +942,7 @@ async function ensureTwitterBrowserForPost() {
     ["-lc", ". skill/lib/twitter-backend.sh && ensure_twitter_browser_for_backend"],
     {
       timeoutMs: 90_000,
-      env,
+      env: withSapsEnvCompat(env as Record<string, string>),
       onLine: (line: string) => {
         const t = line.replace(/\s+$/, "");
         if (t.trim()) console.error(`[post-browser] ${t}`);
@@ -1001,7 +1023,7 @@ async function postApproved(batchId: string, plan: Plan) {
         ["--plan", planPath(approvedBatch)],
         {
           timeoutMs: 900_000,
-          env: {
+          env: withSapsEnvCompat({
             S4L_SKIP_CAMPAIGN_SUFFIX: "1",
             // Manual approval is an EXCEPTION to the tail-link A/B. The cron pipeline
             // runs TWITTER_TAIL_LINK_RATE=0.9 (from .env) so ~10% of autopilot posts
@@ -1028,7 +1050,7 @@ async function postApproved(batchId: string, plan: Plan) {
             // harness Chrome reachable". Honor an inherited value (AppMaker / VM
             // BYO-Chrome), else default to the local harness on port 9555.
             TWITTER_CDP_URL: process.env.TWITTER_CDP_URL || "http://127.0.0.1:9555",
-          },
+          }),
           // Stream the poster's output live so HANDLED
           // failures — e.g. every reply refused with no_account_configured, which
           // returns a reason instead of throwing — surface in main.log + telemetry
@@ -3100,7 +3122,7 @@ function ensureWorkerFolderTrusted(): void {
 // S4L_COWORK_MCP=0.
 function ensureCoworkMcpRegistered(): void {
   try {
-    if (process.env.S4L_COWORK_MCP === "0") return;
+    if ((process.env.S4L_COWORK_MCP ?? process.env.SAPS_COWORK_MCP) === "0") return;
     const home = process.env.HOME || os.homedir();
     const cfgPath = path.join(home, ".claude.json");
     if (!fs.existsSync(cfgPath)) return; // Claude Code not initialised yet; retry next boot
@@ -3368,7 +3390,7 @@ async function ensureFeedbackDigestInstalled(): Promise<{ ok: boolean; detail: s
 async function ensureStallWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.S4L_STALL_WATCH === "0") return { ok: false, detail: "disabled (S4L_STALL_WATCH=0)" };
+    if ((process.env.S4L_STALL_WATCH ?? process.env.SAPS_STALL_WATCH) === "0") return { ok: false, detail: "disabled (S4L_STALL_WATCH=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3412,7 +3434,7 @@ async function ensureStallWatchInstalled(): Promise<{ ok: boolean; detail: strin
 async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.S4L_MEMORY_SNAPSHOT === "0") return { ok: false, detail: "disabled (S4L_MEMORY_SNAPSHOT=0)" };
+    if ((process.env.S4L_MEMORY_SNAPSHOT ?? process.env.SAPS_MEMORY_SNAPSHOT) === "0") return { ok: false, detail: "disabled (S4L_MEMORY_SNAPSHOT=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3469,7 +3491,7 @@ async function ensureMemorySnapshotInstalled(): Promise<{ ok: boolean; detail: s
 async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
     if (process.platform !== "darwin") return { ok: false, detail: "not macOS" };
-    if (process.env.S4L_OVERLAY_WATCH === "0") return { ok: false, detail: "disabled (S4L_OVERLAY_WATCH=0)" };
+    if ((process.env.S4L_OVERLAY_WATCH ?? process.env.SAPS_OVERLAY_WATCH) === "0") return { ok: false, detail: "disabled (S4L_OVERLAY_WATCH=0)" };
     const logDir = path.join(repoDir(), "skill", "logs");
     try {
       fs.mkdirSync(logDir, { recursive: true });
@@ -3694,7 +3716,7 @@ function startLocalPanel(): Promise<string> {
     srv.on("error", reject);
     // Optional fixed port (S4L_PANEL_PORT) for deterministic addressing; default
     // is an OS-assigned ephemeral port.
-    const wantPort = Number(process.env.S4L_PANEL_PORT) || 0;
+    const wantPort = Number(process.env.S4L_PANEL_PORT ?? process.env.SAPS_PANEL_PORT) || 0;
     srv.listen(wantPort, "127.0.0.1", () => {
       const addr = srv.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
@@ -3734,6 +3756,7 @@ function writePanelUrl(url: string): void {
 function sapsStateDir(): string {
   return (
     process.env.S4L_STATE_DIR ||
+    process.env.SAPS_STATE_DIR ||
     path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
   );
 }
@@ -3933,7 +3956,7 @@ function writeReviewRequest(req: {
 // S4L_PANEL_OPEN_BROWSER=1 to restore the old auto-open behavior. (The URL is
 // always returned to the caller regardless, so nothing is lost when we don't open.)
 async function openInBrowser(url: string): Promise<void> {
-  if (!process.env.S4L_PANEL_OPEN_BROWSER) return;
+  if (!(process.env.S4L_PANEL_OPEN_BROWSER ?? process.env.SAPS_PANEL_OPEN_BROWSER)) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
@@ -4066,7 +4089,7 @@ function sigkillAllScans(): void {
 // BETWEEN every card that a parked scan stale-reclaimed (the hijack). Instead we
 // keep the lock and only release it after SHELL_LOCK_GRACE_MS of no posting, so the
 // hold EXPANDS as more cards get approved and there is never a gap between cards.
-const SHELL_LOCK_GRACE_MS = Number(process.env.S4L_POST_LOCK_GRACE_MS) || 60_000;
+const SHELL_LOCK_GRACE_MS = Number(process.env.S4L_POST_LOCK_GRACE_MS ?? process.env.SAPS_POST_LOCK_GRACE_MS) || 60_000;
 let shellLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 // True from the start of a post batch until SHELL_LOCK_GRACE_MS after the last
 // card. The draft-cycle scan checks this and DEFERS launching a scan while it's set —
