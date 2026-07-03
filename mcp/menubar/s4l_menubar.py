@@ -1206,13 +1206,25 @@ class S4LMenuBar(rumps.App):
 
     @staticmethod
     def _ver_tuple(v):
-        out = []
-        for part in str(v).split("-")[0].split("+")[0].split("."):
+        """rc-aware precedence key, kept in lockstep with scripts/snapshot.py::
+        _ver_key and mcp/src/version.ts::verKey. The old key stripped the
+        prerelease part, so on the staging channel an rc.N -> rc.N+1 update
+        compared as equal and the verdict claimed success even when the
+        install never advanced (2026-07-03, rc.12 -> rc.13)."""
+        s = str(v).strip().lstrip("v")
+        core, _, pre = s.partition("-")
+        nums = []
+        for part in core.split("+", 1)[0].split("."):
             try:
-                out.append(int(part))
+                nums.append(int(part))
             except ValueError:
-                out.append(0)
-        return tuple(out)
+                nums.append(0)
+        while len(nums) < 3:
+            nums.append(0)
+        if not pre:
+            return (nums[0], nums[1], nums[2], 1, 0)
+        m = re.findall(r"\d+", pre)
+        return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
 
     def _check_update_verdict(self):
         p = self._update_verify_path()
@@ -2370,7 +2382,17 @@ class S4LMenuBar(rumps.App):
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
         items.append(rumps.MenuItem("Send feedback…", callback=self._menu_feedback))
-        if self._update_available and self._latest_version:
+        # While the update-verify marker is pending, the pipeline copy still
+        # resolves the OLD version (it only advances once the restarted server
+        # re-provisions repo/package, ~2 min), so the snapshot honestly reports
+        # update_available and the menu re-showed "update to vN" right after
+        # the user clicked update — reading as a failed install (2026-07-03).
+        # Show the in-progress state instead; _check_update_verdict drops the
+        # marker on success or after UPDATE_VERIFY_GRACE_SEC either way.
+        if os.path.exists(self._update_verify_path()):
+            items.append(rumps.separator)
+            items.append(self._label("⏳ Finishing update… verifying install"))
+        elif self._update_available and self._latest_version:
             items.append(rumps.separator)
             items.append(self._label(f"⬆ Update available · v{self._latest_version}"))
             items.append(
