@@ -4,8 +4,9 @@
 WHY THIS EXISTS
 ---------------
 The queue-backed autopilot (2026-06-23) drives the drafting pipeline by having
-Claude Desktop fire two scheduled tasks (`saps-phase1-query`, `saps-phase2b-draft`)
-every ~1 minute. Each fire spawns a fresh `claude` agent-mode CLI session
+Claude Desktop fire a universal scheduled task (`saps-worker`) every ~1 minute
+(older installs used `saps-phase1-query` + `saps-phase2b-draft`). Each fire
+spawns a fresh `claude` agent-mode CLI session
 (~200 MB RSS) plus its paired `disclaimer` launcher stub. The session does ONE
 queue iteration and reports "done"... but the `claude` process does NOT exit —
 Desktop keeps the agent-mode session alive (`--input-format stream-json`), so the
@@ -25,15 +26,19 @@ claude-code binary, stream-json mode, and local-agent-mode-sessions paths. So we
 
   1. Use the process signature only as a broad probe for Claude agent-mode children.
   2. Parse `--resume <cliSessionId>` from the command and join it to Claude's local
-     `local_*.json` session record.
-  3. Only admit a process into the reapable set if that session record has
-     `scheduledTaskId` equal to `saps-phase1-query` or `saps-phase2b-draft`.
-     Missing, ambiguous, or non-worker metadata is spared by default.
-  4. Within that metadata-confirmed worker set, apply the queue/claim rules:
+     `local_*.json` session record when the CLI exposes one.
+  3. Only admit a resumed process into the reapable set if that session record has
+     `scheduledTaskId` equal to `s4l-worker` (the live task id), `saps-worker`,
+     `saps-phase1-query`, or `saps-phase2b-draft`.
+     Ambiguous or non-worker metadata is spared by default.
+  4. Scheduled workers currently often launch without `--resume`; for those only,
+     require a second exact proof: cwd `~/.s4l-worker` from `lsof`,
+     model `default`, `AskUserQuestion` disallowed, and replay mode enabled.
+  5. Within that confirmed worker set, apply the queue/claim rules:
      claim-holders are actively drafting and spared; newborns inside claim_grace
      may not have checked the queue yet; old claimless workers are leaked husks.
-  5. When a confirmed worker is reaped, archive its `local_*.json` session by
-     flipping `isArchived` to true so it does not pollute the user's history.
+  6. Archive S4L scheduled-task `local_*.json` sessions by flipping `isArchived`
+     to true so they do not pollute the user's history.
 
 This is allow-by-confirmed-metadata: when the local session record does not prove
 "S4L scheduled worker", the script kills nothing. The count cap is retained only
@@ -56,20 +61,26 @@ import sys
 import tempfile
 import time
 
+# SAPS_->S4L_ env mirror (brand rename 2026-07-03): old launchd plists and
+# scheduled-task prompts still export SAPS_*; this process reads S4L_*.
+import s4l_env  # noqa: E402  (lives next to this file in scripts/)
+
+s4l_env.mirror()
+
 # Age (seconds) past which a leaked worker session is reaped. The threshold MUST
 # sit above the longest a worker's output can still matter, so we never kill a
 # session that is legitimately mid-draft.
 #
 # What bounds a legit worker turn — measured, not assumed:
 #   * The producer (claude_job.py) abandons a queued job after
-#     SAPS_CLAUDE_QUEUE_TIMEOUT (default 1800s / 30 min): once a worker has been
+#     S4L_CLAUDE_QUEUE_TIMEOUT (default 1800s / 30 min): once a worker has been
 #     going longer than that, the producer has already removed the job and
 #     discarded whatever the worker eventually writes. So the queue timeout is the
 #     hard ceiling on USEFUL worker work. (It was 600s until 2026-06-27, but 600s
 #     sat at the edge of the ~9-10 min draft call and dropped ~41% of twitter-prep
 #     jobs on the QA box; raised to 1800s to match the draft's real need + the
 #     direct `claude -p` lane's tolerance. This base MUST stay in lockstep with
-#     claude_job.py:DEFAULT_TIMEOUT_S — both read SAPS_CLAUDE_QUEUE_TIMEOUT.)
+#     claude_job.py:DEFAULT_TIMEOUT_S — both read S4L_CLAUDE_QUEUE_TIMEOUT.)
 #   * The 180-MINUTE budgets in watchdog_hung_runs.py are NOT this. Those govern
 #     run-twitter-cycle.sh / stats.sh, which run as `bash`/python pipeline
 #     processes, not `claude` agent-mode sessions — the reaper signature can never
@@ -83,10 +94,10 @@ import time
 # session pileup: 29 sessions, ~4GB, near-OOM). The margin's only job is to avoid
 # racing a draft the producer is still reading AT the deadline. Invariant preserved:
 # the reaper threshold (timeout + margin) is always strictly greater than the
-# producer timeout. Override the margin with SAPS_REAPER_AGE_MARGIN_SEC, or pin an
-# absolute age with SAPS_REAPER_MAX_AGE_SEC.
-_QUEUE_TIMEOUT_S = int(os.environ.get("SAPS_CLAUDE_QUEUE_TIMEOUT", "1800"))
-_REAPER_AGE_MARGIN_S = int(os.environ.get("SAPS_REAPER_AGE_MARGIN_SEC", "300"))
+# producer timeout. Override the margin with S4L_REAPER_AGE_MARGIN_SEC, or pin an
+# absolute age with S4L_REAPER_MAX_AGE_SEC.
+_QUEUE_TIMEOUT_S = int(os.environ.get("S4L_CLAUDE_QUEUE_TIMEOUT", "1800"))
+_REAPER_AGE_MARGIN_S = int(os.environ.get("S4L_REAPER_AGE_MARGIN_SEC", "300"))
 DEFAULT_MAX_AGE_SEC = _QUEUE_TIMEOUT_S + _REAPER_AGE_MARGIN_S  # 2100s (35 min) by default
 
 # Hard cap on kills per run, so a pathological ps parse can never SIGKILL the world.
@@ -129,8 +140,26 @@ RESUME_RE = re.compile(r"(?:^|\s)--resume\s+([0-9a-fA-F-]{36})(?:\s|$)")
 # stream-json mode, local-agent-mode-sessions paths, and sometimes the same
 # local-agent-mode session uuid. Claude's own session record is the durable local
 # boundary. A process is eligible for reaping only when its `--resume` id maps to a
-# local_*.json whose scheduledTaskId is one of these two S4L worker tasks.
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# local_*.json whose scheduledTaskId is one of these S4L worker tasks. The live
+# task id on current installs is `s4l-worker` (verified in Desktop's main.log:
+# "Confirmed task run for: s4l-worker", and 380+ session records carry it);
+# `saps-worker` never shipped under that name but is kept in case an install
+# registered it. Keep the legacy pair so old installs and old session records
+# continue to clean up.
+WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+S4L_WORKER_CWD = os.path.expanduser("~/.s4l-worker")
+
+# Current Claude Desktop scheduled-task launches on Matthew's machine do not pass
+# `--resume`, so the local session metadata join is unavailable for live process
+# classification. This fallback is intentionally narrow and still requires the
+# out-of-band process cwd proof from lsof before a missing-resume process can be
+# admitted into the reapable set.
+NO_RESUME_WORKER_REQUIRED = (
+    "--model default",
+    "--disallowedTools AskUserQuestion",
+    "--replay-user-messages",
+    "social-autoposter",
+)
 
 # The paired leak: every leaked `claude` worker spawns a `mcp-server-macos-use`
 # node child (the remote-macos-use MCP). When the reaper SIGKILLs the worker, that
@@ -217,6 +246,35 @@ def load_session_index() -> dict[str, list[dict]]:
     return out
 
 
+def load_cwd_index() -> dict[int, str]:
+    """Map live claude-family pids to cwd using lsof.
+
+    macOS `ps` does not expose cwd, and command lines alone were the original
+    foot-gun. If lsof is unavailable or slow, return an empty map and the
+    missing-resume fallback simply fails closed for this cycle.
+    """
+    try:
+        out = subprocess.run(
+            ["/usr/sbin/lsof", "-Fn", "-a", "-d", "cwd", "-c", "claude"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        ).stdout
+    except Exception:
+        return {}
+    cwd_by_pid: dict[int, str] = {}
+    pid = None
+    for line in out.splitlines():
+        if line.startswith("p"):
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                pid = None
+        elif line.startswith("n") and pid:
+            cwd_by_pid[pid] = line[1:]
+    return cwd_by_pid
+
+
 def worker_session_meta(cmd: str, session_index: dict[str, list[dict]]):
     """Return worker metadata for a process command, or (None, reason).
 
@@ -240,6 +298,22 @@ def worker_session_meta(cmd: str, session_index: dict[str, list[dict]]):
         "resume_id": resume_id,
         "session_paths": sorted({r["path"] for r in worker_records if r.get("path")}),
         "scheduled_task_ids": sorted({r["scheduledTaskId"] for r in worker_records}),
+    }, "ok"
+
+
+def no_resume_worker_meta(pid: int, cmd: str, cwd_index: dict[int, str]):
+    """Confirm today's no-resume S4L worker shape, or fail closed."""
+    if RESUME_RE.search(cmd):
+        return None, "has_resume"
+    if cwd_index.get(pid) != S4L_WORKER_CWD:
+        return None, "cwd_mismatch"
+    if not all(tok in cmd for tok in NO_RESUME_WORKER_REQUIRED):
+        return None, "no_resume_signature_miss"
+    return {
+        "resume_id": None,
+        "session_paths": [],
+        "scheduled_task_ids": ["saps-no-resume-cwd"],
+        "metadata_source": "s4l_worker_cwd",
     }, "ok"
 
 
@@ -273,6 +347,42 @@ def archive_session_records(paths: list[str]) -> int:
     return archived
 
 
+def archive_stale_worker_session_records(min_age_sec: int) -> int:
+    """Archive stale S4L scheduled-task records across Claude account roots.
+
+    No-resume workers cannot be joined 1:1 to their local_*.json record. The safe
+    proxy is to archive only records Claude itself marked as the S4L scheduled
+    tasks after the boot/claim grace has elapsed. This is intentionally broader
+    than process killing: `scheduledTaskId` is precise session metadata, while
+    live no-resume process killing still requires the `.s4l-worker` cwd proof.
+    """
+    pattern = os.path.join(
+        os.path.expanduser("~"),
+        "Library", "Application Support", "Claude*",
+        "claude-code-sessions", "*", "*", "local_*.json",
+    )
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - max(0, min_age_sec) * 1000
+    paths = []
+    for path in glob.glob(pattern):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if data.get("scheduledTaskId") not in set(WORKER_TASK_IDS):
+            continue
+        if data.get("isArchived") is True:
+            continue
+        ts = data.get("lastActivityAt") or data.get("createdAt") or 0
+        if isinstance(ts, (int, float)) and ts < 10_000_000_000:
+            ts *= 1000
+        if not isinstance(ts, (int, float)) or ts > cutoff_ms:
+            continue
+        paths.append(path)
+    return archive_session_records(paths)
+
+
 def snapshot():
     """Snapshot the process table once.
 
@@ -285,7 +395,8 @@ def snapshot():
                     MCP server's parent is still alive (orphan detection).
       * stats     — {ps_timed_out, snapshot_empty, worker_probe_seen, reapable_workers,
                     unparsed_worker_procs, metadata_spared_nonworkers,
-                    metadata_unknown, macos_mcp_seen, total_procs}. Pure telemetry
+                    metadata_unknown, cwd_confirmed_workers, s4l_worker_cwd_seen,
+                    macos_mcp_seen, total_procs}. Pure telemetry
                     so a future regression (e.g. UUID_RE stops matching a newer Claude
                     Code, the exact blind spot on Karol's box) is VISIBLE centrally
                     instead of silently piling up.
@@ -298,6 +409,8 @@ def snapshot():
         "unparsed_worker_procs": 0, # probe-positive but NOT reapable (regex/sig miss)
         "metadata_spared_nonworkers": 0,
         "metadata_unknown": 0,
+        "cwd_confirmed_workers": 0,
+        "s4l_worker_cwd_seen": 0,
         "macos_mcp_seen": 0,
         "total_procs": 0,
     }
@@ -318,6 +431,10 @@ def snapshot():
     by_pid = {}
     meta = {}
     session_index = load_session_index()
+    cwd_index = load_cwd_index()
+    stats["s4l_worker_cwd_seen"] = sum(
+        1 for cwd in cwd_index.values() if cwd == S4L_WORKER_CWD
+    )
     for line in out.splitlines():
         m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
         if not m:
@@ -363,11 +480,19 @@ def snapshot():
             continue
         worker_meta, reason = worker_session_meta(cmd, session_index)
         if not worker_meta:
-            if reason == "non_worker_session":
+            if reason == "missing_resume":
+                worker_meta, no_resume_reason = no_resume_worker_meta(pid, cmd, cwd_index)
+                if worker_meta:
+                    stats["cwd_confirmed_workers"] += 1
+                else:
+                    stats["metadata_unknown"] += 1
+                    continue
+            elif reason == "non_worker_session":
                 stats["metadata_spared_nonworkers"] += 1
+                continue
             else:
                 stats["metadata_unknown"] += 1
-            continue
+                continue
         procs.append({
             "pid": pid,
             "ppid": ppid,
@@ -404,8 +529,8 @@ def kill(pid: int) -> bool:
 
 
 def _state_dir() -> str:
-    """Same resolution claude_job.py uses: $SAPS_STATE_DIR or ~/.social-autoposter-mcp."""
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    """Same resolution claude_job.py uses: $S4L_STATE_DIR or ~/.social-autoposter-mcp."""
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
@@ -488,7 +613,7 @@ def _env_int(name: str, default: int) -> int:
 
 def main() -> int:
     dry = "--dry-run" in sys.argv
-    max_age = _env_int("SAPS_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
+    max_age = _env_int("S4L_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
     # (1) Queue-correlated reaping knob.
     #
     # ONE age ceiling, `max_age` (35 min = producer deadline 1800s + margin). There is
@@ -507,7 +632,7 @@ def main() -> int:
     # via running_claim_pids() -- the actively-drafting session is "dragged" along and
     # never reaped; (b) the count-cap (max_group) reaps the oldest-beyond-N by COUNT,
     # regardless of age, and never touches a claim-holder.
-    keep_margin = _env_int("SAPS_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
+    keep_margin = _env_int("S4L_REAPER_KEEP_MARGIN", 1)  # extra newest spared beyond busy set
     # (2) Count-cap backstop: never let one uuid group hold more than this many live
     # workers, regardless of queue state. 0 disables. This is now the PRIMARY brake,
     # not just a pathological backstop: at inflight=0 the age ceiling never fires
@@ -524,7 +649,7 @@ def main() -> int:
     # "1 scan + 1 draft" per-type cap, without needing type visibility in ps. It never
     # caps below inflight+margin (see keep = max(...) below), so an active drafter is
     # never at risk.
-    max_group = _env_int("SAPS_REAPER_MAX_GROUP", 2)
+    max_group = _env_int("S4L_REAPER_MAX_GROUP", 2)
 
     # (3) Claim grace — the PRIMARY brake (2026-07-01, per Matthew). A worker checks
     # the queue EXACTLY ONCE per fire: claude_job.py::cmd_next is single-shot — it
@@ -551,8 +676,8 @@ def main() -> int:
     # claims) and that figure ALREADY includes the claiming worker's spawn+boot+cmd_next.
     # 60s tightens the steady-state floor to ~2-3 warm sessions (one tick of newborns +
     # any active drafter) instead of ~4, while still never racing a real claim. Bump it
-    # back up via SAPS_REAPER_CLAIM_GRACE_SEC if cold boots ever start exceeding a tick.
-    claim_grace = _env_int("SAPS_REAPER_CLAIM_GRACE_SEC", 60)
+    # back up via S4L_REAPER_CLAIM_GRACE_SEC if cold boots ever start exceeding a tick.
+    claim_grace = _env_int("S4L_REAPER_CLAIM_GRACE_SEC", 60)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
@@ -646,6 +771,9 @@ def main() -> int:
             if dry or kill(p["ppid"]):
                 disclaimers += 1
 
+    if not dry:
+        archived_sessions += archive_stale_worker_session_records(claim_grace)
+
     # (3) Reap paired / orphaned remote-macos-use MCP node servers — the SECOND half of
     # the double leak. SIGKILLing a worker orphans its `mcp-server-macos-use` child
     # (reparented to launchd), so it survives forever. Reap an MCP proc when (a) its
@@ -695,6 +823,8 @@ def main() -> int:
         "unparsed_worker_procs": stats["unparsed_worker_procs"],
         "metadata_spared_nonworkers": stats["metadata_spared_nonworkers"],
         "metadata_unknown": stats["metadata_unknown"],
+        "cwd_confirmed_workers": stats["cwd_confirmed_workers"],
+        "s4l_worker_cwd_seen": stats["s4l_worker_cwd_seen"],
         "macos_mcp_seen": stats["macos_mcp_seen"],
         "total_procs": stats["total_procs"],
         "ps_timed_out": stats["ps_timed_out"],
@@ -709,6 +839,8 @@ def main() -> int:
         f" unparsed={stats['unparsed_worker_procs']} leaked_groups={leaked_groups}"
         f" metadata_spared={stats['metadata_spared_nonworkers']}"
         f" metadata_unknown={stats['metadata_unknown']}"
+        f" cwd_confirmed={stats['cwd_confirmed_workers']}"
+        f" s4l_cwd_seen={stats['s4l_worker_cwd_seen']}"
         f" mcp_seen={stats['macos_mcp_seen']} killed={killed}"
         f" disclaimer_killed={disclaimers} mcp_killed={macos_killed}"
         f" archived_sessions={archived_sessions}"
