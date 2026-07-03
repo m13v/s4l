@@ -16,7 +16,7 @@ import { VERSION } from "./version.js";
 // Sentry DSN is a client-side identifier (safe to embed, same posture as Fazm's
 // hardcoded Swift DSN). Overridable via env for dev. Empty -> Sentry disabled.
 const EMBEDDED_DSN = "https://4d44ac907262c6545cf8681703528d04@o4507617161314304.ingest.us.sentry.io/4511598804336640";
-const SENTRY_DSN = process.env.SAPS_SENTRY_DSN || EMBEDDED_DSN;
+const SENTRY_DSN = process.env.S4L_SENTRY_DSN || EMBEDDED_DSN;
 
 let sentryReady = false;
 
@@ -27,7 +27,7 @@ export function initSentry(): void {
       dsn: SENTRY_DSN,
       release: `social-autoposter-mcp@${VERSION}`,
       environment:
-        process.env.SAPS_ENV === "development" || process.env.NODE_ENV === "development"
+        process.env.S4L_ENV === "development" || process.env.NODE_ENV === "development"
           ? "development"
           : "production",
       // Errors only; no performance tracing (keeps the bundle's overhead minimal
@@ -132,14 +132,14 @@ export async function sendHeartbeat(reason: string): Promise<void> {
 //
 // Best-effort: NEVER throws into the server, never blocks the child's I/O, and
 // drops on overflow rather than growing unbounded. Disable with
-// SAPS_LOG_STREAM=0.
+// S4L_LOG_STREAM=0.
 //
 // IMPORTANT: logs go to the CLOUD RUN host (AUTOPOSTER_LOG_BASE, default
 // app.s4l.ai), NOT the Vercel host (AUTOPOSTER_API_BASE / s4l.ai) the heartbeat
 // and onboarding-events use. Cloud Run's native stdout -> Cloud Logging path is
 // the whole point of this lane.
 
-const LOG_STREAM_ENABLED = process.env.SAPS_LOG_STREAM !== "0";
+const LOG_STREAM_ENABLED = process.env.S4L_LOG_STREAM !== "0";
 const LOG_MAX_LINE_LEN = 8192; // mirror the relay cap
 const LOG_MAX_BUFFER = 1000; // drop oldest beyond this (overflow protection)
 const LOG_FLUSH_BATCH = 100; // flush eagerly once we have this many lines
@@ -150,10 +150,10 @@ const LOG_FLUSH_MS = 3000; // otherwise flush on this cadence
 // run doesn't crowd out the signal (and to keep Cloud Logging volume sane).
 // Empty/whitespace-only lines plus an env-extensible regex of obvious dump
 // signatures. Deliberately conservative: real pipeline output is the value, so
-// we only filter clear noise. Extend via SAPS_LOG_NOISE_RE (a JS regex source).
+// we only filter clear noise. Extend via S4L_LOG_NOISE_RE (a JS regex source).
 let logNoiseRe: RegExp | null = null;
 try {
-  const extra = (process.env.SAPS_LOG_NOISE_RE || "").trim();
+  const extra = (process.env.S4L_LOG_NOISE_RE || "").trim();
   const sources = [
     extra,
   ].filter(Boolean);
