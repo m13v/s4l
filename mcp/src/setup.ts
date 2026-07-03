@@ -274,6 +274,7 @@ export function buildProjectEntry(input: ProjectInput): Record<string, unknown> 
 export function applySetup(input: ProjectInput): {
   project: string;
   created: boolean;
+  persona: boolean;
   ready: boolean;
   missing_required: string[];
   fields_set: string[];
@@ -282,6 +283,10 @@ export function applySetup(input: ProjectInput): {
   const cfg = readConfig();
   cfg.projects = cfg.projects || [];
   const idx = cfg.projects.findIndex((p) => p.name === input.name);
+  // Editing the persona project (persona:true) through this path must not pull
+  // it into the managed-PRODUCTS scope list, and its readiness is judged against
+  // PERSONA_REQUIRED_FIELDS (a persona has no website/icp by design).
+  const persona = idx >= 0 && cfg.projects[idx].persona === true;
   let created: boolean;
   let fields_set: string[] = [];
   let fields_removed: string[] = [];
@@ -311,11 +316,13 @@ export function applySetup(input: ProjectInput): {
   fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 
-  recordManagedProject(input.name);
-  const missing = missingForProject(input.name) ?? [];
+  if (!persona) recordManagedProject(input.name);
+  const missing =
+    missingForProject(input.name, persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS) ?? [];
   return {
     project: input.name,
     created,
+    persona,
     ready: missing.length === 0,
     missing_required: missing,
     fields_set,
@@ -571,6 +578,69 @@ export function listManagedProjectStatus(): ProjectStatus[] {
 
 export function hasReadyProject(): boolean {
   return listManagedProjectStatus().some((s) => s.ready);
+}
+
+// ---------------------------------------------------------------------------
+// Settings view: current VALUES of the user-editable fields, per project.
+// Powers the panel's "Project settings" section and project_config action:'get'.
+// Whitelist-only on purpose: the panel edits through project_config's validated
+// merge, so this surface exposes exactly the fields that path models, never the
+// whole raw project object (operator-level keys like posthog/landing_pages stay
+// out of the widget; they remain reachable via the `fields` escape hatch).
+// ---------------------------------------------------------------------------
+export const EDITABLE_PROJECT_FIELDS = [
+  "website",
+  "description",
+  "icp",
+  "voice",
+  "differentiator",
+  "search_topics",
+  "get_started_link",
+  "content_guardrails",
+  // Persona grounding (persona projects only in practice; harmless on products).
+  "content_angle",
+] as const;
+
+export interface ProjectSettingsView {
+  name: string;
+  persona: boolean;
+  ready: boolean;
+  missing_required: string[];
+  // Current values for EDITABLE_PROJECT_FIELDS keys present on the project.
+  fields: Record<string, unknown>;
+  // Advanced keys that exist on the project but aren't in the editable
+  // whitelist — surfaced read-only so nothing looks silently hidden.
+  extra_keys: string[];
+}
+
+// Value snapshots for every project this install manages, plus the persona
+// project (kept out of the managed-products scope by design but still the
+// user's own settings).
+export function listProjectSettings(): ProjectSettingsView[] {
+  let projects: Array<Record<string, unknown>>;
+  try {
+    projects = readConfig().projects || [];
+  } catch {
+    return [];
+  }
+  const managed = new Set(managedProjects());
+  const editable = new Set<string>(EDITABLE_PROJECT_FIELDS);
+  return projects
+    .filter((p) => typeof p.name === "string" && (managed.has(p.name as string) || p.persona === true))
+    .map((p) => {
+      const name = String(p.name);
+      const persona = p.persona === true;
+      const req = persona ? PERSONA_REQUIRED_FIELDS : REQUIRED_FIELDS;
+      const missing = missingForProject(name, req) ?? [...req];
+      const fields: Record<string, unknown> = {};
+      for (const k of EDITABLE_PROJECT_FIELDS) {
+        if (p[k] !== undefined) fields[k] = p[k];
+      }
+      const extra_keys = Object.keys(p)
+        .filter((k) => k !== "name" && k !== "persona" && !editable.has(k))
+        .sort();
+      return { name, persona, ready: missing.length === 0, missing_required: missing, fields, extra_keys };
+    });
 }
 
 // The personal-brand persona project (persona:true) is intentionally kept OUT of
