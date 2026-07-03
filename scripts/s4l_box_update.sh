@@ -190,7 +190,10 @@ import json, os, glob, tempfile, shutil
 home = os.path.expanduser("~")
 worker = os.path.join(home, ".s4l-worker")
 os.makedirs(worker, exist_ok=True)
-WORKERS = {"saps-phase1-query", "saps-phase2b-draft"}
+# saps-worker is the universal type-blind worker (2026-07-02); the phase pair
+# is legacy. This script only heals cwd here — the pair->saps-worker
+# consolidation runs via the menubar's _rewrite_scheduled_task_cwd() self-heal.
+WORKERS = {"saps-worker", "saps-phase1-query", "saps-phase2b-draft"}
 DEPRECATED = {"social-autoposter-autopilot"}
 pat = os.path.join(home, "Library/Application Support/Claude/claude-code-sessions/*/*/scheduled-tasks.json")
 for f in glob.glob(pat):
