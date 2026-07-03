@@ -217,6 +217,10 @@ def main() -> int:
                          "the remainder ships on the next run.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the relay lines instead of POSTing; offsets are NOT advanced.")
+    ap.add_argument("--from-start", action="store_true",
+                    help="On a first run (no state file), ship the existing transcript "
+                         "backlog too instead of baselining at current EOF. Default is "
+                         "forward-only: the first run records offsets and ships nothing.")
     args = ap.parse_args()
 
     # Single-flight: overlapping runs (boot + interval) must not double-ship.
@@ -237,6 +241,23 @@ def main() -> int:
 
     state = _load_state()
     files = _candidate_files()
+
+    # First run on a box: baseline every existing transcript at its current EOF
+    # and ship nothing, so a deploy onto a machine with weeks of session history
+    # (the operator Mac had 2500+ candidate files) doesn't flood Cloud Logging
+    # with stale backlog. New sessions (new files) ship in full from then on.
+    if not os.path.exists(STATE_PATH) and not args.from_start:
+        for path in files:
+            try:
+                state[path] = {"offset": os.path.getsize(path)}
+            except OSError:
+                continue
+        if not args.dry_run:
+            _save_state(state)
+        print(f"[transcript-relay] first run: baselined {len(state)} transcript(s) "
+              f"at EOF; shipping forward-only from the next run"
+              + (" [dry-run]" if args.dry_run else ""))
+        return 0
     budget = max(1, args.max_lines)
     shipped = 0
     files_touched = 0
