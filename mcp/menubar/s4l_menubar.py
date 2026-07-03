@@ -2032,6 +2032,7 @@ class S4LMenuBar(rumps.App):
                     "decision": "approved" if decision.get("approved") else "rejected",
                     "edited": bool(decision.get("edited")),
                     "drop_link": bool(decision.get("drop_link")),
+                    "loved": bool(decision.get("loved")),
                     "reject_category": decision.get("reject_category"),
                     "reject_note": decision.get("reject_note"),
                     "interactions": decision.get("interactions") or [],
@@ -2043,6 +2044,39 @@ class S4LMenuBar(rumps.App):
             )
         except Exception:
             pass
+
+    def _on_feedback_text(self, text):
+        """Ship overall feedback (the card's 💬 button or the menu bar's
+        "Send feedback…" item) as a decision='feedback' review event on the
+        same outbox rail as card decisions. project is intentionally omitted
+        (NULL server-side): the feedback digest folds project-less feedback
+        into EVERY configured project's prompt."""
+        body = (text or "").strip()[:2000]
+        if not body:
+            return
+        try:
+            st.review_event_add(
+                {
+                    "platform": "twitter",
+                    "decision": "feedback",
+                    "batch_id": "overall-feedback",
+                    "reject_note": body,
+                }
+            )
+            self._notify("S4L", "Feedback sent — it will steer future drafts.")
+        except Exception:
+            pass
+
+    def _menu_feedback(self, _):
+        # Dropdown entry point for the overall-feedback composer. Rumps menu
+        # callbacks run on the main run loop, which present_feedback requires.
+        try:
+            import s4l_card
+
+            s4l_card.present_feedback(self._on_feedback_text)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] feedback composer failed: {e}\n")
+            _capture(e, phase="feedback_composer")
 
     def _on_card_decision(self, batch, decision):
         # Runs on the main thread the INSTANT a card is approved/rejected. An
@@ -2272,6 +2306,7 @@ class S4LMenuBar(rumps.App):
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
+        items.append(rumps.MenuItem("Send feedback…", callback=self._menu_feedback))
         if self._update_available and self._latest_version:
             items.append(rumps.separator)
             items.append(self._label(f"⬆ Update available · v{self._latest_version}"))
