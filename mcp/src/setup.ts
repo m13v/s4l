@@ -16,7 +16,7 @@ import { repoDir } from "./repo.js";
 
 // Per-install scoping list lives outside the repo so it survives repo updates.
 const STATE_DIR =
-  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 
 // The pipeline reads projects[] from config.json. Override for tests / custom
@@ -24,7 +24,7 @@ const STATE_PATH = path.join(STATE_DIR, "setup-state.json");
 // per call, not a load-time const, because a bare .mcpb install materializes the
 // repo after boot and setup must write config.json into THAT repo.
 export function configPath(): string {
-  return process.env.S4L_CONFIG_PATH || path.join(repoDir(), "config.json");
+  return process.env.S4L_CONFIG_PATH || process.env.SAPS_CONFIG_PATH || path.join(repoDir(), "config.json");
 }
 
 // Fields the X drafting prompts genuinely consume. Required ones must all be
