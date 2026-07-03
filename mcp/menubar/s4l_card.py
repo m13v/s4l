@@ -19,12 +19,13 @@ was a really good pick" signal, which the feedback digest treats as strong
 positive evidence (a plain approve is merely counter-evidence against avoid
 entries).
 
-`present_feedback(on_submit)` is the OVERALL-feedback composer: a small
-floating panel with one free-text field, reachable from the card's 💬 button
-and from the menu bar's "Send feedback…" item. It carries guidance not tied to
-any single thread; the menu bar registers a default submit handler via
-`set_feedback_handler` (shipping decision='feedback' review events) so both
-entry points behave identically.
+Overall feedback (guidance not tied to any single thread) has two entry
+points that share one submit handler, registered by the menu bar via
+`set_feedback_handler` (it ships decision='feedback' review events): the
+card's bubble button swaps the card body for an in-window composer (a
+separate floating panel was tried and opened where the user never saw it on
+a multi-monitor setup), and the menu bar's "Send feedback…" item opens the
+standalone `present_feedback(on_submit)` panel (no card window need exist).
 
 Rejecting is a two-step flow: the Reject button swaps the card body for a
 reason picker (three one-tap categories plus Other, with an optional free-text
@@ -326,6 +327,7 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
+        self._feedback_tv = None
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
@@ -501,20 +503,23 @@ class _ReviewController(NSObject):
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
-        # Buttons at the TOP, one line: Approve, 😄 (approve + loved), then a
-        # small 💬 (overall feedback, decides nothing), Reject at the right.
-        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 96, 30))
+        # Buttons at the TOP, one line: Approve, Approve 😄 (approve + loved),
+        # a small feedback-bubble icon (overall feedback, decides nothing),
+        # Reject at the right.
+        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 84, 30))
         approve.setTitle_("Approve")
         approve.setBezelStyle_(NSBezelStyleRounded)
         approve.setTarget_(self)
         approve.setAction_("approve:")
         content.addSubview_(approve)
 
-        # 😄 = approve with the "really good one" signal (loved=True on the
-        # decision). Same posting path as Approve; only the feedback rail sees
-        # the difference.
-        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 100, H - 42, 44, 30))
-        smile.setTitle_("😄")
+        # "Approve 😄" = approve with the "really good one" signal (loved=True
+        # on the decision). Same posting path as Approve; only the feedback
+        # rail sees the difference. Labeled as an approve variant, not a bare
+        # emoji: a lone 😄 read as decoration and users doubted the click
+        # registered (2026-07-03 feedback).
+        smile = NSButton.alloc().initWithFrame_(NSMakeRect(M + 88, H - 42, 116, 30))
+        smile.setTitle_("Approve 😄")
         smile.setBezelStyle_(NSBezelStyleRounded)
         smile.setTarget_(self)
         smile.setAction_("approveLoved:")
@@ -524,11 +529,22 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(smile)
 
-        # 💬 = overall feedback (about the pipeline, not this draft). Opens the
-        # composer panel next to the card; the card itself stays undecided.
-        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 184, H - 41, 30, 28))
-        fb.setTitle_("💬")
+        # Feedback bubble = overall feedback (about the pipeline, not this
+        # draft). Swaps the card body for the composer IN THIS WINDOW; a
+        # separate floating panel was tried first and opened somewhere the
+        # user never saw on a multi-monitor setup (2026-07-03: 7 clicks,
+        # zero sightings). SF Symbol, like the stats eye; emoji 💬 rendered
+        # as a grey three-dots glyph nobody could identify.
+        fb = NSButton.alloc().initWithFrame_(NSMakeRect(M + 212, H - 40, 28, 26))
         fb.setBordered_(False)
+        fb_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "bubble.left", "overall feedback"
+        )
+        if fb_img is not None:
+            fb.setImage_(fb_img)
+            fb.setTitle_("")
+        else:  # pre-Big Sur fallback: no SF Symbols
+            fb.setTitle_("💬")
         fb.setTarget_(self)
         fb.setAction_("feedbackOpen:")
         try:
@@ -537,7 +553,7 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(fb)
 
-        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 96, H - 42, 96, 30))
+        reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 84, H - 42, 84, 30))
         reject.setTitle_("Reject")
         reject.setBezelStyle_(NSBezelStyleRounded)
         reject.setTarget_(self)
@@ -948,10 +964,96 @@ class _ReviewController(NSObject):
         self._advance()
 
     def feedbackOpen_(self, sender):
-        # Overall feedback is orthogonal to the card decision: the composer
-        # opens alongside, the card stays as-is (including in-progress edits).
+        # Overall feedback is orthogonal to the card decision: swap the card
+        # body for the composer (same pattern as the reject reason picker),
+        # preserving any in-progress reply edit for Back. In THIS window on
+        # purpose: a separate floating panel opened somewhere the user never
+        # saw on a multi-monitor setup.
         self._track("feedback_open")
-        present_feedback()
+        self._pending_reply_text = self._current_text()
+        self._render_feedback()
+
+    @objc.python_method
+    def _render_feedback(self):
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+        content.addSubview_(
+            _label(NSMakeRect(M, H - 46, W - 2 * M, 20), "Overall feedback", size=13, bold=True)
+        )
+        content.addSubview_(
+            _label(
+                NSMakeRect(M, H - 80, W - 2 * M, 32),
+                "Standing guidance for the drafting loop (thread choice, tone, "
+                "audience), not about this draft.",
+                size=11,
+                muted=True,
+            )
+        )
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(M, 54, W - 2 * M, H - 86 - 54)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(NS_BEZEL_BORDER)
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * M, 100))
+        tv.setFont_(NSFont.systemFontOfSize_(12))
+        tv.setRichText_(False)
+        tv.setEditable_(True)
+        tv.setSelectable_(True)
+        scroll.setDocumentView_(tv)
+        content.addSubview_(scroll)
+        self._feedback_tv = tv
+
+        back = NSButton.alloc().initWithFrame_(NSMakeRect(M, 14, 90, 30))
+        back.setTitle_("Back")
+        back.setBezelStyle_(NSBezelStyleRounded)
+        back.setTarget_(self)
+        back.setAction_("cardFeedbackBack:")
+        content.addSubview_(back)
+
+        send = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 90, 14, 90, 30))
+        send.setTitle_("Send")
+        send.setBezelStyle_(NSBezelStyleRounded)
+        send.setTarget_(self)
+        send.setAction_("cardFeedbackSend:")
+        content.addSubview_(send)
+
+        self._textview = None
+        self._panel.setContentView_(content)
+        self._panel.makeFirstResponder_(tv)
+        _log("in-card feedback composer shown")
+
+    @objc.python_method
+    def _restore_card(self):
+        # Re-render the card and restore any reply edit made before the swap
+        # (same mechanism as rejectBack_).
+        pending = getattr(self, "_pending_reply_text", None)
+        self._feedback_tv = None
+        self._render()
+        if pending is not None and self._textview is not None:
+            try:
+                self._textview.setString_(pending)
+            except Exception:
+                pass
+
+    def cardFeedbackSend_(self, sender):
+        text = ""
+        try:
+            text = str(self._feedback_tv.string()).strip()
+        except Exception:
+            pass
+        if not text:
+            _log("in-card feedback sent empty; dropped")
+        else:
+            _log(f"in-card feedback submitted ({len(text)} chars)")
+            if _feedback_handler is not None:
+                try:
+                    _feedback_handler(text)
+                except Exception:
+                    pass
+        self._restore_card()
+
+    def cardFeedbackBack_(self, sender):
+        _log("in-card feedback cancelled")
+        self._restore_card()
 
     def reject_(self, sender):
         # Two-step reject: swap the card body for the reason picker. The
