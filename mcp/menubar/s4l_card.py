@@ -14,7 +14,7 @@ Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "dwell_ms": int}
 
 Approving comes in two strengths: the plain Approve button, and the 😄 button
-right next to it, which approves AND stamps loved=True — the user's "this one
+right next to it, which approves AND stamps loved=True: the user's "this one
 was a really good pick" signal, which the feedback digest treats as strong
 positive evidence (a plain approve is merely counter-evidence against avoid
 entries).
@@ -1212,7 +1212,7 @@ class _FeedbackController(NSObject):
             _label(
                 NSMakeRect(M, FB_H - 48, FB_W - 2 * M, 32),
                 "Standing guidance for the drafting loop (thread choice, tone, "
-                "audience) — not about any single draft.",
+                "audience), not about any single draft.",
                 size=11,
                 muted=True,
             )
@@ -1280,7 +1280,7 @@ class _FeedbackController(NSObject):
         cb = self._on_submit
         self._close()
         if not text:
-            _log("feedback composer sent empty — dropped")
+            _log("feedback composer sent empty; dropped")
             return
         _log(f"feedback submitted ({len(text)} chars)")
         if cb is not None:
