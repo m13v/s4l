@@ -34,7 +34,7 @@ CHANNEL_FILE = "channel.json"
 
 
 def state_dir() -> str:
-    return os.environ.get("SAPS_STATE_DIR") or os.path.join(
+    return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp"
     )
 
