@@ -484,6 +484,202 @@ def read_plan(plan_path):
         return None
 
 
+# ---- durable review store ---------------------------------------------------
+# The review queue is ONE candidate-keyed store: ~/.social-autoposter-mcp/
+# review-queue.json (written by merge_review_queue.py, decision-stamped here,
+# posted/our_url-stamped by the MCP server). It replaces the old split where
+# drafts lived in an EPHEMERAL /tmp plan (killed by every reboot/tmp sweep,
+# numbering restarting at 1) while decisions lived FOREVER in approved-queue
+# .json keyed by plan index — a mismatch that both lost pending drafts on
+# reboot and let stale ledger entries swallow every new card after a reset.
+#
+# /tmp/twitter_cycle_plan_review-queue.json remains as a SYMLINK to the store:
+# the MCP server (repo.ts planPath) and the locked pipeline scripts resolve
+# that path, and fs.writeFileSync / Path.write_text follow symlinks, so they
+# keep working unchanged. The link is recreated at menubar boot and on every
+# merge; a reboot only ever removes the LINK, never the data.
+
+REVIEW_STORE = "review-queue.json"
+
+
+def store_path():
+    return str(Path(state_dir()) / REVIEW_STORE)
+
+
+def ensure_store_symlink(batch="review-queue"):
+    """Recreate the /tmp compatibility symlink if a reboot swept it. A REAL file
+    at the legacy path (old code wrote it post-reboot) is left for
+    merge_review_queue.py to absorb; only a missing or wrong link is fixed."""
+    try:
+        base = os.environ.get("S4L_TMP_DIR") or "/tmp"
+        link = str(Path(base) / f"twitter_cycle_plan_{batch}.json")
+        sp = store_path()
+        if not Path(sp).exists():
+            return
+        if os.path.islink(link):
+            if os.readlink(link) == sp:
+                return
+            os.unlink(link)
+        elif os.path.exists(link):
+            return  # real legacy file: merge_review_queue absorbs it first
+        tmp_link = f"{link}.lnk.{os.getpid()}"
+        os.symlink(sp, tmp_link)
+        os.replace(tmp_link, link)
+    except Exception:
+        pass
+
+
+_store_thread_lock = threading.Lock()
+
+
+def _store_update(mutate):
+    """Locked read-modify-write of the review store. An fcntl.flock on a sidecar
+    .lock file serializes cross-process python writers; the in-process lock
+    serializes menubar threads; os.replace keeps readers atomic. The MCP
+    server's writePlan does NOT take this lock (interim race, absorbed by the
+    menubar's decision reconciliation on every timer tick). Returns mutate's
+    return value; raises nothing (returns None on failure)."""
+    import fcntl
+
+    sp = store_path()
+    try:
+        with _store_thread_lock:
+            with open(sp + ".lock", "w") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                try:
+                    try:
+                        data = json.loads(Path(sp).read_text())
+                    except Exception:
+                        data = {"candidates": []}
+                    rv = mutate(data)
+                    tmp = f"{sp}.tmp.{os.getpid()}"
+                    Path(tmp).write_text(json.dumps(data, indent=2))
+                    os.replace(tmp, sp)
+                    return rv
+                finally:
+                    fcntl.flock(lk, fcntl.LOCK_UN)
+    except Exception:
+        return None
+
+
+def _match_candidate(data, n, candidate_id):
+    """Locate a candidate by durable identity first (candidate_id), plan index
+    second. Returns the candidate dict or None."""
+    cands = data.get("candidates") or []
+    if candidate_id is not None:
+        for c in cands:
+            if c.get("candidate_id") == candidate_id:
+                return c
+    if isinstance(n, int) and 1 <= n <= len(cands):
+        return cands[n - 1]
+    return None
+
+
+def store_stamp_decision(batch, decision):
+    """Write a card decision INTO the store the instant the user clicks. This is
+    the durable record (the old approved-queue.json ledger is no longer
+    written): approve stamps approved=True + the decision payload (text/edits
+    ride along so a restart can resume the post); reject stamps terminal=True.
+    The MCP server later confirms posted=True/our_url via its own write.
+    Returns True when the stamp landed."""
+
+    def mutate(data):
+        c = _match_candidate(data, decision.get("n"), decision.get("candidate_id"))
+        if c is None:
+            return False
+        payload = {
+            "approved": bool(decision.get("approved")),
+            "text": decision.get("text") or "",
+            "edited": bool(decision.get("edited")),
+            "drop_link": bool(decision.get("drop_link")),
+            "loved": bool(decision.get("loved")),
+            "reject_category": decision.get("reject_category"),
+            "decided_at": time_iso(),
+        }
+        if decision.get("approved"):
+            c["approved"] = True
+            c.pop("post_failed", None)
+            c.pop("post_error", None)
+        else:
+            c["terminal"] = True
+            c["terminal_reason"] = "human_rejected"
+        c["decision"] = payload
+        return True
+
+    return bool(_store_update(mutate))
+
+
+def store_mark_post_failed(batch, n, candidate_id=None, error=None):
+    """A decided post that FAILED surfaces via notification/dashboard, not by
+    re-presenting the card and not by endless resume retries."""
+
+    def mutate(data):
+        c = _match_candidate(data, n, candidate_id)
+        if c is None:
+            return False
+        c["post_failed"] = True
+        if error:
+            c["post_error"] = str(error)[:200]
+        return True
+
+    return bool(_store_update(mutate))
+
+
+def store_pending_posts(batch="review-queue"):
+    """Approved-but-unposted candidates, for the restart resume path. Skips
+    posted/terminal/failed rows; each entry carries everything post_drafts
+    needs (n, final text, drop_link)."""
+    plan = read_plan(store_path())
+    out = []
+    for i, c in enumerate((plan or {}).get("candidates") or []):
+        if not c.get("approved") or c.get("posted") or c.get("terminal") or c.get("post_failed"):
+            continue
+        d = c.get("decision") or {}
+        out.append(
+            {
+                "batch": batch,
+                "n": i + 1,
+                "candidate_id": c.get("candidate_id"),
+                "text": d.get("text") or c.get("reply_text") or "",
+                "edited": bool(d.get("edited")),
+                "drop_link": bool(d.get("drop_link")),
+            }
+        )
+    return out
+
+
+def store_reconcile_decisions(batch, decisions):
+    """Re-stamp any of this session's decisions the store no longer shows. The
+    MCP server's post_drafts does a whole-file read-modify-write while a batch
+    posts (minutes), so a decision stamped mid-drain can be clobbered by its
+    stale rewrite; the menubar calls this every timer tick with its in-memory
+    decision list so the store always converges back to what the user chose.
+    Returns how many had to be re-stamped."""
+    fixed = 0
+    try:
+        plan = read_plan(store_path()) or {}
+        cands = plan.get("candidates") or []
+        by_id = {c.get("candidate_id"): c for c in cands if c.get("candidate_id") is not None}
+        for d in decisions or []:
+            c = by_id.get(d.get("candidate_id"))
+            if c is None:
+                n = d.get("n")
+                c = cands[n - 1] if isinstance(n, int) and 1 <= n <= len(cands) else None
+            if c is None:
+                continue
+            settled = (
+                c.get("posted") is True
+                or c.get("terminal") is True
+                or (c.get("approved") is True if d.get("approved") else False)
+            )
+            if not settled:
+                if store_stamp_decision(batch, d):
+                    fixed += 1
+    except Exception:
+        pass
+    return fixed
+
+
 def review_queue_posted_count():
     """Posts that have LANDED in the review-queue plan — the durable, cross-process
     truth. Independent of the menu bar's in-memory burst queue (which dies on a
@@ -495,7 +691,9 @@ def review_queue_posted_count():
     req = read_review_request()
     if req:
         plan_path = req.get("plan_path")
-    if not plan_path:
+    if not plan_path or not Path(plan_path).exists():
+        plan_path = store_path()
+    if not Path(plan_path).exists():
         plan_path = "/tmp/twitter_cycle_plan_review-queue.json"
     plan = read_plan(plan_path)
     cands = (plan or {}).get("candidates")
@@ -516,8 +714,10 @@ def _plan_generation(batch):
     treated as already-decided: the 2026-07-03 "unapproved cards never show up"
     bug (30 stale entries silently swallowed a whole day of drafts)."""
     try:
-        base = os.environ.get("S4L_TMP_DIR") or "/tmp"
-        p = Path(base) / f"twitter_cycle_plan_{batch}.json"
+        p = Path(store_path())
+        if not p.exists():
+            base = os.environ.get("S4L_TMP_DIR") or "/tmp"
+            p = Path(base) / f"twitter_cycle_plan_{batch}.json"
         return json.loads(p.read_text()).get("created_at") or None
     except Exception:
         return None
