@@ -59,7 +59,7 @@ log "recover-check eligible; mode=${MODE:-?}"
 # linkedin-backend.sh exports LINKEDIN_CDP_URL + LINKEDIN_DISCOVER_PYTHON +
 # MCP_CONFIG_FILE and provides ensure_linkedin_browser_for_backend (launches the
 # port-9556 harness Chrome and acquires the cross-pipeline lock).
-export SAPS_PIPELINE_NAME="linkedin-recovery"
+export S4L_PIPELINE_NAME="linkedin-recovery"
 # shellcheck disable=SC1091
 source "$REPO_DIR/skill/lib/linkedin-backend.sh"
 
