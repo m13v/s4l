@@ -148,10 +148,10 @@ RUN_CLAUDE = os.path.join(SCRIPTS, "run_claude.sh")
 # the owned uv runtime — the same fresh-box failure class that broke the Twitter
 # poster (Karol, 2026-06-22). The GitHub rail posts via the REST API (no browser,
 # so no Playwright dep), but its util/DB children still need the owned venv, so
-# pin the interpreter here too. Honor SAPS_PYTHON (set by the launchd plist),
+# pin the interpreter here too. Honor S4L_PYTHON (set by the launchd plist),
 # else sys.executable; never the literal PYTHON.
-PYTHON = os.environ.get("SAPS_PYTHON") or sys.executable
-os.environ["SAPS_PYTHON"] = PYTHON
+PYTHON = os.environ.get("S4L_PYTHON") or sys.executable
+os.environ["S4L_PYTHON"] = PYTHON
 
 # Momentum tunables. Edit here, not at call sites.
 DELTA_THRESHOLD = 1.0
