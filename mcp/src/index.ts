@@ -2540,12 +2540,12 @@ tool(
   {
     title: "Get autopilot scheduled-task specs",
     description:
-      "Returns the two scheduled tasks that run the hands-free draft autopilot on this machine " +
-      "(saps-phase1-query and saps-phase2b-draft). For EACH returned task, call the host tool " +
+      "Returns the scheduled task that runs the hands-free draft autopilot on this machine " +
+      "(saps-worker, the universal queue worker). For EACH returned task, call the host tool " +
       "create_scheduled_task with its taskId, cronExpression, and prompt VERBATIM (do not edit the " +
-      "prompt — it contains exact local paths). These tasks drain the local drafting queue that the " +
-      "real pipeline feeds; the pipeline itself is kicked by a launchd job this server installs. Use " +
-      "this as the final onboarding step instead of the old single autopilot task.",
+      "prompt — it contains exact local paths). The task drains the local job queue that the " +
+      "real pipeline feeds (all job types); the pipeline itself is kicked by launchd jobs this server " +
+      "installs. Use this as the final onboarding step instead of the old per-type worker tasks.",
     inputSchema: {},
   },
   async () => {
@@ -2600,7 +2600,7 @@ tool(
         "- About every 5 minutes a background draft cycle scans X for posts that match your search topics and drafts replies in your voice.",
         "- Drafts show up as review cards. The first one usually lands within a few minutes when there is matching supply on X; quiet topics mean fewer or no cards until something relevant is posted.",
         "- Nothing is posted automatically. You approve each draft yourself (from the dashboard or the menu bar); posting autopilot stays OFF until you explicitly turn it on. Today it only drafts.",
-        "- Two helper jobs (saps-phase1-query and saps-phase2b-draft) run every minute to drain the draft queue. Leave them enabled; they only draft, they never post.",
+        "- One helper job (saps-worker) runs every minute to drain the background work queue. Leave it enabled; it only drafts, it never posts.",
         "- You can edit your voice, topics, or the drafts themselves at any time, and check status on the dashboard.",
       ],
       next_step:
@@ -2608,9 +2608,11 @@ tool(
         "verbatim) to register its schedule — the prompt file is already written, so creating it just " +
         "wires up the cron. If create_scheduled_task reports a task already exists, that is FINE — the " +
         "schedule is registered and the prompt is current; do NOT delete/recreate, do NOT investigate, " +
-        "just move on. Both fire every minute and only draft — they never post. The pipeline that feeds " +
-        "them runs from a launchd job this server installs. Do NOT create the old " +
-        "'social-autoposter-autopilot' task; it is deprecated. " +
+        "just move on. It fires every minute and only drafts — it never posts. The pipeline that feeds " +
+        "it runs from launchd jobs this server installs. Do NOT create the old " +
+        "'social-autoposter-autopilot' task; it is deprecated. If the older per-type tasks " +
+        "(saps-phase1-query / saps-phase2b-draft) exist from a previous version, LEAVE them — they are " +
+        "compatible with the universal queue and drain the same jobs. " +
         "After the tasks are registered, relay the `expectations` lines to the user so they know the " +
         "cadence (a draft batch about every 5 minutes), that the jobs only draft and never post, and " +
         "that they approve each card themselves. " +
@@ -2619,7 +2621,7 @@ tool(
         `live edit on the next fire). The S4L menu-bar app relocates these tasks to ${workerFolder} ` +
         "automatically: it detects the wrong folder, asks the user once with a modal, then restarts Claude " +
         "once while it is down to apply the change (the only reliable way). So you do NOT need to set any " +
-        "folder here — just create the two tasks; the menu bar handles keeping their once-a-minute runs " +
+        "folder here — just create the task; the menu bar handles keeping its once-a-minute runs " +
         "out of the user's `claude --resume` history.",
     });
   }
@@ -2649,11 +2651,12 @@ tool(
 async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_on: boolean }> {
   let autopilot_on = false;
   try {
-    // Autopilot is "on" once BOTH queue-worker tasks that service the draft
-    // pipeline's queued `claude -p` calls have their SKILL.md on disk.
-    autopilot_on = QUEUE_WORKERS.every((spec) =>
-      fs.existsSync(scheduledTaskSkillPath(spec.taskId))
-    );
+    // Autopilot is "on" once a worker that services the pipeline's queued
+    // `claude -p` calls has its SKILL.md on disk: the universal saps-worker,
+    // or (legacy installs) both per-type workers.
+    autopilot_on =
+      QUEUE_WORKERS.every((spec) => fs.existsSync(scheduledTaskSkillPath(spec.taskId))) ||
+      LEGACY_QUEUE_WORKER_TASK_IDS.every((id) => fs.existsSync(scheduledTaskSkillPath(id)));
   } catch {
     /* leave false */
   }
@@ -2681,14 +2684,17 @@ async function autopilotLoaded(): Promise<{ autopilot_on: boolean; auto_update_o
 // fires every minute, claims ONE job, runs the pipeline's own prompt as its
 // Claude turn, writes the result back, and stops.
 // ===========================================================================
-const QUEUE_WORKER_PROMPT_VERSION = 6; // v6: the ~90s kill is a host INACTIVITY watchdog (resets on each tool call), not a fixed cap. The worker was drafting all candidates in ONE silent turn (its HARD RULES even forbade log_draft.py), starving the clock -> killed mid-draft. v6 requires incremental draft-then-log per candidate and allows the log_draft.py persist commands, so per-candidate tool calls keep the session alive and the full set drains.
+const QUEUE_WORKER_PROMPT_VERSION = 7; // v7: universal type-blind worker. ONE task claims `--type any`; per-type execution notes (e.g. the v6 incremental-draft pacing for twitter-prep) moved into claude_job.py TYPE_TO_WORKER_NOTES and ride the prompt sidecar, so the worker prompt never mentions job types. Legacy per-type tasks get this same body on refresh and become interchangeable universal workers.
 const QUEUE_WORKER_PROMPT_MARKER = "saps_queue_worker_prompt_version";
 
 // One spec per worker task. queueType MUST match scripts/claude_job.py TAG_TO_TYPE.
 const QUEUE_WORKERS: { taskId: string; queueType: string; human: string }[] = [
-  { taskId: PHASE1_TASK_ID, queueType: "twitter-query", human: "Phase 1 X search-query drafting" },
-  { taskId: PHASE2B_TASK_ID, queueType: "twitter-prep", human: "Phase 2b reply drafting" },
+  { taskId: WORKER_TASK_ID, queueType: "any", human: "universal queue" },
 ];
+// Pre-universal installs created these instead. Never created anymore; their
+// SKILL.md is refreshed to the universal body on boot (see
+// ensureQueueWorkerPromptsCurrent) so they keep draining every job type.
+const LEGACY_QUEUE_WORKER_TASK_IDS = [PHASE1_TASK_ID, PHASE2B_TASK_ID];
 
 function scheduledTaskSkillPath(taskId: string): string {
   const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
