@@ -47,16 +47,21 @@ esac
 
 [ -f "$EXT_DIR/manifest.json" ] || { echo "no .mcpb install at $EXT_DIR" >&2; exit 4; }
 
-# CHANNEL (2026-07-02): a box on the `staging` channel tracks the newest release
-# OVERALL (prereleases included), resolved from the releases LIST endpoint;
-# `stable` keeps the exact historical releases/latest behavior. This script is
-# often piped over SSH (`ssh box 'bash -s' < s4l_box_update.sh`) with no repo on
-# PATH, so channel + latest resolution is a self-contained python block reading
+# CHANNEL (2026-07-02, single-path 2026-07-04): ONE resolution path for both
+# channels — a single unauthenticated curl to the releases LIST endpoint.
+# `staging` picks the newest release overall (prereleases included); `stable`
+# picks the newest non-prerelease. There are NO fallbacks by design: no
+# fallback endpoint, no fallback channel, no fallback URL. Any failure prints
+# "unresolved" and the script aborts with nothing changed (the old fallback
+# chain quietly retargeted stable and DOWNGRADED a staging box from rc.9 to
+# 1.6.196 when the anonymous API lane was rate-limited on 2026-07-03). This
+# script is often piped over SSH (`ssh box 'bash -s' < s4l_box_update.sh`)
+# with no repo on PATH, so resolution is a self-contained python block reading
 # the same <state dir>/channel.json marker every other surface uses. It prints
 # four space-separated tokens: "<channel> <tag> <version> <mcpb_url>".
 STATE_DIR="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}"
 RESOLVED="$(S4L_STATE_DIR="$STATE_DIR" "$PY" - <<'PYEOF' 2>/dev/null || true
-import json, os, re, shutil, subprocess
+import json, os, re, subprocess
 
 state = os.environ.get("S4L_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".social-autoposter-mcp")
 try:
@@ -66,32 +71,16 @@ except Exception:
 channel = ch if ch in ("stable", "staging") else "stable"
 
 REPO = "m13v/s4l"
-LATEST_DL = "https://github.com/%s/releases/latest/download/social-autoposter.mcpb" % REPO
 TAG_DL = "https://github.com/%s/releases/download/%s/social-autoposter.mcpb"
 
-def _run(cmd):
+def curl(url):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["/usr/bin/curl", "-fsSL", "-m", "15",
+                            "-H", "Accept: application/vnd.github+json", url],
+                           capture_output=True, text=True, timeout=20)
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
-
-def fetch_api(path):
-    """GitHub API GET, two lanes: unauthenticated curl first (works on fresh
-    boxes with no gh), then `gh api` when installed (authenticated, immune to
-    the per-IP rate limit). The 60/hr anonymous limit 403'd the curl lane on
-    2026-07-03 and the old staging->stable fallback then DOWNGRADED an rc box
-    to 1.6.196; the gh lane makes that failure mode rare, and the fail-closed
-    handling below makes it harmless."""
-    out = _run(["/usr/bin/curl", "-fsSL", "-m", "15",
-                "-H", "Accept: application/vnd.github+json",
-                "https://api.github.com/" + path.lstrip("/")])
-    if out:
-        return out
-    gh = shutil.which("gh") or "/opt/homebrew/bin/gh"
-    if os.path.exists(gh):
-        return _run([gh, "api", path.lstrip("/")])
-    return ""
 
 def ver_key(v):
     s = str(v).strip().lstrip("v")
@@ -104,61 +93,42 @@ def ver_key(v):
     m = re.findall(r"\d+", pre)
     return (nums[0], nums[1], nums[2], 0, int(m[-1]) if m else 0)
 
-tag = ""
-if channel == "staging":
-    try:
-        rels = json.loads(fetch_api("repos/%s/releases?per_page=30" % REPO) or "[]")
-        best = None
-        for r in (rels if isinstance(rels, list) else []):
-            if not isinstance(r, dict) or r.get("draft"):
-                continue
-            t = r.get("tag_name")
-            if not isinstance(t, str) or not t.lstrip("v")[:1].isdigit():
-                continue
-            k = ver_key(t)
-            if best is None or k > best[0]:
-                best = (k, t)
-        if best:
-            tag = best[1]
-    except Exception:
-        tag = ""
-    if not tag:
-        # FAIL CLOSED. The old fallback ("list endpoint failed -> track
-        # stable") downgraded a staging box from 1.6.197-rc.9 to 1.6.196 when
-        # the anonymous API lane was rate-limited (2026-07-03). A staging box
-        # that cannot see the release list must NOT act; the caller retries
-        # later.
-        print("staging-unresolved")
-        raise SystemExit(0)
-else:
-    try:
-        tag = (json.loads(fetch_api("repos/%s/releases/latest" % REPO) or "{}") or {}).get("tag_name") or ""
-    except Exception:
-        tag = ""
-
-version = tag.lstrip("v")
-url = LATEST_DL if channel == "stable" else (TAG_DL % (REPO, tag))
-print("%s %s %s %s" % (channel, tag, version, url))
+try:
+    rels = json.loads(curl("https://api.github.com/repos/%s/releases?per_page=30" % REPO) or "[]")
+except Exception:
+    rels = []
+best = None
+for r in (rels if isinstance(rels, list) else []):
+    if not isinstance(r, dict) or r.get("draft"):
+        continue
+    if channel == "stable" and r.get("prerelease"):
+        continue
+    t = r.get("tag_name")
+    if not isinstance(t, str) or not t.lstrip("v")[:1].isdigit():
+        continue
+    k = ver_key(t)
+    if best is None or k > best[0]:
+        best = (k, t)
+if best is None:
+    print("unresolved")
+    raise SystemExit(0)
+tag = best[1]
+print("%s %s %s %s" % (channel, tag, tag.lstrip("v"), TAG_DL % (REPO, tag)))
 PYEOF
 )"
-CHANNEL="$(printf '%s' "$RESOLVED" | awk '{print $1}')"; [ -n "$CHANNEL" ] || CHANNEL="stable"
+CHANNEL="$(printf '%s' "$RESOLVED" | awk '{print $1}')"
 latest_tag="$(printf '%s' "$RESOLVED" | awk '{print $2}')"
 latest="$(printf '%s' "$RESOLVED" | awk '{print $3}')"
 MCPB_URL="$(printf '%s' "$RESOLVED" | awk '{print $4}')"
 
-# Fail-closed guards for the staging channel. Two failure shapes both used to
-# collapse into "quietly track stable", which DOWNGRADES an rc box (bit this
-# box on 2026-07-03: rc.9 -> 1.6.196 after an anonymous-API 403):
-#   1. the resolver ran but couldn't list releases -> "staging-unresolved"
-#   2. the resolver itself died (python missing, syntax, kill) -> RESOLVED=""
-# In both cases, if channel.json says staging, stop here instead of guessing.
-WANT_CHANNEL="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('channel',''))" "$STATE_DIR/channel.json" 2>/dev/null || true)"
-if [ "$CHANNEL" = "staging-unresolved" ] || { [ "$WANT_CHANNEL" = "staging" ] && [ "$CHANNEL" != "staging" ]; }; then
-  echo "staging channel: could not resolve the newest release (GitHub API unavailable or rate-limited)." >&2
-  echo "refusing to fall back to stable — that would downgrade this rc box. Retry later." >&2
+# Fail closed, both channels. Covers the resolver reporting "unresolved" AND
+# the resolver process dying outright (RESOLVED empty). Nothing is guessed,
+# nothing is downloaded, nothing changes.
+if [ -z "$RESOLVED" ] || [ "$CHANNEL" = "unresolved" ] || [ -z "$MCPB_URL" ]; then
+  echo "could not resolve the newest release from GitHub (network down or API rate-limited)." >&2
+  echo "no fallback by design; nothing changed. Retry later." >&2
   exit 5
 fi
-[ -n "$MCPB_URL" ] || MCPB_URL="https://github.com/m13v/s4l/releases/latest/download/social-autoposter.mcpb"
 
 installed="$("$PY" -c "import json,sys;print((json.load(open(sys.argv[1])) or {}).get('version',''))" "$EXT_DIR/manifest.json" 2>/dev/null || true)"
 echo "channel=$CHANNEL installed=$installed latest=$latest"
