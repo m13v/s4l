@@ -1,31 +1,34 @@
 /* Social Autoposter (S4L) control panel.
- * Black / white / grayscale only (matches the dashboard palette rule). The host
- * (Claude, etc.) injects its own CSS variables via applyHostStyleVariables; we
- * reference them with safe grayscale fallbacks so it looks native in any host. */
+ * Grayscale instrument-panel aesthetic: a flat editorial stack with hairline
+ * separators, small-caps section labels, and monospace data values. Black /
+ * white / gray ONLY (dashboard palette rule). The host (Claude, etc.) injects
+ * its own CSS variables via applyHostStyleVariables; we reference them with
+ * grayscale fallbacks so the panel looks native in any host. */
 
 :root {
   --bg: var(--background, #ffffff);
-  --fg: var(--foreground, #111111);
-  --muted: var(--muted-foreground, #6b6b6b);
-  --card: var(--card, #f5f5f5);
-  --border: var(--border, #e2e2e2);
+  --fg: var(--foreground, #141414);
+  --muted: var(--muted-foreground, #6f6f6f);
+  --faint: var(--muted-foreground, #9a9a9a);
+  --card: var(--card, #f6f6f6);
+  --border: var(--border, #e4e4e4);
+  --hairline: var(--border, #ececec);
   --btn-fg: var(--primary-foreground, #ffffff);
-  --btn-bg: var(--primary, #111111);
-  /* Buttons need a visibly stronger frame than card/separator borders, or a
-   * near-white fill on a white page reads as plain text, not a button. */
-  --btn-border: var(--border, #c4c4c4);
+  --btn-bg: var(--primary, #141414);
+  --mono: var(--font-mono, ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: var(--background, #1a1a1a);
-    --fg: var(--foreground, #f2f2f2);
-    --muted: var(--muted-foreground, #9a9a9a);
-    --card: var(--card, #262626);
+    --bg: var(--background, #191919);
+    --fg: var(--foreground, #f0f0f0);
+    --muted: var(--muted-foreground, #9c9c9c);
+    --faint: var(--muted-foreground, #6f6f6f);
+    --card: var(--card, #232323);
     --border: var(--border, #3a3a3a);
-    --btn-fg: var(--primary-foreground, #111111);
-    --btn-bg: var(--primary, #f2f2f2);
-    --btn-border: var(--border, #555555);
+    --hairline: var(--border, #2d2d2d);
+    --btn-fg: var(--primary-foreground, #141414);
+    --btn-bg: var(--primary, #f0f0f0);
   }
 }
 
@@ -37,114 +40,136 @@ html, body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 .wrap {
-  max-width: 640px;
+  max-width: 620px;
   margin: 0 auto;
-  padding: 14px;
+  padding: 18px 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
+
+/* Small-caps micro label — the one recurring typographic motif. */
+.section-label,
+.settings-field > label,
+.settings-group-title,
+.stat .l {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Data values (versions, counters, numbers) are monospace — instrument dials. */
+.ver, .setup-summary-count, .stat .n, .settings-project-state { font-family: var(--mono); }
 
 /* ---- header --------------------------------------------------------------- */
 .head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  padding-bottom: 14px;
 }
-.head-left { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
-.title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
-.ver { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
-/* The update indicator is an actionable button (black CTA), not just a label. */
+.head-left { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
+.title {
+  font-size: 19px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+.ver { font-size: 11px; color: var(--faint); display: inline-flex; align-items: center; gap: 8px; }
 .ver button.update-btn {
   padding: 3px 10px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
-  border-radius: 7px;
+  font-family: var(--font-sans, -apple-system, sans-serif);
+  border-radius: 999px;
   background: var(--btn-bg);
   color: var(--btn-fg);
   border: 1px solid var(--btn-bg);
 }
 
-/* Inline setup summary in the header: a compact "Setup N/7 ▾" dropdown that
- * expands the milestone details below. The count is hidden once complete, so a
- * finished setup reads as a quiet "Setup ▾" the user can still open on demand. */
+/* Inline setup summary in the header: a compact "Setup N/8 ▾" pill that expands
+ * the milestone details below. The count hides once setup completes. */
 .setup-summary {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   flex: none;
-  padding: 5px 10px;
-  font-size: 12px;
-  font-weight: 550;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--muted);
-  background: var(--bg);
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 999px;
 }
 .setup-summary[hidden] { display: none; }
 .setup-summary.complete { color: var(--fg); }
-.setup-summary-label { font-weight: 600; }
-.setup-summary-count { color: var(--muted); }
+.setup-summary-count { font-size: 11px; }
 .setup-summary-count[hidden] { display: none; }
-.setup-summary.blocked .setup-summary-count { color: var(--fg); font-weight: 600; }
+.setup-summary.blocked { border-color: var(--fg); color: var(--fg); }
+.setup-summary.blocked .setup-summary-count { font-weight: 700; }
 
-/* Grayscale expand/collapse caret (a UI affordance, not decoration). Points down
- * when collapsed, flips up when its control carries the .expanded class. */
+/* Grayscale expand/collapse caret (a UI affordance, not decoration). */
 .chevron {
   width: 0;
   height: 0;
   flex: none;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid currentColor;
-  transition: transform 0.15s ease;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4.5px solid currentColor;
+  opacity: 0.7;
+  transition: transform 0.16s ease;
 }
 .expanded .chevron { transform: rotate(180deg); }
 
-/* ---- buttons (one size + style everywhere) -------------------------------- */
+/* ---- buttons ---------------------------------------------------------------
+ * Two voices: primary (solid) for the single most important action, quiet
+ * (hairline outline) for everything else. */
 button {
   appearance: none;
-  border: 1px solid var(--btn-border);
-  background: var(--card);
+  border: 1px solid var(--border);
+  background: transparent;
   color: var(--fg);
   border-radius: 8px;
-  padding: 7px 12px;
-  font-size: 13px;
-  font-weight: 550;
-  line-height: 1.2;
+  padding: 6px 13px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1.3;
   white-space: nowrap;
   cursor: pointer;
-  transition: opacity 0.12s ease;
+  transition: border-color 0.12s ease, opacity 0.12s ease, background 0.12s ease;
 }
-button:hover:not(:disabled) { opacity: 0.82; }
-button:disabled { opacity: 0.45; cursor: default; }
-button.primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
-/* Secondary buttons still read as buttons: solid (page-bg) fill + visible border,
- * so they stand out both on the page and on top of cards. The CTA stays black. */
-button.ghost { background: var(--bg); }
+button:hover:not(:disabled) { border-color: var(--fg); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary {
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border-color: var(--btn-bg);
+}
+button.primary:hover:not(:disabled) { opacity: 0.85; }
+button.ghost { background: transparent; }
 button[hidden] { display: none; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions:not(:empty) { padding: 2px 0 6px; }
 
-/* ---- unified section card ------------------------------------------------- */
-/* Every body section (live browser, stats) is the same
- * card: a header row with a sentence-case label on the left and its control(s) on
- * the right, plus an optional body that reveals below. Same font, padding, and
- * border everywhere so they line up as one consistent stack. */
+/* ---- flat section stack ----------------------------------------------------
+ * Every body section is a band in one continuous column, separated by a single
+ * hairline — no nested boxes. Header row: small-caps label left, controls right. */
 .section {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-top: 1px solid var(--hairline);
+  padding: 13px 0 15px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .section[hidden] { display: none; }
 .section-row {
@@ -154,11 +179,11 @@ button[hidden] { display: none; }
   gap: 8px 12px;
   width: 100%;
   flex-wrap: wrap;
+  min-height: 24px;
 }
-.section-label { font-size: 13px; font-weight: 600; color: var(--fg); }
-.section-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-/* A whole row that is itself the expand control (stats). Strip the button chrome
- * so it reads as a plain row, not a nested button. */
+.section-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+/* A whole row that is itself the expand control (stats, settings). Strip button
+ * chrome so it reads as a plain row. */
 button.section-row-toggle {
   background: none;
   border: none;
@@ -168,185 +193,234 @@ button.section-row-toggle {
   color: inherit;
 }
 button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
+button.section-row-toggle:hover .section-label { color: var(--fg); }
 .section-row-toggle .chevron { color: var(--muted); }
 
-/* ---- stats grid (revealed under the stats section row) -------------------- */
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 8px; }
-.stats-grid[hidden] { display: none; }
-.stat {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-.stat .n { font-size: 17px; font-weight: 650; }
-.stat .l { font-size: 11px; color: var(--muted); margin-top: 1px; }
-
-/* ---- project settings (revealed under the settings section row) ----------- */
-.settings-body { display: flex; flex-direction: column; gap: 12px; }
-.settings-body[hidden] { display: none; }
-.settings-project {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
+/* ---- engagement lanes -------------------------------------------------------
+ * Two independent lanes, each a name + description row with a real switch,
+ * vertically centered — no floating text next to a mystery button. */
+.lane {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
-.settings-project-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.settings-project-name { font-size: 13px; font-weight: 650; }
+.lane + .lane { margin-top: 2px; }
+.lane-text { min-width: 0; }
+.lane-name { font-size: 13px; font-weight: 600; }
+.lane-desc { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.lane-note { font-size: 12px; color: var(--muted); }
+.lane-note:empty { display: none; }
+
+/* Grayscale switch: track = border tone off / fg on, knob slides. */
+button.switch {
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
+  background: var(--border);
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.18s ease;
+}
+button.switch:hover:not(:disabled) { border: none; }
+button.switch .knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transform: translateX(0);
+  transition: transform 0.18s ease;
+}
+button.switch[aria-checked="true"] { background: var(--fg); }
+button.switch[aria-checked="true"] .knob { transform: translateX(14px); }
+button.switch:disabled { opacity: 0.45; }
+
+/* ---- stats ------------------------------------------------------------------
+ * Dial row: big tabular numerals over micro labels, hairline-separated. */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 0;
+}
+.stats-grid[hidden] { display: none; }
+.stat { padding: 2px 14px 2px 0; }
+.stat + .stat { border-left: 1px solid var(--hairline); padding-left: 14px; }
+.stat .n { font-size: 20px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .l { margin-top: 2px; }
+
+/* ---- project settings -------------------------------------------------------
+ * A real form: project header band (name / persona chip / ready state), then
+ * labeled fields on a consistent rhythm. Object-valued fields (voice,
+ * guardrails) render as an indented sub-group with its own micro title. */
+.settings-body { display: flex; flex-direction: column; gap: 18px; }
+.settings-body[hidden] { display: none; }
+.settings-project { display: flex; flex-direction: column; gap: 12px; }
+.settings-project + .settings-project { border-top: 1px solid var(--hairline); padding-top: 16px; }
+.settings-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings-project-name { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
 .settings-project-tag {
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 2px 8px;
 }
 .settings-project-state { font-size: 11px; color: var(--muted); margin-left: auto; }
-.settings-field { display: flex; flex-direction: column; gap: 4px; }
-.settings-field > label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
+
+.settings-field { display: flex; flex-direction: column; gap: 5px; }
 .settings-input,
 .settings-textarea {
   width: 100%;
-  background: var(--bg);
+  background: var(--card);
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
   font: inherit;
   font-size: 12.5px;
-  line-height: 1.45;
+  line-height: 1.5;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
-.settings-input:focus,
-.settings-textarea:focus {
+.settings-input:hover, .settings-textarea:hover { border-color: var(--border); }
+.settings-input:focus, .settings-textarea:focus {
   outline: none;
   border-color: var(--fg);
+  background: var(--bg);
 }
-.settings-textarea { resize: vertical; min-height: 34px; }
-
-/* Object-valued field (voice, guardrails) rendered as a titled group of its own
- * labeled inputs — a real sub-form, not a raw JSON blob. */
-.settings-group {
-  margin: 0;
-  padding: 10px 12px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-inline-size: 0;
-}
-.settings-group > legend {
-  padding: 0 6px;
-  margin-left: -6px;
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--fg);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
+.settings-input::placeholder, .settings-textarea::placeholder { color: var(--faint); }
+.settings-textarea { resize: vertical; min-height: 36px; }
 .settings-textarea.mono {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-family: var(--mono);
+  font-size: 11.5px;
   white-space: pre;
   overflow-x: auto;
   tab-size: 2;
 }
-.settings-extra { font-size: 11px; color: var(--muted); }
-.settings-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.settings-status { font-size: 11px; color: var(--muted); }
+
+/* Object-valued field: indented sub-form under a micro title, marked by a
+ * hairline rule on the left instead of a boxy fieldset. */
+.settings-group {
+  margin: 2px 0 0;
+  padding: 2px 0 2px 14px;
+  border: none;
+  border-left: 2px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-inline-size: 0;
+}
+.settings-group > legend {
+  /* Rendered as the group's title INSIDE the flex flow (legend default styling
+   * breaks out of fieldsets; float pulls it back in). */
+  float: left;
+  width: 100%;
+  padding: 0;
+  margin: 0 0 2px;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+
+.settings-extra { font-size: 11.5px; color: var(--faint); }
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+.settings-status { font-size: 12px; color: var(--muted); }
 
 /* ---- live browser body ---------------------------------------------------- */
-.live-status { font-size: 11px; color: var(--muted); min-height: 14px; }
+.live-status { font-size: 12px; color: var(--muted); min-height: 0; }
+.live-status:empty { display: none; }
 .live-img {
   display: block;
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: #000;
 }
-/* `display:block` above would otherwise defeat the HTML `hidden` attribute,
-   leaving an empty <img> that renders a broken-image icon when there's no
-   frame. This higher-specificity rule keeps `hidden` working: no frame, no box. */
 .live-img[hidden] { display: none; }
 
-/* ---- first-run runtime installer ------------------------------------------ */
-.install {
+/* ---- first-run runtime installer / banner cards -----------------------------
+ * The only boxed surfaces: transient attention cards (installer, menubar-down),
+ * so they visibly interrupt the calm flat stack. */
+.install,
+.menubar-banner {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  padding: 14px;
+  margin-bottom: 12px;
 }
+.install { display: flex; flex-direction: column; gap: 10px; }
 .install[hidden] { display: none; }
-.install-head { font-size: 14px; font-weight: 650; }
+.install-head { font-size: 14px; font-weight: 700; }
 .install-desc { font-size: 12px; color: var(--muted); }
 .install-actions { display: flex; gap: 8px; }
 .install-err { font-size: 12px; color: var(--fg); font-weight: 600; white-space: pre-wrap; }
 .install-err[hidden] { display: none; }
 
-/* Menu-bar-down banner: same card shell as the installer, one primary action. */
 .menubar-banner {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 .menubar-banner[hidden] { display: none; }
-.menubar-banner-text { font-size: 13px; color: var(--fg); }
+.menubar-banner-text { font-size: 12.5px; }
 
-/* Shared step list (runtime installer + onboarding milestones). Status carried by
- * glyph + weight, never color. */
-.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Shared step list (runtime installer + onboarding milestones). Status carried
+ * by glyph + weight, never color. */
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .steps li {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  font-size: 13px;
+  gap: 9px;
+  font-size: 12.5px;
   color: var(--muted);
 }
 .steps li .glyph {
   width: 1.1em;
   flex: none;
   text-align: center;
-  font-weight: 650;
+  font-weight: 700;
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--fg);
 }
-.steps li.running { color: var(--fg); }
-.steps li.done { color: var(--fg); }
-.steps li.complete { color: var(--fg); }
-.steps li.in_progress { color: var(--fg); }
-.steps li.pending { opacity: 0.55; }
-.steps li.error { color: var(--fg); font-weight: 600; }
-.steps li.blocked { color: var(--fg); font-weight: 600; }
-.steps li .detail { font-size: 11px; color: var(--muted); }
+.steps li.running, .steps li.done, .steps li.complete, .steps li.in_progress { color: var(--fg); }
+.steps li.pending { opacity: 0.5; }
+.steps li.error, .steps li.blocked { color: var(--fg); font-weight: 600; }
+.steps li .detail { font-size: 11px; color: var(--muted); font-weight: 400; }
 
 /* ---- onboarding details (revealed from the header setup dropdown) --------- */
 .onboarding-details {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
+  border-top: 1px solid var(--hairline);
+  padding: 13px 0 15px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .onboarding-details[hidden] { display: none; }
-/* Thin grayscale progress bar: the track is the border tone, the fill is --fg. */
+/* Thin grayscale progress bar: track = hairline tone, fill = fg. */
 .onboarding-bar {
-  height: 4px;
+  height: 3px;
   border-radius: 999px;
   background: var(--border);
   overflow: hidden;
@@ -362,11 +436,11 @@ button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
 .onboarding-steps {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 12px;
+  gap: 7px 16px;
 }
 .onboarding-blocker {
-  border-top: 1px solid var(--border);
-  padding-top: 9px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 10px;
   color: var(--fg);
   font-size: 12px;
   font-weight: 600;
@@ -374,14 +448,16 @@ button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
 }
 .onboarding-blocker[hidden] { display: none; }
 
-@media (max-width: 520px) {
+@media (max-width: 480px) {
   .onboarding-steps { grid-template-columns: 1fr; }
+  .wrap { padding: 14px 14px 20px; }
 }
 
 .log {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--muted);
   min-height: 16px;
   white-space: pre-wrap;
+  padding-top: 8px;
 }
 .muted { color: var(--muted); }
