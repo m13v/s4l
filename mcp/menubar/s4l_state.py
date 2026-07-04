@@ -130,11 +130,6 @@ def runtime_ready() -> bool:
     return bool(py and os.path.exists(py))
 
 
-def version():
-    ep = read_json("panel-endpoint.json") or {}
-    return ep.get("version")
-
-
 def _launchctl_list() -> str:
     try:
         return subprocess.run(
@@ -152,7 +147,12 @@ def autopilot_loaded() -> bool:
     )
 
 
-# ---- loopback panel server (live, when Claude Desktop is running) ----------
+# ---- loopback MCP server (live, when an MCP instance is running) -----------
+# Used ONLY as a "can posting reach the MCP tool handlers?" gate (the approved-
+# drafts resume path). It is NOT a dashboard source: "Open dashboard" always
+# serves the menu bar's own dashboard_server (single path, per user 2026-07-03).
+# panel-endpoint.json is last-writer-wins across many short-lived MCP instances,
+# so treat reachability as best-effort.
 def _endpoint_url():
     ep = read_json("panel-endpoint.json")
     url = (ep or {}).get("url")
@@ -322,11 +322,6 @@ def stats_7d():
 # set_autopilot() (the launchd toggle) was removed: the autopilot is now the Claude
 # Desktop scheduled task `social-autoposter-autopilot`, managed in the Scheduled tab,
 # so the menu bar no longer toggles a launchd job (it mirrors the dashboard instead).
-
-
-def panel_url():
-    """The loopback dashboard url if reachable, else None."""
-    return _endpoint_url()
 
 
 # ---- Accessibility (TCC) permission ---------------------------------------
