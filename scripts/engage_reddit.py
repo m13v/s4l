@@ -53,6 +53,14 @@ from engagement_styles import (
     validate_or_register,
     pick_style_for_post,
 )
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section; empty string when absent.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the engage lane
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 
 def _acquire_browser_lease(timeout: int = 600, ttl: int = 90):
@@ -419,6 +427,7 @@ Your last {len(recent_replies)} replies (vary your style, don't repeat the same 
         )
 
     voice_block = ""
+    learned_prefs_block = ""
     project_name = reply.get("project_name")
     if project_name:
         project_cfg = next(
@@ -433,6 +442,10 @@ Your last {len(recent_replies)} replies (vary your style, don't repeat the same 
 
 Apply this voice when drafting: follow `tone`, never violate any item in `never`, mirror `examples` / `examples_good` when present.
 """
+        try:
+            learned_prefs_block = _learned_prefs_block(project_cfg)
+        except Exception:
+            learned_prefs_block = ""
 
     if reply['platform'] == "moltbook":
         framing = (
@@ -463,7 +476,7 @@ Apply this voice when drafting: follow `tone`, never violate any item in `never`
 
 ## Context
 Read ~/social-autoposter/config.json for project details and content_angle.
-{recent_context}{top_context}{voice_block}{history_block}{callout_block}
+{recent_context}{top_context}{voice_block}{learned_prefs_block}{history_block}{callout_block}
 ## Content rules
 {get_content_rules("reddit")}
 - Vary openings. Don't always start with credentials.
