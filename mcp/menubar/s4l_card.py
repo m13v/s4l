@@ -13,12 +13,13 @@ Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "reject_note": str|None, "interactions": [{"type": str, "ts": str}],
 "dwell_ms": int}
 
-Approving is ONE segmented control with a strength zone per approval level
-(Approve 👍 | 😄 | ❤️‍🔥): a single click on a zone approves at that strength
-and advances immediately. Two side-by-side approve buttons were tried first
-and read as clutter; click-again-to-escalate was tried next and its commit
-delay made every plain approve feel laggy while the escalation stayed
-undiscoverable (2026-07-03/04 feedback). Any zone past the first stamps
+Approving is ONE inline emoji row extending horizontally (👍 😄 ❤️‍🔥): a
+single click on an emoji approves at that strength and advances
+immediately. Two side-by-side approve buttons were tried first and read as
+clutter; click-again-to-escalate was tried next and its commit delay made
+every plain approve feel laggy while the escalation stayed undiscoverable;
+a segmented control was tried next and its bezel read as one squat
+multi-line button (2026-07-03/04 feedback). Any emoji past 👍 stamps
 loved=True: the user's "this one was a really good pick" signal, which the
 feedback digest treats as strong positive evidence (a plain approve is
 merely counter-evidence against avoid entries); the exact level rides along
@@ -126,12 +127,12 @@ REJECT_REASONS = (
 # Client-side cap on tracked interactions per card (server clips at 50 too).
 MAX_INTERACTIONS = 50
 
-# One-control approve: segment label + tooltip per approval level (segment
-# index + 1 = level). Level 1 = plain approve; 2+ = loved=True on the
-# decision, with the exact level shipped as an approve_level_N interaction
-# for the feedback digest.
-APPROVE_SEGMENTS = (
-    ("Approve 👍", "Approve"),
+# Inline approve row: emoji + tooltip per approval level (button tag =
+# level). Level 1 = plain approve; 2+ = loved=True on the decision, with the
+# exact level shipped as an approve_level_N interaction for the feedback
+# digest.
+APPROVE_EMOJIS = (
+    ("👍", "Approve"),
     ("😄", "Approve, really good pick"),
     ("❤️‍🔥", "Approve, best of the best"),
 )
@@ -551,32 +552,28 @@ class _ReviewController(NSObject):
         self._reason_field = None
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
-        # Buttons at the TOP, one line: the segmented Approve control at the
-        # left (one click on a zone = approve at that strength), Reject at
-        # the right. Overall feedback moved to the menu bar item.
-        approve = NSSegmentedControl.alloc().initWithFrame_(
-            NSMakeRect(M, H - 42, 190, 30)
+        # Buttons at the TOP, one line: "Approve" label then the inline emoji
+        # row extending horizontally at the left (one click on an emoji =
+        # approve at that strength), Reject at the right. Overall feedback
+        # moved to the menu bar item.
+        content.addSubview_(
+            _label(NSMakeRect(M, H - 38, 60, 20), "Approve", size=12, bold=True)
         )
-        approve.setSegmentCount_(len(APPROVE_SEGMENTS))
-        approve.setSegmentStyle_(NSSegmentStyleRounded)
-        # SelectOne, not Momentary: in momentary mode selectedSegment is only
-        # valid while the mouse is mid-track, which is fragile (and dead to
-        # programmatic/AX clicks — the QA driver on the box uses those). The
-        # sticky selection is never seen: the click advances the card, which
-        # rebuilds the control fresh.
-        approve.setTrackingMode_(NSSegmentSwitchTrackingSelectOne)
-        for i, (title, tip) in enumerate(APPROVE_SEGMENTS):
-            approve.setLabel_forSegment_(title, i)
-            # The word segment gets the leftover width; emoji zones stay
-            # compact but comfortably clickable.
-            approve.setWidth_forSegment_(96 if i == 0 else 42, i)
+        x = M + 62
+        for i, (emoji, tip) in enumerate(APPROVE_EMOJIS):
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 34, 30))
+            btn.setBordered_(False)  # inline: the emoji IS the button
+            btn.setTitle_(emoji)
+            btn.setFont_(NSFont.systemFontOfSize_(18))
+            btn.setTag_(i + 1)  # tag = approval level
+            btn.setTarget_(self)
+            btn.setAction_("approve:")
             try:
-                approve.setToolTip_forSegment_(tip, i)
+                btn.setToolTip_(tip)
             except Exception:
                 pass
-        approve.setTarget_(self)
-        approve.setAction_("approve:")
-        content.addSubview_(approve)
+            content.addSubview_(btn)
+            x += 38
 
         reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
