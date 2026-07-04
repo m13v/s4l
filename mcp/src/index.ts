@@ -2098,70 +2098,54 @@ tool(
 
     // Status / discovery mode: no project name supplied, or explicitly asked.
     if (args.status === true || !args.name) {
-      const projects = listManagedProjectStatus();
-      const rtReady = runtimeReady();
-      // On a bare .mcpb install the runtime step also materializes the pipeline
-      // source that xStatus shells into. Status must still work before that first
-      // install, otherwise the agent cannot discover that installation is the
-      // next milestone. Avoid probing Python until the owned runtime is ready.
-      const x = rtReady
-        ? await xStatus().catch(() => ({ connected: false, state: "status_unavailable" }) as any)
-        : ({ connected: false, state: "runtime_not_ready" } as any);
-      await ensureDoctorPhase(x.connected ? "full" : "pre_connect");
-      const ver = await versionStatus();
-      const configured = projects.some((p) => p.ready);
-      if (rtReady) completeOnboardingMilestone("runtime_ready");
-      if (x.connected) {
-        completeOnboardingMilestone("x_connected", { state: x.state || "connected" });
-      }
-      if (configured) {
-        completeOnboardingMilestone("project_ready", {
-          missing_count: 0,
-        });
-      }
-      // mode_chosen completes when the user explicitly picked a mode (mode.json
-      // exists) OR this is a legacy install already past setup (a ready product),
-      // so adding this step never regresses an already-onboarded box.
-      if (modeChosen() || configured) {
-        completeOnboardingMilestone("mode_chosen", {
-          source: modeChosen() ? "chosen" : "backfilled_legacy",
-        });
-      }
+      // ONE compute path: buildSnapshot -> scripts/snapshot.py, the same source
+      // the menu bar and browser dashboard read. This branch used to recompute
+      // projects/X/version inline (listManagedProjectStatus + xStatus), which
+      // excluded the persona project and carried no setup_complete — so the
+      // panel's refresh() disagreed with the dashboard tool and the menu bar on
+      // persona-only setups. Do not reintroduce a parallel compute here.
+      const snap = await buildSnapshot();
+      const projects: Array<{ name: string; ready: boolean; missing_required: string[] }> =
+        Array.isArray(snap.projects) ? snap.projects : [];
+      const rtReady = !!snap.runtime_ready;
+      const xConnected = !!snap.x_connected;
+      const configured = (snap.projects_ready || 0) > 0;
       return jsonContent({
         configured,
         projects,
         runtime_ready: rtReady,
-        x_connected: x.connected,
-        x_state: x.state,
-        x_handle: x.handle ?? null,
-        mcp_version: ver.installed,
-        latest_version: ver.latest,
-        update_available: ver.update_available,
-        mode: currentMode(),
-        flags: currentFlags(),
-        update_hint: ver.update_available
-          ? `A newer version (${ver.latest}) is available — you're on ${ver.installed}. ` +
+        x_connected: xConnected,
+        x_state: snap.x_state,
+        x_handle: snap.x_handle ?? null,
+        setup_complete: !!snap.setup_complete,
+        mcp_version: snap.version,
+        latest_version: snap.latest_version,
+        update_available: !!snap.update_available,
+        mode: snap.mode,
+        flags: snap.flags,
+        update_hint: snap.update_available
+          ? `A newer version (${snap.latest_version}) is available — you're on ${snap.version}. ` +
             `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
             `(or \`npx social-autoposter@latest update\`).`
           : undefined,
         required_fields: REQUIRED_FIELDS,
         recommended_fields: RECOMMENDED_FIELDS,
         config_path: configPath(),
-        ready_for_verification: rtReady && configured && x.connected,
-        onboarding: onboardingSnapshot(),
+        ready_for_verification: !!snap.setup_complete,
+        onboarding: snap.onboarding,
         next_step:
           !rtReady
             ? "Runtime is not ready yet. It provisions automatically on boot — poll runtime action:'status' until ready (only call runtime action:'install' to retry if status shows the boot provision failed or stalled), then continue setup automatically."
             : projects.length === 0
             ? "No projects yet. Discover the product from conversation context and the connected X profile; research its website, infer a conservative complete project, and call project_config. Ask only if no product can be identified." +
-              (x.connected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
+              (xConnected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
-              ? (x.connected
+              ? (xConnected
                   ? "All configured projects are ready and X is connected. SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
-                (x.connected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
+                (xConnected ? "" : " X is also not connected yet; detect sources and run connect_x with confirm:true."),
       });
     }
 
@@ -3773,6 +3757,22 @@ async function buildSnapshot() {
   if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
   if ((snap.projects_ready || 0) > 0) completeOnboardingMilestone("project_ready", { missing_count: 0 });
   if (snap.schedule_state === "ok") completeOnboardingMilestone("tasks_scheduled");
+  // mode_chosen completes when the user explicitly picked a mode (mode.json
+  // exists) OR this is a legacy install already past setup (a ready project),
+  // so adding this step never regresses an already-onboarded box. (Moved here
+  // from project_config's status branch so ALL milestone truth lives in one
+  // place next to the snapshot.)
+  if (modeChosen() || (snap.projects_ready || 0) > 0) {
+    completeOnboardingMilestone("mode_chosen", {
+      source: modeChosen() ? "chosen" : "backfilled_legacy",
+    });
+  }
+  // profile_scanned has no file signal of its own, but a provisioned persona
+  // project can only come from the scan+dictation flow — treat its presence as
+  // the completed scan so old installs can't stick at "profile pending".
+  if ((Array.isArray(snap.projects) ? snap.projects : []).some((p: any) => p?.persona)) {
+    completeOnboardingMilestone("profile_scanned", { backfill: true });
+  }
   // topics_seeded has no cheap live signal (it's a DB fact, not a file fact), so
   // installs that finished setup before the persona-path completion landed stay
   // stuck at 7/8 forever. Heal by re-running the idempotent seed for the ready
