@@ -1506,19 +1506,20 @@ class S4LMenuBar(rumps.App):
             pass
 
     def _open_dashboard(self, _=None):
-        # Prefer the LIVE MCP loopback panel (full interactivity — its buttons
-        # reach the MCP tool handlers) when Claude is up. When it's NOT, fall back
-        # to the always-on menu-bar dashboard server, which serves the SAME
-        # panel.html and answers read tools from scripts/snapshot.py — so "Open
-        # dashboard" renders the status view even with Claude closed (actions there
-        # degrade to "open Claude", except the local mode toggle).
-        url = st.panel_url() if st.loopback_reachable() else None
-        if not url:
-            try:
-                import dashboard_server  # mcp/menubar/dashboard_server.py
-                url = dashboard_server.url() or dashboard_server.start()
-            except Exception:
-                url = None
+        # ONE serving path (2026-07-03, per user): always the menu-bar dashboard
+        # server. It serves panel.html and answers reads from scripts/snapshot.py,
+        # so it works identically whether Claude is up or not. The old "prefer the
+        # live MCP loopback" heuristic is gone on purpose: panel-endpoint.json is
+        # last-writer-wins across MANY short-lived MCP instances (Claude Code
+        # sessions, queue workers), so it usually pointed at a dead server and the
+        # dashboard flapped between two paths. Agent actions on this page hand off
+        # to Claude (isError -> "open Claude"); do NOT reintroduce the loopback
+        # preference or any second dashboard path.
+        try:
+            import dashboard_server  # mcp/menubar/dashboard_server.py
+            url = dashboard_server.url() or dashboard_server.start()
+        except Exception:
+            url = None
         if url:
             subprocess.run(["open", url], capture_output=True)
         else:
@@ -2319,7 +2320,10 @@ class S4LMenuBar(rumps.App):
         self.menu.clear()
         items = []
 
-        ver = snap.get("version") or st.version()
+        # Version comes from the snapshot ONLY (snapshot.py reads the installed
+        # manifest). The old st.version() fallback read panel-endpoint.json — a
+        # second, often-stale source written by whichever MCP instance booted last.
+        ver = snap.get("version")
         header = rumps.MenuItem(f"S4L · v{ver}" if ver else "S4L")
         header.set_callback(None)  # non-clickable label
         items.append(header)
