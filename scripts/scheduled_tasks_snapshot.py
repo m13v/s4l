@@ -27,7 +27,15 @@ import os
 import sys
 
 # --- Kept in sync with mcp/menubar/s4l_menubar.py ---------------------------
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# Current installs run ONE universal worker task (s4l-worker). The phase pair
+# is the retired legacy shape kept only so old installs still report. Checking
+# ONLY the legacy names made every current install scream
+# missing_worker_tasks=[saps-phase1-query, saps-phase2b-draft] forever while
+# the real s4l-worker task fired every minute and wasn't even LISTED (Karol,
+# 2026-07-03 — this false alarm derailed the whole onboarding investigation).
+WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
+CURRENT_WORKER_TASK_IDS = ("s4l-worker", "saps-worker")
+LEGACY_WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 DEPRECATED_TASK_IDS = ("social-autoposter-autopilot",)
 WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
 # "Claude*": the host app can run with a custom --user-data-dir (per-account
@@ -88,11 +96,17 @@ def build_summary() -> dict:
             })
 
     mislocated = sum(1 for t in tasks if not t["in_worker_dir"])
+    # "Missing" means NO viable worker lane at all: neither a current universal
+    # task nor the complete legacy pair. Naming every absent id was wrong once
+    # the id set spanned generations (a healthy current install always "misses"
+    # the legacy pair and vice versa).
+    have_current = bool(seen_ids & set(CURRENT_WORKER_TASK_IDS))
+    have_legacy = set(LEGACY_WORKER_TASK_IDS) <= seen_ids
     return {
         "worker_dir_tail": _cwd_tail(WORKER_CWD),
         "registries": registries,
         "worker_tasks": len(tasks),
-        "missing_worker_tasks": sorted(set(WORKER_TASK_IDS) - seen_ids),
+        "missing_worker_tasks": [] if (have_current or have_legacy) else ["s4l-worker"],
         "mislocated": mislocated,
         # all_in_worker_dir is False when there are zero worker tasks too, since
         # "no autopilot registered" is itself a state worth seeing centrally.
