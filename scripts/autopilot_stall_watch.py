@@ -57,7 +57,9 @@ RUNNING_STALL_SECONDS = 900
 # At StartInterval 120 that is ~6 min of continuous stall.
 ALERT_AFTER = 3
 
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# Includes the current universal worker id; legacy phase pair kept for old
+# installs (same stale-checker drift fix as scheduled_tasks_snapshot.py, 2026-07-03).
+WORKER_TASK_IDS = ("s4l-worker", "saps-worker", "saps-phase1-query", "saps-phase2b-draft")
 
 
 def _state_dir() -> str:
