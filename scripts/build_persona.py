@@ -98,7 +98,7 @@ GROUNDING_INSTRUCTIONS = (
     "corpus as one plain-text block: the persona's actual posts, replies, repo "
     "descriptions, site copy, verbatim. This is NOT synthesized. It becomes the "
     "grounding pool the drafter quotes real specifics from, so keep it dense and "
-    "first-hand. Trim only obvious noise; do NOT paraphrase. Cap ~8000 chars.\n"
+    "first-hand. Trim only obvious noise; do NOT paraphrase. Cap ~100000 chars.\n"
     + PUBLIC_ONLY_NOTE
     + "\nThen write the fields to /tmp/persona.json and run "
     "`build_persona.py apply --from /tmp/persona.json`, or hand them to the "
@@ -346,7 +346,7 @@ def cmd_apply(args) -> int:
     if isinstance(corpus, str) and corpus.strip():
         corpus_path = cfg_path.parent / "persona_corpus.txt"
         try:
-            corpus_path.write_text(corpus.strip()[:8000] + "\n")
+            corpus_path.write_text(corpus.strip()[:100000] + "\n")
             corpus_written = str(corpus_path)
             changed.append("content_corpus")
         except Exception as e:
