@@ -700,7 +700,7 @@ const FIELD_LABELS: Record<string, string> = {
   icp: "Target audience",
   voice: "Voice",
   differentiator: "Differentiator",
-  search_topics: "Search topics (one per line)",
+  search_topics: "Search topics",
   get_started_link: "Get-started link",
   content_guardrails: "Content guardrails",
   content_angle: "Content angle",
@@ -714,16 +714,55 @@ const NAMED_PROPS = new Set<string>([
 const SINGLE_LINE = new Set<string>(["website", "get_started_link"]);
 
 type EditorKind = "text" | "list" | "json";
-interface FieldEditor { key: string; kind: EditorKind; el: HTMLInputElement | HTMLTextAreaElement; orig: string }
+// `sub` set = this editor is one key of an object-valued field (e.g. voice.tone),
+// edited as its own labeled input and reassembled into the object on save.
+interface FieldEditor { key: string; sub?: string; kind: EditorKind; el: HTMLInputElement | HTMLTextAreaElement; orig: string }
 
-function editorSeed(key: string, v: unknown): { kind: EditorKind; text: string } {
-  if (key === "search_topics") {
-    return { kind: "list", text: Array.isArray(v) ? v.map(String).join("\n") : String(v ?? "") };
+function humanizeKey(k: string): string {
+  const s = k.replace(/[_-]+/g, " ").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : k;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+// How a single value is edited: string -> plain text, string[] -> one per line,
+// anything still structured (nested object, mixed array) -> JSON as last resort.
+function seedFor(v: unknown): { kind: EditorKind; text: string } {
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+    return { kind: "list", text: v.join("\n") };
   }
   if (v == null || typeof v === "string") return { kind: "text", text: String(v ?? "") };
-  // Structured value (e.g. the persona's voice object): edit as pretty JSON and
-  // send the parsed value back through the `fields` escape hatch.
   return { kind: "json", text: JSON.stringify(v, null, 2) };
+}
+
+function makeField(
+  labelText: string,
+  seed: { kind: EditorKind; text: string },
+  singleLine: boolean
+): { wrap: HTMLElement; el: HTMLInputElement | HTMLTextAreaElement } {
+  const wrap = document.createElement("div");
+  wrap.className = "settings-field";
+  const label = document.createElement("label");
+  label.textContent = labelText + (seed.kind === "list" ? " (one per line)" : "");
+  wrap.appendChild(label);
+  let el: HTMLInputElement | HTMLTextAreaElement;
+  if (seed.kind === "text" && singleLine) {
+    el = document.createElement("input");
+    el.type = "text";
+    el.className = "settings-input";
+  } else {
+    const ta = document.createElement("textarea");
+    const lines = seed.text ? seed.text.split("\n").length : 1;
+    ta.rows = Math.min(8, Math.max(2, lines));
+    ta.className = "settings-textarea" + (seed.kind === "json" ? " mono" : "");
+    el = ta;
+  }
+  el.value = seed.text;
+  el.dataset.orig = seed.text; // mirror of FieldEditor.orig, readable across renders
+  wrap.appendChild(el);
+  return { wrap, el };
 }
 
 function buildProjectEditor(p: ProjectSettings): HTMLElement {
@@ -753,29 +792,31 @@ function buildProjectEditor(p: ProjectSettings): HTMLElement {
   const editors: FieldEditor[] = [];
   const keys = p.persona ? PERSONA_FIELDS : PRODUCT_FIELDS;
   for (const key of keys) {
-    const seed = editorSeed(key, p.fields[key]);
-    const wrap = document.createElement("div");
-    wrap.className = "settings-field";
-    const label = document.createElement("label");
-    label.textContent = FIELD_LABELS[key] || key;
-    wrap.appendChild(label);
-    let el: HTMLInputElement | HTMLTextAreaElement;
-    if (seed.kind === "text" && SINGLE_LINE.has(key)) {
-      el = document.createElement("input");
-      el.type = "text";
-      el.className = "settings-input";
-    } else {
-      const ta = document.createElement("textarea");
-      const lines = seed.text ? seed.text.split("\n").length : 1;
-      ta.rows = Math.min(8, Math.max(2, lines));
-      ta.className = "settings-textarea" + (seed.kind === "json" ? " mono" : "");
-      el = ta;
+    const v = p.fields[key];
+    // Object-valued field (persona voice, structured guardrails): render each key
+    // as its own labeled input inside a titled group instead of one JSON blob.
+    if (isPlainObject(v) && Object.keys(v).length) {
+      const group = document.createElement("fieldset");
+      group.className = "settings-group";
+      const legend = document.createElement("legend");
+      legend.textContent = FIELD_LABELS[key] || humanizeKey(key);
+      group.appendChild(legend);
+      for (const [sub, subVal] of Object.entries(v)) {
+        const seed = seedFor(subVal);
+        const f = makeField(humanizeKey(sub), seed, false);
+        group.appendChild(f.wrap);
+        editors.push({ key, sub, kind: seed.kind, el: f.el, orig: seed.text });
+      }
+      box.appendChild(group);
+      continue;
     }
-    el.value = seed.text;
-    el.dataset.orig = seed.text; // mirror of FieldEditor.orig, readable across renders
-    wrap.appendChild(el);
-    box.appendChild(wrap);
-    editors.push({ key, kind: seed.kind, el, orig: seed.text });
+    const seed =
+      key === "search_topics"
+        ? { kind: "list" as EditorKind, text: Array.isArray(v) ? v.map(String).join("\n") : String(v ?? "") }
+        : seedFor(v);
+    const f = makeField(FIELD_LABELS[key] || humanizeKey(key), seed, SINGLE_LINE.has(key));
+    box.appendChild(f.wrap);
+    editors.push({ key, kind: seed.kind, el: f.el, orig: seed.text });
   }
 
   if (p.extra_keys.length) {
@@ -816,17 +857,52 @@ async function saveProjectSettings(
   if (!dirty.length) return;
   const args: Record<string, unknown> = { name: p.name };
   const extra: Record<string, unknown> = {};
-  for (const e of dirty) {
+
+  const fieldLabel = (e: FieldEditor) =>
+    (FIELD_LABELS[e.key] || humanizeKey(e.key)) + (e.sub ? ` · ${humanizeKey(e.sub)}` : "");
+
+  // Object-valued fields edited as groups: if ANY sub-field changed, rebuild the
+  // whole object from all its sub-editors (unchanged keys keep their value) and
+  // send it through the `fields` escape hatch, same as the old JSON editor did.
+  const dirtyGroupKeys = [...new Set(dirty.filter((e) => e.sub !== undefined).map((e) => e.key))];
+  for (const key of dirtyGroupKeys) {
+    const base: Record<string, unknown> = isPlainObject(p.fields[key])
+      ? { ...(p.fields[key] as Record<string, unknown>) }
+      : {};
+    for (const e of editors.filter((x) => x.key === key && x.sub !== undefined)) {
+      const raw = e.el.value;
+      if (e.kind === "list") {
+        const items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (items.length) base[e.sub!] = items;
+        else delete base[e.sub!]; // cleared -> drop the sub-key
+      } else if (e.kind === "json") {
+        try {
+          base[e.sub!] = JSON.parse(raw);
+        } catch {
+          status.textContent = `${fieldLabel(e)}: invalid JSON, nothing saved.`;
+          return;
+        }
+      } else if (!raw.trim()) {
+        delete base[e.sub!]; // cleared -> drop the sub-key
+      } else {
+        base[e.sub!] = raw;
+      }
+    }
+    extra[key] = Object.keys(base).length ? base : null;
+  }
+
+  for (const e of dirty.filter((x) => x.sub === undefined)) {
     const raw = e.el.value;
     if (e.kind === "list") {
       const items = raw.split("\n").map((s) => s.trim()).filter(Boolean);
-      if (items.length) args[e.key] = items;
-      else extra[e.key] = null; // cleared -> delete the key
+      if (!items.length) extra[e.key] = null; // cleared -> delete the key
+      else if (NAMED_PROPS.has(e.key)) args[e.key] = items;
+      else extra[e.key] = items;
     } else if (e.kind === "json") {
       try {
         extra[e.key] = JSON.parse(raw);
       } catch {
-        status.textContent = `${FIELD_LABELS[e.key] || e.key}: invalid JSON, nothing saved.`;
+        status.textContent = `${fieldLabel(e)}: invalid JSON, nothing saved.`;
         return;
       }
     } else if (!raw.trim()) {
@@ -880,8 +956,21 @@ async function loadSettings() {
   }
   try {
     const res = await call("project_config", { action: "get" });
-    const projects: ProjectSettings[] = Array.isArray(res?.projects) ? res.projects : [];
+    const projects: ProjectSettings[] | null = Array.isArray(res?.projects) ? res.projects : null;
     settingsBody.textContent = "";
+    if (!projects) {
+      // No `projects` array = the call errored (e.g. the menu-bar fallback server
+      // can't serve this action). Show THAT message — reporting "no projects
+      // configured" here reads as "setup is broken" when it isn't.
+      const err = document.createElement("div");
+      err.className = "muted";
+      err.textContent =
+        typeof res?._raw === "string" && res._raw
+          ? res._raw
+          : "Couldn’t load settings.";
+      settingsBody.appendChild(err);
+      return;
+    }
     if (!projects.length) {
       settingsBody.innerHTML = `<div class="muted">No projects configured yet — run Set up first.</div>`;
       return;
