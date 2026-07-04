@@ -1221,6 +1221,12 @@ $STYLES_BLOCK
      (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
+   The learned_preferences block in the Project config above (when present) is
+   distilled human review feedback and is MANDATORY, not advisory: follow every
+   learned_preferences.draft_style_notes entry when writing (it overrides the
+   engagement style's structural template on conflict), and treat
+   learned_preferences.audience_avoid / thread_avoid matches as strong reasons
+   to skip. Never violate content_guardrails.do_not.
    NEVER use em dashes.
 
 2a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
@@ -1404,6 +1410,12 @@ $STYLES_BLOCK
      (OMIT --new-style entirely in USE mode.)
    Apply the project's voice block (voice.tone, never violate voice.never,
    mirror voice.examples if present). Reply in $PA_LANG.
+   The learned_preferences block in the Project config above (when present) is
+   distilled human review feedback and is MANDATORY, not advisory: follow every
+   learned_preferences.draft_style_notes entry when writing (it overrides the
+   engagement style's structural template on conflict), and treat
+   learned_preferences.audience_avoid / thread_avoid matches as strong reasons
+   to skip. Never violate content_guardrails.do_not.
    NEVER use em dashes.
 
 3a. LINK TAIL (A/B-gated, decided by the wrapper). The decision for THIS run is:
