@@ -135,6 +135,14 @@ from audience_pages import (
     prompt_block as _audience_prompt_block,
     classify_url_as_audience_page as _audience_classify_url,
 )
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section; empty string when absent.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the poster
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 SCRIPTS = os.path.join(REPO_DIR, "scripts")
@@ -523,6 +531,7 @@ shown is the search_topic that surfaced the issue, echo it back verbatim in
 {recent_ctx}{top_ctx}{top_topics_ctx}
 {get_styles_prompt("github", context="posting", assignment=style_assignment)}
 
+{_learned_prefs_block(project)}
 ## Targeting
 - Best topics: Agents, Accessibility, Voice/ASR, Tool Use. Prioritize when present.
 - Exclusions are already filtered, but for reference:
