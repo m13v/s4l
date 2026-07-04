@@ -135,7 +135,7 @@ html, body {
 button {
   appearance: none;
   border: 1px solid var(--border);
-  background: transparent;
+  background: var(--card);
   color: var(--fg);
   border-radius: 8px;
   padding: 6px 13px;
@@ -231,7 +231,8 @@ button.switch .knob {
   height: 16px;
   border-radius: 50%;
   background: var(--bg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  /* The outline ring keeps the knob visible on the light OFF track. */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.14);
   transform: translateX(0);
   transition: transform 0.18s ease;
 }
