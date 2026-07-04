@@ -966,112 +966,80 @@ class _ReviewController(NSObject):
 
     # ObjC selectors (trailing underscore -> "approve:" etc.)
     def approve_(self, sender):
-        self._record(True)
-        self._fire_decision()
-        self._advance()
-
-    def approveLoved_(self, sender):
-        _log("approved with love")
-        self._record(True, loved=True)
-        self._fire_decision()
-        self._advance()
-
-    def feedbackOpen_(self, sender):
-        # Overall feedback is orthogonal to the card decision: swap the card
-        # body for the composer (same pattern as the reject reason picker),
-        # preserving any in-progress reply edit for Back. In THIS window on
-        # purpose: a separate floating panel opened somewhere the user never
-        # saw on a multi-monitor setup.
-        self._track("feedback_open")
-        self._pending_reply_text = self._current_text()
-        self._render_feedback()
-
-    @objc.python_method
-    def _render_feedback(self):
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-        content.addSubview_(
-            _label(NSMakeRect(M, H - 46, W - 2 * M, 20), "Overall feedback", size=13, bold=True)
-        )
-        content.addSubview_(
-            _label(
-                NSMakeRect(M, H - 80, W - 2 * M, 32),
-                "Standing guidance for the drafting loop (thread choice, tone, "
-                "audience), not about this draft.",
-                size=11,
-                muted=True,
-            )
-        )
-        scroll, tv = _editable_scroll(NSMakeRect(M, 54, W - 2 * M, H - 86 - 54))
-        content.addSubview_(scroll)
-        self._feedback_tv = tv
-
-        back = NSButton.alloc().initWithFrame_(NSMakeRect(M, 14, 90, 30))
-        back.setTitle_("Back")
-        back.setBezelStyle_(NSBezelStyleRounded)
-        back.setTarget_(self)
-        back.setAction_("cardFeedbackBack:")
-        content.addSubview_(back)
-
-        send = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 90, 14, 90, 30))
-        send.setTitle_("Send")
-        send.setBezelStyle_(NSBezelStyleRounded)
-        send.setTarget_(self)
-        send.setAction_("cardFeedbackSend:")
-        content.addSubview_(send)
-
-        self._textview = None
-        self._panel.setContentView_(content)
-        self._panel.makeFirstResponder_(tv)
-        _log("in-card feedback composer shown")
-
-    @objc.python_method
-    def _restore_card(self):
-        # Re-render the card and restore any reply edit made before the swap
-        # (same mechanism as rejectBack_).
-        pending = getattr(self, "_pending_reply_text", None)
-        self._feedback_tv = None
-        self._render()
-        if pending is not None and self._textview is not None:
-            try:
-                self._textview.setString_(pending)
-            except Exception:
-                pass
-
-    def cardFeedbackSend_(self, sender):
-        text = ""
+        # One button, click-to-escalate: every click bumps the armed level
+        # (capped) and restarts the commit window. Each scheduled commit
+        # carries the level it was armed with; only the one still matching
+        # self._approve_level when it fires actually commits, so extra
+        # clicks, reject, advance, and close all void in-flight commits by
+        # changing/zeroing the level.
+        if self._approve_level < APPROVE_MAX_LEVEL:
+            self._approve_level += 1
+        level = self._approve_level
         try:
-            text = str(self._feedback_tv.string()).strip()
+            self._approve_btn.setTitle_(APPROVE_TITLES[level])
         except Exception:
             pass
-        if not text:
-            _log("in-card feedback sent empty; dropped")
-        else:
-            _log(f"in-card feedback submitted ({len(text)} chars)")
-            if _feedback_handler is not None:
-                try:
-                    _feedback_handler(text)
-                except Exception:
-                    pass
-        self._restore_card()
+        _log(f"approve armed at level {level}")
+        self.performSelector_withObject_afterDelay_(
+            "commitApprove:", level, APPROVE_COMMIT_DELAY
+        )
 
-    def cardFeedbackBack_(self, sender):
-        _log("in-card feedback cancelled")
-        self._restore_card()
+    @objc.python_method
+    def _commit_approve(self, level):
+        """Record the armed approve. Level 2+ is the loved signal; the exact
+        strength rides along as an approve_level_N interaction."""
+        if level > 1:
+            self._track(f"approve_level_{level}")
+        self._record(True, loved=level > 1)
+        self._fire_decision()
+
+    def commitApprove_(self, armed):
+        try:
+            armed = int(armed)
+        except Exception:
+            return
+        if armed == 0 or armed != self._approve_level:
+            return  # stale: escalated further, rejected, advanced, or closed
+        self._approve_level = 0
+        self._commit_approve(armed)
+        self._advance()
 
     def reject_(self, sender):
         # Two-step reject: swap the card body for the reason picker. The
-        # decision is recorded when a reason chip (or Skip) is clicked. Any
-        # in-progress edit of the reply is preserved for Back.
+        # decision is recorded when a reason chip (or the no-reason button)
+        # is clicked. Any in-progress edit of the reply is preserved for
+        # Back. Voids an armed-but-uncommitted approve (last click wins).
+        self._approve_level = 0
         self._pending_reply_text = self._current_text()
         self._render_reason()
 
     @objc.python_method
     def _render_reason(self):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+
+        # Buttons at the TOP, above the title, mirroring the card's action
+        # row so the cursor doesn't have to travel between steps: "Reject,
+        # no reason" sits right-aligned exactly where Reject was (one-click
+        # double-tap keeps the old zero-friction reject), Back sits at the
+        # left where Approve was.
+        back = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 90, 30))
+        back.setTitle_("Back")
+        back.setBezelStyle_(NSBezelStyleRounded)
+        back.setTarget_(self)
+        back.setAction_("rejectBack:")
+        content.addSubview_(back)
+
+        skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 150, H - 42, 150, 30))
+        skip.setTitle_("Reject, no reason")
+        skip.setBezelStyle_(NSBezelStyleRounded)
+        skip.setTarget_(self)
+        skip.setAction_("rejectSkip:")
+        content.addSubview_(skip)
+
         content.addSubview_(
-            _label(NSMakeRect(M, H - 46, W - 2 * M, 20), "Why reject this draft?", size=13, bold=True)
+            _label(NSMakeRect(M, H - 72, W - 2 * M, 20), "Why reject this draft?", size=13, bold=True)
         )
-        y = H - 82
+        y = H - 106
         for i, (_, title) in enumerate(REJECT_REASONS):
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(M, y, W - 2 * M, 28))
             btn.setTitle_(title)
@@ -1081,7 +1049,7 @@ class _ReviewController(NSObject):
             btn.setAction_("rejectReason:")
             content.addSubview_(btn)
             y -= 32
-        note = NSTextField.alloc().initWithFrame_(NSMakeRect(M, 56, W - 2 * M, 48))
+        note = NSTextField.alloc().initWithFrame_(NSMakeRect(M, 14, W - 2 * M, y + 28 - 14 - 8))
         note.setEditable_(True)
         note.setBezeled_(True)
         note.setFont_(NSFont.systemFontOfSize_(12))
@@ -1092,20 +1060,6 @@ class _ReviewController(NSObject):
             pass
         content.addSubview_(note)
         self._reason_field = note
-
-        back = NSButton.alloc().initWithFrame_(NSMakeRect(M, 14, 90, 30))
-        back.setTitle_("Back")
-        back.setBezelStyle_(NSBezelStyleRounded)
-        back.setTarget_(self)
-        back.setAction_("rejectBack:")
-        content.addSubview_(back)
-
-        skip = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 150, 14, 150, 30))
-        skip.setTitle_("Reject (no reason)")
-        skip.setBezelStyle_(NSBezelStyleRounded)
-        skip.setTarget_(self)
-        skip.setAction_("rejectSkip:")
-        content.addSubview_(skip)
 
         self._textview = None
         self._panel.setContentView_(content)
@@ -1146,7 +1100,13 @@ class _ReviewController(NSObject):
 
     def windowShouldClose_(self, sender):
         # Closing the window stops review; remaining cards are left undecided
-        # (not posted). Finish with whatever was decided so far.
+        # (not posted). An approve armed within the last commit window is
+        # committed first — the user DID click Approve; losing it to a fast
+        # close would silently drop a decision. Finish with whatever was
+        # decided so far.
+        if self._approve_level:
+            level, self._approve_level = self._approve_level, 0
+            self._commit_approve(level)
         self._finish()
         return True
 
@@ -1259,11 +1219,11 @@ def heal_active():
 # ---- overall-feedback composer ----------------------------------------------
 # One small floating panel with a free-text field, for guidance that is about
 # the PIPELINE rather than any single draft ("less shilling", "more dev
-# threads", ...). Reachable from the card's Feedback button and the menu bar's
-# "Send feedback…" item; both call present_feedback(), which falls back to the
-# handler the menu bar registered at boot via set_feedback_handler() (that
-# handler ships a decision='feedback' review event down the same outbox rail
-# as card decisions, so the digest processes it the same way).
+# threads", ...). Reachable ONLY from the menu bar's feedback item, which
+# calls present_feedback(); that falls back to the handler the menu bar
+# registered at boot via set_feedback_handler() (the handler ships a
+# decision='feedback' review event down the same outbox rail as card
+# decisions, so the digest processes it the same way).
 
 FB_W = 380
 FB_H = 200
