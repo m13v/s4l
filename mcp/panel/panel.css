@@ -204,21 +204,54 @@ button.section-row-toggle:hover:not(:disabled) { opacity: 1; }
   padding: 1px 8px;
 }
 .settings-project-state { font-size: 11px; color: var(--muted); margin-left: auto; }
-.settings-field { display: flex; flex-direction: column; gap: 3px; }
-.settings-field > label { font-size: 11px; font-weight: 600; color: var(--muted); }
+.settings-field { display: flex; flex-direction: column; gap: 4px; }
+.settings-field > label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 .settings-input,
 .settings-textarea {
   width: 100%;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border-radius: 7px;
+  padding: 7px 9px;
   font: inherit;
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.settings-input:focus,
+.settings-textarea:focus {
+  outline: none;
+  border-color: var(--fg);
 }
 .settings-textarea { resize: vertical; min-height: 34px; }
+
+/* Object-valued field (voice, guardrails) rendered as a titled group of its own
+ * labeled inputs — a real sub-form, not a raw JSON blob. */
+.settings-group {
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-inline-size: 0;
+}
+.settings-group > legend {
+  padding: 0 6px;
+  margin-left: -6px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--fg);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 .settings-textarea.mono {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   white-space: pre;
