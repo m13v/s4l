@@ -83,7 +83,7 @@ from AppKit import (
     NSBezelStyleRounded,
     NSSegmentedControl,
     NSSegmentStyleRounded,
-    NSSegmentSwitchTrackingMomentary,
+    NSSegmentSwitchTrackingSelectOne,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSUnderlineStyleAttributeName,
@@ -559,8 +559,12 @@ class _ReviewController(NSObject):
         )
         approve.setSegmentCount_(len(APPROVE_SEGMENTS))
         approve.setSegmentStyle_(NSSegmentStyleRounded)
-        # Momentary: segments act as push buttons, no sticky selection.
-        approve.setTrackingMode_(NSSegmentSwitchTrackingMomentary)
+        # SelectOne, not Momentary: in momentary mode selectedSegment is only
+        # valid while the mouse is mid-track, which is fragile (and dead to
+        # programmatic/AX clicks — the QA driver on the box uses those). The
+        # sticky selection is never seen: the click advances the card, which
+        # rebuilds the control fresh.
+        approve.setTrackingMode_(NSSegmentSwitchTrackingSelectOne)
         for i, (title, tip) in enumerate(APPROVE_SEGMENTS):
             approve.setLabel_forSegment_(title, i)
             # The word segment gets the leftover width; emoji zones stay
