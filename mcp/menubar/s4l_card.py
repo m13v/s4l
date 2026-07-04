@@ -81,6 +81,9 @@ from AppKit import (
     NSWindowStyleMaskUtilityWindow,
     NSLineBreakByWordWrapping,
     NSBezelStyleRounded,
+    NSSegmentedControl,
+    NSSegmentStyleRounded,
+    NSSegmentSwitchTrackingMomentary,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSUnderlineStyleAttributeName,
@@ -546,25 +549,30 @@ class _ReviewController(NSObject):
             self._interactions = []
             self._card_shown_at = time.time()
         self._reason_field = None
-        self._approve_level = 0  # voids any in-flight delayed commit
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
 
-        # Buttons at the TOP, one line: a single Approve at the left (click
-        # again within the commit window for a stronger reaction), Reject at
+        # Buttons at the TOP, one line: the segmented Approve control at the
+        # left (one click on a zone = approve at that strength), Reject at
         # the right. Overall feedback moved to the menu bar item.
-        approve = NSButton.alloc().initWithFrame_(NSMakeRect(M, H - 42, 130, 30))
-        approve.setTitle_(APPROVE_TITLES[0])
-        approve.setBezelStyle_(NSBezelStyleRounded)
+        approve = NSSegmentedControl.alloc().initWithFrame_(
+            NSMakeRect(M, H - 42, 190, 30)
+        )
+        approve.setSegmentCount_(len(APPROVE_SEGMENTS))
+        approve.setSegmentStyle_(NSSegmentStyleRounded)
+        # Momentary: segments act as push buttons, no sticky selection.
+        approve.setTrackingMode_(NSSegmentSwitchTrackingMomentary)
+        for i, (title, tip) in enumerate(APPROVE_SEGMENTS):
+            approve.setLabel_forSegment_(title, i)
+            # The word segment gets the leftover width; emoji zones stay
+            # compact but comfortably clickable.
+            approve.setWidth_forSegment_(96 if i == 0 else 42, i)
+            try:
+                approve.setToolTip_forSegment_(tip, i)
+            except Exception:
+                pass
         approve.setTarget_(self)
         approve.setAction_("approve:")
-        try:
-            approve.setToolTip_(
-                "Approve; click again for a stronger reaction (😄 → ❤️‍🔥)"
-            )
-        except Exception:
-            pass
         content.addSubview_(approve)
-        self._approve_btn = approve
 
         reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
@@ -960,50 +968,27 @@ class _ReviewController(NSObject):
 
     # ObjC selectors (trailing underscore -> "approve:" etc.)
     def approve_(self, sender):
-        # One button, click-to-escalate: every click bumps the armed level
-        # (capped) and restarts the commit window. Each scheduled commit
-        # carries the level it was armed with; only the one still matching
-        # self._approve_level when it fires actually commits, so extra
-        # clicks, reject, advance, and close all void in-flight commits by
-        # changing/zeroing the level.
-        if self._approve_level < APPROVE_MAX_LEVEL:
-            self._approve_level += 1
-        level = self._approve_level
+        # One segmented control, one click: the clicked zone IS the approval
+        # level (segment index + 1). Commits and advances immediately; level
+        # 2+ is the loved signal, with the exact strength riding along as an
+        # approve_level_N interaction.
         try:
-            self._approve_btn.setTitle_(APPROVE_TITLES[level])
+            level = int(sender.selectedSegment()) + 1
         except Exception:
-            pass
-        _log(f"approve armed at level {level}")
-        self.performSelector_withObject_afterDelay_(
-            "commitApprove:", level, APPROVE_COMMIT_DELAY
-        )
-
-    @objc.python_method
-    def _commit_approve(self, level):
-        """Record the armed approve. Level 2+ is the loved signal; the exact
-        strength rides along as an approve_level_N interaction."""
+            level = 1
+        level = max(1, min(level, len(APPROVE_SEGMENTS)))
+        _log(f"approved at level {level}")
         if level > 1:
             self._track(f"approve_level_{level}")
         self._record(True, loved=level > 1)
         self._fire_decision()
-
-    def commitApprove_(self, armed):
-        try:
-            armed = int(armed)
-        except Exception:
-            return
-        if armed == 0 or armed != self._approve_level:
-            return  # stale: escalated further, rejected, advanced, or closed
-        self._approve_level = 0
-        self._commit_approve(armed)
         self._advance()
 
     def reject_(self, sender):
         # Two-step reject: swap the card body for the reason picker. The
         # decision is recorded when a reason chip (or the no-reason button)
         # is clicked. Any in-progress edit of the reply is preserved for
-        # Back. Voids an armed-but-uncommitted approve (last click wins).
-        self._approve_level = 0
+        # Back.
         self._pending_reply_text = self._current_text()
         self._render_reason()
 
@@ -1094,13 +1079,7 @@ class _ReviewController(NSObject):
 
     def windowShouldClose_(self, sender):
         # Closing the window stops review; remaining cards are left undecided
-        # (not posted). An approve armed within the last commit window is
-        # committed first — the user DID click Approve; losing it to a fast
-        # close would silently drop a decision. Finish with whatever was
-        # decided so far.
-        if self._approve_level:
-            level, self._approve_level = self._approve_level, 0
-            self._commit_approve(level)
+        # (not posted). Finish with whatever was decided so far.
         self._finish()
         return True
 
