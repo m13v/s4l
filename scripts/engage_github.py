@@ -30,6 +30,14 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from http_api import api_get
 from engagement_styles import get_styles_prompt, get_anti_patterns, get_voice_relationship_rule
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section; empty string when absent.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the engage lane
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 REPO_DIR = os.path.expanduser("~/social-autoposter")
 CONFIG_PATH = os.path.join(REPO_DIR, "config.json")
@@ -175,6 +183,22 @@ def build_prompt(reply, thread_summary, recent_replies, our_username, owner, rep
 {snippets}
 """
 
+    # Learned preferences for the reply's matched project (when the joined
+    # post row carries one). Best-effort: any failure renders nothing.
+    learned_prefs_block = ""
+    try:
+        _pname = reply.get("project_name") or reply.get("project")
+        if _pname:
+            _pcfg = next(
+                (p for p in load_config().get("projects", [])
+                 if p.get("name") == _pname),
+                None,
+            )
+            if _pcfg:
+                learned_prefs_block = _learned_prefs_block(_pcfg)
+    except Exception:
+        learned_prefs_block = ""
+
     return f"""You are the Social Autoposter GitHub issues engagement bot.
 
 Your GitHub username is: {our_username}
@@ -191,6 +215,7 @@ Read it carefully before deciding anything.
 {recent_context}
 {get_styles_prompt("github", context="replying")}
 
+{learned_prefs_block}
 ## Content rules
 - Write like a technical peer in the thread, not a marketer.
 - NO em dashes. Use commas, periods, or regular dashes.
