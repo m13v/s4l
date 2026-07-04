@@ -3773,6 +3773,12 @@ async function buildSnapshot() {
   if (snap.x_connected) completeOnboardingMilestone("x_connected", { state: snap.x_state || "connected" });
   if ((snap.projects_ready || 0) > 0) completeOnboardingMilestone("project_ready", { missing_count: 0 });
   if (snap.schedule_state === "ok") completeOnboardingMilestone("tasks_scheduled");
+  // topics_seeded has no cheap live signal (it's a DB fact, not a file fact), so
+  // installs that finished setup before the persona-path completion landed stay
+  // stuck at 7/8 forever. Heal by re-running the idempotent seed for the ready
+  // project(s) and completing the milestone on success. Fire-and-forget: the
+  // ledger flip shows on the next snapshot.
+  if ((snap.projects_ready || 0) > 0) void healTopicsSeeded(snap);
   // Persist this snapshot so the menu bar can answer "set up?" the SAME way when
   // the loopback server is unreachable (Claude Desktop closed or mid-restart)
   // instead of falling back to a divergent local rule. Refreshed on every
@@ -3780,6 +3786,38 @@ async function buildSnapshot() {
   // never more than a poll stale. Best-effort; never fails the snapshot.
   persistStatusSummary(snap);
   return snap;
+}
+
+// One attempt per process: a failed seed (offline DB) retries on the next MCP
+// launch, not on every dashboard poll.
+let topicsSeedHealAttempted = false;
+
+async function healTopicsSeeded(snap: Record<string, any>): Promise<void> {
+  if (topicsSeedHealAttempted) return;
+  topicsSeedHealAttempted = true;
+  try {
+    const ledger = onboardingLedger();
+    if (ledger?.milestones?.topics_seeded?.status === "complete") return;
+    const ready = (Array.isArray(snap.projects) ? snap.projects : []).filter(
+      (p: any) => p && p.ready && typeof p.name === "string"
+    );
+    for (const p of ready) {
+      const seed = await runPython("scripts/seed_search_topics.py", ["--project", p.name], {
+        timeoutMs: 60_000,
+      });
+      if (seed.code === 0) {
+        const m = /planned=(\d+)\s+inserted=(\d+)\s+updated=(\d+)/.exec(seed.stdout);
+        completeOnboardingMilestone("topics_seeded", {
+          project: p.name,
+          topic_count: m ? Number(m[1]) : 0,
+          backfill: true,
+        });
+        return;
+      }
+    }
+  } catch (e: any) {
+    console.error("[snapshot] topics_seeded heal failed:", e?.message || e);
+  }
 }
 
 // ---- dashboard localhost fallback -----------------------------------------
