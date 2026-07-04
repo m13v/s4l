@@ -77,6 +77,66 @@ def _toggle_lane(lane):
         return _compute_snapshot().get("flags") or {"personal_brand": True, "promotion": False}
 
 
+# Keep in sync with EDITABLE_PROJECT_FIELDS (mcp/src/setup.ts): the whitelist the
+# panel's "Project settings" section edits through project_config's validated merge.
+_EDITABLE_PROJECT_FIELDS = (
+    "website",
+    "description",
+    "icp",
+    "voice",
+    "differentiator",
+    "search_topics",
+    "get_started_link",
+    "content_guardrails",
+    "content_angle",
+)
+
+
+def _list_project_settings():
+    """Read-only Python twin of listProjectSettings (mcp/src/setup.ts): current
+    values of the user-editable fields for every managed project + the persona.
+    Powers project_config action:'get' when Claude/the MCP is closed, so the
+    dashboard's settings section renders instead of degrading to an error."""
+    _scripts_dir()
+    import snapshot as snap_mod
+
+    cfg = snap_mod._read_json(snap_mod._config_path()) or {}
+    projects = cfg.get("projects") or []
+    managed = set(snap_mod._managed_projects())
+    out = []
+    for p in projects:
+        name = p.get("name")
+        if not isinstance(name, str):
+            continue
+        persona = p.get("persona") is True
+        if name not in managed and not persona:
+            continue
+        req = snap_mod.PERSONA_REQUIRED_FIELDS if persona else snap_mod.REQUIRED_FIELDS
+        missing = []
+        for f in req:
+            v = p.get(f)
+            if (
+                v is None
+                or (isinstance(v, str) and not v.strip())
+                or (isinstance(v, (list, tuple, dict)) and len(v) == 0)
+            ):
+                missing.append(f)
+        fields = {k: p[k] for k in _EDITABLE_PROJECT_FIELDS if k in p}
+        extra_keys = sorted(
+            k for k in p.keys()
+            if k not in ("name", "persona") and k not in _EDITABLE_PROJECT_FIELDS
+        )
+        out.append({
+            "name": name,
+            "persona": persona,
+            "ready": len(missing) == 0,
+            "missing_required": missing,
+            "fields": fields,
+            "extra_keys": extra_keys,
+        })
+    return out
+
+
 def _result(data):
     return {"content": [{"type": "text", "text": json.dumps(data)}]}
 
@@ -108,6 +168,15 @@ def _handle_tool(name, args):
             "flags": s.get("flags"),
             "onboarding": s.get("onboarding"),
         })
+    if name == "project_config" and (args.get("action") == "get"):
+        return _result({"projects": _list_project_settings()})
+    if name == "project_config" and args:
+        # A save (name + field args) genuinely needs the MCP's validated merge
+        # (which re-seeds topics); be explicit instead of the generic fallback.
+        return _err(
+            "Saving project settings needs Claude open — the edit goes through the "
+            "validated config merge. Open Claude and try again."
+        )
     if name == "runtime" and (args.get("action") in (None, "status")):
         s = _compute_snapshot()
         return _result({
