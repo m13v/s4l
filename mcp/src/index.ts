@@ -354,12 +354,75 @@ function ensurePlist(p: string, xml: string): boolean {
   return true;
 }
 
+// Per-label failure backoff for launchd loads. Karol's box (2026-07-03) looped
+// `bootstrap -> Input/output error 5` + `load -> error 5` several times per heal
+// tick for HOURS, with no label, no stderr detail, and no cooldown: pure log
+// flood, zero diagnosis. launchd's error 5 is a catch-all; the most common
+// FIXABLE cause is the service being disabled in the gui domain, so loadPlist
+// now (a) best-effort `launchctl enable`s the label first, (b) on double
+// failure emits ONE structured relay line carrying the label, plist, both
+// stderr tails, and whether the label appears in the domain's disabled list,
+// and (c) backs off for 6 hours after 3 consecutive failures per label.
+const plistLoadFailures = new Map<string, { count: number; skipUntil: number }>();
+
 async function loadPlist(label: string, plistPath: string, uid: number) {
+  const back = plistLoadFailures.get(label);
+  if (back && back.skipUntil > Date.now()) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: `launchd-load backoff: ${label} failed ${back.count}x; next attempt after ${new Date(back.skipUntil).toISOString()}`,
+    };
+  }
+  // Clears a disabled override when that's the blocker; harmless otherwise.
+  await run("launchctl", ["enable", `gui/${uid}/${label}`], { timeoutMs: 15_000, noTee: true });
   let res = await run("launchctl", ["bootstrap", `gui/${uid}`, plistPath], { timeoutMs: 15_000 });
+  const bootstrapErr = res.code !== 0 ? lastLine(res.stderr || res.stdout) : "";
   if (res.code !== 0) {
     res = await run("launchctl", ["load", plistPath], { timeoutMs: 15_000 });
   }
+  if (res.code !== 0) {
+    const loadErr = lastLine(res.stderr || res.stdout);
+    let disabledEntry = "unknown";
+    try {
+      const disabled = await run("launchctl", ["print-disabled", `gui/${uid}`], {
+        timeoutMs: 15_000,
+        noTee: true,
+      });
+      disabledEntry =
+        (disabled.stdout || "")
+          .split("\n")
+          .find((l) => l.includes(label))
+          ?.trim() || "not-listed";
+    } catch {
+      /* diagnostic only */
+    }
+    const detail = JSON.stringify({
+      label,
+      plist: plistPath,
+      bootstrap_err: bootstrapErr,
+      load_err: loadErr,
+      disabled_entry: disabledEntry,
+    });
+    console.error(`[launchd-load] failed: ${detail}`);
+    logLine("stderr", detail, "launchd-load");
+    const prev = plistLoadFailures.get(label) ?? { count: 0, skipUntil: 0 };
+    prev.count += 1;
+    if (prev.count >= 3) {
+      prev.skipUntil = Date.now() + 6 * 3600_000;
+      const msg = JSON.stringify({ label, backoff_hours: 6, consecutive_failures: prev.count });
+      console.error(`[launchd-load] backing off: ${msg}`);
+      logLine("stderr", `backing off: ${msg}`, "launchd-load");
+    }
+    plistLoadFailures.set(label, prev);
+  } else {
+    plistLoadFailures.delete(label);
+  }
   return res;
+}
+
+function lastLine(s: string): string {
+  return (s || "").trim().split("\n").slice(-1)[0] || "";
 }
 
 async function unloadPlist(label: string, plistPath: string, uid: number) {
