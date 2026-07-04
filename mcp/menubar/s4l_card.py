@@ -13,13 +13,14 @@ Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "reject_note": str|None, "interactions": [{"type": str, "ts": str}],
 "dwell_ms": int}
 
-Approving is ONE inline emoji row extending horizontally (👍 😄 ❤️‍🔥): a
-single click on an emoji approves at that strength and advances
-immediately. Two side-by-side approve buttons were tried first and read as
-clutter; click-again-to-escalate was tried next and its commit delay made
-every plain approve feel laggy while the escalation stayed undiscoverable;
-a segmented control was tried next and its bezel read as one squat
-multi-line button (2026-07-03/04 feedback). Any emoji past 👍 stamps
+Approving is ONE horizontal row of outlined emoji buttons (👍 😄 ❤️‍🔥 after
+an "Approve" label): a single click on an emoji approves at that strength
+and advances immediately. Two side-by-side worded approve buttons were
+tried first and read as clutter; click-again-to-escalate was tried next and
+its commit delay made every plain approve feel laggy while the escalation
+stayed undiscoverable; a segmented control read as one squat multi-line
+button; borderless inline emoji read as decoration (2026-07-03/04
+feedback). Any emoji past 👍 stamps
 loved=True: the user's "this one was a really good pick" signal, which the
 feedback digest treats as strong positive evidence (a plain approve is
 merely counter-evidence against avoid entries); the exact level rides along
@@ -558,10 +559,13 @@ class _ReviewController(NSObject):
         )
         x = M + 62
         for i, (emoji, tip) in enumerate(APPROVE_EMOJIS):
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 34, 30))
-            btn.setBordered_(False)  # inline: the emoji IS the button
+            # Bezeled, not borderless: bare emoji read as decoration and
+            # users doubted the click registered (2026-07-03/04 feedback,
+            # twice now — the outline is what says "button").
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 44, 30))
             btn.setTitle_(emoji)
-            btn.setFont_(NSFont.systemFontOfSize_(18))
+            btn.setBezelStyle_(NSBezelStyleRounded)
+            btn.setFont_(NSFont.systemFontOfSize_(16))
             btn.setTag_(i + 1)  # tag = approval level
             btn.setTarget_(self)
             btn.setAction_("approve:")
@@ -570,7 +574,7 @@ class _ReviewController(NSObject):
             except Exception:
                 pass
             content.addSubview_(btn)
-            x += 38
+            x += 48
 
         reject = NSButton.alloc().initWithFrame_(NSMakeRect(W - M - 66, H - 42, 66, 30))
         reject.setTitle_("Reject")
