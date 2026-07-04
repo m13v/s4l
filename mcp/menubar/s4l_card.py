@@ -82,9 +82,6 @@ from AppKit import (
     NSWindowStyleMaskUtilityWindow,
     NSLineBreakByWordWrapping,
     NSBezelStyleRounded,
-    NSSegmentedControl,
-    NSSegmentStyleRounded,
-    NSSegmentSwitchTrackingSelectOne,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSUnderlineStyleAttributeName,
@@ -969,15 +966,15 @@ class _ReviewController(NSObject):
 
     # ObjC selectors (trailing underscore -> "approve:" etc.)
     def approve_(self, sender):
-        # One segmented control, one click: the clicked zone IS the approval
-        # level (segment index + 1). Commits and advances immediately; level
-        # 2+ is the loved signal, with the exact strength riding along as an
-        # approve_level_N interaction.
+        # One emoji row, one click: the clicked emoji's tag IS the approval
+        # level. Commits and advances immediately; level 2+ is the loved
+        # signal, with the exact strength riding along as an approve_level_N
+        # interaction.
         try:
-            level = int(sender.selectedSegment()) + 1
+            level = int(sender.tag())
         except Exception:
             level = 1
-        level = max(1, min(level, len(APPROVE_SEGMENTS)))
+        level = max(1, min(level, len(APPROVE_EMOJIS)))
         _log(f"approved at level {level}")
         if level > 1:
             self._track(f"approve_level_{level}")
