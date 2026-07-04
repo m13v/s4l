@@ -2128,19 +2128,23 @@ POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 # (~20-30 / 8h) with NO hard cap: the bar is the Nth percentile of the install's
 # OWN recent candidate pool (via /api/v1/twitter-candidates/virality-threshold),
 # so it self-calibrates to cadence and niche instead of being a fixed number.
+# The bar applies to BOTH lanes (2026-07-03, per user instruction): the
+# autopilot lane drops below-bar picks before POSTING, and the DRAFT_ONLY lane
+# drops them before they become review cards, so human review time is never
+# spent on bottom-of-pool drafts. Dropped picks stay status='pending' (never
+# 'rejected'); Phase 0 salvages and re-judges them next cycle.
 # The bar is OFF (empty threshold) when:
-#   - DRAFT_ONLY: new users / manual review see every draft (we don't even fetch).
 #   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
+#     (This is also what keeps brand-new installs seeing every draft card.)
 #   - Fetch failure: fail-open, never silence posting on a transient API blip.
 # Tunables: S4L_TWITTER_VIRALITY_PCTILE (default 0.97),
 #           S4L_TWITTER_VIRALITY_MIN_SAMPLE (default 200).
-VIRALITY_THRESHOLD=""
-if [ "${DRAFT_ONLY:-0}" != "1" ]; then
-    VIRALITY_THRESHOLD=$(S4L_VPCTILE="${S4L_TWITTER_VIRALITY_PCTILE:-0.97}" \
-        S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
-        python3 -c "
+VIRALITY_THRESHOLD=$(S4L_VPCTILE="${S4L_TWITTER_VIRALITY_PCTILE:-0.97}" \
+    S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
+    S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
+    python3 -c "
 import os, sys
-sys.path.insert(0, os.path.expanduser('~/social-autoposter/scripts'))
+sys.path.insert(0, os.environ.get('S4L_SCRIPTS_DIR') or os.path.expanduser('~/social-autoposter/scripts'))
 from http_api import api_get
 try:
     r = api_get('/api/v1/twitter-candidates/virality-threshold',
@@ -2154,11 +2158,10 @@ try:
 except BaseException as e:
     sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
 " 2>>"$LOG_FILE" || echo "")
-    if [ -n "$VIRALITY_THRESHOLD" ]; then
-        log "Virality bar ACTIVE: p${S4L_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 posts only if it clears the bar."
-    else
-        log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 posts ungated."
-    fi
+if [ -n "$VIRALITY_THRESHOLD" ]; then
+    log "Virality bar ACTIVE: p${S4L_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+else
+    log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
 fi
 
 # Parse the prep envelope and write the plan to \$PLAN_FILE; also extract the
