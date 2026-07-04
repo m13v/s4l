@@ -3331,6 +3331,12 @@ function kickerEnv(): Record<string, string> {
     S4L_STATE_DIR: sapsStateDir(),
     TWITTER_TAIL_LINK_RATE: "0",
     TWITTER_PAGE_GEN_RATE: "0",
+    // Rolling virality bar percentile for the draft lane (2026-07-03): the
+    // cycle script now applies the bar to DRAFT_ONLY too, so below-bar picks
+    // never become review cards. p0.90 (not the script's 0.97 default) keeps
+    // card volume useful while cutting bottom-of-pool drafts; cold start
+    // (sample_count < 200) still shows brand-new installs every draft.
+    S4L_TWITTER_VIRALITY_PCTILE: "0.90",
   };
 }
 
