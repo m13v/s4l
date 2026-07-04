@@ -286,7 +286,7 @@ button.switch:disabled { opacity: 0.45; }
   width: 100%;
   background: var(--card);
   color: var(--fg);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
   font: inherit;
@@ -294,7 +294,7 @@ button.switch:disabled { opacity: 0.45; }
   line-height: 1.5;
   transition: border-color 0.12s ease, background 0.12s ease;
 }
-.settings-input:hover, .settings-textarea:hover { border-color: var(--border); }
+.settings-input:hover, .settings-textarea:hover { border-color: var(--muted); }
 .settings-input:focus, .settings-textarea:focus {
   outline: none;
   border-color: var(--fg);
