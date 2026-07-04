@@ -381,21 +381,34 @@ def _bump_drain_timeout() -> None:
 #     never signalled.
 #   * Best-effort throughout: never raises into the caller, never changes the
 #     worker's exit code, never touches the result already written to disk.
+# LOOSE ancestry probe (2026-07-04). The original tuple duplicated the reaper's
+# strict cmdline signature, which Claude Desktop 1.18286.0 broke (Karol's second
+# leak: 53 workers piled up while both the reaper AND this self-reap failed the
+# same parse). Inside our OWN ancestry the strict fingerprint is unnecessary:
+# identification is DETERMINISTIC by construction — claude_job runs as a Bash
+# child of the session that invoked it, so the nearest claude-code agent-mode
+# ancestor IS that session. What the loose probe cannot tell apart is a
+# SCHEDULED WORKER session vs an INTERACTIVE session where someone ran
+# `claude_job next` by hand — that discrimination comes from the cwd gate in
+# _maybe_self_reap (worker tasks run in ~/.s4l-worker; interactive sessions
+# never do), not from cmdline shape.
 _SELF_REAP_SIG = (
     "claude-code/",
-    "/Contents/MacOS/claude ",
     "--input-format stream-json",
-    "local-agent-mode-sessions",
 )
-_SELF_REAP_UUID_RE = re.compile(r"local-agent-mode-sessions/[0-9a-fA-F-]{36}")
+_S4L_WORKER_CWD = os.path.join(os.path.expanduser("~"), ".s4l-worker")
 
 
 def _self_reap_enabled() -> bool:
-    return os.environ.get("S4L_WORKER_SELF_REAP", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    # Default ON since 2026-07-04 (v1.6.202): the dormant flag meant the
+    # source-side trim never ran anywhere, leaving the (signature-fragile)
+    # launchd reaper as the only defense — and when Desktop changed the cmdline
+    # shape, boxes leaked. Opt OUT with S4L_WORKER_SELF_REAP=0.
+    return os.environ.get("S4L_WORKER_SELF_REAP", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -424,8 +437,10 @@ def _ps_pid_map() -> dict:
 
 
 def _find_own_session(psmap: dict):
-    """Walk OUR ancestry to the nearest claude agent-mode worker session that
-    matches the reaper signature. Returns (pid, uuid_token) or None."""
+    """Walk OUR ancestry to the nearest claude-code agent-mode ancestor.
+    Returns (pid, reverify_token) or None. The token is a stable cmdline prefix
+    used to confirm the PID was not recycled before signalling — no UUID/path
+    shape assumptions, so a Desktop cmdline change cannot blind this again."""
     pid = os.getpid()
     seen: set = set()
     for _ in range(40):  # bounded climb up the process tree
@@ -437,9 +452,7 @@ def _find_own_session(psmap: dict):
             break
         ppid, cmd = ent
         if all(t in cmd for t in _SELF_REAP_SIG) and "Helpers/disclaimer" not in cmd:
-            m = _SELF_REAP_UUID_RE.search(cmd)
-            if m:
-                return pid, m.group(0)
+            return pid, cmd[:160]
         pid = ppid
         if pid <= 1:
             break
@@ -447,10 +460,19 @@ def _find_own_session(psmap: dict):
 
 
 def _maybe_self_reap(delay: float = 6.0) -> None:
-    """Opt-in: terminate our own finished worker session. See block comment above."""
+    """Terminate our own finished worker session. See block comment above.
+
+    The cwd gate is the worker-vs-interactive discriminator: scheduled worker
+    tasks run with cwd ~/.s4l-worker (enforced at task creation + menubar cwd
+    rewrite), while an interactive/debug session that shells `claude_job` runs
+    in a project dir. Interactive sessions are therefore never signalled, no
+    matter what their cmdline looks like."""
     if not _self_reap_enabled():
         return
     try:
+        cwd = os.getcwd()
+        if cwd != _S4L_WORKER_CWD and not cwd.startswith(_S4L_WORKER_CWD + os.sep):
+            return
         found = _find_own_session(_ps_pid_map())
         if not found:
             return
