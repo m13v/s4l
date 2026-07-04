@@ -63,6 +63,11 @@ interface Snapshot {
   update_available: boolean;
   runtime_ready: boolean;
   runtime_provisioning?: boolean;
+  // THE single "is set up" definition, computed by scripts/snapshot.py (runtime
+  // ready + a ready project incl. the persona + X connected). Every surface
+  // (menu bar, this panel, browser dashboard) gates on this one field; do not
+  // re-derive it locally.
+  setup_complete?: boolean;
   // Schedule state for the CURRENT Claude account: 'missing'/'disabled' means the
   // draft tasks aren't registered here (e.g. after an account switch) and the
   // "Set up draft schedule" button should show.
@@ -193,6 +198,14 @@ function applySetupDetails() {
   setupSummary.classList.toggle("expanded", setupDetailsOpen);
 }
 
+// THE one "is set up" answer, straight from the snapshot (scripts/snapshot.py).
+// Local derivation only as a fallback for version skew against older servers.
+function isSetupComplete(s: Snapshot | null): boolean {
+  if (!s) return false;
+  if (s.setup_complete !== undefined) return !!s.setup_complete;
+  return !!s.runtime_ready && (s.projects_ready || 0) > 0 && !!s.x_connected;
+}
+
 function renderOnboarding(progress?: OnboardingSnapshot) {
   if (!progress || !Array.isArray(progress.milestones)) {
     setupSummary.hidden = true;
@@ -205,13 +218,16 @@ function renderOnboarding(progress?: OnboardingSnapshot) {
 
   const total = progress.milestones.length;
   const completed = progress.milestones.filter((m) => m.status === "complete").length;
-  const blocked = !!progress.current_blocker && !progress.complete;
-  setupSummary.classList.toggle("complete", progress.complete);
+  // Header state keys off the SAME setup_complete the menu bar uses — never the
+  // milestone ledger — so the two surfaces can't disagree about "set up".
+  const done = isSetupComplete(state);
+  const blocked = !!progress.current_blocker && !done;
+  setupSummary.classList.toggle("complete", done);
   setupSummary.classList.toggle("blocked", blocked);
 
   // The "N/total" counter is shown only while setup is incomplete; once complete
   // it collapses to a bare "Setup ▾" dropdown (progress no longer surfaced inline).
-  onboardingCount.hidden = progress.complete;
+  onboardingCount.hidden = done;
   onboardingCount.textContent = blocked
     ? `${completed}/${total} · needs you`
     : setupPolling
@@ -267,14 +283,10 @@ function render() {
   // snapshot explicitly reports it down (undefined = unknown = don't nag).
   menubarBanner.hidden = needsRuntime || state.menubar_running !== false;
 
-  // "Setup complete" == the pipeline can actually run a draft cycle: the runtime
-  // exists, at least one project is fully configured, and the X session is
-  // connected. Until all three hold, the panel is intentionally minimal — just
-  // the Set up button (or the Install card while the runtime is missing) — and
-  // Run draft cycle is hidden. Once complete, Set up disappears and Run draft
-  // cycle is the single primary action.
-  const hasReady = state.projects_ready > 0;
-  const setupComplete = !needsRuntime && hasReady && state.x_connected;
+  // "Setup complete" is the snapshot's setup_complete — the ONE definition
+  // (computed in scripts/snapshot.py), shared with the menu bar and the browser
+  // dashboard. See isSetupComplete.
+  const setupComplete = isSetupComplete(state);
 
   // Before setup completes, Set up is the primary action. After it completes the
   // autopilot drafts on its own (no manual "draft now" button) — the only action
@@ -340,6 +352,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     x_connected: !!o.x_connected,
     x_state: o.x_state || "",
     x_handle: o.x_handle ?? null,
+    ...(o.setup_complete !== undefined ? { setup_complete: !!o.setup_complete } : {}),
     version: o.mcp_version || state?.version || "",
     latest_version: o.latest_version ?? null,
     update_available: !!o.update_available,
