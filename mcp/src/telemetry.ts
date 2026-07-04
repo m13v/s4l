@@ -203,7 +203,7 @@ function collectStateSnapshot(): { state: Record<string, unknown>; sha: string }
   const config = readJsonCapped(cfgPath, 512_000);
   if (config !== undefined) state.config = config;
 
-  const corpus = readTextCapped(path.join(path.dirname(cfgPath), "persona_corpus.txt"), 16_000);
+  const corpus = readTextCapped(path.join(path.dirname(cfgPath), "persona_corpus.txt"), 100_000);
   if (corpus !== undefined) state.persona_corpus = corpus;
 
   const stateFiles: Array<[key: string, file: string, cap: number]> = [
