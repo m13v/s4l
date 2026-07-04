@@ -62,7 +62,13 @@ REQUIRED_FIELDS = ["name", "website", "description", "icp", "voice", "search_top
 # only setup can NEVER report setup_complete (any_ready requires a managed product),
 # leaving the menu bar stuck on "project not set up". (2026-06-30)
 PERSONA_REQUIRED_FIELDS = ["name", "description", "voice", "search_topics"]
-WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
+# Current installs run ONE universal worker task (s4l-worker); the phase pair
+# is the retired legacy shape. Checking ONLY the legacy pair made every current
+# install read "autopilot off" forever (Karol, 2026-07-03: worker fired every
+# minute while this check reported the tasks missing). Keep in sync with
+# scripts/schedule_state.py and mcp/menubar/s4l_menubar.py.
+CURRENT_WORKER_TASK_IDS = ("s4l-worker", "saps-worker")
+LEGACY_WORKER_TASK_IDS = ("saps-phase1-query", "saps-phase2b-draft")
 UPDATER_LABEL = "com.m13v.social-autoposter-update"
 AUTOPILOT_STALL_MS = 180_000
 
@@ -179,7 +185,15 @@ def _mode_chosen() -> bool:
 def _autopilot_on() -> bool:
     base = os.path.join(_claude_cfg_dir(), "scheduled-tasks")
     try:
-        return all(os.path.exists(os.path.join(base, t, "SKILL.md")) for t in WORKER_TASK_IDS)
+        if any(
+            os.path.exists(os.path.join(base, t, "SKILL.md"))
+            for t in CURRENT_WORKER_TASK_IDS
+        ):
+            return True
+        return all(
+            os.path.exists(os.path.join(base, t, "SKILL.md"))
+            for t in LEGACY_WORKER_TASK_IDS
+        )
     except Exception:
         return False
 
