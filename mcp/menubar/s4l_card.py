@@ -565,7 +565,9 @@ class _ReviewController(NSObject):
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, H - 42, 44, 30))
             btn.setTitle_(emoji)
             btn.setBezelStyle_(NSBezelStyleRounded)
-            btn.setFont_(NSFont.systemFontOfSize_(16))
+            # 13pt = the size Reject's title renders at; anything bigger
+            # overflows the rounded bezel's ~22px content lane (16pt did).
+            btn.setFont_(NSFont.systemFontOfSize_(13))
             btn.setTag_(i + 1)  # tag = approval level
             btn.setTarget_(self)
             btn.setAction_("approve:")
