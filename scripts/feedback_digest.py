@@ -18,12 +18,14 @@ scripts/learned_preferences.py for the full loop). Per run:
      never digested twice. Events are marked processed even when the plan is
      "no changes" — a considered no-op is a completed digestion, not a retry.
 
-Overall feedback (decision='feedback', project IS NULL; typed into the card's
-💬 composer or the menu bar's "Send feedback…" item) is fetched once per run,
+Overall feedback (decision='feedback', project IS NULL; typed into the
+composer behind the menu bar's "Give feedback…" item) is fetched once per run,
 folded into EVERY configured project's prompt as explicit standing guidance,
 and marked processed only after all attempted project digests succeed.
-Loved approvals (the card's 😄 button) arrive as loved=true on approved
-events and are surfaced to the model as strong positive evidence.
+Loved approvals (the card's escalated approve: extra clicks on the one
+Approve button) arrive as loved=true on approved events, with the exact
+strength as an approve_level_N interaction, and are surfaced to the model
+as strong positive evidence.
 
 Failure handling: a Claude failure or unparseable plan leaves the events
 unprocessed for the next run. A run-level flock prevents concurrent digests.
@@ -163,7 +165,7 @@ CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
 NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved)} approved, {len(loved)} of the approvals loved):
 {ev_lines}{overall_block}
 
-Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user pressed the emphatic-approve button ("this was a really good one"): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
+Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user clicked Approve extra times for a stronger reaction ("this was a really good one"; approve_level_N in interactions carries the strength): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
 You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
