@@ -478,7 +478,7 @@ export function ensurePersonaProject(
   if (grounding && typeof grounding.content_corpus === "string" && grounding.content_corpus.trim()) {
     try {
       const corpusPath = path.join(path.dirname(cfgPath), "persona_corpus.txt");
-      fs.writeFileSync(corpusPath, grounding.content_corpus.trim().slice(0, 8000) + "\n", "utf-8");
+      fs.writeFileSync(corpusPath, grounding.content_corpus.trim().slice(0, 100000) + "\n", "utf-8");
     } catch {
       // ignore: corpus is grounding fuel, not required for a working persona.
     }
