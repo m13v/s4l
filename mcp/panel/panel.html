@@ -62,15 +62,32 @@
         <button id="btn-schedule" hidden>Set up draft schedule for this account</button>
       </section>
 
+      <!-- Two independent engagement lanes, each with its own switch (single
+           source: mode.json via the snapshot; toggles go through
+           engagement_mode action:'toggle' lane:<name>). -->
       <section class="section" id="mode-card">
         <div class="section-row">
-          <span class="section-label">Engagement mode</span>
-          <div class="section-actions">
-            <span id="mode-current" class="section-value"></span>
-            <button id="btn-mode" class="ghost">Switch</button>
-          </div>
+          <span class="section-label">Engagement</span>
         </div>
-        <div class="live-status" id="mode-sub"></div>
+        <div class="lane">
+          <div class="lane-text">
+            <div class="lane-name">Personal brand</div>
+            <div class="lane-desc">Organic, link-free engagement in your own voice.</div>
+          </div>
+          <button class="switch" id="switch-personal" type="button" role="switch" aria-checked="false" aria-label="Personal brand lane">
+            <span class="knob"></span>
+          </button>
+        </div>
+        <div class="lane">
+          <div class="lane-text">
+            <div class="lane-name">Product promotion</div>
+            <div class="lane-desc">Marketing your configured products.</div>
+          </div>
+          <button class="switch" id="switch-promo" type="button" role="switch" aria-checked="false" aria-label="Product promotion lane">
+            <span class="knob"></span>
+          </button>
+        </div>
+        <div class="lane-note" id="mode-sub"></div>
       </section>
 
       <section class="section" id="live-card" hidden>
