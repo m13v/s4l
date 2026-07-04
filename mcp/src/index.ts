@@ -1543,7 +1543,7 @@ tool(
         .describe(
           "The RAW voice-memo transcript from the onboarding dictation interview, VERBATIM (do NOT " +
             "paraphrase or summarize). Persisted to the persona_corpus.txt sidecar (never config.json), " +
-            "capped ~8000 chars. This is the grounding pool the drafter quotes real specifics from " +
+            "capped ~100000 chars. This is the grounding pool the drafter quotes real specifics from " +
             "(actual projects, numbers, opinions, phrasing), so keep it dense and first-hand."
         ),
       voice: z
