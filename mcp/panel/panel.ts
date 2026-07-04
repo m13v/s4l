@@ -128,8 +128,8 @@ const btnLiveStop = $("btn-live-stop") as HTMLButtonElement;
 const btnLiveFront = $("btn-live-front") as HTMLButtonElement;
 const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
-const btnMode = $("btn-mode") as HTMLButtonElement;
-const modeCurrent = $("mode-current");
+const switchPersonal = $("switch-personal") as HTMLButtonElement;
+const switchPromo = $("switch-promo") as HTMLButtonElement;
 const modeSub = $("mode-sub");
 const settingsCard = $("settings-card");
 const settingsToggle = $("settings-toggle") as HTMLButtonElement;
@@ -309,21 +309,16 @@ function render() {
     : { personal_brand: true, promotion: false });
   const personalOn = !!flags.personal_brand;
   const promoOn = !!flags.promotion;
-  const lanes: string[] = [];
-  if (personalOn) lanes.push("Personal brand");
-  if (promoOn) lanes.push("Promotion");
-  modeCurrent.textContent = lanes.length ? lanes.join(" + ") : "None";
+  switchPersonal.setAttribute("aria-checked", String(personalOn));
+  switchPromo.setAttribute("aria-checked", String(promoOn));
+  // Per-lane descriptions live in the markup; the note line carries only the
+  // cross-lane facts worth knowing.
   modeSub.textContent =
     personalOn && promoOn
-      ? "Both lanes on: cycles split 50/50 between link-free brand posts and product promotion."
-      : personalOn
-        ? "Organic, link-free engagement in your own voice."
-        : promoOn
-          ? "Marketing your configured products."
-          : "No lane on; the cycle falls back to personal brand.";
-  // The panel button toggles the PRODUCT-PROMOTION lane (personal brand is the
-  // default base lane; turn it off from the menu-bar checkmark if needed).
-  btnMode.textContent = promoOn ? "Turn off product promotion" : "Also promote a product";
+      ? "Both lanes on: cycles split 50/50."
+      : !personalOn && !promoOn
+        ? "No lane on; the cycle falls back to personal brand."
+        : "";
 
   // Secondary surfaces (live browser, 7-day stats) are only meaningful once the
   // product is configured and posting. Hide them until setup is complete so the
@@ -580,19 +575,30 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
   }
 }));
 
-// Engagement-lane toggle: lightweight flip of the PROMOTION lane via
-// engagement_mode action:'toggle' lane:'promotion' (mode.json only, no persona
-// provisioning), then refresh. Mirrors the menu-bar checkmarks (same single
-// source, mode.json). Personal brand is toggled from the menu bar.
-btnMode.addEventListener("click", () => busy(btnMode, "Switching…", async () => {
-  try {
-    const res = await call("engagement_mode", { action: "toggle", lane: "promotion" });
-    if (res && res.flags) applyState({ flags: res.flags });
-    await refresh();
-  } catch (e: any) {
-    log("Couldn’t switch lane: " + (e?.message || e));
-  }
-}));
+// Engagement-lane switches: lightweight flip of ONE lane via engagement_mode
+// action:'toggle' (mode.json only, no persona provisioning), then refresh.
+// Mirrors the menu-bar checkmarks (same single source, mode.json). The switch
+// flips optimistically for immediate feedback; the refresh re-syncs it to the
+// server truth either way.
+function wireLaneSwitch(el: HTMLButtonElement, lane: "personal_brand" | "promotion") {
+  el.addEventListener("click", async () => {
+    if (el.disabled) return;
+    el.disabled = true;
+    el.setAttribute("aria-checked", String(el.getAttribute("aria-checked") !== "true"));
+    try {
+      const res = await call("engagement_mode", { action: "toggle", lane });
+      if (res && res.flags) applyState({ flags: res.flags });
+      await refresh();
+    } catch (e: any) {
+      log("Couldn’t switch lane: " + (e?.message || e));
+      await refresh(); // roll the optimistic flip back to the server truth
+    } finally {
+      el.disabled = false;
+    }
+  });
+}
+wireLaneSwitch(switchPersonal, "personal_brand");
+wireLaneSwitch(switchPromo, "promotion");
 
 // ---- collapsible sections -------------------------------------------------
 // The header setup dropdown and the "Last 7 days stats" header are the only two
@@ -773,6 +779,7 @@ function makeField(
     el = ta;
   }
   el.value = seed.text;
+  if (!seed.text) el.placeholder = "Not set";
   el.dataset.orig = seed.text; // mirror of FieldEditor.orig, readable across renders
   wrap.appendChild(el);
   return { wrap, el };
@@ -843,6 +850,7 @@ function buildProjectEditor(p: ProjectSettings): HTMLElement {
   const actions = document.createElement("div");
   actions.className = "settings-actions";
   const btnSave = document.createElement("button");
+  btnSave.className = "primary";
   btnSave.textContent = "Save changes";
   btnSave.disabled = true;
   const status = document.createElement("span");
