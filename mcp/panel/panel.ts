@@ -773,8 +773,12 @@ function makeField(
     el.className = "settings-input";
   } else {
     const ta = document.createElement("textarea");
-    const lines = seed.text ? seed.text.split("\n").length : 1;
-    ta.rows = Math.min(8, Math.max(2, lines));
+    // Size to the content: count hard newlines AND estimated soft wraps
+    // (~60 chars/line at this width), so long prose isn't clipped to 2 rows.
+    const lines = seed.text
+      ? seed.text.split("\n").reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 60)), 0)
+      : 1;
+    ta.rows = Math.min(10, Math.max(2, lines));
     ta.className = "settings-textarea" + (seed.kind === "json" ? " mono" : "");
     el = ta;
   }
