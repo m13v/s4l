@@ -13,15 +13,16 @@ Decision shape: {"n": int, "approved": bool, "loved": bool, "text": str,
 "reject_note": str|None, "interactions": [{"type": str, "ts": str}],
 "dwell_ms": int}
 
-Approving is ONE button with click-to-escalate strength (two side-by-side
-approve buttons were tried first and read as clutter, 2026-07-03 feedback):
-the first click arms a plain approve, and each extra click within the short
-commit window bumps the reaction (👍 → 😄 → ❤️‍🔥). The decision commits when
-the clicks stop. Any level past the first stamps loved=True: the user's
-"this one was a really good pick" signal, which the feedback digest treats
-as strong positive evidence (a plain approve is merely counter-evidence
-against avoid entries); the exact level rides along as an approve_level_N
-interaction.
+Approving is ONE segmented control with a strength zone per approval level
+(Approve 👍 | 😄 | ❤️‍🔥): a single click on a zone approves at that strength
+and advances immediately. Two side-by-side approve buttons were tried first
+and read as clutter; click-again-to-escalate was tried next and its commit
+delay made every plain approve feel laggy while the escalation stayed
+undiscoverable (2026-07-03/04 feedback). Any zone past the first stamps
+loved=True: the user's "this one was a really good pick" signal, which the
+feedback digest treats as strong positive evidence (a plain approve is
+merely counter-evidence against avoid entries); the exact level rides along
+as an approve_level_N interaction.
 
 Overall feedback (guidance not tied to any single thread) lives in the MENU
 BAR only (the card had its own Feedback button + in-window composer, but it
@@ -122,15 +123,15 @@ REJECT_REASONS = (
 # Client-side cap on tracked interactions per card (server clips at 50 too).
 MAX_INTERACTIONS = 50
 
-# One-button approve escalation: button title per armed level (index = level).
-# Level 1 = plain approve; 2+ = loved=True on the decision, with the exact
-# level shipped as an approve_level_N interaction for the feedback digest.
-APPROVE_TITLES = ("Approve", "Approve 👍", "Approve 😄", "Approve ❤️‍🔥")
-APPROVE_MAX_LEVEL = len(APPROVE_TITLES) - 1
-# How long after the last approve click the decision commits. Long enough to
-# land a second/third click, short enough that a single approve still feels
-# instant-ish.
-APPROVE_COMMIT_DELAY = 0.6
+# One-control approve: segment label + tooltip per approval level (segment
+# index + 1 = level). Level 1 = plain approve; 2+ = loved=True on the
+# decision, with the exact level shipped as an approve_level_N interaction
+# for the feedback digest.
+APPROVE_SEGMENTS = (
+    ("Approve 👍", "Approve"),
+    ("😄", "Approve, really good pick"),
+    ("❤️‍🔥", "Approve, best of the best"),
+)
 
 # Review-surface state mirrored to the state dir for out-of-process observers
 # (the menu bar watchdog, the dashboard, a debugging session). In the 2026-07-02
@@ -372,13 +373,6 @@ class _ReviewController(NSObject):
         self._interactions = []
         self._card_shown_at = None
         self._reason_field = None
-        # Armed-but-uncommitted approve level for the CURRENT card (0 = none).
-        # Doubles as the staleness token for the delayed commit: every
-        # scheduled commit carries the level it was armed with, and only the
-        # one matching the live level fires (reject/advance/close just zero
-        # the level to void all in-flight commits — no cancellation API).
-        self._approve_level = 0
-        self._approve_btn = None
         # Attention anchors for the unattended-review watchdog: the stack counts
         # as "touched" on present, on any tracked interaction, and on any
         # decision. No touch past the watchdog threshold = the user is not
