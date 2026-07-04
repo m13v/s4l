@@ -160,6 +160,7 @@ def _handle_tool(name, args):
             "x_connected": s.get("x_connected"),
             "x_state": s.get("x_state"),
             "x_handle": s.get("x_handle"),
+            "setup_complete": s.get("setup_complete"),
             "runtime_ready": s.get("runtime_ready"),
             "mcp_version": s.get("version"),
             "latest_version": s.get("latest_version"),
