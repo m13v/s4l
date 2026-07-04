@@ -345,12 +345,18 @@ def cmd_apply(args) -> int:
     corpus = data.get("content_corpus")
     if isinstance(corpus, str) and corpus.strip():
         corpus_path = cfg_path.parent / "persona_corpus.txt"
-        try:
-            corpus_path.write_text(corpus.strip()[:100000] + "\n")
-            corpus_written = str(corpus_path)
-            changed.append("content_corpus")
-        except Exception as e:
-            print(f"[build_persona] corpus sidecar write failed: {e}", file=sys.stderr)
+        corpus_written = str(corpus_path)
+        changed.append("content_corpus")
+        # Honor --dry-run: report what WOULD be written but do not touch the
+        # sidecar. The write used to happen here unconditionally, before the
+        # dry_run guard below, so `apply --dry-run` silently clobbered the live
+        # persona_corpus.txt (found 2026-07-04).
+        if not args.dry_run:
+            try:
+                corpus_path.write_text(corpus.strip()[:100000] + "\n")
+            except Exception as e:
+                print(f"[build_persona] corpus sidecar write failed: {e}", file=sys.stderr)
+                corpus_written = None
 
     if args.dry_run:
         print(json.dumps({"would_update": name, "fields": changed,
