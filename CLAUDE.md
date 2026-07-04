@@ -128,6 +128,7 @@ Caller exception branches must call `utm_only_text(text=..., platform=..., proje
 ## Releasing: `bash scripts/release-mcpb.sh` only
 
 ONE command releases npm + the GitHub `.mcpb` in lockstep from a `package.json` bump. Rules:
+- **DEFAULT = STAGING (per user, 2026-07-04): `bash scripts/release-mcpb.sh --staging`.** Produces an `-rc.N` GitHub PRE-release that only staging-channel boxes pull; npm `latest` and `releases/latest` do NOT move. After testing, ship the exact tested artifact with `--promote <tag>` (no rebuild). Go straight to stable ONLY when the user explicitly says stable / promote / ship to everyone.
 - **NEVER `--no-bump`/re-release an existing version.** npm versions are immutable, so it clobbers the `.mcpb` with new code while npm keeps the old → lanes diverge. A fix always gets a fresh patch bump.
 - **Never** the old manual `npm publish` + `gh release create` flow.
 - **Before releasing**, check repo `package.json` vs npm `latest` vs GitHub latest tag; if a version you didn't publish exists, a parallel agent released, so bump again.
