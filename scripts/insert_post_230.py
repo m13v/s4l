@@ -1,5 +1,5 @@
 #!/usr/bin/env python3.11
-"""Insert the media_posts row for post-230 (organic TLH, lesson-191).
+"""Insert the media_posts row for post-230 (organic TLH, lesson-192).
 
 DATABASE_URL was removed from ~/social-autoposter/.env; the canonical value is
 preserved in the macOS keychain under service 's4l-database-url'. There is no
@@ -8,19 +8,25 @@ by-number PATCH exposes only update actions: mark_posted / sync_caption /
 caption_too_long), so the create still goes direct via psycopg2, same as the
 prior insert_post_NNN.py scripts.
 
-NOTE (post-230 re-fire 2026-07-04): Cloud SQL 34.162.152.77:5432 is IP-
-allowlisted and this machine's egress (residential 76.126.131.164) is NOT on
-the allowlist, so the direct connect timed out at render time (same wall the
-2026-07-03 fire hit). gcloud has no interactive auth to patch authorized-
-networks or start a proxy, and the production API exposes no create route. The
-mp4, caption, and data.ts lesson-191 entry were all produced; only this row
-could not be written. Re-run this script from an allowlisted network (or after
-adding this IP to the instance's authorized-networks) to land it atomically.
+NOTE (post-230 re-fire 2026-07-04, third attempt): Cloud SQL 34.162.152.77:5432
+is IP-allowlisted and this machine's egress (residential 76.126.131.164) is NOT
+on the allowlist, so the direct connect times out at render time (same wall the
+2026-07-03 and earlier 2026-07-04 fires hit). gcloud has expired interactive
+auth (admin@fazm.ai / mk0r-prod) and cannot patch authorized-networks or start
+a cloud-sql-proxy (binary not installed, instance connection name unknown from
+here), and the production API exposes no create route. The mp4, caption, and
+data.ts lesson-192 entry were all produced; only this row could not be written.
+Re-run this script from an allowlisted network (or after adding this IP to the
+instance's authorized-networks) to land it atomically.
+
+This fire re-rendered post-230 as lesson-192 (angle ai-killed-the-data-analyst)
+and overwrote out/post-230.mp4 + out/post-230.caption.txt, superseding the
+earlier lesson-191 (frontend) and orphaned lesson-190 data.ts entries, which
+have no DB rows and are not inserted. This script matches the CURRENT on-disk
+lesson-192 deliverables.
 
 This fire's engagement style is ig_defeat_flip_arc (mode=use), so new_style is
-null. The earlier lesson-190 variant (ig_agent_ledger_last_mile) from the
-2026-07-03 fire is an orphaned data.ts entry with no DB row; it is superseded
-by lesson-191 for post-230 and is not inserted.
+null.
 """
 import os, json, subprocess, psycopg2
 
@@ -34,7 +40,7 @@ if not DATABASE_URL:
     raise SystemExit("could not read s4l-database-url from keychain")
 
 POST_NUMBER = 230
-VARIANT_ID = "lesson-191"
+VARIANT_ID = "lesson-192"
 VIDEO_PATH = os.path.join(ROOT, "mixer/remotion/out/post-230.mp4")
 CAPTION_PATH = os.path.join(ROOT, "mixer/remotion/out/post-230.caption.txt")
 AUDIO = os.path.expanduser(
@@ -43,13 +49,13 @@ AUDIO = os.path.expanduser(
 with open(CAPTION_PATH) as f:
     caption = f.read()
 
-# 4 pre-encoded b-roll slots, remixed as-is, 4x2.0s -> 8.0s comp.
-# Fresh recombination: zero prior pairwise co-occurrence AND no exact-set clash
-# vs all 190 prior lesson-* clip-sets (incl orphaned lesson-190). Encoded
-# durations below hold to 2.0s each in-comp (same last-frame hold as lesson-189).
-clip_srcs = ["mixer/tlh-48-1.mp4", "mixer/tlh-45-1.mp4",
-             "mixer/tlh-3-5.mp4", "mixer/tlh-2-6.mp4"]
-clip_src_dur = [1.767, 1.733, 1.6, 1.333]
+# 4 pre-encoded b-roll slots, remixed as-is, 4x2.0s -> 8.0s comp. One b-roll
+# each from distinct source lessons (59/72/85/91); fresh recombination with no
+# exact-set clash vs prior lesson-* clip-sets. Each slot's encoded source
+# duration is 2.0s, so speedup is 1.0 (pure passthrough into the 2.0s slot).
+clip_srcs = ["mixer/tlh-59-1.mp4", "mixer/tlh-72-1.mp4",
+             "mixer/tlh-85-1.mp4", "mixer/tlh-91-1.mp4"]
+clip_src_dur = [2.0, 2.0, 2.0, 2.0]
 CLIP = 2.0
 source_clips = []
 for i, src in enumerate(clip_srcs):
@@ -61,10 +67,10 @@ for i, src in enumerate(clip_srcs):
     })
 
 overlay_texts = [
-    "i built frontends for 9 years.",
-    "an agent shipped the ui by lunch.",
-    "cold coffee. kitchen. 1am.",
-    "the pixels were never the job.",
+    "i read dashboards for 11 years.",
+    "an agent answered it in one prompt.",
+    "cold coffee. kitchen. midnight.",
+    "the sql was never the job.",
 ]
 OV = 2.0
 overlays = []
@@ -73,11 +79,11 @@ for i, t in enumerate(overlay_texts):
                      "end_sec": round((i + 1) * OV, 3), "dur_sec": OV})
 
 metadata = {
-    "composition_id": "TLH-lesson-191",
+    "composition_id": "TLH-lesson-192",
     "format": "TLH",
     "theme": "ai",
-    "theme_angle": "ai-killed-the-frontend-developer",
-    "theme_label": "ai took the frontend build, you still own the taste",
+    "theme_angle": "ai-killed-the-data-analyst",
+    "theme_label": "ai took the sql, you still own the question",
     "clip_count": 4,
     "overlay_count": 4,
     "caption_style": "ig_defeat_flip_arc",
