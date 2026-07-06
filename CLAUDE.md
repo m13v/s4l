@@ -250,3 +250,41 @@ All posting and engagement scripts use `scripts/engagement_styles.py` to generat
 - **NEVER remove `engagement_style`** from DB logging (reply_db.py calls, INSERT statements)
 - **NEVER remove or simplify style definitions** in `scripts/engagement_styles.py`
 - **NEVER inline style definitions** back into individual scripts; the shared module is the single source of truth
+
+## Experiment arms: stamp at source, surface on review cards (2026-07-07)
+
+Every experiment/scenario arm that affects DRAFTING is stamped ONCE, at the
+source, and read everywhere else. The user has explicitly rejected fallback
+layering here (no "env first, plan second" resolution anywhere).
+
+How it works:
+- `run-twitter-cycle.sh`'s plan writer calls `scripts/active_experiments.py::collect()`
+  in the cycle process (where arms are assigned) and stamps an `experiments`
+  {name: variant} dict onto EVERY plan candidate at plan-write time.
+- That per-candidate record is the ONLY source downstream: `merge_review_queue.py`
+  carries it through untouched, the review card's details-eye popover renders
+  every entry generically (`s4l_card._details_lines`), and `twitter_post_plan.py`
+  stamps `posts.draft_prompt_variant` from `c["experiments"]["draft_prompt"]`.
+  The poster does NOT read `S4L_DRAFT_PROMPT_VARIANT` from env at post time;
+  that env read caused the queue-review lane to stamp NULL (the MCP-spawned
+  poster has no cycle env) while autopilot stamped the arm. Do not add it back.
+
+Adding a new drafting experiment (the whole convention):
+- Export `S4L_EXP_<NAME>=<variant>` in the process chain that runs the cycle.
+  Done: it auto-stamps onto candidates, auto-renders on cards, and is readable
+  at post time. Do NOT wire per-experiment code into `s4l_card.py`, the merge,
+  or the poster.
+- Scope limits: arms are cycle-scoped (one dict for the whole plan batch). A
+  per-candidate experiment needs its own candidate field (like
+  `engagement_style` has). Post-time experiments (e.g. `tail_link_variant`,
+  coin-flipped in the poster after approval) cannot appear on cards and keep
+  their own posts-column recording.
+
+Forbidden (v1 design, removed 2026-07-07; do not reintroduce):
+- Merge-time stamping / `--cycle-out` stdout parsing in `merge_review_queue.py`.
+- `S4L_EXPERIMENT name=... variant=...` stdout markers.
+- Any post-time env read or env-vs-plan fallback for arm resolution.
+
+Note: `active_experiments.collect()` deliberately drops `draft_prompt` when
+`lane=personal_brand` (the persona directive replaces both A/B arms, so the
+assigned arm never touched those drafts).
