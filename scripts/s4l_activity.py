@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""saps_activity.py — shared writer for the menu-bar activity.json signal.
+"""s4l_activity.py — shared writer for the menu-bar activity.json signal.
 
 The S4L menu bar polls ``<state_dir>/activity.json`` every second and shows a
 spinner + label while work is happening (scanning / drafting / posting / …).
@@ -105,9 +105,9 @@ def clear() -> None:
 
 def _main(argv: list[str]) -> int:
     # CLI used by shell lanes (run-draft-and-publish.sh):
-    #   saps_activity.py write <state> <label words...>
-    #   saps_activity.py heartbeat <state> <label words...>   (conditional refresh)
-    #   saps_activity.py clear
+    #   s4l_activity.py write <state> <label words...>
+    #   s4l_activity.py heartbeat <state> <label words...>   (conditional refresh)
+    #   s4l_activity.py clear
     if not argv:
         return 0
     cmd = argv[0]
