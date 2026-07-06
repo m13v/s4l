@@ -579,6 +579,37 @@ class _ReviewController(NSObject):
             pass
 
     @objc.python_method
+    def _eye_button(self, frame, kind):
+        """Borderless SF-Symbol eye whose hover/click opens a popover. A plain
+        toolTip was tried first and never fired: this panel belongs to a
+        non-activating accessory (status bar) app, where AppKit's tooltip
+        machinery is unreliable. The tracking area drives hover; the button
+        action covers click and any hover-tracking edge case. kind ('stats' |
+        'details') rides on the tracking area's userInfo so the shared
+        mouseEntered_ owner can route to the right popover."""
+        eye = NSButton.alloc().initWithFrame_(frame)
+        eye.setBordered_(False)
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "eye", "thread stats" if kind == "stats" else "draft details"
+        )
+        if img is not None:
+            eye.setImage_(img)
+            eye.setTitle_("")
+        else:  # pre-Big Sur fallback: no SF Symbols
+            eye.setTitle_("👁")
+        eye.setTarget_(self)
+        eye.setAction_("statsToggle:" if kind == "stats" else "detailsToggle:")
+        eye.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                eye.bounds(),
+                NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
+                self,
+                {"kind": kind},
+            )
+        )
+        return eye
+
+    @objc.python_method
     def _render(self):
         d = self._drafts[self._idx]
         # Fresh card (not a card <-> reason-picker swap): reset telemetry.
@@ -640,31 +671,13 @@ class _ReviewController(NSObject):
         right_x = W - M
         self._close_stats_popover()
         self._eye_btn = None
+        self._details_btn = None
         if _engagement_line(stats):
-            eye = NSButton.alloc().initWithFrame_(NSMakeRect(right_x - 20, H - 70, 20, 18))
-            eye.setBordered_(False)
-            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                "eye", "thread stats"
-            )
-            if img is not None:
-                eye.setImage_(img)
-                eye.setTitle_("")
-            else:  # pre-Big Sur fallback: no SF Symbols
-                eye.setTitle_("👁")
-            # Stats surface in an NSPopover on hover OR click. A plain toolTip
-            # was tried first and never fired: this panel belongs to a
-            # non-activating accessory (status bar) app, where AppKit's tooltip
-            # machinery is unreliable. The tracking area drives hover; the
-            # button action covers click and any hover-tracking edge case.
-            eye.setTarget_(self)
-            eye.setAction_("statsToggle:")
-            eye.addTrackingArea_(
-                NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
-                    eye.bounds(),
-                    NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways,
-                    self,
-                    None,
-                )
+            # y is nudged 2px above the label row: the label's 12pt text draws
+            # top-aligned in its 18px frame while the button centers its image,
+            # so a same-y frame rendered the eye visibly below the text line.
+            eye = self._eye_button(
+                NSMakeRect(right_x - 20, H - 68, 20, 18), "stats"
             )
             content.addSubview_(eye)
             self._eye_btn = eye
@@ -751,15 +764,26 @@ class _ReviewController(NSObject):
             thread_tv.setDelegate_(self)
         thread_tv.textStorage().setAttributedString_(body)
         content.addSubview_(thread_tv)
-        # Reply heading — black.
+        # Reply heading — black. Right-aligned on the same line: an eye icon
+        # whose hover/click popover carries the DRAFTING metadata (project
+        # routing, engagement style, discovery query, link choice), mirroring
+        # the author row's engagement-stats eye. Skipped when the plan carries
+        # none of it (older plans).
         content.addSubview_(
             _label(
-                NSMakeRect(M, H - 172, W - 2 * M, 16),
+                NSMakeRect(M, H - 172, W - 2 * M - 24, 16),
                 "Reply (editable):",
                 size=12,
                 bold=True,
             )
         )
+        if _details_lines(d):
+            # No y nudge needed here (unlike the author row): this label is
+            # 16px, so an 18px button at the same y already centers its image
+            # on the top-aligned text line.
+            deye = self._eye_button(NSMakeRect(W - M - 20, H - 172, 20, 18), "details")
+            content.addSubview_(deye)
+            self._details_btn = deye
 
         # Editable reply, with the attached link folded in as it'll post (no
         # separate link field). The trailing link is stripped on send so the
@@ -796,23 +820,27 @@ class _ReviewController(NSObject):
         self._stats_popover = None
 
     @objc.python_method
-    def _show_stats_popover(self):
-        if self._eye_btn is None:
+    def _show_popover(self, text, anchor, what):
+        """One popover surface for both eyes (thread stats, draft details).
+        Only one is ever open: the two anchors are far apart, so hover-out
+        closes the first before hover-in opens the other."""
+        if anchor is None or not text:
             return
         if self._stats_popover is not None and self._stats_popover.isShown():
             return
-        line = _engagement_line(self._drafts[self._idx].get("stats"))
-        if not line:
-            return
         font = NSFont.systemFontOfSize_(12)
         s = NSAttributedString.alloc().initWithString_attributes_(
-            line, {NSFontAttributeName: font}
+            text, {NSFontAttributeName: font}
         )
-        # +34: 13px side insets plus NSTextField's own ~4px internal padding,
-        # which otherwise clips the last word.
-        pw, ph = int(s.size().width) + 34, 34
+        # Wrap-aware measurement (the details popover is multi-line; option 1 =
+        # NSStringDrawingUsesLineFragmentOrigin). +34: 13px side insets plus
+        # NSTextField's own ~4px internal padding, which otherwise clips the
+        # last word.
+        measured = s.boundingRectWithSize_options_(NSMakeSize(300, 10_000), 1)
+        pw = int(measured.size.width) + 34
+        ph = int(measured.size.height) + 19
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
-        view.addSubview_(_label(NSMakeRect(13, ph - 26, pw - 26, 18), line, size=12))
+        view.addSubview_(_label(NSMakeRect(13, 8, pw - 26, ph - 16), text, size=12))
         vc = NSViewController.alloc().init()
         vc.setView_(view)
         pop = NSPopover.alloc().init()
@@ -834,12 +862,22 @@ class _ReviewController(NSObject):
         # bounds flips the edge meaning (NSButton is a flipped view) and the
         # popover appeared above the card's title bar.
         pop.showRelativeToRect_ofView_preferredEdge_(
-            self._eye_btn.frame(), self._eye_btn.superview(), 1
+            anchor.frame(), anchor.superview(), 1
         )
         self._stats_popover = pop
-        _log(f"stats popover shown ({pw}x{ph})")
+        _log(f"{what} popover shown ({pw}x{ph})")
 
-    # Click on the eye SHOWS the popover, never toggles it closed: a click is
+    @objc.python_method
+    def _show_stats_popover(self):
+        line = _engagement_line(self._drafts[self._idx].get("stats"))
+        self._show_popover(line, self._eye_btn, "stats")
+
+    @objc.python_method
+    def _show_details_popover(self):
+        lines = _details_lines(self._drafts[self._idx])
+        self._show_popover("\n".join(lines), self._details_btn, "details")
+
+    # Click on an eye SHOWS its popover, never toggles it closed: a click is
     # physically preceded by hover (mouseEntered already opened it), so a
     # toggle would close what the hover just opened and the user sees nothing.
     # Closing is owned by hover-out, card advance, and window close.
@@ -848,10 +886,32 @@ class _ReviewController(NSObject):
         self._track("stats_open")
         self._show_stats_popover()
 
-    # NSTrackingArea owner callbacks (hover over the eye icon).
+    def detailsToggle_(self, sender):
+        _log("details eye clicked")
+        self._track("details_open")
+        self._show_details_popover()
+
+    @objc.python_method
+    def _hover_kind(self, event):
+        """Which eye a tracking-area event belongs to ('stats' | 'details'),
+        from the userInfo stamped in _eye_button. Defaults to stats (the
+        original single-eye behavior) if the area carries no info."""
+        try:
+            info = event.trackingArea().userInfo()
+            if info and info.get("kind") == "details":
+                return "details"
+        except Exception:
+            pass
+        return "stats"
+
+    # NSTrackingArea owner callbacks (hover over either eye icon).
     def mouseEntered_(self, event):
-        _log("eye hover enter")
-        self._show_stats_popover()
+        kind = self._hover_kind(event)
+        _log(f"{kind} eye hover enter")
+        if kind == "details":
+            self._show_details_popover()
+        else:
+            self._show_stats_popover()
 
     def mouseExited_(self, event):
         _log("eye hover exit")
@@ -1156,6 +1216,9 @@ def present_review(drafts, on_decision=None, on_complete=None):
     (optional). thread_url renders as a trailing ↗ link on the thread text;
     followers show inline next to the handle, age muted at the right, and the
     thread engagement counts live only in the eye icon's hover/click popover.
+    Optional drafting metadata (project, engagement_style, style_description,
+    search_topic, language, link_source, link_keyword) feeds a second eye on
+    the "Reply (editable):" row whose popover explains how the draft was made.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
