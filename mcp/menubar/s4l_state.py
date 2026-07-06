@@ -811,6 +811,20 @@ def review_drafts(plan, batch="review-queue"):
                 or c.get("tweet_url")
                 or c.get("thread_url"),
                 "stats": c.get("stats") or {},
+                # Drafting metadata for the reply row's details popover: how the
+                # draft came to be (style, discovery query, link choice). All
+                # already on the plan candidate; absent on plans written before
+                # each field shipped, and the card omits what's missing.
+                "engagement_style": c.get("engagement_style"),
+                "style_description": (
+                    (c.get("new_style") or {}).get("description")
+                    if isinstance(c.get("new_style"), dict)
+                    else None
+                ),
+                "search_topic": c.get("search_topic"),
+                "language": c.get("language"),
+                "link_source": c.get("link_source"),
+                "link_keyword": c.get("link_keyword"),
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
