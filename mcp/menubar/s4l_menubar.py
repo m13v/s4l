@@ -648,34 +648,80 @@ class S4LMenuBar(rumps.App):
             recent.sort(key=os.path.getmtime, reverse=True)
             if recent:
                 ran = True
+            cutoff = now - window
             for f in recent[:5]:
                 try:
-                    txt = open(f).read()
+                    fh = open(f)
                 except Exception:
                     continue
-                low = txt.lower()
                 # CRITICAL: only treat this as a limit when it is an actual API
-                # ERROR in this run — NEVER loose prose anywhere in the transcript.
-                # The drafting prompt embeds candidate threads + the feedback report,
-                # which frequently contain phrases like "weekly limit" / "rate limit"
-                # as CONTENT (an AI-product timeline is full of them — a 'claude-meter'
-                # example post "reached your weekly limit by tuesday" false-tripped the
-                # old prose match on 2026-06-29). The api-error markers below are set
-                # by the SDK only on real errors, so they can't appear in content.
+                # ERROR, and a FRESH one — never loose prose, and never an old
+                # error line inside a still-hot file.
                 #
-                # (a) HTTP-429 rate_limit — the definitive routines-lane shape:
-                #     {"error":"rate_limit",...,"isApiErrorMessage":true,"apiErrorStatus":429}
-                if '"apierrorstatus":429' in low or '"error":"rate_limit"' in low:
-                    limit_msg = "Claude rate limit reached (429)"
-                    break
-                # (b) Weekly/usage-limit prose, but ONLY when carried inside a real
-                #     API-error message (gated on the marker so content can't trip it).
-                if '"isapierrormessage":true' in low and (
-                    "weekly limit" in low or "usage limit" in low or "hit your limit" in low
-                ):
-                    import re
-                    m = re.search(r"resets [^\"\\]{0,40}", txt)
-                    limit_msg = m.group(0).strip().rstrip(".") if m else "Claude usage limit reached"
+                # Two false-positive classes this loop must reject:
+                #   (1) Markers as CONTENT. The drafting prompt embeds candidate
+                #       threads + the feedback report, which frequently contain
+                #       phrases like "weekly limit" / "rate limit" (an AI-product
+                #       timeline is full of them — a 'claude-meter' example post
+                #       false-tripped the old prose match on 2026-06-29). A session
+                #       that READS a transcript or this source file re-embeds the
+                #       literal marker strings too. So a substring hit is only a
+                #       cheap prefilter; the verdict comes from the parsed line's
+                #       TOP-LEVEL fields, which only the SDK writes on real errors.
+                #   (2) Stale errors in long-lived sessions. A session that 429'd
+                #       once (e.g. mid account-rotation) but recovered keeps its
+                #       file mtime fresh as it works, so a whole-file scan re-trips
+                #       the banner for as long as the session lives (2026-07-06:
+                #       banner stuck long after the limit lifted). Gate each error
+                #       line on its OWN timestamp being inside the window.
+                with fh:
+                    for line in fh:
+                        low = line.lower()
+                        if (
+                            '"apierrorstatus":429' not in low
+                            and '"error":"rate_limit"' not in low
+                            and '"isapierrormessage":true' not in low
+                        ):
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        if not (d.get("isApiErrorMessage") or d.get("error")):
+                            continue  # marker was content, not a real error line
+                        ts = d.get("timestamp")
+                        if ts:
+                            try:
+                                import datetime as _dt
+                                t = _dt.datetime.fromisoformat(
+                                    ts.replace("Z", "+00:00")
+                                ).timestamp()
+                                if t < cutoff:
+                                    continue  # old error; the session recovered
+                            except Exception:
+                                pass  # unparseable ts -> keep (fail loud, not silent)
+                        # 'resets 4:30pm (America/Los_Angeles)' style prose rides
+                        # inside the error message on both shapes; surface it so
+                        # the menu can say WHEN instead of just "rate limited".
+                        m = re.search(r"resets [^\"\\]{0,40}", line)
+                        resets = " — " + m.group(0).strip().rstrip(".") if m else ""
+                        if d.get("apiErrorStatus") == 429 or d.get("error") == "rate_limit":
+                            limit_msg = "Claude rate limit reached (429)" + resets
+                            break
+                        # Non-429 API errors only count with weekly/usage-limit
+                        # prose in them; a plain 401/500 is NOT a usage limit.
+                        if (
+                            "weekly limit" in low
+                            or "usage limit" in low
+                            or "hit your limit" in low
+                        ):
+                            limit_msg = (
+                                m.group(0).strip().rstrip(".")
+                                if m
+                                else "Claude usage limit reached"
+                            )
+                            break
+                if limit_msg:
                     break
         except Exception:
             pass
