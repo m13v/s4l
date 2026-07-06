@@ -66,7 +66,6 @@ REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 LOCK_PATH = os.path.expanduser("~/.social-autoposter-mcp/feedback-digest.lock")
 MAX_EVENTS_PER_RUN = 200
-CLAUDE_TIMEOUT_SEC = 180
 
 DISALLOWED_TOOLS = (
     "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,"
@@ -184,35 +183,16 @@ OUTPUT: a single JSON object, nothing else. Schema:
 "remove" values must match existing entries EXACTLY. Omit empty keys if you like; an all-empty plan means "no changes"."""
 
 
-def _provider_env() -> dict:
-    """Route the Claude turn through the local job queue (drained by the
-    saps-worker Claude Desktop scheduled task) whenever that worker is actually
-    firing; otherwise leave the provider unset so run_claude.sh execs the
-    claude CLI directly (operator Macs). An explicit S4L_CLAUDE_PROVIDER in
-    the environment always wins. This is the same queue lane the drafting
-    pipeline uses — the digest is just one more job type on it."""
-    env = dict(os.environ)
-    if env.get("S4L_CLAUDE_PROVIDER"):
-        return env
-    try:
-        import schedule_state
-
-        if schedule_state.compute() == "ok":
-            env["S4L_CLAUDE_PROVIDER"] = "queue"
-    except Exception:
-        pass
-    return env
-
-
 def call_claude(prompt: str) -> tuple[bool, str, str]:
     """Headless Claude turn, cost-tracked via run_claude.sh (script_tag
-    feedback-digest). Queue-routed when a worker is firing (see _provider_env);
-    otherwise mirrors scripts/link_tail.py call_claude()."""
-    env = _provider_env()
-    queued = env.get("S4L_CLAUDE_PROVIDER") == "queue"
-    # Queue lane waits for the every-minute worker to claim + draft; give it
-    # the same generous budget the pipeline's queued calls get.
-    timeout_sec = 900 if queued else CLAUDE_TIMEOUT_SEC
+    feedback-digest). The tag is queue-mapped in claude_job.py TAG_TO_TYPE,
+    so run_claude.sh routes it through the job queue unconditionally; the
+    digest is just one more job type on the same lane the drafting pipeline
+    uses. No worker firing means an honest exit 79 from the seam, never a
+    silent CLI fallback."""
+    # The queue lane waits for the every-minute worker to claim + draft; give
+    # it the same generous budget the pipeline's queued calls get.
+    timeout_sec = 900
     if os.path.exists(RUN_CLAUDE_SH):
         cmd = ["bash", RUN_CLAUDE_SH, "feedback-digest", "-p", prompt,
                "--max-turns", "1", "--disallowed-tools", DISALLOWED_TOOLS]
@@ -228,7 +208,7 @@ def call_claude(prompt: str) -> tuple[bool, str, str]:
         pass
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout_sec, cwd=REPO_DIR, env=env)
+                           timeout=timeout_sec, cwd=REPO_DIR)
         out = (r.stdout or "").strip()
         if r.returncode != 0:
             return False, out, f"rc={r.returncode}: {(r.stderr or '')[:300]}"
