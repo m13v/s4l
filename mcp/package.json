@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "npm run build:panel && tsc",
-    "build:panel": "vite build && SAPS_PANEL_ENTRY=product-link vite build",
+    "build:panel": "vite build && S4L_PANEL_ENTRY=product-link vite build",
     "build:server": "tsc",
     "bundle:pipeline": "node bundle-pipeline.mjs",
     "build:bundle": "npm run build:panel && tsc && node bundle-pipeline.mjs",
