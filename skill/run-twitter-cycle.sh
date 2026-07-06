@@ -1656,7 +1656,7 @@ fi
 # at the Phase 1 handoff, so this exits clean via the EXIT trap. NO current caller
 # sets SCAN_ONLY, so the autopilot/draft_cycle paths are byte-for-byte unchanged.
 if [ "${SCAN_ONLY:-0}" = "1" ]; then
-    SCAN_FILE="/tmp/saps_scan_candidates_${BATCH_ID}.json"
+    SCAN_FILE="/tmp/s4l_scan_candidates_${BATCH_ID}.json"
     # $CANDIDATES is the same pipe-separated top-N the drafting step consumes (cols
     # documented in twitter_cycle_helper.py:cmd_candidates; tweet_text/draft fields
     # are pipe+newline sanitized there, so a field split is safe). Batch id + out
@@ -1714,7 +1714,7 @@ CANDIDATE_BLOCK=""
 # draft against and feed it into the prep prompt. Gated by
 # S4L_TWITTER_CAPTURE_MEDIA so it stays a no-op until the website API (with the
 # set_media action + thread_media column) deploys. Populated in the loop below.
-MEDIA_URLS_FILE=$(mktemp -t saps_twitter_media_urls_XXXXXX.tsv)
+MEDIA_URLS_FILE=$(mktemp -t s4l_twitter_media_urls_XXXXXX.tsv)
 while IFS='|' read -r cid curl cauthor ctext cscore cdelta cproject ctopic clikes crts creplies cviews cfollowers cage cdraft cdraftstyle cdraftage; do
     if [ -n "$cid" ] && [ -n "$curl" ]; then
         printf '%s\t%s\n' "$cid" "$curl" >> "$MEDIA_URLS_FILE"
@@ -1784,12 +1784,12 @@ else:
 # Engagement-style picker (2026-05-19): pick ONE assigned style for this
 # cycle. The picked style flows two places: (1) --style filter for
 # top_performers.py so the per-style exemplars section shows only posts
-# matching the assigned style, (2) saps_render_style_block (below) so the
+# matching the assigned style, (2) s4l_render_style_block (below) so the
 # prompt block embeds the same assignment. On invent mode picked_style is
 # empty and top_performers stays unfiltered (model sees full landscape).
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_assign_XXXXXX.json)
-saps_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_assign_XXXXXX.json)
+s4l_pick_style twitter posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
 PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -1827,14 +1827,16 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # The arm is stamped onto every post this cycle via S4L_DRAFT_PROMPT_VARIANT
 # (read by twitter_post_plan.py -> log_post.py -> posts.draft_prompt_variant),
 # mirroring the tail_link_variant plumbing. Split tunable via
-# TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment' (the
-# decoupled directive). CODE DEFAULT 1 = 100% treatment: a fresh plugin install /
-# new user with no override drafts in the DECOUPLED style by default (the old
-# concede->pivot 'control' is opt-in, not the default for customers). OUR own
-# install pins this to 0.5 in .env for a 50/50 holdback so we can measure
-# decoupled vs the old behavior on our account. The dashboard reads the SAME var
-# with the SAME default (bin/server.js), so display and routing never diverge.
-DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-1}"
+# TWITTER_DRAFT_PROMPT_AB_RATE = fraction of cycles assigned to 'treatment'.
+# CODE DEFAULT 0.5 = 50/50 EVERYWHERE (2026-07-06): every install runs a real
+# holdback so treatment (skeleton-ban, v2) can always be measured against the old
+# control prompt. The old default of 1 (100% treatment) was changed because it
+# silently dropped the control arm whenever the .env pin did not propagate to the
+# running env (the installed-package driver reads its OWN .env, not the source
+# tree's), leaving no control data. Robustly defaulting to 0.5 in code, not via an
+# .env override, prevents that. The dashboard reads the SAME var with the SAME
+# default (bin/server.js), so display and routing never diverge.
+DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
 S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
@@ -1906,7 +1908,7 @@ else
     log "WARN: generation_trace build returned empty path; posts this cycle will have NULL trace"
 fi
 
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" twitter posting)
 # Style assignment file is the same one we picked above; styles.sh already sourced.
 # Cleanup at cycle end (best effort).
 trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
