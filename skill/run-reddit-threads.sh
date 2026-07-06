@@ -51,18 +51,18 @@ acquire_lock "reddit-threads" 600
 
 # Load engagement styles.
 # 2026-05-25: switched from generate_styles_block (which throws away the
-# picker assignment) to the explicit saps_pick_style + saps_render_style_block
+# picker assignment) to the explicit s4l_pick_style + s4l_render_style_block
 # pair. PICKED_STYLE/PICK_MODE flow into the DB-insert heredoc below as env
 # vars so validate_or_register can coerce USE-mode drift back to the assigned
 # style, matching post_reddit.py / twitter_post_plan.py / post_github.py
 # semantics. Without this, the prompt's "pick from the list" instruction is
 # unenforced and any drifted/invented name silently lands in posts.engagement_style.
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_reddit_threads_style_XXXXXX.json)
-saps_pick_style reddit posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_reddit_threads_style_XXXXXX.json)
+s4l_pick_style reddit posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
 PICKED_STYLE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('style') or '')" 2>/dev/null || echo "")
 PICK_MODE=$(/usr/bin/python3 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('mode','')) " 2>/dev/null || echo "")
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" reddit posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" reddit posting)
 echo "engagement_style: picked='${PICKED_STYLE}' mode='${PICK_MODE}'" | tee -a "$LOG_FILE"
 
 # RETRY-FROM-PENDING (added 2026-05-01 after r/AutoHotkey MCP-crash incident):
@@ -556,7 +556,7 @@ account   = os.environ.get("POST_ACCOUNT", "")
 pending_id_str = os.environ.get("PENDING_ID_ENV", "")
 
 # 2026-05-25: validate_or_register pass. The picker assignment (PICKED_STYLE +
-# PICK_MODE) is sourced from the shell-level saps_pick_style call near the top
+# PICK_MODE) is sourced from the shell-level s4l_pick_style call near the top
 # of this script. USE mode coerces drift back to the assigned style; INVENT
 # mode registers the new_style block (if the model shipped one) into
 # engagement_styles_registry via /api/v1/engagement-styles/registry. Without
