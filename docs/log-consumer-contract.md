@@ -190,7 +190,9 @@ These closed the exact blind spots this class of incident exposed. When SSH'd in
 ### 4. The mechanism (why it leaks at all)
 
 Customer `.mcpb` boxes have no `claude` CLI, so the pipeline's `claude -p` calls are
-intercepted by the queue provider seam (`S4L_CLAUDE_PROVIDER=queue`): each becomes a
+intercepted by the queue routing seam in run_claude.sh (queue-mapped script tags in
+claude_job.py `TAG_TO_TYPE`; the `S4L_CLAUDE_PROVIDER` env var was removed 2026-07-06,
+routing is by tag on every machine): each becomes a
 file-queue job, and the real Claude turn is run by a **Claude Desktop scheduled task**
 (agent-mode stream-json session), NOT a `claude -p` subprocess. Those Desktop sessions
 finish their one queue turn but never exit (Desktop keeps the stream-json session warm),
