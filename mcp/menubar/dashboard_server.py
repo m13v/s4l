@@ -59,7 +59,7 @@ def _compute_snapshot():
 
 
 def _toggle_lane(lane):
-    """Flip ONE engagement lane (personal_brand|promotion) via saps_mode.py and
+    """Flip ONE engagement lane (personal_brand|promotion) via s4l_mode.py and
     return the new flags dict."""
     if lane not in ("personal_brand", "promotion"):
         lane = "personal_brand"
@@ -69,7 +69,7 @@ def _toggle_lane(lane):
         or sys.executable
         or "python3"
     )
-    sm = os.path.join(_repo_dir(), "scripts", "saps_mode.py")
+    sm = os.path.join(_repo_dir(), "scripts", "s4l_mode.py")
     out = (subprocess.run([py, sm, "toggle", lane], capture_output=True, text=True, timeout=15).stdout or "").strip()
     try:
         return json.loads(out)
