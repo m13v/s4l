@@ -145,9 +145,19 @@ def get_mode() -> str:
 
 
 def write_flags(personal_brand: bool, promotion: bool) -> dict:
-    """Persist both lane flags atomically (plus the derived legacy `mode`)."""
+    """Persist both lane flags atomically (plus the derived legacy `mode`).
+
+    Preserves any OTHER keys already in mode.json (e.g. `autopilot`) so a lane
+    flip can never silently reset an unrelated setting.
+    """
     flags = {"personal_brand": bool(personal_brand), "promotion": bool(promotion)}
-    payload = dict(flags)
+    try:
+        payload = json.loads(mode_file().read_text())
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    payload.update(flags)
     payload["mode"] = _legacy_mode(flags)
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -155,6 +165,41 @@ def write_flags(personal_brand: bool, promotion: bool) -> dict:
     tmp.write_text(json.dumps(payload))
     tmp.replace(mode_file())
     return flags
+
+
+def get_autopilot() -> bool:
+    """Whether promotion-lane cycles POST autonomously (no review card).
+
+    Persona-lane cycles are unaffected: they always stay DRAFT_ONLY so the
+    user's own voice keeps human review. Default OFF: a fresh install drafts
+    cards only, autopilot is an explicit opt-in.
+    """
+    try:
+        data = json.loads(mode_file().read_text())
+        return _coerce_bool(data.get("autopilot", False)) if isinstance(data, dict) else False
+    except Exception:
+        return False
+
+
+def set_autopilot(on: bool) -> bool:
+    try:
+        payload = json.loads(mode_file().read_text())
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    payload["autopilot"] = bool(on)
+    # Keep the lane keys + legacy mirror intact on first-ever write.
+    flags = get_flags()
+    payload.setdefault("personal_brand", flags["personal_brand"])
+    payload.setdefault("promotion", flags["promotion"])
+    payload["mode"] = _legacy_mode(flags)
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = mode_file().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(mode_file())
+    return bool(on)
 
 
 def set_mode(mode: str) -> str:
