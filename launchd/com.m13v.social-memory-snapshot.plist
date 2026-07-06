@@ -21,9 +21,9 @@
 		<string>/Users/matthewdi/.local/bin:/opt/homebrew/Cellar/node/25.9.0_2/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>HOME</key>
 		<string>/Users/matthewdi</string>
-		<key>SAPS_REPO_DIR</key>
+		<key>S4L_REPO_DIR</key>
 		<string>/Users/matthewdi/social-autoposter</string>
-		<key>SAPS_PYTHON</key>
+		<key>S4L_PYTHON</key>
 		<string>/opt/homebrew/bin/python3.11</string>
 		<key>BH_CHROME_BIN</key>
 		<string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
