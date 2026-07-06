@@ -1518,6 +1518,15 @@ tool(
         .boolean()
         .optional()
         .describe("action:'set' — turn the product-promotion lane on/off. Defaults to false; set true when the user says they also want to promote a product."),
+      autopilot: z
+        .boolean()
+        .optional()
+        .describe(
+          "action:'set' — FULL AUTOPILOT for the promotion lane: promotion cycles POST autonomously " +
+            "(gated by the rolling virality bar) instead of stopping at review cards. Persona cycles " +
+            "always stay human-reviewed cards regardless. Default false (cards only). Only set true " +
+            "when the user explicitly asks for hands-free autonomous posting."
+        ),
       lane: z
         .enum(["personal_brand", "promotion"])
         .optional()
@@ -3314,14 +3323,16 @@ function ensureCoworkMcpRegistered(): void {
   }
 }
 
-// ---- launchd kicker: run the REAL pipeline in DRAFT_ONLY + queue mode --------
+// ---- launchd kicker: run the REAL pipeline in queue mode ---------------------
 // Reinstates com.m13v.social-twitter-cycle as the customer-box kicker. It runs
-// run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen) but
-// STOPS before posting (DRAFT_ONLY=1), writing the plan to the review-queue the
-// approval cards read. Its `claude -p` steps route through the job queue
-// (S4L_CLAUDE_PROVIDER=queue) for the scheduled-task workers to service.
-// link_tail is skipped for now (TWITTER_TAIL_LINK_RATE=0); the short link is
-// still baked by twitter_gen_links.py (pure Python).
+// run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen); its
+// `claude -p` steps route through the job queue (S4L_CLAUDE_PROVIDER=queue) for
+// the scheduled-task workers to service. The per-cycle DRAFT_ONLY value is NOT
+// baked here anymore: run-draft-and-publish.sh decides it from mode.json
+// (autopilot flag, 2026-07-06) — draft cycles stop before posting and merge into
+// review cards; autopilot promotion cycles post autonomously behind the virality
+// bar. The DRAFT_ONLY=1 below is only the safe baseline an OLD wrapper (which
+// never overrides it) inherits.
 const QUEUE_KICKER_INTERVAL_SECS = 300; // a fresh draft cycle every 5 min
 
 function kickerEnv(): Record<string, string> {
@@ -3329,12 +3340,20 @@ function kickerEnv(): Record<string, string> {
     DRAFT_ONLY: "1",
     S4L_CLAUDE_PROVIDER: "queue",
     S4L_STATE_DIR: sapsStateDir(),
-    TWITTER_TAIL_LINK_RATE: "0",
     TWITTER_PAGE_GEN_RATE: "0",
-    // Rolling virality bar percentile for the draft lane (2026-07-03): the
-    // cycle script now applies the bar to DRAFT_ONLY too, so below-bar picks
-    // never become review cards. p0.95 (not the script's 0.97 default) keeps
-    // card volume useful while cutting bottom-of-pool drafts; cold start
+    // Thread-media context for the drafter (2026-07-06): parity with the
+    // retired CLI autopilot plist. Without it the prep step drafts blind to
+    // images in the candidate threads.
+    S4L_TWITTER_CAPTURE_MEDIA: "1",
+    // NOTE: TWITTER_TAIL_LINK_RATE is deliberately NOT set here (2026-07-06).
+    // The persona lane exports =0 per cycle via saps_mode.py env (link-free
+    // organic replies); promotion cycles keep the script's own default so
+    // autopilot posts carry the project link per the A/B gate, and card posts
+    // still force =1.0 inside post_drafts.
+    // Rolling virality bar percentile (2026-07-03): applies to BOTH lanes in
+    // the cycle script — below-bar picks never become review cards, and in
+    // autopilot mode never post. p0.95 (not the script's 0.97 default) keeps
+    // volume useful while cutting bottom-of-pool drafts; cold start
     // (sample_count < 200) still shows brand-new installs every draft.
     S4L_TWITTER_VIRALITY_PCTILE: "0.95",
   };
