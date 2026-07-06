@@ -303,13 +303,27 @@ def _details_lines(d):
     # merge_review_queue.py from scripts/active_experiments.py. Rendered
     # generically so every future experiment surfaces here with no card change.
     # 'lane' reads as a scenario, not an A/B arm, so it gets its own label.
+    # Each arm carries its meaning from the DESCRIPTIONS registry in
+    # active_experiments.py (scripts/ is on sys.path via s4l_state's
+    # S4L_REPO_DIR insertion); the reviewer needs what the variant DOES, not
+    # just its name. Unknown arms fall back to the bare name.
     exps = d.get("experiments") or {}
+    if exps:
+        try:
+            from active_experiments import describe as _exp_describe
+        except Exception:
+            def _exp_describe(_name, _variant):
+                return None
     for name in sorted(exps):
         label = (
             "Lane" if name == "lane"
             else f"Experiment {str(name).replace('_', ' ')}"
         )
-        lines.append(f"{label}: {exps[name]}")
+        line = f"{label}: {exps[name]}"
+        exp_desc = _exp_describe(name, exps[name])
+        if exp_desc:
+            line += f" ({exp_desc})"
+        lines.append(line)
     topic = (d.get("search_topic") or "").strip()
     if topic:
         lines.append(f"Found via search: {topic}")
