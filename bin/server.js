@@ -6715,15 +6715,16 @@ async function handleApi(req, res) {
           }, { n_candidates: 0, n_posted: 0, n_batches: null });
           // Assignment weight read LIVE from .env (fraction to 'treatment').
           // SAME source + SAME default as the actual routing in
-          // run-twitter-cycle.sh (TWITTER_DRAFT_PROMPT_AB_RATE, code default 1 =
-          // 100% treatment: decoupled is the new-user/plugin default; our own
-          // install pins 0.5 for a 50/50 holdback), so display and logic never
+          // run-twitter-cycle.sh (TWITTER_DRAFT_PROMPT_AB_RATE, code default 0.5 =
+          // 50/50 everywhere so the control arm is always collected; changed from
+          // 1 on 2026-07-06 after the .env pin silently failed to propagate to the
+          // running env and dropped the holdback), so display and logic never
           // diverge.
           const dpRate = (() => {
             const raw = (loadEnv().TWITTER_DRAFT_PROMPT_AB_RATE || '').trim();
-            if (raw === '') return 1;
+            if (raw === '') return 0.5;
             const n = Number(raw);
-            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 1;
+            return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.5;
           })();
           const dpWeightTreatment = Math.round(dpRate * 1000) / 10;
           const dpWeightControl = Math.round((1 - dpRate) * 1000) / 10;
