@@ -20,7 +20,6 @@ const MILESTONES = [
 function stateDir(opts = {}) {
   return (
     opts.stateDir ||
-    process.env.SAPS_STATE_DIR ||
     path.join(os.homedir(), ".social-autoposter-mcp")
   );
 }
