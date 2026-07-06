@@ -159,7 +159,7 @@ def _runtime_provisioning() -> bool:
 def _flags() -> dict:
     """Engagement lane flags {"personal_brand": bool, "promotion": bool}.
 
-    Mirrors scripts/saps_mode.py get_flags(): explicit flag keys win; else map a
+    Mirrors scripts/s4l_mode.py get_flags(): explicit flag keys win; else map a
     legacy {"mode": ...} string; else default personal ON / promotion OFF."""
     d = _read_json(os.path.join(_state_dir(), "mode.json")) or {}
     if "personal_brand" in d or "promotion" in d:
