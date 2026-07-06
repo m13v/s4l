@@ -3352,12 +3352,8 @@ function kickerEnv(): Record<string, string> {
     // organic replies); promotion cycles keep the script's own default so
     // draft-only-OFF posts carry the project link per the A/B gate, and card posts
     // still force =1.0 inside post_drafts.
-    // Rolling virality bar percentile (2026-07-03): applies to BOTH lanes in
-    // the cycle script — below-bar picks never become review cards, and in
-    // with draft-only OFF never post. p0.90 (not the script's 0.97 default) keeps
-    // volume useful while cutting bottom-of-pool drafts; cold start
-    // (sample_count < 200) still shows brand-new installs every draft.
-    S4L_TWITTER_VIRALITY_PCTILE: "0.90",
+    // Virality bar percentile is NOT set here: it is hardcoded to 0.90 in
+    // skill/run-twitter-cycle.sh (single source of truth, no env dependency).
   };
 }
 
