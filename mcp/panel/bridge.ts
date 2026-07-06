@@ -14,7 +14,7 @@
  *                  which replays the exact same captured tool handler.
  *
  * createBridge() picks based on a flag the loopback server injects into the
- * page (window.__SAPS_BRIDGE__). Inline (ui://) renders never see that flag and
+ * page (window.__S4L_BRIDGE__). Inline (ui://) renders never see that flag and
  * get the AppsBridge.
  */
 import { App } from "@modelcontextprotocol/ext-apps";
@@ -122,7 +122,7 @@ class HttpBridge implements PanelBridge {
 }
 
 export function createBridge(): PanelBridge {
-  const mode = (globalThis as any).__SAPS_BRIDGE__;
+  const mode = (globalThis as any).__S4L_BRIDGE__;
   if (mode === "http") return new HttpBridge();
   // Inline MCP Apps host: the real App satisfies PanelBridge structurally.
   return new App({ name: "S4L Panel", version: "1.0.0" }) as unknown as PanelBridge;
