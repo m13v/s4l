@@ -637,6 +637,9 @@ def cmd_provider(ns) -> int:
 
     job_id = uuid.uuid4().hex
     created = time.time()
+    # Cycle batch id (run-twitter-cycle.sh exports BATCH_ID) so every provider.log
+    # line correlates to the cycle's own twitter-cycle-<batch>.log. '-' when off-cycle.
+    batch = (os.environ.get("BATCH_ID") or os.environ.get("SA_CYCLE_ID") or "-").strip() or "-"
     _ensure_dirs(qtype)
     _sweep_stale()  # clear leftovers from prior timed-out producers before enqueuing
     job = {
@@ -652,7 +655,7 @@ def cmd_provider(ns) -> int:
     pending_path = os.path.join(pending_dir(qtype), fname)
     running_path = os.path.join(running_dir(), fname)
     _atomic_write(pending_path, job)
-    _plog(f"enqueued {qtype} job {job_id}; waiting for a scheduled task (timeout {ns.timeout}s)")
+    _plog(f"enqueued {qtype} job {job_id} batch={batch}; waiting for a scheduled task (timeout {ns.timeout}s)")
     # Narrate the (multi-minute) block to the menu bar. The launchd draft lane has
     # no other activity writer, so without this the box looks idle while it works.
     # Cleared by run-draft-and-publish.sh's exit trap at cycle end (and by the
@@ -712,6 +715,16 @@ def cmd_provider(ns) -> int:
             # A worker drained this job -> the autopilot is alive; clear any latched
             # stall so the menu bar / dashboard / Sentry watcher recover.
             _mark_drain_success()
+            # Success-consume event: the SILENT gap that made an orphaned result
+            # (worker wrote it, producer died before consuming) indistinguishable
+            # from a healthy one. A result file only survives in result/ if it was
+            # NEVER consumed (we os.remove above), so "consumed" here + a surviving
+            # file = the orphan signature the salvage reconciler keys on.
+            try:
+                _ncand = len(obj.get("candidates")) if isinstance(obj, dict) and isinstance(obj.get("candidates"), list) else "?"
+            except Exception:
+                _ncand = "?"
+            _plog(f"consumed result for job {job_id} batch={batch} ({qtype}); {_ncand} candidates -> producer assembles the plan")
             return 0
         time.sleep(POLL_INTERVAL_S)
 
@@ -731,7 +744,7 @@ def cmd_provider(ns) -> int:
     # (no pending file exists between cycles, so an instantaneous queue check would
     # flicker the ⚠ off). Cleared only when a draft actually drains.
     _bump_drain_timeout()
-    _plog(f"timed out after {ns.timeout}s waiting for job {job_id} ({qtype}); removed the job")
+    _plog(f"timed out after {ns.timeout}s waiting for job {job_id} batch={batch} ({qtype}); removed the job")
     return 79  # mirror run_claude.sh's "blocked, skip cleanly" exit code
 
 
