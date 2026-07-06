@@ -1171,7 +1171,11 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                     print(f"[reply_to_tweet] <main> not rendered on "
                           f"nav_attempt={nav_attempt} (url={cur_url!r}); "
                           f"nudging + re-navigating", file=sys.stderr)
-                if "this page doesn't exist" in page_text.lower():
+                # X renders the 404 copy with a CURLY apostrophe
+                # ("Hmm...this page doesn’t exist"), so normalize before
+                # matching — the plain-ASCII check silently never fired and
+                # dead tweets fell through to tweet_unavailable instead.
+                if "this page doesn't exist" in page_text.lower().replace("’", "'"):
                     tweet_not_found = True
                     break
 
