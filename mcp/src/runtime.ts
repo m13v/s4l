@@ -69,7 +69,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Everything we own lives under one state dir (next to setup-state.json).
 const STATE_DIR =
-  process.env.S4L_STATE_DIR || process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 const RUNTIME_DIR = path.join(STATE_DIR, "runtime");
 const VENV_DIR = path.join(RUNTIME_DIR, ".venv");
 const RUNTIME_JSON = path.join(STATE_DIR, "runtime.json");
@@ -195,7 +195,7 @@ function isMaterializedPath(dir: string | undefined | null): boolean {
 // user owns (npm/git install). The materialized repo and stray checkouts do
 // not qualify — self-update lanes must stay in charge of those.
 function envRepoClone(): string | null {
-  const env = process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR;
+  const env = process.env.S4L_REPO_DIR;
   if (!env || isMaterializedPath(env)) return null;
   if (!looksLikeRepo(env) || isStrayCheckout(env)) return null;
   return env;
@@ -213,7 +213,7 @@ function envRepoClone(): string | null {
 // the running server does NOT live in can never be the pipeline repo on a
 // shipped install, because no update lane will ever advance it.
 export function resolveRepoDir(): string {
-  const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
+  const env = (process.env.S4L_REPO_DIR);
   const clone = envRepoClone();
   if (clone) return clone;
   const rt = readRuntime();
@@ -371,7 +371,7 @@ export function ensurePipelineCurrent(): void {
 // server boot from ensurePipelineCurrent(); best-effort, never throws.
 function healStrayCheckout(): void {
   try {
-    const env = (process.env.S4L_REPO_DIR ?? process.env.SAPS_REPO_DIR);
+    const env = (process.env.S4L_REPO_DIR);
     const rt = readRuntime();
     const stray =
       (looksLikeRepo(env) && isStrayCheckout(env) && (env as string)) ||
@@ -440,7 +440,7 @@ export function runtimeReady(): boolean {
 export function resolvePython(): string {
   const rt = readRuntime();
   if (rt && rt.python && fs.existsSync(rt.python)) return rt.python;
-  return process.env.S4L_PYTHON || process.env.SAPS_PYTHON || "python3";
+  return process.env.S4L_PYTHON || "python3";
 }
 
 // First Chrome/Chromium binary that exists AND is executable, from the same
@@ -840,8 +840,8 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
     // ~/Applications branch without re-detecting spaces-in-path quirks).
     const script = [
       "set -e",
-      'DMG="$(mktemp -t saps-gchrome).dmg"',
-      'MNT="$(mktemp -d -t saps-gchrome-mnt)"',
+      'DMG="$(mktemp -t s4l-gchrome).dmg"',
+      'MNT="$(mktemp -d -t s4l-gchrome-mnt)"',
       'cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; rm -f "$DMG"; rmdir "$MNT" 2>/dev/null || true; }',
       "trap cleanup EXIT",
       `curl -fsSL -o "$DMG" "${GOOGLE_CHROME_DMG}"`,
@@ -1009,15 +1009,9 @@ function menubarPlistXml(python: string): string {
 \t\t<string>${os.homedir()}</string>
 \t\t<key>S4L_STATE_DIR</key>
 \t\t<string>${STATE_DIR}</string>
-\t\t<key>SAPS_STATE_DIR</key>
-\t\t<string>${STATE_DIR}</string>
 \t\t<key>S4L_PYTHON</key>
 \t\t<string>${python}</string>
-\t\t<key>SAPS_PYTHON</key>
-\t\t<string>${python}</string>
 \t\t<key>S4L_REPO_DIR</key>
-\t\t<string>${resolveRepoDir()}</string>
-\t\t<key>SAPS_REPO_DIR</key>
 \t\t<string>${resolveRepoDir()}</string>
 \t</dict>
 </dict>
