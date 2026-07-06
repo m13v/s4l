@@ -108,18 +108,18 @@ TW_ENGINE_PREFIX=""
 # ceiling drops that carry runway so aged-out junk expires instead of riding
 # ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
 #
-# 2026-06-17 (per user request): DRAFT mode (DRAFT_ONLY=1, the MCP draft_cycle
-# tool) widens both freshness knobs to 24h so human review surfaces more (and
-# older) candidates. Autopilot is untouched: it keeps the experiment-concluded
-# 2h expire ceiling + 1h discovery window (variant D). The branch is on
-# DRAFT_ONLY, an external env var set by the draft_cycle tool, available here.
-# 2026-07-02 (first-run onboarding boost, per user request): the draft-mode
-# value accepts an env override, S4L_DRAFT_FRESHNESS_HOURS, so the kicker
-# wrapper (run-draft-and-publish.sh) can widen a brand-new user's FIRST draft
-# cycle to 48h and surface multiple review cards. Unset = the standard 24h
-# draft window. Autopilot (DRAFT_ONLY=0) ignores the override entirely.
-if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS="${S4L_DRAFT_FRESHNESS_HOURS:-24}"
+# 2026-07-06 (per user request): the wide draft window is SETUP-ONLY. The
+# original 2026-06-17 change made DRAFT_ONLY=1 default to 24h permanently,
+# so every steady-state draft-autopilot cycle kept surfacing day-old tweets.
+# Now the ONLY way draft mode widens is the explicit S4L_DRAFT_FRESHNESS_HOURS
+# env override, which run-draft-and-publish.sh exports solely while the
+# first-run-boost.json onboarding marker is live (consumed after the first
+# delivered batch, hard-expired after 24h). Once the marker is gone the env
+# is unset and draft cycles run the same experiment-concluded variant D
+# windows as autopilot: 2h expire ceiling + 1h discovery.
+# Autopilot (DRAFT_ONLY=0) ignores the override entirely, as before.
+if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -n "${S4L_DRAFT_FRESHNESS_HOURS:-}" ]; then
+    FRESHNESS_HOURS="$S4L_DRAFT_FRESHNESS_HOURS"
 else
     FRESHNESS_HOURS=2
 fi
@@ -139,13 +139,13 @@ fi
 # other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
-# DRAFT mode widens discovery to 24h by default; autopilot keeps the winning D
-# setting of 1h. S4L_DRAFT_FRESHNESS_HOURS (first-run onboarding boost, see the
-# FRESHNESS_HOURS branch above) can widen the draft-mode value further (48h on a
-# brand-new install's first cycle). The lean Phase 1 CDP scraper reads
-# FRESHNESS_HOURS_DISCOVER directly and honors any value.
-if [ "${DRAFT_ONLY:-0}" = "1" ]; then
-    FRESHNESS_HOURS_DISCOVER="${S4L_DRAFT_FRESHNESS_HOURS:-24}"
+# Discovery widens ONLY under the first-run onboarding boost (see the
+# FRESHNESS_HOURS branch above): S4L_DRAFT_FRESHNESS_HOURS set + DRAFT_ONLY=1.
+# Steady-state draft cycles keep the winning D setting of 1h, same as
+# autopilot. The lean Phase 1 CDP scraper reads FRESHNESS_HOURS_DISCOVER
+# directly and honors any value.
+if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -n "${S4L_DRAFT_FRESHNESS_HOURS:-}" ]; then
+    FRESHNESS_HOURS_DISCOVER="$S4L_DRAFT_FRESHNESS_HOURS"
 else
     FRESHNESS_HOURS_DISCOVER=1
 fi
