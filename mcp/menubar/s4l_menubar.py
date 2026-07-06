@@ -227,6 +227,43 @@ REARM_PROMPT = (
     "Do not redo my X connection or project setup — only register the scheduled task. "
     "Keep replies short."
 )
+# Universal diagnose-and-heal prompt behind the ⚠ "Diagnose & fix" menu item. One
+# prompt for EVERY persistent attention state (draft stuck, rate-limited, schedule
+# missing/disabled): the menu bar can only see the symptom, Claude on the box can
+# see the cause. The prompt encodes the known heal patterns (the 2026-07-06
+# dead-claim incident chief among them), forbids code hot patches, and ends by
+# shipping a report back to us via scripts/send_diagnostic_report.py, so every
+# click doubles as fleet telemetry about what actually breaks in the field.
+DIAGNOSE_PROMPT_TEMPLATE = (
+    "The S4L plugin's menu bar on this machine is showing a persistent warning. "
+    "Reason code: {reason}. Detail: {detail}. Diagnose and heal it now.\n"
+    "Evidence lives under ~/.social-autoposter-mcp: activity.json (the producer's "
+    "live drafting label), claude-queue/ (pending/, running/ — each running job "
+    "stamps claim_pid, result/, provider.log, reaper-status.json, drain-status.json) "
+    "and the reaper log at repo/package/skill/logs/launchd-claude-reaper-stderr.log. "
+    "Worker transcripts: the *.jsonl files in the ~/.claude/projects/ entry for the "
+    "~/.s4l-worker directory.\n"
+    "Known heal patterns, in order of likelihood: "
+    "(1) dead claim — a job in claude-queue/running/ whose claim_pid no longer "
+    "exists in ps was orphaned by a killed worker (app quit mid-draft); move its "
+    "json back to claude-queue/pending/<its type>/ under the SAME filename with the "
+    "claim_pid and claimed_at keys deleted, and the every-minute worker will "
+    "re-claim it. "
+    "(2) rate-limited — worker transcripts end in 429/limit errors; nothing local "
+    "to fix, say so in the report. "
+    "(3) schedule missing/disabled — re-register via queue_setup or the host "
+    "create_scheduled_task with the prompt from "
+    "~/.claude/scheduled-tasks/s4l-worker/SKILL.md.\n"
+    "HARD RULE: fix state files only. Never edit, copy, or patch code in "
+    "~/.social-autoposter-mcp or any extension bundle (hot patches are auto-reverted "
+    "and mask the real bug).\n"
+    "Finally — ALWAYS, healed or not — write a short markdown report (symptom, root "
+    "cause, actions taken, current state) to "
+    "~/.social-autoposter-mcp/diagnostics/report-<UTC-timestamp>.md and run "
+    "`~/.social-autoposter-mcp/runtime/.venv/bin/python3 "
+    "~/.social-autoposter-mcp/repo/package/scripts/send_diagnostic_report.py "
+    "<that file>` so the report reaches the S4L developers. Keep replies short."
+)
 
 # A pending draft job older than this (seconds) with nothing claiming it means no
 # routine is draining the queue — the worker would claim within a minute if it
@@ -516,6 +553,29 @@ class S4LMenuBar(rumps.App):
             "schedule the autopilot",
         )
 
+
+    def _diagnose_fix(self, _=None):
+        """Universal ⚠ escape hatch: hand Claude a diagnose-and-heal prompt for
+        whatever persistent attention state the menu bar is showing, via the same
+        clipboard-prompt flow as Set up / Re-arm. The prompt makes Claude ship a
+        report back through send_diagnostic_report.py, so we hear about every
+        field failure this button gets used on — the click itself is also
+        captured, so \"clicked but no report arrived\" is a visible signal."""
+        reason, detail = getattr(self, "_stall_reason_info", ("", "")) or ("", "")
+        if not reason:
+            sched = getattr(self, "_schedule_state_cache", "") or ""
+            reason = f"schedule_{sched}" if sched in ("missing", "disabled") else "unknown"
+        _capture_msg(
+            "S4L diagnose&fix clicked",
+            phase="diagnose_fix",
+            reason=reason,
+        )
+        self._clipboard_prompt(
+            DIAGNOSE_PROMPT_TEMPLATE.format(reason=reason, detail=detail or "n/a"),
+            "Diagnose & fix S4L in Claude",
+            "Claude will diagnose the warning, heal what it safely can, and send "
+            "a report to the S4L developers",
+        )
 
     def _rearm(self, _=None):
         """Register the draft schedule for the CURRENT account via the host
