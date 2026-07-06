@@ -31,7 +31,7 @@ from pathlib import Path
 # The repo dir must be read tolerantly INLINE (old name included) because the
 # mirror module itself lives in $REPO/scripts and isn't importable before the
 # sys.path insertion below. Best-effort: failure degrades to defaults.
-_repo_for_env = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
+_repo_for_env = os.environ.get("S4L_REPO_DIR")
 if _repo_for_env:
     _scripts_for_env = os.path.join(_repo_for_env, "scripts")
     if _scripts_for_env not in sys.path:
@@ -225,7 +225,6 @@ _snap_refreshing = [False]
 def _snapshot_module():
     repo = (
         os.environ.get("S4L_REPO_DIR")
-        or os.environ.get("SAPS_REPO_DIR")  # pre-rename plists (2026-07-03)
         or str(Path.home() / "social-autoposter")
     )
     scripts = os.path.join(repo, "scripts")
