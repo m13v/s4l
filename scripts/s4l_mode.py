@@ -38,26 +38,33 @@ pipeline already honors:
     TWITTER_TAIL_LINK_RATE=0 -> twitter_post_plan.py ships every reply bare.
 
 Usage:
-    saps_mode.py get                 # print derived legacy mode (compat)
-    saps_mode.py flags               # print JSON {personal_brand, promotion}
-    saps_mode.py set personal_brand  # legacy: personal-only (compat)
-    saps_mode.py set promotion       # legacy: promotion-only (compat)
-    saps_mode.py set-flags <pb> <pr> # set both lanes, e.g. `set-flags 1 1`
-    saps_mode.py enable personal_brand|promotion
-    saps_mode.py disable personal_brand|promotion
-    saps_mode.py toggle personal_brand|promotion   # flip ONE lane
-    saps_mode.py toggle              # legacy whole-mode flip (compat)
-    saps_mode.py env                 # print shell `export` lines for this cycle
-    saps_mode.py persona-name        # print the persona project name (or empty)
-    saps_mode.py autopilot           # print 1|0 (promotion cycles post autonomously?)
-    saps_mode.py autopilot on|off    # set the autopilot flag
+    s4l_mode.py get                 # print derived legacy mode (compat)
+    s4l_mode.py flags               # print JSON {personal_brand, promotion}
+    s4l_mode.py set personal_brand  # legacy: personal-only (compat)
+    s4l_mode.py set promotion       # legacy: promotion-only (compat)
+    s4l_mode.py set-flags <pb> <pr> # set both lanes, e.g. `set-flags 1 1`
+    s4l_mode.py enable personal_brand|promotion
+    s4l_mode.py disable personal_brand|promotion
+    s4l_mode.py toggle personal_brand|promotion   # flip ONE lane
+    s4l_mode.py toggle              # legacy whole-mode flip (compat)
+    s4l_mode.py env                 # print shell `export` lines for this cycle
+    s4l_mode.py persona-name        # print the persona project name (or empty)
+    s4l_mode.py draft-only          # print 1|0 (1 = cycles stop at review cards)
+    s4l_mode.py draft-only on|off   # set the draft-only flag (operator-only)
 
-Autopilot (2026-07-06): a third, independent flag in mode.json. When ON,
-run-draft-and-publish.sh runs promotion-lane cycles with DRAFT_ONLY=0 so they
-POST autonomously (the rolling virality bar activates as the quality gate).
-Persona-lane cycles ALWAYS stay DRAFT_ONLY=1 (review cards) regardless.
+Draft-only (2026-07-06): a third, independent flag in mode.json, DEFAULT ON.
+While ON (the normal state), every cycle stops before posting and its drafts
+become review cards. When an OPERATOR turns it off, run-draft-and-publish.sh
+runs promotion-lane cycles with DRAFT_ONLY=0 so they POST autonomously (the
+rolling virality bar is the quality gate). Persona-lane cycles ALWAYS stay
+draft-only (review cards) regardless. Deliberately NOT exposed on any user
+surface (no MCP tool param, no menubar toggle): this CLI and mode.json are the
+only way to flip it.
 `env` additionally exports S4L_CYCLE_LANE=<lane> for both lanes so the wrapper
 knows which lane this cycle is without re-deriving it.
+
+This file was named saps_mode.py before the 2026-07-06 SAPS->S4L rename; a
+thin shim keeps that path alive for the chflags-locked run-twitter-cycle.sh.
 """
 
 import json
@@ -176,28 +183,37 @@ def write_flags(personal_brand: bool, promotion: bool) -> dict:
     return flags
 
 
-def get_autopilot() -> bool:
-    """Whether promotion-lane cycles POST autonomously (no review card).
+def get_draft_only() -> bool:
+    """Whether every cycle stops at review cards (DEFAULT: True).
 
-    Persona-lane cycles are unaffected: they always stay DRAFT_ONLY so the
-    user's own voice keeps human review. Default OFF: a fresh install drafts
-    cards only, autopilot is an explicit opt-in.
+    False (operator opt-out via `draft-only off`) means promotion-lane cycles
+    POST autonomously behind the rolling virality bar. Persona-lane cycles are
+    unaffected either way: they always stay draft-only so the user's own voice
+    keeps human review. Reads the retired `autopilot` key (inverted) from
+    mode.json files written before the 2026-07-06 rename.
     """
     try:
         data = json.loads(mode_file().read_text())
-        return _coerce_bool(data.get("autopilot", False)) if isinstance(data, dict) else False
+        if not isinstance(data, dict):
+            return True
+        if "draft_only" in data:
+            return _coerce_bool(data.get("draft_only"))
+        if "autopilot" in data:  # pre-rename file: autopilot=true meant NOT draft-only
+            return not _coerce_bool(data.get("autopilot"))
+        return True
     except Exception:
-        return False
+        return True
 
 
-def set_autopilot(on: bool) -> bool:
+def set_draft_only(on: bool) -> bool:
     try:
         payload = json.loads(mode_file().read_text())
         if not isinstance(payload, dict):
             payload = {}
     except Exception:
         payload = {}
-    payload["autopilot"] = bool(on)
+    payload["draft_only"] = bool(on)
+    payload.pop("autopilot", None)  # retire the pre-rename key
     # Keep the lane keys + legacy mirror intact on first-ever write.
     flags = get_flags()
     payload.setdefault("personal_brand", flags["personal_brand"])
