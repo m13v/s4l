@@ -2,18 +2,18 @@
 # Shared engagement styles helper.
 # Usage:
 #   source styles.sh
-#   ASSIGN_FILE=$(mktemp -t saps_style_assign_XXXXXX.json)
-#   ASSIGNMENT=$(saps_pick_style twitter posting "$ASSIGN_FILE")
+#   ASSIGN_FILE=$(mktemp -t s4l_style_assign_XXXXXX.json)
+#   ASSIGNMENT=$(s4l_pick_style twitter posting "$ASSIGN_FILE")
 #   PICKED_STYLE=$(echo "$ASSIGNMENT" | python3 -c "import json,sys; print((json.load(sys.stdin).get('style') or ''))")
-#   STYLES_BLOCK=$(saps_render_style_block "$ASSIGN_FILE" twitter posting)
+#   STYLES_BLOCK=$(s4l_render_style_block "$ASSIGN_FILE" twitter posting)
 # Requires REPO_DIR to be set before sourcing.
 #
 # Architecture (2026-05-19 picker rollout):
-#   - saps_pick_style: programmatic style picker. Emits the assignment JSON to
+#   - s4l_pick_style: programmatic style picker. Emits the assignment JSON to
 #     stdout AND writes it to the optional outfile path so a sibling shell var
 #     can keep the path around and re-read it later. Replaces the legacy
 #     "show all styles, let the model pick" pattern.
-#   - saps_render_style_block: turns an assignment JSON file into the compact
+#   - s4l_render_style_block: turns an assignment JSON file into the compact
 #     prompt block (one assigned style + description + example + note, or the
 #     invent block with top-N references) plus content rules + anti-patterns
 #     + grounding rule.
@@ -23,7 +23,7 @@
 
 # Pick a style and emit the assignment as JSON to stdout. Optionally also
 # writes the JSON to $3 (an outfile path).
-saps_pick_style() {
+s4l_pick_style() {
   local platform="$1"
   local context="${2:-posting}"
   local outfile="${3:-}"
@@ -46,7 +46,7 @@ print(json.dumps(assignment))
 # voice relationship rule (introduced 2026-05-27 so the model knows whether
 # to speak AS the matched project's maker or as an outside observer; per
 # project the rule reads voice_relationship in config.json).
-saps_render_style_block() {
+s4l_render_style_block() {
   local assign_file="$1"
   local platform="$2"
   local context="${3:-posting}"
@@ -77,11 +77,11 @@ generate_styles_block() {
   local platform="$1"
   local context="${2:-posting}"
   local tmpfile
-  tmpfile=$(mktemp -t saps_style_assign_XXXXXX.json) || {
+  tmpfile=$(mktemp -t s4l_style_assign_XXXXXX.json) || {
     echo "(style module unavailable: mktemp failed)"
     return
   }
-  saps_pick_style "$platform" "$context" "$tmpfile" >/dev/null
-  saps_render_style_block "$tmpfile" "$platform" "$context"
+  s4l_pick_style "$platform" "$context" "$tmpfile" >/dev/null
+  s4l_render_style_block "$tmpfile" "$platform" "$context"
   rm -f "$tmpfile"
 }
