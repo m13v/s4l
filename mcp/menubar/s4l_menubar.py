@@ -2469,6 +2469,10 @@ class S4LMenuBar(rumps.App):
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            # Universal escape hatch for EVERY persistent ⚠ (the draft_stuck and
+            # rate_limited branches previously dead-ended with labels only): hand
+            # Claude a diagnose-and-heal prompt that also reports back to us.
+            items.append(rumps.MenuItem("Diagnose & fix in Claude…", callback=self._diagnose_fix))
             items.append(rumps.separator)
 
         if not runtime_ready:
