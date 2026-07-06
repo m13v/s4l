@@ -1,13 +1,17 @@
 #!/bin/bash
 # run-draft-and-publish.sh — the launchd kicker entrypoint for the queue-backed
-# draft autopilot (2026-06-24). It is the ONLY way cards are produced on a
-# customer box: there is no host-draft scenario.
+# twitter cycle (2026-06-24; autopilot mode 2026-07-06). It is the ONLY way
+# cards are produced on a customer box: there is no host-draft scenario.
 #
-# Runs the REAL pipeline in DRAFT_ONLY mode (inheriting the kicker plist's
-# DRAFT_ONLY=1 / S4L_CLAUDE_PROVIDER=queue env, so Phase 2b drafting routes
-# through the job queue and is drafted by the scheduled-task worker), then MERGES
-# the drafts it produced into the review-queue cards the menu bar shows. Without
-# this merge the cycle's plan would sit in a /tmp batch file nobody reads.
+# Runs the REAL pipeline with Phase 2b drafting routed through the job queue
+# (S4L_CLAUDE_PROVIDER=queue, drafted by the scheduled-task worker). The
+# per-cycle DRAFT_ONLY value is decided BELOW from mode.json, not by the plist:
+#   - draft mode (default): stop before posting, MERGE the plan into the
+#     review-queue cards the menu bar shows. Without this merge the cycle's
+#     plan would sit in a /tmp batch file nobody reads.
+#   - autopilot (mode.json {"autopilot": true}, promotion-lane cycles only):
+#     DRAFT_ONLY=0 — the cycle posts its top-1 pick autonomously, gated by the
+#     rolling virality bar. Persona cycles keep making cards either way.
 set -uo pipefail
 
 # SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
@@ -75,6 +79,25 @@ if [ -n "${S4L_FORCE_PROJECT:-}" ]; then
     echo "[run-draft-and-publish] personal_brand mode: forcing project '$S4L_FORCE_PROJECT' (link-free)" >&2
 fi
 
+# Autopilot (2026-07-06). Per-cycle DRAFT_ONLY decision, overriding the plist's
+# baked DRAFT_ONLY=1 baseline:
+#   - promotion cycle + autopilot flag ON  -> DRAFT_ONLY=0: the cycle POSTS its
+#     top-1 pick autonomously; the rolling virality bar activates automatically
+#     (run-twitter-cycle.sh only fetches it when DRAFT_ONLY != 1) as the
+#     no-human quality gate.
+#   - persona cycle, or autopilot OFF      -> DRAFT_ONLY=1: draft stops before
+#     posting and the plan merges into review cards, exactly as before.
+# S4L_CYCLE_LANE comes from the saps_mode env eval above; when absent (e.g. a
+# personal_brand-only setup with no persona provisioned yet) we default to the
+# safe card path.
+AUTOPILOT="$("$PY" "$REPO_DIR/scripts/saps_mode.py" autopilot 2>/dev/null || echo 0)"
+if [ "${S4L_CYCLE_LANE:-}" = "promotion" ] && [ "$AUTOPILOT" = "1" ]; then
+    export DRAFT_ONLY=0
+    echo "[run-draft-and-publish] autopilot: promotion cycle will POST autonomously (DRAFT_ONLY=0, virality bar active)" >&2
+else
+    export DRAFT_ONLY=1
+fi
+
 # First-run onboarding boost (2026-07-02). The MCP server drops
 # first-run-boost.json into the state dir when it installs the kicker for the
 # very first time. While the marker is live, widen the draft discovery window
@@ -116,6 +139,10 @@ if [ -n "$MARKER" ]; then
         rm -f "$BOOST_MARKER"
         echo "[run-draft-and-publish] first-run boost consumed (cards delivered)" >&2
     fi
+elif [ "${DRAFT_ONLY:-1}" = "0" ]; then
+    # Autopilot cycle: the cycle posted (or bar/relevance-gated) inline; there is
+    # no plan left over to merge into cards by design.
+    echo "[run-draft-and-publish] autopilot cycle complete (rc=$RC); no card merge (posted inline)" >&2
 else
     echo "[run-draft-and-publish] no DRAFT_ONLY_PLAN marker (cycle rc=$RC); nothing to merge" >&2
 fi
