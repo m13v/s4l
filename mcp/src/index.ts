@@ -3358,7 +3358,11 @@ function ensureCoworkMcpRegistered(): void {
 // review cards; autopilot promotion cycles post autonomously behind the virality
 // bar. The DRAFT_ONLY=1 below is only the safe baseline an OLD wrapper (which
 // never overrides it) inherits.
-const QUEUE_KICKER_INTERVAL_SECS = 300; // a fresh draft cycle every 5 min
+// 60s tick (2026-07-06): parity with the retired claude -p autopilot plist.
+// The preflight slot gate (max-1) makes this safe — a tick that fires while a
+// cycle is still running skips in milliseconds — so the effective cadence is
+// back-to-back ~10-min cycles with ≤1 min idle, not one cycle per minute.
+const QUEUE_KICKER_INTERVAL_SECS = 60;
 
 function kickerEnv(): Record<string, string> {
   return {
