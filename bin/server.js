@@ -396,7 +396,9 @@ function lastLogFromSnapshot(snap, job) {
   const matches = snap.logFiles.filter(f => {
     if (!f.endsWith('.log')) return false;
     if (f.startsWith('launchd-')) return false;
-    if (logPrefix) return f.startsWith(logPrefix);
+    // Require the per-run timestamp suffix so helper logs sharing the prefix
+    // (e.g. twitter-cycle-singleton.log) can't shadow the newest real run.
+    if (logPrefix) return f.startsWith(logPrefix) && /\d{4}-\d{2}-\d{2}_\d{6}\.log$/.test(f);
     return /^\d{4}-\d{2}-\d{2}_/.test(f);
   }).sort().reverse();
   if (!matches.length) return { file: null, time: null };
@@ -420,7 +422,9 @@ function getLastLog(job) {
     const files = listLogDir().filter(f => {
       if (!f.endsWith('.log')) return false;
       if (f.startsWith('launchd-')) return false;
-      if (job.logPrefix) return f.startsWith(job.logPrefix);
+      // Require the per-run timestamp suffix so helper logs sharing the prefix
+      // (e.g. twitter-cycle-singleton.log) can't shadow the newest real run.
+      if (job.logPrefix) return f.startsWith(job.logPrefix) && /\d{4}-\d{2}-\d{2}_\d{6}\.log$/.test(f);
       // Post job: files starting with a digit (YYYY-MM-DD_...)
       return /^\d{4}-\d{2}-\d{2}_/.test(f);
     }).sort().reverse();
@@ -2040,7 +2044,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
     let phaseDurations = null;
     if (chosenLog) {
       try {
-        const body = fs.readFileSync(path.join(LOG_DIR, chosenLog), 'utf8');
+        const body = fs.readFileSync(resolveLogPath(chosenLog), 'utf8');
         const m = body.match(phase0SalvageRe);
         if (m) salvageAttempted = parseInt(m[1], 10);
         // Count every [stale_age_skip] marker in the cycle log. The marker is
@@ -5027,7 +5031,7 @@ async function handleApi(req, res) {
   if (p === '/api/logs' && req.method === 'GET') {
     const jobFilter = url.searchParams.get('job');
     try {
-      let files = fs.readdirSync(LOG_DIR)
+      let files = listLogDir()
         .filter(f => f.endsWith('.log') && !f.startsWith('launchd-'))
         .sort().reverse();
       if (jobFilter) {
@@ -5064,7 +5068,7 @@ async function handleApi(req, res) {
     const fname = decodeURIComponent(logFileMatch[1]);
     // Prevent path traversal
     if (fname.includes('..') || fname.includes('/')) return json(res, { error: 'Invalid' }, 400);
-    const fpath = path.join(LOG_DIR, fname);
+    const fpath = resolveLogPath(fname);
     try {
       const content = fs.readFileSync(fpath, 'utf8');
       // Return last 500 lines
@@ -5081,14 +5085,14 @@ async function handleApi(req, res) {
       'Connection': 'keep-alive',
     });
     // Find the most recent log file
-    const files = fs.readdirSync(LOG_DIR)
+    const files = listLogDir()
       .filter(f => f.endsWith('.log') && !f.startsWith('launchd-'))
       .sort().reverse();
     if (!files.length) {
       res.write('data: No log files found\n\n');
       return;
     }
-    const logFile = path.join(LOG_DIR, files[0]);
+    const logFile = resolveLogPath(files[0]);
     let pos = 0;
     try {
       const stat = fs.statSync(logFile);
