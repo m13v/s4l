@@ -25,7 +25,6 @@ function findPython(home, preferred) {
   return (
     findFirst([
       preferred,
-      process.env.SAPS_PYTHON,
       path.join(home, ".social-autoposter-mcp", "runtime", ".venv", "bin", "python3"),
       "/opt/homebrew/bin/python3",
       "/usr/local/bin/python3",
@@ -52,7 +51,6 @@ function runDoctorSync(options = {}) {
   const home = options.home || os.homedir();
   const repoDir =
     options.repoDir ||
-    process.env.SAPS_REPO_DIR ||
     path.join(home, "social-autoposter");
   const python = findPython(home, options.python);
   const harness = path.join(home, ".local", "bin", "browser-harness");
