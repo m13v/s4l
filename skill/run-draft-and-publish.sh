@@ -131,7 +131,11 @@ if [ -n "$MARKER" ]; then
     # merge_review_queue prints ONLY to stderr; capture and re-emit verbatim on
     # stderr (those [merge_review_queue] marker lines are load-bearing) so the
     # first-run boost can read the merged count.
-    MERGE_OUT="$("$PY" "$REPO_DIR/scripts/merge_review_queue.py" --plan-from-marker "$MARKER" 2>&1 || true)"
+    # --cycle-out hands the merge the full cycle stdout so it can stamp each
+    # candidate's `experiments` dict (e.g. the locked cycle's per-run
+    # "Draft-prompt A/B arm:" line); env arms (S4L_EXP_*, S4L_CYCLE_LANE from
+    # the s4l_mode eval above) are collected by the merge directly.
+    MERGE_OUT="$("$PY" "$REPO_DIR/scripts/merge_review_queue.py" --plan-from-marker "$MARKER" --cycle-out "$OUT" 2>&1 || true)"
     [ -n "$MERGE_OUT" ] && printf '%s\n' "$MERGE_OUT" >&2
     # Consume the first-run boost the moment a merge actually delivers cards, so
     # the widened window applies to exactly one successful first batch.
