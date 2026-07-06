@@ -75,15 +75,15 @@ PER_SCRIPT_CAP_SEC = {
     # MAX_AB_HITS_PER_CYCLE cap (4), gen phase now has a 60min worst-case
     # ceiling, leaving 120min for scan + T1 sleep + prep + post.
     ("run-twitter-cycle.sh", None): 180 * 60,
-    # 2026-05-28: launchd spawns the singleton WRAPPER, not the inner cycle, so
-    # the wrapper is the ppid==1 process main() matches; the inner cycle is its
-    # child (ppid != 1) and gets skipped. Without this entry the wrapper fell back
-    # to the 45 min global and killed healthy Variant-A cycles (20 min ripen sleep
-    # + scan + draft + gen + post routinely exceed 45 min) mid-Phase-2b, stamped
-    # phase2b_silent. Mirror the inner cycle's 180 min cap. The
-    # ("run-twitter-cycle.sh", None) entry above is now effectively unreachable but
-    # kept for clarity / in case the wrapper is ever bypassed.
-    ("run-twitter-cycle-singleton.sh", None): 180 * 60,
+    # 2026-07-06: launchd now spawns run-draft-and-publish.sh (the queue-lane
+    # driver) as the ppid==1 process main() matches; the inner run-twitter-cycle.sh
+    # is its child (ppid != 1) and gets skipped. Without an entry for the wrapper it
+    # falls back to the 45 min global and can SIGKILL a healthy cycle (scan + draft
+    # + post routinely exceed 45 min) mid-run. Mirror the inner cycle's 180 min cap.
+    # Replaces the retired run-twitter-cycle-singleton.sh entry (that old launchd
+    # wrapper + its run-cycle-update-guard.sh were deleted 2026-07-06). The
+    # ("run-twitter-cycle.sh", None) entry above stays as a clarity fallback.
+    ("run-draft-and-publish.sh", None): 180 * 60,
     ("run-linkedin.sh", None): 120 * 60,
     ("run-moltbook.sh", None): 120 * 60,
     ("run-github.sh", None): 120 * 60,
@@ -115,9 +115,9 @@ SHARED_SCRIPT_PREFIX = {
 
 SCRIPT_LABELS = {
     "run-twitter-cycle.sh": "post_twitter",
-    # 2026-05-28: wrapper is the launchd-parented process now; label its kills
-    # under the same post_twitter dashboard row as a normal cycle.
-    "run-twitter-cycle-singleton.sh": "post_twitter",
+    # wrapper is the launchd-parented process now; label its kills under the same
+    # post_twitter dashboard row as a normal cycle.
+    "run-draft-and-publish.sh": "post_twitter",
     "run-linkedin.sh": "post_linkedin",
     "run-moltbook.sh": "post_moltbook",
     "run-reddit-threads.sh": "post_reddit",

@@ -1,7 +1,9 @@
 #!/bin/bash
 # social-autoposter-update.sh — standalone self-updater for SHIPPED client
 # installs. Driven by the launchd/systemd job com.m13v.social-autoposter-update
-# (daily) and reused by the per-cycle guard (run-cycle-update-guard.sh).
+# (daily). The per-cycle guard that also invoked it (run-cycle-update-guard.sh)
+# was removed 2026-07-06 when the legacy launchd->guard->singleton chain was
+# retired in favor of run-draft-and-publish.sh.
 #
 # WHAT IT DOES
 #   1. Refuses to run on a dev/source checkout (presence of .git). A dev box
