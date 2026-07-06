@@ -3,7 +3,7 @@
 -- Close the Twitter engagement-style enforcement gap.
 --
 -- Before this migration, the Twitter cycle picked an engagement style via
--- saps_pick_style (USE mode 95% / INVENT mode 5%) and baked the assignment
+-- s4l_pick_style (USE mode 95% / INVENT mode 5%) and baked the assignment
 -- into the prompt, but the post pipeline (twitter_post_plan.py) consumed
 -- whatever engagement_style the model returned without coercion. Two
 -- failure modes resulted:
