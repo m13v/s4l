@@ -637,6 +637,132 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# A claim whose agent-session pid has been ABSENT from the full ps snapshot for this
+# many consecutive reaper cycles is provably dead — requeue its job. Two cycles (not
+# one) so a single torn/raced ps snapshot can never orphan-then-duplicate a live
+# draft. The 2026-07-06 incident this fixes: quitting the Claude app mid-draft killed
+# the claim-holder; the job sat claimed in running/ for the producer's full 30-minute
+# timeout while the menu bar showed ⚠, even though this reaper logged the dead pid
+# every cycle. Absence from the process table is the kernel's word that the process
+# is gone; the only wrong-verdict risk is ps itself failing, which the empty-snapshot
+# guard below covers (pid REUSE makes a dead pid look alive — never the reverse — so
+# reuse can only delay this path, never mistrigger it).
+STALE_CLAIM_STRIKES = _env_int("S4L_REAPER_STALE_CLAIM_STRIKES", 2)
+
+
+def requeue_dead_claims(by_pid, dry=False):
+    """Move running/ jobs whose claim-holder session is provably dead back to
+    pending/<type>/ so the next scheduled worker re-claims them within a tick.
+
+    This is the exact inverse of the atomic claim rename in claude_job.py::cmd_next
+    (pending/<type>/<name> -> running/<name>), with the stale claim stamp scrubbed
+    so the re-claiming worker stamps fresh. The producer is unaffected: it only
+    polls the result path once claimed_at is set, and its timeout still removes
+    both the pending and running paths, so a requeued job cannot outlive its
+    producer. Strike counts persist in claude-queue/stale-claim-strikes.json.
+    Returns the number of jobs requeued. Best-effort: never raises."""
+    requeued = 0
+    try:
+        qroot = os.path.join(_state_dir(), "claude-queue")
+        running = os.path.join(qroot, "running")
+        strikes_path = os.path.join(qroot, "stale-claim-strikes.json")
+        try:
+            names = [
+                n for n in os.listdir(running)
+                if n.endswith(".json") and not n.endswith(".tmp")
+            ]
+        except OSError:
+            return 0
+        try:
+            with open(strikes_path) as f:
+                strikes = json.load(f)
+            if not isinstance(strikes, dict):
+                strikes = {}
+        except Exception:
+            strikes = {}
+        # ps failed / returned nothing: EVERY pid would look dead. Don't strike.
+        if not by_pid:
+            return 0
+        seen = set()
+        for name in names:
+            path = os.path.join(running, name)
+            try:
+                with open(path) as f:
+                    job = json.load(f)
+            except Exception:
+                continue
+            pid = job.get("claim_pid")
+            if not isinstance(pid, int) or pid <= 1:
+                continue  # unstamped claim: nothing to test liveness against
+            seen.add(name)
+            if pid in by_pid:
+                strikes.pop(name, None)  # holder alive -> clean slate
+                continue
+            entry = strikes.get(name)
+            if not isinstance(entry, dict) or entry.get("pid") != pid:
+                entry = {"pid": pid, "strikes": 0}
+            entry["strikes"] = int(entry.get("strikes", 0)) + 1
+            strikes[name] = entry
+            if entry["strikes"] < STALE_CLAIM_STRIKES:
+                continue
+            qtype = job.get("type") or "twitter-prep"
+            pend_dir = os.path.join(qroot, "pending", str(qtype))
+            print(
+                f"[claude-reaper] releasing stale claim: job {name} held by dead"
+                f" pid {pid} for {entry['strikes']} cycles -> requeue to"
+                f" pending/{qtype}",
+                file=sys.stderr,
+            )
+            if dry:
+                continue
+            try:
+                job.pop("claim_pid", None)
+                job.pop("claimed_at", None)
+                os.makedirs(pend_dir, exist_ok=True)
+                dst = os.path.join(pend_dir, name)
+                tmp = dst + f".tmp.{os.getpid()}"
+                with open(tmp, "w") as f:
+                    json.dump(job, f)
+                os.replace(tmp, dst)
+                os.remove(path)
+                strikes.pop(name, None)
+                requeued += 1
+            except Exception as e:
+                print(
+                    f"[claude-reaper] requeue of {name} failed: {e}",
+                    file=sys.stderr,
+                )
+                continue
+            # Fleet visibility: a released claim means a worker died mid-draft on
+            # this install (app quit, crash, logout). Same lane as the reaper's
+            # crash telemetry; best-effort.
+            try:
+                import sentry_init
+                sentry_init.init()
+                sentry_init.capture_message(
+                    f"S4L reaper requeued stale claim (dead pid {pid}): {name}",
+                    level="warning",
+                    tags={"component": "claude_reaper", "phase": "stale_claim_requeue"},
+                )
+                sentry_init.flush(2.0)
+            except Exception:
+                pass
+        # Drop strike entries for jobs that left running/ (drained or timed out).
+        for name in list(strikes):
+            if name not in seen:
+                strikes.pop(name, None)
+        try:
+            tmp = strikes_path + f".tmp.{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump(strikes, f)
+            os.replace(tmp, strikes_path)
+        except Exception:
+            pass
+    except Exception:
+        return requeued
+    return requeued
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv
     max_age = _env_int("S4L_REAPER_MAX_AGE_SEC", DEFAULT_MAX_AGE_SEC)
@@ -777,6 +903,12 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    # Act on the dead set (not just log it): release claims whose holder has been
+    # gone from the process table for STALE_CLAIM_STRIKES consecutive cycles, so a
+    # worker killed mid-draft (app quit, crash, logout) costs the producer ~2-3
+    # minutes instead of its full 30-minute timeout behind a ⚠ menu bar.
+    requeued_claims = requeue_dead_claims(by_pid, dry=dry)
+
     live_pids = set(meta.keys())
 
     killed = 0
@@ -843,6 +975,7 @@ def main() -> int:
         "disclaimer_killed": disclaimers,
         "macos_mcp_killed": macos_killed,
         "archived_sessions": archived_sessions,
+        "requeued_stale_claims": requeued_claims,
         "spared_claim_pids": sorted(claim_pids),
         "worker_probe_seen": stats["worker_probe_seen"],
         "reapable_workers": stats["reapable_workers"],
