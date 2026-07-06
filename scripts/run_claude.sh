@@ -40,28 +40,31 @@ SESSION_ID="${CLAUDE_SESSION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
 export CLAUDE_SESSION_ID="$SESSION_ID"
 
 # ---------------------------------------------------------------------------
-# Queue provider seam (added 2026-06-23) — customer boxes have no `claude` CLI.
+# Queue routing seam (queue lane 2026-06-23; env-var-free routing 2026-07-06).
 #
-# On a .mcpb install the runtime provisions Python only; there is no `claude`
-# binary to exec. When S4L_CLAUDE_PROVIDER=queue, route this call through the
-# job queue instead: scripts/claude_job.py enqueues the prompt + --json-schema,
-# BLOCKS until a Claude Desktop scheduled task ("saps-phase1-query" /
-# "saps-phase2b-draft") processes it, and prints a claude `--output-format json`
-# -shaped envelope to stdout so the pipeline's existing parsers are unchanged.
+# Routing is decided by the script tag alone. Tags mapped in
+# scripts/claude_job.py TAG_TO_TYPE are pure text->JSON calls and ALWAYS route
+# through the job queue: claude_job.py enqueues the prompt + --json-schema,
+# BLOCKS until the every-minute s4l-worker scheduled task processes it, and
+# prints a claude `--output-format json`-shaped envelope to stdout so the
+# pipeline's existing parsers are unchanged. Every other tag ALWAYS falls
+# through to the real `claude -p` below.
 #
-# Provider unset (your own machines, every launchd plist) => fall straight
-# through to the real `claude -p` below, byte-for-byte unchanged. The seam lives
-# here, in the single chokepoint every claude call funnels through, so NO
-# pipeline script needs to know whether it's on a customer box or yours.
+# There is no per-machine or per-plist switch (S4L_CLAUDE_PROVIDER removed
+# 2026-07-06): the same tag routes the same way on operator Macs and customer
+# boxes. TAG_TO_TYPE is the single source of truth AND the migration
+# checklist: moving a lane onto the queue means adding its tag there,
+# nothing else.
 #
 # The prompt reaches us either as a trailing positional arg (Phase 1 queries) or
 # piped on stdin (Phase 2b prep); claude_job.py handles both. `exec` inherits
 # stdin so the piped form passes through, and propagates the helper's exit code
-# (0 = result, 79 = timed-out/blocked like a quota skip, 1 = not queue-eligible).
+# (0 = result, 79 = timed-out/no worker firing, like a quota skip).
 # ---------------------------------------------------------------------------
-if [ "${S4L_CLAUDE_PROVIDER:-}" = "queue" ]; then
-    S4L_QUEUE_REPO="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-    S4L_QUEUE_PY="${S4L_PYTHON:-python3}"
+S4L_QUEUE_REPO="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+S4L_QUEUE_PY="${S4L_PYTHON:-python3}"
+if "$S4L_QUEUE_PY" "$S4L_QUEUE_REPO/scripts/claude_job.py" \
+        eligible --tag "$SCRIPT_TAG" 2>/dev/null; then
     exec "$S4L_QUEUE_PY" "$S4L_QUEUE_REPO/scripts/claude_job.py" \
         provider --tag "$SCRIPT_TAG" -- "$@"
 fi
