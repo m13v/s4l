@@ -814,7 +814,8 @@ const LENGTH_VARIANT_DEFS = {
 // treatment bans the concede-then-reverse antithesis skeleton (not just the
 // product pivot). Per-CYCLE arm; lives on posts.draft_prompt_variant. Tunable via
 // TWITTER_DRAFT_PROMPT_AB_RATE (code default 0.5). Keep keys in sync with the
-// arm strings printed in run-twitter-cycle.sh.
+// arm strings printed in run-twitter-cycle.sh AND the DESCRIPTIONS registry in
+// scripts/active_experiments.py (the review card's details popover reads that).
 const DRAFT_PROMPT_VARIANT_DEFS = {
   treatment_v2: { label: 'Skeleton-ban', desc: 'bans the concede-then-reverse "easy X / hard Y" antithesis structure in any form; forces varied entry points' },
   control_v2:   { label: 'Current',      desc: 'current draft directive (style + product pivot), no structure ban' },
