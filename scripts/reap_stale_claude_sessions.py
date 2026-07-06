@@ -751,13 +751,14 @@ def requeue_dead_claims(by_pid, dry=False):
         for name in list(strikes):
             if name not in seen:
                 strikes.pop(name, None)
-        try:
-            tmp = strikes_path + f".tmp.{os.getpid()}"
-            with open(tmp, "w") as f:
-                json.dump(strikes, f)
-            os.replace(tmp, strikes_path)
-        except Exception:
-            pass
+        if not dry:
+            try:
+                tmp = strikes_path + f".tmp.{os.getpid()}"
+                with open(tmp, "w") as f:
+                    json.dump(strikes, f)
+                os.replace(tmp, strikes_path)
+            except Exception:
+                pass
     except Exception:
         return requeued
     return requeued
