@@ -128,7 +128,8 @@ Caller exception branches must call `utm_only_text(text=..., platform=..., proje
 ## Releasing: `bash scripts/release-mcpb.sh` only
 
 ONE command releases npm + the GitHub `.mcpb` in lockstep from a `package.json` bump. Rules:
-- **DEFAULT = STAGING (per user, 2026-07-04): `bash scripts/release-mcpb.sh --staging`.** Produces an `-rc.N` GitHub PRE-release that only staging-channel boxes pull; npm `latest` and `releases/latest` do NOT move. After testing, ship the exact tested artifact with `--promote <tag>` (no rebuild). Go straight to stable ONLY when the user explicitly says stable / promote / ship to everyone.
+- **DEFAULT = STAGING (per user, 2026-07-04): `bash scripts/release-mcpb.sh --staging`.** Produces an `-rc.N` GitHub PRE-release that only staging-channel boxes pull; npm `latest` and `releases/latest` do NOT move. Go to stable ONLY when the user explicitly says stable / promote / ship to everyone.
+- **STABLE = CLEAN DIGITS (user rule, re-stated 2026-07-06 after the second rc-promote incident; the first left v1.6.197-rc.16 flagged stable on 2026-07-03).** When the user says "promote/release to stable", they ALWAYS mean a fresh stable with a plain version: commit + push everything (the pack ships the working tree), then `bash scripts/release-mcpb.sh --version X.Y.Z` (the rc's base version, or the next patch if that number is already published). NEVER flip an `-rc.N` tag to stable in place; the script now hard-blocks `--promote` on rc tags (`ALLOW_RC_PROMOTE=1` exists for emergencies only).
 - **NEVER `--no-bump`/re-release an existing version.** npm versions are immutable, so it clobbers the `.mcpb` with new code while npm keeps the old → lanes diverge. A fix always gets a fresh patch bump.
 - **Never** the old manual `npm publish` + `gh release create` flow.
 - **Before releasing**, check repo `package.json` vs npm `latest` vs GitHub latest tag; if a version you didn't publish exists, a parallel agent released, so bump again.
