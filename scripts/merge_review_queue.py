@@ -170,11 +170,6 @@ def main() -> int:
         help="text containing a DRAFT_ONLY_PLAN=<path> marker (e.g. cycle stdout)",
     )
     ap.add_argument("--project", default=None, help="project name for the review-request marker")
-    ap.add_argument(
-        "--cycle-out",
-        default=None,
-        help="path to the captured cycle stdout, scanned for experiment-arm markers",
-    )
     ns = ap.parse_args()
 
     src = ns.plan
@@ -201,34 +196,11 @@ def main() -> int:
         print("[merge_review_queue] source plan has 0 candidates; nothing to merge", file=sys.stderr)
         return 0
 
-    # Experiment/scenario arms (2026-07-06): stamp {name: variant} onto every
-    # incoming candidate so the review card's details popover can show which
-    # arms shaped the draft. Sources: this process's env (S4L_EXP_* + legacy
-    # vars; S4L_CYCLE_LANE comes from the wrapper's s4l_mode eval) and the
-    # captured cycle stdout (--cycle-out), which carries the locked cycle's
-    # per-run "Draft-prompt A/B arm:" line. See scripts/active_experiments.py
-    # for the convention every new experiment must follow. Best-effort: any
-    # failure leaves candidates unstamped and never blocks card delivery.
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from active_experiments import collect as _collect_experiments
-
-        cycle_text = ns.plan_from_marker or ""
-        if ns.cycle_out and os.path.exists(ns.cycle_out):
-            with open(ns.cycle_out, "r", errors="replace") as f:
-                cycle_text = f"{cycle_text}\n{f.read()}"
-        exps = _collect_experiments(text=cycle_text or None)
-        if exps:
-            fresh = [c for c in new_cands if not c.get("experiments")]
-            for c in fresh:
-                c["experiments"] = dict(exps)
-            print(
-                f"[merge_review_queue] experiments stamped on {len(fresh)} candidate(s): "
-                + " ".join(f"{k}={v}" for k, v in sorted(exps.items())),
-                file=sys.stderr,
-            )
-    except Exception as e:
-        print(f"[merge_review_queue] experiment stamping skipped: {e}", file=sys.stderr)
+    # Experiment/scenario arms ride in on each candidate's `experiments` dict,
+    # stamped at the SOURCE by run-twitter-cycle.sh's plan writer (see
+    # scripts/active_experiments.py). This merge just carries them through to
+    # review-queue.json; it does NOT stamp — the arms were assigned in the
+    # cycle process and only that process knows them.
 
     dst = store_path()
     existing = []
