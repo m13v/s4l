@@ -1,17 +1,18 @@
 #!/bin/bash
 # run-draft-and-publish.sh — the launchd kicker entrypoint for the queue-backed
-# twitter cycle (2026-06-24; autopilot mode 2026-07-06). It is the ONLY way
+# twitter cycle (2026-06-24; draft-only flag 2026-07-06). It is the ONLY way
 # cards are produced on a customer box: there is no host-draft scenario.
 #
 # Runs the REAL pipeline with Phase 2b drafting routed through the job queue
 # (S4L_CLAUDE_PROVIDER=queue, drafted by the scheduled-task worker). The
 # per-cycle DRAFT_ONLY value is decided BELOW from mode.json, not by the plist:
-#   - draft mode (default): stop before posting, MERGE the plan into the
+#   - draft-only ON (the DEFAULT): stop before posting, MERGE the plan into the
 #     review-queue cards the menu bar shows. Without this merge the cycle's
 #     plan would sit in a /tmp batch file nobody reads.
-#   - autopilot (mode.json {"autopilot": true}, promotion-lane cycles only):
-#     DRAFT_ONLY=0 — the cycle posts its top-1 pick autonomously, gated by the
-#     rolling virality bar. Persona cycles keep making cards either way.
+#   - draft-only OFF (operator opt-out via `s4l_mode.py draft-only off`,
+#     promotion-lane cycles only): DRAFT_ONLY=0 — the cycle posts its top-1
+#     pick autonomously, gated by the rolling virality bar. Persona cycles
+#     keep making cards either way.
 set -uo pipefail
 
 # SAPS_->S4L_ env mirror (brand rename 2026-07-03): old plists/tasks still
@@ -25,13 +26,13 @@ EOF_ENV
 REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${S4L_PYTHON:-python3}"
 
-OUT="$(mktemp -t saps_draft_publish.XXXXXX)"
+OUT="$(mktemp -t s4l_draft_publish.XXXXXX)"
 HB_PID=""  # scan-phase heartbeat (started below); torn down by the EXIT trap
 # Clear the menu-bar activity signal on ANY exit so a crash/early-exit mid-cycle
 # never leaves a stuck "scanning/drafting" label, and stop the heartbeat so it
 # can't outlive the cycle. Best-effort; the || true keeps the trap from changing
 # the cycle's exit code.
-trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/saps_activity.py" clear 2>/dev/null || true' EXIT
+trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts/s4l_activity.py" clear 2>/dev/null || true' EXIT
 
 # Narrate the scan phase, GRANULARLY. The CDP scan runs inside the (locked)
 # run-twitter-cycle.sh which has no activity writer; this covers that window until
@@ -42,7 +43,7 @@ trap 'kill "$HB_PID" 2>/dev/null || true; rm -f "$OUT"; "$PY" "$REPO_DIR/scripts
 # Phase 1 reports them — so the menu bar actually moves. Reads $OUT only; never
 # touches the locked cycle. heartbeat() re-stamps ONLY while the state is still
 # "scanning", so once the provider advances the phase it goes quiet (no flicker).
-"$PY" "$REPO_DIR/scripts/saps_activity.py" write scanning "scan: starting" 2>/dev/null || true
+"$PY" "$REPO_DIR/scripts/s4l_activity.py" write scanning "scan: starting" 2>/dev/null || true
 SCAN_T0=$(date +%s)
 (
   while true; do
@@ -61,7 +62,7 @@ SCAN_T0=$(date +%s)
     else
       _lbl="scan: ${_dur} · ${_qpart}"
     fi
-    "$PY" "$REPO_DIR/scripts/saps_activity.py" heartbeat scanning "$_lbl" 2>/dev/null || true
+    "$PY" "$REPO_DIR/scripts/s4l_activity.py" heartbeat scanning "$_lbl" 2>/dev/null || true
   done
 ) &
 HB_PID=$!
@@ -74,26 +75,25 @@ HB_PID=$!
 # Read at cycle runtime (NOT baked into the plist) so flipping the toggle takes
 # effect on the very next cycle with no launchd reload. Best-effort: any failure
 # leaves the env untouched and the promotion pipeline runs.
-eval "$("$PY" "$REPO_DIR/scripts/saps_mode.py" env 2>/dev/null || true)"
+eval "$("$PY" "$REPO_DIR/scripts/s4l_mode.py" env 2>/dev/null || true)"
 if [ -n "${S4L_FORCE_PROJECT:-}" ]; then
     echo "[run-draft-and-publish] personal_brand mode: forcing project '$S4L_FORCE_PROJECT' (link-free)" >&2
 fi
 
-# Autopilot (2026-07-06). Per-cycle DRAFT_ONLY decision, overriding the plist's
-# baked DRAFT_ONLY=1 baseline:
-#   - promotion cycle + autopilot flag ON  -> DRAFT_ONLY=0: the cycle POSTS its
+# Draft-only flag (2026-07-06). Per-cycle DRAFT_ONLY decision, overriding the
+# plist's baked DRAFT_ONLY=1 baseline:
+#   - draft-only ON (default), or persona cycle -> DRAFT_ONLY=1: draft stops
+#     before posting and the plan merges into review cards, exactly as before.
+#   - draft-only OFF + promotion cycle -> DRAFT_ONLY=0: the cycle POSTS its
 #     top-1 pick autonomously; the rolling virality bar activates automatically
-#     (run-twitter-cycle.sh only fetches it when DRAFT_ONLY != 1) as the
-#     no-human quality gate.
-#   - persona cycle, or autopilot OFF      -> DRAFT_ONLY=1: draft stops before
-#     posting and the plan merges into review cards, exactly as before.
-# S4L_CYCLE_LANE comes from the saps_mode env eval above; when absent (e.g. a
+#     as the no-human quality gate.
+# S4L_CYCLE_LANE comes from the s4l_mode env eval above; when absent (e.g. a
 # personal_brand-only setup with no persona provisioned yet) we default to the
 # safe card path.
-AUTOPILOT="$("$PY" "$REPO_DIR/scripts/saps_mode.py" autopilot 2>/dev/null || echo 0)"
-if [ "${S4L_CYCLE_LANE:-}" = "promotion" ] && [ "$AUTOPILOT" = "1" ]; then
+DRAFT_ONLY_FLAG="$("$PY" "$REPO_DIR/scripts/s4l_mode.py" draft-only 2>/dev/null || echo 1)"
+if [ "${S4L_CYCLE_LANE:-}" = "promotion" ] && [ "$DRAFT_ONLY_FLAG" = "0" ]; then
     export DRAFT_ONLY=0
-    echo "[run-draft-and-publish] autopilot: promotion cycle will POST autonomously (DRAFT_ONLY=0, virality bar active)" >&2
+    echo "[run-draft-and-publish] draft-only OFF: promotion cycle will POST autonomously (DRAFT_ONLY=0, virality bar active)" >&2
 else
     export DRAFT_ONLY=1
 fi
@@ -140,9 +140,9 @@ if [ -n "$MARKER" ]; then
         echo "[run-draft-and-publish] first-run boost consumed (cards delivered)" >&2
     fi
 elif [ "${DRAFT_ONLY:-1}" = "0" ]; then
-    # Autopilot cycle: the cycle posted (or bar/relevance-gated) inline; there is
-    # no plan left over to merge into cards by design.
-    echo "[run-draft-and-publish] autopilot cycle complete (rc=$RC); no card merge (posted inline)" >&2
+    # Draft-only OFF cycle: the cycle posted (or bar/relevance-gated) inline;
+    # there is no plan left over to merge into cards by design.
+    echo "[run-draft-and-publish] draft-only OFF cycle complete (rc=$RC); no card merge (posted inline)" >&2
 else
     echo "[run-draft-and-publish] no DRAFT_ONLY_PLAN marker (cycle rc=$RC); nothing to merge" >&2
 fi
