@@ -4,7 +4,8 @@
 # cards are produced on a customer box: there is no host-draft scenario.
 #
 # Runs the REAL pipeline with Phase 2b drafting routed through the job queue
-# (S4L_CLAUDE_PROVIDER=queue, drafted by the scheduled-task worker). The
+# (queue-mapped script tags in claude_job.py TAG_TO_TYPE, drafted by the
+# scheduled-task worker; the S4L_CLAUDE_PROVIDER env var is gone). The
 # per-cycle DRAFT_ONLY value is decided BELOW from mode.json, not by the plist:
 #   - draft-only ON (the DEFAULT): stop before posting, MERGE the plan into the
 #     review-queue cards the menu bar shows. Without this merge the cycle's

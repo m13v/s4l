@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-claude_job.py — queue-backed substitute for `claude -p` on boxes without the
-Claude CLI (customer .mcpb installs).
+claude_job.py — queue-backed substitute for `claude -p` for the pipeline's
+pure text->JSON turns, on every machine (operator Macs and customer .mcpb
+boxes alike).
 
 The deterministic pipeline never calls `claude` directly; every invocation goes
-through scripts/run_claude.sh. When S4L_CLAUDE_PROVIDER=queue is set (only on
-customer boxes — your own machines leave it unset and keep calling claude -p
-directly), run_claude.sh delegates here instead of exec'ing the `claude` binary.
-The pipeline is otherwise untouched: it enqueues the same prompt + json-schema it
+through scripts/run_claude.sh. For script tags mapped in TAG_TO_TYPE below,
+run_claude.sh delegates here instead of exec'ing the `claude` binary. The
+pipeline is otherwise untouched: it enqueues the same prompt + json-schema it
 would have passed to claude, blocks until a result appears, and gets back bytes
 shaped exactly like claude's `--output-format json` envelope, so the existing
 parsers don't change.
 
-Three roles:
+Four roles:
   provider  — (producer side, called by run_claude.sh) extract the prompt (stdin
               or trailing arg) + --json-schema, enqueue a typed job, BLOCK until a
               result lands, then print a claude-json-shaped envelope to stdout.
