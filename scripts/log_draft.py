@@ -17,7 +17,7 @@ Usage:
 
 Engagement-style fields (2026-05-22 cutover, closes the Twitter enforcement gap):
     --assigned-style / --assigned-mode
-        Picker output from saps_pick_style. Persisted to
+        Picker output from s4l_pick_style. Persisted to
         twitter_candidates.assigned_style + .assigned_mode so
         twitter_post_plan.py can call validate_or_register with the
         original assignment and coerce USE-mode drift back, or accept the
