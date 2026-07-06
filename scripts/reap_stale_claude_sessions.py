@@ -279,7 +279,7 @@ def worker_session_meta(cmd: str, session_index: dict[str, list[dict]]):
     """Return worker metadata for a process command, or (None, reason).
 
     Fail closed. If the command has no resume id, has no session record, or maps
-    to anything other than the known SAPS scheduled tasks, it is not reapable.
+    to anything other than the known S4L scheduled tasks, it is not reapable.
     """
     m = RESUME_RE.search(cmd)
     if not m:
@@ -318,7 +318,7 @@ def no_resume_worker_meta(pid: int, cmd: str, cwd_index: dict[int, str]):
 
 
 def archive_session_records(paths: list[str]) -> int:
-    """Archive confirmed SAPS worker session records by flipping isArchived=true."""
+    """Archive confirmed S4L worker session records by flipping isArchived=true."""
     archived = 0
     for path in sorted(set(paths)):
         try:
@@ -405,7 +405,7 @@ def snapshot():
         "ps_timed_out": False,
         "snapshot_empty": False,
         "worker_probe_seen": 0,     # procs that look like a claude-code agent worker
-        "reapable_workers": 0,      # metadata-confirmed SAPS worker procs (=len(procs))
+        "reapable_workers": 0,      # metadata-confirmed S4L worker procs (=len(procs))
         "unparsed_worker_procs": 0, # probe-positive but NOT reapable (regex/sig miss)
         "unparsed_samples": [],     # up to 3 truncated cmdlines of unparsed procs
         "cwd_fallback_admitted": 0, # unparsed procs rescued via the ~/.s4l-worker cwd proof
