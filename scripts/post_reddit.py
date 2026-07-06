@@ -115,6 +115,15 @@ from audience_pages import (
     prompt_block as _audience_prompt_block,
     classify_url_as_audience_page as _audience_classify_url,
 )
+# Learned preferences (2026-07-03): human review feedback distilled by
+# feedback_digest.py into the project's learned_preferences config block.
+# Rendered as an explicit prompt section here because this pipeline does not
+# embed the raw project JSON. Empty string when the project has no block.
+try:
+    from learned_preferences import prompt_block as _learned_prefs_block
+except Exception:  # never let a missing module break the poster
+    def _learned_prefs_block(_project_cfg):
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1144,7 @@ OMIT THESE (clear no-bridge cases only):
 
 {get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
 
+{_learned_prefs_block(project)}
 {get_voice_relationship_rule()}
 
 ## OUTPUT FORMAT
@@ -1287,6 +1297,7 @@ VOICE RELATIONSHIP: see the dedicated section below; it governs whether you spea
 {recent_ctx}{top_ctx}{top_topics_ctx}{dud_queries_ctx}
 {get_styles_prompt("reddit", context="posting", assignment=style_assignment)}
 
+{_learned_prefs_block(project)}
 {get_voice_relationship_rule()}
 
 ## Tools (via Bash) - ALWAYS foreground, NEVER run_in_background
