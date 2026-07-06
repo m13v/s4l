@@ -84,30 +84,30 @@ REASSURE = (
 )
 
 # --- the page-side overlay builder ------------------------------------------
-# `_BODY` defines window.__sapsPaint(payload): idempotently creates the overlay
+# `_BODY` defines window.__s4lPaint(payload): idempotently creates the overlay
 # DOM, then updates its text. A lone setInterval drives both the pulse and the
 # "updated Ns ago" ticker so the overlay always looks alive between status
 # pushes. Built with createElement + element.style.<prop> + textContent only
 # (CSP-safe; no <style> tag, no innerHTML-with-style-attrs). pointer-events is
 # none so the overlay can never intercept the automation's own clicks.
 _BODY = r"""
-window.__sapsAnnounce = function(payload){
+window.__s4lAnnounce = function(payload){
   // One-time, dismissible-forever launch notice. The reassurance disclaimer
   // lives HERE (a big centered modal with an OK button) instead of eating space
   // in the always-on status overlay. Once OK is clicked we stamp localStorage so
   // it never shows again. Best-effort + CSP-safe (createElement/style/textContent
   // + addEventListener only); never throws into the page.
   try {
-    var KEY = "__saps_announce_v1";
+    var KEY = "__s4l_announce_v1";
     var dismissed = false;
     try { dismissed = window.localStorage.getItem(KEY) === "1"; } catch(e) {}
-    if(window.__sapsAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
+    if(window.__s4lAnnounceDismissed) dismissed = true;  // session fallback if storage is blocked
     if(dismissed) return;
-    if(document.getElementById("__saps_announce")) return;
+    if(document.getElementById("__s4l_announce")) return;
 
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
-    var back = mk("div", document.documentElement); back.id = "__saps_announce";
+    var back = mk("div", document.documentElement); back.id = "__s4l_announce";
     var bs = back.style;
     bs.position="fixed"; bs.top="0"; bs.left="0"; bs.width="100vw"; bs.height="100vh";
     bs.zIndex="2147483647"; bs.display="flex";
@@ -147,21 +147,21 @@ window.__sapsAnnounce = function(payload){
     os_.fontWeight="600"; os_.minWidth="120px";
     ok.addEventListener("click", function(){
       try { window.localStorage.setItem(KEY, "1"); } catch(e) {}
-      window.__sapsAnnounceDismissed = true;  // session fallback if storage is blocked
+      window.__s4lAnnounceDismissed = true;  // session fallback if storage is blocked
       if(back && back.remove) back.remove();
     });
   } catch(e) { /* announcement is best-effort, never throw into the page */ }
 };
 
-window.__sapsPaint = function(payload){
+window.__s4lPaint = function(payload){
   try {
-    var ID = "__saps_overlay";
-    var st = window.__sapsOverlayState || (window.__sapsOverlayState = {});
+    var ID = "__s4l_overlay";
+    var st = window.__s4lOverlayState || (window.__s4lOverlayState = {});
     st.title = payload.title; st.reassure = payload.reassure;
     st.status = payload.status; st.ts = payload.ts || Date.now();
 
     // Surface the one-time launch notice (carries the reassurance disclaimer).
-    try { window.__sapsAnnounce({title: st.title + " is running", reassure: st.reassure}); } catch(e){}
+    try { window.__s4lAnnounce({title: st.title + " is running", reassure: st.reassure}); } catch(e){}
 
     function mk(tag, parent){ var e=document.createElement(tag); if(parent)parent.appendChild(e); return e; }
 
@@ -243,13 +243,13 @@ window.__sapsPaint = function(payload){
 
 # Playwright evaluate expression: (re)define the painter, then call it with the
 # arg Playwright passes. Used for live updates on existing pages.
-PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__sapsPaint(payload); } catch(e){} }"
+PAINT_EXPR = "(payload) => { " + _BODY + " try { window.__s4lPaint(payload); } catch(e){} }"
 
 # Removes the overlay from a page.
 CLEAR_EXPR = (
-    "() => { var e=document.getElementById('__saps_overlay'); if(e&&e.remove)e.remove(); "
-    "var a=document.getElementById('__saps_announce'); if(a&&a.remove)a.remove(); "
-    "var s=window.__sapsOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
+    "() => { var e=document.getElementById('__s4l_overlay'); if(e&&e.remove)e.remove(); "
+    "var a=document.getElementById('__s4l_announce'); if(a&&a.remove)a.remove(); "
+    "var s=window.__s4lOverlayState; if(s&&s._iv)clearInterval(s._iv); }"
 )
 
 
@@ -258,7 +258,7 @@ def _build_init_script(title: str, reassure: str, status: str) -> str:
     it with the latest known text so a mid-cycle navigation paints instantly."""
     seed = json.dumps({"title": title, "reassure": reassure, "status": status})
     return _BODY + (
-        "try { var __p = " + seed + "; __p.ts = Date.now(); window.__sapsPaint(__p); } catch(e){}"
+        "try { var __p = " + seed + "; __p.ts = Date.now(); window.__s4lPaint(__p); } catch(e){}"
     )
 
 
@@ -464,7 +464,7 @@ def cmd_watch(interval: float = 2.0) -> int:
     # intentionally leaked (kept open) until the process dies so the OS releases
     # it automatically on exit/kill.
     try:
-        _lock_fd = os.open("/tmp/saps_overlay_watch.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        _lock_fd = os.open("/tmp/s4l_overlay_watch.lock", os.O_CREAT | os.O_RDWR, 0o644)
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         print("another overlay watcher already running; exiting", file=sys.stderr)
