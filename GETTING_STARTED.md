@@ -49,7 +49,7 @@ TROUBLESHOOTING (handle these yourself, don't make me debug)
   - MCP tools don't appear after restart: re-check the two config files above; if
     an entry's command/args point at a missing path, re-run
     `node ~/social-autoposter/mcp/install.mjs`.
-  - python errors: make sure the MCP's SAPS_PYTHON points at
+  - python errors: make sure the MCP's S4L_PYTHON points at
     /opt/homebrew/bin/python3, not /usr/bin/python3.
 
 When everything above succeeds, tell me the next step in your own words: I need
