@@ -21174,7 +21174,7 @@ async function warmJobRunsCache(host, port) {
 
 function startDashboardWarmers(host, port) {
   if (auth.CLIENT_MODE) return; // local operator dashboard only
-  const warmerSetting = String(process.env.S4L_DASHBOARD_WARMERS || process.env.SAPS_DASHBOARD_WARMERS || '0').trim().toLowerCase();
+  const warmerSetting = String(process.env.S4L_DASHBOARD_WARMERS || '0').trim().toLowerCase();
   if (['0', 'false', 'off', 'no'].includes(warmerSetting)) {
     console.log('[warmer] dashboard cache warmers disabled by S4L_DASHBOARD_WARMERS');
     return;
