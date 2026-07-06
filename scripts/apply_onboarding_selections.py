@@ -3,7 +3,7 @@
 apply_onboarding_selections.py -- PROTOTYPE handler for the S4L bundled-question
 widget. Turns the widget's sendPrompt confirmation into concrete actions:
 
-  1. Engagement lanes -> saps_mode.py enable/disable (DRY-RUN by default so a
+  1. Engagement lanes -> s4l_mode.py enable/disable (DRY-RUN by default so a
      prototype never flips the LIVE autopilot; pass --commit-lanes to really run).
   2. History consent   -> history_context.set_optin(...) (persisted sidecar).
   3. If consent == yes  -> history_context.pull(project) and summarize candidates.
@@ -19,7 +19,7 @@ Usage:
       --personal-brand on --product off --read-history yes
   python3 scripts/apply_onboarding_selections.py --project S4L \
       --from-prompt "personal_brand lane: ON, product lane: OFF, read past Claude conversations: YES"
-  # add --commit-lanes to actually toggle saps_mode (default is dry-run)
+  # add --commit-lanes to actually toggle s4l_mode (default is dry-run)
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import history_context as hc  # noqa: E402
 
-S4L_MODE = Path(__file__).resolve().parent / "saps_mode.py"
+S4L_MODE = Path(__file__).resolve().parent / "s4l_mode.py"
 
 
 def parse_from_prompt(text: str) -> dict:
@@ -53,7 +53,7 @@ def parse_from_prompt(text: str) -> dict:
 
 
 def apply_lanes(personal_brand: bool, product: bool, commit: bool) -> list[str]:
-    """Return the saps_mode commands, running them only when commit=True."""
+    """Return the s4l_mode commands, running them only when commit=True."""
     plan = [
         [sys.executable, str(S4L_MODE),
          "enable" if personal_brand else "disable", "personal_brand"],
@@ -75,7 +75,7 @@ def main() -> None:
     ap.add_argument("--product", choices=["on", "off"])
     ap.add_argument("--read-history", choices=["yes", "no"])
     ap.add_argument("--commit-lanes", action="store_true",
-                    help="actually toggle saps_mode (default: dry-run print only)")
+                    help="actually toggle s4l_mode (default: dry-run print only)")
     args = ap.parse_args()
 
     sel = {"personal_brand": None, "product_mode": None, "read_history": None}
