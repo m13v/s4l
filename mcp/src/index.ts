@@ -1404,7 +1404,7 @@ async function seedSearchQueriesForProject(
     };
   }
   try {
-    const qfile = path.join(os.tmpdir(), `saps-queries-${project}-${Date.now()}.json`);
+    const qfile = path.join(os.tmpdir(), `s4l-queries-${project}-${Date.now()}.json`);
     fs.writeFileSync(
       qfile,
       JSON.stringify({ queries: agentQueries.map((q) => ({ query: q, topic: "" })) })
@@ -2875,7 +2875,7 @@ function scheduledTaskSkillPath(taskId: string): string {
 // The queue dir the worker reads/writes. MUST equal what the launchd kicker sets
 // (kickerEnv below) and what claude_job.py uses, so both ends meet on one path.
 function queueDir(): string {
-  return path.join(sapsStateDir(), "claude-queue");
+  return path.join(s4lStateDir(), "claude-queue");
 }
 
 // A draft job left unclaimed in pending/ this long (ms) means no scheduled-task
@@ -2965,7 +2965,7 @@ function queueWorkerCwd(): string {
 function queueWorkerBody(spec: { taskId: string; queueType: string; human: string }): string {
   const py = resolvePython();
   const job = path.join(repoDir(), "scripts", "claude_job.py");
-  const sd = sapsStateDir();
+  const sd = s4lStateDir();
   const outDir = queueDir();
   return [
     `You are the S4L queue worker. Run ONE iteration, then STOP.`,
@@ -3312,7 +3312,7 @@ function kickerEnv(): Record<string, string> {
   return {
     DRAFT_ONLY: "1",
     S4L_CLAUDE_PROVIDER: "queue",
-    S4L_STATE_DIR: sapsStateDir(),
+    S4L_STATE_DIR: s4lStateDir(),
     TWITTER_PAGE_GEN_RATE: "0",
     // Thread-media context for the drafter (2026-07-06): parity with the
     // retired CLI twitter-cycle plist. Without it the prep step drafts blind to
@@ -3406,7 +3406,7 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
         // every later cycle runs the standard 24h + top-1 logic. Best-effort: a
         // failed write just means a standard first cycle.
         try {
-          const stateDir = sapsStateDir();
+          const stateDir = s4lStateDir();
           fs.mkdirSync(stateDir, { recursive: true });
           fs.writeFileSync(
             path.join(stateDir, "first-run-boost.json"),
@@ -3958,7 +3958,7 @@ function writePanelUrl(url: string): void {
 }
 
 // The owned state dir, honoring S4L_STATE_DIR (matches menubar/s4l_state.py).
-function sapsStateDir(): string {
+function s4lStateDir(): string {
   return (
     process.env.S4L_STATE_DIR ||
     path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp")
@@ -3970,7 +3970,7 @@ function sapsStateDir(): string {
 // mode_chosen onboarding milestone. (Source of truth: scripts/s4l_mode.py.)
 function modeChosen(): boolean {
   try {
-    return fs.existsSync(path.join(sapsStateDir(), "mode.json"));
+    return fs.existsSync(path.join(s4lStateDir(), "mode.json"));
   } catch {
     return false;
   }
@@ -3982,7 +3982,7 @@ function modeChosen(): boolean {
 // legacy {"mode": ...} string; else default personal ON / promotion OFF.
 function currentFlags(): { personal_brand: boolean; promotion: boolean } {
   try {
-    const d = JSON.parse(fs.readFileSync(path.join(sapsStateDir(), "mode.json"), "utf-8"));
+    const d = JSON.parse(fs.readFileSync(path.join(s4lStateDir(), "mode.json"), "utf-8"));
     if ("personal_brand" in d || "promotion" in d) {
       return { personal_brand: !!d.personal_brand, promotion: !!d.promotion };
     }
@@ -4012,11 +4012,11 @@ function currentMode(): "promotion" | "personal_brand" {
 const POSTING_FLAG_TTL_MS = 45_000;
 let postingFlagHeartbeat: ReturnType<typeof setInterval> | null = null;
 function postingFlagPath(): string {
-  return path.join(sapsStateDir(), "posting-active.json");
+  return path.join(s4lStateDir(), "posting-active.json");
 }
 function writePostingFlag(): void {
   try {
-    fs.mkdirSync(sapsStateDir(), { recursive: true });
+    fs.mkdirSync(s4lStateDir(), { recursive: true });
     fs.writeFileSync(
       postingFlagPath(),
       JSON.stringify({ pid: process.pid, expires_at: Date.now() + POSTING_FLAG_TTL_MS }) + "\n",
@@ -4065,7 +4065,7 @@ let _activityLast: { state: string; label: string } | null = null;
 let _activityHb: ReturnType<typeof setInterval> | null = null;
 function _writeActivityFile(state: string, label: string): void {
   try {
-    const dir = sapsStateDir();
+    const dir = s4lStateDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "activity.json"),
@@ -4100,7 +4100,7 @@ function clearActivity(): void {
     _activityHb = null;
   }
   try {
-    fs.rmSync(path.join(sapsStateDir(), "activity.json"), { force: true });
+    fs.rmSync(path.join(s4lStateDir(), "activity.json"), { force: true });
   } catch {
     /* best effort */
   }
@@ -4113,7 +4113,7 @@ function clearActivity(): void {
 // Written atomically so a 1s poll never sees a half-written file.
 function persistStatusSummary(snap: Record<string, unknown>): void {
   try {
-    const dir = sapsStateDir();
+    const dir = s4lStateDir();
     fs.mkdirSync(dir, { recursive: true });
     const tmp = path.join(dir, `status-summary.json.${process.pid}.tmp`);
     fs.writeFileSync(
@@ -4141,7 +4141,7 @@ function writeReviewRequest(req: {
   created_at: string;
 }): void {
   try {
-    const dir = sapsStateDir();
+    const dir = s4lStateDir();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "review-request.json"),
