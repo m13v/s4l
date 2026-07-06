@@ -26,6 +26,14 @@ EOF_ENV
 REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${S4L_PYTHON:-python3}"
 
+# Salvage twitter-prep drafts orphaned when a producer cycle died after its worker
+# wrote the result but before consuming it (a consumed result is deleted, so a
+# surviving one in claude-queue/result/ = never consumed). Best-effort, dedup-safe
+# merge into the review queue; the default age gate only touches results past the
+# queue timeout, so no live producer is racing. Runs every tick so a dead
+# producer's drafts land within a cycle instead of being lost. Never blocks.
+"$PY" "$REPO_DIR/scripts/salvage_orphaned_prep_results.py" >/dev/null 2>&1 || true
+
 # Posting-defer gate (2026-07-06). Posting and scanning share ONE harness Chrome,
 # and the MCP poster SIGKILLs any scan holding the twitter-browser lock (it cannot
 # wait: an approved card must land while the user watches, and scans trap SIGTERM).
