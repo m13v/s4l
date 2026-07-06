@@ -138,12 +138,12 @@ print(json.dumps({p['name']: p.get('voice', {}) for p in c.get('projects', []) i
     # Engagement-style picker (2026-05-19): pick ONE assigned style per
     # reply iteration. The picked style flows two places: (1) --style
     # filter for top_performers.py so the per-style exemplars match the
-    # assignment, (2) saps_render_style_block so the prompt embeds the
+    # assignment, (2) s4l_render_style_block so the prompt embeds the
     # same assignment. On invent mode picked_style is empty and
     # top_performers stays unfiltered.
     source "$REPO_DIR/skill/styles.sh"
-    STYLE_ASSIGN_FILE=$(mktemp -t saps_twitter_eng_assign_XXXXXX.json)
-    saps_pick_style twitter replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+    STYLE_ASSIGN_FILE=$(mktemp -t s4l_twitter_eng_assign_XXXXXX.json)
+    s4l_pick_style twitter replying "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
     PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -162,7 +162,7 @@ try:
 except Exception:
     print('use')
 " 2>/dev/null)
-    STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" twitter replying)
+    STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" twitter replying)
     rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true
 
     # Top performers feedback report — filtered to the picked style when
