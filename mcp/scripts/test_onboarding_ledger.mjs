@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const ledger = require("../shared/onboarding-ledger.cjs");
 const doctor = require("../shared/doctor.cjs");
 
-const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "saps-onboarding-"));
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "s4l-onboarding-"));
 const opts = { stateDir };
 
 try {
