@@ -856,7 +856,7 @@ def _write_approved_queue(d):
 #                                   own brand (forced persona project)
 #   promotion      (default OFF) -> the product-marketing pipeline (link replies)
 # Both can be ON (the cycle then splits 50/50). State is ONE file the cycle
-# wrapper also reads via scripts/saps_mode.py; keep the shape in lockstep with it.
+# wrapper also reads via scripts/s4l_mode.py; keep the shape in lockstep with it.
 MODE_FILE = "mode.json"
 MODE_PROMOTION = "promotion"
 MODE_PERSONAL_BRAND = "personal_brand"
@@ -868,7 +868,7 @@ _DEFAULT_FLAGS = {"personal_brand": True, "promotion": False}
 def read_flags():
     """Current lane flags {"personal_brand": bool, "promotion": bool}.
 
-    Mirrors scripts/saps_mode.py get_flags(): explicit flag keys win; else map a
+    Mirrors scripts/s4l_mode.py get_flags(): explicit flag keys win; else map a
     legacy {"mode": ...} string; else the default (personal ON / promotion OFF).
     """
     d = read_json(MODE_FILE)
@@ -1049,7 +1049,7 @@ def post_drafts(batch_id, post=None, edits=None, reject=None, clear_link=None, t
     loopback is unreachable (Claude Desktop closed)."""
     args = {"batch_id": batch_id, "post": post or [], "edits": edits or [], "reject": reject or [], "clear_link": clear_link or []}
     if activity_label:
-        args["__saps_activity_label"] = activity_label
+        args["__s4l_activity_label"] = activity_label
     return loopback_tool("post_drafts", args, timeout=timeout)
 
 
