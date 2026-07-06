@@ -146,10 +146,18 @@ if [ -f "$BOOST_MARKER" ]; then
     else
         BOOST_ACTIVE=1
         export S4L_DRAFT_FRESHNESS_HOURS="${S4L_FIRST_RUN_FRESHNESS_HOURS:-48}"
-        export S4L_TWITTER_POST_TOP_N="${S4L_FIRST_RUN_TOP_N:-5}"
-        echo "[run-draft-and-publish] first-run boost active: freshness=${S4L_DRAFT_FRESHNESS_HOURS}h top_n=${S4L_TWITTER_POST_TOP_N}" >&2
+        echo "[run-draft-and-publish] first-run boost active: freshness=${S4L_DRAFT_FRESHNESS_HOURS}h" >&2
     fi
 fi
+
+# Top-N cap REMOVED (per user, 2026-07-06): every draft the worker produces goes
+# through — review cards in DRAFT_ONLY, bar-gated posts in the autopilot lane —
+# instead of "top-1 kept, rest deferred". 0 is the locked cycle's documented env
+# opt-out (run-twitter-cycle.sh POST_TOP_N: "0 = no cap, env opt-out only"). The
+# rolling p0.90 virality bar stays as the volume/quality valve. An operator can
+# re-cap by exporting S4L_TWITTER_POST_TOP_N=<n> in the environment. This also
+# supersedes the first-run boost's old top_n=5 export: no cap ≥ boost.
+export S4L_TWITTER_POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-0}"
 
 # Run the cycle; tee stdout so we can scan it for the DRAFT_ONLY_PLAN marker.
 # Phase 2b blocks on the queue until the worker drafts it, so this can take a
