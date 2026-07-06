@@ -40,7 +40,7 @@ set -euo pipefail
 # together, both on 9556). The per-phase locks do NOT prevent this because
 # they release between phases. This guard makes the ENTIRE run a singleton:
 # if a prior run-linkedin.sh is still alive, this fire exits immediately.
-S4L_LI_RUN_LOCK="/tmp/saps-run-linkedin.lock"
+S4L_LI_RUN_LOCK="/tmp/s4l-run-linkedin.lock"
 if mkdir "$S4L_LI_RUN_LOCK" 2>/dev/null; then
   echo $$ > "$S4L_LI_RUN_LOCK/pid"
 else
@@ -1096,14 +1096,14 @@ print(json.dumps(p, indent=2))
 # generate_styles_block path). The picked style flows three places, identical
 # to run-twitter-cycle.sh: (1) --style filter for top_performers.py so the
 # exemplars section shows only posts matching the assigned style, (2)
-# saps_render_style_block so the prompt block embeds the same assignment, (3)
+# s4l_render_style_block so the prompt block embeds the same assignment, (3)
 # --assigned-style/--assigned-mode flags on log_post.py so the post pipeline
 # coerces USE-mode drift back to the assigned name and registers INVENT-mode
 # inventions. On invent mode PICKED_STYLE is empty and top_performers stays
 # unfiltered (model sees the full landscape to invent against).
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_linkedin_assign_XXXXXX.json)
-saps_pick_style linkedin posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_linkedin_assign_XXXXXX.json)
+s4l_pick_style linkedin posting "$STYLE_ASSIGN_FILE" >/dev/null 2>&1 || true
 PICKED_STYLE=$(python3 -c "
 import json
 try:
@@ -1129,7 +1129,7 @@ if [ -n "$PICKED_STYLE" ]; then
 else
     TOP_REPORT=$(python3 "$REPO_DIR/scripts/top_performers.py" --platform linkedin 2>/dev/null || echo "(top performers report unavailable)")
 fi
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" linkedin posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" linkedin posting)
 # Best-effort cleanup of the assignment tempfile at wrapper exit.
 trap 'rm -f "$STYLE_ASSIGN_FILE" 2>/dev/null || true' EXIT
 
