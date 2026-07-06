@@ -805,7 +805,7 @@ def _count_x_cookies_on_disk() -> int:
     import tempfile
     tmpdir = None
     try:
-        tmpdir = Path(tempfile.mkdtemp(prefix="saps_flushchk_"))
+        tmpdir = Path(tempfile.mkdtemp(prefix="s4l_flushchk_"))
         dst = tmpdir / "Cookies"
         shutil.copy2(db, dst)
         for suffix in ("-wal", "-shm"):
