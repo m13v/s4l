@@ -4022,12 +4022,22 @@ function writePostingFlag(): void {
       JSON.stringify({ pid: process.pid, expires_at: Date.now() + POSTING_FLAG_TTL_MS }) + "\n",
       "utf-8"
     );
-  } catch {
-    /* best effort */
+  } catch (e) {
+    // The 2026-06-23 saga flagged "posting-active.json never writes" as open,
+    // and this silent catch is why nobody could tell. Say it, both places.
+    console.error(`[post] posting-active flag write FAILED: ${String(e)}`);
+    logPostEvent(`posting_flag_write_failed err=${String(e)}`);
   }
 }
 function startPostingFlagHeartbeat(): void {
   writePostingFlag();
+  try {
+    if (!fs.existsSync(postingFlagPath())) {
+      logPostEvent(`posting_flag_missing_after_write path=${postingFlagPath()}`);
+    }
+  } catch {
+    /* best effort */
+  }
   if (postingFlagHeartbeat) return;
   // Refresh well within the TTL so a long batch stays flagged, but a dead poster
   // expires within POSTING_FLAG_TTL_MS.
@@ -4243,7 +4253,26 @@ const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // autopilot tick stacks another on top (the zombie pileup that stale-reclaimed the
 // lock mid-post). SIGKILL can't be trapped. Kill children first so the harness CDP
 // driver lets go of Chrome immediately.
+// Timestamped on-disk trail for every scan preemption and posting-flag failure.
+// The console.error lines land in Claude Desktop's per-profile MCP log, which has
+// proven hard to even LOCATE during incidents (2026-07-06 forensics had to infer
+// two of six scan kills from bash job-control lines). This file lives next to the
+// post-*.log dumps so one directory tells the whole posting story. Best-effort.
+function logPostEvent(msg: string): void {
+  try {
+    const dir = path.join(repoDir(), "skill", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, "post-preempt-events.log"),
+      `${new Date().toISOString()} pid=${process.pid} ${msg}\n`
+    );
+  } catch {
+    /* best effort */
+  }
+}
+
 function sigkillScanTree(pid: number): void {
+  logPostEvent(`sigkill_scan_tree target=${pid}`);
   try {
     const out = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf-8", timeout: 4000 });
     for (const cstr of out.split(/\s+/)) {
@@ -4329,6 +4358,7 @@ function preemptScanHoldingBrowser(): void {
       console.error(
         `[post] preempting cross-process scan holding the twitter-browser lock (pid ${pid}) — SIGKILL tree`
       );
+      logPostEvent(`preempt_scan_holding_browser scan_pid=${pid}`);
       sigkillScanTree(pid);
     }
   } catch {
@@ -4378,6 +4408,7 @@ async function acquireShellBrowserLock(): Promise<boolean> {
       if (!pid || !pidAlive(pid)) {
         rmShellLockDir();
       } else if (pidIsScan(pid)) {
+        logPostEvent(`preempt_scan_on_lock_acquire scan_pid=${pid} attempt=${attempt}`);
         sigkillScanTree(pid); // SIGKILL — scans trap SIGTERM and survive it
         await sleepMs(300);
         rmShellLockDir();
