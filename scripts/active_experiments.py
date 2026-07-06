@@ -59,12 +59,12 @@ def collect(env=None):
     for var, v in env.items():
         if var.startswith(ENV_PREFIX) and (v or "").strip():
             out[var[len(ENV_PREFIX):].lower()] = v.strip()
-    # The personal_brand lane REPLACES the draft directive wholesale (lane
-    # override in run-twitter-cycle.sh runs AFTER the A/B arm is picked), so
-    # the assigned draft_prompt arm never touched these drafts; stamping it
-    # would mislead the reviewer and pollute any per-arm readout built on it.
-    if out.get("lane") == "personal_brand":
-        out.pop("draft_prompt", None)
+    # 2026-07-06: the personal_brand persona directive is now ARM-AWARE in
+    # run-twitter-cycle.sh (treatment_v2 adds the concede-then-reverse skeleton ban,
+    # control_v2 does not), so the assigned draft_prompt arm DOES touch persona
+    # drafts. Keep it stamped so the arm surfaces on persona cards and the per-arm
+    # readout covers both lanes. (Previously dropped here because the persona
+    # directive overrode both arms wholesale; that is no longer the case.)
     return out
 
 
