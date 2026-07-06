@@ -974,6 +974,16 @@ function parsePostCandidateResults(stdout: string): PostCandidateResult[] {
       upsert(m[1], "skipped", "empty_reply_text");
       continue;
     }
+    m = /\[post\] candidate (\d+) log_post\.py did not return post_id/.exec(line);
+    if (m) {
+      // The reply IS live on X; only the posts-row INSERT failed (e.g. the
+      // 2026-07-06 draft_prompt_variant validation 400). Mark the card POSTED
+      // so the drain never re-attempts a live reply — re-posting slams into
+      // X's duplicate guard at best and double-posts at worst. The missing
+      // posts row is recoverable from the post-*.log (reply_url + final_text).
+      upsert(m[1], "posted", "log_post_no_id");
+      continue;
+    }
     m = /\[post\] candidate (\d+) crashed:/.exec(line);
     if (m) upsert(m[1], "failed", "exception");
   }
