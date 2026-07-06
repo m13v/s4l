@@ -2144,9 +2144,10 @@ POST_TOP_N="${S4L_TWITTER_POST_TOP_N:-1}"
 #   - Cold start: sample_count < min, so a fresh pool posts ungated until it fills.
 #     (This is also what keeps brand-new installs seeing every draft card.)
 #   - Fetch failure: fail-open, never silence posting on a transient API blip.
-# Tunables: S4L_TWITTER_VIRALITY_PCTILE (default 0.97),
-#           S4L_TWITTER_VIRALITY_MIN_SAMPLE (default 200).
-VIRALITY_THRESHOLD=$(S4L_VPCTILE="${S4L_TWITTER_VIRALITY_PCTILE:-0.97}" \
+# Virality percentile is HARDCODED to 0.90 here: single source of truth, no env
+# var, no fallback, one path (every install behaves identically regardless of how
+# its plist was generated). Sample floor S4L_TWITTER_VIRALITY_MIN_SAMPLE default 200.
+VIRALITY_THRESHOLD=$(S4L_VPCTILE="0.90" \
     S4L_VMIN="${S4L_TWITTER_VIRALITY_MIN_SAMPLE:-200}" \
     S4L_SCRIPTS_DIR="$REPO_DIR/scripts" \
     python3 -c "
@@ -2166,7 +2167,7 @@ except BaseException as e:
     sys.stderr.write(f'virality-bar fetch failed (bar OFF this cycle): {e}\n')
 " 2>>"$LOG_FILE" || echo "")
 if [ -n "$VIRALITY_THRESHOLD" ]; then
-    log "Virality bar ACTIVE: p${S4L_TWITTER_VIRALITY_PCTILE:-0.97} = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
+    log "Virality bar ACTIVE: p0.90 = $VIRALITY_THRESHOLD (this install, trailing 24h); top-1 kept only if it clears the bar."
 else
     log "Virality bar OFF this cycle (cold-start/thin pool or fetch failed); top-1 kept ungated."
 fi
