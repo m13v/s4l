@@ -190,14 +190,14 @@ These closed the exact blind spots this class of incident exposed. When SSH'd in
 ### 4. The mechanism (why it leaks at all)
 
 Customer `.mcpb` boxes have no `claude` CLI, so the pipeline's `claude -p` calls are
-intercepted by the queue provider seam (`SAPS_CLAUDE_PROVIDER=queue`): each becomes a
+intercepted by the queue provider seam (`S4L_CLAUDE_PROVIDER=queue`): each becomes a
 file-queue job, and the real Claude turn is run by a **Claude Desktop scheduled task**
 (agent-mode stream-json session), NOT a `claude -p` subprocess. Those Desktop sessions
 finish their one queue turn but never exit (Desktop keeps the stream-json session warm),
 and Desktop starts a NEW one every ~1 min regardless of whether the prior finished. That
 is the pileup. (Our launchd autopilot uses `StartInterval`, which coalesces and does not
 double-fire, so the MacStadium box does not leak this way; a customer's Desktop scheduler
-does.) `SAPS_REAPER_MAX_GROUP` (default 12) is a per-session-uuid count-cap backstop, not
+does.) `S4L_REAPER_MAX_GROUP` (default 12) is a per-session-uuid count-cap backstop, not
 a per-task-type limit; it only fires when the queue-aware spare signal is stale. The real
 fix is source-level (worker exits after one queue iteration); until then the reaper is the
 containment.
