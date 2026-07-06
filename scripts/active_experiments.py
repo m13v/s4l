@@ -32,6 +32,45 @@ import sys
 
 ENV_PREFIX = "S4L_EXP_"
 
+# What each arm MEANS, for humans reviewing cards: the details popover shows
+# this next to the bare variant name (s4l_card._details_lines calls
+# describe()). Keyed experiment name -> variant -> short description; one
+# sentence, the popover wraps at ~300px. A missing entry degrades to the bare
+# variant name, so unknown or future arms need no code change to render.
+# Keep draft_prompt entries in sync with bin/server.js
+# DRAFT_PROMPT_VARIANT_DEFS and the arm strings in run-twitter-cycle.sh.
+DESCRIPTIONS = {
+    "draft_prompt": {
+        "treatment_v2": (
+            "skeleton ban: forbids the concede-then-reverse "
+            '"easy X / hard Y" structure and forces varied entry points'
+        ),
+        "control_v2": (
+            "current draft directive (style + product pivot), no structure ban"
+        ),
+        # v1 arms (decoupled-product-pivot) retired 2026-07-06; kept so any
+        # straggler card from an old plan still explains itself.
+        "treatment": "v1, retired: product pivot decoupled from the reply",
+        "control": "v1, retired: original draft directive",
+    },
+    "lane": {
+        "personal_brand": (
+            "organic persona lane: first-hand voice, no product, no link, no CTA"
+        ),
+        "promotion": (
+            "product lane: routes to the matched project and may carry a link"
+        ),
+    },
+}
+
+
+def describe(name, variant):
+    """Human-readable meaning of an arm, or None when unknown."""
+    try:
+        return DESCRIPTIONS.get(str(name), {}).get(str(variant))
+    except Exception:
+        return None
+
 # Experiments/scenarios that predate the S4L_EXP_ convention, keyed by env
 # var. Order matters where two vars map to one name: later entries win, so
 # S4L_CYCLE_LANE (the wrapper's authoritative per-cycle lane tag) overrides
