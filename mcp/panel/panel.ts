@@ -563,9 +563,12 @@ btnSchedule.addEventListener("click", () => busy(btnSchedule, "Setting up\u2026"
         text:
           "Set up the S4L draft autopilot schedule for this Claude account. " +
           "If queue_setup is available, call it; then for s4l-worker call the host tool " +
-          "create_scheduled_task with taskId, cronExpression \"* * * * *\", and the prompt " +
+          "create_scheduled_task with taskId, cronExpression \"* * * * *\", notifyOnCompletion " +
+          "false (REQUIRED \u2014 the default true pops a notification every minute), and the prompt " +
           "\u2014 read it from ~/.claude/scheduled-tasks/s4l-worker/SKILL.md (already on " +
-          "disk). Do NOT redo my X connection or project setup. Keep replies to me very short.",
+          "disk). If the task already exists, call update_scheduled_task with taskId s4l-worker " +
+          "and notifyOnCompletion false instead. " +
+          "Do NOT redo my X connection or project setup. Keep replies to me very short.",
       }],
     });
     if ((res as any)?.isError) log("The host rejected it \u2014 type \u201cset up the draft schedule\u201d in the chat instead.");
