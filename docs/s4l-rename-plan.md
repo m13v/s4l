@@ -27,7 +27,24 @@ What deliberately did NOT change: `npx social-autoposter@latest` command hints
 (functional until Tier 3), the manifest `name` (host config identity), tool
 namespace `mcp__social-autoposter__*`, launchd labels, paths.
 
-## Tier 2 — internal SAPS_* env vars -> S4L_* (designed, needs go + unlocks)
+## Tier 2 — internal SAPS_* env vars -> S4L_* (COMPLETED 2026-07-06)
+
+Executed with Matthew's explicit unlock authorization. Every functional SAPS_*
+read/write, saps* identifier (sapsStateDir, saps_pick_style/topic, lock paths,
+tmp prefixes, __saps* JS globals, marker keys) is renamed to the S4L form. The
+ONLY remaining "saps" references in the tree are legacy-NEUTRALIZERS, kept on
+purpose while pre-rename artifacts exist in the field:
+  - entry-script SAPS_->S4L_ env mirror blocks (old baked plists keep working)
+  - env scrubbers (menubar launch filter, s4l_box_update env -u)
+  - filename shims scripts/saps_mode.py + saps_activity.py (the chflags-locked
+    run-twitter-cycle.sh references those paths)
+  - legacy scheduled-task-id matchers (saps-worker / saps-phase1-query /
+    saps-phase2b-draft / saps-no-resume-cwd) in reapers/scrubbers/snapshots
+  - this plan doc
+Drop the mirrors/shims/matchers once fleet heartbeats show no pre-2026-07
+artifacts remain.
+
+## Tier 2 original design (historical)
 
 383 references in 65 files; 7 are LOCKED (`run-twitter-cycle.sh` 45 refs,
 `post_reddit.py` 12, `reddit_tools.py` 6, `twitter_browser.py` 6,
