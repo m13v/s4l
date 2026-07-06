@@ -824,6 +824,11 @@ def review_drafts(plan, batch="review-queue"):
                 "language": c.get("language"),
                 "link_source": c.get("link_source"),
                 "link_keyword": c.get("link_keyword"),
+                # {name: variant} of every experiment/scenario arm active when
+                # the draft was written, stamped by merge_review_queue.py via
+                # scripts/active_experiments.py. Generic: the card renders
+                # whatever is here, so new experiments surface with no UI work.
+                "experiments": c.get("experiments") or {},
             }
         )
     # The review queue is append-only, so the highest stable index is newest and
