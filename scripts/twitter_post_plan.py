@@ -692,6 +692,11 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         update_candidate(cid, "skipped", "no_reply_url_captured")
         return ("skipped", "no_reply_url_captured")
 
+    # Stash the live URL on the candidate NOW, before the posts-row INSERT:
+    # main() needs it for candidate_results and the durable audit line even
+    # when log_post.py fails below (the reply is already live on X).
+    c["our_url"] = reply_url
+
     # Insert the post row.
     # Pass --account explicitly so log_post.py stamps posts.our_account with
     # this machine's configured Twitter handle (e.g. `m13v_` on the local
@@ -797,7 +802,23 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         # logging outages (e.g. the /api/v1/posts 5000/24h rate-limit cap)
         # behind a benign-looking metric.
         update_candidate(cid, "skipped", "log_post_no_id")
-        return ("failed", "log_post_no_id")
+        # 2026-07-06 incident hardening: the server-side 'skipped' flip alone
+        # did NOT stop retries — the menu-bar card lane re-fed the batch
+        # because nothing told it the reply was live (8 approved cards were
+        # re-posted into X's duplicate guard after a posts-API 400).
+        # Three belts now:
+        #   1. Stash the exact log_post.py argv so the posts row can be
+        #      replayed once the API accepts it (restores the
+        #      already_posted_to_thread dedup guard).
+        #   2. Print the "posted as" line the mcp outcome parsers (old and
+        #      new) recognize, so the CARD is marked posted and never re-fed.
+        #   3. Return the posted_unlogged sentinel: main() still counts it in
+        #      `failed` (the dashboard must surface the logging outage) but
+        #      reports the card as posted in candidate_results.
+        _stash_pending_post_log(cid, reply_url, log_args, out, err)
+        print(f"[post] candidate {cid} posted as {reply_url} "
+              f"(post_id=unlogged; posts-row backfill pending)", flush=True)
+        return ("posted_unlogged", "log_post_no_id")
 
     # Stamp post_links.post_id for the URLs minted at wrap time. Idempotent;
     # no-op when minted_session is None (no URLs in the original text).
@@ -840,9 +861,8 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
                             matched_project=project, search_topic=search_topic)
     print(f"[post] candidate {cid} posted as {reply_url} (post_id={post_id})",
           flush=True)
-    # Stash the live URL on the candidate so main() can include it in the durable
-    # post-results audit log (so the menu bar/dashboard can surface "posted N + links").
-    c["our_url"] = reply_url
+    # (our_url was already stashed on the candidate right after reply_url
+    # validation, so the audit line has it even on log_post failure paths.)
 
     # Persist the human-top-replies snapshot via the s4l.ai routes. We POST
     # even when top_replies is empty so posts.top_replies_captured_at is
@@ -890,6 +910,35 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
               flush=True)
 
     return ("posted", "")
+
+
+def _stash_pending_post_log(cid, reply_url, log_args, out, err) -> None:
+    """The reply landed on X but the posts-API INSERT failed, so the posts row
+    (and with it the already_posted_to_thread dedup guard + stats) is missing.
+    Persist the exact log_post.py argv so the row can be replayed later —
+    log_post.py is idempotent per thread (DUPLICATE_THREAD returns the existing
+    post_id), so replaying is always safe. Best-effort: never affects the run.
+
+    Replay: <runtime python> scripts/log_post.py <argv...> from the package dir.
+    """
+    try:
+        path = os.path.join(REPO_DIR, "skill", "logs", "pending-post-logs.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "candidate_id": cid,
+                "reply_url": reply_url,
+                # Drop the interpreter; keep script path + flags.
+                "log_post_argv": [str(a) for a in log_args[1:]],
+                "stdout_tail": (out or "")[-500:],
+                "stderr_tail": (err or "")[-500:],
+            }) + "\n")
+        print(f"[post] candidate {cid} pending posts-row logged to {path}",
+              flush=True)
+    except Exception as e:
+        print(f"[post] candidate {cid} WARNING: pending-post-log stash failed "
+              f"({e})", flush=True)
 
 
 def _s4l_state_dir() -> str:
@@ -976,6 +1025,12 @@ def main() -> int:
               flush=True)
 
     posted = skipped = failed = 0
+    # Per-candidate outcome rows for the summary JSON. The MCP layer
+    # (mcp/src/index.ts post_drafts) prefers summary.candidate_results over
+    # regex-parsing our stdout; this is the authoritative channel that marks
+    # review-queue cards posted/terminal so a card is never re-fed to a poster
+    # after its reply already landed (2026-07-06 duplicate-retry incident).
+    candidate_results: list[dict] = []
     # Split skip vs fail reasons. The dashboard renders `failure_reasons` as
     # a "failed: <reason>" pill, so intentional skips (duplicate_thread_pre_post,
     # empty_reply_text, rate_limited, tweet_not_found, reply_box_not_found,
