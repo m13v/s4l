@@ -2123,7 +2123,7 @@ class S4LMenuBar(rumps.App):
             pass
 
     def _on_feedback_text(self, text):
-        """Ship overall feedback (the menu bar's "Give feedback…" item; the
+        """Ship overall feedback (the menu bar's "Give overall feedback to AI…" item; the
         card had its own button once but it moved out, 2026-07-03 feedback)
         as a decision='feedback' review event on the same outbox rail as
         card decisions. project is intentionally omitted
@@ -2391,7 +2391,7 @@ class S4LMenuBar(rumps.App):
         # The one entry point for overall feedback (the review card no longer
         # carries a Feedback button); named for what it does to the pipeline,
         # not the mechanism.
-        items.append(rumps.MenuItem("Give feedback…", callback=self._menu_feedback))
+        items.append(rumps.MenuItem("Give overall feedback to AI…", callback=self._menu_feedback))
         items.append(self._label("   overall guidance, steers future drafts"))
         # While the update-verify marker is pending, the pipeline copy still
         # resolves the OLD version (it only advances once the restarted server
