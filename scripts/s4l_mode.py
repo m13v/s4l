@@ -156,7 +156,7 @@ def get_mode() -> str:
 def write_flags(personal_brand: bool, promotion: bool) -> dict:
     """Persist both lane flags atomically (plus the derived legacy `mode`).
 
-    Preserves any OTHER keys already in mode.json (e.g. `autopilot`) so a lane
+    Preserves any OTHER keys already in mode.json (e.g. `draft_only`) so a lane
     flip can never silently reset an unrelated setting.
     """
     flags = {"personal_brand": bool(personal_brand), "promotion": bool(promotion)}
