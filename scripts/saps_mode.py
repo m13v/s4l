@@ -49,6 +49,15 @@ Usage:
     saps_mode.py toggle              # legacy whole-mode flip (compat)
     saps_mode.py env                 # print shell `export` lines for this cycle
     saps_mode.py persona-name        # print the persona project name (or empty)
+    saps_mode.py autopilot           # print 1|0 (promotion cycles post autonomously?)
+    saps_mode.py autopilot on|off    # set the autopilot flag
+
+Autopilot (2026-07-06): a third, independent flag in mode.json. When ON,
+run-draft-and-publish.sh runs promotion-lane cycles with DRAFT_ONLY=0 so they
+POST autonomously (the rolling virality bar activates as the quality gate).
+Persona-lane cycles ALWAYS stay DRAFT_ONLY=1 (review cards) regardless.
+`env` additionally exports S4L_CYCLE_LANE=<lane> for both lanes so the wrapper
+knows which lane this cycle is without re-deriving it.
 """
 
 import json
@@ -267,8 +276,16 @@ def _persona_env_lines() -> str:
             # from S4L_FORCE_PROJECT (which is also set by manual single-project
             # MCP draft_cycle runs). Only the personal_brand lane sets this.
             "export S4L_ACTIVE_LANE=personal_brand",
+            # Wrapper-facing lane tag (2026-07-06). Unlike S4L_ACTIVE_LANE (which
+            # the locked cycle branches on and must stay persona-only), this is
+            # exported for BOTH lanes so run-draft-and-publish.sh can decide the
+            # per-cycle DRAFT_ONLY value (autopilot posts promotion cycles).
+            "export S4L_CYCLE_LANE=personal_brand",
         ]
     )
+
+
+_PROMOTION_ENV = "export S4L_CYCLE_LANE=promotion"
 
 
 def env_exports() -> str:
@@ -293,11 +310,11 @@ def env_exports() -> str:
             return _persona_env_lines()
         print("[saps_mode] both lanes on; this cycle -> promotion (50/50)",
               file=sys.stderr)
-        return ""
+        return _PROMOTION_ENV
     if pb:
         return _persona_env_lines()
     if pr:
-        return ""
+        return _PROMOTION_ENV
     # Neither on (degenerate) -> don't leave the cycle dead; run personal.
     print("[saps_mode] no lane enabled; defaulting this cycle to personal_brand.",
           file=sys.stderr)
@@ -364,6 +381,13 @@ def main(argv) -> int:
         return 0
     if cmd == "persona-name":
         print(persona_name())
+        return 0
+    if cmd == "autopilot":
+        # `autopilot` -> print 1|0; `autopilot on|off|1|0` -> set and print.
+        if len(argv) >= 2:
+            print("1" if set_autopilot(_coerce_bool(argv[1])) else "0")
+            return 0
+        print("1" if get_autopilot() else "0")
         return 0
     print(f"unknown command: {cmd}", file=sys.stderr)
     return 2
