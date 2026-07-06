@@ -440,7 +440,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     thread_text = c.get("thread_text") or ""
     # Engagement-style enforcement (2026-05-22 cutover). Twitter is now
     # symmetric with Reddit/GitHub/Moltbook: the draft phase pre-picks an
-    # assignment via saps_pick_style; the post phase calls
+    # assignment via s4l_pick_style; the post phase calls
     # validate_or_register(decision, assigned_style=..., assigned_mode=...)
     # which coerces USE drift back to the assigned name OR registers
     # INVENT inventions into engagement_styles_registry via
@@ -888,7 +888,7 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     return ("posted", "")
 
 
-def _saps_state_dir() -> str:
+def _s4l_state_dir() -> str:
     return os.environ.get("S4L_STATE_DIR") or os.path.join(
         os.path.expanduser("~"), ".social-autoposter-mcp")
 
@@ -899,7 +899,7 @@ def _write_activity(label: str) -> None:
     the menu-bar spinner renders our per-post progress ("posting 3/10", then
     "posted 3/10 ✓"). Purely cosmetic: a failure here never affects posting."""
     try:
-        sd = _saps_state_dir()
+        sd = _s4l_state_dir()
         os.makedirs(sd, exist_ok=True)
         payload = {"state": "working", "label": label,
                    "since": datetime.now(timezone.utc).isoformat()}
@@ -914,7 +914,7 @@ def _clear_activity() -> None:
     NOT go through the MCP runTool's clear) leaves a stale 'posting/posted' stuck
     in the menu bar. Double-clearing with runTool is harmless."""
     try:
-        p = os.path.join(_saps_state_dir(), "activity.json")
+        p = os.path.join(_s4l_state_dir(), "activity.json")
         if os.path.exists(p):
             os.remove(p)
     except Exception:
@@ -954,7 +954,7 @@ def main() -> int:
         os.environ["CLAUDE_SESSION_ID"] = plan_session_id
 
     # Pull the picker assignment from the plan envelope (written by
-    # run-twitter-cycle.sh after saps_pick_style). Shared across every
+    # run-twitter-cycle.sh after s4l_pick_style). Shared across every
     # candidate in the batch because the picker fires once per cycle.
     # Falls back to None on legacy plans (pre-2026-05-22 envelopes that
     # don't carry these keys); post_one then runs the legacy uncoerced
