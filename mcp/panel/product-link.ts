@@ -13,7 +13,7 @@
  *
  * Mirrors panel.ts's bridge handshake and reuses the same grayscale tokens; it
  * duplicates no pipeline logic. Runs both inline (App/postMessage) and over the
- * loopback HTTP bridge (createBridge picks based on window.__SAPS_BRIDGE__).
+ * loopback HTTP bridge (createBridge picks based on window.__S4L_BRIDGE__).
  */
 import {
   applyDocumentTheme,
