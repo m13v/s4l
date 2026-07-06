@@ -108,20 +108,24 @@ TW_ENGINE_PREFIX=""
 # ceiling drops that carry runway so aged-out junk expires instead of riding
 # ~80 cycles. Discovery is already capped at 1h (FRESHNESS_HOURS_DISCOVER).
 #
-# 2026-07-06 (per user request): the wide draft window is SETUP-ONLY. The
-# original 2026-06-17 change made DRAFT_ONLY=1 default to 24h permanently,
-# so every steady-state draft-autopilot cycle kept surfacing day-old tweets.
-# Now the ONLY way draft mode widens is the explicit S4L_DRAFT_FRESHNESS_HOURS
-# env override, which run-draft-and-publish.sh exports solely while the
-# first-run-boost.json onboarding marker is live (consumed after the first
-# delivered batch, hard-expired after 24h). Once the marker is gone the env
-# is unset and draft cycles run the same experiment-concluded variant D
-# windows as autopilot: 2h expire ceiling + 1h discovery.
-# Autopilot (DRAFT_ONLY=0) ignores the override entirely, as before.
-if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -n "${S4L_DRAFT_FRESHNESS_HOURS:-}" ]; then
-    FRESHNESS_HOURS="$S4L_DRAFT_FRESHNESS_HOURS"
+# 2026-07-06 (per user request): there is exactly ONE freshness path and ONE
+# exception, with NO env-var knobs. Every cycle, draft or autopilot, runs the
+# experiment-concluded variant D windows: 2h expire ceiling here plus 1h
+# discovery. The single exception is first-run setup: the MCP server drops
+# first-run-boost.json into the state dir when it installs the kicker
+# (mcp/src/index.ts), and while that marker is live a draft cycle widens both
+# knobs to a hardcoded 48h so the user's FIRST review batch surfaces real
+# candidates. run-draft-and-publish.sh owns the marker lifecycle: consumed
+# the moment a merge delivers cards, removed after 24h without any. We read
+# the marker file directly; the old S4L_DRAFT_FRESHNESS_HOURS and
+# S4L_FIRST_RUN_FRESHNESS_HOURS env overrides are retired.
+FIRST_RUN_BOOST_MARKER="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
+if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -f "$FIRST_RUN_BOOST_MARKER" ]; then
+    FRESHNESS_HOURS=48
+    FRESHNESS_HOURS_DISCOVER=48
 else
     FRESHNESS_HOURS=2
+    FRESHNESS_HOURS_DISCOVER=1
 fi
 
 # ----------------------------------------------------------------------------
@@ -139,16 +143,10 @@ fi
 # other's still-pending rows. FRESHNESS_HOURS_DISCOVER (Phase 1 prompt +
 # since-rewrite hook) stays tightened to 1h, the winning D setting.
 TWITTER_CYCLE_VARIANT=D
-# Discovery widens ONLY under the first-run onboarding boost (see the
-# FRESHNESS_HOURS branch above): S4L_DRAFT_FRESHNESS_HOURS set + DRAFT_ONLY=1.
-# Steady-state draft cycles keep the winning D setting of 1h, same as
-# autopilot. The lean Phase 1 CDP scraper reads FRESHNESS_HOURS_DISCOVER
-# directly and honors any value.
-if [ "${DRAFT_ONLY:-0}" = "1" ] && [ -n "${S4L_DRAFT_FRESHNESS_HOURS:-}" ]; then
-    FRESHNESS_HOURS_DISCOVER="$S4L_DRAFT_FRESHNESS_HOURS"
-else
-    FRESHNESS_HOURS_DISCOVER=1
-fi
+# FRESHNESS_HOURS_DISCOVER is set together with FRESHNESS_HOURS in the
+# first-run-boost block above: 1h (the winning variant D setting) everywhere,
+# 48h only while the setup marker is live. The lean Phase 1 CDP scraper reads
+# it directly and honors any value.
 # Export FRESHNESS_HOURS too so score_twitter_candidates.py inherits it and
 # drives the expire-stale gate from the same knob (was hardcoded 18h there).
 export TWITTER_CYCLE_VARIANT FRESHNESS_HOURS_DISCOVER FRESHNESS_HOURS
