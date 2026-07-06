@@ -38,9 +38,9 @@ import time
 # best-effort: a missing repo path or SDK degrades to a silent no-op.
 _sentry = None
 try:
-    # Tolerate the pre-rename plist name (SAPS_REPO_DIR) inline: this read runs
+    # Read the repo dir from the plist env; this read runs
     # BEFORE scripts/ is on sys.path, so the s4l_env mirror can't help yet.
-    _repo = os.environ.get("S4L_REPO_DIR") or os.environ.get("SAPS_REPO_DIR")
+    _repo = os.environ.get("S4L_REPO_DIR")
     if _repo:
         _scripts = os.path.join(_repo, "scripts")
         if _scripts not in sys.path:
