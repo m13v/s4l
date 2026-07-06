@@ -29,6 +29,31 @@ const auth = require('./auth');
 
 const DEST = path.join(os.homedir(), 'social-autoposter');
 const LOG_DIR = path.join(DEST, 'skill', 'logs');
+// S4L plugin runtime log dir (2026-07-06). The queue-backed twitter-cycle
+// kicker (com.m13v.social-twitter-cycle) runs from the packaged runtime and
+// writes its per-run logs there, NOT into the repo's skill/logs — which left
+// the Status tab showing lastRun=null for a live pipeline. Every log listing
+// merges this dir in (repo wins on filename collision) and every log read
+// resolves across both dirs.
+const S4L_PKG_LOG_DIR = path.join(os.homedir(), '.social-autoposter-mcp', 'repo', 'package', 'skill', 'logs');
+function listLogDir() {
+  let names = [];
+  try { names = fs.readdirSync(LOG_DIR); } catch {}
+  let pkg = [];
+  try { pkg = fs.readdirSync(S4L_PKG_LOG_DIR); } catch {}
+  if (pkg.length) {
+    const seen = new Set(names);
+    for (const f of pkg) if (!seen.has(f)) names.push(f);
+  }
+  return names;
+}
+function resolveLogPath(fname) {
+  const repoPath = path.join(LOG_DIR, fname);
+  if (fs.existsSync(repoPath)) return repoPath;
+  const pkgPath = path.join(S4L_PKG_LOG_DIR, fname);
+  if (fs.existsSync(pkgPath)) return pkgPath;
+  return repoPath;
+}
 const SCHED_KIND = platform.scheduler();
 const UNIT_DIR = path.join(DEST, 'launchd');
 const AGENT_DIR = platform.agentsDir();
@@ -245,9 +270,7 @@ function buildBatchSnapshot() {
   }
   const { loadedLabels, pidByLabel } = driver.list();
 
-  const logFiles = (() => {
-    try { return fs.readdirSync(LOG_DIR); } catch { return []; }
-  })();
+  const logFiles = listLogDir();
 
   const lockHolders = readLockHoldersFromTmp();
 
@@ -394,7 +417,7 @@ function getPlistInterval(unitPath) {
 
 function getLastLog(job) {
   try {
-    const files = fs.readdirSync(LOG_DIR).filter(f => {
+    const files = listLogDir().filter(f => {
       if (!f.endsWith('.log')) return false;
       if (f.startsWith('launchd-')) return false;
       if (job.logPrefix) return f.startsWith(job.logPrefix);
@@ -1732,7 +1755,7 @@ async function enrichPostCommentsTwitterRuns(runs) {
   // salvage marker we need for the salvaged pill. Read once per enricher call.
   let logFiles = [];
   try {
-    logFiles = fs.readdirSync(LOG_DIR).filter(f => f.startsWith('twitter-cycle-') && f.endsWith('.log'));
+    logFiles = listLogDir().filter(f => f.startsWith('twitter-cycle-') && f.endsWith('.log'));
   } catch { /* empty */ }
   const cycleFileTs = (name) => {
     const m = name.match(/^twitter-cycle-(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})(\d{2})\.log$/);
