@@ -27,10 +27,8 @@ HOME = os.path.expanduser("~")
 
 
 def _repo_dir():
-    # SAPS_REPO_DIR fallback: pre-rename (2026-07-03) launchd plists / parents.
     return (
         os.environ.get("S4L_REPO_DIR")
-        or os.environ.get("SAPS_REPO_DIR")
         or os.path.join(HOME, "social-autoposter")
     )
 
@@ -65,7 +63,6 @@ def _toggle_lane(lane):
         lane = "personal_brand"
     py = (
         os.environ.get("S4L_PYTHON")
-        or os.environ.get("SAPS_PYTHON")  # pre-rename plists (2026-07-03)
         or sys.executable
         or "python3"
     )
@@ -222,7 +219,7 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(500, f"read error: {e}", "text/plain")
                 return
-            inject = '<script>window.__SAPS_BRIDGE__="http";</script>'
+            inject = '<script>window.__S4L_BRIDGE__="http";</script>'
             html = html.replace("</head>", inject + "</head>", 1) if "</head>" in html else inject + html
             self._send(200, html, "text/html; charset=utf-8")
             return
