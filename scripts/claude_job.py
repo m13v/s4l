@@ -52,7 +52,7 @@ s4l_env.mirror()
 # directory (scripts/) is on sys.path[0] when run as `python3 .../claude_job.py`.
 # A failure to import (or to write) must NEVER affect the queue's real work.
 try:
-    import saps_activity as _activity  # type: ignore
+    import s4l_activity as _activity  # type: ignore
 except Exception:  # pragma: no cover - cosmetic only
     _activity = None
 
