@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build the personal-brand PERSONA from the user's own public footprint (step 2,
-2026-06-26). Companion to scripts/saps_mode.py + the menu-bar toggle.
+2026-06-26). Companion to scripts/s4l_mode.py + the menu-bar toggle.
 
 Personal-brand mode (the menu-bar toggle) drafts organic replies for the persona
 project (config.json entry with `persona: true`). Those replies are only as good
@@ -73,7 +73,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import saps_mode  # noqa: E402  (config/persona resolution, shared source of truth)
+import s4l_mode  # noqa: E402  (config/persona resolution, shared source of truth)
 
 PUBLIC_ONLY_NOTE = (
     "PUBLICLY PUBLISHABLE ONLY: every field below must be safe to post in "
@@ -295,7 +295,7 @@ def cmd_gather(args) -> int:
 
     corpus = {
         "ok": True,
-        "persona_project": saps_mode.persona_name() or "(none configured)",
+        "persona_project": s4l_mode.persona_name() or "(none configured)",
         "public_only": True,
         "sources": sources,
         "grounding_instructions": GROUNDING_INSTRUCTIONS,
@@ -312,12 +312,12 @@ def cmd_apply(args) -> int:
         print(f"could not read --from {args.from_file!r}: {e}", file=sys.stderr)
         return 2
 
-    name = saps_mode.persona_name()
+    name = s4l_mode.persona_name()
     if not name:
         print("no persona project (persona:true) in config.json", file=sys.stderr)
         return 2
 
-    cfg_path = saps_mode.config_path()
+    cfg_path = s4l_mode.config_path()
     cfg = json.loads(cfg_path.read_text())
     proj = next((p for p in cfg.get("projects", []) if p.get("name") == name), None)
     if proj is None:
