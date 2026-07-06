@@ -455,8 +455,11 @@ const server = new McpServer(
       "onboarding does NOT need to wait for or verify a draft. Steps, in order: " +
       "(1) call `queue_setup` — it pre-writes the worker task prompt and returns the task spec " +
       "(s4l-worker, the universal queue worker); " +
-      "(2) for EACH returned spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, and " +
-      "prompt VERBATIM (if it says the task already exists, that's fine — move on, do not recreate); " +
+      "(2) for EACH returned spec, call the HOST tool `create_scheduled_task` with its taskId, cronExpression, " +
+      "prompt, and notifyOnCompletion VERBATIM — notifyOnCompletion MUST be false, or the per-minute worker " +
+      "pops a 'no jobs' notification every run (if it says the task already exists, that's fine — do not " +
+      "recreate, but DO call `update_scheduled_task` with the same taskId and notifyOnCompletion:false to " +
+      "silence an older install's per-run notifications, then move on); " +
       "(3) the launchd kicker + scheduled tasks now run the pipeline on their own — call the `dashboard` " +
       "tool to confirm the schedule is firing (schedule_state 'ok'), then summarize. Do NOT create the " +
       "old 'social-autoposter-autopilot' task — it is deprecated. Do NOT ask the user to review drafts " +
@@ -1726,8 +1729,10 @@ tool(
           ? `Personal-brand lane is on (the default); the persona is provisioned, topic-seeded, and ${personaQueryCount} search quer${personaQueryCount === 1 ? "y" : "ies"} seeded, so there `
           : "Personal-brand lane is on (the default); the persona is provisioned + topic-seeded (but NO search_queries were supplied, so it will run one topic-as-query at a time — re-call engagement_mode action:'set' with a search_queries array of ~30 X search strings expanded from the persona topics to fan out). There ") +
         "is nothing more to configure (no product project is needed). NOW SCHEDULE THE AUTOPILOT: call " +
-        "queue_setup and create each returned task with create_scheduled_task (prompt verbatim; " +
-        "'already exists' is fine), then call the dashboard tool to confirm the schedule is firing. " +
+        "queue_setup and create each returned task with create_scheduled_task (prompt and " +
+        "notifyOnCompletion verbatim — notifyOnCompletion must be false; 'already exists' is fine, but then " +
+        "call update_scheduled_task with notifyOnCompletion:false to silence per-run notifications), " +
+        "then call the dashboard tool to confirm the schedule is firing. " +
         "That is the final setup step — do NOT stop before the autopilot is scheduled.";
 
     return jsonContent({
@@ -2136,7 +2141,7 @@ tool(
               (xConnected ? "" : " X is not connected yet either — detect_x_sources, warn about keychain prompts, then run connect_x with confirm:true without a separate permission turn.")
             : projects.every((p) => p.ready)
               ? (xConnected
-                  ? "All configured projects are ready and X is connected. SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt verbatim; 'already exists' is fine); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
+                  ? "All configured projects are ready and X is connected. SCHEDULE THE AUTOPILOT: (1) call queue_setup and create each returned task with create_scheduled_task (prompt and notifyOnCompletion verbatim — notifyOnCompletion must be false; 'already exists' is fine, but then call update_scheduled_task with notifyOnCompletion:false to silence per-run notifications); (2) the autopilot then runs on its own (launchd kicker + queue worker). Call the `dashboard` tool to confirm the schedule is firing (schedule_state 'ok') — that is the terminal step; do NOT wait for or verify a draft card. Do NOT pause to ask the user to review drafts."
                   : "All configured projects are ready, but X is NOT connected — posting needs a logged-in " +
                     "x.com session. Detect sources and run project_config action:'connect_x', confirm:true; do not ask whether to proceed.")
               : "Some projects are missing required fields (see each project's missing_required). Derive them from config, context, profile_scan, and website research, then call project_config again. Ask only if a required field is genuinely unknowable." +
@@ -2274,7 +2279,8 @@ tool(
           ? `Project '${result.project}' is fully configured.${seedNote} Next: if X is not connected, ` +
             `detect sources, warn about keychain prompts, and call project_config with ` +
             `action:'connect_x', confirm:true immediately. Once X is connected, schedule the autopilot ` +
-            `(queue_setup + create_scheduled_task per task); the autopilot then drafts on its own. Call the ` +
+            `(queue_setup + create_scheduled_task per task, passing each spec's fields verbatim including ` +
+            `notifyOnCompletion:false); the autopilot then drafts on its own. Call the ` +
             `dashboard to confirm the schedule is firing (schedule_state 'ok') — that is the final step, ` +
             `no need to wait for or verify a draft card.`
           : `Saved what you provided for '${result.project}'. Still need: ${result.missing_required.join(", ")}. ` +
@@ -2720,8 +2726,9 @@ tool(
     description:
       "Returns the scheduled task that runs the hands-free draft autopilot on this machine " +
       "(s4l-worker, the universal queue worker). For EACH returned task, call the host tool " +
-      "create_scheduled_task with its taskId, cronExpression, and prompt VERBATIM (do not edit the " +
-      "prompt — it contains exact local paths). The task drains the local job queue that the " +
+      "create_scheduled_task with its taskId, cronExpression, prompt, and notifyOnCompletion " +
+      "VERBATIM (do not edit the prompt — it contains exact local paths; notifyOnCompletion MUST be " +
+      "false or the per-minute worker spams a notification every run). The task drains the local job queue that the " +
       "real pipeline feeds (all job types); the pipeline itself is kicked by launchd jobs this server " +
       "installs. Use this as the final onboarding step instead of the old per-type worker tasks.",
     inputSchema: {},
@@ -2765,6 +2772,11 @@ tool(
       cronExpression: "* * * * *",
       folder: workerFolder,
       prompt: queueWorkerBody(spec),
+      // The host defaults notifyOnCompletion to TRUE, which fires a Notification
+      // Center toast after EVERY run — for a per-minute worker whose normal
+      // report is "no jobs", that's up to 60 "couldn't find anything" popups an
+      // hour. A customer disabled the autopilot over exactly this (2026-07-06).
+      notifyOnCompletion: false,
     }));
     return jsonContent({
       tasks,
@@ -2782,11 +2794,15 @@ tool(
         "- You can edit your voice, topics, or the drafts themselves at any time, and check status on the dashboard.",
       ],
       next_step:
-        "For EACH task, call the host tool create_scheduled_task (taskId, cronExpression, prompt " +
-        "verbatim) to register its schedule — the prompt file is already written, so creating it just " +
-        "wires up the cron. If create_scheduled_task reports a task already exists, that is FINE — the " +
-        "schedule is registered and the prompt is current; do NOT delete/recreate, do NOT investigate, " +
-        "just move on. It fires every minute and only drafts — it never posts. The pipeline that feeds " +
+        "For EACH task, call the host tool create_scheduled_task (taskId, cronExpression, prompt, " +
+        "notifyOnCompletion verbatim) to register its schedule — the prompt file is already written, so creating it just " +
+        "wires up the cron. notifyOnCompletion:false is REQUIRED: the host default is true, and a " +
+        "per-minute worker whose normal result is 'no jobs' would otherwise pop a notification every " +
+        "run. If create_scheduled_task reports a task already exists, that is FINE — the " +
+        "schedule is registered and the prompt is current; do NOT delete/recreate, do NOT investigate — " +
+        "but DO silence its run notifications once: call the host tool update_scheduled_task with the " +
+        "same taskId and notifyOnCompletion:false (existing installs were created before this default " +
+        "was overridden), then move on. It fires every minute and only drafts — it never posts. The pipeline that feeds " +
         "it runs from launchd jobs this server installs. Do NOT create the old " +
         "'social-autoposter-autopilot' task; it is deprecated. If the older per-type tasks " +
         "(saps-phase1-query / saps-phase2b-draft) exist from a previous version, LEAVE them — they are " +
