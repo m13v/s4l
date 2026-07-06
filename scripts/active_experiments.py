@@ -1,76 +1,57 @@
 #!/usr/bin/env python3
-"""THE generic structure for surfacing experiment/scenario arms on draft cards.
+"""THE generic structure for experiment/scenario arms on drafts.
 
-Problem this solves (2026-07-06): experiments used to be invisible ad-hoc
-plumbing. Each one was an env var assigned inside the locked cycle script
-(S4L_DRAFT_PROMPT_VARIANT, historically LENGTH_ARM) or a per-post coin flip at
-post time (tail_link_variant), stamped straight onto a dedicated posts column
-at post time and NEVER onto the plan candidate. So the review card could not
-show which arms shaped a draft, and every new experiment needed bespoke wiring.
+How arms flow (2026-07-07, stamp-at-source design):
+  1. An experiment assigns its arm wherever it naturally lives and exports it
+     as an env var in the cycle process (see convention below).
+  2. run-twitter-cycle.sh's plan writer calls collect() IN the cycle process
+     and stamps an `experiments` {name: variant} dict onto every plan
+     candidate as the plan is written. That per-candidate record is the ONLY
+     source downstream — there are no env reads and no fallbacks later:
+       - merge_review_queue.py carries it into review-queue.json,
+       - the menu bar card's details popover renders every entry as-is,
+       - twitter_post_plan.py stamps posts.draft_prompt_variant from it in
+         BOTH posting homes (inside the cycle on autopilot, and spawned by
+         the MCP server for approved cards, where cycle env never existed).
 
 Convention (REQUIRED for every new experiment that affects drafting):
-  1. Assign the arm wherever it naturally lives.
-  2. Make it discoverable by AT LEAST ONE of:
-       a. export S4L_EXP_<NAME>=<variant> in the process chain that runs the
-          cycle/merge (name is lowercased for display), or
-       b. print ONE machine-readable marker line to the cycle's stdout:
-              S4L_EXPERIMENT name=<name> variant=<variant>
-  3. Done. merge_review_queue.py calls collect() and stamps every incoming
-     plan candidate with an `experiments` {name: variant} dict, the menu bar
-     card's details popover renders every entry automatically, and the dict
-     rides the candidate into review-queue.json for any later reader. Zero
-     per-experiment wiring in the card.
+  export S4L_EXP_<NAME>=<variant> in the process chain that runs the cycle
+  (the name is lowercased for display). Nothing else to wire: the plan writer
+  stamps it, the card shows it, and any post-time consumer can read it off
+  the candidate. Do NOT add per-experiment code to s4l_card.py or new env
+  reads to twitter_post_plan.py.
 
-Post-time experiments (e.g. tail_link_variant, decided by a coin flip inside
-twitter_post_plan.py AFTER approval) have no arm yet at review time and are out
-of scope here by design.
-
-LEGACY_TEXT below recovers the draft-prompt arm from the LOCKED cycle script's
-existing human log line. That file is chflags-uchg locked, which freezes the
-line's format, so parsing it is stable by construction. If the cycle is ever
-unlocked and edited, prefer switching it to the S4L_EXPERIMENT marker.
+Post-time experiments (e.g. tail_link_variant, coin-flipped inside
+twitter_post_plan.py AFTER approval) have no arm at draft time and are out of
+scope here by design.
 """
 
 import json
 import os
-import re
 import sys
 
 ENV_PREFIX = "S4L_EXP_"
 
-# Experiments that predate the S4L_EXP_ convention, keyed by their env var.
-# S4L_CYCLE_LANE is the dual-lane scenario (personal_brand | promotion) from
-# s4l_mode.py env; not an A/B arm strictly, but it is THE scenario that decides
+# Experiments/scenarios that predate the S4L_EXP_ convention, keyed by env
+# var. Order matters where two vars map to one name: later entries win, so
+# S4L_CYCLE_LANE (the wrapper's authoritative per-cycle lane tag) overrides
+# S4L_ACTIVE_LANE (set only on persona cycles; also present on direct cycle
+# runs that bypass the wrapper). `lane` is the dual-lane scenario
+# (personal_brand | promotion) — not an A/B arm strictly, but it decides
 # which draft directive a card came from, so review wants it.
 LEGACY_ENV = {
-    "S4L_DRAFT_PROMPT_VARIANT": "draft_prompt",
+    "S4L_ACTIVE_LANE": "lane",
     "S4L_CYCLE_LANE": "lane",
+    "S4L_DRAFT_PROMPT_VARIANT": "draft_prompt",
 }
 
-MARKER_RE = re.compile(
-    r"^S4L_EXPERIMENT\s+name=([\w.-]+)\s+variant=(\S+)\s*$", re.MULTILINE
-)
 
-# Arms recoverable only from the locked cycle's stdout (see module docstring).
-LEGACY_TEXT = (
-    # run-twitter-cycle.sh: log "Draft-prompt A/B arm: <arm> (rate=<r>)"
-    (re.compile(r"Draft-prompt A/B arm:\s+(\S+)"), "draft_prompt"),
-)
-
-
-def collect(text=None, env=None):
-    """{experiment_name: variant} for the current cycle. `text` is the cycle's
-    captured stdout (optional); env entries win over text on conflict because
-    env is same-process truth while text is recovered from a child process."""
+def collect(env=None):
+    """{experiment_name: variant} from the calling process's environment.
+    Must run in the process where arms are assigned (the cycle); downstream
+    processes read the stamped candidate dict instead of calling this."""
     env = os.environ if env is None else env
     out = {}
-    if text:
-        for rex, name in LEGACY_TEXT:
-            m = rex.search(text)
-            if m:
-                out[name] = m.group(1)
-        for m in MARKER_RE.finditer(text):
-            out[m.group(1)] = m.group(2)
     for var, name in LEGACY_ENV.items():
         v = (env.get(var) or "").strip()
         if v:
@@ -87,28 +68,6 @@ def collect(text=None, env=None):
     return out
 
 
-def main(argv):
-    import argparse
-
-    ap = argparse.ArgumentParser(
-        description="Print the active experiment arms as JSON"
-    )
-    ap.add_argument(
-        "--text-file",
-        help="path to captured cycle stdout to also scan for arm markers",
-    )
-    ns = ap.parse_args(argv)
-    text = None
-    if ns.text_file:
-        try:
-            with open(ns.text_file, "r", errors="replace") as f:
-                text = f.read()
-        except OSError as e:
-            print(f"[active_experiments] cannot read {ns.text_file}: {e}",
-                  file=sys.stderr)
-    print(json.dumps(collect(text=text), indent=2, sort_keys=True))
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    print(json.dumps(collect(), indent=2, sort_keys=True))
+    sys.exit(0)
