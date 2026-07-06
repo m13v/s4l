@@ -4858,6 +4858,31 @@ async function main() {
     const tr = setInterval(relayTranscripts, 5 * 60_000);
     tr.unref();
   }
+  // Relay the queue producer/consumer log (claude-queue/provider.log) so a
+  // stranded/orphaned draft batch — a producer that died after its worker wrote
+  // the result but before consuming it — is visible in Cloud Logging remotely,
+  // not just on the box (context="queue-provider"). Incremental (byte offset),
+  // self-locking, forward-only baseline. Best-effort; opt out S4L_PROVIDER_LOG_RELAY=0.
+  if ((process.env.S4L_PROVIDER_LOG_RELAY ?? "1") !== "0") {
+    let providerRelayRunning = false;
+    const relayProviderLog = () => {
+      if (providerRelayRunning) return;
+      providerRelayRunning = true;
+      runPython("scripts/relay_provider_log.py", ["--max-lines", "500"], {
+        timeoutMs: 120_000,
+      })
+        .catch((e: any) => {
+          console.error("[social-autoposter-mcp] provider-log relay failed:", e?.message || e);
+        })
+        .finally(() => {
+          providerRelayRunning = false;
+        });
+    };
+    const prBoot = setTimeout(relayProviderLog, 95_000); // off the boot hot path
+    prBoot.unref();
+    const pr = setInterval(relayProviderLog, 5 * 60_000);
+    pr.unref();
+  }
   // Sync the install's configuration state (config.json, persona corpus, mode,
   // queues, onboarding ledger) to the backend. Hash-gated on the interval, so
   // the recurring tick only POSTs when something actually changed; setup.ts

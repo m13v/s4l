@@ -172,15 +172,12 @@ def main():
         else:
             break  # stop on failure; retry from the saved offset next run
 
-    # Only advance the offset by what we actually shipped, so a mid-run POST failure
-    # re-ships the un-acked tail next run instead of dropping it.
-    if shipped >= len(raw_lines):
-        # Shipped everything we read (and possibly capped by max_lines == read count).
-        _save_state({"offset": new_offset, "inode": cur_inode})
-    elif shipped > 0:
-        # Shipped only a prefix; advance past exactly those lines (+ their newlines).
-        partial = "\n".join(raw_lines[:shipped]) + "\n"
-        _save_state({"offset": offset + len(partial.encode("utf-8")), "inode": cur_inode})
+    # Advance the offset by EXACTLY the bytes of the lines we shipped, never to
+    # new_offset: the read may have been capped by --max-lines (unshipped tail must
+    # re-read next run) and a mid-run POST failure must re-ship the un-acked lines.
+    if shipped > 0:
+        consumed = "\n".join(raw_lines[:shipped]) + "\n"
+        _save_state({"offset": offset + len(consumed.encode("utf-8")), "inode": cur_inode})
     print(f"[provider-relay] shipped {shipped}/{len(records)} provider.log line(s)")
     return 0
 
