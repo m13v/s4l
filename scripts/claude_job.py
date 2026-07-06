@@ -24,10 +24,13 @@ Three roles:
 Queue = plain files under <state_dir>/claude-queue/. No DB, no network.
   state_dir = $S4L_STATE_DIR or ~/.social-autoposter-mcp
 
-Job-type mapping is by run_claude.sh script_tag. Only the PURE text->JSON calls
-are queue-eligible; anything else exits non-zero so the caller's own fallback
-runs (e.g. link_tail's mechanical concat). twitter-link-tail is intentionally
-NOT mapped: the customer flow skips it for now.
+Job-type mapping is by run_claude.sh script_tag, and TAG_TO_TYPE is the ONLY
+router (the S4L_CLAUDE_PROVIDER env var was removed 2026-07-06): run_claude.sh
+asks `eligible --tag` and routes mapped tags through the queue unconditionally,
+on every machine. Only PURE text->JSON calls belong in the map; unmapped tags
+always run the real `claude -p`. Migrating a lane onto the queue = adding its
+tag to TAG_TO_TYPE, nothing else. twitter-link-tail is intentionally NOT
+mapped: the customer flow skips it (S4L_SKIP_LINK_TAIL=1) for now.
 """
 
 from __future__ import annotations
@@ -993,9 +996,19 @@ def cmd_result(ns) -> int:
     return 0
 
 
+def cmd_eligible(ns: argparse.Namespace) -> int:
+    """Routing probe for run_claude.sh: exit 0 when the tag is queue-mapped,
+    1 otherwise. TAG_TO_TYPE is the single routing truth — no env var."""
+    return 0 if ns.tag in TAG_TO_TYPE else 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="claude -p queue shim")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    pe = sub.add_parser("eligible", help="exit 0 iff --tag is queue-mapped (router probe)")
+    pe.add_argument("--tag", required=True)
+    pe.set_defaults(func=cmd_eligible)
 
     pp = sub.add_parser("provider", help="enqueue + block-poll (run by run_claude.sh)")
     pp.add_argument("--tag", required=True)
