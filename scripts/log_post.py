@@ -91,7 +91,7 @@ from version import read_version as read_autoposter_version
 # post path goes straight through log_post.py (no candidate/plan pipeline like
 # Twitter's twitter_post_plan.py), so the picker-coercion engine has to live
 # here. When the caller passes --assigned-style/--assigned-mode (sourced from
-# saps_pick_style in run-linkedin.sh), we call validate_or_register exactly
+# s4l_pick_style in run-linkedin.sh), we call validate_or_register exactly
 # like twitter_post_plan.py::post_one so (a) USE-mode drift coerces back to the
 # assigned style and (b) INVENT-mode inventions land in
 # engagement_styles_registry via the /api/v1/engagement-styles/registry POST.
@@ -165,7 +165,7 @@ def coerce_engagement_style(args):
     records the same coerced/assigned style as a successful one (otherwise
     INVENT-mode model names leak onto rejected rows and pollute the per-style
     report). When the caller passed --assigned-style/--assigned-mode (from
-    saps_pick_style in run-linkedin.sh), call validate_or_register exactly
+    s4l_pick_style in run-linkedin.sh), call validate_or_register exactly
     like twitter_post_plan.py::post_one:
       - USE-mode drift coerces back to the assigned name
       - INVENT-mode + well-formed --new-style registers in the registry
@@ -373,7 +373,7 @@ def main():
                              "--is-recommendation, which is intent.")
     parser.add_argument("--assigned-style", default=None,
                         help="The engagement style the programmatic picker "
-                             "(saps_pick_style / pick_style_for_post) assigned for "
+                             "(s4l_pick_style / pick_style_for_post) assigned for "
                              "this post. When present alongside --assigned-mode, "
                              "log_post runs validate_or_register so USE-mode drift "
                              "is coerced back to this name and INVENT-mode names "
