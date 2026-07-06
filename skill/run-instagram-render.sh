@@ -338,9 +338,9 @@ log "target=$TARGET selected_project=${SELECTED_PROJECT:-<null/organic>} draft_c
 # stamps metadata.engagement_style on the media_posts row. sync_ig_to_posts.py
 # mirrors that field to posts.engagement_style for the dashboard A/B.
 source "$REPO_DIR/skill/styles.sh"
-STYLE_ASSIGN_FILE=$(mktemp -t saps_ig_style_XXXXXX.json)
+STYLE_ASSIGN_FILE=$(mktemp -t s4l_ig_style_XXXXXX.json)
 if [ "$TARGET" = "organic" ]; then
-  saps_pick_style instagram posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
+  s4l_pick_style instagram posting "$STYLE_ASSIGN_FILE" >/dev/null 2>>"$LOG_FILE" || true
   PICKED_STYLE=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('style') or '')")
   PICK_MODE=$(/opt/homebrew/bin/python3.11 -c "import json; print(json.load(open('$STYLE_ASSIGN_FILE')).get('mode',''))")
 else
@@ -362,7 +362,7 @@ with open(out, 'w') as f:
     }, f)
 PY
 fi
-STYLES_BLOCK=$(saps_render_style_block "$STYLE_ASSIGN_FILE" instagram posting)
+STYLES_BLOCK=$(s4l_render_style_block "$STYLE_ASSIGN_FILE" instagram posting)
 log "engagement_style: picked='${PICKED_STYLE}' mode='${PICK_MODE}' target=${TARGET} project=${SELECTED_PROJECT:-organic}"
 
 # Buffer guard: if 3+ drafts of target type already exist, skip.
