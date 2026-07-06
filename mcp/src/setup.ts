@@ -342,7 +342,7 @@ export function applySetup(input: ProjectInput): {
 // readiness counts and the "all projects ready" gate. It is identified by
 // `persona: true`, runs with `enabled: false` (so the normal weighted pick never
 // touches it) and is force-selected via S4L_FORCE_PROJECT only when the mode
-// toggle is on. Keep these defaults in lockstep with scripts/saps_mode.py and the
+// toggle is on. Keep these defaults in lockstep with scripts/s4l_mode.py and the
 // hand-authored PersonalBrand entry in config.json.
 export const PERSONA_DEFAULT_NAME = "PersonalBrand";
 
