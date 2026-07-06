@@ -54,7 +54,9 @@
 #   bash scripts/release-mcpb.sh --no-release    # build + pack + verify only (no npm, no GitHub)
 #   bash scripts/release-mcpb.sh --draft         # GitHub release as a draft
 #   bash scripts/release-mcpb.sh --staging       # PRE-release -rc.N (staging channel only)
-#   bash scripts/release-mcpb.sh --promote v1.6.193-rc.2   # ship a tested pre-release to stable
+#   bash scripts/release-mcpb.sh --promote v1.6.193-rc.2   # BLOCKED for -rc tags: stable must
+#                                  # carry clean digits (user rule, 2026-07-06). Commit + push,
+#                                  # then cut stable with --version X.Y.Z. ALLOW_RC_PROMOTE=1 forces.
 
 set -euo pipefail
 
@@ -117,14 +119,28 @@ command -v node >/dev/null || die "node not found on PATH"
 # Flip the SAME artifact the staging box tested: clear GitHub's prerelease flag
 # and mark it latest (so releases/latest + the stable boxes pick it up), and move
 # npm's `latest` dist-tag onto it. Byte-for-byte identical to what was tested;
-# there is no repack, so nothing can drift between test and ship. The version
-# keeps its -rc.N label on purpose (that IS the tested build); cut a fresh stable
-# patch later if you want a clean number.
+# there is no repack, so nothing can drift between test and ship.
+#
+# USER RULE (2026-07-06, after the SECOND in-place rc promote; the first left
+# v1.6.197-rc.16 flagged stable on 2026-07-03): the stable channel must show
+# clean version digits, never an -rc.N label. So promoting an -rc tag in place
+# is BLOCKED by default. Ship the same code with a clean number instead:
+# commit + push (the pack ships the working tree), then
+# `bash scripts/release-mcpb.sh --version X.Y.Z`. Set ALLOW_RC_PROMOTE=1 only
+# for an emergency where a rebuild is riskier than the label.
 if [[ -n "$PROMOTE_TAG" ]]; then
   command -v gh >/dev/null || die "gh CLI not found"
   gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
   PTAG="$PROMOTE_TAG"; [[ "$PTAG" == v* ]] || PTAG="v$PTAG"
   PVER="${PTAG#v}"
+  if [[ "$PVER" == *-rc* && "${ALLOW_RC_PROMOTE:-0}" != "1" ]]; then
+    CLEAN_VER="${PVER%%-rc*}"
+    die "stable releases carry clean digits (user rule, 2026-07-06); refusing to promote $PTAG in place.
+  Ship the same code under a clean number instead:
+    1. commit + push the repo (the pipeline pack ships the working tree)
+    2. bash scripts/release-mcpb.sh --version $CLEAN_VER   (pick the next patch if $CLEAN_VER is already published)
+  Emergency override (ships the -rc label to every stable box): ALLOW_RC_PROMOTE=1 bash scripts/release-mcpb.sh --promote $PTAG"
+  fi
   gh release view "$PTAG" -R "$GH_REPO" >/dev/null 2>&1 || die "no release $PTAG to promote"
   say "Promoting $PTAG to stable (in place; same tested artifact, no rebuild)"
   gh release edit "$PTAG" -R "$GH_REPO" --prerelease=false --latest
@@ -493,7 +509,8 @@ if [[ -n "$DRAFT_FLAG" ]]; then
 elif [[ "$DO_STAGING" == "1" ]]; then
   say "Staging pre-release — releases/latest deliberately EXCLUDES it, so stable boxes stay put."
   echo "  Only boxes on the staging channel pull $TAG (via the releases LIST endpoint)."
-  echo "  To ship it to everyone once tested:  bash scripts/release-mcpb.sh --promote $TAG"
+  echo "  To ship it to everyone once tested (stable = clean digits, never -rc): commit + push, then"
+  echo "    bash scripts/release-mcpb.sh --version ${VERSION%%-rc*}   # pick the next patch if that version is already published"
 else
   say "Verifying releases/latest serves $TAG (drives the menu-bar update banner)"
   LATEST_SEEN=""
