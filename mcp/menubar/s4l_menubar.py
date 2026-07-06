@@ -1795,8 +1795,14 @@ class S4LMenuBar(rumps.App):
         # has been "drafting" past DRAFT_STUCK_SECONDS the worker keeps getting
         # killed mid-run (or never claims) and nothing is draining — flip to ⚠
         # instead of leaving the reassuring "drafting (8m)" spinner up. Skip when a
-        # more specific cause (rate limit) already owns the reason.
-        if setup_complete and self._stall_reason_info[0] != "rate_limited":
+        # more specific cause (rate limit) already owns the reason. Gated on
+        # schedule_state == "ok" (like the rate-limit check above): when the
+        # schedule is missing/disabled (e.g. orphaned by an account switch), the
+        # producer ALSO sits "drafting" forever, and without this gate draft_stuck
+        # shadowed the missing branch in _build_menu — the user saw "worker keeps
+        # getting killed" with NO Re-arm button instead of "Draft tasks aren't
+        # scheduled on this account" + the one-click fix (Karol, 2026-07-06).
+        if setup_complete and schedule_state == "ok" and self._stall_reason_info[0] != "rate_limited":
             _act = st.read_activity()
             if (
                 _act
