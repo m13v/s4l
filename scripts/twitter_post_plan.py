@@ -728,10 +728,14 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
     if tail_link_variant:
         log_args += ["--tail-link-variant", tail_link_variant]
     # Draft-prompt A/B arm: assigned ONCE per cycle in run-twitter-cycle.sh and
-    # exported as S4L_DRAFT_PROMPT_VARIANT, so every post this cycle inherits the
-    # same arm (the whole prep batch shared one draft directive). Stamp it onto
-    # posts.draft_prompt_variant, mirroring tail_link_variant.
-    draft_prompt_variant = os.environ.get("S4L_DRAFT_PROMPT_VARIANT") or None
+    # persisted onto the plan candidate's `experiments` dict at plan-write time
+    # (scripts/active_experiments.py). That stamp is the ONLY source here — env
+    # is deliberately NOT consulted (2026-07-07): this poster runs in two homes,
+    # inside the cycle (autopilot) and spawned by the MCP server for approved
+    # cards (no cycle env), and reading env made the queue-review lane stamp
+    # NULL while autopilot stamped the arm, silently dropping the human-review
+    # lane from the experiment readout.
+    draft_prompt_variant = (c.get("experiments") or {}).get("draft_prompt")
     if draft_prompt_variant:
         log_args += ["--draft-prompt-variant", draft_prompt_variant]
     # LENGTH A/B concluded 2026-06-04; future production posts are no longer
