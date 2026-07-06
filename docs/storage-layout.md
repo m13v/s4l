@@ -9,7 +9,7 @@ path constants is `mcp/src/runtime.ts` and `mcp/src/index.ts`; the reset flow in
 | Zone | Location | Lifetime | Holds |
 |------|----------|----------|-------|
 | Extension dir | `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.s4l.ai.social-autoposter/` | Wiped + rewritten on every `.mcpb` update | Code only (`dist/index.js`, `dist/pipeline.tgz`, `manifest.json`) |
-| State dir | `~/.social-autoposter-mcp/` (override: `SAPS_STATE_DIR`) | Durable, survives updates | Everything load-bearing |
+| State dir | `~/.social-autoposter-mcp/` (override: `S4L_STATE_DIR`) | Durable, survives updates | Everything load-bearing |
 | System wiring | `~/Library/LaunchAgents/`, `~/.claude.json`, `~/.s4l-worker/`, `~/.claude/scheduled-tasks/` | OS-level, persistent | Supervisors, Cowork registration, scheduler |
 
 Rule of thumb: **never anchor anything durable in the extension dir** — it is
@@ -56,13 +56,13 @@ glob-detects it).
 `repoDir()` in `mcp/src/runtime.ts` resolves in this order so a first-run
 materialize is picked up without a server restart:
 
-1. `SAPS_REPO_DIR` when it is a real clone (npm/git installs keep their working tree).
+1. `S4L_REPO_DIR` when it is a real clone (npm/git installs keep their working tree).
 2. `runtime.json`'s `repo_dir` (the materialized repo from a `.mcpb` install).
 3. The materialized `repo/package` path on disk even if `runtime.json` is missing.
-4. `SAPS_REPO_DIR` as-is, then the two-levels-up dev fallback.
+4. `S4L_REPO_DIR` as-is, then the two-levels-up dev fallback.
 
 A directory only counts as a repo if it has both `requirements.txt` and
-`scripts/`. `resolvePython()` mirrors this: owned venv → `SAPS_PYTHON` → bare
+`scripts/`. `resolvePython()` mirrors this: owned venv → `S4L_PYTHON` → bare
 `python3`.
 
 ## System wiring
@@ -102,7 +102,7 @@ The Code tab is a separate embedded `claude-code` launched with
 
 It rewrites on every boot (idempotent, atomic, preserves other keys) so the path
 self-corrects after an update relocates the extension dir. Kill switch:
-`SAPS_COWORK_MCP=0`. Caveat: the Cowork host's `--allowedTools` allowlist may
+`S4L_COWORK_MCP=0`. Caveat: the Cowork host's `--allowedTools` allowlist may
 prompt for permission on the first tool call; the tools still load and appear.
 
 ### Queue worker
