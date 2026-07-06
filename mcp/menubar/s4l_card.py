@@ -299,6 +299,17 @@ def _details_lines(d):
         # new_style registration payload); registry styles carry no description
         # on the plan.
         lines.append(f"New style: {desc}")
+    # Experiment/scenario arms active when this draft was written, stamped by
+    # merge_review_queue.py from scripts/active_experiments.py. Rendered
+    # generically so every future experiment surfaces here with no card change.
+    # 'lane' reads as a scenario, not an A/B arm, so it gets its own label.
+    exps = d.get("experiments") or {}
+    for name in sorted(exps):
+        label = (
+            "Lane" if name == "lane"
+            else f"Experiment {str(name).replace('_', ' ')}"
+        )
+        lines.append(f"{label}: {exps[name]}")
     topic = (d.get("search_topic") or "").strip()
     if topic:
         lines.append(f"Found via search: {topic}")
@@ -1217,8 +1228,10 @@ def present_review(drafts, on_decision=None, on_complete=None):
     followers show inline next to the handle, age muted at the right, and the
     thread engagement counts live only in the eye icon's hover/click popover.
     Optional drafting metadata (project, engagement_style, style_description,
-    search_topic, language, link_source, link_keyword) feeds a second eye on
-    the "Reply (editable):" row whose popover explains how the draft was made.
+    search_topic, language, link_source, link_keyword, experiments) feeds a
+    second eye on the "Reply (editable):" row whose popover explains how the
+    draft was made; experiments is a generic {name: variant} dict rendered
+    as-is, one line per active experiment/scenario arm.
     on_decision(decision) fires the instant each card is approved/rejected (so an
     approved draft posts right away); on_complete(decisions) fires when the user
     finishes the last card or closes the window. Both run on the main thread."""
