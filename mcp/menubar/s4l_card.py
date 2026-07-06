@@ -281,6 +281,44 @@ def _engagement_line(stats):
     return " · ".join(parts)
 
 
+def _details_lines(d):
+    """Drafting metadata for the reply row's eye popover: how this draft came
+    to be (project routing, engagement style, discovery query, link choice).
+    Everything comes from fields the plan candidate already carries; fields the
+    pipeline didn't stamp are omitted, and an empty list skips the icon."""
+    d = d or {}
+    lines = []
+    if d.get("project"):
+        lines.append(f"Project: {d['project']}")
+    style = (d.get("engagement_style") or "").strip()
+    if style:
+        lines.append(f"Style: {style}")
+    desc = (d.get("style_description") or "").strip()
+    if desc:
+        # Present only when the model INVENTED this style on the fly (the
+        # new_style registration payload); registry styles carry no description
+        # on the plan.
+        lines.append(f"New style: {desc}")
+    topic = (d.get("search_topic") or "").strip()
+    if topic:
+        lines.append(f"Found via search: {topic}")
+    lang = (d.get("language") or "").strip()
+    if lang and lang.lower() != "en":
+        lines.append(f"Language: {lang}")
+    if d.get("link_url"):
+        kw = (d.get("link_keyword") or "").strip()
+        lines.append(f"Link: {kw}" if kw else f"Link: {d['link_url']}")
+    elif (d.get("link_source") or "").strip():
+        lines.append(f"Link: none ({d['link_source'].strip().replace('_', ' ')})")
+    v = (d.get("stats") or {}).get("virality_score")
+    if v is not None:
+        try:
+            lines.append(f"Virality score: {float(v):g}")
+        except (TypeError, ValueError):
+            pass
+    return lines
+
+
 def _age_str(iso):
     """Thread age since tweet_posted_at, minute-granular for fresh threads
     ('38m'); rolls to hours/days only when minutes would be absurd."""
@@ -368,6 +406,7 @@ class _ReviewController(NSObject):
         self._textview = None
         self._link_targets = {}
         self._eye_btn = None
+        self._details_btn = None
         self._stats_popover = None
         # Per-card telemetry, reset when a NEW card renders (not on the
         # card <-> reason-picker swap, which is the same card).
