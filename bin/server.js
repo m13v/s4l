@@ -6732,7 +6732,9 @@ async function handleApi(req, res) {
           const dpWeightTreatment = Math.round(dpRate * 1000) / 10;
           const dpWeightControl = Math.round((1 - dpRate) * 1000) / 10;
           dpVariants.forEach(v => {
-            v.weight_pct = v.key === 'treatment' ? dpWeightTreatment : dpWeightControl;
+            // Arm keys are versioned on experiment resets (treatment_v2, ...),
+            // so match by prefix, not equality.
+            v.weight_pct = /^treatment/.test(String(v.key)) ? dpWeightTreatment : dpWeightControl;
           });
           const dpStartedAt = dpVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
           experiments.push({
