@@ -542,8 +542,8 @@ function toolActivityLabel(name: string, args: any): string | null {
   const fallback = TOOL_ACTIVITY[name];
   if (!fallback) return null;
   const override =
-    typeof args?.__saps_activity_label === "string"
-      ? args.__saps_activity_label.replace(/\s+/g, " ").trim().slice(0, 80)
+    typeof args?.__s4l_activity_label === "string"
+      ? args.__s4l_activity_label.replace(/\s+/g, " ").trim().slice(0, 80)
       : "";
   return override || fallback;
 }
@@ -1483,7 +1483,7 @@ async function seedSearchQueriesForProject(
 // ---- engagement_mode: choose personal-brand vs product (setup-time) --------
 // Part of onboarding: AFTER X connect + profile_scan, BEFORE product config, the
 // agent asks the user which mode they want and calls this. It persists the mode
-// (scripts/saps_mode.py, the single source of truth the cycle reads) and
+// (scripts/s4l_mode.py, the single source of truth the cycle reads) and
 // provisions the persona project (grounded in the profile scan), then the agent
 // continues to product setup — a product is always configured regardless of mode.
 tool(
@@ -1570,7 +1570,7 @@ tool(
     const action = args.action || "get";
 
     const readFlags = async (): Promise<{ personal_brand: boolean; promotion: boolean }> => {
-      const cur = await runPython("scripts/saps_mode.py", ["flags"], { timeoutMs: 15_000 });
+      const cur = await runPython("scripts/s4l_mode.py", ["flags"], { timeoutMs: 15_000 });
       try {
         const f = JSON.parse((cur.stdout || "").trim());
         return { personal_brand: !!f.personal_brand, promotion: !!f.promotion };
@@ -1587,11 +1587,11 @@ tool(
     }
 
     // Lightweight flip of ONE lane (the dashboard/menu-bar quick toggle): just
-    // rewrite mode.json via saps_mode.py — NO persona provisioning. Mirrors the
+    // rewrite mode.json via s4l_mode.py — NO persona provisioning. Mirrors the
     // menu bar's pure-local _toggle_lane so flipping from either surface is cheap.
     if (action === "toggle") {
       const lane = args.lane === "promotion" ? "promotion" : "personal_brand";
-      const res = await runPython("scripts/saps_mode.py", ["toggle", lane], { timeoutMs: 15_000 });
+      const res = await runPython("scripts/s4l_mode.py", ["toggle", lane], { timeoutMs: 15_000 });
       if (res.code !== 0) {
         const tail = (res.stderr || res.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
         return textContent(`Could not switch lane: ${tail}`);
@@ -1625,7 +1625,7 @@ tool(
     recordOnboardingAttempt("mode_chosen", { personal_brand: personalBrand, promotion });
 
     const setRes = await runPython(
-      "scripts/saps_mode.py",
+      "scripts/s4l_mode.py",
       ["set-flags", personalBrand ? "1" : "0", promotion ? "1" : "0"],
       { timeoutMs: 15_000 }
     );
@@ -1638,7 +1638,7 @@ tool(
     // NOTE (2026-07-06): the autopilot flag (mode.json {"autopilot": true} —
     // promotion cycles POST autonomously instead of drafting cards) is
     // DELIBERATELY NOT exposed on this tool or any user surface. It is an
-    // operator-only switch, set via `scripts/saps_mode.py autopilot on|off`.
+    // operator-only switch, set via `scripts/s4l_mode.py autopilot on|off`.
     // run-draft-and-publish.sh reads it per cycle. Do not add a tool param,
     // menubar toggle, or onboarding step for it.
 
@@ -3348,7 +3348,7 @@ function kickerEnv(): Record<string, string> {
     // images in the candidate threads.
     S4L_TWITTER_CAPTURE_MEDIA: "1",
     // NOTE: TWITTER_TAIL_LINK_RATE is deliberately NOT set here (2026-07-06).
-    // The persona lane exports =0 per cycle via saps_mode.py env (link-free
+    // The persona lane exports =0 per cycle via s4l_mode.py env (link-free
     // organic replies); promotion cycles keep the script's own default so
     // autopilot posts carry the project link per the A/B gate, and card posts
     // still force =1.0 inside post_drafts.
@@ -4001,7 +4001,7 @@ function sapsStateDir(): string {
 
 // Has the user explicitly chosen an engagement mode? mode.json is written by the
 // engagement_mode tool (setup) and the menu-bar toggle. Used to complete the
-// mode_chosen onboarding milestone. (Source of truth: scripts/saps_mode.py.)
+// mode_chosen onboarding milestone. (Source of truth: scripts/s4l_mode.py.)
 function modeChosen(): boolean {
   try {
     return fs.existsSync(path.join(sapsStateDir(), "mode.json"));
@@ -4011,8 +4011,8 @@ function modeChosen(): boolean {
 }
 
 // The current engagement lane flags, surfaced in the snapshot so the dashboard
-// AND menu bar read them from ONE place (mode.json, the same file saps_mode.py
-// writes). Mirrors saps_mode.py get_flags(): explicit flag keys win; else map a
+// AND menu bar read them from ONE place (mode.json, the same file s4l_mode.py
+// writes). Mirrors s4l_mode.py get_flags(): explicit flag keys win; else map a
 // legacy {"mode": ...} string; else default personal ON / promotion OFF.
 function currentFlags(): { personal_brand: boolean; promotion: boolean } {
   try {
