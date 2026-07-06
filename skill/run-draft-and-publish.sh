@@ -138,13 +138,15 @@ else
     export DRAFT_ONLY=1
 fi
 
-# First-run onboarding boost (2026-07-02). The MCP server drops
-# first-run-boost.json into the state dir when it installs the kicker for the
-# very first time. While the marker is live, widen the draft discovery window
-# to 48h (vs the standard 24h draft window) and lift the top-1 card cap so the
-# user's FIRST review batch surfaces several REAL drafts instead of one (or
-# none). The marker is deleted the moment a merge actually delivers cards, or
-# after 24h without any, so every later cycle runs the standard logic.
+# First-run onboarding boost (2026-07-02; env plumbing removed 2026-07-06).
+# The MCP server drops first-run-boost.json into the state dir when it
+# installs the kicker for the very first time. run-twitter-cycle.sh reads the
+# marker file DIRECTLY and widens its freshness windows to a hardcoded 48h
+# while it exists; the S4L_DRAFT_FRESHNESS_HOURS and
+# S4L_FIRST_RUN_FRESHNESS_HOURS env vars are retired. This wrapper only owns
+# the marker lifecycle: expire it after 24h without cards, consume it the
+# moment a merge delivers cards, so the widened window applies to exactly one
+# successful first batch.
 BOOST_MARKER="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/first-run-boost.json"
 BOOST_ACTIVE=0
 if [ -f "$BOOST_MARKER" ]; then
@@ -153,8 +155,7 @@ if [ -f "$BOOST_MARKER" ]; then
         echo "[run-draft-and-publish] first-run boost expired (>24h, no cards produced); removed" >&2
     else
         BOOST_ACTIVE=1
-        export S4L_DRAFT_FRESHNESS_HOURS="${S4L_FIRST_RUN_FRESHNESS_HOURS:-48}"
-        echo "[run-draft-and-publish] first-run boost active: freshness=${S4L_DRAFT_FRESHNESS_HOURS}h" >&2
+        echo "[run-draft-and-publish] first-run boost active: cycle reads the marker and widens discovery to 48h" >&2
     fi
 fi
 
