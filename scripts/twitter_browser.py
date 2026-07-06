@@ -811,6 +811,37 @@ def _dismiss_known_overlays(page) -> bool:
     return False
 
 
+_STATUS_URL_RE = re.compile(
+    r"^https?://(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/(\d+)", re.I)
+
+
+def _same_author_status_url(old_url, new_url):
+    """True when new_url is a plain /status/<id> permalink by the SAME author
+    as old_url (and a different status id). Guards the edited-tweet redirect
+    so we only ever follow X's own latest-version link, never an arbitrary
+    anchor scraped off the page."""
+    mo = _STATUS_URL_RE.match(old_url or "")
+    mn = _STATUS_URL_RE.match(new_url or "")
+    return bool(mo and mn and mo.group(1).lower() == mn.group(1).lower()
+                and mn.group(2) != mo.group(2))
+
+
+def _find_latest_version_url(page):
+    """On an edited tweet's STALE permalink, X strips the composer and renders
+    "There's a new version of this post. See the latest post." with the link
+    pointing at the newest status id. Return that href, or None."""
+    try:
+        return page.evaluate(
+            """() => {
+              const a = [...document.querySelectorAll('a[href*="/status/"]')]
+                .find(el => /see the latest post/i.test(el.textContent || ''));
+              return a ? a.href : null;
+            }"""
+        )
+    except Exception:
+        return None
+
+
 def _dump_reply_failure_diag(page, tweet_url):
     """Dump screenshot + DOM state on reply_box_not_found. Returns a diag dict."""
     import time as _t
@@ -1086,7 +1117,20 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
             # re-navigating. On final miss, dump diagnostics for triage.
             reply_box = None
             tweet_not_found = False
-            for nav_attempt in (1, 2):
+            # Edited-tweet redirect (2026-07-06): when the author edits a
+            # tweet, the OLD permalink keeps rendering but X strips the
+            # composer and shows "There's a new version of this post." — the
+            # nudge + re-nav below can never recover from that, so the reply
+            # used to die as reply_box_not_found. Follow X's own latest-version
+            # link (same-author /status/<id> only) and reply to the LATEST
+            # version instead. Hops are bounded so a pathological edit chain
+            # can't loop; each hop refreshes the nav-attempt budget. The
+            # reassigned tweet_url flows into the success payload's tweet_url,
+            # so the caller logs the thread we actually replied to.
+            edit_hops = 0
+            nav_attempt = 0
+            while nav_attempt < 2:
+                nav_attempt += 1
                 try:
                     page.goto(tweet_url, wait_until="load", timeout=60000)
                 except Exception:
@@ -1130,6 +1174,17 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                 if "this page doesn't exist" in page_text.lower():
                     tweet_not_found = True
                     break
+
+                if "new version of this post" in page_text.lower() and edit_hops < 2:
+                    latest_url = _find_latest_version_url(page)
+                    if latest_url and _same_author_status_url(tweet_url, latest_url):
+                        edit_hops += 1
+                        print(f"[reply_to_tweet] edited-tweet banner on {tweet_url}; "
+                              f"following latest version {latest_url} "
+                              f"(hop {edit_hops})", file=sys.stderr)
+                        tweet_url = latest_url
+                        nav_attempt = 0  # fresh attempt budget for the new URL
+                        continue
 
                 reply_box = _wait_for_reply_textbox(page, total_timeout_ms=45000)
                 if reply_box:
