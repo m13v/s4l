@@ -22,14 +22,14 @@ State lives in ONE small file, `$S4L_STATE_DIR/mode.json`:
 
 The `"mode"` field is a DERIVED legacy mirror (personal_brand if that lane is on,
 else promotion) kept only so any old reader that still does `data["mode"]` keeps
-working. saps_mode.py is the only writer; it always writes all three keys.
+working. s4l_mode.py is the only writer; it always writes all three keys.
 
 Backward-compat read: a legacy file `{"mode": "promotion"}` (no flags) maps to
 promotion-only; `{"mode": "personal_brand"}` maps to personal-only. A missing
 file defaults to personal_brand ON / promotion OFF (the 2026-06-29 default flip).
 
 The toggle takes effect WITHOUT touching any locked pipeline file: the unlocked
-wrapper `skill/run-draft-and-publish.sh` evals `saps_mode.py env` right before it
+wrapper `skill/run-draft-and-publish.sh` evals `s4l_mode.py env` right before it
 invokes the locked `run-twitter-cycle.sh`, exporting the env vars the locked
 pipeline already honors:
     S4L_FORCE_PROJECT       -> pick_project.py forces this exact project
@@ -63,8 +63,9 @@ only way to flip it.
 `env` additionally exports S4L_CYCLE_LANE=<lane> for both lanes so the wrapper
 knows which lane this cycle is without re-deriving it.
 
-This file was named saps_mode.py before the 2026-07-06 SAPS->S4L rename; a
-thin shim keeps that path alive for the chflags-locked run-twitter-cycle.sh.
+Before the 2026-07-06 SAPS->S4L rename this file lived at scripts/saps_mode.py;
+a thin shim keeps that old path alive for the chflags-locked
+run-twitter-cycle.sh. Do not reference the old name in new code.
 """
 
 import json
@@ -278,7 +279,7 @@ def _persona_env_lines() -> str:
     name = persona_name()
     if not name:
         print(
-            "[saps_mode] personal_brand lane is on but no persona project "
+            "[s4l_mode] personal_brand lane is on but no persona project "
             "(persona:true) is configured; running the normal pick instead.",
             file=sys.stderr,
         )
@@ -295,7 +296,7 @@ def _persona_env_lines() -> str:
             # Wrapper-facing lane tag (2026-07-06). Unlike S4L_ACTIVE_LANE (which
             # the locked cycle branches on and must stay persona-only), this is
             # exported for BOTH lanes so run-draft-and-publish.sh can decide the
-            # per-cycle DRAFT_ONLY value (autopilot posts promotion cycles).
+            # per-cycle DRAFT_ONLY value (draft-only off posts promotion cycles).
             "export S4L_CYCLE_LANE=personal_brand",
         ]
     )
@@ -321,10 +322,10 @@ def env_exports() -> str:
     if pb and pr:
         # Both lanes active: this single cycle is one or the other, 50/50.
         if random.random() < 0.5:
-            print("[saps_mode] both lanes on; this cycle -> personal_brand (50/50)",
+            print("[s4l_mode] both lanes on; this cycle -> personal_brand (50/50)",
                   file=sys.stderr)
             return _persona_env_lines()
-        print("[saps_mode] both lanes on; this cycle -> promotion (50/50)",
+        print("[s4l_mode] both lanes on; this cycle -> promotion (50/50)",
               file=sys.stderr)
         return _PROMOTION_ENV
     if pb:
@@ -332,7 +333,7 @@ def env_exports() -> str:
     if pr:
         return _PROMOTION_ENV
     # Neither on (degenerate) -> don't leave the cycle dead; run personal.
-    print("[saps_mode] no lane enabled; defaulting this cycle to personal_brand.",
+    print("[s4l_mode] no lane enabled; defaulting this cycle to personal_brand.",
           file=sys.stderr)
     return _persona_env_lines()
 
@@ -350,7 +351,7 @@ def main(argv) -> int:
         return 0
     if cmd == "set":
         if len(argv) < 2:
-            print("usage: saps_mode.py set <personal_brand|promotion>", file=sys.stderr)
+            print("usage: s4l_mode.py set <personal_brand|promotion>", file=sys.stderr)
             return 2
         try:
             print(set_mode(argv[1]))
@@ -360,7 +361,7 @@ def main(argv) -> int:
             return 2
     if cmd == "set-flags":
         if len(argv) < 3:
-            print("usage: saps_mode.py set-flags <personal_brand 0|1> <promotion 0|1>",
+            print("usage: s4l_mode.py set-flags <personal_brand 0|1> <promotion 0|1>",
                   file=sys.stderr)
             return 2
         flags = write_flags(_coerce_bool(argv[1]), _coerce_bool(argv[2]))
@@ -368,7 +369,7 @@ def main(argv) -> int:
         return 0
     if cmd in ("enable", "disable"):
         if len(argv) < 2:
-            print(f"usage: saps_mode.py {cmd} <personal_brand|promotion>", file=sys.stderr)
+            print(f"usage: s4l_mode.py {cmd} <personal_brand|promotion>", file=sys.stderr)
             return 2
         try:
             flags = set_lane(argv[1], on=(cmd == "enable"))
@@ -398,12 +399,12 @@ def main(argv) -> int:
     if cmd == "persona-name":
         print(persona_name())
         return 0
-    if cmd == "autopilot":
-        # `autopilot` -> print 1|0; `autopilot on|off|1|0` -> set and print.
+    if cmd == "draft-only":
+        # `draft-only` -> print 1|0; `draft-only on|off|1|0` -> set and print.
         if len(argv) >= 2:
-            print("1" if set_autopilot(_coerce_bool(argv[1])) else "0")
+            print("1" if set_draft_only(_coerce_bool(argv[1])) else "0")
             return 0
-        print("1" if get_autopilot() else "0")
+        print("1" if get_draft_only() else "0")
         return 0
     print(f"unknown command: {cmd}", file=sys.stderr)
     return 2
