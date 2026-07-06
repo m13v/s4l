@@ -98,7 +98,7 @@ const RELEASES_LIST_API =
 // <state dir>/channel.json. Read fresh each call (cheap file read) so a channel
 // flip takes effect on the next probe with no restart.
 const STATE_DIR =
-  process.env.S4L_STATE_DIR || process.env.SAPS_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
+  process.env.S4L_STATE_DIR || path.join(os.homedir(), ".social-autoposter-mcp");
 
 export function releaseChannel(): "stable" | "staging" {
   try {
