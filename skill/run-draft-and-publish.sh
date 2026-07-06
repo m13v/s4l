@@ -26,6 +26,38 @@ EOF_ENV
 REPO_DIR="${S4L_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${S4L_PYTHON:-python3}"
 
+# Posting-defer gate (2026-07-06). Posting and scanning share ONE harness Chrome,
+# and the MCP poster SIGKILLs any scan holding the twitter-browser lock (it cannot
+# wait: an approved card must land while the user watches, and scans trap SIGTERM).
+# The poster always wins, so a cycle launched into an active posting window only
+# gets killed 1-5 min in (rc=137, no plan, wasted scan) — 6 of 9 cycles died this
+# way on 2026-07-06 while a 17-card approval batch drained. Don't start a cycle
+# that is born to die: defer this tick and let launchd refire in 60s. Two signals,
+# either one defers:
+#   1. posting-active.json fresh (expires_at in the future) — the cross-instance
+#      flag the poster heartbeats through the whole batch (mcp 1.6.94).
+#   2. a post-*.log younger than 90s — every posted card writes one at completion,
+#      so this covers per-card gaps and installed MCPs that predate the flag. 90s
+#      outlives the poster's 60s lock grace-hold by design.
+_posting_reason=""
+_flag="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/posting-active.json"
+if [ -f "$_flag" ] && "$PY" -c '
+import json, sys, time
+try:
+    j = json.load(open(sys.argv[1]))
+    sys.exit(0 if j.get("expires_at", 0) > time.time() * 1000 else 1)
+except Exception:
+    sys.exit(1)
+' "$_flag" 2>/dev/null; then
+    _posting_reason="posting-active.json fresh"
+elif [ -n "$(find "$REPO_DIR/skill/logs" -maxdepth 1 -name 'post-*.log' -mtime -90s 2>/dev/null | head -1)" ]; then
+    _posting_reason="post-*.log younger than 90s"
+fi
+if [ -n "$_posting_reason" ]; then
+    echo "[run-draft-and-publish] posting active ($_posting_reason); deferring this cycle — launchd retries in 60s" >&2
+    exit 0
+fi
+
 OUT="$(mktemp -t s4l_draft_publish.XXXXXX)"
 HB_PID=""  # scan-phase heartbeat (started below); torn down by the EXIT trap
 # Clear the menu-bar activity signal on ANY exit so a crash/early-exit mid-cycle
