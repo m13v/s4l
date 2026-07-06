@@ -1163,9 +1163,21 @@ def main() -> int:
                 if reason:
                     skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             else:
+                # 'failed' and 'posted_unlogged' both count as failed for the
+                # dashboard: posted_unlogged means the reply IS live on X but
+                # the posts-row INSERT failed, which is a logging outage that
+                # must stay visible (posted=0, failed=N), not a silent skip.
                 failed += 1
                 if reason:
                     fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+            # Card-level outcome: posted_unlogged maps to 'posted' so the MCP
+            # layer marks the card done and never re-posts a live reply.
+            candidate_results.append({
+                "candidate_id": c.get("candidate_id"),
+                "outcome": "posted" if outcome == "posted_unlogged" else outcome,
+                "reason": reason or "",
+                "our_url": c.get("our_url") or "",
+            })
     finally:
         _clear_activity()
         # Release the batch hold so the next scan/post can take the browser
@@ -1186,6 +1198,10 @@ def main() -> int:
         "failed": failed,
         "failure_reasons": ",".join(f"{k}:{v}" for k, v in fail_reasons.items()),
         "skip_reasons":    ",".join(f"{k}:{v}" for k, v in skip_reasons.items()),
+        # Authoritative per-candidate outcomes for the MCP card layer (see the
+        # candidate_results declaration above). Outcome 'posted' here includes
+        # posted-but-unlogged replies so cards are never re-fed.
+        "candidate_results": candidate_results,
     }
     # Remote observability: a handled post failure returns a reason instead of
     # raising, so the global Sentry excepthook never sees it. On customer .mcpb
