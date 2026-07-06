@@ -55,8 +55,8 @@ const serverEntry = {
   command: nodeBin,
   args: [distEntry],
   env: {
-    SAPS_PYTHON: pythonBin,
-    SAPS_REPO_DIR: repoDir,
+    S4L_PYTHON: pythonBin,
+    S4L_REPO_DIR: repoDir,
     PATH: `${path.dirname(nodeBin)}:${path.dirname(pythonBin)}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
   },
 };
