@@ -655,6 +655,18 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
 
     reply_url = parsed.get("reply_url") or ""
     final_text = parsed.get("final_text") or full_text
+    # Edited-tweet redirect (2026-07-06): reply_to_tweet may have followed the
+    # "See the latest post" banner and replied to a NEWER status id than the
+    # candidate's. Its payload carries the URL it actually replied to; adopt it
+    # so posts.thread_url, the top-replies snapshot, and the
+    # already_posted_to_thread dedup guard all key to the REAL thread instead
+    # of the stale pre-edit permalink.
+    _replied_url = parsed.get("tweet_url") or ""
+    if _replied_url and _replied_url != candidate_url:
+        print(f"[post] candidate {cid} reply landed on edited-tweet latest "
+              f"version: {_replied_url} (candidate had {candidate_url})",
+              flush=True)
+        candidate_url = _replied_url
     applied_campaigns = parsed.get("applied_campaigns") or []
     # Snapshot the top human replies on the thread at post-success time.
     # twitter_browser.reply_to_tweet scrapes them while the page is still on
