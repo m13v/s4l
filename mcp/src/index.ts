@@ -1518,15 +1518,6 @@ tool(
         .boolean()
         .optional()
         .describe("action:'set' — turn the product-promotion lane on/off. Defaults to false; set true when the user says they also want to promote a product."),
-      autopilot: z
-        .boolean()
-        .optional()
-        .describe(
-          "action:'set' — FULL AUTOPILOT for the promotion lane: promotion cycles POST autonomously " +
-            "(gated by the rolling virality bar) instead of stopping at review cards. Persona cycles " +
-            "always stay human-reviewed cards regardless. Default false (cards only). Only set true " +
-            "when the user explicitly asks for hands-free autonomous posting."
-        ),
       lane: z
         .enum(["personal_brand", "promotion"])
         .optional()
@@ -1588,21 +1579,11 @@ tool(
       }
     };
 
-    const readAutopilot = async (): Promise<boolean> => {
-      const cur = await runPython("scripts/saps_mode.py", ["autopilot"], { timeoutMs: 15_000 });
-      return (cur.stdout || "").trim() === "1";
-    };
-
     if (action === "get") {
       const flags = await readFlags();
       const persona = findPersonaProject();
       const mode = flags.personal_brand ? "personal_brand" : "promotion";
-      return jsonContent({
-        flags,
-        mode,
-        autopilot: await readAutopilot(),
-        persona: persona ? persona.name : null,
-      });
+      return jsonContent({ flags, mode, persona: persona ? persona.name : null });
     }
 
     // Lightweight flip of ONE lane (the dashboard/menu-bar quick toggle): just
@@ -1654,19 +1635,12 @@ tool(
       return textContent(`Couldn't save the engagement lanes: ${tail}`);
     }
 
-    // Autopilot flag (2026-07-06): only touch it when the caller passed it, so a
-    // routine lane re-set never silently flips posting behavior.
-    if (args.autopilot !== undefined) {
-      const apRes = await runPython(
-        "scripts/saps_mode.py",
-        ["autopilot", args.autopilot ? "on" : "off"],
-        { timeoutMs: 15_000 }
-      );
-      if (apRes.code !== 0) {
-        const tail = (apRes.stderr || apRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
-        return textContent(`Lanes saved, but couldn't set autopilot: ${tail}. Retry engagement_mode action:'set'.`);
-      }
-    }
+    // NOTE (2026-07-06): the autopilot flag (mode.json {"autopilot": true} —
+    // promotion cycles POST autonomously instead of drafting cards) is
+    // DELIBERATELY NOT exposed on this tool or any user surface. It is an
+    // operator-only switch, set via `scripts/saps_mode.py autopilot on|off`.
+    // run-draft-and-publish.sh reads it per cycle. Do not add a tool param,
+    // menubar toggle, or onboarding step for it.
 
     // Provision the persona (grounded from the scan when supplied) regardless of
     // mode, so the toggle always has a real persona to flip to.
@@ -1772,7 +1746,6 @@ tool(
       ok: true,
       flags: { personal_brand: personalBrand, promotion },
       mode,
-      autopilot: await readAutopilot(),
       persona: personaName,
       persona_created: personaCreated,
       persona_topics_seeded: personaTopicsSeeded,
