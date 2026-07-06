@@ -807,14 +807,17 @@ const LENGTH_VARIANT_DEFS = {
   control:   { label: 'Unconstrained',     desc: 'no length target (legacy, longer replies)' },
 };
 
-// twitter draft-prompt variant defs (experiment started 2026-06-29). Per-CYCLE
-// arm assigned in run-twitter-cycle.sh; lives on posts.draft_prompt_variant.
-// 'treatment' drops the forced concede->pivot-to-product scaffold from the
-// draft directive; 'control' keeps the current directive. Mirrors the
-// tail_link_variant readout. Tunable via TWITTER_DRAFT_PROMPT_AB_RATE.
+// twitter draft-prompt variant defs. RESET to v2 on 2026-07-06: the arm value was
+// versioned to '..._v2' in run-twitter-cycle.sh so the experiment restarts from
+// zero. v1 ('treatment'/'control', decoupled-product-pivot) is retired but its
+// rows stay in the DB; the dashboard only counts the '_v2' arms below. v2's
+// treatment bans the concede-then-reverse antithesis skeleton (not just the
+// product pivot). Per-CYCLE arm; lives on posts.draft_prompt_variant. Tunable via
+// TWITTER_DRAFT_PROMPT_AB_RATE (code default 0.5). Keep keys in sync with the
+// arm strings printed in run-twitter-cycle.sh.
 const DRAFT_PROMPT_VARIANT_DEFS = {
-  treatment: { label: 'Decoupled pivot', desc: 'reply stands on its own; product only when relevant, no forced concede->pivot' },
-  control:   { label: 'Current',         desc: 'current draft directive (style + product pivot)' },
+  treatment_v2: { label: 'Skeleton-ban', desc: 'bans the concede-then-reverse "easy X / hard Y" antithesis structure in any form; forces varied entry points' },
+  control_v2:   { label: 'Current',      desc: 'current draft directive (style + product pivot), no structure ban' },
 };
 
 // Standalone jobs with no platform axis. script_name -> display label.
@@ -6686,7 +6689,7 @@ async function handleApi(req, res) {
             GROUP BY p.draft_prompt_variant
           `, []);
           const dpDefs = DRAFT_PROMPT_VARIANT_DEFS;
-          const dpVariants = ['treatment', 'control'].map(k => {
+          const dpVariants = ['treatment_v2', 'control_v2'].map(k => {
             const row = (dpRows || []).find(r => r.variant === k) || {};
             const n = Number(row.n_posts || 0);
             return {
@@ -6734,10 +6737,10 @@ async function handleApi(req, res) {
           const dpStartedAt = dpVariants.map(v => v.started_at).filter(Boolean).sort()[0] || null;
           experiments.push({
             id: 'twitter-draft-prompt',
-            name: 'Twitter draft prompt (decoupled product pivot)',
+            name: 'Twitter draft prompt v2 (ban antithesis skeleton)',
             status: 'running',
             started_at: dpStartedAt,
-            hypothesis: 'Replies drafted without the forced concede-then-pivot-to-product scaffold read less like a bot and earn more engagement (views, likes, replies) than the current product-pivot directive. Click-through is the offsetting cost to watch.',
+            hypothesis: 'Replies drafted without the concede-then-reverse "easy X / hard Y" skeleton read less like a bot and earn more engagement (views, likes, replies) than the current directive. v2 bans the antithesis structure in any form and forces varied entry points; v1 (retired) only decoupled the product pivot and the skeleton persisted at ~30% in either arm. Reset to zero 2026-07-06. Click-through is the offsetting cost to watch.',
             primary_metric: 'avg_replies',
             progress: null,  // no fixed target
             totals: dpTotals,

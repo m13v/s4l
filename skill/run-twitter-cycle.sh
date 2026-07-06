@@ -1837,15 +1837,20 @@ log "Engagement style assigned: mode=$PICKED_MODE style=${PICKED_STYLE:-(invent)
 # .env override, prevents that. The dashboard reads the SAME var with the SAME
 # default (bin/server.js), so display and routing never diverge.
 DRAFT_PROMPT_AB_RATE="${TWITTER_DRAFT_PROMPT_AB_RATE:-0.5}"
+# Arm VALUE versioned to '..._v2' on 2026-07-06 to RESET the experiment. The old
+# 'treatment'/'control' rows (v1, decoupled-product-pivot) are retired: they stay
+# in the DB under their old labels but the dashboard now counts only the '_v2'
+# arms, so the v2 skeleton-ban experiment starts fresh from zero. Bump this suffix
+# again on any future reset (keep bin/server.js DRAFT_PROMPT_VARIANT_DEFS in sync).
 S4L_DRAFT_PROMPT_VARIANT=$(python3 -c "
 import random
 try:
     rate = float('$DRAFT_PROMPT_AB_RATE')
 except Exception:
-    rate = 1.0
+    rate = 0.5
 rate = min(1.0, max(0.0, rate))
-print('treatment' if random.random() < rate else 'control')
-" 2>/dev/null || echo treatment)
+print('treatment_v2' if random.random() < rate else 'control_v2')
+" 2>/dev/null || echo treatment_v2)
 export S4L_DRAFT_PROMPT_VARIANT
 log "Draft-prompt A/B arm: $S4L_DRAFT_PROMPT_VARIANT (rate=$DRAFT_PROMPT_AB_RATE)"
 if [ "$S4L_DRAFT_PROMPT_VARIANT" = "treatment" ]; then
