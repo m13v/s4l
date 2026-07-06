@@ -97,13 +97,15 @@ const REVIEW_QUEUE_ID = "review-queue";
 // ---- Queue-backed drafting (2026-06-23) -----------------------------------
 // Customer .mcpb boxes have no `claude` CLI, so the deterministic pipeline can't
 // run its `claude -p` steps directly. Instead a launchd job kicks the REAL
-// pipeline (run-twitter-cycle.sh in DRAFT_ONLY mode with S4L_CLAUDE_PROVIDER=
-// queue); each `claude -p` call enqueues onto scripts/claude_job.py's file queue
-// and blocks. Two Claude Desktop scheduled tasks — one per job type — drain that
-// queue, run the pipeline's own prompt as a Claude turn, and write the result
-// back, unblocking the cycle. This reuses the entire pipeline (styles, voice,
+// pipeline (run-twitter-cycle.sh in DRAFT_ONLY mode); its `claude -p` steps
+// carry queue-mapped script tags, so run_claude.sh routes each one onto
+// scripts/claude_job.py's file queue and blocks (routing is by tag via
+// claude_job.py TAG_TO_TYPE — the S4L_CLAUDE_PROVIDER env var was removed
+// 2026-07-06). Claude Desktop scheduled tasks drain that queue, run the
+// pipeline's own prompt as a Claude turn, and write the result back,
+// unblocking the cycle. This reuses the entire pipeline (styles, voice,
 // top-performers, em-dash rules). See scripts/claude_job.py + run_claude.sh's
-// provider seam.
+// routing seam.
 // Universal type-blind queue worker (2026-07-02): ONE scheduled task drains
 // EVERY job type (`claude_job.py next --type any`). Per-type execution notes
 // ride in the job's prompt sidecar (claude_job.py TYPE_TO_WORKER_NOTES), so
@@ -282,7 +284,7 @@ function plistXml(opts: {
   const chromeEnv = chrome
     ? `\n\t\t<key>BH_CHROME_BIN</key>\n\t\t<string>${chrome}</string>`
     : "";
-  // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY / S4L_CLAUDE_PROVIDER).
+  // Caller-supplied env (e.g. the queue kicker's DRAFT_ONLY).
   // Rendered after the baked-in vars so a caller can also override S4L_STATE_DIR.
   const extraEnv = opts.extraEnv
     ? Object.entries(opts.extraEnv)
@@ -3321,8 +3323,9 @@ function ensureCoworkMcpRegistered(): void {
 // ---- launchd kicker: run the REAL pipeline in queue mode ---------------------
 // Reinstates com.m13v.social-twitter-cycle as the customer-box kicker. It runs
 // run-twitter-cycle.sh straight through (scan -> score -> draft -> link-gen); its
-// `claude -p` steps route through the job queue (S4L_CLAUDE_PROVIDER=queue) for
-// the scheduled-task workers to service. The per-cycle DRAFT_ONLY value is NOT
+// `claude -p` steps carry queue-mapped tags, so run_claude.sh routes them through
+// the job queue (claude_job.py TAG_TO_TYPE) for the scheduled-task workers to
+// service. The per-cycle DRAFT_ONLY value is NOT
 // baked here anymore: run-draft-and-publish.sh decides it from mode.json
 // (draft-only flag, 2026-07-06) — while draft-only is ON (default) cycles stop
 // before posting and merge into review cards; with draft-only OFF (operator
@@ -3337,7 +3340,8 @@ const QUEUE_KICKER_INTERVAL_SECS = 60;
 function kickerEnv(): Record<string, string> {
   return {
     DRAFT_ONLY: "1",
-    S4L_CLAUDE_PROVIDER: "queue",
+    // S4L_CLAUDE_PROVIDER is gone (2026-07-06): queue routing is by script tag
+    // (claude_job.py TAG_TO_TYPE), so the plist carries no routing switch.
     S4L_STATE_DIR: s4lStateDir(),
     TWITTER_PAGE_GEN_RATE: "0",
     // Thread-media context for the drafter (2026-07-06): parity with the
