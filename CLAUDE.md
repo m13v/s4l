@@ -285,6 +285,10 @@ Forbidden (v1 design, removed 2026-07-07; do not reintroduce):
 - `S4L_EXPERIMENT name=... variant=...` stdout markers.
 - Any post-time env read or env-vs-plan fallback for arm resolution.
 
-Note: `active_experiments.collect()` deliberately drops `draft_prompt` when
-`lane=personal_brand` (the persona directive replaces both A/B arms, so the
-assigned arm never touched those drafts).
+Note: as of 2026-07-06 the `personal_brand` persona directive in
+run-twitter-cycle.sh is ARM-AWARE (`treatment_v2` adds the concede-then-reverse
+skeleton ban, `control_v2` keeps the plain persona directive), so the assigned
+`draft_prompt` arm DOES affect persona drafts. `active_experiments.collect()`
+therefore KEEPS `draft_prompt` for `lane=personal_brand` (it used to drop it, back
+when the persona directive overrode both arms wholesale), so the arm stamps onto
+persona review cards and the per-arm readout covers both lanes.
