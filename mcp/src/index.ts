@@ -1635,10 +1635,10 @@ tool(
       return textContent(`Couldn't save the engagement lanes: ${tail}`);
     }
 
-    // NOTE (2026-07-06): the autopilot flag (mode.json {"autopilot": true} —
+    // NOTE (2026-07-06): the draft-only flag (mode.json {"draft_only": false} —
     // promotion cycles POST autonomously instead of drafting cards) is
     // DELIBERATELY NOT exposed on this tool or any user surface. It is an
-    // operator-only switch, set via `scripts/s4l_mode.py autopilot on|off`.
+    // operator-only switch, set via `scripts/s4l_mode.py draft-only on|off`.
     // run-draft-and-publish.sh reads it per cycle. Do not add a tool param,
     // menubar toggle, or onboarding step for it.
 
@@ -3327,11 +3327,11 @@ function ensureCoworkMcpRegistered(): void {
 // `claude -p` steps route through the job queue (S4L_CLAUDE_PROVIDER=queue) for
 // the scheduled-task workers to service. The per-cycle DRAFT_ONLY value is NOT
 // baked here anymore: run-draft-and-publish.sh decides it from mode.json
-// (autopilot flag, 2026-07-06) — draft cycles stop before posting and merge into
-// review cards; autopilot promotion cycles post autonomously behind the virality
-// bar. The DRAFT_ONLY=1 below is only the safe baseline an OLD wrapper (which
+// (draft-only flag, 2026-07-06) — while draft-only is ON (default) cycles stop
+// before posting and merge into review cards; with draft-only OFF (operator
+// opt-out) promotion cycles post autonomously behind the virality bar. The DRAFT_ONLY=1 below is only the safe baseline an OLD wrapper (which
 // never overrides it) inherits.
-// 60s tick (2026-07-06): parity with the retired claude -p autopilot plist.
+// 60s tick (2026-07-06): parity with the retired claude -p twitter-cycle plist.
 // The preflight slot gate (max-1) makes this safe — a tick that fires while a
 // cycle is still running skips in milliseconds — so the effective cadence is
 // back-to-back ~10-min cycles with ≤1 min idle, not one cycle per minute.
@@ -3344,20 +3344,20 @@ function kickerEnv(): Record<string, string> {
     S4L_STATE_DIR: sapsStateDir(),
     TWITTER_PAGE_GEN_RATE: "0",
     // Thread-media context for the drafter (2026-07-06): parity with the
-    // retired CLI autopilot plist. Without it the prep step drafts blind to
+    // retired CLI twitter-cycle plist. Without it the prep step drafts blind to
     // images in the candidate threads.
     S4L_TWITTER_CAPTURE_MEDIA: "1",
     // NOTE: TWITTER_TAIL_LINK_RATE is deliberately NOT set here (2026-07-06).
     // The persona lane exports =0 per cycle via s4l_mode.py env (link-free
     // organic replies); promotion cycles keep the script's own default so
-    // autopilot posts carry the project link per the A/B gate, and card posts
+    // draft-only-OFF posts carry the project link per the A/B gate, and card posts
     // still force =1.0 inside post_drafts.
     // Rolling virality bar percentile (2026-07-03): applies to BOTH lanes in
     // the cycle script — below-bar picks never become review cards, and in
-    // autopilot mode never post. p0.95 (not the script's 0.97 default) keeps
+    // with draft-only OFF never post. p0.90 (not the script's 0.97 default) keeps
     // volume useful while cutting bottom-of-pool drafts; cold start
     // (sample_count < 200) still shows brand-new installs every draft.
-    S4L_TWITTER_VIRALITY_PCTILE: "0.95",
+    S4L_TWITTER_VIRALITY_PCTILE: "0.90",
   };
 }
 
