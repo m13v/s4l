@@ -19,7 +19,8 @@ scripts/learned_preferences.py for the full loop). Per run:
      "no changes" — a considered no-op is a completed digestion, not a retry.
 
 Overall feedback (decision='feedback', project IS NULL; typed into the
-composer behind the menu bar's "Give feedback…" item) is fetched once per run,
+composer behind the menu bar's "Give overall feedback to AI…" item) is fetched
+once per run,
 folded into EVERY configured project's prompt as explicit standing guidance,
 and marked processed only after all attempted project digests succeed.
 Loved approvals (the stronger emoji in the card's inline approve row:
