@@ -1588,11 +1588,21 @@ tool(
       }
     };
 
+    const readAutopilot = async (): Promise<boolean> => {
+      const cur = await runPython("scripts/saps_mode.py", ["autopilot"], { timeoutMs: 15_000 });
+      return (cur.stdout || "").trim() === "1";
+    };
+
     if (action === "get") {
       const flags = await readFlags();
       const persona = findPersonaProject();
       const mode = flags.personal_brand ? "personal_brand" : "promotion";
-      return jsonContent({ flags, mode, persona: persona ? persona.name : null });
+      return jsonContent({
+        flags,
+        mode,
+        autopilot: await readAutopilot(),
+        persona: persona ? persona.name : null,
+      });
     }
 
     // Lightweight flip of ONE lane (the dashboard/menu-bar quick toggle): just
@@ -1642,6 +1652,20 @@ tool(
       const tail = (setRes.stderr || setRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
       blockOnboardingMilestone("mode_chosen", "mode_set_failed", tail, { personal_brand: personalBrand, promotion });
       return textContent(`Couldn't save the engagement lanes: ${tail}`);
+    }
+
+    // Autopilot flag (2026-07-06): only touch it when the caller passed it, so a
+    // routine lane re-set never silently flips posting behavior.
+    if (args.autopilot !== undefined) {
+      const apRes = await runPython(
+        "scripts/saps_mode.py",
+        ["autopilot", args.autopilot ? "on" : "off"],
+        { timeoutMs: 15_000 }
+      );
+      if (apRes.code !== 0) {
+        const tail = (apRes.stderr || apRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+        return textContent(`Lanes saved, but couldn't set autopilot: ${tail}. Retry engagement_mode action:'set'.`);
+      }
     }
 
     // Provision the persona (grounded from the scan when supplied) regardless of
@@ -1748,6 +1772,7 @@ tool(
       ok: true,
       flags: { personal_brand: personalBrand, promotion },
       mode,
+      autopilot: await readAutopilot(),
       persona: personaName,
       persona_created: personaCreated,
       persona_topics_seeded: personaTopicsSeeded,
