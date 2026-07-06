@@ -262,6 +262,18 @@ def parse_plan(text: str):
     return None
 
 
+def _is_actionable(e: dict) -> bool:
+    """Whether this event alone justifies burning a Claude turn: rejections,
+    loved (strong) approvals, any decision carrying a typed note, and overall
+    feedback. A plain approval is not a trigger; it stays unprocessed and rides
+    along as evidence when the next actionable event fires a digest."""
+    if e.get("decision") != "approved":
+        return True
+    if e.get("loved"):
+        return True
+    return bool((e.get("reject_note") or "").strip())
+
+
 def digest_project(project: dict, platform: str, dry_run: bool,
                    overall_events: list[dict] | None = None) -> bool:
     """Digest one project's pending events (plus any overall-feedback notes,
@@ -275,6 +287,10 @@ def digest_project(project: dict, platform: str, dry_run: bool,
                     "limit": str(MAX_EVENTS_PER_RUN)})
     events = ((resp or {}).get("data") or {}).get("events") or []
     if not events and not overall_events:
+        return True
+    if not overall_events and not any(_is_actionable(e) for e in events):
+        log(f"project={name} platform={platform} events={len(events)} "
+            "plain_approvals_only, no digest (they ride along with the next actionable event)")
         return True
     prompt = build_prompt(project, events, overall_events)
     if dry_run:
