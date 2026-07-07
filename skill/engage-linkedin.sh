@@ -242,7 +242,18 @@ PROMPT_EOF
 # SA_PIPELINE_LOCKED=1 + SA_PIPELINE_PLATFORM so the PreToolUse hook
 # (~/.claude/hooks/linkedin-agent-lock.sh) skips the cross-session block check.
 acquire_lock "linkedin-browser" 3600
-ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# rc=78 is the linkedin-pipeline lock's reserved skip code (peer pipeline is
+# driving the 9556 Chrome). It must be converted to exit 0 HERE, in the parent
+# shell: an exit inside ensure_* only kills the tee subshell (2026-07-06 bug).
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 gtimeout 1800 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase A claude exited with code $?"
 
@@ -519,7 +530,17 @@ PROMPT_EOF
     # styles-prep window (~1-3s). FIFO ticket queue in lock.sh ensures
     # fairness if a peer or parallel cycle grabbed it in the meantime.
     acquire_lock "linkedin-browser" 3600
-    ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+    # rc=78 skip check: normally Phase B re-enters the pipeline lock we took in
+    # Phase A (holder pid is ours), so 78 here means a peer stole/reclaimed it.
+    _LI_BOOT_RC=0
+    ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+    if [ "$_LI_BOOT_RC" -eq 78 ]; then
+        log "linkedin-pipeline lock: peer pipeline took the 9556 Chrome; skipping Phase B"
+        exit 0
+    elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+        log "ERROR: linkedin browser bootstrap failed before Phase B (rc=$_LI_BOOT_RC)"
+        exit "$_LI_BOOT_RC"
+    fi
 
     gtimeout 5400 "$REPO_DIR/scripts/run_claude.sh" "engage-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: Phase B claude exited with code $?"
 
