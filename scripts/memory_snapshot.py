@@ -604,6 +604,7 @@ def build_snapshot(top_n: int) -> dict[str, Any]:
         "repo_dir": str(REPO_DIR),
         "claude_desktop_version": claude_desktop_version(),
         "reaper": reaper_status(),
+        "menubar": menubar_status(),
         "memory": parse_vm_stat(),
         "process_count": len(rows),
         "top_rss": [
@@ -696,6 +697,7 @@ def build_summary() -> dict[str, Any]:
         "app_version": _app_version(),
         "claude_desktop_version": claude_desktop_version(),
         "reaper": reaper_status(),
+        "menubar": menubar_status(),
         "twitter_cycle": twitter_cycle_status(),
         "process_count": len(rows),
         "mem": {
@@ -763,6 +765,39 @@ def claude_desktop_version() -> str | None:
         except Exception:
             continue
     return None
+
+
+def menubar_status() -> dict[str, Any] | None:
+    """Last status-item visibility probe written by s4l_menubar._icon_watch_tick(),
+    or None. A live menubar PROCESS says nothing about whether macOS is drawing
+    its icon (2026-07-07: a customer's menubar ran ~25 min icon-less after a
+    reboot and support had no remote signal). Carrying this on the heartbeat
+    makes "process up, icon hidden" diagnosable centrally. age_sec doubles as a
+    process-liveness hint: the menubar rewrites the file every ~60s, so a stale
+    file means the menubar itself is down."""
+    path = (
+        Path(os.environ.get("S4L_STATE_DIR", str(Path.home() / ".social-autoposter-mcp")))
+        / "menubar-state.json"
+    )
+    try:
+        if not path.exists():
+            return None
+        ds = json.loads(path.read_text())
+        age = None
+        try:
+            age = round(time.time() - path.stat().st_mtime, 1)
+        except OSError:
+            pass
+        return {
+            "age_sec": age,  # >150s means the menubar process itself is likely dead
+            "pid": ds.get("pid"),
+            "uptime_sec": ds.get("uptime_sec"),
+            "statusitem_on_screen": ds.get("statusitem_on_screen"),
+            "statusitem_visible_pref": ds.get("statusitem_visible_pref"),
+            "hidden_for_sec": ds.get("hidden_for_sec"),
+        }
+    except Exception:
+        return None
 
 
 def reaper_status() -> dict[str, Any] | None:
