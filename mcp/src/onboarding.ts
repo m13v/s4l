@@ -13,19 +13,12 @@ import { resolvePython } from "./runtime.js";
 
 const require = createRequire(import.meta.url);
 
-export const ONBOARDING_MILESTONES = [
-  "environment_checked",
-  "runtime_ready",
-  "x_connected",
-  "x_verified",
-  "profile_scanned",
-  "mode_chosen",
-  "project_ready",
-  "topics_seeded",
-  "tasks_scheduled",
-] as const;
-
-export type OnboardingMilestone = (typeof ONBOARDING_MILESTONES)[number];
+// Milestone identifiers are NOT redeclared here. onboarding-ledger.cjs is the
+// single source of truth (it must be plain, build-free CommonJS so bin/cli.js
+// can require() it directly with no compile step) — ONBOARDING_MILESTONES below
+// re-exports its live MILESTONES array instead of hand-copying the list, which
+// is what let "x_verified" exist in one copy but not the other and throw
+// `unknown onboarding milestone` at runtime (2026-07-07).
 export type DoctorPhase = "pre_connect" | "full";
 export type DoctorCheckStatus = "pass" | "fail" | "expected" | "warn";
 
@@ -68,6 +61,7 @@ interface LedgerEvent {
 }
 
 interface LedgerApi {
+  MILESTONES: readonly string[];
   readLedger(): any;
   publicSnapshot(): any;
   recordAttempt(
@@ -99,6 +93,11 @@ interface DoctorApi {
 
 const ledgerApi = require("../shared/onboarding-ledger.cjs") as LedgerApi;
 const doctorApi = require("../shared/doctor.cjs") as DoctorApi;
+
+// Re-export of the ONE runtime array (see the comment above the imports): this
+// is not a second list, just a typed alias for ledgerApi.MILESTONES.
+export const ONBOARDING_MILESTONES = ledgerApi.MILESTONES;
+export type OnboardingMilestone = (typeof ONBOARDING_MILESTONES)[number];
 
 export function onboardingSnapshot() {
   return ledgerApi.publicSnapshot();
