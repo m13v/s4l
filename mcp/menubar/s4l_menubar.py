@@ -16,6 +16,7 @@ runtime install step). No .app bundle, so notifications go through osascript
 rather than rumps.notification (which needs a bundle id).
 """
 
+import functools
 import glob
 import json
 import os
@@ -811,7 +812,7 @@ class S4LMenuBar(rumps.App):
         flags = st.toggle_lane(lane)
         pb, pr = flags.get("personal_brand"), flags.get("promotion")
         if pb and pr:
-            msg = "Personal brand + promotion both on (cycles split 50/50)"
+            msg = f"Personal brand + promotion both on (cycles split {self._split_pct()})"
         elif pb:
             msg = "Personal brand only: organic, link-free"
         elif pr:
@@ -833,6 +834,37 @@ class S4LMenuBar(rumps.App):
 
     def _toggle_promotion(self, _=None):
         self._toggle_lane(st.MODE_PROMOTION)
+
+    # Personal-brand share presets for the both-lanes-on state. rumps has no
+    # slider, so the "Lane split" submenu offers these fixed points; the
+    # dashboard's slider can set anything in between and the checkmark simply
+    # lands on the nearest exact match (or none).
+    SPLIT_PRESETS = (0.9, 0.75, 0.5, 0.25, 0.1)
+
+    def _split_pct(self, share=None):
+        """'70/30' style personal/promotion percent string for menu copy."""
+        if share is None:
+            share = st.read_split()
+        return f"{round(share * 100)}/{round((1 - share) * 100)}"
+
+    def _on_split_preset(self, share, _sender=None):
+        """Menu callback shim: rumps passes the clicked MenuItem last."""
+        self._set_split(share)
+
+    def _set_split(self, share):
+        """Set the personal-brand share (pure local mode.json write, same
+        contract as _toggle_lane) and rebuild so the checkmark moves instantly."""
+        written = st.write_split(share)
+        self._notify(
+            "S4L lane split",
+            f"Cycles now split {self._split_pct(written)} personal brand/promotion",
+        )
+        self._sig = None
+        try:
+            self._tick(None)
+        except Exception as e:
+            sys.stderr.write(f"[s4l-menubar] lane split rebuild failed: {e}\n")
+            sys.stderr.flush()
 
     # ---- factory reset (menu-bar driven) ----------------------------------
     def _reset_machine(self, _=None):
@@ -2005,6 +2037,7 @@ class S4LMenuBar(rumps.App):
             snap.get("projects_ready"),
             snap.get("projects_total"),
             tuple(sorted((st.read_flags() or {}).items())),
+            st.read_split(),
             attention,
             schedule_state,
             self._stall_reason_info,
@@ -2490,8 +2523,8 @@ class S4LMenuBar(rumps.App):
 
         # Engagement lanes — ALWAYS visible (every state), not just post-setup, so
         # the user can see + flip either lane any time. Two INDEPENDENT checkmarks
-        # (both can be on -> the cycle splits 50/50). Single source: snap['flags']
-        # (mode.json), same value the dashboard shows.
+        # (both can be on -> the cycle splits per personal_brand_share). Single
+        # source: snap['flags'] (mode.json), same value the dashboard shows.
         flags = snap.get("flags") or st.read_flags()
         personal_on = bool(flags.get("personal_brand"))
         promo_on = bool(flags.get("promotion"))
@@ -2506,7 +2539,18 @@ class S4LMenuBar(rumps.App):
         items.append(pr_item)
         items.append(self._label("   promoting your products (link replies)"))
         if personal_on and promo_on:
-            items.append(self._label("   both on · cycles split 50/50"))
+            # Both lanes on: the split becomes meaningful, so offer the presets.
+            share = st.read_split()
+            items.append(self._label(f"   both on · cycles split {self._split_pct(share)}"))
+            split_menu = rumps.MenuItem(f"Lane split: {self._split_pct(share)}")
+            for preset in self.SPLIT_PRESETS:
+                it = rumps.MenuItem(
+                    f"{self._split_pct(preset)} personal/promotion",
+                    callback=functools.partial(self._on_split_preset, preset),
+                )
+                it.state = 1 if round(share * 100) == round(preset * 100) else 0
+                split_menu.add(it)
+            items.append(split_menu)
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open dashboard", callback=self._open_dashboard))
