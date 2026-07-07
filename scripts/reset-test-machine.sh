@@ -556,10 +556,68 @@ if [ "$DEEP" -eq 1 ]; then
   rm_path "$HOME_DIR/.local/bin/uv"                "uv-bin"
   rm_path "$HOME_DIR/.local/bin/uvx"               "uvx-bin"
   rm_path "$HOME_DIR/.cache/uv"                    "uv-cache"
+  # uv's DATA dir (installed standalone Pythons + tool venvs) and its PATH shim
+  # survive the bin removal — a bare box has neither. The uv installer also
+  # appends `. "$HOME/.local/bin/env"` to the shell rc files; strip that exact
+  # line so no uv PATH shim lingers.
+  rm_path "$HOME_DIR/.local/share/uv"             "uv-data"
+  rm_path "$HOME_DIR/.local/bin/env"              "uv-env-script"
+  for rc in "$HOME_DIR/.zshrc" "$HOME_DIR/.zprofile" "$HOME_DIR/.profile" \
+            "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc"; do
+    [ -f "$rc" ] || continue
+    if grep -q '\.local/bin/env' "$rc" 2>/dev/null; then
+      echo "  edit    strip uv env-shim line from $rc"
+      if [ "$DRY" -eq 0 ]; then
+        cp "$rc" "$rc.bak" 2>/dev/null || true
+        grep -v '\.local/bin/env' "$rc" > "$rc.tmp" 2>/dev/null && mv "$rc.tmp" "$rc"
+      fi
+    fi
+  done
   echo "  WARN    --deep removed uv + ms-playwright; other tools on this machine that rely on them will re-provision."
 else
   echo "  (left uv + ~/Library/Caches/ms-playwright + ~/.cache/uv in place)"
 fi
+fi
+echo
+
+# ---- 6b. DEEP: packaged Google Chrome + its Keystone updater ----------------
+# The provisioner installs a REAL Google Chrome.app (runtime.ts Step 7) — the
+# browser the scanner drives over CDP — that NO other reset step removes, plus
+# installing it drops Google's Keystone auto-updater (LaunchAgents + support
+# dirs). A bare box had none of this. --deep removes all of it so the Chrome
+# install step is exercised fresh. NOTE: this touches the machine's Google Chrome
+# globally, not just S4L — hence --deep / test-box only.
+if [ "$PLUGIN_ONLY" -eq 1 ]; then
+  echo "[6b] packaged Google Chrome + Keystone updater — skipped (plugin reset; pass --deep to remove)"
+else
+  echo "[6b] packaged Google Chrome + Keystone updater — $([ "$DEEP" -eq 1 ] && echo ENABLED || echo 'skipped (pass --deep)')"
+  if [ "$DEEP" -eq 1 ]; then
+    # Stop Chrome + unload the Keystone/updater agents before deleting their plists.
+    if [ "$DRY" -eq 0 ]; then
+      pkill -f 'Google Chrome' 2>/dev/null || true
+      for lbl in com.google.keystone.agent com.google.keystone.xpcservice com.google.GoogleUpdater.wake; do
+        launchctl bootout "gui/$(id -u)/$lbl" 2>/dev/null || true
+      done
+    fi
+    rm_path "/Applications/Google Chrome.app"            "google-chrome"
+    rm_path "$HOME_DIR/Applications/Google Chrome.app"   "google-chrome-user"
+    for p in \
+      "$HOME_DIR/Library/Application Support/Google" \
+      "$HOME_DIR/Library/Google" \
+      "$HOME_DIR/Library/Caches/Google" \
+      "$HOME_DIR/Library/Caches/com.google.Chrome" \
+      "$HOME_DIR/Library/Caches/com.google.Keystone" \
+      "$HOME_DIR/Library/LaunchAgents/com.google.keystone.agent.plist" \
+      "$HOME_DIR/Library/LaunchAgents/com.google.keystone.xpcservice.plist" \
+      "$HOME_DIR/Library/LaunchAgents/com.google.GoogleUpdater.wake.plist" \
+      "$HOME_DIR/Library/LaunchAgents/com.google.GoogleUpdater.plist"; do
+      rm_path "$p" "google"
+    done
+    for f in "$HOME_DIR"/Library/Preferences/com.google.Chrome*.plist; do
+      [ -e "$f" ] && rm_path "$f" "google-pref"
+    done
+    echo "  WARN    --deep removed Google Chrome + Keystone updater machine-wide."
+  fi
 fi
 echo
 
