@@ -71,7 +71,7 @@ interface Snapshot {
   // Schedule state for the CURRENT Claude account: 'missing'/'disabled' means the
   // draft tasks aren't registered here (e.g. after an account switch) and the
   // "Set up draft schedule" button should show.
-  schedule_state?: "missing" | "disabled" | "ok" | "unknown";
+  schedule_state?: "missing" | "disabled" | "stalled" | "ok" | "unknown";
   // Engagement lanes (single source: mode.json via the server snapshot). Two
   // INDEPENDENT lanes; both can be on (the cycle then splits per
   // personal_brand_share, default 0.5). `mode` is the derived legacy mirror
@@ -304,7 +304,10 @@ function render() {
   btnSetup.classList.toggle("primary", !setupComplete);
 
   const needsSchedule =
-    setupComplete && (state.schedule_state === "missing" || state.schedule_state === "disabled");
+    setupComplete &&
+    (state.schedule_state === "missing" ||
+      state.schedule_state === "disabled" ||
+      state.schedule_state === "stalled");
   btnSchedule.hidden = !needsSchedule;
   btnSchedule.classList.toggle("primary", needsSchedule);
 
