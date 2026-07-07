@@ -87,6 +87,16 @@
             <span class="knob"></span>
           </button>
         </div>
+        <!-- Lane split slider: only meaningful (and only shown) when BOTH lanes
+             are on. Sets the personal-brand share of cycles via
+             engagement_mode action:'split'. -->
+        <div class="lane-split" id="split-row" hidden>
+          <div class="lane-text">
+            <div class="lane-name">Lane split</div>
+            <div class="lane-desc" id="split-desc"></div>
+          </div>
+          <input type="range" id="split-slider" min="0" max="100" step="5" value="50" aria-label="Personal brand share of cycles (percent)" />
+        </div>
         <div class="lane-note" id="mode-sub"></div>
       </section>
 
