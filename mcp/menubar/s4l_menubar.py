@@ -438,11 +438,21 @@ class S4LMenuBar(rumps.App):
         self._drain_baseline = None  # posted count just before this drain started
         self._drain_last_posted = None
         self._drain_last_change = 0.0
-        # One-shot: on the first tick where the loopback is reachable, re-enqueue
-        # any approvals the durable queue recorded but never confirmed posted (a
-        # restart wiped the in-memory _post_q). Deferred until the loopback is up
-        # so post_drafts can actually reach the server.
+        # Edge-triggered (not one-shot): re-enqueue any approvals the durable queue
+        # recorded but never confirmed posted (a restart, or a stranded approval
+        # from a loopback outage, wiped/never populated the in-memory _post_q).
+        # panel-endpoint.json is last-writer-wins across many short-lived MCP
+        # instances (Claude Code side-panel sessions, the s4l-worker queue runner,
+        # etc.), so "reachable" can flap: down for a while, then some session
+        # boots and it's briefly up again. We used to resume only on the FIRST
+        # reachable tick ever, which meant a card that got stranded after that
+        # first success stayed stranded until the whole menubar process restarted.
+        # Now we re-arm on every reachable->unreachable transition so the NEXT
+        # reachable tick resumes again, and throttle the (blocking, ~1.5s worst
+        # case) reachability probe itself so a steady-state outage doesn't cost
+        # a hitch every 5s tick.
         self._resumed = False
+        self._loopback_check_due_at = 0.0
         # Reliable self-check of our own Accessibility (TCC) grant — this is the
         # faithful reading (our launchd process identity, not a parent's). Logged
         # so menubar.err.log records whether keystroke posting will work.
@@ -1948,22 +1958,33 @@ class S4LMenuBar(rumps.App):
             self._check_update_verdict()
         except Exception:
             pass
-        # Restart recovery (one-shot, once the loopback is up so posting can reach
-        # the server): resume any approved-but-unposted drafts the durable queue
-        # recorded, instead of stranding them and re-presenting the cards.
-        if not self._resumed and st.loopback_reachable():
-            self._resumed = True
-            try:
-                self._resume_approved_queue()
-            except Exception as e:
-                sys.stderr.write(f"[s4l-menubar] resume approved queue failed: {e}\n")
-                sys.stderr.flush()
-            # Drain any review-events the outbox buffered while offline / before
-            # the last restart. Async + idempotent (server dedups event_uuid).
-            try:
-                st.flush_review_events_async()
-            except Exception:
-                pass
+        # Restart/outage recovery: resume any approved-but-unposted drafts the
+        # durable queue recorded, instead of stranding them and re-presenting the
+        # cards. Throttled (at most once/60s) because the reachability probe is a
+        # blocking HTTP call on the main thread; edge-triggered on
+        # unreachable->reachable so a card stranded by a loopback outage that
+        # started AFTER the very first successful tick still gets retried once
+        # the loopback comes back, not just on process start.
+        now = time.monotonic()
+        if now >= self._loopback_check_due_at:
+            self._loopback_check_due_at = now + 60.0
+            if st.loopback_reachable():
+                if not self._resumed:
+                    self._resumed = True
+                    try:
+                        self._resume_approved_queue()
+                    except Exception as e:
+                        sys.stderr.write(f"[s4l-menubar] resume approved queue failed: {e}\n")
+                        sys.stderr.flush()
+                    # Drain any review-events the outbox buffered while offline /
+                    # before the last restart. Async + idempotent (server dedups
+                    # event_uuid).
+                    try:
+                        st.flush_review_events_async()
+                    except Exception:
+                        pass
+            else:
+                self._resumed = False
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
         # 0.12s), but the menu + update indicator must still refresh mid-run —
         # otherwise the "Update now & restart Claude Desktop" item never appears on a box that's always
