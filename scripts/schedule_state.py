@@ -19,8 +19,16 @@ States:
   'ok'       — a complete worker set present, enabled, and FIRING (lastRunAt
                within FIRING_WINDOW seconds).
   'disabled' — present but a worker task is disabled.
-  'missing'  — not firing anywhere (orphaned / not registered for the live
-               account) -> the dashboard offers "Set up draft schedule".
+  'stalled'  — present AND enabled somewhere, but lastRunAt is stale: the host
+               scheduler stopped launching it. Two known causes: the Claude
+               Desktop warm-session wedge (finished worker sessions never exit,
+               the overlap guard skips every fire; full app restart fixes it —
+               Karol, 2026-07-06) or an account switch orphaning the registry.
+               UI should offer "Restart Claude Desktop" FIRST, re-arm second.
+  'missing'  — no registry contains a complete worker set at all (deleted /
+               never scheduled) -> the dashboard offers "Set up draft schedule".
+               Consumers that predate 'stalled' treated both cases as 'missing';
+               anything gating on == 'ok' is unaffected.
 
 stdlib-only on purpose, so the MCP can run it with system python3 before the
 owned runtime is provisioned. Run as a script -> prints {"state": "..."} as JSON.
@@ -113,7 +121,7 @@ def _ms_to_epoch(ms):
 
 
 def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
-    """Return 'ok' | 'disabled' | 'missing' for the live account's draft schedule."""
+    """Return 'ok' | 'disabled' | 'stalled' | 'missing' for the draft schedule."""
     newest_epoch, newest_enabled = None, False
     # Track the freshest just-created, enabled, never-yet-fired task so a schedule
     # the user only moments ago set up doesn't read as "missing" before its first
@@ -150,9 +158,13 @@ def compute(glob_pattern: str = SCHED_REGISTRY_GLOB) -> str:
     # Suppresses the false ⚠ right after the user sets up the draft schedule.
     if newest_fresh_created is not None and (time.time() - newest_fresh_created) <= CREATED_GRACE:
         return "ok"
-    # Not firing anywhere. Registered-but-disabled => disabled; else missing.
+    # Not firing anywhere. Registered-but-disabled => disabled; registered and
+    # enabled but the host stopped launching it => stalled (Desktop scheduler
+    # wedge or account-switch orphan); absent everywhere => missing.
     if any_present and not any_enabled:
         return "disabled"
+    if any_present and any_enabled:
+        return "stalled"
     return "missing"
 
 
