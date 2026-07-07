@@ -17,9 +17,12 @@
 #              disturbing the rest of the environment.
 #   --deep     FULL NUKE — the plugin reset above PLUS the shared layer it touches:
 #              per-agent Chrome profiles + cookies (reddit/linkedin/twitter), the
-#              browser-harness backend, and the packaged toolchain (uv binary, uv
-#              cache, Chromium ~1.7G). Other tools that rely on uv/Chromium
-#              re-provision afterward. Use to reproduce a true bare-metal box.
+#              browser-harness backend, the packaged toolchain (uv binary + uv
+#              data/cache, Chromium ~1.7G), the uv PATH shim in your shell rc, the
+#              real Google Chrome.app the provisioner installs, and Google's
+#              Keystone updater. Reproduces a genuinely bare-metal box (as if S4L
+#              had never run). Other tools that rely on uv/Chrome/Chromium
+#              re-provision afterward — intended for DEDICATED test machines.
 #
 # Usage:
 #   scripts/reset-test-machine.sh            # dry run: print what the plugin reset WOULD remove
@@ -203,6 +206,27 @@ echo
 # ---- 1. MCP state dir (owned python + venv + materialized repo) ------------
 echo "[1] MCP state dir (uv-owned python, venv, materialized repo, runtime.json, setup-state)"
 rm_path "$HOME_DIR/.social-autoposter-mcp" "state"
+echo
+
+# ---- 1a. compat symlink ~/social-autoposter -> materialized repo -----------
+# The .mcpb provisioner plants ~/social-autoposter as a symlink INTO the state
+# dir (so the pipeline's hardcoded $HOME/social-autoposter paths resolve). The
+# state-dir wipe in [1] leaves it DANGLING. Remove it — but ONLY when it is a
+# symlink resolving into .social-autoposter-mcp, so a developer's real clone (or
+# their own ~/social-autoposter symlink to a working tree) is never touched.
+echo "[1a] compat symlink ~/social-autoposter (plugin-planted)"
+SA_LINK="$HOME_DIR/social-autoposter"
+if [ -L "$SA_LINK" ]; then
+  SA_TARGET="$(readlink "$SA_LINK" 2>/dev/null || true)"
+  case "$SA_TARGET" in
+    *.social-autoposter-mcp/*|*.social-autoposter-mcp) rm_path "$SA_LINK" "compat-symlink" ;;
+    *) echo "  (leaving $SA_LINK -> $SA_TARGET — not a plugin-planted symlink)" ;;
+  esac
+elif [ -e "$SA_LINK" ]; then
+  echo "  (leaving $SA_LINK — a real directory/clone, not a plugin-planted symlink)"
+else
+  echo "  (no ~/social-autoposter symlink)"
+fi
 echo
 
 # ---- 1b. Claude Desktop .mcpb extension -----------------------------------
