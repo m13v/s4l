@@ -234,9 +234,19 @@ except Exception:
     fi
     if [ "$_invent_due" = "1" ] && [ -z "$_invent_posting" ]; then
         touch "$INVENT_STAMP"
-        echo "[run-draft-and-publish] invent-topics due (every ${INVENT_EVERY_HOURS}h); launching in background (log: skill/logs/invent-topics-*.log)" >&2
-        nohup env S4L_REPO_DIR="$REPO_DIR" S4L_PYTHON="$PY" \
-            bash "$REPO_DIR/skill/invent-topics.sh" >/dev/null 2>&1 &
+        echo "[run-draft-and-publish] invent-topics due (every ${INVENT_EVERY_HOURS}h); launching detached (log: skill/logs/invent-topics-*.log)" >&2
+        # MUST detach into a NEW SESSION, not just nohup+&: launchd kills this
+        # kicker's whole process group the moment it exits (no
+        # AbandonProcessGroup in the plist), and nohup only shields SIGHUP —
+        # the first live firing (2026-07-06 18:27) left a stamp and a child
+        # that died before it could even open its log. start_new_session
+        # (setsid) moves the run out of the doomed group.
+        S4L_REPO_DIR="$REPO_DIR" S4L_PYTHON="$PY" "$PY" -c '
+import subprocess, sys
+subprocess.Popen(["bash", sys.argv[1]],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL, start_new_session=True)
+' "$REPO_DIR/skill/invent-topics.sh"
     elif [ "$_invent_due" = "1" ]; then
         echo "[run-draft-and-publish] invent-topics due but posting active ($_invent_posting); retrying next tick" >&2
     fi
