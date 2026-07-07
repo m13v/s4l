@@ -2058,9 +2058,12 @@ tool(
           "a phrase bank + things they avoid, and their icp. The scan is BACKWARD-LOOKING (only what " +
           "they already posted) so it is the source for VOICE, not the primary source for topics. " +
           "SECOND (the DICTATION interview — this is where TOPICS + grounding corpus come from, do NOT " +
-          "skip it and do NOT infer topics from the scan alone): tell the user to answer ALL of the " +
+          "skip it and do NOT infer topics from the scan alone): invite the user to answer the " +
           "following in ONE spoken dictation (the Claude input box already supports dictation, so they " +
-          "just talk once and you split the answers into fields). Ask verbatim, as a single numbered " +
+          "just talk once and you split the answers into fields). KEEP THE FRAMING CHILL: this is a " +
+          "casual brain-dump, not a form. No pressure; they can answer as much or as little as they " +
+          "like, skip anything, and come back to the rest whenever they feel like it. Preface the list " +
+          "with one short low-key line saying exactly that, then ask verbatim, as a single numbered " +
           "list:\n" +
           "  1. Who are you, and what do you want to be known for? (-> description)\n" +
           "  2. What subjects could you talk about for an hour, work and non-work? (-> search_topics: " +
@@ -2079,8 +2082,10 @@ tool(
           "Then SYNTHESIZE the fields from their dictation: search_topics comes PRIMARILY from answer 2 " +
           "(fold in recurring scan themes only as reinforcement); description/content_angle/voice from " +
           "the rest. Keep their RAW transcript VERBATIM as content_corpus (do NOT paraphrase; their " +
-          "actual numbers, opinions, and phrasing are what make drafts sound like them). If the user " +
-          "declines or gives nothing usable, fall back to scan-derived topics. " +
+          "actual numbers, opinions, and phrasing are what make drafts sound like them). If they " +
+          "answer only some questions, take what they gave, continue without nagging, and mention once " +
+          "that they can answer the rest any time later to make drafts sound more like them. If the " +
+          "user declines or gives nothing usable, fall back to scan-derived topics. " +
           "THIRD (engagement lanes — ASK THE USER, do not infer): the PERSONAL BRAND lane (organic, " +
           "link-free engagement in their own voice) is ON by default, so ask the ONE question — do they " +
           "ALSO want to PROMOTE a PRODUCT (the marketing lane, link replies)? Both lanes can run (the " +
