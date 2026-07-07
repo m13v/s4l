@@ -834,9 +834,10 @@ const STANDALONE_JOBS = {
   daily_report: { job_type: 'report', job_label: 'Daily Report' },
   deploy_status: { job_type: 'report', job_label: 'Deploy Status' },
   precompute_stats: { job_type: 'report', job_label: 'Precompute Stats' },
-  // Invent Topics: hourly cron (com.m13v.social-invent-topics) that picks one
-  // project, invents new Twitter search_topic seeds via the MCP-tool Claude
-  // session, supply-tests their queries. result.invent carries the per-run
+  // Invent Topics: kicker-driven job (run-draft-and-publish.sh, every
+  // S4L_INVENT_EVERY_HOURS; queue-native since 2026-07-06) that picks one
+  // project, invents new Twitter search_topic seeds via queue-routed Claude
+  // turns, supply-tests their queries. result.invent carries the per-run
   // stats (project, topics, queries, queries_w_supply, qpt[]).
   invent_topics: { job_type: 'invent', job_label: 'Invent Topics' },
 };
