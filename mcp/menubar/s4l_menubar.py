@@ -611,6 +611,48 @@ class S4LMenuBar(rumps.App):
             "that schedules the draft tasks for this account",
         )
 
+    def _restart_claude_fix(self, _=None):
+        """One-click fix for schedule_state == 'stalled': fully quit and relaunch
+        Claude Desktop. Fixes the warm-session scheduler wedge (finished worker
+        sessions never exit, so the host's overlap guard skips every fire — a
+        Claude Desktop platform bug; Karol, 2026-07-06). While Claude is down we
+        also run the registry self-heal, which additionally repairs the
+        account-switch orphan case, so this one click covers both known causes."""
+        _activate_front()
+        choice = rumps.alert(
+            title="Restart Claude Desktop?",
+            message=(
+                "Claude’s scheduler stopped running the draft tasks (a known "
+                "Claude Desktop glitch). Restarting Claude fixes it — its window "
+                "will close and reopen in a moment. Drafting resumes within a "
+                "couple of minutes."
+            ),
+            ok="Restart Claude", cancel="Cancel",
+        )
+        if choice != 1:
+            return
+        _capture_msg(
+            "S4L restart-claude-fix clicked",
+            phase="draft_schedule",
+            reason="stalled",
+            _extra={"scheduled_tasks": _registry_summary_for_capture()},
+        )
+        self._notify("S4L", "Restarting Claude Desktop… drafts resume shortly.")
+        threading.Thread(target=self._restart_claude_fix_work, daemon=True).start()
+
+    def _restart_claude_fix_work(self):
+        try:
+            user_data_dirs = self._claude_user_data_dirs()
+            self._quit_claude_and_wait()
+            # Claude is down: safe window for registry edits. Runs the cwd fix,
+            # legacy consolidation, AND the ensure-worker heal (orphan repair).
+            self._rewrite_scheduled_task_cwd()
+            self._relaunch_claude(user_data_dirs)
+            self._sig = None
+        except Exception as e:
+            self._notify("S4L restart failed", str(e)[:140])
+            _capture(e, phase="restart_claude_fix")
+
     # ---- schedule-state detection ----------------------------------------
     def _schedule_state(self):
         """Is the draft schedule registered AND running for the live account?
@@ -1993,11 +2035,12 @@ class S4LMenuBar(rumps.App):
             # Once per episode (gated by _stall_notified), so it never spams.
             _reason = (
                 self._stall_reason_info[0]
-                or ("disabled" if schedule_state == "disabled" else "missing")
+                or (schedule_state if schedule_state in ("disabled", "stalled") else "missing")
             )
             _capture_msg(
                 f"S4L draft autopilot needs attention: {_reason}",
                 level="warning",
+                _extra={"scheduled_tasks": _registry_summary_for_capture()},
                 phase="draft_schedule",
                 reason=_reason,
                 schedule_state=str(schedule_state),
@@ -2013,6 +2056,13 @@ class S4LMenuBar(rumps.App):
                     "S4L draft tasks disabled",
                     "The draft tasks are scheduled but disabled. Open the S4L menu → "
                     "“Set up draft schedule” to re-enable.",
+                )
+            elif schedule_state == "stalled":
+                self._notify(
+                    "S4L drafts stopped",
+                    "Claude’s scheduler stopped running the draft tasks (a known "
+                    "Claude Desktop glitch). Open the S4L menu → “Restart Claude "
+                    "Desktop to fix”.",
                 )
             else:
                 self._notify(
@@ -2527,6 +2577,16 @@ class S4LMenuBar(rumps.App):
                 ))
             elif schedule_state == "disabled":
                 items.append(self._label("⚠ Draft tasks are scheduled but disabled"))
+                items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
+            elif schedule_state == "stalled":
+                # Task registered + enabled but the host stopped launching it: the
+                # Claude Desktop warm-session wedge (finished worker sessions never
+                # exit; the overlap guard skips every fire) or an account-switch
+                # orphan. A full Claude restart fixes the wedge and is harmless
+                # otherwise, so it's the PRIMARY action; re-arm stays as fallback
+                # for the orphan case (Karol, 2026-07-06).
+                items.append(self._label("⚠ Drafts stopped — Claude’s scheduler is stuck"))
+                items.append(rumps.MenuItem("Restart Claude Desktop to fix", callback=self._restart_claude_fix))
                 items.append(rumps.MenuItem("Set up draft schedule for this account", callback=self._rearm))
             else:
                 items.append(self._label("⚠ Draft tasks aren’t scheduled on this account"))
