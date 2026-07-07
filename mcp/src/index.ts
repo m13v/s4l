@@ -3139,9 +3139,9 @@ function autopilotStalled(): boolean {
     let oldest = Infinity;
     for (const sub of fs.readdirSync(pendRoot, { withFileTypes: true })) {
       if (!sub.isDirectory()) continue;
-      // feedback-digest jobs are latency-insensitive (hourly kicker, retried
-      // forever) and may legitimately queue behind a multi-minute draft job;
-      // aging past the draft threshold there is NOT an autopilot stall.
+      // feedback-digest jobs are latency-insensitive (every-minute kicker,
+      // retried forever) and may legitimately queue behind a multi-minute
+      // draft job; aging past the draft threshold there is NOT an autopilot stall.
       if (sub.name === "feedback-digest") continue;
       const subPath = path.join(pendRoot, sub.name);
       for (const f of fs.readdirSync(subPath)) {
@@ -3716,12 +3716,19 @@ async function ensureClaudeReaperInstalled(): Promise<{ ok: boolean; detail: str
 }
 
 // ---- launchd feedback digest: card decisions -> learned_preferences ---------
-// Hourly, stdlib-only under SYSTEM python (http_api + learned_preferences use
-// urllib/json only; run_claude.sh resolves the claude CLI itself). A run with
-// no unprocessed review_events for this install is a cheap no-op, so the job
-// is installed unconditionally like the reaper. Content-aware install so an
-// already-installed box picks up changed args on the next Claude boot.
-const FEEDBACK_DIGEST_INTERVAL_SECS = 3600;
+// Every minute, same cadence as com.m13v.social-twitter-cycle (the drafting
+// producer), stdlib-only under SYSTEM python (http_api + learned_preferences
+// use urllib/json only; run_claude.sh resolves the claude CLI itself). A run
+// with no unprocessed review_events for this install is a cheap no-op, so the
+// job is installed unconditionally like the reaper. Content-aware install so
+// an already-installed box picks up changed args on the next Claude boot.
+// (Was hourly from the day this shipped, 2026-07-02, on purpose: the digest
+// was designed as a standalone scheduled batch job, not a per-event trigger.
+// Changed 2026-07-06 to close the gap with edits/feedback sitting unprocessed
+// for up to an hour: every-minute checks are still cheap no-ops between
+// actionable events, since digest_project() only calls Claude when at least
+// one fetched event is actionable.)
+const FEEDBACK_DIGEST_INTERVAL_SECS = 60;
 
 async function ensureFeedbackDigestInstalled(): Promise<{ ok: boolean; detail: string }> {
   try {
@@ -3736,7 +3743,7 @@ async function ensureFeedbackDigestInstalled(): Promise<{ ok: boolean; detail: s
       label: FEEDBACK_DIGEST_LABEL,
       programArgs: ["/usr/bin/python3", path.join(repoDir(), "scripts", "feedback_digest.py")],
       intervalSecs: FEEDBACK_DIGEST_INTERVAL_SECS,
-      runAtLoad: false, // no boot-time Claude runs; the hourly tick is enough
+      runAtLoad: false, // no boot-time Claude runs; the every-minute tick is enough
       stdoutLog: path.join(logDir, "launchd-feedback-digest-stdout.log"),
       stderrLog: path.join(logDir, "launchd-feedback-digest-stderr.log"),
     });
