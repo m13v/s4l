@@ -66,6 +66,12 @@ REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_CLAUDE_SH = os.path.join(REPO_DIR, "scripts", "run_claude.sh")
 LOCK_PATH = os.path.expanduser("~/.social-autoposter-mcp/feedback-digest.lock")
 MAX_EVENTS_PER_RUN = 200
+# A cluster of reason-less rejects in one batch is a signal worth flagging
+# even when no shared textual pattern justifies a learned_preferences entry:
+# pure volume with no discernible pattern usually means something upstream
+# degraded (a bad search topic, a draft-quality regression), not that any
+# single draft was wrong in a way the digest model could articulate.
+BULK_NO_REASON_THRESHOLD = int(os.environ.get("S4L_BULK_NO_REASON_THRESHOLD", "3"))
 
 DISALLOWED_TOOLS = (
     "ScheduleWakeup,CronCreate,CronDelete,CronList,EnterPlanMode,EnterWorktree,"
@@ -137,12 +143,22 @@ def _event_line(e: dict) -> str:
     return line
 
 
+def _no_reason_rejects(events: list[dict]) -> list[dict]:
+    """Rejects via the card's 'Reject, no reason' fast-path: neither a
+    category chip nor a typed note. Shared by build_prompt (for the header
+    count) and digest_project (for the bulk-cluster flag) so the two never
+    diverge on what counts."""
+    return [e for e in events
+            if e.get("decision") == "rejected"
+            and not e.get("reject_category")
+            and not (e.get("reject_note") or "").strip()]
+
+
 def build_prompt(project: dict, events: list[dict], overall_events: list[dict] | None = None) -> str:
     block = lp.get_block(project)
     overall_events = overall_events or []
     rejected = [e for e in events if e.get("decision") == "rejected"]
-    no_reason = [e for e in rejected
-                 if not e.get("reject_category") and not (e.get("reject_note") or "").strip()]
+    no_reason = _no_reason_rejects(events)
     approved = [e for e in events if e.get("decision") == "approved"]
     loved = [e for e in approved if e.get("loved")]
     voice_never = ((project.get("voice") or {}).get("never")) or []
@@ -321,6 +337,13 @@ def digest_project(project: dict, platform: str, dry_run: bool,
     events = ((resp or {}).get("data") or {}).get("events") or []
     if not events and not overall_events:
         return True
+    no_reason = _no_reason_rejects(events)
+    if len(no_reason) >= BULK_NO_REASON_THRESHOLD:
+        ids = ", ".join(str(e.get("id")) for e in no_reason)
+        log(f"BULK_NO_REASON_REJECTS project={name} platform={platform} "
+            f"count={len(no_reason)} threshold={BULK_NO_REASON_THRESHOLD} "
+            f"event_ids=[{ids}] (volume signal, logged regardless of whether "
+            "the digest model finds a shared textual pattern below)")
     if not overall_events and not any(_is_actionable(e) for e in events):
         log(f"project={name} platform={platform} events={len(events)} "
             "plain_approvals_only, no digest (they ride along with the next actionable event)")
