@@ -2128,6 +2128,17 @@ tool(
         // as expected. Once connect_x succeeds, run the full phase immediately
         // to verify persistence, CDP, and the durable cookie mirror.
         doctorReport = await runDoctorPhase("full");
+        // Only mark x_verified once doctor confirms all X checks pass (session valid,
+        // cookies persisted, CDP responding, keychain accessible). This prevents the
+        // autopilot from starting if X connection didn't actually persist.
+        if (doctorReport?.ok) {
+          completeOnboardingMilestone("x_verified", {
+            x_session: doctorReport.checks?.find(c => c.id === "x_session")?.status,
+            x_cookies: doctorReport.checks?.find(c => c.id === "x_cookie_sqlite")?.status,
+          });
+        } else {
+          recordOnboardingAttempt("x_verified", { doctor_ok: false });
+        }
       } else {
         blockOnboardingMilestone(
           "x_connected",
@@ -3602,6 +3613,20 @@ async function ensureQueueKickerInstalled(): Promise<{ ok: boolean; detail: stri
       return {
         ok: false,
         detail: "no ready project or active persona yet",
+      };
+    }
+    // Additional gate: X must be connected and verified before autopilot starts.
+    // This prevents wasted cycles against a logged-out x.com if X connection didn't
+    // persist after import/login. x_verified milestone only completes after doctor
+    // confirms X session and cookies are valid.
+    const onboardingState = onboardingSnapshot();
+    const xVerified = onboardingState?.milestones?.some(
+      (m: any) => m.id === "x_verified" && m.status === "complete"
+    );
+    if (!xVerified) {
+      return {
+        ok: false,
+        detail: "X not yet verified (awaiting explicit pre-flight confirmation)",
       };
     }
     const logDir = path.join(repoDir(), "skill", "logs");
