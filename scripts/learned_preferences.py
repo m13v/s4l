@@ -54,6 +54,17 @@ MAX_ENTRIES_PER_LIST = 10
 MAX_ENTRY_CHARS = 200
 MAX_HISTORY = 50
 
+# Few-shot edit examples (2026-07-06, ported from the s4l-email inbox repo's
+# original_draft_body/draft_body pair): when the user rewrites a draft on the
+# review card before approving, the (original, final) pair is the strongest
+# style signal we have; showing recent pairs to the drafting model beats any
+# distilled negative rule (measured: the draft-prompt A/B's one-bullet skeleton
+# ban moved nothing, treatment 30% ~= control 28%). Written DETERMINISTICALLY
+# by feedback_digest.record via record_edit_examples(), never by the digest
+# LLM's mutation plan (apply_mutations drops 'edit_examples' as unknown).
+MAX_EDIT_EXAMPLES = 5
+MAX_EXAMPLE_CHARS = 600
+
 # Travels inside the JSON the prep prompt embeds (ALL_PROJECTS_JSON is the
 # full project entry), so the drafting model reads its own operating manual
 # for the block. Split semantics (2026-07-03, after the persona lane kept
@@ -70,7 +81,13 @@ DEFAULT_INSTRUCTION = (
     "preferences, not hard bans; use judgment when a candidate is "
     "exceptionally on-topic despite a match. When WRITING a draft, "
     "draft_style_notes is MANDATORY, not advisory: follow every entry, and "
-    "on conflict it overrides the engagement style's structural template."
+    "on conflict it overrides the engagement style's structural template. "
+    "edit_examples are before/after pairs from the user's own manual edits "
+    "on the review card: 'original' is the draft we wrote, 'final' is what "
+    "the user rewrote it to before posting. Treat every 'final' as the "
+    "target voice and every 'original' as the rejected voice: write new "
+    "drafts in the style of the finals, and never reproduce phrasing or "
+    "structure that the user edited away."
 )
 
 
@@ -101,6 +118,19 @@ def normalized(block) -> dict:
     for key in MANAGED_LISTS:
         vals = b.get(key)
         out[key] = [str(v).strip()[:MAX_ENTRY_CHARS] for v in vals if str(v).strip()] if isinstance(vals, list) else []
+    # Few-shot before/after pairs from the user's card edits (newest first).
+    # Preserved through normalization so apply_mutations round-trips never
+    # drop them; only record_edit_examples() writes this list.
+    ex = b.get("edit_examples")
+    out["edit_examples"] = [
+        {
+            "original": str(e.get("original") or "")[:MAX_EXAMPLE_CHARS],
+            "final": str(e.get("final") or "")[:MAX_EXAMPLE_CHARS],
+            "ts": e.get("ts"),
+        }
+        for e in (ex if isinstance(ex, list) else [])
+        if isinstance(e, dict) and str(e.get("original") or "").strip() and str(e.get("final") or "").strip()
+    ][:MAX_EDIT_EXAMPLES]
     out["updated_at"] = b.get("updated_at")
     hist = b.get("history")
     out["history"] = list(hist)[-MAX_HISTORY:] if isinstance(hist, list) else []
@@ -128,6 +158,12 @@ def prompt_block(project_cfg) -> str:
     for key in MANAGED_LISTS:
         for v in b[key]:
             lines.append(f"- {labels[key]}: {v}")
+    for e in b["edit_examples"]:
+        lines.append(
+            "- Edit example (write like FINAL, never like ORIGINAL):\n"
+            f"  ORIGINAL (ours, rejected style): {e['original']}\n"
+            f"  FINAL (user's rewrite, target style): {e['final']}"
+        )
     if not lines:
         return ""
     return (
@@ -150,6 +186,80 @@ def _validate_add_list(raw, cap=MAX_ENTRIES_PER_LIST):
         if len(out) >= cap:
             break
     return out
+
+
+def record_edit_examples(project_name: str, pairs, cfg_path: str | None = None) -> dict:
+    """Deterministically record (original, final) card-edit pairs as few-shot
+    examples in the project's learned_preferences.edit_examples (newest first,
+    capped at MAX_EDIT_EXAMPLES). This is CODE-owned, not part of the digest
+    LLM's mutation plan: an edit the user made IS the ground truth, no judgment
+    call needed to keep it (mirrors the s4l-email inbox repo, which injects
+    the last 5 human-edited drafts into every draft prompt). Same flock +
+    backup + atomic-replace mechanics as apply_mutations().
+
+    pairs: iterable of {"original": str, "final": str} (ts optional).
+    Returns {ok, recorded: int}.
+    """
+    cfg_path = cfg_path or config_path()
+    clean = []
+    for p in pairs or []:
+        if not isinstance(p, dict):
+            continue
+        orig = str(p.get("original") or "").strip()
+        final = str(p.get("final") or "").strip()
+        if not orig or not final or orig == final:
+            continue
+        clean.append({
+            "original": orig[:MAX_EXAMPLE_CHARS],
+            "final": final[:MAX_EXAMPLE_CHARS],
+            "ts": str(p.get("ts") or _now_iso()),
+        })
+    if not clean:
+        return {"ok": True, "recorded": 0}
+
+    lock_path = cfg_path + ".lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        try:
+            cfg = json.loads(Path(cfg_path).read_text())
+        except Exception as e:
+            return {"ok": False, "error": f"config unreadable: {e}", "recorded": 0}
+        projects = cfg.get("projects") or []
+        proj = next((p for p in projects if p.get("name") == project_name), None)
+        if proj is None:
+            return {"ok": False, "error": "project not in config", "recorded": 0}
+
+        block = get_block(proj)
+        existing = block["edit_examples"]
+        # Dedup on the final text (a retried digest re-records the same batch).
+        seen = {e["final"] for e in existing}
+        fresh = [e for e in clean if e["final"] not in seen]
+        if not fresh:
+            return {"ok": True, "recorded": 0}
+        block["edit_examples"] = (fresh + existing)[:MAX_EDIT_EXAMPLES]
+        block["updated_at"] = _now_iso()
+        block["history"] = (block["history"] + [
+            {
+                "ts": _now_iso(),
+                "change": f"edit_examples recorded: {len(fresh)}",
+                "rationale": "user rewrote the draft on the review card",
+                "source_events": [],
+            }
+        ])[-MAX_HISTORY:]
+        proj["learned_preferences"] = block
+
+        stamp = _now_iso().replace(":", "-").replace(".", "-")
+        try:
+            if os.path.exists(cfg_path):
+                shutil.copyfile(cfg_path, f"{cfg_path}.bak-{stamp}")
+        except Exception:
+            pass
+        tmp = cfg_path + ".tmp"
+        Path(tmp).write_text(json.dumps(cfg, indent=2) + "\n")
+        os.replace(tmp, cfg_path)
+
+    return {"ok": True, "recorded": len(fresh)}
 
 
 def apply_mutations(project_name: str, plan: dict, source_event_ids=None, cfg_path: str | None = None) -> dict:
