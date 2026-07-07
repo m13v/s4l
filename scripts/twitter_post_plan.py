@@ -536,59 +536,69 @@ def post_one(c: dict, picker_assignment: dict | None = None) -> tuple[str, str]:
         update_candidate(cid, "skipped")
         return ("skipped", "duplicate_thread_pre_post")
 
-    # CTA bridge generation: instead of bolting `link_url` onto `reply_text`
-    # with a space (the old `f"{reply_text} {link_url}"`), call link_tail.py
-    # which spawns one Claude call (default smart model, NOT Haiku) to write
-    # a 1-sentence bridge that names a concrete benefit and ends in the URL.
-    # On any failure (timeout, model error, output fails sanity gate) the
-    # script returns the mechanical concat as a fallback, so this code path
-    # is always tolerant of model failure.
-    #
-    # AB TEST — tail link on/off:
-    # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
-    # of posts that receive a tail link. Setting it to 1.0 restores old
-    # behavior (always add link). Setting it to 0.0 disables links entirely.
-    # tail_link_variant is logged to posts.tail_link_variant so the dashboard
-    # can compare engagement across arms.
-    _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
-    _add_tail_link = link_url and (random.random() < _tail_link_rate)
-    tail_link_variant: str | None = None
-    if link_url:
-        tail_link_variant = "link" if _add_tail_link else "no_link"
+    # CTA bridge generation. 2026-07-06: moved from HERE (post time) to
+    # twitter_gen_links.py's Phase 2b-gen step (draft time). Phase 2b-gen runs
+    # BEFORE the DRAFT_ONLY gate for every candidate, so both the review-card
+    # path and the autonomous-post path already carry a stamped
+    # tail_link_variant + finalized reply_text by the time they reach here.
+    # Post time is a bad fit for the queue-backed Claude call: post_drafts is
+    # a synchronous MCP call the user is actively waiting on after clicking
+    # Approve, while the s4l-worker scheduled task claims one job per minute
+    # and doesn't overlap a multi-minute drafting turn, so a queue-routed call
+    # here could stall an approval for minutes. This block is now a FALLBACK
+    # for a candidate that somehow reaches post time unstamped (e.g. a plan
+    # already in flight from before this change).
+    tail_link_variant = c.get("tail_link_variant")
     full_text = reply_text
-    link_tail_outcome = "skipped_no_link"
-    if _add_tail_link:
-        rc, out, err = run_subprocess(
-            [PYTHON, LINK_TAIL,
-             "--reply-text", reply_text,
-             "--link-url", link_url,
-             "--thread-text", thread_text or "",
-             "--project", project,
-             "--platform", "twitter",
-             "--timeout", "120"],
-            timeout_sec=180,
-        )
-        tail_obj = parse_last_json_object(out) or {}
-        if tail_obj.get("text"):
-            full_text = tail_obj["text"]
-            if tail_obj.get("model_call_ok") and not tail_obj.get("fallback_used"):
-                link_tail_outcome = "bridge_generated"
+    if tail_link_variant is not None:
+        link_tail_outcome = c.get("link_tail_outcome") or "applied_at_draft_time"
+        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+              f"(already finalized at draft time, tail_link_variant={tail_link_variant})",
+              flush=True)
+    else:
+        # AB TEST — tail link on/off:
+        # TWITTER_TAIL_LINK_RATE (float 0..1, default 0.5) controls the fraction
+        # of posts that receive a tail link. Setting it to 1.0 restores old
+        # behavior (always add link). Setting it to 0.0 disables links entirely.
+        # tail_link_variant is logged to posts.tail_link_variant so the dashboard
+        # can compare engagement across arms.
+        _tail_link_rate = float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
+        _add_tail_link = link_url and (random.random() < _tail_link_rate)
+        if link_url:
+            tail_link_variant = "link" if _add_tail_link else "no_link"
+        link_tail_outcome = "skipped_no_link"
+        if _add_tail_link:
+            rc, out, err = run_subprocess(
+                [PYTHON, LINK_TAIL,
+                 "--reply-text", reply_text,
+                 "--link-url", link_url,
+                 "--thread-text", thread_text or "",
+                 "--project", project,
+                 "--platform", "twitter",
+                 "--timeout", "120"],
+                timeout_sec=180,
+            )
+            tail_obj = parse_last_json_object(out) or {}
+            if tail_obj.get("text"):
+                full_text = tail_obj["text"]
+                if tail_obj.get("model_call_ok") and not tail_obj.get("fallback_used"):
+                    link_tail_outcome = "bridge_generated"
+                else:
+                    link_tail_outcome = f"fallback:{tail_obj.get('error', 'unknown')[:60]}"
             else:
-                link_tail_outcome = f"fallback:{tail_obj.get('error', 'unknown')[:60]}"
-        else:
-            # link_tail.py is supposed to ALWAYS return JSON; if we got
-            # nothing, hard-fall-back to the mechanical concat to preserve
-            # prior behavior (post still ships, link still on the wire).
-            full_text = f"{reply_text} {link_url}".strip()
-            link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
-        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-              f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
-    elif link_url and not _add_tail_link:
-        # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
-        # no URL). Log the outcome so the dashboard can tally the arm.
-        link_tail_outcome = "ab_no_link"
-        print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
-              f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
+                # link_tail.py is supposed to ALWAYS return JSON; if we got
+                # nothing, hard-fall-back to the mechanical concat to preserve
+                # prior behavior (post still ships, link still on the wire).
+                full_text = f"{reply_text} {link_url}".strip()
+                link_tail_outcome = f"hard_fallback_no_json:rc={rc}"
+            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+                  f"(elapsed={tail_obj.get('elapsed_sec')}s)", flush=True)
+        elif link_url and not _add_tail_link:
+            # No-link arm of the AB test: post the reply text as-is (no CTA bridge,
+            # no URL). Log the outcome so the dashboard can tally the arm.
+            link_tail_outcome = "ab_no_link"
+            print(f"[post] candidate {cid} link_tail: {link_tail_outcome} "
+                  f"(tail_link_variant=no_link, rate={_tail_link_rate})", flush=True)
 
     # URL-wrap the text BEFORE handing it to twitter_browser. The browser
     # script appends the campaign suffix internally; suffixes are plain
