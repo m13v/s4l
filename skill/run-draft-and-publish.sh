@@ -197,4 +197,47 @@ else
     echo "[run-draft-and-publish] no DRAFT_ONLY_PLAN marker (cycle rc=$RC); nothing to merge" >&2
 fi
 
+# Topic-invention lane (queue-native, 2026-07-06). Exploration now runs on
+# EVERY install from this kicker — the operator-only launchd job
+# com.m13v.social-invent-topics is retired. One project per run (same
+# pick_projects weighting as the cycle), every S4L_INVENT_EVERY_HOURS
+# (default 4; 0 disables). Placed AFTER the merge so exploration never delays
+# card delivery. Pre-stamped + backgrounded: the stamp keeps the every-60s
+# launchd ticks from piling runs up, the background keeps this kicker snappy,
+# and the run logs to skill/logs/invent-topics-*.log via invent-topics.sh.
+# Skipped while posting is active (the poster owns the browser and SIGKILLs
+# scans; the supply-test helper bails on the twitter-browser lock anyway,
+# this just avoids burning the slot). The Claude turns inside are queue jobs;
+# with no worker draining, the run exits 79 and the next window retries.
+INVENT_EVERY_HOURS="${S4L_INVENT_EVERY_HOURS:-4}"
+INVENT_STAMP="${S4L_STATE_DIR:-$HOME/.social-autoposter-mcp}/invent-last-run"
+if [ "$INVENT_EVERY_HOURS" != "0" ]; then
+    _invent_due=1
+    if [ -f "$INVENT_STAMP" ] && \
+       [ -z "$(find "$INVENT_STAMP" -mmin +$(( INVENT_EVERY_HOURS * 60 )) 2>/dev/null)" ]; then
+        _invent_due=0
+    fi
+    _invent_posting=""
+    if [ -f "$_flag" ] && "$PY" -c '
+import json, sys, time
+try:
+    j = json.load(open(sys.argv[1]))
+    sys.exit(0 if j.get("expires_at", 0) > time.time() * 1000 else 1)
+except Exception:
+    sys.exit(1)
+' "$_flag" 2>/dev/null; then
+        _invent_posting="posting-active.json fresh"
+    elif [ -n "$(find "$REPO_DIR/skill/logs" -maxdepth 1 -name 'post-*.log' -mtime -90s 2>/dev/null | head -1)" ]; then
+        _invent_posting="post-*.log younger than 90s"
+    fi
+    if [ "$_invent_due" = "1" ] && [ -z "$_invent_posting" ]; then
+        touch "$INVENT_STAMP"
+        echo "[run-draft-and-publish] invent-topics due (every ${INVENT_EVERY_HOURS}h); launching in background (log: skill/logs/invent-topics-*.log)" >&2
+        nohup env S4L_REPO_DIR="$REPO_DIR" S4L_PYTHON="$PY" \
+            bash "$REPO_DIR/skill/invent-topics.sh" >/dev/null 2>&1 &
+    elif [ "$_invent_due" = "1" ]; then
+        echo "[run-draft-and-publish] invent-topics due but posting active ($_invent_posting); retrying next tick" >&2
+    fi
+fi
+
 exit "$RC"
