@@ -45,6 +45,16 @@
 # the EXACT tested artifact ships to everyone. Nothing can drift between test and
 # ship because there is no repack.
 #
+# FIXED STAGING DOWNLOAD LINK (2026-07-07, step 7b): stable has a permanent
+# "latest" URL (releases/latest/download/social-autoposter.mcpb); staging did
+# not, because GitHub's releases/latest hard-excludes prereleases with no
+# override. Every --staging run now also mirrors the .mcpb onto a separate,
+# non-version-tagged release ("staging-latest") so this URL never changes:
+#   https://github.com/m13v/s4l/releases/download/staging-latest/social-autoposter.mcpb
+# The tag deliberately isn't semver-shaped, so version.ts/snapshot.py's real
+# "newest rc" resolution (which requires a ^\d+\.\d+\.\d+ tag) ignores it —
+# it is a convenience download link only, never a candidate update source.
+#
 # Usage:
 #   bash scripts/release-mcpb.sh                 # patch bump, npm + .mcpb + GitHub (STABLE)
 #   bash scripts/release-mcpb.sh --bump minor
@@ -68,6 +78,12 @@ MCP_DIR="$REPO_ROOT/mcp"
 BUNDLE="$MCP_DIR/social-autoposter.mcpb"
 GH_REPO="m13v/s4l"
 SIZE_CAP_MB=180
+# Floating alias release for a fixed "always the newest staging build" download
+# link, mirroring what releases/latest/download/<asset> already gives stable.
+# GitHub's own releases/latest excludes prereleases with no override, so there is
+# no built-in equivalent for the rc channel — see step 7b below for why a
+# non-semver tag here is safe (never confuses the real update-detection code).
+STAGING_ALIAS_TAG="staging-latest"
 
 TAG_OVERRIDE=""
 VERSION_OVERRIDE=""
@@ -495,6 +511,38 @@ URL=$(gh release view "$TAG" -R "$GH_REPO" --json url -q .url 2>/dev/null || ech
 say "Released $TAG"
 echo "  asset: social-autoposter.mcpb (${MB}MB)"
 [[ -n "$URL" ]] && echo "  $URL"
+
+# ---- 7b. Fixed "always latest staging" download link ------------------------
+# Mirrors the asset just uploaded above onto a SEPARATE release tagged
+# "$STAGING_ALIAS_TAG" (not a version), so the download URL never changes:
+#   https://github.com/$GH_REPO/releases/download/$STAGING_ALIAS_TAG/social-autoposter.mcpb
+# Safe by construction: latestFromGithubListStaging() (mcp/src/version.ts) and
+# _latest_from_github_list_staging() (scripts/snapshot.py) both require
+# tag_name to match ^\d+\.\d+\.\d+ before treating a release as a candidate
+# "newest" build; a tag literally named "staging-latest" fails that check and
+# is silently skipped by both, so this alias can never get mistaken for a real
+# rc and can never confuse which build a box installs. It exists ONLY to give
+# humans (and scripts) one fixed bookmark — actual boxes still resolve "newest"
+# from the real per-release rc tags via the releases LIST endpoint, unchanged.
+if [[ "$DO_STAGING" == "1" ]]; then
+  say "Mirroring asset onto the fixed staging-latest alias"
+  ALIAS_NOTES="Always mirrors the newest staging pre-release's .mcpb asset (currently $TAG).
+
+Fixed download link (never changes): https://github.com/$GH_REPO/releases/download/$STAGING_ALIAS_TAG/social-autoposter.mcpb
+
+Not a real release — do not install from the tag page; use the asset link above. Actual per-build releases are tagged by version (e.g. $TAG)."
+  if gh release view "$STAGING_ALIAS_TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+    gh release upload "$STAGING_ALIAS_TAG" "$BUNDLE" -R "$GH_REPO" --clobber
+    gh release edit "$STAGING_ALIAS_TAG" -R "$GH_REPO" --notes "$ALIAS_NOTES" >/dev/null
+  else
+    gh release create "$STAGING_ALIAS_TAG" "$BUNDLE" \
+      -R "$GH_REPO" \
+      --title "social-autoposter (staging — always latest)" \
+      --notes "$ALIAS_NOTES" \
+      --prerelease
+  fi
+  echo "  https://github.com/$GH_REPO/releases/download/$STAGING_ALIAS_TAG/social-autoposter.mcpb"
+fi
 
 # ---- 8. Verify the update banner will fire ---------------------------------
 # The menu-bar "⬆ Update available" banner (mcp/src/version.ts::versionStatus)
