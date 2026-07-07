@@ -1260,7 +1260,22 @@ fi
 # per-MCP-call heartbeat proxy wired through their MCP configs yet.
 log "Acquiring platform-browser lock(s) for Claude/MCP step..."
 case "${PLATFORM:-all}" in
-    linkedin) acquire_lock "linkedin-browser" 3600; ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) ;;
+    linkedin)
+        acquire_lock "linkedin-browser" 3600
+        # rc=78 is the linkedin-pipeline lock's reserved skip code (peer
+        # pipeline is driving the 9556 Chrome). The subshell's exit status
+        # must be checked HERE: an exit inside it never stops this script
+        # (2026-07-06 bug: two live LinkedIn tabs from two pipelines).
+        _LI_BOOT_RC=0
+        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
+        if [ "$_LI_BOOT_RC" -eq 78 ]; then
+            log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+            exit 0
+        elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+            log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            exit "$_LI_BOOT_RC"
+        fi
+        ;;
     reddit)
         # Reddit: brief pre-flight acquire+ensure+release ONLY. Per-DM
         # acquire/release happens inside the Claude prompt.
@@ -1273,7 +1288,18 @@ case "${PLATFORM:-all}" in
     twitter|x) acquire_lock "twitter-browser" 3600; ensure_twitter_browser_for_backend ;;
     all)
         acquire_lock "linkedin-browser" 3600
-        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend )
+        # rc=78 skip (see the `linkedin` branch). A LinkedIn skip exits the
+        # WHOLE all-platform fire, matching the pipeline lock's documented
+        # skip-this-fire semantics; launchd re-fires on the next cadence.
+        _LI_BOOT_RC=0
+        ( source "$(dirname "$0")/lib/linkedin-backend.sh"; ensure_linkedin_browser_for_backend ) || _LI_BOOT_RC=$?
+        if [ "$_LI_BOOT_RC" -eq 78 ]; then
+            log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire (all-platform run)"
+            exit 0
+        elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+            log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+            exit "$_LI_BOOT_RC"
+        fi
         # Reddit: brief pre-flight only (same as the `reddit` branch above).
         log "Reddit pre-flight: brief acquire + ensure_reddit_browser_for_backend (harness 9557) + release..."
         python3 "$REPO_DIR/scripts/reddit_browser_lock.py" acquire --timeout 60 --ttl 30 2>&1 | tee -a "$LOG_FILE" || \
