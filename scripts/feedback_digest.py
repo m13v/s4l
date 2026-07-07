@@ -121,7 +121,13 @@ def _event_line(e: dict) -> str:
     if tweet:
         line += f"\n  their post was: {tweet[:200]}"
     draft = (e.get("draft_text") or "").strip()
-    if draft:
+    original = (e.get("original_text") or "").strip()
+    if original and draft and original != draft:
+        # Edited approval: show the diff pair, the strongest style evidence
+        # we have (draft_text carries the FINAL text the user actually posted).
+        line += f"\n  our ORIGINAL draft was: {original[:300]}"
+        line += f"\n  user REWROTE it to: {draft[:300]}"
+    elif draft:
         line += f"\n  our draft was: {draft[:200]}"
     url = (e.get("thread_url") or "").strip()
     if url:
@@ -165,7 +171,7 @@ CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
 NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved)} approved, {len(loved)} of the approvals loved):
 {ev_lines}{overall_block}
 
-Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked a stronger emoji in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 3 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
+Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "edited_before_approving" with an ORIGINAL/REWROTE pair means the user hand-corrected our draft before posting: the rewrite is a direct statement of the voice they want. Diff the pair; when 2+ edits show the same correction (a phrase type removed, a structure replaced, tone shifted, length cut), distill that recurring pattern into draft_style_notes. Ignore edit content that is lead-specific or cosmetic (typo fixes, one-off facts); learn only what generalizes. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked a stronger emoji in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 3 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
 You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
@@ -251,6 +257,10 @@ def _is_actionable(e: dict) -> bool:
         return True
     if e.get("loved"):
         return True
+    # An approval where the user rewrote the draft first is a correction,
+    # as actionable as a reject (and it feeds edit_examples).
+    if e.get("edited"):
+        return True
     return bool((e.get("reject_note") or "").strip())
 
 
@@ -298,6 +308,29 @@ def digest_project(project: dict, platform: str, dry_run: bool,
     if not result.get("ok"):
         log(f"project={name} platform={platform} events={len(events)} apply_failed={result.get('error')} (events left unprocessed)")
         return False
+
+    # Few-shot edit examples (2026-07-06): every edited approval's
+    # (original, final) pair is recorded deterministically, no LLM judgment;
+    # the user's rewrite IS the ground truth. record_edit_examples dedups on
+    # the final text, so a retried digest never double-records. Best-effort:
+    # a failure here never fails the digest (the distilled plan already
+    # landed and events must still be marked processed).
+    edit_pairs = [
+        {"original": e.get("original_text"), "final": e.get("draft_text"),
+         "ts": e.get("client_ts") or e.get("created_at")}
+        for e in events
+        if e.get("decision") == "approved" and e.get("edited")
+        and (e.get("original_text") or "").strip()
+        and (e.get("draft_text") or "").strip()
+        and e.get("original_text") != e.get("draft_text")
+    ]
+    if edit_pairs:
+        try:
+            rec = lp.record_edit_examples(name, edit_pairs)
+            if rec.get("recorded"):
+                log(f"project={name} edit_examples_recorded={rec['recorded']}")
+        except Exception as e:
+            log(f"project={name} edit_examples_failed={e}")
 
     # Author blocks the digest agent decided on (its judgment call, never
     # automatic; see the prompt). Applied via the blocklist API so the
