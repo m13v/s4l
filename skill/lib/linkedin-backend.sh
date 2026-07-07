@@ -200,7 +200,9 @@ cleanup_harness_tabs() {
 # No release trap on purpose: a finished pipeline's lock dir is reclaimed by
 # the next pipeline's dead-PID check, exactly like the singleton guard. This
 # avoids clobbering the parent scripts' EXIT/INT/TERM/HUP run_monitor traps.
-_LI_PIPELINE_LOCK_DIR="/tmp/s4l-linkedin-pipeline.lock"
+# Env-overridable ONLY so tests can exercise the lock against a scratch dir;
+# real pipelines never set this and share the one /tmp path.
+_LI_PIPELINE_LOCK_DIR="${_LI_PIPELINE_LOCK_DIR:-/tmp/s4l-linkedin-pipeline.lock}"
 _acquire_linkedin_pipeline_lock() {
     # Already held by THIS process (re-entry across phases) -> proceed.
     if [ "${_LI_PIPELINE_LOCK_HELD:-0}" = "1" ]; then

@@ -126,6 +126,13 @@ set +e
 ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
 BOOTSTRAP_RC=${PIPESTATUS[0]}
 set -e
+# rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+# Chrome): a skip, not a failure, so don't record it as a bootstrap error.
+if [ "$BOOTSTRAP_RC" -eq 78 ]; then
+    release_lock "linkedin-browser"
+    log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+    exit 0
+fi
 if [ "$BOOTSTRAP_RC" -ne 0 ]; then
     release_lock "linkedin-browser"
     if [ -f "$HOME/.claude/social-autoposter/linkedin.killswitch" ]; then
