@@ -1128,6 +1128,28 @@ async function postApproved(batchId: string, plan: Plan) {
   // batch so the every-minute autopilot scan queues behind the post instead of
   // seizing Chrome mid-batch — the root cause of approved batches landing 0/N.
   const heldShellLock = await acquireShellBrowserLock();
+  if (!heldShellLock) {
+    // acquireShellBrowserLock now WAITS (up to 8 min) for any live non-scan
+    // holder instead of giving up instantly, so reaching `false` means a real
+    // CLI Twitter job (DM engagement, an audit run, etc.) has held the browser
+    // the whole time — not "nobody's using it, go ahead anyway" like the old
+    // unconditional-proceed behavior. Bail out instead of racing that peer for
+    // the same reused browser tab (2026-07-07: that race yanked a reply's
+    // composer away mid-type and mis-classified a live tweet as gone). The
+    // approved cards stay sticky (approved && !posted && !terminal), so the
+    // very next post_drafts call — the next approval, or this same tool
+    // retried — picks them straight back up; nothing is lost or re-queued.
+    postingActive = false;
+    stopPostingFlagHeartbeat();
+    return {
+      attempted: 0,
+      exit_code: 0,
+      summary:
+        "another Twitter CLI job (DM engagement, discovery, an audit run, etc.) has held the " +
+        "browser for 8+ minutes; approved cards stay queued and will post automatically once " +
+        "it's free — re-run post_drafts to check now",
+    };
+  }
   const approvedBatch = `${batchId}_approved`;
   writePlan(approvedBatch, { ...plan, candidates: approved });
   // S4L_SKIP_CAMPAIGN_SUFFIX=1: manual/reviewed posts from this MCP draft_cycle
@@ -4541,9 +4563,24 @@ function preemptScanHoldingBrowser(): void {
   }
 }
 
-// Take (or extend) the shell browser lock for the batch. Preempts a scan holder
-// with SIGKILL; never steals from a live non-scan holder (a peer poster) — there
-// it returns false and posting proceeds unguarded (no worse than before).
+// Take (or extend) the shell browser lock for the batch, so posting is aware of
+// EVERY CLI Twitter job, not just the discovery scan. The lock dir itself is the
+// source of truth: 8+ scripts (engage-twitter.sh, dm-outreach-twitter.sh,
+// run-twitter-threads.sh, engage-dm-replies.sh, scan-twitter-followups.sh,
+// refresh-twitter-following.sh, audit.sh, invent-supply-test.sh, in addition to
+// run-twitter-cycle.sh) all take this exact dir before touching the shared
+// harness Chrome, so whoever holds it is doing real browser work by construction
+// — there is no per-script allowlist to maintain. 2026-07-07 incident: only
+// run-twitter-cycle.sh was ever recognized as preemptable, so posting fell
+// through to "proceed unguarded" against every OTHER script and collided with a
+// LIVE engage-twitter.sh (DM/mentions engagement) mid-reply — both processes
+// reused the same open x.com tab (get_browser_and_page prefers a reusable
+// Twitter tab), so engage-twitter.sh's own navigation yanked the composer away
+// mid-type and got one candidate wrongly classified tweet_unavailable. Only the
+// discovery scan gets SIGKILLed (cheap, idempotent, relaunched every minute —
+// posting has priority over it); every OTHER live holder is waited out instead
+// of stolen from, bounded so a stuck peer can't hang this call forever (under
+// the menubar's 900s loopback timeout so a blocked call still returns cleanly).
 async function acquireShellBrowserLock(): Promise<boolean> {
   // A new post cancels any pending grace-release and EXTENDS the existing hold.
   cancelScheduledShellLockRelease();
@@ -4563,7 +4600,9 @@ async function acquireShellBrowserLock(): Promise<boolean> {
     }
     return true;
   }
-  for (let attempt = 0; attempt < 8; attempt++) {
+  const deadline = Date.now() + 8 * 60_000;
+  let loggedWait = false;
+  while (Date.now() < deadline) {
     try {
       fs.mkdirSync(TW_BROWSER_LOCK_DIR); // atomic mutex — only one winner
       // Write the pid IMMEDIATELY (sync) so the dir is never observably pid-less.
@@ -4577,22 +4616,34 @@ async function acquireShellBrowserLock(): Promise<boolean> {
       );
       return true;
     } catch {
-      // Dir exists. Reclaim if the holder is dead; SIGKILL-preempt if it's a scan;
-      // otherwise (a live peer poster) leave it and post unguarded.
+      // Dir exists. Reclaim if the holder is dead; SIGKILL-preempt if it's the
+      // discovery scan; otherwise (ANY other live CLI Twitter job) wait for it.
       const pid = shellLockHolderPid();
       if (!pid || !pidAlive(pid)) {
         rmShellLockDir();
+        await sleepMs(200);
       } else if (pidIsScan(pid)) {
-        logPostEvent(`preempt_scan_on_lock_acquire scan_pid=${pid} attempt=${attempt}`);
+        logPostEvent(`preempt_scan_on_lock_acquire scan_pid=${pid}`);
         sigkillScanTree(pid); // SIGKILL — scans trap SIGTERM and survive it
         await sleepMs(300);
         rmShellLockDir();
       } else {
-        return false; // a real peer holds it — don't steal; proceed
+        if (!loggedWait) {
+          logPostEvent(`waiting_for_peer pid=${pid}`);
+          console.error(
+            `[post] twitter-browser shell lock held by a live non-scan peer (pid ${pid}); ` +
+              `waiting up to 8m instead of posting unguarded`
+          );
+          loggedWait = true;
+        }
+        // These jobs run for minutes, not milliseconds — poll coarsely.
+        await sleepMs(3000);
       }
-      await sleepMs(200);
     }
   }
+  console.error(
+    "[post] gave up waiting for the twitter-browser shell lock after 8m; a live peer still holds it"
+  );
   return false;
 }
 
