@@ -358,96 +358,97 @@ Strict topic constraints (dedup-enforced after you answer):
 - NO Twitter operators (no `min_faves:`, `-filter:replies`, `since:` — those are added at query-draft time downstream)"""
 
 
-# --- Claude invocation ------------------------------------------------------
+# --- Claude invocation (queue-only) ------------------------------------------
 
-# Path to the MCP server that exposes search/stats/submit tools for the
-# in-session topic + query lookups. Kept beside this file so the launchd job
-# always finds it.
-_MCP_SERVER_PY = os.path.join(_REPO_DIR, "scripts", "invent_mcp_server.py")
+# Top-level JSON schemas forwarded with each job (--json-schema). The worker
+# validates its result against the top-level required keys before submitting,
+# so a malformed turn is retried worker-side instead of surfacing here as a
+# parse failure. Saturation MUST still carry proposals=[] (required key).
+TOPIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["topic"],
+            },
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["proposals"],
+}
+QUERIES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "queries": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["queries"],
+}
 
-# Tool names the topic round is allowed to call. Claude Code's --allowed-tools
-# accepts the `mcp__<server-name>__<tool>` form for MCP-provided tools.
-# `invent-tools` is the name we passed to FastMCP() in the server.
-_TOPIC_TOOLS = [
-    "mcp__invent-tools__search_topics",
-    "mcp__invent-tools__get_topic_stats",
-    "mcp__invent-tools__submit_topic",
-]
-# Query round may also probe history if it wants to (read-only).
-_QUERY_TOOLS = [
-    "mcp__invent-tools__search_queries",
-    "mcp__invent-tools__get_query_stats",
-]
-
-
-def _write_mcp_config_file() -> str:
-    """Write a temporary MCP config JSON pointing at our invent-tools server
-    and return its path. claude -p --mcp-config <file> will spawn the server
-    as a subprocess over stdio."""
-    cfg = {
-        "mcpServers": {
-            "invent-tools": {
-                "command": "/opt/homebrew/bin/python3.11",
-                "args": [_MCP_SERVER_PY],
-            }
-        }
-    }
-    fd, path = tempfile.mkstemp(prefix="invent-mcp-", suffix=".json")
-    with os.fdopen(fd, "w") as f:
-        json.dump(cfg, f)
-    return path
+# Queue jobs wait for the every-minute scheduled-task worker to claim + run
+# the turn; give each call the same generous budget the drafting pipeline's
+# queued calls get.
+QUEUE_CALL_TIMEOUT_SEC = 900
 
 
-def call_claude(prompt: str, timeout_sec: int = 300,
-                allowed_tools: list[str] | None = None) -> str:
-    """Run a single `claude -p` invocation and return its text output.
+def call_claude(prompt: str, script_tag: str,
+                schema: dict | None = None,
+                timeout_sec: int = QUEUE_CALL_TIMEOUT_SEC) -> str:
+    """One queue-routed Claude turn via run_claude.sh and return its text.
 
-    When `allowed_tools` is non-empty the call goes through the invent-tools
-    MCP server (search/stats/submit) and the model can call those tools
-    in-session before producing its final response. The Jaccard dedup runs
-    on the SERVER inside submit_topic, so a near-dupe surfaces as a
-    tool-call error Claude can react to instead of a silent post-hoc kill.
-
-    Inherits the global model from ~/.claude/settings.json per the
-    project's "single source of truth" convention (do NOT hardcode
-    --model here). The CLAUDE_MODEL env var, if set, is forwarded.
+    Queue-ONLY by design (2026-07-06): S4L_CLAUDE_PROVIDER is pinned to
+    "queue" here, so run_claude.sh always delegates to claude_job.py, which
+    enqueues the prompt for the Claude Desktop scheduled-task worker — on
+    every install, operator Mac included. There is no `claude -p` fallback:
+    no worker firing means the provider exits 79 and the run skips, the same
+    failure posture as the drafting pipeline. run_claude.sh stays in the path
+    (rather than calling claude_job.py directly) so session tagging and cost
+    tracking keep flowing through the one chokepoint every pipeline uses.
     """
-    cmd = ["claude", "-p", "--output-format", "json"]
-    model = os.environ.get("CLAUDE_MODEL")
-    if model:
-        cmd += ["--model", model]
-    # When the parent process is in dry-run mode it sets INVENT_DRY_RUN=1
-    # in its own env at startup; claude -p inherits it, which propagates to
-    # the MCP server, which short-circuits submit_topic without POSTing.
-    mcp_cfg_path = None
-    if allowed_tools:
-        mcp_cfg_path = _write_mcp_config_file()
-        # --strict-mcp-config: ignore any user-level MCP config so test runs
-        # never pick up the operator's personal MCP servers by accident.
-        # --allowed-tools: explicit allow-list so Claude can't reach for any
-        # other tool (Read/Bash/etc) it might infer from its default kit.
-        cmd += ["--mcp-config", mcp_cfg_path,
-                "--strict-mcp-config",
-                "--allowed-tools", ",".join(allowed_tools)]
+    env = dict(os.environ)
+    env["S4L_CLAUDE_PROVIDER"] = "queue"
+    schema_path = None
+    cmd = ["bash", _RUN_CLAUDE_SH, script_tag, "-p", "--output-format", "json"]
     try:
+        if schema is not None:
+            fd, schema_path = tempfile.mkstemp(prefix="invent-schema-",
+                                               suffix=".json")
+            with os.fdopen(fd, "w") as f:
+                json.dump(schema, f)
+            cmd += ["--json-schema", schema_path]
+        cmd.append(prompt)
         proc = subprocess.run(
             cmd,
-            input=prompt,
             text=True,
             capture_output=True,
             timeout=timeout_sec,
+            env=env,
         )
     finally:
-        if mcp_cfg_path:
+        if schema_path:
             try:
-                os.remove(mcp_cfg_path)
+                os.remove(schema_path)
             except OSError:
                 pass
+    if proc.returncode == 79:
+        # Provider timed out / blocked (no worker drained the job) — the
+        # queue's quota-skip-shaped exit. Skip the run; the next kicker
+        # firing retries.
+        raise SystemExit(
+            f"queue provider blocked for tag={script_tag!r} (exit 79: no "
+            f"worker drained the job within its window); skipping this run"
+        )
     if proc.returncode != 0:
         raise SystemExit(
-            f"claude -p exited {proc.returncode}: {proc.stderr[:500]}"
+            f"run_claude.sh tag={script_tag!r} exited {proc.returncode}: "
+            f"{(proc.stderr or '')[:500]}"
         )
-    # claude -p --output-format json wraps the model's text in
+    # The provider prints a claude `--output-format json`-shaped envelope:
     # {"result": "...", ...}. Extract the result string.
     try:
         envelope = json.loads(proc.stdout)
@@ -460,16 +461,16 @@ def call_claude(prompt: str, timeout_sec: int = 300,
 
 # --- Output parsing ---------------------------------------------------------
 
-def extract_proposals(claude_text: str) -> list[dict]:
-    """Pull the proposals[] array out of Claude's output.
+def _extract_envelope(claude_text: str) -> dict | None:
+    """Parse the JSON object out of Claude's output.
 
     Defensive: handles plain JSON, JSON in fenced code blocks, and the
-    occasional preamble. Returns [] on any parse failure; the caller
-    audit-logs the raw text so we can debug offline.
+    occasional preamble/trailing prose. Returns None when nothing parseable
+    is found; the caller audit-logs the raw text so we can debug offline.
     """
     text = (claude_text or "").strip()
     if not text:
-        return []
+        return None
     # Try fenced JSON first
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = m.group(1) if m else None
@@ -479,11 +480,12 @@ def extract_proposals(claude_text: str) -> list[dict]:
         if start >= 0:
             candidate = text[start:]
     if not candidate:
-        return []
+        return None
     try:
         env = json.loads(candidate)
     except json.JSONDecodeError:
         # Trailing prose can break json.loads; try to find the matching brace
+        env = None
         try:
             depth = 0
             for i, ch in enumerate(candidate):
@@ -494,13 +496,14 @@ def extract_proposals(claude_text: str) -> list[dict]:
                     if depth == 0:
                         env = json.loads(candidate[: i + 1])
                         break
-            else:
-                return []
         except Exception:
-            return []
-    props = env.get("proposals") or []
+            return None
+    return env if isinstance(env, dict) else None
+
+
+def _clean_proposals(env: dict) -> list[dict]:
     cleaned: list[dict] = []
-    for p in props:
+    for p in env.get("proposals") or []:
         if not isinstance(p, dict):
             continue
         topic = (p.get("topic") or "").strip().lower()
@@ -511,56 +514,27 @@ def extract_proposals(claude_text: str) -> list[dict]:
     return cleaned
 
 
-def extract_submitted_topic(claude_text: str) -> dict | None:
-    """Parse Claude's final envelope from the tool-using topic session.
+def extract_proposals(claude_text: str) -> list[dict]:
+    """Pull the proposals[] array out of Claude's output ([] on any failure)."""
+    env = _extract_envelope(claude_text)
+    return _clean_proposals(env) if env else []
 
-    Looks for the LAST JSON object in the response containing a
-    `submitted_topic` field. Returns:
-      - {"topic": "...", "rationale": "..."} on a successful submission
-      - {"topic": None, "reason": "..."} on a saturated session
-      - None if the envelope is missing or malformed (caller treats as bailout)
+
+def extract_proposals_env(claude_text: str) -> tuple[list[dict], str | None]:
+    """(proposals, saturation_reason) from one flattened topic turn.
+
+    saturation_reason is non-None ONLY when the model explicitly answered the
+    saturation envelope (a parseable object whose `proposals` key is present
+    and empty); a plain parse failure returns ([], None) so the caller can
+    tell "model says the universe is saturated" from "turn was garbage".
     """
-    text = (claude_text or "").strip()
-    if not text:
-        return None
-    # Walk all fenced JSON blocks first, then any bare {...} blocks; take the
-    # LAST that contains "submitted_topic" so trailing prose from the tool
-    # iteration doesn't shadow the final answer.
-    candidates: list[str] = []
-    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
-        candidates.append(m.group(1))
-    # Fallback: scan balanced braces for any unfenced JSON
-    depth, start = 0, -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    candidates.append(text[start:i + 1])
-                    start = -1
-    last_ok: dict | None = None
-    for blob in candidates:
-        try:
-            env = json.loads(blob)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(env, dict) or "submitted_topic" not in env:
-            continue
-        topic_val = env.get("submitted_topic")
-        if topic_val is None:
-            last_ok = {"topic": None,
-                       "reason": (env.get("reason") or "").strip()}
-        else:
-            topic = (str(topic_val) or "").strip().lower()
-            if not topic:
-                continue
-            last_ok = {"topic": topic,
-                       "rationale": (env.get("rationale") or "").strip()}
-    return last_ok
+    env = _extract_envelope(claude_text)
+    if env is None:
+        return [], None
+    props = _clean_proposals(env)
+    if not props and "proposals" in env:
+        return [], ((env.get("reason") or "").strip() or "(no reason given)")
+    return props, None
 
 
 # --- Validation -------------------------------------------------------------
@@ -1103,7 +1077,7 @@ def process_topic(
 
     # 1. Draft queries.
     qprompt = build_query_prompt(project, topic, QUERIES_PER_TOPIC)
-    raw = call_claude(qprompt)
+    raw = call_claude(qprompt, "invent-queries", schema=QUERIES_SCHEMA)
     drafted = extract_queries(raw, QUERIES_PER_TOPIC)
     print(f"  [{topic}] drafted {len(drafted)} queries", file=sys.stderr)
 
@@ -1118,7 +1092,8 @@ def process_topic(
             project, topic, QUERIES_PER_TOPIC,
             avoid_queries={normalize_query(q) for q in drafted},
         )
-        refill_raw = call_claude(refill_prompt)
+        refill_raw = call_claude(refill_prompt, "invent-queries",
+                                 schema=QUERIES_SCHEMA)
         refill = extract_queries(refill_raw, QUERIES_PER_TOPIC)
         more_new, _ = dedup_queries(refill, tried_cores)
         for q in more_new:
@@ -1187,11 +1162,6 @@ def main():
     ap.add_argument("--window-days", type=int, default=WINDOW_DAYS,
                     help="Ledger window passed to /api/v1/topic-funnel")
     args = ap.parse_args()
-
-    # Propagate dry-run into the spawned claude -p / MCP server subprocess
-    # tree so submit_topic short-circuits without POSTing during smoke tests.
-    if args.dry_run:
-        os.environ["INVENT_DRY_RUN"] = "1"
 
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     t0 = time.time()
