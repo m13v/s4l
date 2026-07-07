@@ -64,6 +64,10 @@ TAG_TO_TYPE = {
     "run-twitter-cycle-queries": "twitter-query",
     "run-twitter-cycle-prep": "twitter-prep",
     "feedback-digest": "feedback-digest",
+    # Topic-invention lane (queue-native since 2026-07-06; invent_topics.py
+    # pins the provider to queue itself, no env switch).
+    "invent-topic": "invent-topic",
+    "invent-queries": "invent-queries",
 }
 
 # queue type -> (activity state, label) the menu bar shows while the job is in
@@ -74,6 +78,8 @@ TYPE_TO_ACTIVITY = {
     "twitter-query": ("scanning", "queries"),
     "twitter-prep": ("drafting", "draft"),
     "feedback-digest": ("learning", "feedback"),
+    "invent-topic": ("learning", "inventing topic"),
+    "invent-queries": ("learning", "inventing queries"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
