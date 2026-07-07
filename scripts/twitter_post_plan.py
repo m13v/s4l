@@ -962,8 +962,9 @@ def _s4l_state_dir() -> str:
 def _write_activity(label: str) -> None:
     """Best-effort live status for the S4L menu bar, which polls
     <state_dir>/activity.json. Mirrors the Node server's writeActivity shape so
-    the menu-bar spinner renders our per-post progress ("posting 3/10", then
-    "posted 3/10 ✓"). Purely cosmetic: a failure here never affects posting."""
+    the menu-bar spinner renders our per-post progress ("posting +3 · 4/10",
+    then "posting +3 ✓ · 4/10"). Purely cosmetic: a failure here never affects
+    posting."""
     try:
         sd = _s4l_state_dir()
         os.makedirs(sd, exist_ok=True)
@@ -1141,9 +1142,11 @@ def main() -> int:
             # REAL count of replies that actually landed), not `_idx` (the loop
             # position). _idx races through already-posted / deleted cards as instant
             # dedup-skips, so a bare "posting 88/139" looked like 88 were sent when
-            # 0 were — misleading on every restart. "{posted} sent · {_idx}/{_total}"
-            # keeps the honest number in front; the position is secondary context.
-            _write_activity(f"posting {posted} sent · {_idx}/{_total}")
+            # 0 were — misleading on every restart. "+{posted}" keeps the honest
+            # number in front; the position is secondary context. The label MUST
+            # keep the "posting" prefix: the menu bar detects a live drain by that
+            # substring (s4l_menubar _compute_posting_label / _spin).
+            _write_activity(f"posting +{posted} · {_idx}/{_total}")
             # Re-stamp the batch hold at each candidate boundary so the
             # POST_LOCK_EXPIRY failsafe measures silence from the LAST real
             # progress, not from batch start. Insurance on top of the child's own
@@ -1169,7 +1172,7 @@ def main() -> int:
                 # Flash the confirmation with a short dwell so the menu bar shows
                 # it before the next iteration's "posting" overwrites the label.
                 # `posted` was just incremented, so it reflects the reply that landed.
-                _write_activity(f"posting {posted} sent ✓ · {_idx}/{_total}")
+                _write_activity(f"posting +{posted} ✓ · {_idx}/{_total}")
                 time.sleep(0.6)
             elif outcome == "skipped":
                 skipped += 1
