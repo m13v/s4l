@@ -240,6 +240,40 @@ button.switch[aria-checked="true"] { background: var(--fg); }
 button.switch[aria-checked="true"] .knob { transform: translateX(14px); }
 button.switch:disabled { opacity: 0.45; }
 
+/* Lane split slider (both-lanes-on only): grayscale range matching the switch. */
+.lane-split {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 2px;
+}
+.lane-split[hidden] { display: none; }
+.lane-split input[type="range"] {
+  flex: none;
+  width: 120px;
+  height: 20px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+}
+.lane-split input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+.lane-split input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+.lane-split input[type="range"]:disabled { opacity: 0.45; }
+
 /* ---- stats ------------------------------------------------------------------
  * Dial row: big tabular numerals over micro labels, hairline-separated. */
 .stats-grid {
