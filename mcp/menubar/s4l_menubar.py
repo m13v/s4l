@@ -476,6 +476,11 @@ class S4LMenuBar(rumps.App):
         # "update to an OLDER version" because it polled a different registry).
         self._update_available = False
         self._latest_version = None
+        # True from the instant "Update now" is clicked until the download +
+        # unzip either fails or hands off to the update-verify.json marker
+        # (see _update_in_flight). Drives the immediate title spinner + menu
+        # disable so the click never reads as dead while curl/unzip run.
+        self._updating_mcpb = False
         # Release channel + resolved release tag for this box (from the snapshot;
         # stable = releases/latest, staging = newest release overall). The tag is
         # what a staging update downloads from. See scripts/s4l_channel.py.
@@ -1211,9 +1216,24 @@ class S4LMenuBar(rumps.App):
         """User clicked 'Update now & restart Claude Desktop'. Pull the latest .mcpb, unpack it over
         the Desktop extension dir in place, and restart Claude so the new server
         loads. The menu bar is a launchd process (not a Claude child), so the
-        restart is clean. Heavy work runs on a background thread."""
+        restart is clean. Heavy work runs on a background thread.
+
+        Give instant feedback before any of that: the click used to be silent
+        until the marker file appeared (up to 300s later), reading as a dead
+        button. Flip _updating_mcpb, kick the spinner, and force a menu
+        rebuild synchronously so the title + disabled items change this tick,
+        not on the next 5s poll."""
+        if self._update_in_flight():
+            return  # already running; ignore a double-click
+        self._updating_mcpb = True
+        self._sig = None
+        if self._spinner is None:
+            self._spin_i = 0
+            self._spinner = rumps.Timer(self._spin, 0.12)
+            self._spinner.start()
         self._notify("S4L", "Updating… Claude will restart in a moment.")
         threading.Thread(target=self._mcpb_update_work, daemon=True).start()
+        self._tick(None)
 
     @staticmethod
     def _claude_user_data_dirs():
@@ -1327,11 +1347,15 @@ class S4LMenuBar(rumps.App):
             r = subprocess.run(["curl", "-fLs", "-m", "300", self._mcpb_url(), "-o", mcpb],
                                capture_output=True, timeout=320)
             if r.returncode != 0 or not os.path.exists(mcpb) or os.path.getsize(mcpb) < 100000:
+                self._updating_mcpb = False
+                self._sig = None
                 self._notify("S4L update failed", "Couldn't download the update — check your connection.")
                 return
             r = subprocess.run(["unzip", "-oq", mcpb, "-d", self._ext_dir()],
                                capture_output=True, timeout=180)
             if r.returncode != 0:
+                self._updating_mcpb = False
+                self._sig = None
                 self._notify("S4L update failed", "Couldn't unpack the update.")
                 return
             # Record what we just installed so the tick loop can verify the
@@ -1378,6 +1402,8 @@ class S4LMenuBar(rumps.App):
             else:
                 self._notify("S4L updated", "Claude restarted on the latest version.")
         except Exception as e:
+            self._updating_mcpb = False
+            self._sig = None
             self._notify("S4L update failed", str(e)[:140])
         finally:
             try:
@@ -1398,6 +1424,14 @@ class S4LMenuBar(rumps.App):
     @staticmethod
     def _update_verify_path():
         return os.path.join(st.state_dir(), "update-verify.json")
+
+    def _update_in_flight(self):
+        """True from the instant 'Update now' is clicked (_updating_mcpb, set
+        before curl/unzip even start) through Claude's restart + verification
+        (update-verify.json). Single predicate the title spinner, the menu's
+        update section, and the disable-other-items pass all read, so there's
+        no gap between click and marker where the UI looks idle."""
+        return self._updating_mcpb or os.path.exists(self._update_verify_path())
 
     @staticmethod
     def _effective_version():
@@ -1472,12 +1506,16 @@ class S4LMenuBar(rumps.App):
                 "Try updating again from the menu.",
             )
 
-    @staticmethod
-    def _drop_update_marker(p):
+    def _drop_update_marker(self, p):
         try:
             os.remove(p)
         except OSError:
             pass
+        # Single resolve point for _update_in_flight: whatever path got us
+        # here (settled, timed out, or a stale no-target marker), the in-flight
+        # window is over, so re-enable the rest of the menu on the next paint.
+        self._updating_mcpb = False
+        self._sig = None
 
     @staticmethod
     def _scheduled_task_cwd_needs_fix():
@@ -1793,6 +1831,16 @@ class S4LMenuBar(rumps.App):
         # so the title can show steady posting progress even when the server's
         # per-post activity.json is momentarily empty between posts.
         self._posting_label = self._compute_posting_label()
+        # An update in flight always owns the title (Claude is about to
+        # restart regardless of stall/posting state) — make sure the spinner
+        # is running and skip the stall short-circuit below, which would
+        # otherwise stomp "S4L updating" with "S4L ⚠" within a second.
+        if self._update_in_flight():
+            if self._spinner is None:
+                self._spin_i = 0
+                self._spinner = rumps.Timer(self._spin, 0.12)
+                self._spinner.start()
+            return
         # While the autopilot is stalled, the server's "drafting"/"scanning" label is
         # stale (the producer re-asserts it for the whole time it blocks on a job no
         # routine will claim). Don't let the spinner own the title with that lie —
