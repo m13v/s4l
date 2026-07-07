@@ -143,6 +143,17 @@ def parse_last_json_object(text):
 
 
 def _tail_link_rate() -> float:
+    # DRAFT_ONLY=1 candidates always go through a human-approval review card
+    # (run-draft-and-publish.sh exports DRAFT_ONLY before invoking the cycle
+    # that calls this script). Force rate=1.0 there so a hand-approved draft
+    # never drops the link the user already saw baked into the card text —
+    # ported from the old post-time override in mcp/src/index.ts
+    # (`TWITTER_TAIL_LINK_RATE: "1.0"` on the post_drafts path), which no
+    # longer fires now that the decision happens here, before the card is
+    # ever shown. The autonomous DRAFT_ONLY=0 lane keeps running the real A/B
+    # experiment at the configured rate.
+    if os.environ.get("DRAFT_ONLY") == "1":
+        return 1.0
     try:
         return float(os.environ.get("TWITTER_TAIL_LINK_RATE", "0.5"))
     except ValueError:
