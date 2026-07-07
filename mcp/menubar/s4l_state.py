@@ -873,8 +873,9 @@ def _write_approved_queue(d):
 #   personal_brand (default ON)  -> link-free organic engagement for the user's
 #                                   own brand (forced persona project)
 #   promotion      (default OFF) -> the product-marketing pipeline (link replies)
-# Both can be ON (the cycle then splits 50/50). State is ONE file the cycle
-# wrapper also reads via scripts/s4l_mode.py; keep the shape in lockstep with it.
+# Both can be ON; the cycle then splits per `personal_brand_share` (default
+# 0.5). State is ONE file the cycle wrapper also reads via
+# scripts/s4l_mode.py; keep the shape in lockstep with it.
 MODE_FILE = "mode.json"
 MODE_PROMOTION = "promotion"
 MODE_PERSONAL_BRAND = "personal_brand"
@@ -913,10 +914,17 @@ def read_mode():
 
 def write_flags(personal_brand, promotion):
     """Persist both lane flags atomically (plus the derived legacy `mode`).
+
+    Preserves any OTHER keys already in mode.json (`draft_only`,
+    `personal_brand_share`, ...) so a lane flip can never silently reset an
+    unrelated setting — same contract as scripts/s4l_mode.py write_flags().
     Returns the written flags. Never raises — a menu click must not crash."""
     flags = {"personal_brand": bool(personal_brand), "promotion": bool(promotion)}
     try:
-        payload = dict(flags)
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(flags)
         payload["mode"] = MODE_PERSONAL_BRAND if flags["personal_brand"] else MODE_PROMOTION
         p = Path(state_dir()) / MODE_FILE
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -926,6 +934,43 @@ def write_flags(personal_brand, promotion):
     except Exception:
         pass
     return flags
+
+
+def read_split():
+    """Personal-brand share of both-lanes-on cycles (0.0-1.0, default 0.5).
+    Mirrors scripts/s4l_mode.py get_split()."""
+    d = read_json(MODE_FILE)
+    try:
+        share = float(d.get("personal_brand_share"))
+    except (TypeError, ValueError, AttributeError):
+        return 0.5
+    return min(1.0, max(0.0, share))
+
+
+def write_split(share):
+    """Persist the personal-brand share, preserving every other mode.json key.
+    Returns the written share. Never raises — a menu click must not crash."""
+    try:
+        share = min(1.0, max(0.0, float(share)))
+    except (TypeError, ValueError):
+        return read_split()
+    try:
+        payload = read_json(MODE_FILE)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["personal_brand_share"] = share
+        flags = read_flags()
+        payload.setdefault("personal_brand", flags["personal_brand"])
+        payload.setdefault("promotion", flags["promotion"])
+        payload["mode"] = MODE_PERSONAL_BRAND if flags["personal_brand"] else MODE_PROMOTION
+        p = Path(state_dir()) / MODE_FILE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(p))
+    except Exception:
+        pass
+    return share
 
 
 def write_mode(mode):
