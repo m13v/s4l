@@ -1,6 +1,6 @@
 {
   "name": "@m13v/s4l-mcp",
-  "version": "1.6.204-rc.26",
+  "version": "1.6.204-rc.27",
   "private": true,
   "description": "Desktop MCP client for social-autoposter (X/Twitter rail): manual draft/review/approve loop, autopilot control, and stats. Thin wrapper over the existing pipeline scripts.",
   "license": "MIT",
