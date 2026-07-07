@@ -85,18 +85,31 @@ def _capture(err, **tags):
         pass
 
 
-def _capture_msg(message, level="warning", **tags):
+def _capture_msg(message, level="warning", _extra=None, **tags):
     """Report a handled menu-bar CONDITION (not an exception) to Sentry so we get
     fleet-wide signal on operational states like an orphaned/disabled/rate-limited
     draft schedule. capture_exception only covers thrown errors; this covers the
     "nothing crashed but the autopilot isn't running" case. No-op if the Sentry
-    bootstrap failed."""
+    bootstrap failed. `_extra` (dict) rides as event extras for structured
+    payloads too big for tags (e.g. the registry summary)."""
     try:
         if _sentry is not None:
             tags.setdefault("component", "menubar")
-            _sentry.capture_message(message, level=level, tags=tags)
+            _sentry.capture_message(message, level=level, tags=tags, extra=_extra)
     except Exception:
         pass
+
+
+def _registry_summary_for_capture():
+    """The scheduled-task registry breakdown (scripts/scheduled_tasks_snapshot
+    build_summary) as a Sentry extra, so every needs-attention event carries the
+    WHY (which account registry has the task, enabled, last_run_at age) instead
+    of requiring on-box forensics. Best-effort: None on any failure."""
+    try:
+        import scheduled_tasks_snapshot
+        return scheduled_tasks_snapshot.build_summary()
+    except Exception:
+        return None
 
 
 def _flush():
@@ -1914,7 +1927,11 @@ class S4LMenuBar(rumps.App):
         # never nag the user mid-onboarding — only the value is now always honest.
         schedule_state = self._schedule_state()
         self._schedule_state_cache = schedule_state
-        attention = setup_complete and schedule_state in ("missing", "disabled")
+        # 'stalled' (task present + enabled, host scheduler stopped launching it:
+        # the Desktop warm-session wedge or an account-switch orphan) needs
+        # attention just like missing/disabled, but its primary fix is a Claude
+        # Desktop restart, not re-arm (Karol, 2026-07-06).
+        attention = setup_complete and schedule_state in ("missing", "disabled", "stalled")
         # Routines-lane rate limit (429): the draft tasks ARE registered and firing
         # for this account, but every run dies on a Claude rate limit, so nothing
         # drafts. Re-arm can't fix that — surface it as its own ⚠ attention state
