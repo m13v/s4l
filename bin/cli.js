@@ -823,6 +823,29 @@ function installMcp() {
   } catch (e) {
     console.warn('  WARNING: could not stamp MCP version:', e && e.message);
   }
+  // Auto-opt a fresh install into the staging channel when the version being
+  // installed is itself a pre-release (-rc.N) — e.g. `npx social-autoposter@
+  // X.Y.Z-rc.N init`. Without this, channel.json stays absent, which
+  // scripts/s4l_channel.py's fail-safe default reads as "stable", so the box
+  // would install this one rc and then silently stop tracking staging (never
+  // pick up the next rc). Mirrors the same one-time write in
+  // mcp/src/runtime.ts's provision() for the .mcpb (Desktop) install path.
+  // Only writes when no channel marker exists yet — never overrides an
+  // existing preference (e.g. a user who already opted back out).
+  try {
+    const pkgVersion = require('../package.json').version;
+    if (pkgVersion.includes('-rc.')) {
+      const stateDir = process.env.S4L_STATE_DIR || path.join(os.homedir(), '.social-autoposter-mcp');
+      const channelPath = path.join(stateDir, 'channel.json');
+      if (!fs.existsSync(channelPath)) {
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(channelPath, JSON.stringify({ channel: 'staging' }, null, 2) + '\n');
+        console.log('  pre-release install detected -> opted into the staging channel');
+      }
+    }
+  } catch (e) {
+    console.warn('  WARNING: could not set staging channel:', e && e.message);
+  }
   console.log('  installing MCP runtime deps (npm install --omit=dev in mcp/)');
   const npmRes = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
     cwd: mcpDest,
