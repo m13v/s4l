@@ -2232,6 +2232,9 @@ class S4LMenuBar(rumps.App):
                     "thread_url": decision.get("thread_url"),
                     "thread_author": decision.get("thread_author"),
                     "draft_text": decision.get("text"),
+                    # Pre-edit draft (None unless edited=true): lets the
+                    # feedback digest diff what the user changed.
+                    "original_text": decision.get("original_text"),
                 }
             )
         except Exception:
