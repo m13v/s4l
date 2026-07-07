@@ -178,6 +178,18 @@ def _mode() -> str:
     return "personal_brand" if _flags().get("personal_brand") else "promotion"
 
 
+def _personal_brand_share() -> float:
+    """Share of both-lanes-on cycles that run personal_brand (0.0-1.0).
+
+    Mirrors scripts/s4l_mode.py get_split(): missing/invalid key -> 0.5."""
+    d = _read_json(os.path.join(_state_dir(), "mode.json")) or {}
+    try:
+        share = float(d.get("personal_brand_share"))
+    except (TypeError, ValueError):
+        return 0.5
+    return min(1.0, max(0.0, share))
+
+
 def _mode_chosen() -> bool:
     return os.path.exists(os.path.join(_state_dir(), "mode.json"))
 
@@ -580,6 +592,7 @@ def compute() -> dict:
         "setup_complete": setup_complete,
         "mode": mode,
         "flags": _flags(),
+        "personal_brand_share": _personal_brand_share(),
         "onboarding": _onboarding_live(live_status),
     }
 
