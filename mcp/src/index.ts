@@ -1485,7 +1485,8 @@ tool(
     title: "Choose engagement lanes (personal brand + optional product promotion)",
     description:
       "Set or read the engagement LANES the autopilot drafts in. There are TWO independent lanes that " +
-      "can BOTH be on (the cycle then splits 50/50): PERSONAL BRAND (organic, link-free engagement in " +
+      "can BOTH be on (the cycle then splits per the configurable lane split, default 50/50 — see " +
+      "action:'split'): PERSONAL BRAND (organic, link-free engagement in " +
       "the user's own voice — ON by default) and PRODUCT PROMOTION (the marketing pipeline, link " +
       "replies — OFF by default, opt-in). This is a SETUP step: AFTER X is connected, the profile " +
       "is scanned (for VOICE), and the user has answered the DICTATION interview (for TOPICS + corpus), " +
@@ -1500,9 +1501,9 @@ tool(
       "project_config afterward. The user flips either lane any time from the menu-bar checkmarks.",
     inputSchema: {
       action: z
-        .enum(["get", "set", "toggle"])
+        .enum(["get", "set", "toggle", "split"])
         .optional()
-        .describe("get = read current lane flags + persona status. set = record the user's chosen lanes (provisions the persona). toggle = lightweight flip of ONE lane (pass `lane`); mode.json only, no persona work — the dashboard/menu-bar quick toggle."),
+        .describe("get = read current lane flags + persona status + lane split. set = record the user's chosen lanes (provisions the persona). toggle = lightweight flip of ONE lane (pass `lane`); mode.json only, no persona work — the dashboard/menu-bar quick toggle. split = set the personal-brand share of both-lanes-on cycles (pass `split`); mode.json only — the dashboard slider."),
       personal_brand: z
         .boolean()
         .optional()
@@ -1515,6 +1516,14 @@ tool(
         .enum(["personal_brand", "promotion"])
         .optional()
         .describe("action:'toggle' — which single lane to flip."),
+      split: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe(
+          "action:'split' (or alongside action:'set') — the personal-brand SHARE of cycles when both " +
+            "lanes are on: 0.7, 70, or '70%' all mean 70% personal brand / 30% promotion. Clamped to " +
+            "0..1; ignored while only one lane is on (single-lane states run that lane every cycle)."
+        ),
       mode: z
         .enum(["personal_brand", "promotion"])
         .optional()
@@ -1572,11 +1581,47 @@ tool(
       }
     };
 
+    const readSplit = async (): Promise<number> => {
+      const r = await runPython("scripts/s4l_mode.py", ["split"], { timeoutMs: 15_000 });
+      try {
+        const v = Number(JSON.parse((r.stdout || "").trim()).personal_brand_share);
+        return Number.isFinite(v) ? v : 0.5;
+      } catch {
+        return 0.5;
+      }
+    };
+
     if (action === "get") {
       const flags = await readFlags();
       const persona = findPersonaProject();
       const mode = flags.personal_brand ? "personal_brand" : "promotion";
-      return jsonContent({ flags, mode, persona: persona ? persona.name : null });
+      return jsonContent({
+        flags,
+        mode,
+        personal_brand_share: await readSplit(),
+        persona: persona ? persona.name : null,
+      });
+    }
+
+    // Set the both-lanes-on split (the dashboard slider): just rewrite
+    // mode.json via s4l_mode.py — NO persona provisioning, same weight class
+    // as action:'toggle'.
+    if (action === "split") {
+      if (args.split === undefined || args.split === null || args.split === "") {
+        return jsonContent({ personal_brand_share: await readSplit() });
+      }
+      const res = await runPython("scripts/s4l_mode.py", ["split", String(args.split)], {
+        timeoutMs: 15_000,
+      });
+      if (res.code !== 0) {
+        const tail = (res.stderr || res.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
+        return textContent(`Could not set the lane split: ${tail}`);
+      }
+      try {
+        return jsonContent(JSON.parse((res.stdout || "").trim()));
+      } catch {
+        return jsonContent({ personal_brand_share: await readSplit() });
+      }
     }
 
     // Lightweight flip of ONE lane (the dashboard/menu-bar quick toggle): just
@@ -1610,7 +1655,7 @@ tool(
     if (!personalBrand && !promotion) {
       return textContent(
         "At least one lane must be on. personal_brand is the default; set promotion:true if the user " +
-          "also wants product promotion (both on -> the cycle splits 50/50)."
+          "also wants product promotion (both on -> the cycle splits per the lane split, default 50/50)."
       );
     }
     const mode = personalBrand ? "personal_brand" : "promotion";
@@ -1626,6 +1671,12 @@ tool(
       const tail = (setRes.stderr || setRes.stdout).trim().split("\n").slice(-1)[0] || "unknown error";
       blockOnboardingMilestone("mode_chosen", "mode_set_failed", tail, { personal_brand: personalBrand, promotion });
       return textContent(`Couldn't save the engagement lanes: ${tail}`);
+    }
+
+    // Optional lane split rider on 'set' (best-effort: the lanes are saved
+    // either way, and the split keeps its previous/default value on failure).
+    if (args.split !== undefined && args.split !== null && args.split !== "") {
+      await runPython("scripts/s4l_mode.py", ["split", String(args.split)], { timeoutMs: 15_000 });
     }
 
     // NOTE (2026-07-06): the draft-only flag (mode.json {"draft_only": false} —
