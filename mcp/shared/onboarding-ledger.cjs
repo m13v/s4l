@@ -10,6 +10,7 @@ const MILESTONES = [
   "environment_checked",
   "runtime_ready",
   "x_connected",
+  "x_verified",
   "profile_scanned",
   "mode_chosen",
   "project_ready",
