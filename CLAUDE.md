@@ -292,3 +292,15 @@ skeleton ban, `control_v2` keeps the plain persona directive), so the assigned
 therefore KEEPS `draft_prompt` for `lane=personal_brand` (it used to drop it, back
 when the persona directive overrode both arms wholesale), so the arm stamps onto
 persona review cards and the per-arm readout covers both lanes.
+
+## Debugging a customer install (READ THIS FIRST when a customer reports "S4L not working")
+
+Everything below is queryable from this machine, no SSH to the customer. Check in THIS order; the first two usually answer "why".
+
+1. **Registry truth: `installations.scheduled_tasks_sample`** (Postgres, keychain `s4l-database-url`). The MCP heartbeat ships a summary of every scheduled-tasks.json on the customer box (task id, enabled, cwd_tail, last_run_at, registries count, worker_tasks count), refreshed every ~15 min while Claude Desktop is open. `registries: N, worker_tasks < N` + frozen `last_run_at` = account switch orphaned the worker task. `scheduled_tasks_sampled_at` tells you how fresh it is.
+2. **Claude session transcripts: GCP Cloud Logging, project `s4l-app-prod`**. `relay_session_transcripts.py` ships the actual queue-worker (and s4l-repo) session transcripts every 5 min. Query: `gcloud logging read 'jsonPayload.install_id="<uuid>" AND jsonPayload.context:"transcript:"' --project=s4l-app-prod`. Shows what each s4l-worker run actually said/did (e.g. "No jobs", rate-limit errors). Pipeline subprocess logs and onboarding milestones ride the same lane (`jsonPayload.logType="onboarding-milestone"`).
+3. **Sentry, org `mediar-n5`, project `social-autoposter`** (token: keychain `sentry-auth-token`). Menubar warnings ("S4L draft autopilot needs attention: missing|disabled|draft_stuck|rate_limited"), field diagnosis reports (component=diagnose_fix), post_drafts errors. Filter by tag `install_id`. Discover API `statsPeriod` accepts only 24h/14d.
+4. **Postgres history**: `installation_state_snapshots` (jsonb; `runtime.pipeline_version` dates updates; reason=startup rows = Claude Desktop restarts), `twitter_batches` by `owner_host` (batch ids are in the CUSTOMER's local time; stuck at `phase2b-prep` = worker not servicing queue jobs), `posts` by `install_id`, `review_events` by `install_id::text` (proves user was at the machine).
+5. Find the install_id: Sentry events carry hostname; `installations` has hostname/tz/app_version.
+
+Key architecture fact behind most confusion: the launchd lanes (cycle producer, posting, review cards) run WITHOUT Claude; only draft generation needs the `s4l-worker` scheduled task, which fires ONLY while Claude Desktop is open AND logged into the account that owns the registry entry. "It's posting but shows a warning" = worker dead, launchd alive.
