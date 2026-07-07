@@ -286,7 +286,7 @@ AUTOPILOT_RUNNING_STALL_SECONDS = 900
 # truth, scripts/schedule_state.py (FIRING_WINDOW there). _schedule_state delegates
 # to it, so it is intentionally NOT redefined here.
 
-# How long the producer can sit narrating "drafting replies (Nm)" before we treat
+# How long the producer can sit narrating "draft Nm" before we treat
 # the draft as STUCK rather than healthy. The producer writes that label the whole
 # time it blocks waiting for a worker to return a result (up to its 30-min queue
 # timeout). A healthy drain clears in ~1-2 min; if the label has been "drafting"
@@ -317,9 +317,10 @@ REVIEW_UNATTENDED_SENTRY_SECONDS = 3600.0
 
 def _label_elapsed_secs(label):
     """Parse the trailing duration the producer encodes in a drafting activity
-    label — 'drafting replies (8m)', '... (queued 18m)', '... (45s)' — into
-    seconds. Returns 0 when there's no parseable duration. _fmt_dur (claude_job.py)
-    only ever emits '<n>s' (<60s) or '<n>m', so this mirror stays trivial."""
+    label — 'draft 8m', 'draft ⧖18m' (⧖ = still queued, unclaimed), '... 45s' —
+    into seconds. Returns 0 when there's no parseable duration. _fmt_dur
+    (claude_job.py) only ever emits '<n>s' (<60s) or '<n>m', so this mirror
+    stays trivial."""
     if not label:
         return 0
     import re
@@ -1748,7 +1749,7 @@ class S4LMenuBar(rumps.App):
             self._drain_baseline = None
             return None
         sent = max(0, posted - self._drain_baseline)
-        return f"posting · {sent} sent"
+        return f"posting +{sent}"
 
     def _spin(self, _):
         # Stall beats a stale activity label: bail (and self-stop) so the title
