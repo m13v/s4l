@@ -1054,6 +1054,38 @@ async function ensureTwitterBrowserForPost() {
 }
 
 async function postApproved(batchId: string, plan: Plan) {
+  // Drain serialization (2026-07-06 incident). Every call drains the WHOLE
+  // approved backlog, so overlapping drains are pure waste and actively harmful:
+  // a Claude restart mid-drain at 00:25Z left 10 landed replies unstamped, then
+  // restart recovery + per-approval calls launched 8 concurrent approved=14
+  // drains that re-attempted already-replied threads, fought over the browser
+  // lock, and clobbered each other's posted stamps. Wait for any in-flight drain
+  // (ours via `postingActive`, a sibling MCP's via the posting flag on disk)
+  // instead of stacking a new one. 8-minute cap: comfortably above a normal
+  // drain, comfortably below the menu bar's 900s loopback timeout so a waiting
+  // call still returns to its caller. After a wait, RE-READ the plan so the
+  // peer's posted/terminal stamps shrink our backlog before we attempt anything.
+  {
+    const gateDeadline = Date.now() + 8 * 60_000;
+    let waited = false;
+    while ((postingActive || isPeerDrainActive()) && Date.now() < gateDeadline) {
+      waited = true;
+      await sleepMs(5000);
+    }
+    if (postingActive || isPeerDrainActive()) {
+      return {
+        attempted: 0,
+        exit_code: 0,
+        summary:
+          "another posting drain has been running for 8+ minutes; approved cards stay " +
+          "queued in the review store — re-run post_drafts once it finishes",
+      };
+    }
+    if (waited) {
+      const fresh = readPlan(batchId);
+      if (fresh) plan = fresh;
+    }
+  }
   // Post every card the user APPROVED that hasn't already landed or been ruled out.
   // `approved` is now a DURABLE decision (sticky, never cleared by a later call), so
   // filtering out posted/terminal here makes this idempotent: re-running it only
@@ -1256,9 +1288,48 @@ async function postApproved(batchId: string, plan: Plan) {
   }
   if (touchedPlan) {
     try {
-      writePlan(batchId, plan);
+      // Merge our stamps into a FRESH read of the store instead of rewriting the
+      // whole plan from the copy we took minutes ago. The old whole-file write
+      // was last-writer-wins: while this batch posted, the menubar (decision
+      // re-stamps) and any peer drain also wrote the store, and whichever run
+      // finished last erased the others' posted flags (2026-07-06: card 344877
+      // posted at 00:29Z ended `posted=None, terminal=duplicate_thread_pre_post`
+      // after a later run's stale write). Merge rules: `posted` is sticky and
+      // wins over terminal; `terminal` never overwrites a fresh `posted=true`.
+      // Fallback: candidates without a candidate_id can't be matched into the
+      // fresh copy, so keep the legacy whole-plan write for those older plans.
+      const mergeable = approved.every(
+        (c) => c.candidate_id !== undefined && c.candidate_id !== null
+      );
+      const fresh = mergeable ? readPlan(batchId) : null;
+      if (fresh && Array.isArray(fresh.candidates)) {
+        const freshById = new Map<string, PlanCandidate>();
+        fresh.candidates.forEach((c: PlanCandidate) => {
+          if (c.candidate_id !== undefined && c.candidate_id !== null)
+            freshById.set(String(c.candidate_id), c);
+        });
+        for (const c of approved) {
+          const f = freshById.get(String(c.candidate_id));
+          if (!f) continue;
+          if (c.posted === true) {
+            f.posted = true;
+            f.terminal = false;
+            if (c.our_url) f.our_url = c.our_url;
+          } else if (c.terminal === true && f.posted !== true) {
+            f.terminal = true;
+            f.terminal_reason = c.terminal_reason;
+          }
+        }
+        writePlan(batchId, fresh);
+      } else {
+        writePlan(batchId, plan);
+      }
     } catch {
-      /* best effort */
+      try {
+        writePlan(batchId, plan);
+      } catch {
+        /* best effort */
+      }
     }
   }
   // Post failures are HANDLED in the pipeline (it returns a count, never throws),
@@ -4149,6 +4220,21 @@ function isPostingFlagFresh(): boolean {
   try {
     const j = JSON.parse(fs.readFileSync(postingFlagPath(), "utf-8"));
     return typeof j?.expires_at === "number" && j.expires_at > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+// True when a DIFFERENT process holds a fresh posting flag — i.e. a sibling MCP
+// instance is mid-drain. Our own fresh flag doesn't count: same-process
+// re-entrancy is covered by the in-memory `postingActive`, and a leftover flag
+// from our own earlier drain (a crash before the finally cleared it) must not
+// deadlock us against ourselves.
+function isPeerDrainActive(): boolean {
+  try {
+    const j = JSON.parse(fs.readFileSync(postingFlagPath(), "utf-8"));
+    if (typeof j?.expires_at !== "number" || j.expires_at <= Date.now()) return false;
+    return typeof j?.pid === "number" && j.pid !== process.pid;
   } catch {
     return false;
   }
