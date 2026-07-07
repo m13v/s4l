@@ -1,5 +1,6 @@
 skill/logs/
 skill/cache/
+scripts/state/
 *.log
 .env
 node_modules/
