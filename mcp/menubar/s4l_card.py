@@ -908,27 +908,45 @@ class _ReviewController(NSObject):
         self._stats_popover = None
 
     @objc.python_method
-    def _show_popover(self, text, anchor, what):
+    def _show_popover(self, content, anchor, what):
         """One popover surface for both eyes (thread stats, draft details).
         Only one is ever open: the two anchors are far apart, so hover-out
-        closes the first before hover-in opens the other."""
-        if anchor is None or not text:
+        closes the first before hover-in opens the other. `content` is a
+        single string (stats: one compact line) or a list of strings
+        (details: one bulleted row per field, gapped vertically so the
+        fields read as a list instead of one dense run-on paragraph)."""
+        if anchor is None or not content:
             return
         if self._stats_popover is not None and self._stats_popover.isShown():
             return
+        lines = content if isinstance(content, list) else [content]
+        bulleted = len(lines) > 1
+        rows = [f"•  {line}" if bulleted else line for line in lines]
+        row_gap = 8 if bulleted else 0
         font = NSFont.systemFontOfSize_(12)
-        s = NSAttributedString.alloc().initWithString_attributes_(
-            text, {NSFontAttributeName: font}
-        )
-        # Wrap-aware measurement (the details popover is multi-line; option 1 =
-        # NSStringDrawingUsesLineFragmentOrigin). +34: 13px side insets plus
+        # Wrap-aware measurement per row (option 1 = NSStringDrawingUsesLine
+        # FragmentOrigin; a row can itself be multi-line, e.g. the truncated
+        # original-thread text). +34 on width: 13px side insets plus
         # NSTextField's own ~4px internal padding, which otherwise clips the
-        # last word.
-        measured = s.boundingRectWithSize_options_(NSMakeSize(300, 10_000), 1)
-        pw = int(measured.size.width) + 34
-        ph = int(measured.size.height) + 19
+        # last word. +3 on each row's height: buffer against descender
+        # clipping (matches the single-line sizing this replaces).
+        heights = []
+        pw = 0
+        for row in rows:
+            s = NSAttributedString.alloc().initWithString_attributes_(
+                row, {NSFontAttributeName: font}
+            )
+            measured = s.boundingRectWithSize_options_(NSMakeSize(300, 10_000), 1)
+            heights.append(int(measured.size.height) + 3)
+            pw = max(pw, int(measured.size.width))
+        pw += 34
+        ph = sum(heights) + row_gap * (len(rows) - 1) + 16
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
-        view.addSubview_(_label(NSMakeRect(13, 8, pw - 26, ph - 16), text, size=12))
+        y = ph - 8
+        for row, h in zip(rows, heights):
+            y -= h
+            view.addSubview_(_label(NSMakeRect(13, y, pw - 26, h), row, size=12))
+            y -= row_gap
         vc = NSViewController.alloc().init()
         vc.setView_(view)
         pop = NSPopover.alloc().init()
@@ -963,7 +981,7 @@ class _ReviewController(NSObject):
     @objc.python_method
     def _show_details_popover(self):
         lines = _details_lines(self._drafts[self._idx])
-        self._show_popover("\n".join(lines), self._details_btn, "details")
+        self._show_popover(lines, self._details_btn, "details")
 
     # Click on an eye SHOWS its popover, never toggles it closed: a click is
     # physically preceded by hover (mouseEntered already opened it), so a
