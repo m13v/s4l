@@ -93,8 +93,11 @@ def load_config():
 def _event_line(e: dict) -> str:
     """One compact evidence line per event for the prompt."""
     parts = [f"[{e.get('decision')}{'+loved' if e.get('loved') else ''}]"]
+    note = (e.get("reject_note") or "").strip()
     if e.get("reject_category"):
         parts.append(f"category={e['reject_category']}")
+    elif e.get("decision") == "rejected" and not note:
+        parts.append("no_reason_given")
     if e.get("thread_author"):
         parts.append(f"author=@{e['thread_author']}")
     # Candidate-join context (author_followers, search_topic, tweet_text come
@@ -114,7 +117,6 @@ def _event_line(e: dict) -> str:
     if e.get("edited"):
         parts.append("edited_before_approving")
     line = " ".join(parts)
-    note = (e.get("reject_note") or "").strip()
     if note:
         line += f"\n  user note: {note[:300]}"
     tweet = (e.get("tweet_text") or "").strip()
@@ -139,6 +141,8 @@ def build_prompt(project: dict, events: list[dict], overall_events: list[dict] |
     block = lp.get_block(project)
     overall_events = overall_events or []
     rejected = [e for e in events if e.get("decision") == "rejected"]
+    no_reason = [e for e in rejected
+                 if not e.get("reject_category") and not (e.get("reject_note") or "").strip()]
     approved = [e for e in events if e.get("decision") == "approved"]
     loved = [e for e in approved if e.get("loved")]
     voice_never = ((project.get("voice") or {}).get("never")) or []
@@ -168,10 +172,10 @@ CURRENT learned_preferences:
 CURRENT voice.never: {json.dumps(voice_never)}
 CURRENT content_guardrails.do_not: {json.dumps(guard_do_not)}
 
-NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(approved)} approved, {len(loved)} of the approvals loved):
+NEW REVIEW EVENTS since the last digest ({len(rejected)} rejected, {len(no_reason)} of the rejects without a stated reason, {len(approved)} approved, {len(loved)} of the approvals loved):
 {ev_lines}{overall_block}
 
-Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "edited_before_approving" with an ORIGINAL/REWROTE pair means the user hand-corrected our draft before posting: the rewrite is a direct statement of the voice they want. Diff the pair; when 2+ edits show the same correction (a phrase type removed, a structure replaced, tone shifted, length cut), distill that recurring pattern into draft_style_notes. Ignore edit content that is lead-specific or cosmetic (typo fixes, one-off facts); learn only what generalizes. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked a stronger emoji in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 3 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
+Categories: wrong_author = the thread's author/audience was a bad fit; off_topic = the thread itself was a bad fit; bad_draft = thread was fine but the written reply was off; other = see the note. "no_reason_given" means the user rejected without picking a category or typing a note: the rejection itself is real, but WHY is your inference from the author/thread/draft context alone, so treat it as weak evidence. It can corroborate a pattern that reasoned events already show, but a no_reason_given reject never justifies a new entry or an author block on its own, and 2+ of them agreeing still only justify an entry when the shared pattern in their context is unmistakable. "edited_before_approving" with an ORIGINAL/REWROTE pair means the user hand-corrected our draft before posting: the rewrite is a direct statement of the voice they want. Diff the pair; when 2+ edits show the same correction (a phrase type removed, a structure replaced, tone shifted, length cut), distill that recurring pattern into draft_style_notes. Ignore edit content that is lead-specific or cosmetic (typo fixes, one-off facts); learn only what generalizes. "user_checked=profile_click" means the user opened the author's profile before deciding (a strong author-quality signal even without a note). "[approved+loved]" means the user picked a stronger emoji in the approve row ("this was a really good one"; approve_level_N in interactions carries the strength, 3 = best of the best): strong positive evidence for audience_prefer and thread selection, worth roughly two plain approvals.
 
 You can also block SPECIFIC authors via the plan's block_authors list. A block is a permanent hard exclusion of that one handle from all future thread selection, so it is YOUR judgment call, never automatic. Block when the evidence is strong: a wrong_author reject IS a direct human statement about that author (especially with profile_click), and the author context (author_followers, their post, found_via_topic) or the user's note confirms the account itself was the problem rather than the topic. Do NOT block when the reject looks topic-driven (off_topic/bad_draft on a reasonable account) or when you are unsure; the generalizable TYPE entry in audience_avoid is the softer tool for that.
 
