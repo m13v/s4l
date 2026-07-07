@@ -794,6 +794,13 @@ def review_drafts(plan, batch="review-queue"):
                 "thread_author": c.get("thread_author"),
                 "thread_text": c.get("thread_text"),
                 "reply_text": c.get("reply_text") or "",
+                # English translations stamped at draft time (prep step) when
+                # language != en. Display-only: the card shows them so the
+                # operator can understand a non-English draft; the ORIGINAL
+                # reply_text is what gets edited and posted. Absent on English
+                # drafts and on plans written before the field shipped.
+                "reply_text_en": c.get("reply_text_en"),
+                "thread_text_en": c.get("thread_text_en"),
                 "link_url": c.get("link_url"),
                 # Ride-along context for the review-events feedback rail: the
                 # card copies these onto each decision so the shipped event can
