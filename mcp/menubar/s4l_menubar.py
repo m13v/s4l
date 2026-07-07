@@ -469,6 +469,20 @@ class S4LMenuBar(rumps.App):
             f"[s4l-menubar] accessibility_trusted={st.accessibility_trusted()}\n"
         )
         sys.stderr.flush()
+        # Status-item visibility watchdog (telemetry only). A live process says
+        # nothing about whether macOS is actually DRAWING our icon: on 2026-07-07
+        # a customer's menu bar process ran for ~25 min with no visible icon
+        # (post-reboot login storm) and support had no signal to tell "process
+        # dead" from "icon hidden". _tick probes the real NSStatusItem every 60s,
+        # persists menubar-state.json (memory_snapshot ships it on the heartbeat)
+        # and logs transitions to stderr. Deliberately NO auto-restart: the
+        # occlusion probe also reads not-visible during fullscreen apps and the
+        # locked screen, so acting on it would false-fire; the remote fix is the
+        # restart_menubar MCP tool.
+        self._icon_check_due_at = 0.0
+        self._icon_hidden_since = None
+        self._icon_last_on_screen = "unprobed"
+        self._icon_watch_started = time.monotonic()
         self._timer = rumps.Timer(self._tick, POLL_SECONDS)
         self._timer.start()
         # Light 1s poll for server activity (scanning/drafting/posting/…); it
@@ -2020,6 +2034,98 @@ class S4LMenuBar(rumps.App):
             self._notify("S4L", f"Resuming {resumed} approved draft(s) after restart…")
 
     # ---- tick: read state, set title, (re)build menu ----------------------
+    def _probe_statusitem(self):
+        """Actual on-screen state of our NSStatusItem: (visible_pref, on_screen).
+
+        visible_pref False = the item was removed from the bar (e.g. the user
+        Cmd-dragged it off). on_screen False with visible_pref True = the item
+        exists but macOS is not drawing it: menu bar full / notch clipping, a
+        status-item render glitch after a login storm, OR a benign fullscreen
+        app / locked screen (why this feeds telemetry, never an automatic
+        action). Two independent signals are recorded because we don't yet know
+        which one is reliable in the field: the window's occlusion state and
+        whether its frame intersects any screen (clipped items get parked
+        off-screen). Either value may be None when the probe can't answer (old
+        macOS, rumps internals moved). Never raises."""
+        try:
+            item = getattr(getattr(self, "_nsapp", None), "nsstatusitem", None)
+            if item is None:
+                return None, None
+            visible_pref = None
+            try:
+                visible_pref = bool(item.isVisible())
+            except Exception:
+                pass
+            on_screen = None
+            try:
+                win = item.button().window()
+                if win is not None:
+                    from AppKit import NSScreen, NSWindowOcclusionStateVisible
+                    occluded_visible = bool(
+                        win.occlusionState() & NSWindowOcclusionStateVisible
+                    )
+                    f = win.frame()
+                    intersects = False
+                    for s in NSScreen.screens():
+                        sf = s.frame()
+                        if (
+                            f.origin.x < sf.origin.x + sf.size.width
+                            and f.origin.x + f.size.width > sf.origin.x
+                            and f.origin.y < sf.origin.y + sf.size.height
+                            and f.origin.y + f.size.height > sf.origin.y
+                        ):
+                            intersects = True
+                            break
+                    on_screen = occluded_visible and intersects
+            except Exception:
+                pass
+            return visible_pref, on_screen
+        except Exception:
+            return None, None
+
+    def _icon_watch_tick(self, now):
+        """60s-throttled visibility probe + menubar-state.json write. See the
+        __init__ comment for why this exists and why it never self-heals."""
+        if now < self._icon_check_due_at:
+            return
+        self._icon_check_due_at = now + 60.0
+        try:
+            visible_pref, on_screen = self._probe_statusitem()
+            if on_screen is False:
+                if self._icon_hidden_since is None:
+                    self._icon_hidden_since = now
+            else:
+                self._icon_hidden_since = None
+            hidden_for = (
+                int(now - self._icon_hidden_since)
+                if self._icon_hidden_since is not None
+                else 0
+            )
+            if on_screen != self._icon_last_on_screen:
+                sys.stderr.write(
+                    f"[s4l-menubar] statusitem on_screen={on_screen} "
+                    f"visible_pref={visible_pref} hidden_for_sec={hidden_for}\n"
+                )
+                sys.stderr.flush()
+                self._icon_last_on_screen = on_screen
+            dest = os.path.join(st.state_dir(), "menubar-state.json")
+            tmp = dest + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(
+                    {
+                        "ts": time.time(),
+                        "pid": os.getpid(),
+                        "uptime_sec": int(now - self._icon_watch_started),
+                        "statusitem_on_screen": on_screen,
+                        "statusitem_visible_pref": visible_pref,
+                        "hidden_for_sec": hidden_for,
+                    },
+                    f,
+                )
+            os.replace(tmp, dest)
+        except Exception:
+            pass
+
     def _tick(self, _):
         # Post-update verdict: cheap (a single stat when no update is pending).
         try:
@@ -2053,6 +2159,8 @@ class S4LMenuBar(rumps.App):
                         pass
             else:
                 self._resumed = False
+        # Status-item visibility telemetry (60s-throttled inside; see __init__).
+        self._icon_watch_tick(now)
         # The activity spinner owns the TITLE while a tool runs (we don't fight it at
         # 0.12s), but the menu + update indicator must still refresh mid-run —
         # otherwise the "Update now & restart Claude Desktop" item never appears on a box that's always
