@@ -1027,17 +1027,50 @@ def cmd_connect(args) -> dict:
     except Exception as e:
         return {"ok": False, "connected": False, "state": "error", "error": str(e), "cdp": CDP}
 
-    # 1b. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02).
-    # On macOS, copy_browser_cookies.py needs to read the per-browser Safe
-    # Storage entry from the OS keychain. SSH-invoked processes get
-    # errSecAuthFailed silently — no prompt, no warning. We probe up front so
-    # the user sees "your keychain is locked / run unlock-keychain" instead of
-    # the misleading "log in manually" cascade.
-    headless = _is_headless()
-    if headless:
-        # Probe with the first source's likely browser label. We don't know
-        # which source will succeed yet, so probe Chrome (the autoposter
-        # default); if that's denied, all the AUTO_SOURCES will be too.
+    # 1b. Choose the connection PATH before doing any keychain work. There are
+    #     two mutually exclusive paths, and only one of them touches the keychain:
+    #       - IMPORT: copy an existing x.com session out of the user's everyday
+    #         browser. This reads that browser's "Safe Storage" key from the macOS
+    #         Keychain, so it (and ONLY it) is gated by the headless keychain
+    #         preflight below.
+    #       - MANUAL LOGIN: open the managed Chrome's own login page and let the
+    #         user sign in by hand. Reads NO keychain and needs NO everyday-browser
+    #         session, so it must NEVER be blocked by the keychain preflight.
+    #     Auto-import is only possible when some installed browser actually holds
+    #     an x.com session. On a fresh or remote/headless box there is nothing to
+    #     import, so gating manual login behind the keychain check dead-ended setup
+    #     on "keychain locked" even though there was no session to copy anyway
+    #     (the exact wedge that stalled the macstadium test box). We now skip
+    #     straight to manual login whenever there's nothing to import.
+    #
+    #     Source selection:
+    #       - explicit --source X   -> just that one (one keychain prompt)
+    #       - --source all          -> the full chrome/arc/brave/edge sweep (legacy)
+    #       - no --source (default) -> the browser(s) that ACTUALLY hold an x.com
+    #         session, so we prompt the keychain for exactly the right one.
+    if args.source == "all":
+        sources = AUTO_SOURCES
+        has_importable = True
+    elif args.source:
+        sources = [args.source]
+        has_importable = True
+    else:
+        _srcs = _list_sources()
+        _with_session = [s["spec"] for s in _srcs if s.get("x_session")]
+        sources = _with_session or ["chrome:Default"]
+        has_importable = bool(_with_session)
+
+    manual_login = bool(getattr(args, "manual_login", False))
+    # Attempt an auto-import ONLY when the user didn't force manual login AND
+    # there is a real session to copy. Otherwise fall through to manual login.
+    will_import = has_importable and not manual_login
+
+    # 1c. Headless + Keychain pre-flight (#3 + #4, added 2026-06-02) — relevant
+    #     ONLY to the import path. copy_browser_cookies.py must read the per-browser
+    #     Safe Storage entry from the OS keychain; SSH/launchd-invoked processes get
+    #     errSecAuthFailed silently (no prompt). The manual-login path skips this.
+    if will_import and _is_headless():
+        # Probe Chrome (the autoposter default); if that's denied, the rest are too.
         kc_ok, kc_detail = _keychain_safe_storage_ok("Chrome")
         if not kc_ok:
             return {
@@ -1053,28 +1086,17 @@ def cmd_connect(args) -> dict:
                     "or another headless context). No GUI prompt is shown for this — macOS "
                     "denies access silently. To fix, run this once in the same session:\n"
                     "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
-                    "Then re-run connect_x. If you're on the autoposter machine via SSH, you "
-                    "may also need to run it before every fresh shell, or persist with "
-                    "`security set-keychain-settings -lut 0`."
+                    "Then re-run connect_x. Or connect X with manual login instead — that "
+                    "signs in directly in the autoposter's own browser and needs no keychain."
                 ),
                 "remediation_cmd": "security unlock-keychain ~/Library/Keychains/login.keychain-db",
                 "cdp": CDP,
             }
 
-    # 2. Import from the user's everyday browser.
-    #    - explicit --source X        -> just that one (one keychain prompt)
-    #    - --source all               -> the full chrome/arc/brave/edge sweep (legacy)
-    #    - no --source (the default)  -> auto-pick the browser(s) that ACTUALLY
-    #      hold an x.com session, so we prompt the keychain for exactly the right
-    #      one instead of blindly walking all four and prompting per browser.
-    if args.source == "all":
-        sources = AUTO_SOURCES
-    elif args.source:
-        sources = [args.source]
-    else:
-        sources = _auto_pick_sources()
+    # 2. Import from the user's everyday browser (skipped entirely when we're on
+    #    the manual-login path — `will_import` False makes this loop a no-op).
     attempts = []
-    for src in sources:
+    for src in (sources if will_import else []):
         res = _import_from(src)
         copied = res.get("stdout", "")
         detail = copied or res.get("error") or res.get("stderr")
@@ -1139,8 +1161,15 @@ def cmd_connect(args) -> dict:
     rolled_up_error_type = (
         next(iter(distinct_error_types)) if len(distinct_error_types) == 1 else None
     )
-    manual_login = bool(getattr(args, "manual_login", False))
-    open_login = manual_login or rolled_up_error_type == "keychain_acl_denied"
+    # Open a focused login window when the user asked for manual login, when the
+    # keychain prompt was denied (import can't proceed), OR when there was nothing
+    # to import in the first place — in that last case manual login is the ONLY
+    # path that can work, so we must open the window rather than dead-end.
+    open_login = (
+        manual_login
+        or not will_import
+        or rolled_up_error_type == "keychain_acl_denied"
+    )
 
     shown = False
     if open_login:
@@ -1156,7 +1185,7 @@ def cmd_connect(args) -> dict:
         # That race is what made setup misreport the handle as "missing." If the
         # cookie appears, fall through to the same connected/persist/handle path the
         # auto-import success branch uses.
-        login_wait = getattr(args, "login_wait", 90.0)
+        login_wait = getattr(args, "login_wait", 300.0)
         if login_wait and login_wait > 0 and _poll_for_login(timeout=login_wait):
             try:
                 if _is_session_valid():
@@ -1197,16 +1226,23 @@ def cmd_connect(args) -> dict:
         )
         extra["remediation"] = "rerun_connect_x_and_click_allow"
     elif open_login:
-        # Explicit --manual-login: a window is open and we waited; they just
-        # haven't finished signing in yet.
+        # Manual login: either the caller asked for it (--manual-login) or there
+        # was no existing X session anywhere to import, so this is the only path.
+        # A focused login window is open and we waited; they just haven't finished
+        # signing in yet.
+        _why = (
+            "" if will_import
+            else "No existing X session was found in your everyday browser to import, so "
+        )
+        _tried = (" (Auto-import tried: " + ", ".join(sources) + ".)") if will_import else ""
         note = (
-            "A Chrome window for the autoposter is open at the X login page"
+            _why
+            + "a Chrome window for the autoposter is open at the X login page"
             + ("" if shown else " (if you don't see it, look for a 'Google Chrome' window)")
             + " and you are NOT logged in yet. Log in there yourself — username, password, "
             "and 2FA if prompted — in that window. When your X home timeline shows, ask me "
             "to confirm and I'll re-check (run connect_x again). The session is saved to the "
-            "autoposter's own profile, so this is a one-time step. "
-            "(Auto-import tried: " + ", ".join(sources) + ".)"
+            "autoposter's own profile, so this is a one-time step." + _tried
         )
     else:
         # Auto-import failed for a non-deny reason and the user did NOT ask for
@@ -1294,10 +1330,12 @@ def main() -> int:
                         "the login window only opens when the user DENIED the keychain "
                         "prompt; every other auto-import failure returns needs_login "
                         "without popping an unexpected browser window.")
-    c.add_argument("--login-wait", type=float, default=90.0,
+    c.add_argument("--login-wait", type=float, default=300.0,
                    help="Seconds to wait for a MANUAL login to complete before "
-                        "returning needs_login (default 90; 0 disables the wait). "
-                        "Prevents the detection race that misreports the handle as missing.")
+                        "returning needs_login (default 300; 0 disables the wait). "
+                        "A human finding the on-screen/VNC window plus password + 2FA "
+                        "routinely exceeds 90s, so the wait is generous. Prevents the "
+                        "detection race that misreports the handle as missing.")
     args = ap.parse_args()
 
     if args.cmd == "detect-sources":
