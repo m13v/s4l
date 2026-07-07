@@ -231,31 +231,71 @@ acquire_lock() {
       # We're head-of-queue but lock_dir exists. Either the holder is alive
       # and active (normal — wait), or they died uncleanly. Apply the same
       # stale-detection used pre-FIFO.
+      # 2026-07-07 hardening: twice (2026-07-06 20:36, 2026-07-07 11:10) this
+      # block reclaimed linkedin-browser from a LIVE run-linkedin holder, and
+      # the old single-line event gave no clue WHICH branch fired. Now:
+      #   - every reclaim records reason=no_pidfile|dead_pid|age
+      #   - stat_mtime's 0-on-failure sentinel no longer counts as ancient
+      #     (now-0 made the age check treat a fresh lock as 56 years old)
+      #   - a 1s re-verify runs before rm so a one-poll misread (transient
+      #     cat/kill -0 flake) cannot yank a live peer's lock
       local should_remove=false
+      local stale_reason=""
       if [ ! -f "$lock_dir/pid" ]; then
         should_remove=true
+        stale_reason="no_pidfile"
       else
         local holder_pid
         holder_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
         if [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
           should_remove=true
+          stale_reason="dead_pid:${holder_pid:-empty}"
         fi
       fi
-      # Safety net: remove any lock older than 3 hours regardless. Watchdog's
-      # per-script caps (45m default, 120m for stats_reddit/github-engage) will
-      # SIGTERM a hung holder long before this fires.
-      if [ -d "$lock_dir" ]; then
-        local lock_age
-        lock_age=$(( $(date +%s) - $(stat_mtime "$lock_dir") ))
-        if [ "$lock_age" -gt 10800 ]; then
-          should_remove=true
+      # Safety net: remove any lock older than 3 hours regardless of holder
+      # liveness. Watchdog's per-script caps (45m default, 120m for
+      # stats_reddit/github-engage) will SIGTERM a hung holder long before
+      # this fires.
+      if ! $should_remove && [ -d "$lock_dir" ]; then
+        local lock_age lock_mtime
+        lock_mtime=$(stat_mtime "$lock_dir")
+        if [ "$lock_mtime" -gt 0 ]; then
+          lock_age=$(( $(date +%s) - lock_mtime ))
+          if [ "$lock_age" -gt 10800 ]; then
+            should_remove=true
+            stale_reason="age:${lock_age}s"
+          fi
         fi
       fi
       if $should_remove; then
-        _sa_lock_event stale_reclaim "$name" "$(_sa_lock_owner_tag "$lock_dir")"
-        echo "Removing stale $name lock"
-        rm -rf "$lock_dir"
-        continue
+        sleep 1
+        if [ ! -d "$lock_dir" ]; then
+          # Holder (or its trap) removed it during our re-verify window; loop
+          # back and race mkdir normally.
+          continue
+        fi
+        local still_stale=false
+        if [ ! -f "$lock_dir/pid" ]; then
+          still_stale=true
+        else
+          local recheck_pid
+          recheck_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+          if [ -z "$recheck_pid" ] || ! kill -0 "$recheck_pid" 2>/dev/null; then
+            still_stale=true
+          elif [ "${stale_reason#age:}" != "$stale_reason" ]; then
+            # Age-based reclaim is deliberate even with a live (hung) holder.
+            still_stale=true
+          fi
+        fi
+        if $still_stale; then
+          _sa_lock_event stale_reclaim "$name" "reason=$stale_reason $(_sa_lock_owner_tag "$lock_dir")"
+          echo "Removing stale $name lock (reason=$stale_reason)"
+          rm -rf "$lock_dir"
+          continue
+        fi
+        _sa_lock_event stale_reclaim_aborted "$name" "reason=$stale_reason $(_sa_lock_owner_tag "$lock_dir")"
+        echo "[lock] stale-reclaim ABORTED for $name pid=$$ (initial reason=$stale_reason; holder alive on re-verify)" >&2
+        # Not stale after all — fall through to the normal wait path.
       fi
     fi
 
