@@ -781,6 +781,57 @@ def _wait_for_reply_textbox(page, total_timeout_ms=45000):
     return None
 
 
+# Author-block detection (2026-07-06). Since X's late-2024 block change, a
+# blocked account can still VIEW the blocker's public posts, so the tweet page
+# renders normally — article present, reply icon present, logged in, no
+# restriction banner — but the inline composer never mounts. That passive
+# signature is byte-identical to a transient React composer-mount miss, so the
+# blocked case used to fall through to reply_box_not_found (transient) and got
+# retried every cycle forever. The only deterministic discriminator (verified
+# live against a real blocked thread, candidate 345441): CLICK the parent
+# article's reply icon. Blocked -> X paints "This author has blocked you, so
+# you can't perform this action" into anonymous spans (NO [data-testid="toast"],
+# NO [role="alert"] — text match is the only stable hook). Not blocked -> the
+# click opens the compose modal, which doubles as a free recovery of the
+# transient-miss case.
+_BLOCKED_BY_AUTHOR_RE = r"has blocked you"
+
+
+def _probe_author_block(page):
+    """Click the parent tweet's reply icon to distinguish blocked-by-author
+    from a transient composer-mount failure. Only call when the tweet rendered
+    but no reply textbox was found.
+
+    Returns ("blocked", None) when the author has blocked us,
+    ("recovered", locator) when the click opened the compose modal (the
+    transient miss healed itself — caller can proceed with the reply), or
+    ("unknown", None) when neither signal appeared. Never raises.
+    """
+    try:
+        reply_btn = page.locator(
+            'article[data-testid="tweet"]').first.locator('[data-testid="reply"]')
+        if reply_btn.count() == 0:
+            return ("unknown", None)
+        reply_btn.first.click(timeout=5000)
+        page.wait_for_timeout(2000)
+        blocked = page.evaluate(
+            "() => /" + _BLOCKED_BY_AUTHOR_RE + "/i.test(document.body.innerText)"
+        )
+        if blocked:
+            print("[reply_to_tweet] author-block probe: blocked-by-author "
+                  "message present after reply-icon click", file=sys.stderr)
+            return ("blocked", None)
+        box = _wait_for_reply_textbox(page, total_timeout_ms=8000)
+        if box:
+            print("[reply_to_tweet] author-block probe: compose modal opened; "
+                  "recovered from transient composer miss", file=sys.stderr)
+            return ("recovered", box)
+    except Exception as e:
+        print(f"[reply_to_tweet] author-block probe failed (non-fatal): "
+              f"{str(e).splitlines()[0]}", file=sys.stderr)
+    return ("unknown", None)
+
+
 # Post-action interstitials X shows AFTER a successful reply (e.g. the
 # "Unlock more on X" graduated-access sheet). They don't block the post that
 # triggered them, but the sheet stays up on screen and would overlay the
@@ -1228,7 +1279,20 @@ def reply_to_tweet(tweet_url, text, apply_campaigns=True):
                             "diag": diag}
                 if not dom.get("tweet_rendered") and not dom.get("has_login_modal"):
                     return {"ok": False, "error": "tweet_unavailable", "diag": diag}
-                return {"ok": False, "error": "reply_box_not_found", "diag": diag}
+                #  - blocked_by_author: tweet rendered, we're logged in, yet no
+                #    composer — either the author blocked us or the composer
+                #    mount transiently failed. The reply-icon click probe tells
+                #    them apart (see _probe_author_block) and, when it turns out
+                #    to be the transient case, hands back the modal composer so
+                #    this attempt can still land instead of burning a cycle.
+                if dom.get("tweet_rendered") and not dom.get("has_login_modal"):
+                    verdict, probe_box = _probe_author_block(page)
+                    if verdict == "blocked":
+                        return {"ok": False, "error": "blocked_by_author", "diag": diag}
+                    if verdict == "recovered":
+                        reply_box = probe_box
+                if not reply_box:
+                    return {"ok": False, "error": "reply_box_not_found", "diag": diag}
 
             # Snapshot our reply links right before posting (to detect the new one)
             links_before = _collect_our_reply_links(page)
