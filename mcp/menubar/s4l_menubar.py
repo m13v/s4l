@@ -309,6 +309,15 @@ AUTOPILOT_RUNNING_STALL_SECONDS = 900
 # healthy single drain (the worker itself dies at ~2 min today).
 DRAFT_STUCK_SECONDS = 300
 
+# A poll can read a transient "not stuck" moment (e.g. the activity file
+# between one dying worker attempt and the next claim on the same aged job)
+# even though the underlying episode never really cleared. Without this, each
+# such blip resets _stall_notified and the very next poll re-fires the Sentry
+# alert, producing a burst of duplicate events for one continuous episode
+# (observed: 5 events in 40s, 2026-07-07). Require attention to read false for
+# this long, continuously, before treating the episode as over.
+ATTENTION_CLEAR_COOLDOWN_SECONDS = 60
+
 # Unattended-review watchdog. A card stack is open with pending drafts and the
 # user has not decided or clicked anything on it for REVIEW_UNATTENDED_SECONDS:
 # treat that as "the user is not seeing this window" regardless of what AppKit
@@ -501,6 +510,11 @@ class S4LMenuBar(rumps.App):
         # One-shot guard so the "autopilot not running" notification fires once per
         # stall episode, not every poll. Reset when the stall clears.
         self._stall_notified = False
+        # Wall-clock time (time.time()) attention first read false since the last
+        # true reading, or None while attention is true / already cleared. Debounces
+        # _stall_notified's reset against ATTENTION_CLEAR_COOLDOWN_SECONDS so a
+        # transient blip doesn't end the episode early and cause a re-fire burst.
+        self._attention_clear_since = None
         # Cached stall flag (set each _tick) so the 1s activity poll can suppress a
         # stale "drafting" spinner that would otherwise mask the ⚠ in the title.
         self._stalled = False
@@ -2138,6 +2152,8 @@ class S4LMenuBar(rumps.App):
             )
         self._last_blocker_code = blocker_code
         # Notify once per episode (the draft schedule isn't running for this account).
+        if attention:
+            self._attention_clear_since = None
         if attention and not self._stall_notified:
             # Fleet-wide telemetry: the draft autopilot needs attention on THIS
             # install (orphaned by an account switch, disabled, rate-limited, or a
@@ -2151,7 +2167,10 @@ class S4LMenuBar(rumps.App):
             _capture_msg(
                 f"S4L draft autopilot needs attention: {_reason}",
                 level="warning",
-                _extra={"scheduled_tasks": _registry_summary_for_capture()},
+                _extra={
+                    "scheduled_tasks": _registry_summary_for_capture(),
+                    "stall_label": self._stall_reason_info[1] or None,
+                },
                 phase="draft_schedule",
                 reason=_reason,
                 schedule_state=str(schedule_state),
@@ -2182,8 +2201,12 @@ class S4LMenuBar(rumps.App):
                     "accounts clears them). Open the S4L menu → “Set up draft schedule”.",
                 )
             self._stall_notified = True
-        elif not attention:
-            self._stall_notified = False
+        elif not attention and self._stall_notified:
+            if self._attention_clear_since is None:
+                self._attention_clear_since = time.time()
+            elif time.time() - self._attention_clear_since >= ATTENTION_CLEAR_COOLDOWN_SECONDS:
+                self._stall_notified = False
+                self._attention_clear_since = None
 
         # Single-source update signal: copy the snapshot's result (snapshot.py
         # _latest_published: GitHub releases/latest first, npm fallback; semver >,
