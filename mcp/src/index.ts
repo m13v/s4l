@@ -4163,19 +4163,61 @@ function startLocalPanel(): Promise<string> {
   });
 }
 
+function panelEndpointPath(): string {
+  return path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp", "panel-endpoint.json");
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readPanelEndpoint(): { url?: string; pid?: number } | null {
+  try {
+    return JSON.parse(fs.readFileSync(panelEndpointPath(), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
 // Publish the loopback URL to stable files so out-of-process readers can find
 // the ephemeral port without scraping `lsof`:
 //   - panel-url            plain text, for the Claude Code side-panel reverse proxy.
 //   - panel-endpoint.json  richer (url + version + pid), for the menu bar app,
 //                          which POSTs /tool/<name> here for live data.
 // Best-effort: a write failure never blocks the panel (readers re-check /health).
+//
+// panel-endpoint.json is a SINGLE shared file that every S4L MCP process writes
+// to on boot (Claude Desktop/Cowork, a Claude Code side-panel session, the
+// ~/.s4l-worker queue runner, ...). Startup here is eager (see main(), "Eagerly
+// start the loopback panel server") so even a one-shot queue-worker invocation
+// that lives for well under a minute claims this file, then exits and leaves it
+// pointing at a dead pid until some other process happens to overwrite it. The
+// menu bar depends on this file to find a server to POST approved drafts to
+// (s4l_state.py loopback_tool), so a dead pointer silently strands approved
+// drafts (post_failed: loopback_unreachable) until pure chance fixes the file.
+// Fix: don't steal the slot from an existing registrant that's still alive —
+// last-writer-wins only among writers that found a dead (or absent) entry.
 function writePanelUrl(url: string): void {
   try {
     const dir = path.join(process.env.HOME || os.homedir(), ".social-autoposter-mcp");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "panel-url"), url, "utf-8");
+    const existing = readPanelEndpoint();
+    if (existing?.pid && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+      // Someone else already holds a live registration (most likely a longer-
+      // lived session than us) — don't clobber it. Our own panel is still up
+      // and fully usable via `url` for anything that already has it (e.g. this
+      // process's own Code side-panel proxy); we just don't publish ourselves
+      // as THE shared menu-bar target.
+      return;
+    }
     fs.writeFileSync(
-      path.join(dir, "panel-endpoint.json"),
+      panelEndpointPath(),
       JSON.stringify(
         { url, pid: process.pid, version: VERSION, started_at: new Date().toISOString() },
         null,
@@ -4187,6 +4229,23 @@ function writePanelUrl(url: string): void {
     console.error("[social-autoposter-mcp] writePanelUrl failed:", e?.message || e);
   }
 }
+
+// Relinquish panel-endpoint.json on clean exit if we currently own it, so a
+// short-lived process (typical for the ~/.s4l-worker queue runner or a one-off
+// Claude Code session) never leaves a dead pid lingering as a false-positive
+// registrant — the next process to check sees "nothing registered" (clean,
+// correctly reported as unreachable) rather than a stale pointer that only
+// gets fixed by chance when something else happens to boot.
+process.on("exit", () => {
+  try {
+    const existing = readPanelEndpoint();
+    if (existing?.pid === process.pid) {
+      fs.unlinkSync(panelEndpointPath());
+    }
+  } catch {
+    // best-effort; nothing to do if it's already gone or unreadable
+  }
+});
 
 // The owned state dir, honoring S4L_STATE_DIR (matches menubar/s4l_state.py).
 function s4lStateDir(): string {
