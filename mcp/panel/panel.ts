@@ -73,10 +73,13 @@ interface Snapshot {
   // "Set up draft schedule" button should show.
   schedule_state?: "missing" | "disabled" | "ok" | "unknown";
   // Engagement lanes (single source: mode.json via the server snapshot). Two
-  // INDEPENDENT lanes; both can be on (the cycle then splits 50/50). `mode` is
-  // the derived legacy mirror kept for back-compat.
+  // INDEPENDENT lanes; both can be on (the cycle then splits per
+  // personal_brand_share, default 0.5). `mode` is the derived legacy mirror
+  // kept for back-compat.
   mode?: "promotion" | "personal_brand";
   flags?: { personal_brand?: boolean; promotion?: boolean };
+  // Personal-brand share of both-lanes-on cycles, 0.0-1.0.
+  personal_brand_share?: number;
   onboarding?: OnboardingSnapshot;
   // False only when the always-on tray app was quit while the runtime is ready
   // (macOS only). Drives the "Restart menu bar" banner.
@@ -130,6 +133,9 @@ const liveStatus = $("live-status");
 const liveImg = $("live-img") as HTMLImageElement;
 const switchPersonal = $("switch-personal") as HTMLButtonElement;
 const switchPromo = $("switch-promo") as HTMLButtonElement;
+const splitRow = $("split-row");
+const splitDesc = $("split-desc");
+const splitSlider = $("split-slider") as HTMLInputElement;
 const modeSub = $("mode-sub");
 const settingsCard = $("settings-card");
 const settingsToggle = $("settings-toggle") as HTMLButtonElement;
@@ -140,6 +146,7 @@ let installPolling = false; // guard against overlapping poll loops
 let setupPolling = false; // guard the live setup-progress poll started by Set up
 let updating = false; // guard against double-firing the in-header update button
 let setupDetailsOpen = false; // header setup dropdown expanded state
+let splitDragging = false; // don't let a snapshot repaint fight an in-progress drag
 let statsOpen = false; // "Last 7 days stats" dropdown expanded state
 let settingsOpen = false; // "Project settings" dropdown expanded state
 let settingsLoading = false; // guard against overlapping settings fetches
@@ -302,8 +309,9 @@ function render() {
   btnSchedule.classList.toggle("primary", needsSchedule);
 
   // Engagement lanes — always shown, mirroring the menu bar. Two independent
-  // lanes; both can be on (cycle splits 50/50). Single source: state.flags (the
-  // server snapshot's mode.json read), with state.mode as a legacy fallback.
+  // lanes; both can be on (cycle splits per personal_brand_share). Single
+  // source: state.flags (the server snapshot's mode.json read), with
+  // state.mode as a legacy fallback.
   const flags = state.flags || (state.mode === "promotion"
     ? { personal_brand: false, promotion: true }
     : { personal_brand: true, promotion: false });
@@ -311,11 +319,22 @@ function render() {
   const promoOn = !!flags.promotion;
   switchPersonal.setAttribute("aria-checked", String(personalOn));
   switchPromo.setAttribute("aria-checked", String(promoOn));
+  // Lane split: only meaningful (and only shown) when both lanes are on. Don't
+  // yank the slider out from under an in-progress drag; the drag's own commit
+  // re-syncs it to the server truth.
+  const sharePct = Math.round(
+    (typeof state.personal_brand_share === "number" ? state.personal_brand_share : 0.5) * 100
+  );
+  splitRow.hidden = !(personalOn && promoOn);
+  if (!splitDragging) {
+    splitSlider.value = String(sharePct);
+    renderSplitDesc(sharePct);
+  }
   // Per-lane descriptions live in the markup; the note line carries only the
   // cross-lane facts worth knowing.
   modeSub.textContent =
     personalOn && promoOn
-      ? "Both lanes on: cycles split 50/50."
+      ? `Both lanes on: cycles split ${sharePct}/${100 - sharePct} personal/promotion.`
       : !personalOn && !promoOn
         ? "No lane on; the cycle falls back to personal brand."
         : "";
@@ -602,6 +621,35 @@ function wireLaneSwitch(el: HTMLButtonElement, lane: "personal_brand" | "promoti
 }
 wireLaneSwitch(switchPersonal, "personal_brand");
 wireLaneSwitch(switchPromo, "promotion");
+
+// Lane split slider: live-update the caption while dragging, persist on
+// commit (change) via engagement_mode action:'split' (mode.json only, same
+// weight class as the lane toggles), then refresh to the server truth.
+function renderSplitDesc(pct: number) {
+  splitDesc.textContent = `${pct}% personal brand / ${100 - pct}% promotion`;
+}
+splitSlider.addEventListener("pointerdown", () => { splitDragging = true; });
+splitSlider.addEventListener("input", () => {
+  splitDragging = true;
+  renderSplitDesc(Number(splitSlider.value));
+});
+splitSlider.addEventListener("change", async () => {
+  const pct = Number(splitSlider.value);
+  splitSlider.disabled = true;
+  try {
+    const res = await call("engagement_mode", { action: "split", split: pct });
+    if (res && typeof res.personal_brand_share === "number") {
+      applyState({ personal_brand_share: res.personal_brand_share });
+    }
+    await refresh();
+  } catch (e: any) {
+    log("Couldn’t set the lane split: " + (e?.message || e));
+    await refresh(); // roll the slider back to the server truth
+  } finally {
+    splitSlider.disabled = false;
+    splitDragging = false;
+  }
+});
 
 // ---- collapsible sections -------------------------------------------------
 // The header setup dropdown and the "Last 7 days stats" header are the only two
