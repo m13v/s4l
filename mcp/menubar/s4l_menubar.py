@@ -1901,6 +1901,12 @@ class S4LMenuBar(rumps.App):
         return f"posting +{sent}"
 
     def _spin(self, _):
+        # An update in flight beats everything else: the click-to-restart
+        # window needs its own unmistakable, unmasked spinner state.
+        if self._update_in_flight():
+            self._spin_i = (self._spin_i + 1) % len(SPINNER)
+            self.title = f"S4L updating {SPINNER[self._spin_i]}"
+            return
         # Stall beats a stale activity label: bail (and self-stop) so the title
         # falls back to "S4L ⚠" rather than a "drafting" lie. _poll_activity also
         # stops us within 1s; this makes the switch immediate.
@@ -2754,7 +2760,10 @@ class S4LMenuBar(rumps.App):
         # the user clicked update — reading as a failed install (2026-07-03).
         # Show the in-progress state instead; _check_update_verdict drops the
         # marker on success or after UPDATE_VERIFY_GRACE_SEC either way.
-        if os.path.exists(self._update_verify_path()):
+        if self._updating_mcpb:
+            items.append(rumps.separator)
+            items.append(self._label("⇩ Updating… downloading & installing"))
+        elif os.path.exists(self._update_verify_path()):
             items.append(rumps.separator)
             items.append(self._label("⏳ Finishing update… verifying install"))
         elif self._update_available and self._latest_version:
@@ -2783,6 +2792,13 @@ class S4LMenuBar(rumps.App):
             cleaned.append(it)
         while cleaned and cleaned[-1] is rumps.separator:
             cleaned.pop()
+        # An update is in flight: grey out every other action so nothing races
+        # the download/unzip/restart (a second update click, a post, a lane
+        # toggle, Quit killing the background thread mid-curl).
+        if self._update_in_flight():
+            for it in cleaned:
+                if it is not rumps.separator and it.callback is not None:
+                    it.set_callback(None)
         for it in cleaned:
             self.menu.add(it)
 
