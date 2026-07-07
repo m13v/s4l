@@ -1236,12 +1236,12 @@ def main():
     avoid_topics: set[str] = set()
 
     processed: list[dict] = []     # one entry per topic we supply-tested
-    all_rejected: list[dict] = []  # filled by submit_topic dupe errors reported by Claude
-    total_proposals_parsed = 0     # kept for audit compatibility; counts successful submits
+    all_rejected: list[dict] = []  # dupes killed by validate_proposals (post-hoc)
+    total_proposals_parsed = 0     # every proposal the model returned, dupe or not
     last_raw = ""
     attempts_used = 0       # SCANS performed (the only thing that ticks up to max_attempts)
-    claude_calls = 0        # ALL Claude sessions (tool calls hidden inside each session)
-    dupe_retries_total = 0  # kept for audit compatibility; always 0 in MCP-session mode
+    claude_calls = 0        # ALL queue-routed Claude turns (topic proposals only here)
+    dupe_retries_total = 0  # re-prompts caused by all-dupe proposal turns
     aborted_untested = False
     saturated_bailout = False
 
@@ -1252,52 +1252,76 @@ def main():
         if n_qualifying() >= args.target:
             break
 
-        # --- ONE tool-using Claude session per scan slot. Inside this session
-        #     Claude can call search_topics / get_topic_stats to explore, and
-        #     submit_topic to commit. submit_topic runs Jaccard dedup on the
-        #     server, so near-dupes surface as in-session tool errors Claude
-        #     reacts to — no post-hoc kill, no dupe-retry-doesn't-count
-        #     bookkeeping needed in Python. The session ends when Claude
-        #     emits the final JSON envelope with `submitted_topic`. -----------
-        prompt = build_prompt(project, topics_for_project, args.proposals,
-                              avoid_topics=avoid_topics)
-        last_raw = call_claude(prompt, allowed_tools=_TOPIC_TOOLS)
-        claude_calls += 1
+        # --- ONE flattened text->JSON queue job per proposal turn. Dedup runs
+        #     post-hoc in validate_proposals against the full working universe;
+        #     a dupe re-prompts with the grown avoid list (each retry is a full
+        #     queue job, hence the small DUPE_RETRIES_PER_SLOT cap). The model
+        #     self-reports saturation via the proposals=[] envelope. ----------
+        picked: dict | None = None
+        for retry in range(1 + DUPE_RETRIES_PER_SLOT):
+            prompt = build_prompt(project, topics_for_project, args.proposals,
+                                  avoid_topics=avoid_topics,
+                                  universe=working_universe)
+            last_raw = call_claude(prompt, "invent-topic", schema=TOPIC_SCHEMA)
+            claude_calls += 1
 
-        envelope = extract_submitted_topic(last_raw)
-        if envelope is None:
-            print(f"[invent_topics] session returned no parseable envelope; "
-                  f"raw head: {(last_raw or '')[:200]!r}", file=sys.stderr)
-            saturated_bailout = True
-            break
-
-        if envelope.get("topic") is None:
-            # Claude self-reported saturation (tried N submits, all dupes).
-            reason = envelope.get("reason") or "(no reason given)"
-            print(f"[invent_topics] saturated: claude session reports "
-                  f"no non-dupe available — {reason}",
+            proposals, sat_reason = extract_proposals_env(last_raw)
+            total_proposals_parsed += len(proposals)
+            if not proposals:
+                if sat_reason is not None:
+                    print(f"[invent_topics] saturated: model reports no "
+                          f"non-dupe available — {sat_reason}", file=sys.stderr)
+                else:
+                    print(f"[invent_topics] turn returned no parseable "
+                          f"proposals; raw head: {(last_raw or '')[:200]!r}",
+                          file=sys.stderr)
+                saturated_bailout = True
+                break
+            for p in proposals:
+                avoid_topics.add(p["topic"])
+            committed_ok, rejected = validate_proposals(proposals,
+                                                        working_universe)
+            all_rejected.extend(rejected)
+            if committed_ok:
+                picked = committed_ok[0]
+                break
+            dupe_retries_total += 1
+            print(f"[invent_topics] all {len(proposals)} proposal(s) were "
+                  f"dupes (retry {retry + 1}/{DUPE_RETRIES_PER_SLOT}); "
+                  f"re-prompting with grown avoid list", file=sys.stderr)
+        else:
+            # Dupe-retry budget exhausted without a non-dupe: saturation.
+            print(f"[invent_topics] no non-dupe topic after "
+                  f"{DUPE_RETRIES_PER_SLOT} dupe retries; stopping run",
                   file=sys.stderr)
             saturated_bailout = True
+
+        if picked is None:
             break
 
-        topic = envelope["topic"]
-        rationale = envelope.get("rationale", "")
-        total_proposals_parsed += 1
-        avoid_topics.add(topic)
+        topic = picked["topic"]
+        rationale = picked.get("rationale", "")
         working_universe.add(topic)
         print(f"[invent_topics] scan {attempts_used+1}/{args.max_attempts}: "
-              f"submitted {topic!r} (qualifying so far={n_qualifying()}/{args.target})",
+              f"proposed {topic!r} (qualifying so far={n_qualifying()}/{args.target})",
               file=sys.stderr)
         print(f"  rationale: {rationale[:120]}", file=sys.stderr)
 
-        # The topic is ALREADY in project_search_topics via the submit_topic
-        # tool — do not re-commit. Now draft queries + supply-test.
+        # Commit BEFORE the supply test — same semantics the retired MCP
+        # submit_topic tool had: the topic is a real concept either way; its
+        # supply record lives in twitter_search_attempts.
+        if not commit_topic(project_name, topic, dry_run=args.dry_run):
+            print(f"[invent_topics] commit failed for {topic!r}; stopping run",
+                  file=sys.stderr)
+            break
+
         result = process_topic(project, topic, existing_query_cores,
                                batch_id, dry_run=args.dry_run)
 
         # A False 'tested' means the browser dropped mid-run; abort the run
-        # and let the next hourly retry it. The topic stays committed (it's a
-        # real concept either way), but we don't fabricate a supply verdict.
+        # and let the next kicker firing retry it. The topic stays committed
+        # (it's a real concept either way), but we don't fabricate a supply
+        # verdict.
         if not result.get("tested", False):
             print(f"[invent_topics] supply test UNTESTED for {topic!r} "
                   f"(browser unavailable); aborting run.", file=sys.stderr)
@@ -1314,8 +1338,10 @@ def main():
         processed.append({
             "topic": topic,
             "rationale": rationale,
+            "neighbor": picked.get("neighbor"),
+            "similarity": picked.get("similarity"),
             **result,
-            "committed": True,  # submit_topic already wrote it
+            "committed": True,
             "attempt": attempts_used,
         })
 
