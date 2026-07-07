@@ -186,7 +186,7 @@ def build_html(new_rows, growing_rows, first_run, total_open):
         sections.append("<p>First run: baselining every open critical issue. No investigation, "
                          "just a snapshot. Future runs only flag NEW or GROWING issues.</p>")
 
-    if new_rows:
+    if new_rows and not first_run:
         sections.append("<h3>New issues</h3><table border='1' cellpadding='6' "
                          "style='border-collapse:collapse'><tr><th>Issue</th><th>Events</th>"
                          "<th>Installs</th></tr>" + build_rows_html(new_rows) + "</table>")
