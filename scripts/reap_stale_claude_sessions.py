@@ -804,33 +804,28 @@ def main() -> int:
     # never at risk.
     max_group = _env_int("S4L_REAPER_MAX_GROUP", 2)
 
-    # (3) Claim grace — the PRIMARY brake (2026-07-01, per Matthew). A worker checks
-    # the queue EXACTLY ONCE per fire: claude_job.py::cmd_next is single-shot — it
-    # claims one pending job (stamping claim_pid) or prints {} and returns; it never
-    # polls again. So within one cron tick of spawning, a session either CLAIMS a job
-    # (=> it has a "type", is actively drafting, and is spared outright via
-    # running_claim_pids()) or finds the queue empty and becomes a PERMANENT typeless
-    # husk that will NEVER claim again. Those husks are exactly what we want to kill.
+    # (3) Claim grace — the PRIMARY brake (2026-07-01, per Matthew; updated 2026-07-06
+    # for the polling worker). A worker no longer checks the queue exactly once per
+    # fire: claude_job.py::cmd_next now takes --wait-seconds and polls internally for
+    # up to QUEUE_WORKER_POLL_SECONDS (mcp/src/index.ts, 240s default) before giving
+    # up. So a claimless session may be legitimately, actively polling for the WHOLE
+    # poll window — not yet a husk — and only becomes a proven husk once it exits
+    # (prints "{}") without ever stamping a claim_pid. Reaping it mid-poll would kill
+    # a session that might claim a job seconds later.
     #
-    # The ONLY reason to spare a claimless session is that it may not have run its one
-    # cmd_next yet (cold agent-mode boot: skill load + MCP init before the first tool
-    # call). claim_grace bounds that boot+claim window. Measured on the box:
-    # enqueue->claim was ALWAYS < 60s (3-55s across 85 claims); 120s is a generous
-    # margin. Past claim_grace a claimless session is a proven husk -> reap it now,
-    # regardless of the 35-min age ceiling and regardless of group size. This is the
-    # type-driven rule: spare drafters + spare boot-window newborns, reap all the rest.
-    # Worst case of an over-tight grace is a job delayed one tick (it stays in pending
-    # for the next worker), never a lost draft. A DRAFTING session is protected by
-    # claim_pids, not by grace, so no grace value can kill a real draft (this is what
-    # makes the old "~120s code-143 mid-draft kill" impossible now).
+    # claim_grace must therefore bound "boot + one full poll window", not just
+    # "boot + one cmd_next call" as before. It stays the type-driven rule: spare
+    # drafters (claim_pids) + spare in-grace newborns, reap everything else. Worst
+    # case of an over-tight grace is a job delayed until the next cron tick's worker
+    # (it stays in pending), never a lost draft — a DRAFTING session is protected by
+    # claim_pids, not by grace, so no grace value can kill a real draft.
     #
-    # Default 60s (2026-07-01, per Matthew): the boot+claim window is comfortably
-    # inside one cron tick — measured enqueue->claim was always < 60s (3-55s across 85
-    # claims) and that figure ALREADY includes the claiming worker's spawn+boot+cmd_next.
-    # 60s tightens the steady-state floor to ~2-3 warm sessions (one tick of newborns +
-    # any active drafter) instead of ~4, while still never racing a real claim. Bump it
-    # back up via S4L_REAPER_CLAIM_GRACE_SEC if cold boots ever start exceeding a tick.
-    claim_grace = _env_int("S4L_REAPER_CLAIM_GRACE_SEC", 60)
+    # Default 300s (2026-07-06): QUEUE_WORKER_POLL_SECONDS (240s) + ~60s margin for
+    # cold agent-mode boot (skill load + MCP init) and this reaper's own ps-scan
+    # latency. COUPLING: must stay >= QUEUE_WORKER_POLL_SECONDS + margin — if that
+    # constant grows, bump this default (or S4L_REAPER_CLAIM_GRACE_SEC) to match, or
+    # the reaper will SIGTERM a legitimately-polling worker before it ever claims.
+    claim_grace = _env_int("S4L_REAPER_CLAIM_GRACE_SEC", 300)
 
     inflight = count_running_jobs()  # None => queue unreadable => age-gate fallback
     claim_pids = running_claim_pids()  # agent-session pids actively holding a claim
