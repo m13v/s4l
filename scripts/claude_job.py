@@ -107,6 +107,15 @@ TYPE_TO_WORKER_NOTES = {
         "candidate promptly. Only after EVERY candidate is drafted and logged "
         "do you assemble and submit the single result JSON."
     ),
+    "twitter-link-tail": (
+        "WORKER EXECUTION NOTES (queue metadata; follow while executing the "
+        "prompt below): this job's answer is ONE LINE OF PLAIN TEXT, not a "
+        "structured object — the prompt itself says 'no JSON, no markdown, no "
+        "quotes'. Submit that single line as a bare JSON STRING (e.g. "
+        "\"your one-line answer\"), not as an object like {\"text\": \"...\"} "
+        "and not wrapped in any other keys. The caller unwraps a plain string "
+        "result directly; wrapping it in an object will corrupt the reply."
+    ),
 }
 
 
