@@ -868,7 +868,18 @@ else
   # <60s stale (tail-flush window), producing $8.91 empty-envelope runs.
   # 2026-05-01: false-positive hardened by env-var bypass + pgrep alive check.
   acquire_lock "linkedin-browser" 3600
-  ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+  # rc=78 = linkedin-pipeline lock skip code (peer pipeline drives the 9556
+  # Chrome); must be converted to exit 0 HERE, in the parent shell (an exit
+  # inside ensure_* only kills the tee subshell; 2026-07-06 bug).
+  _LI_BOOT_RC=0
+  ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+  if [ "$_LI_BOOT_RC" -eq 78 ]; then
+      log "linkedin-pipeline lock: peer pipeline is driving the 9556 Chrome; skipping this fire"
+      exit 0
+  elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+      log "ERROR: linkedin browser bootstrap failed (rc=$_LI_BOOT_RC)"
+      exit "$_LI_BOOT_RC"
+  fi
 
   set +e
   "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseA" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_A_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
@@ -1579,7 +1590,17 @@ else
 # linkedin cycle's Phase A) grabbed it in the meantime, this acquire blocks
 # until they release; the FIFO ticket queue in lock.sh guarantees fairness.
 acquire_lock "linkedin-browser" 3600
-ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE"
+# rc=78 skip check: normally Phase B re-enters the pipeline lock from Phase A
+# (holder pid is ours), so 78 here means a peer stole/reclaimed it mid-run.
+_LI_BOOT_RC=0
+ensure_linkedin_browser_for_backend 2>&1 | tee -a "$LOG_FILE" || _LI_BOOT_RC=$?
+if [ "$_LI_BOOT_RC" -eq 78 ]; then
+    log "linkedin-pipeline lock: peer pipeline took the 9556 Chrome; skipping Phase B"
+    exit 0
+elif [ "$_LI_BOOT_RC" -ne 0 ]; then
+    log "ERROR: linkedin browser bootstrap failed before Phase B (rc=$_LI_BOOT_RC)"
+    exit "$_LI_BOOT_RC"
+fi
 
 set +e
 "$REPO_DIR/scripts/run_claude.sh" "run-linkedin-phaseB" --strict-mcp-config --mcp-config "$MCP_CONFIG_FILE" --output-format stream-json --verbose -p "$(cat "$PHASE_B_PROMPT")" 2>&1 | tee -a "$LOG_FILE"
