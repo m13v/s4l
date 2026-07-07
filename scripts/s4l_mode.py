@@ -12,13 +12,17 @@ The S4L pipeline drafts for TWO independently toggleable lanes:
                      The weighted pick (pick_project.py) chooses among enabled
                      projects; replies carry the project's link per the A/B gate.
 
-Both can be ON at once. When both are ON the cycle splits **50/50**: each cycle
-invocation flips a coin and runs that one cycle as either a persona (link-free)
-cycle or a normal promotion cycle. The locked pipeline never changes — it just
-reads the env vars env_exports() prints.
+Both can be ON at once. When both are ON, each cycle invocation flips a
+WEIGHTED coin (`personal_brand_share` in mode.json, default 0.5) and runs that
+one cycle as either a persona (link-free) cycle or a normal promotion cycle.
+The locked pipeline never changes — it just reads the env vars env_exports()
+prints. The share only matters in the both-on state; single-lane states ignore
+it. Set it via `s4l_mode.py split <value>` (the dashboard slider and the menu
+bar's "Lane split" presets both call that).
 
 State lives in ONE small file, `$S4L_STATE_DIR/mode.json`:
-    {"personal_brand": true, "promotion": false, "mode": "personal_brand"}
+    {"personal_brand": true, "promotion": false, "mode": "personal_brand",
+     "personal_brand_share": 0.5}
 
 The `"mode"` field is a DERIVED legacy mirror (personal_brand if that lane is on,
 else promotion) kept only so any old reader that still does `data["mode"]` keeps
@@ -51,6 +55,8 @@ Usage:
     s4l_mode.py persona-name        # print the persona project name (or empty)
     s4l_mode.py draft-only          # print 1|0 (1 = cycles stop at review cards)
     s4l_mode.py draft-only on|off   # set the draft-only flag (operator-only)
+    s4l_mode.py split               # print the personal-brand share (0.0-1.0)
+    s4l_mode.py split <value>       # set it; accepts 70, 70%, or 0.7
 
 Draft-only (2026-07-06): a third, independent flag in mode.json, DEFAULT ON.
 While ON (the normal state), every cycle stops before posting and its drafts
@@ -86,6 +92,11 @@ DEFAULT_PROMOTION = False
 
 # Retained so old imports of `DEFAULT_MODE` don't break.
 DEFAULT_MODE = PERSONAL_BRAND
+
+# Share of both-lanes-on cycles that run as personal_brand (the rest run as
+# promotion). Only consulted when BOTH lanes are on; a missing/invalid
+# mode.json key falls back here, so pre-split files keep the historic 50/50.
+DEFAULT_PERSONAL_BRAND_SHARE = 0.5
 
 
 def state_dir() -> Path:
@@ -182,6 +193,57 @@ def write_flags(personal_brand: bool, promotion: bool) -> dict:
     tmp.write_text(json.dumps(payload))
     tmp.replace(mode_file())
     return flags
+
+
+def parse_share(value) -> float:
+    """Normalize a user-supplied share: accepts 70, '70%', or 0.7.
+
+    Bare numbers above 1 are read as percentages. Clamps to [0, 1]; raises
+    ValueError on non-numeric input so callers can report it.
+    """
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
+    try:
+        share = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid share {value!r}; expected a number like 70, 70%, or 0.7")
+    if share > 1.0:
+        share = share / 100.0
+    return min(1.0, max(0.0, share))
+
+
+def get_split() -> float:
+    """Personal-brand share of both-lanes-on cycles (0.0-1.0, default 0.5)."""
+    try:
+        data = json.loads(mode_file().read_text())
+        if isinstance(data, dict) and "personal_brand_share" in data:
+            return parse_share(data.get("personal_brand_share"))
+    except Exception:
+        pass
+    return DEFAULT_PERSONAL_BRAND_SHARE
+
+
+def set_split(value) -> float:
+    """Persist the personal-brand share, preserving every other mode.json key."""
+    share = parse_share(value)
+    try:
+        payload = json.loads(mode_file().read_text())
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    payload["personal_brand_share"] = share
+    # Keep the lane keys + legacy mirror intact on first-ever write.
+    flags = get_flags()
+    payload.setdefault("personal_brand", flags["personal_brand"])
+    payload.setdefault("promotion", flags["promotion"])
+    payload["mode"] = _legacy_mode(flags)
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = mode_file().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(mode_file())
+    return share
 
 
 def get_draft_only() -> bool:
@@ -310,8 +372,9 @@ def env_exports() -> str:
 
     personal_brand only -> force the persona project + link-free replies.
     promotion only      -> nothing (normal weighted pick; persona is enabled:false).
-    both on             -> 50/50 coin flip per cycle: half persona/link-free,
-                           half normal promotion pick.
+    both on             -> weighted coin flip per cycle: personal_brand with
+                           probability `personal_brand_share` (default 0.5),
+                           else the normal promotion pick.
     neither (shouldn't happen; default keeps personal on) -> behave like personal
                            so the cycle is never a silent no-op.
     """
@@ -320,12 +383,14 @@ def env_exports() -> str:
     pr = flags.get("promotion")
 
     if pb and pr:
-        # Both lanes active: this single cycle is one or the other, 50/50.
-        if random.random() < 0.5:
-            print("[s4l_mode] both lanes on; this cycle -> personal_brand (50/50)",
+        # Both lanes active: this single cycle is one or the other, weighted.
+        share = get_split()
+        pct = f"{round(share * 100)}/{round((1 - share) * 100)}"
+        if random.random() < share:
+            print(f"[s4l_mode] both lanes on; this cycle -> personal_brand ({pct})",
                   file=sys.stderr)
             return _persona_env_lines()
-        print("[s4l_mode] both lanes on; this cycle -> promotion (50/50)",
+        print(f"[s4l_mode] both lanes on; this cycle -> promotion ({pct})",
               file=sys.stderr)
         return _PROMOTION_ENV
     if pb:
@@ -398,6 +463,17 @@ def main(argv) -> int:
         return 0
     if cmd == "persona-name":
         print(persona_name())
+        return 0
+    if cmd == "split":
+        # `split` -> print current share; `split <value>` -> set and print.
+        if len(argv) >= 2:
+            try:
+                print(json.dumps({"personal_brand_share": set_split(argv[1])}))
+                return 0
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+        print(json.dumps({"personal_brand_share": get_split()}))
         return 0
     if cmd == "draft-only":
         # `draft-only` -> print 1|0; `draft-only on|off|1|0` -> set and print.
