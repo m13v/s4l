@@ -737,6 +737,29 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
       /* best effort; S4L_REPO_DIR + the run-*.sh fallback also resolve the repo */
     }
     setStep("repo", "done", `unpacked to ${resolvedRepo}`);
+
+    // Auto-opt a bare .mcpb FIRST install into the staging channel when the
+    // shipped build is itself a pre-release (-rc.N) — e.g. downloaded from
+    // the staging-latest alias link (scripts/release-mcpb.sh step 7b).
+    // Without this, channel.json stays absent, which releaseChannel()'s
+    // fail-safe default reads as "stable" (mcp/src/version.ts), so the box
+    // would install this one rc and then silently stop tracking staging
+    // (never pick up the next rc). Mirrors the same one-time write in
+    // bin/cli.js's installMcp() for the npx install path. Gated to this
+    // `else` branch (genuine bare-.mcpb unpack, not envClone) so a
+    // developer's own npm/git clone is never auto-enrolled. Only writes when
+    // no channel marker exists yet — never overrides an existing preference.
+    try {
+      const bv = bundledVersion();
+      const channelPath = path.join(STATE_DIR, "channel.json");
+      if (bv && bv.includes("-rc.") && !fs.existsSync(channelPath)) {
+        fs.mkdirSync(STATE_DIR, { recursive: true });
+        fs.writeFileSync(channelPath, JSON.stringify({ channel: "staging" }, null, 2) + "\n", "utf-8");
+        console.error(`[runtime] first install of a staging build (${bv}) — opted into the staging channel`);
+      }
+    } catch {
+      /* best effort; worst case the box just tracks stable */
+    }
   }
 
   // --- Step 1: uv -----------------------------------------------------------
