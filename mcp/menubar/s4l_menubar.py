@@ -2268,6 +2268,11 @@ class S4LMenuBar(rumps.App):
                     # Pre-edit draft (None unless edited=true): lets the
                     # feedback digest diff what the user changed.
                     "original_text": decision.get("original_text"),
+                    # Draft language (ISO 639-1, None on older plans). draft_text
+                    # and original_text are ALWAYS original-language (what
+                    # posts); English translations on the card are display-only
+                    # and never shipped here.
+                    "language": decision.get("language"),
                 }
             )
         except Exception:
