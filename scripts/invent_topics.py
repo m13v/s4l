@@ -11,20 +11,30 @@ background job:
     GET /api/v1/topic-funnel?project=<name> — server-side aggregation,
     no local-file state (replaces ~/social-autoposter/state/topic_ledger.json
     from earlier draft of this job, 2026-05-28).
-  - Asks Claude to propose 3-5 NEW search_topic candidates given the
-    project's description, the existing universe, the strong/decent
+  - Asks Claude to propose ONE new search_topic per scan slot given the
+    project's description, the COMPLETE existing universe, the strong/decent
     performers, the duds, and the untried tail.
-  - For each proposal, computes the closest existing neighbor in the
-    project's universe via token-Jaccard similarity (cheap, no
-    embeddings needed at our scale).
-  - Drops proposals that are exact-match dupes or near-dupes
-    (Jaccard >= SIMILARITY_THRESHOLD against any existing topic).
+  - Dedups post-hoc via token-Jaccard against the full universe; a dupe
+    re-prompts with a grown avoid-list (up to DUPE_RETRIES_PER_SLOT).
   - POSTs survivors to /api/v1/project-search-topics with
     source='invented', status='active'.
   - POSTs an audit row to /api/v1/invented-topics-audit so invention
     quality is reviewable offline (no local file).
 
-Cadence: hourly via launchd com.m13v.social-invent-topics.
+Queue-native (2026-07-06): EVERY Claude turn is a typed job on the local
+claude-queue (scripts/claude_job.py, tags invent-topic / invent-queries),
+drained by the Claude Desktop scheduled-task worker — on every install,
+operator Mac included. There is no `claude -p` path and no provider env
+switch in this pipeline; call_claude pins S4L_CLAUDE_PROVIDER=queue into
+run_claude.sh. No worker firing => the run logs and skips (exit 79 from
+the provider), same failure posture as the drafting pipeline. The old
+in-session invent-tools MCP mode (scripts/invent_mcp_server.py) was
+deleted with this change; its full-universe visibility moved into the
+prompt and its server-side dedup moved back to validate_proposals().
+
+Cadence: invoked by the skill/run-draft-and-publish.sh kicker on every
+install (state-file gate, S4L_INVENT_EVERY_HOURS). The operator-only
+launchd job com.m13v.social-invent-topics is retired.
 Project budget: one per run (n=1). Knob is PROJECTS_PER_RUN below.
 
 CLI:
@@ -64,6 +74,12 @@ WINDOW_DAYS = 30  # ledger window the picker reads from
 DEFAULT_TARGET = 1        # qualifying topics wanted per run (one is enough; supply is the real target)
 DEFAULT_MAX_ATTEMPTS = 5  # hard cap on loop iterations per run (cost guard)
 
+# Dupe handling is POST-HOC (validate_proposals) since the queue-native
+# rewrite: a rejected near-dupe re-prompts with the grown avoid-list, at most
+# this many times per scan slot before the run declares saturation. Each retry
+# is a full queue job, so keep this small.
+DUPE_RETRIES_PER_SLOT = 3
+
 # Supply-test knobs (2026-05-28: invent loop now scans drafted queries before
 # committing, mirroring the cycle's Phase 1 freshness gate).
 QUERIES_PER_TOPIC = 5     # distinct queries drafted + scanned per invented topic
@@ -72,9 +88,13 @@ FRESHNESS_HOURS = 6       # freshness window each query is scanned at (matches d
 CDP_PORT = 9555           # managed Chrome the twitter-harness drives
 LOCK_TIMEOUT_SEC = 600    # how long the supply-test helper waits for twitter-browser lock
 
-_REPO_DIR = os.path.expanduser("~/social-autoposter")
+# Honor S4L_REPO_DIR (set by the MCP wrapper + the kicker on .mcpb installs)
+# so the plugin's installed package resolves its own helpers; operator Macs
+# fall back to the classic path.
+_REPO_DIR = os.environ.get("S4L_REPO_DIR") or os.path.expanduser("~/social-autoposter")
 _SUPPLY_TEST_SH = os.path.join(_REPO_DIR, "skill", "invent-supply-test.sh")
 _LOG_ATTEMPTS_PY = os.path.join(_REPO_DIR, "scripts", "log_twitter_search_attempts.py")
+_RUN_CLAUDE_SH = os.path.join(_REPO_DIR, "scripts", "run_claude.sh")
 
 
 # --- Query normalization (copied verbatim from qualified_query_bank.normalize
