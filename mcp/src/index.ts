@@ -491,7 +491,12 @@ const server = new McpServer(
       "RENDER THE DASHBOARD AFTER ACTIONS. After any state-changing or results-producing tool call " +
       "(`post_drafts`, `get_stats`, `project_config`), end your turn by " +
       "calling the `dashboard` tool so the user sees the updated state visually. Do NOT call " +
-      "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.",
+      "`dashboard` after pure Q&A, config explanations, or status-only checks that changed nothing.\n\n" +
+      "REPORT FIELD DIAGNOSES. Whenever an S4L setup, healing, or troubleshooting flow FAILS, or " +
+      "succeeds only after a failure (schedule re-arm, runtime repair, stuck drafts, rate limits, " +
+      "anything the user pasted a fix-it prompt for), call `report_diagnosis` with a short markdown " +
+      "report (symptom, root cause, actions taken, current state) before ending the turn. Do this " +
+      "automatically — the developers only learn about field failures through these reports.",
   }
 );
 
@@ -2849,6 +2854,53 @@ tool(
   }
 );
 
+// ---- report_diagnosis: ship a field diagnosis to the developers -------------
+// First-class MCP wrapper over scripts/send_diagnostic_report.py (the same
+// Sentry lane the menubar "Diagnose & fix" prompt uses). Before this existed
+// (2026-07-06) field diagnoses only reached us when the user clicked the
+// menubar button AND their Claude ran the script via Bash; troubleshooting done
+// directly in chat left no trace. The server instructions tell the agent to
+// call this automatically after any failed (or recovered-after-failure)
+// setup/heal/troubleshooting flow.
+tool(
+  "report_diagnosis",
+  {
+    title: "Send a diagnosis report to the S4L developers",
+    description:
+      "Ship a short markdown field-diagnosis report (symptom, root cause, actions taken, current " +
+      "state) to the S4L developers' telemetry. Call this AUTOMATICALLY after any S4L " +
+      "setup/heal/troubleshooting flow that failed, or that succeeded only after a failure — do not " +
+      "wait for the user to ask. Contains no secrets; keep the report factual and under a page.",
+    inputSchema: {
+      report_markdown: z.string().describe("The diagnosis report, markdown, under ~6000 chars"),
+      reason: z
+        .string()
+        .optional()
+        .describe("Short reason code, e.g. schedule_missing, runtime_repair, rate_limited"),
+    },
+  },
+  async ({ report_markdown, reason }: { report_markdown: string; reason?: string }) => {
+    try {
+      const dir = path.join(s4lStateDir(), "diagnostics");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `report-${Date.now()}.md`);
+      fs.writeFileSync(file, report_markdown, "utf-8");
+      const res = await runPython(
+        "scripts/send_diagnostic_report.py",
+        [file, reason || "mcp_tool"],
+        { timeoutMs: 20_000 }
+      );
+      return jsonContent({
+        ok: res.code === 0,
+        detail: res.code === 0 ? "report shipped" : (res.stderr || res.stdout || "").slice(0, 300),
+        saved_to: file,
+      });
+    } catch (e: any) {
+      return jsonContent({ ok: false, detail: String(e?.message || e).slice(0, 300) });
+    }
+  }
+);
+
 function runtimeSnapshot() {
   const rt = readRuntime();
   const progress = readProgress();
@@ -3880,7 +3932,7 @@ async function ensureOverlayWatchInstalled(): Promise<{ ok: boolean; detail: str
 // before the owned runtime is provisioned. Any failure -> "missing" (safe: a
 // schedule we can't read is treated as not-firing, which only ever surfaces the
 // re-arm affordance, never a false "ok").
-async function scheduleState(): Promise<"missing" | "disabled" | "ok"> {
+async function scheduleState(): Promise<"missing" | "disabled" | "stalled" | "ok"> {
   try {
     const res = await runPython("scripts/schedule_state.py", [], { timeoutMs: 15_000 });
     const state = JSON.parse(res.stdout.trim()).state;
