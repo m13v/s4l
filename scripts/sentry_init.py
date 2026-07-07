@@ -90,12 +90,17 @@ def capture_exception(err, tags=None) -> None:
         return
 
 
-def capture_message(message, level="error", tags=None) -> None:
+def capture_message(message, level="error", tags=None, extra=None) -> None:
     """Report a handled, non-exception condition to Sentry (e.g. a post that
     failed gracefully and returned a reason instead of raising). The global
     excepthook only catches UNHANDLED exceptions, so operational failures that
     are caught + reported as a result count would otherwise never reach Sentry.
-    Safe to call even if init() never ran or sentry-sdk is missing (no-op)."""
+    Safe to call even if init() never ran or sentry-sdk is missing (no-op).
+
+    `extra` is a dict of larger structured values (e.g. the scheduled-task
+    registry summary) attached as event extras — tags are capped at 200 chars
+    and would truncate them. Added 2026-07-06: the "needs attention: missing"
+    events carried no registry detail, which cost hours on the Karol case."""
     if not _initialized:
         return
     try:
@@ -103,10 +108,12 @@ def capture_message(message, level="error", tags=None) -> None:
     except Exception:
         return
     try:
-        if tags:
+        if tags or extra:
             with sentry_sdk.push_scope() as scope:
-                for k, v in tags.items():
+                for k, v in (tags or {}).items():
                     scope.set_tag(str(k), str(v))
+                for k, v in (extra or {}).items():
+                    scope.set_extra(str(k), v)
                 sentry_sdk.capture_message(str(message), level=level)
         else:
             sentry_sdk.capture_message(str(message), level=level)
