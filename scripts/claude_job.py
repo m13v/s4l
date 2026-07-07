@@ -200,6 +200,13 @@ VALUE_FLAGS = {
 }
 
 POLL_INTERVAL_S = 2.0
+# Consumer-side poll cadence for `next --wait-seconds` (see cmd_next). Separate
+# constant from POLL_INTERVAL_S (the producer's own wait loop) because the two
+# sides have different cost profiles: the producer polls a single result file
+# it's blocked on anyway, while the worker's poll re-execs claude_job.py itself
+# each pass, so a slightly coarser cadence avoids needless process churn during
+# a multi-minute wait.
+WORKER_POLL_INTERVAL_S = 5.0
 # Per-call budget the producer waits for ONE claude job (a query or a draft-prep
 # reasoning turn). Was 600s, which sat right at the edge of the draft call's real
 # ~9-10 min need: on the QA box ~41% of twitter-prep jobs breached 600s and got
@@ -804,9 +811,11 @@ def _agent_session_pid():
     return None
 
 
-def cmd_next(ns) -> int:
-    _apply_state_dir_override(ns)
-    qtype = ns.type
+def _attempt_claim(ns, qtype: str) -> bool:
+    """One pass over the pending dirs: try to claim the oldest job. Returns True
+    (and prints the claimed job's payload) iff a job was claimed; False if the
+    queue was empty this pass. Split out of cmd_next so the poll loop below can
+    call it repeatedly without duplicating the claim/stamp/print logic."""
     # "any" (the universal type-blind worker) scans EVERY pending type dir;
     # a comma list scans those types; a single type keeps legacy behavior.
     # Job filenames start with a zero-padded nanosecond timestamp, so one
@@ -896,8 +905,34 @@ def cmd_next(ns) -> int:
             payload["prompt"] = job["prompt"]
             payload["schema"] = job.get("schema")
         print(json.dumps(payload))
-        return 0
-    print(json.dumps({}))  # no work
+        return True
+    return False
+
+
+def cmd_next(ns) -> int:
+    _apply_state_dir_override(ns)
+    qtype = ns.type
+    wait_seconds = max(0, ns.wait_seconds or 0)
+    # wait_seconds=0 (default) is the legacy single-shot behavior: one pass,
+    # then done. wait_seconds>0 polls in a bounded loop within THIS ONE process
+    # (one Bash call from the calling session's perspective) instead of relying
+    # on the scheduled task's own cron cadence to re-check. A finished-but-empty
+    # pass sleeps WORKER_POLL_INTERVAL_S and tries again until the deadline.
+    #
+    # COUPLING: the reaper's claim_grace (S4L_REAPER_CLAIM_GRACE_SEC in
+    # reap_stale_claude_sessions.py) must stay >= whatever --wait-seconds the
+    # worker prompt actually passes, plus margin — a claimless session polling
+    # inside this loop is legitimate, not a husk, and a too-tight claim_grace
+    # would SIGTERM it mid-poll before it ever gets a chance to claim.
+    deadline = time.time() + wait_seconds
+    while True:
+        if _attempt_claim(ns, qtype):
+            return 0
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(WORKER_POLL_INTERVAL_S, remaining))
+    print(json.dumps({}))  # no work found within the wait window
     _maybe_self_reap()  # idle turn, no job claimed — safe to retire this session
     return 0
 
@@ -1039,6 +1074,13 @@ def main() -> int:
         "--prompt-file",
         action="store_true",
         help="write the prompt/schema to sidecar files and print their paths",
+    )
+    pn.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=0,
+        help="poll for a job up to this many seconds before giving up "
+        "(0 = legacy single-shot: check once and return immediately)",
     )
     pn.set_defaults(func=cmd_next)
 
