@@ -75,11 +75,11 @@ TAG_TO_TYPE = {
 # the reply drafting. Both the launchd provider (which blocks for minutes) and the
 # scheduled-task worker (which does the LLM turn) narrate from this one map.
 TYPE_TO_ACTIVITY = {
-    "twitter-query": ("scanning", "queries"),
+    "twitter-query": ("scanning", "search"),
     "twitter-prep": ("drafting", "draft"),
     "feedback-digest": ("learning", "feedback"),
-    "invent-topic": ("learning", "inventing topic"),
-    "invent-queries": ("learning", "inventing queries"),
+    "invent-topic": ("learning", "new topic"),
+    "invent-queries": ("learning", "new queries"),
 }
 
 # queue type -> execution notes PREPENDED to the prompt sidecar at claim time.
@@ -112,7 +112,7 @@ def _act_write(qtype: str) -> None:
     if not sl:
         return
     try:
-        _activity.write(sl[0], f"{sl[1]}: starting")
+        _activity.write(sl[0], f"{sl[1]}…")
     except Exception:
         pass
 
@@ -140,11 +140,15 @@ def _act_write_progress(
     timeout (the failure mode where the worker never claims the job, or claims it
     and dies mid-run, looked identical to healthy drafting before this).
 
-      - job still in pending/ (no worker has claimed it) -> '<base> (queued <dur>)'
-        counting from enqueue. A growing 'queued 18m' is the unmistakable tell that
+      - job still in pending/ (no worker has claimed it) -> '<base> ⧖<dur>'
+        counting from enqueue. A growing '⧖18m' is the unmistakable tell that
         a scheduled-task worker is orphaned and nothing is draining.
-      - job claimed (pending file gone -> moved to running/) -> '<base> (<dur>)'
+      - job claimed (pending file gone -> moved to running/) -> '<base> <dur>'
         counting from the claim, i.e. real drafting elapsed.
+
+    The menu bar's stall watchdog parses the TRAILING '<n>s'/'<n>m' token out of
+    this label (s4l_menubar._label_elapsed_secs), so the duration must stay the
+    last number in the string whatever else changes.
 
     Purely cosmetic and best-effort: a write failure must never affect the queue."""
     if _activity is None:
@@ -154,9 +158,9 @@ def _act_write_progress(
         return
     state, base = sl
     if claimed_at is None:
-        label = f"{base}: queued {_fmt_dur(now - created)}"
+        label = f"{base} ⧖{_fmt_dur(now - created)}"
     else:
-        label = f"{base}: {_fmt_dur(now - claimed_at)}"
+        label = f"{base} {_fmt_dur(now - claimed_at)}"
     try:
         _activity.write(state, label)
     except Exception:
