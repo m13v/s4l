@@ -1129,25 +1129,22 @@ async function postApproved(batchId: string, plan: Plan) {
   // seizing Chrome mid-batch — the root cause of approved batches landing 0/N.
   const heldShellLock = await acquireShellBrowserLock();
   if (!heldShellLock) {
-    // acquireShellBrowserLock now WAITS (up to 8 min) for any live non-scan
-    // holder instead of giving up instantly, so reaching `false` means a real
-    // CLI Twitter job (DM engagement, an audit run, etc.) has held the browser
-    // the whole time — not "nobody's using it, go ahead anyway" like the old
-    // unconditional-proceed behavior. Bail out instead of racing that peer for
-    // the same reused browser tab (2026-07-07: that race yanked a reply's
-    // composer away mid-type and mis-classified a live tweet as gone). The
-    // approved cards stay sticky (approved && !posted && !terminal), so the
-    // very next post_drafts call — the next approval, or this same tool
-    // retried — picks them straight back up; nothing is lost or re-queued.
+    // acquireShellBrowserLock now preempts (SIGKILLs) whatever holds this lock
+    // unconditionally, so reaching `false` here means even reclaiming the dir
+    // across 8 attempts didn't stick (e.g. something is re-taking it faster than
+    // we can write our own pid) — a pathological edge case, not the normal path.
+    // Bail out rather than proceed without ever confirming we hold it. Approved
+    // cards stay sticky (approved && !posted && !terminal), so the very next
+    // post_drafts call — the next approval, or this same tool retried — picks
+    // them straight back up; nothing is lost or re-queued.
     postingActive = false;
     stopPostingFlagHeartbeat();
     return {
       attempted: 0,
       exit_code: 0,
       summary:
-        "another Twitter CLI job (DM engagement, discovery, an audit run, etc.) has held the " +
-        "browser for 8+ minutes; approved cards stay queued and will post automatically once " +
-        "it's free — re-run post_drafts to check now",
+        "couldn't pin down the twitter-browser lock after repeated attempts; approved cards " +
+        "stay queued — re-run post_drafts to retry",
     };
   }
   const approvedBatch = `${batchId}_approved`;
@@ -3887,7 +3884,7 @@ async function scheduleState(): Promise<"missing" | "disabled" | "ok"> {
   try {
     const res = await runPython("scripts/schedule_state.py", [], { timeoutMs: 15_000 });
     const state = JSON.parse(res.stdout.trim()).state;
-    if (state === "ok" || state === "disabled") return state;
+    if (state === "ok" || state === "disabled" || state === "stalled") return state;
     return "missing";
   } catch {
     return "missing";
@@ -4546,16 +4543,29 @@ function scheduleShellLockRelease(): void {
   }, SHELL_LOCK_GRACE_MS);
 }
 
-// SIGKILL a live scan holding the shell browser lock so the post takes the browser
-// at once. Best-effort; only ever targets a run-twitter-cycle.sh.
+// SIGKILL whatever live process holds the shell browser lock so the post takes
+// the browser at once. Universal preemption (2026-07-07, explicit user call):
+// posting always wins over ANY other CLI Twitter job — the discovery scan,
+// DM engagement, DM outreach, thread posting, follow-up scans, everything.
+// This is a deliberate, informed tradeoff, not an oversight: unlike the scan
+// (read-only, relaunches every minute, nothing to lose), several of these
+// jobs are mid-*send* when they hold this lock (engage-twitter.sh Phase B
+// replies, dm-outreach-twitter.sh / engage-dm-replies.sh send DMs,
+// run-twitter-threads.sh posts a multi-tweet thread). Killing one of those at
+// the wrong instant can leave an action landed on X with its "we did this"
+// bookkeeping never written, so it silently retries and double-sends next
+// cycle — the same class of bug this file's ghost-post handling exists to
+// avoid, just now possible for DMs/threads too. Accepted in exchange for
+// posting never waiting on anything. Best-effort; never throws.
 function preemptScanHoldingBrowser(): void {
   try {
     const pid = shellLockHolderPid();
-    if (pid && pidAlive(pid) && pidIsScan(pid)) {
+    if (pid && pidAlive(pid)) {
+      const label = pidIsScan(pid) ? "scan" : "peer job";
       console.error(
-        `[post] preempting cross-process scan holding the twitter-browser lock (pid ${pid}) — SIGKILL tree`
+        `[post] preempting cross-process ${label} holding the twitter-browser lock (pid ${pid}) — SIGKILL tree`
       );
-      logPostEvent(`preempt_scan_holding_browser scan_pid=${pid}`);
+      logPostEvent(`preempt_holder_holding_browser pid=${pid} kind=${label}`);
       sigkillScanTree(pid);
     }
   } catch {
@@ -4576,11 +4586,18 @@ function preemptScanHoldingBrowser(): void {
 // LIVE engage-twitter.sh (DM/mentions engagement) mid-reply — both processes
 // reused the same open x.com tab (get_browser_and_page prefers a reusable
 // Twitter tab), so engage-twitter.sh's own navigation yanked the composer away
-// mid-type and got one candidate wrongly classified tweet_unavailable. Only the
-// discovery scan gets SIGKILLed (cheap, idempotent, relaunched every minute —
-// posting has priority over it); every OTHER live holder is waited out instead
-// of stolen from, bounded so a stuck peer can't hang this call forever (under
-// the menubar's 900s loopback timeout so a blocked call still returns cleanly).
+// mid-type and got one candidate wrongly classified tweet_unavailable.
+//
+// UNIVERSAL PREEMPTION (2026-07-07, explicit user call, superseding the
+// wait-for-non-scan-peers version that briefly shipped in rc.13): posting
+// SIGKILLs whatever holds this lock, full stop — no waiting on anyone,
+// scan or not. Traded away deliberately: several of these jobs are mid-*send*
+// when they hold the lock (DM outreach/replies, thread posting, mention
+// replies), so killing one at the wrong instant can leave an action landed on
+// X with its own "we did this" bookkeeping never written -> a silent retry
+// double-sends next cycle, the same class of bug this file's ghost-post
+// handling exists to guard against. Accepted in exchange for posting never
+// blocking on anything else running.
 async function acquireShellBrowserLock(): Promise<boolean> {
   // A new post cancels any pending grace-release and EXTENDS the existing hold.
   cancelScheduledShellLockRelease();
@@ -4600,9 +4617,7 @@ async function acquireShellBrowserLock(): Promise<boolean> {
     }
     return true;
   }
-  const deadline = Date.now() + 8 * 60_000;
-  let loggedWait = false;
-  while (Date.now() < deadline) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     try {
       fs.mkdirSync(TW_BROWSER_LOCK_DIR); // atomic mutex — only one winner
       // Write the pid IMMEDIATELY (sync) so the dir is never observably pid-less.
@@ -4612,38 +4627,24 @@ async function acquireShellBrowserLock(): Promise<boolean> {
         String(Math.floor(Date.now() / 1000) + 1800)
       );
       console.error(
-        `[post] holding twitter-browser shell lock pid=${process.pid} — scans queue behind the post`
+        `[post] holding twitter-browser shell lock pid=${process.pid} — every other CLI Twitter job yields`
       );
       return true;
     } catch {
-      // Dir exists. Reclaim if the holder is dead; SIGKILL-preempt if it's the
-      // discovery scan; otherwise (ANY other live CLI Twitter job) wait for it.
+      // Dir exists. Reclaim if the holder is dead; SIGKILL-preempt unconditionally
+      // otherwise — scan or not, posting always wins.
       const pid = shellLockHolderPid();
       if (!pid || !pidAlive(pid)) {
         rmShellLockDir();
-        await sleepMs(200);
-      } else if (pidIsScan(pid)) {
-        logPostEvent(`preempt_scan_on_lock_acquire scan_pid=${pid}`);
-        sigkillScanTree(pid); // SIGKILL — scans trap SIGTERM and survive it
+      } else {
+        logPostEvent(`preempt_holder_on_lock_acquire pid=${pid} attempt=${attempt}`);
+        sigkillScanTree(pid); // SIGKILL — these jobs don't reliably yield to SIGTERM
         await sleepMs(300);
         rmShellLockDir();
-      } else {
-        if (!loggedWait) {
-          logPostEvent(`waiting_for_peer pid=${pid}`);
-          console.error(
-            `[post] twitter-browser shell lock held by a live non-scan peer (pid ${pid}); ` +
-              `waiting up to 8m instead of posting unguarded`
-          );
-          loggedWait = true;
-        }
-        // These jobs run for minutes, not milliseconds — poll coarsely.
-        await sleepMs(3000);
       }
+      await sleepMs(200);
     }
   }
-  console.error(
-    "[post] gave up waiting for the twitter-browser shell lock after 8m; a live peer still holds it"
-  );
   return false;
 }
 
