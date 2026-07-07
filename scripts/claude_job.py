@@ -934,12 +934,24 @@ def cmd_next(ns) -> int:
     # inside this loop is legitimate, not a husk, and a too-tight claim_grace
     # would SIGTERM it mid-poll before it ever gets a chance to claim.
     deadline = time.time() + wait_seconds
+    start = time.time()
+    attempt = 0
     while True:
         if _attempt_claim(ns, qtype):
             return 0
+        attempt += 1
         remaining = deadline - time.time()
         if remaining <= 0:
             break
+        # Observability for the polling path (2026-07-07): production has no
+        # per-attempt visibility otherwise — only the final claim gets a _plog
+        # line, so there was no way to see a worker actually waiting out a real
+        # gap vs. just getting lucky on its first check. Silent for the legacy
+        # wait_seconds=0 single-shot path (never had this concern, no new noise).
+        _plog(
+            f"polling {qtype}: attempt {attempt}, {time.time() - start:.0f}s elapsed, "
+            f"no job yet ({remaining:.0f}s left in wait window)"
+        )
         time.sleep(min(WORKER_POLL_INTERVAL_S, remaining))
     print(json.dumps({}))  # no work found within the wait window
     _maybe_self_reap()  # idle turn, no job claimed — safe to retire this session
