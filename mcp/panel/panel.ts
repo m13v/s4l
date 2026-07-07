@@ -372,6 +372,7 @@ function fromSetupStatus(o: any): Partial<Snapshot> {
     update_available: !!o.update_available,
     mode: o.mode ?? state?.mode,
     flags: o.flags ?? state?.flags,
+    personal_brand_share: o.personal_brand_share ?? state?.personal_brand_share,
     onboarding: o.onboarding,
   };
 }
