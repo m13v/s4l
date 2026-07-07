@@ -14,6 +14,8 @@ import path from "node:path";
 
 const SERVER_KEY = "social-autoposter";
 const UNINSTALL = process.argv.includes("--uninstall");
+const CHANNEL_STAGING = process.argv.includes("--channel-staging");
+const CHANNEL_STABLE = process.argv.includes("--channel-stable");
 
 // ---- resolve the absolute paths we want pinned into the spawn env ----------
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -132,6 +134,19 @@ for (const t of targets) {
     ok++;
   } catch (err) {
     console.error(`✗ ${t.name}: ${err.message}`);
+  }
+}
+
+// Set release channel if requested
+if (!UNINSTALL && (CHANNEL_STAGING || CHANNEL_STABLE)) {
+  const stateDir = path.join(home, ".social-autoposter-mcp");
+  const channel = CHANNEL_STAGING ? "staging" : "stable";
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    writeJson(path.join(stateDir, "channel.json"), { channel });
+    console.log(`✓ Release channel set to: ${channel}`);
+  } catch (err) {
+    console.error(`✗ Failed to set channel: ${err.message}`);
   }
 }
 

@@ -254,6 +254,11 @@ export interface ProgressStep {
   label: string;
   status: StepStatus;
   detail?: string;
+  // ISO timestamp the step last entered "running". Lets status render
+  // elapsed-in-step so a slow download (Chromium/Chrome) is distinguishable
+  // from a hung one — the progress file's top-level updated_at alone froze for
+  // minutes during long steps and read as "stuck."
+  started_at?: string;
 }
 export interface InstallProgress {
   running: boolean;
@@ -575,11 +580,49 @@ export function startProvisioning(): InstallProgress {
   if (!inFlight) {
     const progress = freshProgress();
     writeProgress(progress);
+    // Heartbeat: the long download steps (Chromium ~150MB, Google Chrome DMG)
+    // don't call setStep for minutes, so the progress file's updated_at froze
+    // and pollers couldn't tell "slow" from "hung." Re-stamp updated_at on a
+    // timer while the run is live so status always shows real motion.
+    const heartbeat = setInterval(() => {
+      try {
+        if (!progress.done) writeProgress(progress);
+      } catch {
+        /* best effort; never let the heartbeat throw into the timer */
+      }
+    }, 15000);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
     inFlight = provision(progress).finally(() => {
+      clearInterval(heartbeat);
       inFlight = null;
     });
   }
   return readProgress() ?? freshProgress();
+}
+
+// Bounded auto-retry for a provision that ended in failure. Called from the
+// runtime `status` handler on each poll: if the last run failed (done && !ok)
+// and nothing is in flight, kick a fresh run so a TRANSIENT failure (a dropped
+// Chromium download, a flaky DMG mount) self-heals during normal status polling
+// instead of parking until the next server boot. The venv/harness steps clean
+// their own partial artifacts, so a retry starts from a clean slate. Capped so a
+// genuinely broken environment (no network, no disk) surfaces the error instead
+// of looping forever. Returns true if it started a retry.
+let autoRetryCount = 0;
+const MAX_AUTO_RETRIES = 3;
+export function retryProvisionIfStalled(): boolean {
+  try {
+    if (runtimeReady()) return false;
+    if (isProvisioning()) return false;
+    const p = readProgress();
+    if (!(p && p.done && !p.ok)) return false; // only retry a real failure
+    if (autoRetryCount >= MAX_AUTO_RETRIES) return false;
+    autoRetryCount += 1;
+    startProvisioning();
+    return true;
+  } catch {
+    return false; // best-effort; must never break a status poll
+  }
 }
 
 // Boot-time deterministic provisioning: bring the owned runtime to ready on
@@ -613,6 +656,9 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   const setStep = (id: string, status: StepStatus, detail?: string) => {
     const st = progress.steps.find((s) => s.id === id);
     if (st) {
+      if (status === "running" && st.status !== "running") {
+        st.started_at = new Date().toISOString();
+      }
       st.status = status;
       if (detail !== undefined) st.detail = detail;
     }
@@ -725,9 +771,24 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   setStep("python", "done");
 
   // --- Step 3: owned venv ---------------------------------------------------
+  // A prior aborted run can leave a PARTIAL .venv (dir created, but the
+  // interpreter symlink never landed because the standalone-Python download was
+  // cut off). `uv venv` refuses a non-empty target, so every retry then failed
+  // identically and the ONLY escape was a human `rm -rf .venv` — the single
+  // non-idempotent step that turned a 5-minute install into an hour. Treat a
+  // venv with no interpreter as garbage and clear it first (same defensive idiom
+  // Step 0 uses for a half-unpacked repo), and pass --clear so uv rebuilds
+  // cleanly. This makes re-provision fully self-healing.
   setStep("venv", "running");
   {
-    const r = await sh(uv, ["venv", "--python", PYTHON_VERSION, VENV_DIR], {
+    if (fs.existsSync(VENV_DIR) && !fs.existsSync(VENV_PYTHON)) {
+      try {
+        fs.rmSync(VENV_DIR, { recursive: true, force: true });
+      } catch {
+        /* best effort; --clear below is the second line of defense */
+      }
+    }
+    const r = await sh(uv, ["venv", "--clear", "--python", PYTHON_VERSION, VENV_DIR], {
       env: uvEnv,
       timeoutMs: 120000,
     });
@@ -786,6 +847,18 @@ async function provision(progress: InstallProgress): Promise<InstallProgress> {
   // draft_cycle returned "no candidates". This brings .mcpb to parity with npm.
   setStep("harness", "running");
   {
+    // Retry-safety: a clone cut off mid-way leaves HARNESS_DIR present but with
+    // no .git, so the "clone if absent" check below skips it and the fetch/reset
+    // then fail forever against a broken checkout — the same partial-artifact
+    // deadlock the venv step had. Treat a non-git HARNESS_DIR as garbage and
+    // rebuild it.
+    if (fs.existsSync(HARNESS_DIR) && !fs.existsSync(path.join(HARNESS_DIR, ".git"))) {
+      try {
+        fs.rmSync(HARNESS_DIR, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
     // Clone if absent (mkdir parent first), else reuse the checkout.
     if (!fs.existsSync(HARNESS_DIR)) {
       fs.mkdirSync(path.dirname(HARNESS_DIR), { recursive: true });
