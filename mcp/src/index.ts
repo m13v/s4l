@@ -1192,15 +1192,23 @@ async function postApproved(batchId: string, plan: Plan) {
             // opts.env AFTER process.env, and twitter_post_plan.py never load_dotenv's
             // with override, so nothing clobbers it. Cron is untouched (it never goes
             // through this MCP path), so the 0.9 experiment keeps running there.
+            //
+            // 2026-07-06: the tail-link decision (link vs no_link) and the Claude
+            // bridge call both moved to DRAFT time (scripts/twitter_gen_links.py's
+            // Phase 2b-gen step, which stamps tail_link_variant + finalizes
+            // reply_text before the review card is ever shown — see
+            // twitter_post_plan.py's guard on tail_link_variant). That step reads
+            // DRAFT_ONLY (forced to rate=1.0 there) to guarantee a hand-approved
+            // card never drops the link it already shows. So both env vars below
+            // are now no-ops for the normal path — every approved candidate
+            // already carries tail_link_variant by the time it reaches this MCP
+            // tool. They're left in place as a defense-in-depth fallback for the
+            // rare case a candidate reaches post_drafts unstamped (e.g. a plan
+            // already in flight from before this change): S4L_SKIP_LINK_TAIL=1
+            // still guarantees post_drafts (a synchronous call the user is
+            // waiting on) never makes a blocking Claude/queue call at post time,
+            // no matter what.
             TWITTER_TAIL_LINK_RATE: "1.0",
-            // Plugin flow only: skip the link_tail Claude call. It just rewords
-            // prose around the URL (the minted short link comes from the
-            // deterministic wrap step), and on .mcpb boxes there's no `claude`
-            // binary so it wastes ~35s/post of run_claude.sh retry backoff before
-            // falling back to the mechanical concat anyway. link_tail.py honors
-            // this and short-circuits to that concat instantly. The local
-            // cron/plist autopilot never sets this, so it keeps generating the
-            // bridge sentence.
             S4L_SKIP_LINK_TAIL: "1",
             // The poster attaches to the twitter-harness Chrome over CDP. The cron
             // pipeline exports this from skill/lib/twitter-backend.sh; the MCP path
