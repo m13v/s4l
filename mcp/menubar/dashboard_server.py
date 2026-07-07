@@ -56,22 +56,40 @@ def _compute_snapshot():
     return snap_mod.compute()
 
 
-def _toggle_lane(lane):
-    """Flip ONE engagement lane (personal_brand|promotion) via s4l_mode.py and
-    return the new flags dict."""
-    if lane not in ("personal_brand", "promotion"):
-        lane = "personal_brand"
+def _s4l_mode(*cli_args):
+    """Run scripts/s4l_mode.py with the given args and return parsed JSON stdout
+    (or None on any failure)."""
     py = (
         os.environ.get("S4L_PYTHON")
         or sys.executable
         or "python3"
     )
     sm = os.path.join(_repo_dir(), "scripts", "s4l_mode.py")
-    out = (subprocess.run([py, sm, "toggle", lane], capture_output=True, text=True, timeout=15).stdout or "").strip()
+    out = (subprocess.run([py, sm, *cli_args], capture_output=True, text=True, timeout=15).stdout or "").strip()
     try:
         return json.loads(out)
     except Exception:
-        return _compute_snapshot().get("flags") or {"personal_brand": True, "promotion": False}
+        return None
+
+
+def _toggle_lane(lane):
+    """Flip ONE engagement lane (personal_brand|promotion) via s4l_mode.py and
+    return the new flags dict."""
+    if lane not in ("personal_brand", "promotion"):
+        lane = "personal_brand"
+    out = _s4l_mode("toggle", lane)
+    if isinstance(out, dict):
+        return out
+    return _compute_snapshot().get("flags") or {"personal_brand": True, "promotion": False}
+
+
+def _set_split(value):
+    """Set the personal-brand share via s4l_mode.py and return
+    {"personal_brand_share": float} (falls back to the snapshot value)."""
+    out = _s4l_mode("split", str(value))
+    if isinstance(out, dict) and "personal_brand_share" in out:
+        return out
+    return {"personal_brand_share": _compute_snapshot().get("personal_brand_share", 0.5)}
 
 
 # Keep in sync with EDITABLE_PROJECT_FIELDS (mcp/src/setup.ts): the whitelist the
@@ -164,6 +182,7 @@ def _handle_tool(name, args):
             "update_available": s.get("update_available"),
             "mode": s.get("mode"),
             "flags": s.get("flags"),
+            "personal_brand_share": s.get("personal_brand_share"),
             "onboarding": s.get("onboarding"),
         })
     if name == "project_config" and (args.get("action") == "get"):
@@ -183,10 +202,21 @@ def _handle_tool(name, args):
             "onboarding": s.get("onboarding"),
         })
     if name == "engagement_mode":
-        if (args.get("action") or "get") == "toggle":
+        action = args.get("action") or "get"
+        if action == "toggle":
             return _result({"flags": _toggle_lane(args.get("lane") or "personal_brand")})
+        if action == "split":
+            v = args.get("split")
+            if v is None or v == "":
+                s = _compute_snapshot()
+                return _result({"personal_brand_share": s.get("personal_brand_share", 0.5)})
+            return _result(_set_split(v))
         s = _compute_snapshot()
-        return _result({"mode": s.get("mode"), "flags": s.get("flags")})
+        return _result({
+            "mode": s.get("mode"),
+            "flags": s.get("flags"),
+            "personal_brand_share": s.get("personal_brand_share", 0.5),
+        })
     # Everything else (setup, schedule, connect_x, install, show_browser, stats)
     # needs the agent/MCP — degrade gracefully.
     return _err(_NEEDS_CLAUDE)
