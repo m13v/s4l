@@ -56,6 +56,33 @@ def _cwd_tail(cwd: str) -> str:
     return os.path.basename(os.path.normpath(cwd))
 
 
+def _registry_ident(path: str) -> dict:
+    """Compact identity for one registry file WITHOUT shipping the home path:
+    the user-data dir tail (e.g. 'Claude', 'Claude-mediar') plus the first 8
+    chars of the account and session uuids from
+    .../<user-data-dir>/claude-code-sessions/<account>/<session>/scheduled-tasks.json.
+    The account uuid is what distinguishes an account-switch orphan (worker task
+    under one account uuid, none under the other) from a single-account
+    scheduler wedge — the Karol 2026-07-06 ambiguity this exists to remove."""
+    parts = os.path.normpath(path).split(os.sep)
+    try:
+        session = parts[-2][:8]
+        account = parts[-3][:8]
+        # parts[-4] == "claude-code-sessions"; parts[-5] is the user-data dir.
+        data_dir = parts[-5]
+    except IndexError:
+        session, account, data_dir = "", "", ""
+    return {"data_dir": data_dir, "account": account, "session": session}
+
+
+def _mtime_age(path: str) -> int | None:
+    try:
+        import time
+        return int(time.time() - os.path.getmtime(path))
+    except Exception:
+        return None
+
+
 def build_summary() -> dict:
     """Scan every scheduled-tasks.json registry and summarize the S4L worker
     tasks' folder state. Never raises; a broken/absent registry yields an empty
@@ -64,6 +91,7 @@ def build_summary() -> dict:
     registries = 0
     deprecated_present = False
     seen_ids: set[str] = set()
+    per_registry: list[dict] = []
 
     try:
         files = glob.glob(SCHED_REGISTRY_GLOB)
@@ -77,6 +105,15 @@ def build_summary() -> dict:
         except Exception:
             continue
         registries += 1
+        reg = _registry_ident(f)
+        reg["worker_ids"] = []
+        reg["enabled"] = False
+        reg["last_run_at"] = None
+        # Freshness proxy for "is this the account the host is actively using":
+        # the session dir's mtime moves with host activity even when no task
+        # fires, while the registry file's mtime only moves on task writes.
+        reg["registry_mtime_age_s"] = _mtime_age(f)
+        reg["session_dir_mtime_age_s"] = _mtime_age(os.path.dirname(f))
         for t in (d.get("scheduledTasks") or []):
             tid = t.get("id")
             if tid in DEPRECATED_TASK_IDS:
@@ -87,6 +124,10 @@ def build_summary() -> dict:
             cwd = t.get("cwd") or ""
             in_worker = os.path.normpath(cwd) == os.path.normpath(WORKER_CWD) if cwd else False
             seen_ids.add(tid)
+            reg["worker_ids"].append(tid)
+            reg["enabled"] = reg["enabled"] or bool(t.get("enabled"))
+            if t.get("lastRunAt") and (reg["last_run_at"] is None or str(t.get("lastRunAt")) > str(reg["last_run_at"])):
+                reg["last_run_at"] = t.get("lastRunAt")
             tasks.append({
                 "id": tid,
                 "enabled": bool(t.get("enabled")),
@@ -94,6 +135,7 @@ def build_summary() -> dict:
                 "cwd_tail": _cwd_tail(cwd),
                 "last_run_at": t.get("lastRunAt"),
             })
+        per_registry.append(reg)
 
     mislocated = sum(1 for t in tasks if not t["in_worker_dir"])
     # "Missing" means NO viable worker lane at all: neither a current universal
@@ -113,6 +155,7 @@ def build_summary() -> dict:
         "all_in_worker_dir": bool(tasks) and mislocated == 0,
         "deprecated_present": deprecated_present,
         "tasks": tasks,
+        "per_registry": per_registry,
     }
 
 
