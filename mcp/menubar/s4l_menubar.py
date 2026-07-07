@@ -479,7 +479,11 @@ class S4LMenuBar(rumps.App):
         # occlusion probe also reads not-visible during fullscreen apps and the
         # locked screen, so acting on it would false-fire; the remote fix is the
         # restart_menubar MCP tool.
-        self._icon_check_due_at = 0.0
+        # First probe at +60s, not immediately: the window server takes a few
+        # seconds to place a fresh status item (occlusion reads not-visible and
+        # the frame sits at x=0 until then — measured 2026-07-07), so an eager
+        # probe would log a false "hidden" on every single process start.
+        self._icon_check_due_at = time.monotonic() + 60.0
         self._icon_hidden_since = None
         self._icon_last_on_screen = "unprobed"
         self._icon_watch_started = time.monotonic()
