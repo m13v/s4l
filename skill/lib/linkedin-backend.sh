@@ -177,12 +177,26 @@ cleanup_harness_tabs() {
 # editing the (chflags-locked) top-level scripts. Semantics mirror
 # run-linkedin.sh's existing singleton guard:
 #   - try once (mkdir), reclaim if the holder PID is dead
-#   - if a DIFFERENT live pipeline holds it -> exit 0 (skip this fire; the
-#     launchd job retries on its next cadence). No indefinite wait, so the
-#     ordering vs the per-phase FIFO `linkedin-browser` lock can't deadlock.
-#   - idempotent within a process via _LI_PIPELINE_LOCK_HELD so the SECOND
-#     phase-call (e.g. run-linkedin Phase B) does not block on a lock this
-#     same process already owns.
+#   - if a DIFFERENT live pipeline holds it -> return 78 (reserved skip code).
+#     Every call site converts 78 into a clean `exit 0` in the PARENT shell
+#     (skip this fire; the launchd job retries on its next cadence). No
+#     indefinite wait, so the ordering vs the per-phase FIFO
+#     `linkedin-browser` lock can't deadlock.
+#     WHY return-78 and not exit-0 here (2026-07-06 incident): most call
+#     sites invoke ensure_linkedin_browser_for_backend inside a subshell,
+#     either `( source ...; ensure... )` or `ensure... | tee`, so an `exit 0`
+#     in this function only killed the subshell and every pipeline kept
+#     driving Chrome anyway (observed: engage-linkedin Phase B and
+#     engage-dm-replies-linkedin with two live LinkedIn tabs at once, and
+#     linkedin-presence scrolling mid run-linkedin). `kill -TERM $$` is NOT a
+#     usable alternative: lock.sh traps TERM with _sa_release_locks, which
+#     cleans up locks but does not exit, so the pipeline would continue
+#     running lockless. Only an explicit status check in the parent works.
+#   - idempotent within a process via _LI_PIPELINE_LOCK_HELD, AND via a
+#     holder-pid==$$ check (the env flag is lost when the acquiring call ran
+#     in a subshell/pipe, but $$ is the top-level script pid even inside
+#     subshells), so the SECOND phase-call (e.g. run-linkedin Phase B) does
+#     not skip a lock this same process already owns.
 # No release trap on purpose: a finished pipeline's lock dir is reclaimed by
 # the next pipeline's dead-PID check, exactly like the singleton guard. This
 # avoids clobbering the parent scripts' EXIT/INT/TERM/HUP run_monitor traps.
@@ -211,13 +225,21 @@ _acquire_linkedin_pipeline_lock() {
         local _h_pid _h_who
         _h_pid="$(cat "$_LI_PIPELINE_LOCK_DIR/pid" 2>/dev/null || echo "")"
         _h_who="$(cat "$_LI_PIPELINE_LOCK_DIR/holder" 2>/dev/null || echo "?")"
+        # Re-entry when the acquiring call ran in a subshell/pipe: the
+        # _LI_PIPELINE_LOCK_HELD export was lost with that subshell, but the
+        # recorded holder pid is still OURS ($$ is the top-level script pid
+        # even inside subshells). Treat as already held.
+        if [ "$_h_pid" = "$$" ]; then
+            export _LI_PIPELINE_LOCK_HELD=1
+            return 0
+        fi
         if [ -z "$_h_pid" ] || ! kill -0 "$_h_pid" 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: reclaiming stale lock (dead holder ${_h_who} pid ${_h_pid:-unknown})" >&2
             rm -rf "$_LI_PIPELINE_LOCK_DIR"
             continue
         fi
-        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} exiting this fire to avoid two drivers on the 9556 Chrome" >&2
-        exit 0
+        echo "[$(date +%H:%M:%S)] linkedin-pipeline lock: held by ${_h_who} (pid ${_h_pid}); ${_who} skipping this fire (rc=78) to avoid two drivers on the 9556 Chrome" >&2
+        return 78
     done
 }
 
@@ -255,10 +277,13 @@ ensure_linkedin_browser_for_backend() {
     fi
     # Cross-pipeline whole-run lock: only one LinkedIn browser pipeline drives
     # the 9556 harness Chrome at a time. Acquired here (the single chokepoint
-    # every browser pipeline calls) so it covers run/engage/dm/audit/stats
-    # without editing the locked top-level scripts. Skipped above for
-    # externally-managed (AppMaker/BYO) Chrome, which is not ours to serialize.
-    _acquire_linkedin_pipeline_lock
+    # every browser pipeline calls). Skipped above for externally-managed
+    # (AppMaker/BYO) Chrome, which is not ours to serialize. A held-by-peer
+    # lock returns the reserved skip code 78; propagate it so the CALLER's
+    # parent shell can exit 0 (an exit here would only kill the subshell most
+    # call sites wrap around this function; see the 2026-07-06 incident note
+    # above the lock function).
+    _acquire_linkedin_pipeline_lock || return $?
     # Probe + launch harness Chrome on port 9556 if needed.
     if ! curl -sf --max-time 2 -o /dev/null http://127.0.0.1:9556/json/version 2>/dev/null; then
         echo "[$(date +%H:%M:%S)] LinkedIn harness Chrome down on port 9556, launching..." >&2
