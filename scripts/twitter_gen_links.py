@@ -180,8 +180,13 @@ def apply_tail_link(candidate: dict, link_url: str) -> None:
     Stamps tail_link_variant + link_tail_outcome on `candidate` so
     twitter_post_plan.py can detect this candidate is already finalized and
     skip its own (now fallback-only) tail-link block.
+
+    Idempotent: a candidate that already carries tail_link_variant is a
+    no-op. Guards against any re-run of this stage over the same candidate
+    (retry, salvage, plan re-merge) re-rolling the decision and re-appending
+    link_url onto a reply_text that already has it baked in.
     """
-    if not link_url:
+    if not link_url or candidate.get("tail_link_variant"):
         return
     rate = _tail_link_rate()
     add_link = random.random() < rate
