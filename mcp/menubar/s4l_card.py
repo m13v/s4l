@@ -913,16 +913,14 @@ class _ReviewController(NSObject):
         Only one is ever open: the two anchors are far apart, so hover-out
         closes the first before hover-in opens the other. `content` is a
         single string (stats: one compact line) or a list of strings
-        (details: one bulleted row per field, gapped vertically so the
-        fields read as a list instead of one dense run-on paragraph)."""
+        (details: one row per field, gapped vertically so multi-line fields
+        stay visually separated instead of running into the next one)."""
         if anchor is None or not content:
             return
         if self._stats_popover is not None and self._stats_popover.isShown():
             return
-        lines = content if isinstance(content, list) else [content]
-        bulleted = len(lines) > 1
-        rows = [f"•  {line}" if bulleted else line for line in lines]
-        row_gap = 8 if bulleted else 0
+        rows = content if isinstance(content, list) else [content]
+        row_gap = 8 if len(rows) > 1 else 0
         font = NSFont.systemFontOfSize_(12)
         # Wrap-aware measurement per row (option 1 = NSStringDrawingUsesLine
         # FragmentOrigin; a row can itself be multi-line, e.g. the truncated
