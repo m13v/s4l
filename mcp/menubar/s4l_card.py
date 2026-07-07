@@ -241,6 +241,23 @@ def _truncate(s, n=320):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+# Human names for the ISO 639-1 codes the drafting model actually emits, so the
+# card can say "posts in Japanese" instead of "posts in ja". Unknown codes fall
+# back to the bare code; never raises.
+_LANG_NAMES = {
+    "ar": "Arabic", "de": "German", "es": "Spanish", "fr": "French",
+    "hi": "Hindi", "id": "Indonesian", "it": "Italian", "ja": "Japanese",
+    "ko": "Korean", "nl": "Dutch", "pl": "Polish", "pt": "Portuguese",
+    "ru": "Russian", "th": "Thai", "tr": "Turkish", "uk": "Ukrainian",
+    "vi": "Vietnamese", "zh": "Chinese",
+}
+
+
+def _lang_name(code):
+    c = (code or "").strip().lower()
+    return _LANG_NAMES.get(c, c)
+
+
 def _fmt_count(n):
     """1234 -> '1.2k', 3400000 -> '3.4M'; None/garbage -> None (omit the stat)."""
     try:
@@ -329,7 +346,21 @@ def _details_lines(d):
         lines.append(f"Found via search: {topic}")
     lang = (d.get("language") or "").strip()
     if lang and lang.lower() != "en":
-        lines.append(f"Language: {lang}")
+        lines.append(
+            f"Language: {_lang_name(lang)} ({lang.lower()}), "
+            f"reply will POST in {_lang_name(lang)}"
+        )
+        # When the card body shows English translations (stamped at draft
+        # time), the popover carries the originals + the full English draft so
+        # nothing is lost to the inline truncation.
+        if (d.get("thread_text_en") or "").strip() and (d.get("thread_text") or "").strip():
+            lines.append(
+                f"Original thread ({lang.lower()}): {_truncate(d.get('thread_text'), 280)}"
+            )
+        if (d.get("reply_text_en") or "").strip():
+            lines.append(
+                f"Draft in English: {_truncate(d.get('reply_text_en'), 280)}"
+            )
     if d.get("link_url"):
         kw = (d.get("link_keyword") or "").strip()
         lines.append(f"Link: {kw}" if kw else f"Link: {d['link_url']}")
@@ -752,6 +783,17 @@ class _ReviewController(NSObject):
             content.addSubview_(
                 _label(NSMakeRect(M + 78, H - 70, handle_w, 18), "thread", size=12, bold=True)
             )
+        # Non-English drafts: the prep step stamps display-only English
+        # translations (thread_text_en / reply_text_en) on the candidate. The
+        # card shows the ENGLISH text so the reviewer understands the thread
+        # and the draft, while the editable field keeps the ORIGINAL-language
+        # reply_text, because that exact text is what posts (the poster reads
+        # reply_text verbatim; there is no re-translation at post time). The
+        # originals + full English draft live in the details-eye popover.
+        card_lang = (d.get("language") or "").strip().lower()
+        is_foreign = bool(card_lang and card_lang != "en")
+        thread_en = (d.get("thread_text_en") or "").strip() if is_foreign else ""
+        reply_en = (d.get("reply_text_en") or "").strip() if is_foreign else ""
         # Thread text — black, with a small trailing ↗ link that opens the
         # thread (an NSTextView because NSTextField can't do clickable links).
         thread_tv = NSTextView.alloc().initWithFrame_(
@@ -767,7 +809,7 @@ class _ReviewController(NSObject):
         thread_tv.setVerticallyResizable_(False)
         thread_tv.setHorizontallyResizable_(False)
         body = NSMutableAttributedString.alloc().initWithString_attributes_(
-            _truncate(d.get("thread_text"), 200),
+            _truncate(thread_en or d.get("thread_text"), 200),
             {
                 NSFontAttributeName: NSFont.systemFontOfSize_(12),
                 NSForegroundColorAttributeName: NSColor.labelColor(),
@@ -797,7 +839,11 @@ class _ReviewController(NSObject):
         content.addSubview_(
             _label(
                 NSMakeRect(M, H - 172, W - 2 * M - 24, 16),
-                "Reply (editable):",
+                (
+                    f"Reply (posts in {_lang_name(card_lang)}, editable):"
+                    if is_foreign
+                    else "Reply (editable):"
+                ),
                 size=12,
                 bold=True,
             )
@@ -816,8 +862,25 @@ class _ReviewController(NSObject):
         reply = d.get("reply_text") or ""
         link = d.get("link_url")
         composed = f"{reply} {link}" if link else reply
+        # Non-English draft with a stamped translation: a muted read-only
+        # "EN:" block sits between the heading and the editable field so the
+        # reviewer reads the draft in English while still editing (and
+        # posting) the original-language text below. Full translation lives
+        # in the details popover; inline is truncated to what ~3 lines fit.
+        edit_top = H - 172 - 6
+        if reply_en:
+            tr_h = 42
+            content.addSubview_(
+                _label(
+                    NSMakeRect(M, edit_top - tr_h, W - 2 * M, tr_h),
+                    f"EN: {_truncate(reply_en, 150)}",
+                    size=11,
+                    muted=True,
+                )
+            )
+            edit_top -= tr_h + 4
         scroll, tv = _editable_scroll(
-            NSMakeRect(M, M, W - 2 * M, H - 172 - M - 6), composed
+            NSMakeRect(M, M, W - 2 * M, edit_top - M), composed
         )
         content.addSubview_(scroll)
         self._textview = tv
@@ -1046,6 +1109,10 @@ class _ReviewController(NSObject):
                 "project": d.get("project"),
                 "thread_url": d.get("thread_url"),
                 "thread_author": d.get("thread_author"),
+                # Draft language (ISO 639-1) so the feedback digest can scope
+                # edit/reject patterns per language. draft_text/original_text
+                # stay in the ORIGINAL language (that is what posts).
+                "language": d.get("language"),
             }
         )
         self._last_decision_at = time.time()
@@ -1245,6 +1312,10 @@ def present_review(drafts, on_decision=None, on_complete=None):
     (optional). thread_url renders as a trailing ↗ link on the thread text;
     followers show inline next to the handle, age muted at the right, and the
     thread engagement counts live only in the eye icon's hover/click popover.
+    Non-English drafts may carry thread_text_en / reply_text_en (stamped at
+    draft time): the card then shows the English thread text, a muted read-only
+    "EN:" translation of the reply, and a "posts in <language>" heading, while
+    the editable field keeps the original-language reply_text (what posts).
     Optional drafting metadata (project, engagement_style, style_description,
     search_topic, language, link_source, link_keyword, experiments) feeds a
     second eye on the "Reply (editable):" row whose popover explains how the
