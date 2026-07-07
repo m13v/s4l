@@ -1844,7 +1844,8 @@ tool(
     const bothOn = personalBrand && promotion;
     const next_step = promotion
       ? (bothOn
-          ? "Personal brand + product promotion are BOTH on (the cycle splits 50/50), and the persona " +
+          ? "Personal brand + product promotion are BOTH on (the cycle splits per the lane split, " +
+            "default 50/50 — adjustable via action:'split' or the dashboard slider), and the persona " +
             "is provisioned + topic-seeded. "
           : "Product promotion is on and the persona is provisioned. ") +
         "NOW CONTINUE SETUP: configure the product project with project_config (research the product " +
@@ -2211,7 +2212,8 @@ tool(
           "THIRD (engagement lanes — ASK THE USER, do not infer): the PERSONAL BRAND lane (organic, " +
           "link-free engagement in their own voice) is ON by default, so ask the ONE question — do they " +
           "ALSO want to PROMOTE a PRODUCT (the marketing lane, link replies)? Both lanes can run (the " +
-          "cycle splits 50/50). Call the `engagement_mode` tool action:'set' with personal_brand:true, " +
+          "cycle splits per the configurable lane split, default 50/50). Call the `engagement_mode` tool " +
+          "action:'set' with personal_brand:true, " +
           "promotion:true|false AND the voice/description/search_topics you synthesized PLUS the raw " +
           "dictation transcript as content_corpus (this provisions the persona and seeds topics). Only " +
           "NOW are topics seeded — postponed until the dictation is in. " +
@@ -2252,6 +2254,7 @@ tool(
         update_available: !!snap.update_available,
         mode: snap.mode,
         flags: snap.flags,
+        personal_brand_share: snap.personal_brand_share,
         update_hint: snap.update_available
           ? `A newer version (${snap.latest_version}) is available — you're on ${snap.version}. ` +
             `Tell the user and offer to run the \`runtime\` tool with action:'update' ` +
