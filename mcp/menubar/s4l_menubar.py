@@ -1524,7 +1524,7 @@ class S4LMenuBar(rumps.App):
     def _rewrite_scheduled_task_cwd(self):
         """Registry self-heal, run ONLY while Claude is DOWN (the running app
         caches the registry in memory and clobbers a live edit on the next
-        fire). Three fixes in one pass, across every scheduled-tasks.json:
+        fire). Four fixes in one pass, across every scheduled-tasks.json:
           1. Point worker tasks' cwd at ~/.s4l-worker.
           2. REMOVE the deprecated single autopilot task.
           3. CONSOLIDATE every legacy worker entry into ONE s4l-worker entry
@@ -1532,6 +1532,18 @@ class S4LMenuBar(rumps.App):
              if no s4l-worker is registered there yet, add one inheriting the
              legacy cron/enabled state. This is the migration path for installs
              that predate the universal queue.
+          4. ENSURE an enabled s4l-worker entry exists in EVERY account registry
+             (the account-switch orphan heal, 2026-07-06): switching Claude
+             accounts leaves the task under the old account's registry and the
+             new account never fires it. Writing the record into every registry
+             while Claude is down means whichever account the user logs into has
+             the task; copies under logged-out accounts are inert. Guarded by
+             user intent: if ANY registry holds an explicitly DISABLED worker
+             copy, the user turned it off — we add nothing anywhere. (The Quit
+             flow deletes the SKILL.md dirs, so worker_skill_ok also gates this
+             from resurrecting a quit install.) This restores the June 27
+             direct-write re-arm (45f1c45d) with the targeting problem dissolved
+             by writing everywhere instead of guessing the live account.
         Best-effort: never raises. Kept in sync with scripts/s4l_box_update.sh
         and queueWorkerCwd()/QUEUE_WORKERS in mcp/src/index.ts."""
         try:
@@ -1539,6 +1551,26 @@ class S4LMenuBar(rumps.App):
         except Exception:
             pass
         worker_skill_ok = self._ensure_worker_skill_md()
+        # Pre-scan for user intent + a template: an explicitly disabled worker
+        # copy anywhere means the user opted out — never re-add. Otherwise clone
+        # cron from an existing record so the shape matches what the host wrote.
+        any_disabled = False
+        tmpl_cron = "* * * * *"
+        try:
+            for f in glob.glob(SCHED_REGISTRY_GLOB):
+                try:
+                    with open(f) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    continue
+                for t in (d.get("scheduledTasks") or []):
+                    if t.get("id") in WORKER_TASK_IDS:
+                        if not t.get("enabled", True):
+                            any_disabled = True
+                        if t.get("cronExpression"):
+                            tmpl_cron = t.get("cronExpression")
+        except Exception:
+            pass
         try:
             for f in glob.glob(SCHED_REGISTRY_GLOB):
                 try:
@@ -1563,11 +1595,15 @@ class S4LMenuBar(rumps.App):
                         t["cwd"] = WORKER_CWD
                         dirty = True
                     new_tasks.append(t)
-                if legacy and not has_worker and worker_skill_ok:
-                    tmpl = legacy[0]
+                add_worker = worker_skill_ok and not has_worker and (
+                    legacy                      # fix 3: legacy consolidation
+                    or not any_disabled         # fix 4: orphan heal (user intent guard)
+                )
+                if add_worker:
+                    tmpl = legacy[0] if legacy else {}
                     new_tasks.append({
                         "id": WORKER_TASK_ID,
-                        "cronExpression": tmpl.get("cronExpression") or "* * * * *",
+                        "cronExpression": tmpl.get("cronExpression") or tmpl_cron,
                         "enabled": bool(tmpl.get("enabled", True)),
                         "filePath": os.path.join(
                             os.path.expanduser("~"), ".claude",
