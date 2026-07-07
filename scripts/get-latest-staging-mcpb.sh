@@ -7,6 +7,14 @@
 #   --download    Download the .mcpb to current directory (instead of just printing URL)
 #   --channel     Also set the local channel to staging after download
 #   --path        Print the download path instead of the URL (for scripts)
+#
+# Implementation note: the GitHub release JSON is parsed in ONE python3 call
+# that reads straight from urllib, never round-tripped through a bash variable
+# + `echo`. `echo` (zsh's builtin especially, but also bash under some shopts)
+# can interpret backslash escapes, so a `\n` that json.dumps() correctly
+# escaped inside the release notes text gets turned into a REAL newline byte
+# before the second parse, which then throws "Invalid control character".
+# This bit in practice on 2026-07-07; do not reintroduce the echo-pipe pattern.
 
 set -euo pipefail
 
@@ -23,20 +31,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Fetch the latest pre-release from GitHub API (first page, per_page=1 for speed)
-# Response is a JSON array; use python to extract the first object
-RELEASE_DATA=$(curl -fsS "https://api.github.com/repos/m13v/s4l/releases?per_page=1&pre_release=true" 2>/dev/null | python3 -c "import sys, json; data=json.load(sys.stdin); r=data[0] if data else {}; print(json.dumps(r))")
+RELEASE_INFO=$(python3 -c "
+import json, urllib.request, sys
 
-# Extract version and download URL using python for reliable JSON parsing
-LATEST_TAG=$(echo "$RELEASE_DATA" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('tag_name', ''))" 2>/dev/null)
-MCPB_URL=$(echo "$RELEASE_DATA" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for asset in data.get('assets', []):
-    if 'social-autoposter.mcpb' in asset.get('name', ''):
-        print(asset.get('browser_download_url', ''))
-        break
-" 2>/dev/null)
+req = urllib.request.Request(
+    'https://api.github.com/repos/m13v/s4l/releases?per_page=1&pre_release=true',
+    headers={'Accept': 'application/vnd.github+json'},
+)
+with urllib.request.urlopen(req, timeout=15) as r:
+    releases = json.loads(r.read().decode('utf-8'))
+
+if not releases:
+    sys.exit(1)
+
+rel = releases[0]
+tag = rel['tag_name']
+url = next(
+    (a['browser_download_url'] for a in rel.get('assets', [])
+     if a.get('name', '').endswith('social-autoposter.mcpb')),
+    None,
+)
+if not url:
+    sys.exit(1)
+print(tag)
+print(url)
+")
+
+LATEST_TAG=$(echo "$RELEASE_INFO" | sed -n '1p')
+MCPB_URL=$(echo "$RELEASE_INFO" | sed -n '2p')
 
 if [ -z "$LATEST_TAG" ] || [ -z "$MCPB_URL" ]; then
   echo "Error: Could not find latest staging release" >&2
